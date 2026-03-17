@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "trading-project"
+version = "0.1.0"
+description = "Research platform for trading strategies, feature engineering, and backtesting"
+readme = "README.md"
+requires-python = ">=3.10"
+
+authors = [
+  { name = "Brad Assaly" }
+]
+
+dependencies = [
+  "pandas>=2.0",
+  "numpy>=1.26",
+  "polars>=0.20",
+  "yfinance>=0.2",
+  "backtesting>=0.3",
+  "pyarrow>=14.0"
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+  "ruff>=0.4",
+  "black>=24.0"
+]
+
+[project.scripts]
+trading-cli = "trading_platform.cli.__main__:main"
