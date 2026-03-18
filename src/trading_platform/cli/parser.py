@@ -18,6 +18,9 @@ from trading_platform.cli.common import (
 )
 from trading_platform.strategies.registry import STRATEGY_REGISTRY
 from trading_platform.cli.commands.portfolio_topn import cmd_portfolio_topn
+from trading_platform.cli.commands.run_job import cmd_run_job
+from trading_platform.cli.commands.run_sweep import cmd_run_sweep
+from trading_platform.cli.commands.run_walk_forward import cmd_run_walk_forward
 
 def add_execution_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
@@ -255,5 +258,53 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional path to CSV with columns: symbol,group",
     )
     portfolio_topn_parser.set_defaults(func=cmd_portfolio_topn)
+
+    run_job_parser = subparsers.add_parser(
+        "run-job",
+        help="Run a research job from a YAML or JSON config file",
+    )
+    run_job_parser.add_argument(
+        "--config",
+        required=True,
+        help="Path to a YAML or JSON research workflow config file",
+    )
+    run_job_parser.add_argument(
+        "--symbols",
+        nargs="*",
+        help="Optional symbol override list",
+    )
+    run_job_parser.add_argument(
+        "--fail-fast",
+        action="store_true",
+        help="Stop immediately on the first symbol error",
+    )
+    run_job_parser.set_defaults(func=cmd_run_job)
+
+    run_sweep_parser = subparsers.add_parser(
+        "run-sweep",
+        help="Run a parameter sweep from a YAML or JSON config file",
+    )
+    run_sweep_parser.add_argument(
+        "--config",
+        required=True,
+        help="Path to a YAML or JSON parameter sweep config file",
+    )
+    run_sweep_parser.add_argument(
+        "--fail-fast",
+        action="store_true",
+        help="Stop immediately on the first sweep error",
+    )
+    run_sweep_parser.set_defaults(func=cmd_run_sweep)
+
+    run_wf_parser = subparsers.add_parser(
+        "run-walk-forward",
+        help="Run a walk-forward evaluation from a YAML or JSON config file",
+    )
+    run_wf_parser.add_argument(
+        "--config",
+        required=True,
+        help="Path to a YAML or JSON walk-forward config file",
+    )
+    run_wf_parser.set_defaults(func=cmd_run_walk_forward)
 
     return parser

@@ -10,6 +10,7 @@ METADATA_DIR = DATA_DIR / "metadata"
 
 ARTIFACTS_DIR = PROJECT_ROOT / "artifacts"
 EXPERIMENT_DIR = ARTIFACTS_DIR / "experiments"
+JOB_ARTIFACTS_DIR = ARTIFACTS_DIR / "jobs"
 
 for path in [
     DATA_DIR,
@@ -19,5 +20,6 @@ for path in [
     METADATA_DIR,
     ARTIFACTS_DIR,
     EXPERIMENT_DIR,
+    JOB_ARTIFACTS_DIR,
 ]:
     path.mkdir(parents=True, exist_ok=True)

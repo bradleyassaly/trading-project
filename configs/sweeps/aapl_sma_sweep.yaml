@@ -1,0 +1,14 @@
+symbol: AAPL
+start: "2015-01-01"
+interval: "1d"
+feature_groups:
+  - trend
+  - momentum
+  - volatility
+  - volume
+strategy: sma_cross
+fast_values: [10, 20, 50]
+slow_values: [100, 150, 200]
+cash: 10000
+commission: 0.001
+rank_metric: "Return [%]"
