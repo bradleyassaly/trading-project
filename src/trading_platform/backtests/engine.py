@@ -1,53 +1,155 @@
+from __future__ import annotations
+
+from typing import Any
+
 import pandas as pd
-from backtesting import Backtest, Strategy
+from backtesting import Backtest
 
-from trading_platform.settings import FEATURE_DATA_DIR
-
-
-def sma(values, n: int):
-    return pd.Series(values).rolling(n).mean()
+from trading_platform.settings import FEATURES_DIR
+from trading_platform.strategies.registry import STRATEGY_REGISTRY
 
 
-class SMACross(Strategy):
-    fast = 20
-    slow = 100
+def _validate_strategy_params(
+    strategy: str,
+    fast: int,
+    slow: int,
+    lookback: int,
+    cash: float,
+    commission: float,
+) -> None:
+    if cash <= 0:
+        raise ValueError("cash must be > 0")
+    if commission < 0:
+        raise ValueError("commission must be >= 0")
 
-    def init(self):
-        self.fast_ma = self.I(sma, self.data.Close, self.fast)
-        self.slow_ma = self.I(sma, self.data.Close, self.slow)
+    if strategy == "sma_cross":
+        if fast <= 0:
+            raise ValueError("fast must be > 0")
+        if slow <= 0:
+            raise ValueError("slow must be > 0")
+        if fast >= slow:
+            raise ValueError("fast must be less than slow")
+    elif strategy == "momentum_hold":
+        if lookback <= 0:
+            raise ValueError("lookback must be > 0")
 
-    def next(self):
-        # skip warmup / NaN region
-        if pd.isna(self.fast_ma[-1]) or pd.isna(self.slow_ma[-1]):
-            return
-
-        if self.fast_ma[-1] > self.slow_ma[-1]:
-            if not self.position:
-                self.buy()
-        elif self.fast_ma[-1] < self.slow_ma[-1]:
-            if self.position:
-                self.position.close()
+    if strategy not in STRATEGY_REGISTRY:
+        raise ValueError(
+            f"Unknown strategy: {strategy}. "
+            f"Available: {sorted(STRATEGY_REGISTRY.keys())}"
+        )
 
 
-def run_backtest(symbol: str):
-    df = pd.read_parquet(FEATURE_DATA_DIR / f"{symbol}.parquet")
+def _normalize_backtest_df(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
 
-    # make sure timestamp is the index
-    df["timestamp"] = pd.to_datetime(df["timestamp"])
-    df = df.set_index("timestamp").sort_index()
+    rename_map = {}
+    for col in df.columns:
+        lower = str(col).lower()
+        if lower in {"date", "timestamp", "datetime"}:
+            rename_map[col] = "Date"
+        elif lower == "open":
+            rename_map[col] = "Open"
+        elif lower == "high":
+            rename_map[col] = "High"
+        elif lower == "low":
+            rename_map[col] = "Low"
+        elif lower == "close":
+            rename_map[col] = "Close"
+        elif lower == "volume":
+            rename_map[col] = "Volume"
 
-    # backtesting.py expects these exact column names
-    df = df.rename(columns={
-        "open": "Open",
-        "high": "High",
-        "low": "Low",
-        "close": "Close",
-        "volume": "Volume",
-    })
+    df = df.rename(columns=rename_map)
 
-    # keep only required columns
-    df = df[["Open", "High", "Low", "Close", "Volume"]].dropna()
+    required_cols = {"Open", "High", "Low", "Close", "Volume"}
+    missing = required_cols - set(df.columns)
+    if missing:
+        raise ValueError(
+            f"Missing required columns for backtest: {sorted(missing)}. "
+            f"Available columns: {list(df.columns)}"
+        )
 
-    bt = Backtest(df, SMACross, cash=10_000, commission=0.001)
-    stats = bt.run()
-    return stats
+    if "Date" in df.columns:
+        df["Date"] = pd.to_datetime(df["Date"])
+        df = df.set_index("Date")
+    else:
+        df.index = pd.to_datetime(df.index)
+
+    df = df.sort_index()
+    return df
+
+
+def run_backtest_on_df(
+    df: pd.DataFrame,
+    symbol: str,
+    strategy: str = "sma_cross",
+    fast: int = 20,
+    slow: int = 100,
+    lookback: int = 20,
+    cash: float = 10_000,
+    commission: float = 0.001,
+) -> dict[str, Any]:
+    _validate_strategy_params(
+        strategy=strategy,
+        fast=fast,
+        slow=slow,
+        lookback=lookback,
+        cash=cash,
+        commission=commission,
+    )
+
+    df = _normalize_backtest_df(df)
+    strategy_cls = STRATEGY_REGISTRY[strategy]
+
+    bt = Backtest(
+        df,
+        strategy_cls,
+        cash=cash,
+        commission=commission,
+        exclusive_orders=True,
+    )
+
+    if strategy == "sma_cross":
+        stats = bt.run(fast=fast, slow=slow)
+    elif strategy == "momentum_hold":
+        stats = bt.run(lookback=lookback)
+    else:
+        stats = bt.run()
+
+    result = dict(stats)
+    result["symbol"] = symbol
+    result["strategy"] = strategy
+    result["fast"] = fast
+    result["slow"] = slow
+    result["lookback"] = lookback
+    result["cash"] = cash
+    result["commission"] = commission
+    return result
+
+
+def run_backtest(
+    symbol: str,
+    strategy: str = "sma_cross",
+    fast: int = 20,
+    slow: int = 100,
+    lookback: int = 20,
+    cash: float = 10_000,
+    commission: float = 0.001,
+) -> dict[str, Any]:
+    path = FEATURES_DIR / f"{symbol}.parquet"
+    if not path.exists():
+        raise FileNotFoundError(
+            f"Feature file not found for {symbol}: {path}. Run the features step first."
+        )
+
+    df = pd.read_parquet(path)
+    return run_backtest_on_df(
+        df=df,
+        symbol=symbol,
+        strategy=strategy,
+        fast=fast,
+        slow=slow,
+        lookback=lookback,
+        cash=cash,
+        commission=commission,
+    )

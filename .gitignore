@@ -55,3 +55,6 @@ data/processed/
 # Local databases
 *.db
 *.sqlite
+
+# Json experiment files
+artifacts/experiments/*.json

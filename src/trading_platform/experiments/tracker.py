@@ -21,22 +21,29 @@ def _json_safe(value: Any) -> Any:
         return int(value)
 
     if isinstance(value, (np.floating,)):
+        if pd.isna(value):
+            return None
         return float(value)
 
     if isinstance(value, (np.bool_,)):
         return bool(value)
 
     if isinstance(value, (pd.Timestamp, datetime)):
+        if pd.isna(value):
+            return None
         return value.isoformat()
+
+    if value is pd.NaT:
+        return None
 
     if isinstance(value, Path):
         return str(value)
 
     if isinstance(value, pd.Series):
-        return value.to_dict()
+        return {str(k): _json_safe(v) for k, v in value.to_dict().items()}
 
     if isinstance(value, pd.DataFrame):
-        return value.to_dict(orient="records")
+        return [_json_safe(record) for record in value.to_dict(orient="records")]
 
     if isinstance(value, dict):
         return {str(k): _json_safe(v) for k, v in value.items()}
@@ -44,8 +51,13 @@ def _json_safe(value: Any) -> Any:
     if isinstance(value, (list, tuple, set)):
         return [_json_safe(v) for v in value]
 
-    return str(value)
+    try:
+        if pd.isna(value):
+            return None
+    except Exception:
+        pass
 
+    return str(value)
 
 def get_git_commit_hash() -> str:
     try:
