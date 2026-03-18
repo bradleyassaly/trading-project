@@ -92,3 +92,24 @@ def test_walk_forward_config_rejects_invalid_windows() -> None:
             slow=20,
             train_window_bars=0,
         )
+
+def test_walk_forward_config_rejects_invalid_windows() -> None:
+    with pytest.raises(ValueError, match="train_window_bars must be > 0"):
+        WalkForwardConfig(
+            symbol="AAPL",
+            strategy="sma_cross",
+            fast=10,
+            slow=20,
+            train_window_bars=0,
+        )
+
+
+def test_walk_forward_config_rejects_optimize_mode_without_sweep_values() -> None:
+    with pytest.raises(ValueError, match="requires fast_values and slow_values"):
+        WalkForwardConfig(
+            symbol="AAPL",
+            strategy="sma_cross",
+            walk_forward_mode="optimize",
+            fast_values=[],
+            slow_values=[],
+        )

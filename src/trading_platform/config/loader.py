@@ -45,6 +45,7 @@ def load_parameter_sweep_config(path: str | Path) -> ParameterSweepConfig:
     data = _read_config_file(Path(path))
     return ParameterSweepConfig(**data)
 
+
 def load_walk_forward_config(path: str | Path) -> WalkForwardConfig:
     data = _read_config_file(Path(path))
     return WalkForwardConfig(**data)

@@ -1,0 +1,22 @@
+symbol: AAPL
+start: "2015-01-01"
+interval: "1d"
+feature_groups:
+  - trend
+  - momentum
+  - volatility
+  - volume
+strategy: sma_cross
+cash: 10000
+commission: 0.001
+
+walk_forward_mode: optimize
+rank_metric: "Return [%]"
+
+fast_values: [10, 20, 50]
+slow_values: [100, 150, 200]
+
+train_window_bars: 504
+test_window_bars: 63
+step_bars: 63
+min_required_bars: 252

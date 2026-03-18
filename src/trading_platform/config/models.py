@@ -19,6 +19,11 @@ VALID_STRATEGIES = {
     "buy_and_hold",
 }
 
+VALID_WALK_FORWARD_MODES = {
+    "fixed",
+    "optimize",
+}
+
 
 def _validate_symbol(symbol: str) -> None:
     if not symbol or not symbol.strip():
@@ -156,6 +161,7 @@ class ResearchWorkflowConfig:
             if self.lookback <= 0:
                 raise ValueError("lookback must be > 0")
 
+
 @dataclass(frozen=True)
 class ParameterSweepConfig:
     symbol: str
@@ -208,6 +214,7 @@ class ParameterSweepConfig:
             if not self.lookback_values:
                 raise ValueError("momentum sweep requires lookback_values")
 
+
 @dataclass(frozen=True)
 class WalkForwardConfig:
     symbol: str
@@ -217,9 +224,17 @@ class WalkForwardConfig:
     interval: str = "1d"
     feature_groups: list[str] | None = None
 
+    # fixed-parameter mode fields
     fast: int | None = None
     slow: int | None = None
     lookback: int | None = None
+
+    # optimize mode fields
+    walk_forward_mode: str = "fixed"
+    rank_metric: str = "Return [%]"
+    fast_values: list[int] = field(default_factory=list)
+    slow_values: list[int] = field(default_factory=list)
+    lookback_values: list[int] = field(default_factory=list)
 
     cash: float = 10_000
     commission: float = 0.0
@@ -252,6 +267,12 @@ class WalkForwardConfig:
                 f"Supported strategies: {sorted(VALID_STRATEGIES)}"
             )
 
+        if self.walk_forward_mode not in VALID_WALK_FORWARD_MODES:
+            raise ValueError(
+                f"Unsupported walk_forward_mode: {self.walk_forward_mode}. "
+                f"Supported modes: {sorted(VALID_WALK_FORWARD_MODES)}"
+            )
+
         if self.cash <= 0:
             raise ValueError("cash must be > 0")
 
@@ -267,16 +288,30 @@ class WalkForwardConfig:
         if self.min_required_bars <= 0:
             raise ValueError("min_required_bars must be > 0")
 
-        if self.strategy == "sma_cross":
-            if self.fast is None or self.slow is None:
-                raise ValueError("sma_cross strategy requires both fast and slow")
-            if self.fast <= 0 or self.slow <= 0:
-                raise ValueError("fast and slow must be > 0")
-            if self.fast >= self.slow:
-                raise ValueError("fast must be < slow for sma_cross")
+        if self.walk_forward_mode == "fixed":
+            if self.strategy == "sma_cross":
+                if self.fast is None or self.slow is None:
+                    raise ValueError("fixed sma_cross walk-forward requires both fast and slow")
+                if self.fast <= 0 or self.slow <= 0:
+                    raise ValueError("fast and slow must be > 0")
+                if self.fast >= self.slow:
+                    raise ValueError("fast must be < slow for sma_cross")
 
-        if self.strategy == "momentum":
-            if self.lookback is None:
-                raise ValueError("momentum strategy requires lookback")
-            if self.lookback <= 0:
-                raise ValueError("lookback must be > 0")
+            if self.strategy == "momentum":
+                if self.lookback is None:
+                    raise ValueError("fixed momentum walk-forward requires lookback")
+                if self.lookback <= 0:
+                    raise ValueError("lookback must be > 0")
+
+        if self.walk_forward_mode == "optimize":
+            if self.strategy == "sma_cross":
+                if not self.fast_values or not self.slow_values:
+                    raise ValueError(
+                        "optimize sma_cross walk-forward requires fast_values and slow_values"
+                    )
+
+            if self.strategy == "momentum":
+                if not self.lookback_values:
+                    raise ValueError(
+                        "optimize momentum walk-forward requires lookback_values"
+                    )

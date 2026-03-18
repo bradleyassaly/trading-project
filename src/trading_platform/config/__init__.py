@@ -1,6 +1,7 @@
 from trading_platform.config.loader import (
     load_parameter_sweep_config,
     load_research_workflow_config,
+    load_walk_forward_config,
 )
 from trading_platform.config.models import (
     BacktestConfig,
@@ -17,6 +18,8 @@ __all__ = [
     "BacktestConfig",
     "ResearchWorkflowConfig",
     "ParameterSweepConfig",
+    "WalkForwardConfig",
     "load_research_workflow_config",
     "load_parameter_sweep_config",
+    "load_walk_forward_config",
 ]
