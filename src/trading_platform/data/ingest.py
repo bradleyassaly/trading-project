@@ -1,50 +1,45 @@
-import pandas as pd
-import yfinance as yf
+from __future__ import annotations
 
-from trading_platform.settings import RAW_DATA_DIR
+from pathlib import Path
+
+from trading_platform.data.normalize import normalize_yahoo_bars
+from trading_platform.data.providers.base import BarDataProvider
+from trading_platform.data.providers.yahoo import YahooBarDataProvider
+from trading_platform.data.validate import validate_bars
+from trading_platform.settings import NORMALIZED_DATA_DIR, RAW_DATA_DIR
 
 
-def ingest_symbol(symbol: str, start: str = "2010-01-01"):
-    df = yf.download(symbol, start=start, progress=False, auto_adjust=False)
+def ingest_symbol(
+    symbol: str,
+    start: str = "2010-01-01",
+    end: str | None = None,
+    interval: str = "1d",
+    provider: BarDataProvider | None = None,
+) -> Path:
+    """
+    Fetch raw bar data from a provider, save the raw snapshot, normalize it into
+    canonical schema, validate it, and save normalized output.
 
-    if df.empty:
-        raise ValueError(f"No data returned for {symbol}")
+    Returns the normalized parquet path.
+    """
+    provider = provider or YahooBarDataProvider()
 
-    # Flatten MultiIndex columns from yfinance if present
-    if isinstance(df.columns, pd.MultiIndex):
-        found = False
-        for level in range(df.columns.nlevels):
-            vals = set(df.columns.get_level_values(level))
-            if {"Open", "High", "Low", "Close", "Volume"}.issubset(vals):
-                df.columns = df.columns.get_level_values(level)
-                found = True
-                break
+    raw_df = provider.fetch_bars(
+        symbol=symbol,
+        start=start,
+        end=end,
+        interval=interval,
+    )
 
-        if not found:
-            df.columns = [c[0] if isinstance(c, tuple) else c for c in df.columns]
+    raw_path = RAW_DATA_DIR / f"{symbol}.parquet"
+    raw_df.to_parquet(raw_path)
 
-    # Normalize names
-    df = df.rename(columns={
-        "Open": "open",
-        "High": "high",
-        "Low": "low",
-        "Close": "close",
-        "Volume": "volume",
-    })
+    # For now, normalization is Yahoo-specific because Yahoo is the only provider.
+    # Later we can generalize this by adding provider-specific normalizers.
+    normalized_df = normalize_yahoo_bars(raw_df, symbol=symbol)
+    normalized_df = validate_bars(normalized_df)
 
-    required = ["open", "high", "low", "close", "volume"]
-    missing = [c for c in required if c not in df.columns]
-    if missing:
-        raise ValueError(f"Missing required columns: {missing}. Actual columns: {list(df.columns)}")
+    normalized_path = NORMALIZED_DATA_DIR / f"{symbol}.parquet"
+    normalized_df.to_parquet(normalized_path, index=False)
 
-    df["symbol"] = symbol
-    df["timestamp"] = pd.to_datetime(df.index)
-
-    df = df.reset_index(drop=True)
-    df = df[["timestamp", "symbol", "open", "high", "low", "close", "volume"]]
-
-    path = RAW_DATA_DIR / f"{symbol}.parquet"
-
-    df.to_parquet(path, index=False)
-
-    return path
+    return normalized_path

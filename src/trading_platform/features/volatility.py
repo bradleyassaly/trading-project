@@ -4,7 +4,7 @@ import polars as pl
 
 
 def add_volatility_features(df: pl.DataFrame) -> pl.DataFrame:
-    close_ret = pl.col("Close").pct_change()
+    close_ret = pl.col("close").pct_change()
 
     return df.with_columns(
         [
