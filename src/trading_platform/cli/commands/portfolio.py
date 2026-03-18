@@ -11,6 +11,8 @@ from trading_platform.portfolio.engine import run_equal_weight_portfolio_backtes
 from trading_platform.portfolio.stats import summarize_portfolio_result
 from trading_platform.signals.loaders import load_feature_frame
 from trading_platform.signals.registry import SIGNAL_REGISTRY
+from trading_platform.execution.policies import ExecutionPolicy
+from trading_platform.simulation.portfolio import simulate_equal_weight_portfolio
 
 
 def cmd_portfolio(args: argparse.Namespace) -> None:
@@ -51,10 +53,17 @@ def cmd_portfolio(args: argparse.Namespace) -> None:
     asset_returns = pd.concat(asset_return_frames, axis=1).sort_index().fillna(0.0)
     positions = pd.concat(position_frames, axis=1).sort_index().fillna(0.0)
 
-    result, weights = run_equal_weight_portfolio_backtest(
+    simulation_result = simulate_equal_weight_portfolio(
         asset_returns=asset_returns,
         positions=positions,
+        cost_per_turnover=args.commission,
+        initial_equity=args.cash,
+        execution_policy=execution_policy,
     )
+
+    result = simulation_result.timeseries
+    weights = simulation_result.weights
+    summary = simulation_result.summary
 
     summary = summarize_portfolio_result(result)
     summary["strategy"] = args.strategy
@@ -63,6 +72,7 @@ def cmd_portfolio(args: argparse.Namespace) -> None:
     summary["fast"] = args.fast
     summary["slow"] = args.slow
     summary["lookback"] = args.lookback
+    summary["rebalance_frequency"] = args.rebalance_frequency
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)

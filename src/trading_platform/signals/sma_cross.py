@@ -5,6 +5,7 @@ import pandas as pd
 
 from trading_platform.signals.common import make_base_signal_frame, normalize_price_frame
 
+
 def generate_signal_frame(
     df: pd.DataFrame,
     *,
@@ -20,10 +21,11 @@ def generate_signal_frame(
 
     out["fast_ma"] = working["close"].rolling(fast).mean()
     out["slow_ma"] = working["close"].rolling(slow).mean()
+    out["score"] = out["fast_ma"] / out["slow_ma"] - 1.0
     out["position"] = (out["fast_ma"] > out["slow_ma"]).astype(float)
     out["position"] = out["position"].fillna(0.0)
 
-    return out[["close", "asset_return", "position"]]
+    return out[["close", "asset_return", "score", "position"]]
 
 def normalize_price_frame(df: pd.DataFrame) -> pd.DataFrame:
     working = df.copy()

@@ -1,0 +1,31 @@
+{
+  "portfolio_total_return": 717197.9372969262,
+  "portfolio_annual_return": 0.30242782509003296,
+  "portfolio_annual_vol": 0.26342206808315743,
+  "portfolio_sharpe": 1.148073232021556,
+  "portfolio_max_drawdown": -0.4109565110859035,
+  "benchmark_total_return": 591099.6629062472,
+  "benchmark_annual_return": 0.2869462637236353,
+  "benchmark_annual_vol": 0.2577983055685426,
+  "benchmark_sharpe": 1.113064971822877,
+  "benchmark_max_drawdown": -0.4927532348642024,
+  "excess_total_return": 126098.27439067897,
+  "strategy": "momentum_hold",
+  "symbols": [
+    "AAPL",
+    "MSFT",
+    "NVDA",
+    "AMZN",
+    "META",
+    "GOOGL",
+    "TSLA"
+  ],
+  "n_symbols": 7,
+  "top_n": 3,
+  "weighting_scheme": "inverse_vol",
+  "vol_window": 20,
+  "rebalance_frequency": "monthly",
+  "fast": 20,
+  "slow": 100,
+  "lookback": 120
+}

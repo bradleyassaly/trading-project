@@ -8,6 +8,7 @@ FEATURES_DIR = DATA_DIR / "features"
 
 ARTIFACTS_DIR = PROJECT_ROOT / "artifacts"
 EXPERIMENT_DIR = ARTIFACTS_DIR / "experiments"
+METADATA_DIR = DATA_DIR / "metadata"
 
 RAW_DATA_DIR.mkdir(parents=True, exist_ok=True)
 FEATURES_DIR.mkdir(parents=True, exist_ok=True)

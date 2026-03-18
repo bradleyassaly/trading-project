@@ -18,7 +18,11 @@ from trading_platform.experiments.reporting import (
     save_walkforward_param_plot,
     save_walkforward_return_plot,
 )
-from trading_platform.settings import FEATURES_DIR
+from trading_platform.research.service import (
+    run_vectorized_research_on_df,
+    to_legacy_stats,
+)
+from trading_platform.signals.loaders import load_feature_frame
 
 
 def cmd_walkforward(args: argparse.Namespace) -> None:
@@ -31,12 +35,11 @@ def cmd_walkforward(args: argparse.Namespace) -> None:
     )
 
     for symbol in symbols:
-        path = FEATURES_DIR / f"{symbol}.parquet"
-        if not path.exists():
-            print(f"[ERROR] {symbol}: feature file not found at {path}")
+        try:
+            df = load_feature_frame(symbol)
+        except Exception as e:
+            print(f"[ERROR] {symbol}: failed to load feature frame -> {e}")
             continue
-
-        df = pd.read_parquet(path)
 
         if "Date" in df.columns:
             df["Date"] = pd.to_datetime(df["Date"])
@@ -58,16 +61,22 @@ def cmd_walkforward(args: argparse.Namespace) -> None:
 
         if args.strategy == "sma_cross":
             if not args.fast_values or not args.slow_values:
-                raise SystemExit("walkforward with sma_cross requires --fast-values and --slow-values")
+                raise SystemExit(
+                    "walkforward with sma_cross requires --fast-values and --slow-values"
+                )
             param_grid = [
                 {"fast": fast, "slow": slow}
                 for fast, slow in product(args.fast_values, args.slow_values)
                 if fast < slow
             ]
+
         elif args.strategy == "momentum_hold":
             if not args.lookback_values:
-                raise SystemExit("walkforward with momentum_hold requires --lookback-values")
+                raise SystemExit(
+                    "walkforward with momentum_hold requires --lookback-values"
+                )
             param_grid = [{"lookback": lb} for lb in args.lookback_values]
+
         else:
             raise SystemExit(f"Unsupported strategy for walkforward: {args.strategy}")
 
@@ -88,16 +97,41 @@ def cmd_walkforward(args: argparse.Namespace) -> None:
 
             for params in param_grid:
                 try:
-                    train_stats = run_backtest_on_df(
-                        df=train_df,
-                        symbol=symbol,
-                        strategy=args.strategy,
-                        fast=params.get("fast", 20),
-                        slow=params.get("slow", 100),
-                        lookback=params.get("lookback", 20),
-                        cash=args.cash,
-                        commission=args.commission,
-                    )
+                    if args.engine == "legacy":
+                        train_stats = run_backtest_on_df(
+                            df=train_df,
+                            symbol=symbol,
+                            strategy=args.strategy,
+                            fast=params.get("fast", 20),
+                            slow=params.get("slow", 100),
+                            lookback=params.get("lookback", 20),
+                            cash=args.cash,
+                            commission=args.commission,
+                        )
+                    elif args.engine == "vectorized":
+                        train_result = run_vectorized_research_on_df(
+                            df=train_df,
+                            symbol=symbol,
+                            strategy=args.strategy,
+                            fast=params.get("fast", 20),
+                            slow=params.get("slow", 100),
+                            lookback=params.get("lookback", 20),
+                            cost_per_turnover=args.commission,
+                            initial_equity=args.cash,
+                        )
+                        train_stats = to_legacy_stats(
+                            train_result,
+                            symbol=symbol,
+                            strategy=args.strategy,
+                            fast=params.get("fast"),
+                            slow=params.get("slow"),
+                            lookback=params.get("lookback"),
+                            cash=args.cash,
+                            commission=args.commission,
+                        )
+                    else:
+                        raise SystemExit(f"Unsupported engine: {args.engine}")
+
                     score = train_stats.get(args.select_by)
 
                     if score is None or pd.isna(score):
@@ -109,6 +143,7 @@ def cmd_walkforward(args: argparse.Namespace) -> None:
                             "params": params,
                             "train_stats": train_stats,
                         }
+
                 except Exception as e:
                     print(
                         f"[WARN] {symbol}: train window "
@@ -127,16 +162,41 @@ def cmd_walkforward(args: argparse.Namespace) -> None:
             selected_params = best_train["params"]
 
             try:
-                test_stats = run_backtest_on_df(
-                    df=test_df,
-                    symbol=symbol,
-                    strategy=args.strategy,
-                    fast=selected_params.get("fast", 20),
-                    slow=selected_params.get("slow", 100),
-                    lookback=selected_params.get("lookback", 20),
-                    cash=args.cash,
-                    commission=args.commission,
-                )
+                if args.engine == "legacy":
+                    test_stats = run_backtest_on_df(
+                        df=test_df,
+                        symbol=symbol,
+                        strategy=args.strategy,
+                        fast=selected_params.get("fast", 20),
+                        slow=selected_params.get("slow", 100),
+                        lookback=selected_params.get("lookback", 20),
+                        cash=args.cash,
+                        commission=args.commission,
+                    )
+                elif args.engine == "vectorized":
+                    test_result = run_vectorized_research_on_df(
+                        df=test_df,
+                        symbol=symbol,
+                        strategy=args.strategy,
+                        fast=selected_params.get("fast", 20),
+                        slow=selected_params.get("slow", 100),
+                        lookback=selected_params.get("lookback", 20),
+                        cost_per_turnover=args.commission,
+                        initial_equity=args.cash,
+                    )
+                    test_stats = to_legacy_stats(
+                        test_result,
+                        symbol=symbol,
+                        strategy=args.strategy,
+                        fast=selected_params.get("fast"),
+                        slow=selected_params.get("slow"),
+                        lookback=selected_params.get("lookback"),
+                        cash=args.cash,
+                        commission=args.commission,
+                    )
+                else:
+                    raise SystemExit(f"Unsupported engine: {args.engine}")
+
             except Exception as e:
                 print(
                     f"[WARN] {symbol}: test window "
@@ -148,7 +208,11 @@ def cmd_walkforward(args: argparse.Namespace) -> None:
             benchmark_return_pct = compute_buy_and_hold_return_pct(test_df)
             test_return_pct = test_stats.get("Return [%]")
 
-            if test_return_pct is not None and not pd.isna(test_return_pct) and not pd.isna(benchmark_return_pct):
+            if (
+                test_return_pct is not None
+                and not pd.isna(test_return_pct)
+                and not pd.isna(benchmark_return_pct)
+            ):
                 excess_return_pct = test_return_pct - benchmark_return_pct
             else:
                 excess_return_pct = float("nan")
@@ -156,6 +220,7 @@ def cmd_walkforward(args: argparse.Namespace) -> None:
             row = {
                 "symbol": symbol,
                 "strategy": args.strategy,
+                "engine": args.engine,
                 "train_start": current_train_start.date().isoformat(),
                 "train_end": train_end.date().isoformat(),
                 "test_start": train_end.date().isoformat(),
@@ -178,6 +243,7 @@ def cmd_walkforward(args: argparse.Namespace) -> None:
 
             print(
                 f"[OK] {symbol}: "
+                f"engine={args.engine} | "
                 f"train {row['train_start']}->{row['train_end']} | "
                 f"test {row['test_start']}->{row['test_end']} | "
                 f"params fast={row['fast']} slow={row['slow']} lookback={row['lookback']} | "
@@ -186,6 +252,7 @@ def cmd_walkforward(args: argparse.Namespace) -> None:
                 f"excess Return[%]={row['excess_return_pct']} | "
                 f"test Sharpe={row['test_sharpe']}"
             )
+
             current_train_start = current_train_start + test_offset
 
     if not results:
@@ -205,6 +272,7 @@ def cmd_walkforward(args: argparse.Namespace) -> None:
         row: dict[str, object] = {
             "symbol": symbol,
             "strategy": args.strategy,
+            "engine": args.engine,
             "windows": len(symbol_df),
             "avg_test_return_pct": symbol_df["test_return_pct"].mean(),
             "median_test_return_pct": symbol_df["test_return_pct"].median(),

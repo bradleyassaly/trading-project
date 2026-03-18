@@ -8,6 +8,7 @@ import pandas as pd
 from trading_platform.backtests.engine import run_backtest
 from trading_platform.cli.common import print_symbol_list, resolve_symbols
 from trading_platform.experiments.tracker import log_experiment
+from trading_platform.research.service import run_vectorized_research, to_legacy_stats
 
 
 def cmd_sweep(args: argparse.Namespace) -> None:
@@ -43,20 +44,47 @@ def cmd_sweep(args: argparse.Namespace) -> None:
     for symbol in symbols:
         for params in param_sets:
             try:
-                stats = run_backtest(
-                    symbol=symbol,
-                    strategy=args.strategy,
-                    fast=params.get("fast", 20),
-                    slow=params.get("slow", 100),
-                    lookback=params.get("lookback", 20),
-                    cash=args.cash,
-                    commission=args.commission,
-                )
+                if args.engine == "legacy":
+                    stats = run_backtest(
+                        symbol=symbol,
+                        strategy=args.strategy,
+                        fast=params.get("fast", 20),
+                        slow=params.get("slow", 100),
+                        lookback=params.get("lookback", 20),
+                        cash=args.cash,
+                        commission=args.commission,
+                    )
+
+                elif args.engine == "vectorized":
+                    result = run_vectorized_research(
+                        symbol=symbol,
+                        strategy=args.strategy,
+                        fast=params.get("fast", 20),
+                        slow=params.get("slow", 100),
+                        lookback=params.get("lookback", 20),
+                        cost_per_turnover=args.commission,
+                        initial_equity=args.cash,
+                    )
+                    stats = to_legacy_stats(
+                        result,
+                        symbol=symbol,
+                        strategy=args.strategy,
+                        fast=params.get("fast"),
+                        slow=params.get("slow"),
+                        lookback=params.get("lookback"),
+                        cash=args.cash,
+                        commission=args.commission,
+                    )
+
+                else:
+                    raise SystemExit(f"Unsupported engine: {args.engine}")
+
                 exp_id = log_experiment(stats)
 
                 row = {
                     "symbol": symbol,
                     "strategy": args.strategy,
+                    "engine": args.engine,
                     "fast": params.get("fast"),
                     "slow": params.get("slow"),
                     "lookback": params.get("lookback"),
@@ -70,7 +98,7 @@ def cmd_sweep(args: argparse.Namespace) -> None:
                 results.append(row)
 
                 print(
-                    f"[OK] {symbol}: strategy={args.strategy}, "
+                    f"[OK] {symbol}: engine={args.engine}, strategy={args.strategy}, "
                     f"fast={row['fast']}, slow={row['slow']}, "
                     f"lookback={row['lookback']}, "
                     f"Return[%]={row['return_pct']}, "
@@ -78,9 +106,10 @@ def cmd_sweep(args: argparse.Namespace) -> None:
                     f"MaxDD[%]={row['max_drawdown_pct']}, "
                     f"Experiment={exp_id}"
                 )
+
             except Exception as e:
                 print(
-                    f"[ERROR] {symbol}: strategy={args.strategy}, "
+                    f"[ERROR] {symbol}: engine={args.engine}, strategy={args.strategy}, "
                     f"params={params} -> {e}"
                 )
 

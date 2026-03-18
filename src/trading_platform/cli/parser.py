@@ -17,7 +17,16 @@ from trading_platform.cli.common import (
     add_strategy_arguments,
 )
 from trading_platform.strategies.registry import STRATEGY_REGISTRY
+from trading_platform.cli.commands.portfolio_topn import cmd_portfolio_topn
 
+def add_execution_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--rebalance-frequency",
+        type=str,
+        default="daily",
+        choices=["daily", "weekly", "monthly"],
+        help="How often to refresh positions/weights",
+    )
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -44,6 +53,20 @@ def build_parser() -> argparse.ArgumentParser:
     research_parser = subparsers.add_parser("research", help="Run backtests")
     add_shared_symbol_args(research_parser)
     add_strategy_arguments(research_parser)
+    add_execution_arguments(research_parser)
+    research_parser.add_argument(
+        "--engine",
+        type=str,
+        default="legacy",
+        choices=["legacy", "vectorized"],
+        help="Backtest engine to use",
+    )
+    research_parser.add_argument(
+        "--output-dir",
+        type=str,
+        default=None,
+        help="Optional directory to save vectorized research outputs",
+    )
     research_parser.set_defaults(func=cmd_research)
 
     pipeline_parser = subparsers.add_parser(
@@ -78,6 +101,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Run parameter sweep for a strategy",
     )
     add_shared_symbol_args(sweep_parser)
+    add_execution_arguments(sweep_parser)
     sweep_parser.add_argument(
         "--strategy",
         type=str,
@@ -96,6 +120,14 @@ def build_parser() -> argparse.ArgumentParser:
         default="artifacts/experiments/sweep_results.csv",
         help="CSV output path for sweep summary",
     )
+    sweep_parser.add_argument(
+        "--engine",
+        type=str,
+        default="legacy",
+        choices=["legacy", "vectorized"],
+        help="Backtest engine to use",
+    )
+
     sweep_parser.set_defaults(func=cmd_sweep)
 
     walk_parser = subparsers.add_parser(
@@ -110,6 +142,7 @@ def build_parser() -> argparse.ArgumentParser:
         choices=sorted(STRATEGY_REGISTRY.keys()),
         help="Strategy to validate",
     )
+    add_execution_arguments(walk_parser)
     walk_parser.add_argument("--fast-values", type=int, nargs="+")
     walk_parser.add_argument("--slow-values", type=int, nargs="+")
     walk_parser.add_argument("--lookback-values", type=int, nargs="+")
@@ -132,6 +165,14 @@ def build_parser() -> argparse.ArgumentParser:
         default="artifacts/experiments/walkforward_results.csv",
         help="CSV output path",
     )
+    walk_parser.add_argument(
+        "--engine",
+        type=str,
+        default="legacy",
+        choices=["legacy", "vectorized"],
+        help="Backtest engine to use",
+    )
+
     walk_parser.set_defaults(func=cmd_walkforward)
 
     portfolio_parser = subparsers.add_parser(
@@ -140,12 +181,79 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_shared_symbol_args(portfolio_parser)
     add_strategy_arguments(portfolio_parser)
+    add_execution_arguments(portfolio_parser)
     portfolio_parser.add_argument(
         "--output-dir",
         type=str,
         default="data/experiments/portfolio",
         help="Directory for portfolio outputs",
     )
+
+
     portfolio_parser.set_defaults(func=cmd_portfolio)
+
+    portfolio_topn_parser = subparsers.add_parser(
+        "portfolio-topn",
+        help="Run top-N cross-sectional portfolio backtest",
+    )
+    add_shared_symbol_args(portfolio_topn_parser)
+    add_strategy_arguments(portfolio_topn_parser)
+    add_execution_arguments(portfolio_topn_parser)
+    portfolio_topn_parser.add_argument(
+        "--top-n",
+        type=int,
+        required=True,
+        help="Number of top-ranked symbols to hold",
+    )
+    portfolio_topn_parser.add_argument(
+        "--weighting-scheme",
+        type=str,
+        default="equal",
+        choices=["equal", "inverse_vol"],
+        help="How to size selected holdings",
+    )
+    portfolio_topn_parser.add_argument(
+        "--vol-window",
+        type=int,
+        default=20,
+        help="Rolling volatility window for inverse-vol weighting",
+    )
+    portfolio_topn_parser.add_argument(
+        "--min-score",
+        type=float,
+        default=None,
+        help="Optional minimum score required for a symbol to be held",
+    )
+    portfolio_topn_parser.add_argument(
+        "--max-weight",
+        type=float,
+        default=None,
+        help="Optional cap on any single position weight, e.g. 0.4",
+    )
+    portfolio_topn_parser.add_argument(
+        "--max-names-per-group",
+        type=int,
+        default=None,
+        help="Optional maximum number of holdings allowed per group",
+    )
+    portfolio_topn_parser.add_argument(
+        "--max-group-weight",
+        type=float,
+        default=None,
+        help="Optional cap on total portfolio weight per group, e.g. 0.4",
+    )
+    portfolio_topn_parser.add_argument(
+        "--output-dir",
+        type=str,
+        default="data/experiments/portfolio_topn",
+        help="Directory for portfolio outputs",
+    )
+    portfolio_topn_parser.add_argument(
+        "--group-map-path",
+        type=str,
+        default=None,
+        help="Optional path to CSV with columns: symbol,group",
+    )
+    portfolio_topn_parser.set_defaults(func=cmd_portfolio_topn)
 
     return parser
