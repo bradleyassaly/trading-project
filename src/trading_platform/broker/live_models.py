@@ -46,6 +46,11 @@ class LiveBrokerOrderStatus:
     status: str
     submitted_at: str | None = None
 
+    @property
+    def remaining_quantity(self) -> int:
+        remaining = int(self.quantity) - int(self.filled_quantity)
+        return max(remaining, 0)
+
 
 @dataclass(frozen=True)
 class LiveBrokerFill:

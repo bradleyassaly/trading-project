@@ -55,8 +55,18 @@ def print_symbol_list(symbols: list[str], max_items: int = 10) -> str:
         return ", ".join(symbols)
     return f"{', '.join(symbols[:max_items])}, ... ({len(symbols)} total)"
 
-def add_shared_symbol_args(parser: argparse.ArgumentParser) -> None:
-    add_symbol_arguments(parser)
+def add_shared_symbol_args(parser) -> None:
+    parser.add_argument(
+        "--symbols",
+        nargs="+",
+        default=None,
+        help="Symbols to include in the run.",
+    )
+    parser.add_argument(
+        "--universe",
+        default=None,
+        help="Named universe to trade instead of passing --symbols.",
+    )
 
 def add_strategy_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(

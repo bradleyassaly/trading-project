@@ -104,6 +104,9 @@ def test_cmd_live_dry_run_prints_reconciled_orders(monkeypatch, capsys) -> None:
         reserve_cash_pct=0.0,
         order_type="market",
         time_in_force="day",
+        broker="mock",
+        mock_equity=100_000.0,
+        mock_cash=100_000.0,
     )
 
     cmd_live_dry_run(args)
@@ -111,5 +114,154 @@ def test_cmd_live_dry_run_prints_reconciled_orders(monkeypatch, capsys) -> None:
     stdout = capsys.readouterr().out
     assert "Running live dry-run for 2 symbol(s): AAPL, MSFT" in stdout
     assert "As of: 2025-01-04" in stdout
-    assert "Computed orders:" in stdout
+    assert "Broker: mock" in stdout
+    assert "Open orders: 0" in stdout
+    assert "Raw computed orders:" in stdout
+    assert "Adjusted orders after open-order awareness:" in stdout
     assert "BUY" in stdout or "SELL" in stdout
+
+def test_cmd_live_dry_run_with_mock_broker(monkeypatch, capsys) -> None:
+    import pandas as pd
+    from types import SimpleNamespace
+    from trading_platform.cli.commands.live_dry_run import cmd_live_dry_run
+
+    idx = pd.to_datetime(["2025-01-03", "2025-01-04"])
+
+    class DummySnapshot:
+        def __init__(self):
+            self.closes = pd.DataFrame({"AAPL": [100.0, 101.0]}, index=idx)
+            self.scores = pd.DataFrame({"AAPL": [1.0, 2.0]}, index=idx)
+            self.asset_returns = pd.DataFrame({"AAPL": [0.0, 0.01]}, index=idx)
+            self.skipped_symbols = []
+
+    monkeypatch.setattr(
+        "trading_platform.cli.commands.live_dry_run.load_signal_snapshot",
+        lambda **kwargs: DummySnapshot(),
+    )
+    monkeypatch.setattr(
+        "trading_platform.cli.commands.live_dry_run.compute_latest_target_weights",
+        lambda **kwargs: (
+            "2025-01-04",
+            {"AAPL": 1.0},
+            {"AAPL": 1.0},
+            {"selected_symbols": ["AAPL"]},
+        ),
+    )
+
+    args = SimpleNamespace(
+        symbols=["AAPL"],
+        universe=None,
+        strategy="sma_cross",
+        fast=None,
+        slow=None,
+        lookback=None,
+        top_n=1,
+        weighting_scheme="equal",
+        vol_window=20,
+        min_score=None,
+        max_weight=None,
+        max_names_per_group=None,
+        max_group_weight=None,
+        group_map_path=None,
+        rebalance_frequency="daily",
+        timing="next_bar",
+        initial_cash=100_000.0,
+        min_trade_dollars=1.0,
+        lot_size=1,
+        reserve_cash_pct=0.0,
+        order_type="market",
+        time_in_force="day",
+        broker="mock",
+        mock_equity=100_000.0,
+        mock_cash=100_000.0,
+    )
+
+    cmd_live_dry_run(args)
+
+    stdout = capsys.readouterr().out
+    assert "Running live dry-run for 1 symbol(s): AAPL" in stdout
+    assert "As of: 2025-01-04" in stdout
+    assert "Broker: mock" in stdout
+    assert "Open orders: 0" in stdout
+    assert "Raw computed orders:" in stdout
+    assert "Adjusted orders after open-order awareness:" in stdout
+    assert "BUY" in stdout or "SELL" in stdout
+
+    def test_cmd_live_dry_run_with_mock_positions(monkeypatch, capsys, tmp_path: Path) -> None:
+        import pandas as pd
+        from types import SimpleNamespace
+        from trading_platform.cli.commands.live_dry_run import cmd_live_dry_run
+
+        idx = pd.to_datetime(["2025-01-03", "2025-01-04"])
+
+        class DummySnapshot:
+            def __init__(self):
+                self.closes = pd.DataFrame(
+                    {"AAPL": [100.0, 101.0], "MSFT": [200.0, 202.0]},
+                    index=idx,
+                )
+                self.scores = pd.DataFrame(
+                    {"AAPL": [1.0, 2.0], "MSFT": [1.5, 2.5]},
+                    index=idx,
+                )
+                self.asset_returns = pd.DataFrame(
+                    {"AAPL": [0.0, 0.01], "MSFT": [0.0, 0.02]},
+                    index=idx,
+                )
+                self.skipped_symbols = []
+
+        monkeypatch.setattr(
+            "trading_platform.cli.commands.live_dry_run.load_signal_snapshot",
+            lambda **kwargs: DummySnapshot(),
+        )
+        monkeypatch.setattr(
+            "trading_platform.cli.commands.live_dry_run.compute_latest_target_weights",
+            lambda **kwargs: (
+                "2025-01-04",
+                {"MSFT": 1.0},
+                {"MSFT": 1.0},
+                {"selected_symbols": ["MSFT"]},
+            ),
+        )
+
+        positions_path = tmp_path / "mock_positions.csv"
+        pd.DataFrame(
+            [
+                {"symbol": "AAPL", "quantity": 10, "avg_price": 100.0, "market_price": 101.0},
+            ]
+        ).to_csv(positions_path, index=False)
+
+        args = SimpleNamespace(
+            symbols=["AAPL", "MSFT"],
+            universe=None,
+            strategy="sma_cross",
+            fast=None,
+            slow=None,
+            lookback=None,
+            top_n=1,
+            weighting_scheme="equal",
+            vol_window=20,
+            min_score=None,
+            max_weight=None,
+            max_names_per_group=None,
+            max_group_weight=None,
+            group_map_path=None,
+            rebalance_frequency="daily",
+            timing="next_bar",
+            initial_cash=100_000.0,
+            min_trade_dollars=1.0,
+            lot_size=1,
+            reserve_cash_pct=0.0,
+            order_type="market",
+            time_in_force="day",
+            broker="mock",
+            mock_equity=100_000.0,
+            mock_cash=100_000.0,
+            mock_positions_path=str(positions_path),
+        )
+
+        cmd_live_dry_run(args)
+
+        stdout = capsys.readouterr().out
+        assert "Current broker positions: 1" in stdout
+        assert "AAPL: qty=10" in stdout

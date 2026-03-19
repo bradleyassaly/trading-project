@@ -90,12 +90,15 @@ def load_signal_snapshot(
     for symbol in symbols:
         try:
             feature_df = load_feature_frame(symbol)
-            signal_df = signal_fn(
-                feature_df,
-                fast=fast,
-                slow=slow,
-                lookback=lookback,
-            ).copy()
+            signal_kwargs = {}
+            if fast is not None:
+                signal_kwargs["fast"] = fast
+            if slow is not None:
+                signal_kwargs["slow"] = slow
+            if lookback is not None:
+                signal_kwargs["lookback"] = lookback
+
+            signal_df = signal_fn(feature_df, **signal_kwargs).copy()
 
             if "score" not in signal_df.columns:
                 raise ValueError("Signal frame missing required column: score")

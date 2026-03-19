@@ -422,12 +422,8 @@ def build_parser() -> argparse.ArgumentParser:
         "daily-paper-job",
         help="Run the daily paper trading workflow.",
     )
-    daily_paper_parser.add_argument(
-        "--symbols",
-        nargs="+",
-        required=True,
-        help="Symbols to include in the daily paper trading job.",
-    )
+
+
     daily_paper_parser.add_argument(
         "--strategy",
         default="sma_cross",
@@ -548,19 +544,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     daily_paper_parser.set_defaults(func=cmd_daily_paper_job)
 
-    paper_run_parser.add_argument(
-        "--symbols",
-        nargs="+",
-        default=None,
-        help="Symbols to include in the paper trading run.",
-    )
-    paper_run_parser.add_argument(
-        "--universe",
-        default=None,
-        help="Named universe to trade instead of passing --symbols.",
-    )
-
-    # daily-paper-job changes:
     daily_paper_parser.add_argument(
         "--symbols",
         nargs="+",
@@ -700,6 +683,31 @@ def build_parser() -> argparse.ArgumentParser:
         default="day",
         help="Time in force for hypothetical live orders.",
     )
+    live_dry_run_parser.add_argument(
+        "--broker",
+        default="mock",
+        choices=["mock", "alpaca"],
+        help="Broker backend for dry-run reconciliation.",
+    )
+    live_dry_run_parser.add_argument(
+        "--mock-equity",
+        type=float,
+        default=100_000.0,
+        help="Mock broker equity used when --broker mock.",
+    )
+    live_dry_run_parser.add_argument(
+        "--mock-cash",
+        type=float,
+        default=100_000.0,
+        help="Mock broker cash used when --broker mock.",
+    )
+
+    live_dry_run_parser.add_argument(
+        "--mock-positions-path",
+        default=None,
+        help="Optional CSV of mock broker positions for --broker mock.",
+    )
+
     live_dry_run_parser.set_defaults(func=cmd_live_dry_run)
 
     return parser

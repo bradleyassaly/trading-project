@@ -19,7 +19,8 @@ dependencies = [
   "polars>=0.20",
   "yfinance>=0.2",
   "backtesting>=0.3",
-  "pyarrow>=14.0"
+  "pyarrow>=14.0",
+    "alpaca-py",
 ]
 
 [tool.setuptools]
