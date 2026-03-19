@@ -1,4 +1,5 @@
 from __future__ import annotations
+
 import json
 from pathlib import Path
 
@@ -10,15 +11,11 @@ from trading_platform.research.alpha_lab.metrics import (
     compute_cross_sectional_daily_metrics,
     evaluate_cross_sectional_signal,
 )
+from trading_platform.research.alpha_lab.promotion import (
+    DEFAULT_PROMOTION_THRESHOLDS,
+    apply_promotion_rules,
+)
 from trading_platform.research.alpha_lab.signals import build_signal
-
-
-MIN_PROMOTION_MEAN_SPEARMAN_IC = 0.02
-MIN_PROMOTION_FOLDS = 2
-MIN_PROMOTION_MEAN_DATES = 3.0
-MIN_PROMOTION_TOTAL_OBS = 100.0
-MAX_PROMOTION_MEAN_TURNOVER = 0.75
-MIN_PROMOTION_SYMBOLS = 2.0
 
 
 def _load_symbol_feature_data(feature_dir: Path, symbol: str) -> pd.DataFrame:
@@ -116,38 +113,6 @@ def _safe_series_corr(left: pd.Series, right: pd.Series) -> float:
         return float(corr)
 
     return float("nan")
-
-
-def _apply_promotion_rules(leaderboard_df: pd.DataFrame) -> pd.DataFrame:
-    if leaderboard_df.empty:
-        result = leaderboard_df.copy()
-        result["rejection_reason"] = pd.Series(dtype="object")
-        result["promotion_status"] = pd.Series(dtype="object")
-        return result
-
-    def rejection_reasons(row: pd.Series) -> str:
-        reasons: list[str] = []
-        if pd.isna(row["mean_spearman_ic"]) or row["mean_spearman_ic"] <= MIN_PROMOTION_MEAN_SPEARMAN_IC:
-            reasons.append("low_mean_rank_ic")
-        if row["symbols_tested"] < MIN_PROMOTION_SYMBOLS:
-            reasons.append("insufficient_symbols")
-        if row["folds_tested"] < MIN_PROMOTION_FOLDS:
-            reasons.append("insufficient_folds")
-        if row["mean_dates_evaluated"] < MIN_PROMOTION_MEAN_DATES:
-            reasons.append("insufficient_dates")
-        if row["total_obs"] < MIN_PROMOTION_TOTAL_OBS:
-            reasons.append("insufficient_observations")
-        if pd.isna(row["mean_turnover"]) or row["mean_turnover"] > MAX_PROMOTION_MEAN_TURNOVER:
-            reasons.append("high_turnover")
-        return ";".join(reasons)
-
-    result = leaderboard_df.copy()
-    result["rejection_reason"] = result.apply(rejection_reasons, axis=1)
-    result["promotion_status"] = result["rejection_reason"].map(
-        lambda value: "promote" if not value else "reject"
-    )
-    result.loc[result["promotion_status"] == "promote", "rejection_reason"] = "none"
-    return result
 
 
 def _compute_redundancy_diagnostics(
@@ -404,6 +369,7 @@ def run_alpha_research(
                 "mean_long_short_spread",
                 "mean_quantile_spread",
                 "mean_turnover",
+                "worst_fold_spearman_ic",
                 "total_obs",
                 "rejection_reason",
                 "promotion_status",
@@ -422,6 +388,7 @@ def run_alpha_research(
                 mean_long_short_spread=("long_short_spread", "mean"),
                 mean_quantile_spread=("quantile_spread", "mean"),
                 mean_turnover=("turnover", "mean"),
+                worst_fold_spearman_ic=("spearman_ic", "min"),
                 total_obs=("n_obs", "sum"),
             )
             .sort_values(
@@ -430,7 +397,7 @@ def run_alpha_research(
             )
             .reset_index(drop=True)
         )
-        leaderboard_df = _apply_promotion_rules(leaderboard_df)
+        leaderboard_df = apply_promotion_rules(leaderboard_df)
 
     combined_daily_metrics = {
         key: pd.concat(frames, ignore_index=True).sort_values("timestamp").reset_index(drop=True)
@@ -450,20 +417,31 @@ def run_alpha_research(
         daily_metrics_by_candidate=combined_daily_metrics,
         score_panel_by_candidate=combined_score_panels,
     )
+    promoted_signals_df = leaderboard_df.loc[
+        leaderboard_df["promotion_status"] == "promote"
+    ].reset_index(drop=True)
 
     detailed_path_csv = output_dir / "fold_results.csv"
     leaderboard_path_csv = output_dir / "leaderboard.csv"
     detailed_path_parquet = output_dir / "fold_results.parquet"
     leaderboard_path_parquet = output_dir / "leaderboard.parquet"
+    promoted_signals_path_csv = output_dir / "promoted_signals.csv"
+    promoted_signals_path_parquet = output_dir / "promoted_signals.parquet"
+    redundancy_report_path_csv = output_dir / "redundancy_report.csv"
+    redundancy_report_path_parquet = output_dir / "redundancy_report.parquet"
     redundancy_path_csv = output_dir / "redundancy_diagnostics.csv"
     redundancy_path_parquet = output_dir / "redundancy_diagnostics.parquet"
     diagnostics_path = output_dir / "signal_diagnostics.json"
 
     detailed_df.to_csv(detailed_path_csv, index=False)
     leaderboard_df.to_csv(leaderboard_path_csv, index=False)
+    promoted_signals_df.to_csv(promoted_signals_path_csv, index=False)
+    redundancy_df.to_csv(redundancy_report_path_csv, index=False)
     redundancy_df.to_csv(redundancy_path_csv, index=False)
     detailed_df.to_parquet(detailed_path_parquet, index=False)
     leaderboard_df.to_parquet(leaderboard_path_parquet, index=False)
+    promoted_signals_df.to_parquet(promoted_signals_path_parquet, index=False)
+    redundancy_df.to_parquet(redundancy_report_path_parquet, index=False)
     redundancy_df.to_parquet(redundancy_path_parquet, index=False)
 
     diagnostics = {
@@ -478,19 +456,14 @@ def run_alpha_research(
         "test_size": test_size,
         "step_size": step_size,
         "min_train_size": min_train_size,
-        "promotion_rules": {
-            "min_mean_spearman_ic": MIN_PROMOTION_MEAN_SPEARMAN_IC,
-            "min_folds_tested": MIN_PROMOTION_FOLDS,
-            "min_mean_dates_evaluated": MIN_PROMOTION_MEAN_DATES,
-            "min_total_obs": MIN_PROMOTION_TOTAL_OBS,
-            "max_mean_turnover": MAX_PROMOTION_MEAN_TURNOVER,
-            "min_symbols_tested": MIN_PROMOTION_SYMBOLS,
-        },
+        "promotion_rules": DEFAULT_PROMOTION_THRESHOLDS.to_dict(),
     }
     diagnostics_path.write_text(json.dumps(diagnostics, indent=2, default=str))
 
     return {
         "leaderboard_path": str(leaderboard_path_csv),
         "fold_results_path": str(detailed_path_csv),
+        "promoted_signals_path": str(promoted_signals_path_csv),
+        "redundancy_report_path": str(redundancy_report_path_csv),
         "redundancy_path": str(redundancy_path_csv),
     }

@@ -11,6 +11,10 @@ from trading_platform.research.alpha_lab.metrics import (
     compute_turnover,
     evaluate_signal,
 )
+from trading_platform.research.alpha_lab.promotion import (
+    DEFAULT_PROMOTION_THRESHOLDS,
+    apply_promotion_rules,
+)
 from trading_platform.research.alpha_lab.runner import run_alpha_research
 from trading_platform.research.alpha_lab.signals import build_signal
 
@@ -194,22 +198,30 @@ def test_run_alpha_research_writes_leaderboard_and_fold_results(tmp_path: Path) 
 
     leaderboard_path = Path(result["leaderboard_path"])
     fold_results_path = Path(result["fold_results_path"])
+    promoted_signals_path = Path(result["promoted_signals_path"])
+    redundancy_report_path = Path(result["redundancy_report_path"])
     redundancy_path = Path(result["redundancy_path"])
 
     assert leaderboard_path.exists()
     assert fold_results_path.exists()
+    assert promoted_signals_path.exists()
+    assert redundancy_report_path.exists()
     assert redundancy_path.exists()
     assert (output_dir / "leaderboard.parquet").exists()
     assert (output_dir / "fold_results.parquet").exists()
+    assert (output_dir / "promoted_signals.parquet").exists()
+    assert (output_dir / "redundancy_report.parquet").exists()
     assert (output_dir / "redundancy_diagnostics.parquet").exists()
     assert (output_dir / "signal_diagnostics.json").exists()
 
     leaderboard_df = pd.read_csv(leaderboard_path)
     fold_results_df = pd.read_csv(fold_results_path)
+    promoted_signals_df = pd.read_csv(promoted_signals_path)
     redundancy_df = pd.read_csv(redundancy_path)
 
     assert not leaderboard_df.empty
     assert not fold_results_df.empty
+    assert promoted_signals_df.empty
     assert "performance_corr" in redundancy_df.columns
 
     assert "signal_family" in leaderboard_df.columns
@@ -217,6 +229,7 @@ def test_run_alpha_research_writes_leaderboard_and_fold_results(tmp_path: Path) 
     assert "horizon" in leaderboard_df.columns
     assert "mean_spearman_ic" in leaderboard_df.columns
     assert "mean_long_short_spread" in leaderboard_df.columns
+    assert "worst_fold_spearman_ic" in leaderboard_df.columns
     assert "rejection_reason" in leaderboard_df.columns
     assert "promotion_status" in leaderboard_df.columns
 
@@ -233,6 +246,50 @@ def test_add_forward_return_labels_does_not_use_current_bar_as_future_return() -
 
     assert result.loc[0, "fwd_return_1d"] != 0.0
     assert result.loc[0, "fwd_return_1d"] == pytest.approx(0.10)
+
+
+def test_apply_promotion_rules_adds_expected_rejection_reasons() -> None:
+    leaderboard_df = pd.DataFrame(
+        [
+            {
+                "signal_family": "momentum",
+                "lookback": 5,
+                "horizon": 1,
+                "symbols_tested": 3.0,
+                "folds_tested": 3,
+                "mean_dates_evaluated": 10.0,
+                "mean_spearman_ic": 0.05,
+                "mean_turnover": 0.2,
+                "worst_fold_spearman_ic": 0.01,
+                "total_obs": 300.0,
+            },
+            {
+                "signal_family": "momentum",
+                "lookback": 10,
+                "horizon": 1,
+                "symbols_tested": 1.0,
+                "folds_tested": 1,
+                "mean_dates_evaluated": 2.0,
+                "mean_spearman_ic": 0.0,
+                "mean_turnover": 0.9,
+                "worst_fold_spearman_ic": -0.2,
+                "total_obs": 20.0,
+            },
+        ]
+    )
+
+    result = apply_promotion_rules(leaderboard_df)
+
+    assert result.loc[0, "promotion_status"] == "promote"
+    assert result.loc[0, "rejection_reason"] == "none"
+    assert result.loc[1, "promotion_status"] == "reject"
+    assert "low_mean_rank_ic" in result.loc[1, "rejection_reason"]
+    assert "insufficient_symbols" in result.loc[1, "rejection_reason"]
+    assert "insufficient_folds" in result.loc[1, "rejection_reason"]
+    assert "insufficient_dates" in result.loc[1, "rejection_reason"]
+    assert "insufficient_observations" in result.loc[1, "rejection_reason"]
+    assert "high_turnover" in result.loc[1, "rejection_reason"]
+    assert "weak_worst_fold_rank_ic" in result.loc[1, "rejection_reason"]
 
 
 def test_run_alpha_research_adds_promotion_and_redundancy_outputs(tmp_path: Path) -> None:
@@ -276,10 +333,15 @@ def test_run_alpha_research_adds_promotion_and_redundancy_outputs(tmp_path: Path
     )
 
     leaderboard_df = pd.read_csv(result["leaderboard_path"])
+    promoted_signals_df = pd.read_csv(result["promoted_signals_path"])
+    redundancy_report_df = pd.read_csv(result["redundancy_report_path"])
     redundancy_df = pd.read_csv(result["redundancy_path"])
 
     assert set(leaderboard_df["promotion_status"]) == {"promote"}
     assert set(leaderboard_df["rejection_reason"]) == {"none"}
+    assert len(promoted_signals_df) == 2
+    assert set(promoted_signals_df["promotion_status"]) == {"promote"}
+    assert len(redundancy_report_df) == 1
     assert len(redundancy_df) == 1
     assert redundancy_df.loc[0, "score_corr"] > 0.999
     assert redundancy_df.loc[0, "performance_corr"] > 0.999
@@ -310,10 +372,15 @@ def test_run_alpha_research_handles_empty_outputs_and_edge_case_rejections(
     )
 
     leaderboard_df = pd.read_csv(result["leaderboard_path"])
+    promoted_signals_df = pd.read_csv(result["promoted_signals_path"])
+    redundancy_report_df = pd.read_csv(result["redundancy_report_path"])
     redundancy_df = pd.read_csv(result["redundancy_path"])
 
     assert leaderboard_df.empty
+    assert promoted_signals_df.empty
+    assert redundancy_report_df.empty
     assert redundancy_df.empty
     assert "rejection_reason" in leaderboard_df.columns
     assert "promotion_status" in leaderboard_df.columns
     assert "score_corr" in redundancy_df.columns
+    assert DEFAULT_PROMOTION_THRESHOLDS.min_worst_fold_spearman_ic == pytest.approx(-0.10)

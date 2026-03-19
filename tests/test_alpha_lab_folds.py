@@ -64,10 +64,14 @@ def test_run_alpha_research_writes_fold_level_walk_forward_results(tmp_path: Pat
 
     fold_results = pd.read_csv(output_dir / "fold_results.csv")
     leaderboard = pd.read_csv(output_dir / "leaderboard.csv")
+    promoted_signals = pd.read_csv(output_dir / "promoted_signals.csv")
+    redundancy_report = pd.read_csv(output_dir / "redundancy_report.csv")
     redundancy = pd.read_csv(output_dir / "redundancy_diagnostics.csv")
 
     assert not fold_results.empty
     assert not leaderboard.empty
+    assert promoted_signals.empty
+    assert redundancy_report.empty
     assert redundancy.empty
 
     assert "fold_id" in fold_results.columns
@@ -80,5 +84,6 @@ def test_run_alpha_research_writes_fold_level_walk_forward_results(tmp_path: Pat
 
     assert "folds_tested" in leaderboard.columns
     assert "mean_long_short_spread" in leaderboard.columns
+    assert "worst_fold_spearman_ic" in leaderboard.columns
     assert "rejection_reason" in leaderboard.columns
     assert "promotion_status" in leaderboard.columns
