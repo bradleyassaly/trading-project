@@ -4,33 +4,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from trading_platform.cli.commands.paper_run import cmd_paper_run
-from trading_platform.paper.models import (
-    PaperPortfolioState,
-    PaperPosition,
-    PaperTradingConfig,
-    PaperOrder,
-    PaperSignalSnapshot,
-    OrderGenerationResult,
-)
-from trading_platform.paper.service import (
-    JsonPaperStateStore,
-    apply_filled_orders,
-    generate_rebalance_orders,
-    run_paper_trading_cycle,
-)
-from trading_platform.paper.models import (
-    PaperPortfolioState,
-    PaperTradingRunResult,
-)
-
-class DummyStateStore:
-    def __init__(self) -> None:
-        self.loaded = False
-
-    def load(self) -> PaperPortfolioState:  # pragma: no cover - not used directly
-        self.loaded = True
-        return PaperPortfolioState(cash=100_000.0)
-
+from trading_platform.paper.models import PaperPortfolioState, PaperTradingRunResult
 
 
 def test_cmd_paper_run_writes_artifacts(monkeypatch, tmp_path: Path, capsys) -> None:
@@ -101,8 +75,13 @@ def test_cmd_paper_run_writes_artifacts(monkeypatch, tmp_path: Path, capsys) -> 
 
     assert captured["config"].symbols == ["AAPL", "MSFT"]
     assert captured["auto_apply_fills"] is False
-    assert captured["output_dir"] == tmp_path / "paper" / "run_2025-01-04"
+    assert captured["output_dir"] == tmp_path / "paper"
 
     stdout = capsys.readouterr().out
-    assert "Paper trading summary:" in stdout
-    assert "as_of: 2025-01-04" in stdout
+    assert "Running paper trading cycle for 2 symbol(s): AAPL, MSFT" in stdout
+    assert "As of: 2025-01-04" in stdout
+    assert "Orders: 0" in stdout
+    assert "Fills: 0" in stdout
+    assert "Cash: 10,000.00" in stdout
+    assert "Equity: 10,000.00" in stdout
+    assert "Artifacts:" in stdout

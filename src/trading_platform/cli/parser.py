@@ -22,6 +22,7 @@ from trading_platform.cli.commands.run_job import cmd_run_job
 from trading_platform.cli.commands.run_sweep import cmd_run_sweep
 from trading_platform.cli.commands.run_walk_forward import cmd_run_walk_forward
 from trading_platform.cli.commands.paper_run import cmd_paper_run
+from trading_platform.cli.commands.daily_paper_job import cmd_daily_paper_job
 
 
 def add_execution_arguments(parser: argparse.ArgumentParser) -> None:
@@ -414,5 +415,160 @@ def build_parser() -> argparse.ArgumentParser:
         help="Immediately apply simulated fills and update positions/cash",
     )
     paper_run_parser.set_defaults(func=cmd_paper_run)
+
+    daily_paper_parser = subparsers.add_parser(
+        "daily-paper-job",
+        help="Run the daily paper trading workflow.",
+    )
+    daily_paper_parser.add_argument(
+        "--symbols",
+        nargs="+",
+        required=True,
+        help="Symbols to include in the daily paper trading job.",
+    )
+    daily_paper_parser.add_argument(
+        "--strategy",
+        default="sma_cross",
+        help="Signal strategy name.",
+    )
+    daily_paper_parser.add_argument(
+        "--fast",
+        type=int,
+        default=None,
+        help="Fast lookback parameter for the signal.",
+    )
+    daily_paper_parser.add_argument(
+        "--slow",
+        type=int,
+        default=None,
+        help="Slow lookback parameter for the signal.",
+    )
+    daily_paper_parser.add_argument(
+        "--lookback",
+        type=int,
+        default=None,
+        help="Lookback parameter for the signal.",
+    )
+    daily_paper_parser.add_argument(
+        "--top-n",
+        type=int,
+        default=10,
+        help="Number of symbols to select.",
+    )
+    daily_paper_parser.add_argument(
+        "--weighting-scheme",
+        default="equal",
+        help="Weighting scheme for portfolio construction.",
+    )
+    daily_paper_parser.add_argument(
+        "--vol-window",
+        type=int,
+        default=20,
+        help="Volatility lookback window for inverse-vol weighting.",
+    )
+    daily_paper_parser.add_argument(
+        "--min-score",
+        type=float,
+        default=None,
+        help="Minimum score threshold for portfolio inclusion.",
+    )
+    daily_paper_parser.add_argument(
+        "--max-weight",
+        type=float,
+        default=None,
+        help="Maximum position weight.",
+    )
+    daily_paper_parser.add_argument(
+        "--max-names-per-group",
+        type=int,
+        default=None,
+        help="Maximum number of names per group.",
+    )
+    daily_paper_parser.add_argument(
+        "--max-group-weight",
+        type=float,
+        default=None,
+        help="Maximum aggregate weight per group.",
+    )
+    daily_paper_parser.add_argument(
+        "--group-map-path",
+        default=None,
+        help="Optional path to symbol-to-group mapping file.",
+    )
+    daily_paper_parser.add_argument(
+        "--rebalance-frequency",
+        default="daily",
+        help="Rebalance frequency.",
+    )
+    daily_paper_parser.add_argument(
+        "--timing",
+        default="next_bar",
+        help="Execution timing policy.",
+    )
+    daily_paper_parser.add_argument(
+        "--initial-cash",
+        type=float,
+        default=100_000.0,
+        help="Initial paper trading cash balance.",
+    )
+    daily_paper_parser.add_argument(
+        "--min-trade-dollars",
+        type=float,
+        default=25.0,
+        help="Minimum trade notional.",
+    )
+    daily_paper_parser.add_argument(
+        "--lot-size",
+        type=int,
+        default=1,
+        help="Trading lot size.",
+    )
+    daily_paper_parser.add_argument(
+        "--reserve-cash-pct",
+        type=float,
+        default=0.0,
+        help="Fraction of equity to keep in cash reserve.",
+    )
+    daily_paper_parser.add_argument(
+        "--state-path",
+        required=True,
+        help="Path to the paper trading state file.",
+    )
+    daily_paper_parser.add_argument(
+        "--output-dir",
+        required=True,
+        help="Directory for paper trading artifacts.",
+    )
+    daily_paper_parser.add_argument(
+        "--auto-apply-fills",
+        action="store_true",
+        help="Apply simulated fills through the paper broker.",
+    )
+    daily_paper_parser.set_defaults(func=cmd_daily_paper_job)
+
+    paper_run_parser.add_argument(
+        "--symbols",
+        nargs="+",
+        default=None,
+        help="Symbols to include in the paper trading run.",
+    )
+    paper_run_parser.add_argument(
+        "--universe",
+        default=None,
+        help="Named universe to trade instead of passing --symbols.",
+    )
+
+    # daily-paper-job changes:
+    daily_paper_parser.add_argument(
+        "--symbols",
+        nargs="+",
+        default=None,
+        help="Symbols to include in the daily paper trading job.",
+    )
+    daily_paper_parser.add_argument(
+        "--universe",
+        default=None,
+        help="Named universe to trade instead of passing --symbols.",
+    )
 
     return parser

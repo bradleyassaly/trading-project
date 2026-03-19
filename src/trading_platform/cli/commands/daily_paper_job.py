@@ -2,12 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from trading_platform.jobs.daily_paper_trading import run_daily_paper_trading_job
 from trading_platform.paper.models import PaperTradingConfig
-from trading_platform.paper.service import (
-    JsonPaperStateStore,
-    run_paper_trading_cycle,
-    write_paper_trading_artifacts,
-)
 from trading_platform.universes.registry import get_universe_symbols
 
 
@@ -24,7 +20,7 @@ def _resolve_symbols(args) -> list[str]:
     return list(args.symbols)
 
 
-def cmd_paper_run(args) -> None:
+def cmd_daily_paper_job(args) -> None:
     symbols = _resolve_symbols(args)
 
     config = PaperTradingConfig(
@@ -50,31 +46,25 @@ def cmd_paper_run(args) -> None:
     )
 
     print(
-        "Running paper trading cycle for "
+        "Running daily paper trading job for "
         f"{len(config.symbols)} symbol(s): {', '.join(config.symbols)}"
     )
 
-    state_store = JsonPaperStateStore(Path(args.state_path))
-    result = run_paper_trading_cycle(
+    result = run_daily_paper_trading_job(
         config=config,
-        state_store=state_store,
-        auto_apply_fills=args.auto_apply_fills,
-    )
-    artifact_paths = write_paper_trading_artifacts(
-        result=result,
+        state_path=Path(args.state_path),
         output_dir=Path(args.output_dir),
+        auto_apply_fills=args.auto_apply_fills,
     )
 
     print(f"As of: {result.as_of}")
-    print(f"Orders: {len(result.orders)}")
-    print(f"Fills: {len(result.fills)}")
-    print(f"Cash: {result.state.cash:,.2f}")
-    print(f"Equity: {result.state.equity:,.2f}")
+    print(f"Orders: {result.order_count}")
+    print(f"Fills: {result.fill_count}")
+    print(f"Cash: {result.cash:,.2f}")
+    print(f"Equity: {result.equity:,.2f}")
     print("Artifacts:")
-    for name, path in sorted(artifact_paths.items()):
+    for name, path in sorted(result.artifact_paths.items()):
         print(f"  {name}: {path}")
-
-
-def _resolve_run_output_dir(base_dir: str | Path, as_of: str) -> Path:
-    safe_as_of = as_of.replace(":", "-")
-    return Path(base_dir) / f"run_{safe_as_of}"
+    print("Ledgers:")
+    for name, path in sorted(result.ledger_paths.items()):
+        print(f"  {name}: {path}")
