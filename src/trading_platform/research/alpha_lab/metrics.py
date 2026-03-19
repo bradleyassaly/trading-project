@@ -121,6 +121,59 @@ def compute_cross_sectional_turnover(
     return float(turnover) if pd.notna(turnover) else math.nan
 
 
+def compute_cross_sectional_daily_metrics(
+    panel: pd.DataFrame,
+    *,
+    signal_col: str = "signal",
+    forward_return_col: str = "forward_return",
+    date_col: str = "timestamp",
+    top_quantile: float = 0.2,
+    bottom_quantile: float = 0.2,
+) -> pd.DataFrame:
+    required_cols = [date_col, signal_col, forward_return_col]
+    joined = panel[required_cols].dropna().copy()
+    if joined.empty:
+        return pd.DataFrame(
+            columns=[
+                date_col,
+                "n_obs",
+                "pearson_ic",
+                "spearman_ic",
+                "hit_rate",
+                "long_short_spread",
+                "quantile_spread",
+            ]
+        )
+
+    daily_rows: list[dict[str, float]] = []
+    for timestamp, date_df in joined.groupby(date_col):
+        if len(date_df) < 2:
+            continue
+
+        ranked_signal = date_df[signal_col].rank(method="first", ascending=True)
+        forward_return = date_df[forward_return_col]
+        long_short_spread = _compute_rank_long_short_spread(
+            ranked_signal,
+            forward_return,
+            top_quantile=top_quantile,
+            bottom_quantile=bottom_quantile,
+        )
+
+        daily_rows.append(
+            {
+                date_col: timestamp,
+                "n_obs": float(len(date_df)),
+                "pearson_ic": _safe_corr(ranked_signal, forward_return, method="pearson"),
+                "spearman_ic": _safe_corr(ranked_signal, forward_return, method="spearman"),
+                "hit_rate": compute_hit_rate(date_df[signal_col], forward_return),
+                "long_short_spread": long_short_spread,
+                "quantile_spread": long_short_spread,
+            }
+        )
+
+    return pd.DataFrame(daily_rows)
+
+
 def evaluate_cross_sectional_signal(
     panel: pd.DataFrame,
     *,
@@ -146,31 +199,16 @@ def evaluate_cross_sectional_signal(
             "turnover": math.nan,
         }
 
-    date_metrics: list[dict[str, float]] = []
-    for _, date_df in joined.groupby(date_col):
-        if len(date_df) < 2:
-            continue
+    daily_metrics = compute_cross_sectional_daily_metrics(
+        joined,
+        signal_col=signal_col,
+        forward_return_col=forward_return_col,
+        date_col=date_col,
+        top_quantile=top_quantile,
+        bottom_quantile=bottom_quantile,
+    )
 
-        ranked_signal = date_df[signal_col].rank(method="first", ascending=True)
-        forward_return = date_df[forward_return_col]
-        long_short_spread = _compute_rank_long_short_spread(
-            ranked_signal,
-            forward_return,
-            top_quantile=top_quantile,
-            bottom_quantile=bottom_quantile,
-        )
-
-        metrics = {
-            "n_obs": float(len(date_df)),
-            "pearson_ic": _safe_corr(ranked_signal, forward_return, method="pearson"),
-            "spearman_ic": _safe_corr(ranked_signal, forward_return, method="spearman"),
-            "hit_rate": compute_hit_rate(date_df[signal_col], forward_return),
-            "long_short_spread": long_short_spread,
-            "quantile_spread": long_short_spread,
-        }
-        date_metrics.append(metrics)
-
-    if not date_metrics:
+    if daily_metrics.empty:
         n_obs = float(len(joined))
         return {
             "n_obs": n_obs,
@@ -189,16 +227,15 @@ def evaluate_cross_sectional_signal(
             ),
         }
 
-    metrics_df = pd.DataFrame(date_metrics)
-    long_short_spread = float(metrics_df["long_short_spread"].mean())
+    long_short_spread = float(daily_metrics["long_short_spread"].mean())
 
     return {
-        "n_obs": float(metrics_df["n_obs"].sum()),
-        "dates_evaluated": float(len(metrics_df)),
+        "n_obs": float(daily_metrics["n_obs"].sum()),
+        "dates_evaluated": float(len(daily_metrics)),
         "symbols_evaluated": float(joined[symbol_col].nunique()),
-        "pearson_ic": float(metrics_df["pearson_ic"].mean()),
-        "spearman_ic": float(metrics_df["spearman_ic"].mean()),
-        "hit_rate": float(metrics_df["hit_rate"].mean()),
+        "pearson_ic": float(daily_metrics["pearson_ic"].mean()),
+        "spearman_ic": float(daily_metrics["spearman_ic"].mean()),
+        "hit_rate": float(daily_metrics["hit_rate"].mean()),
         "long_short_spread": long_short_spread,
         "quantile_spread": long_short_spread,
         "turnover": compute_cross_sectional_turnover(

@@ -194,24 +194,31 @@ def test_run_alpha_research_writes_leaderboard_and_fold_results(tmp_path: Path) 
 
     leaderboard_path = Path(result["leaderboard_path"])
     fold_results_path = Path(result["fold_results_path"])
+    redundancy_path = Path(result["redundancy_path"])
 
     assert leaderboard_path.exists()
     assert fold_results_path.exists()
+    assert redundancy_path.exists()
     assert (output_dir / "leaderboard.parquet").exists()
     assert (output_dir / "fold_results.parquet").exists()
+    assert (output_dir / "redundancy_diagnostics.parquet").exists()
     assert (output_dir / "signal_diagnostics.json").exists()
 
     leaderboard_df = pd.read_csv(leaderboard_path)
     fold_results_df = pd.read_csv(fold_results_path)
+    redundancy_df = pd.read_csv(redundancy_path)
 
     assert not leaderboard_df.empty
     assert not fold_results_df.empty
+    assert "performance_corr" in redundancy_df.columns
 
     assert "signal_family" in leaderboard_df.columns
     assert "lookback" in leaderboard_df.columns
     assert "horizon" in leaderboard_df.columns
     assert "mean_spearman_ic" in leaderboard_df.columns
     assert "mean_long_short_spread" in leaderboard_df.columns
+    assert "rejection_reason" in leaderboard_df.columns
+    assert "promotion_status" in leaderboard_df.columns
 
     assert "symbols_evaluated" in fold_results_df.columns
     assert "dates_evaluated" in fold_results_df.columns
@@ -226,3 +233,87 @@ def test_add_forward_return_labels_does_not_use_current_bar_as_future_return() -
 
     assert result.loc[0, "fwd_return_1d"] != 0.0
     assert result.loc[0, "fwd_return_1d"] == pytest.approx(0.10)
+
+
+def test_run_alpha_research_adds_promotion_and_redundancy_outputs(tmp_path: Path) -> None:
+    feature_dir = tmp_path / "features"
+    output_dir = tmp_path / "alpha_outputs"
+    feature_dir.mkdir(parents=True, exist_ok=True)
+
+    timestamps = pd.date_range("2024-01-01", periods=80, freq="D")
+    daily_returns = {
+        "AAPL": 0.010,
+        "MSFT": 0.015,
+        "NVDA": 0.020,
+    }
+
+    for symbol, daily_return in daily_returns.items():
+        closes = [100.0]
+        for _ in range(79):
+            closes.append(closes[-1] * (1.0 + daily_return))
+        pd.DataFrame(
+            {
+                "timestamp": timestamps,
+                "symbol": [symbol] * len(timestamps),
+                "close": closes,
+            }
+        ).to_parquet(feature_dir / f"{symbol}.parquet", index=False)
+
+    result = run_alpha_research(
+        symbols=["AAPL", "MSFT", "NVDA"],
+        universe=None,
+        feature_dir=feature_dir,
+        signal_family="momentum",
+        lookbacks=[1, 2],
+        horizons=[1],
+        min_rows=20,
+        top_quantile=0.34,
+        bottom_quantile=0.34,
+        output_dir=output_dir,
+        train_size=20,
+        test_size=10,
+        step_size=10,
+    )
+
+    leaderboard_df = pd.read_csv(result["leaderboard_path"])
+    redundancy_df = pd.read_csv(result["redundancy_path"])
+
+    assert set(leaderboard_df["promotion_status"]) == {"promote"}
+    assert set(leaderboard_df["rejection_reason"]) == {"none"}
+    assert len(redundancy_df) == 1
+    assert redundancy_df.loc[0, "score_corr"] > 0.999
+    assert redundancy_df.loc[0, "performance_corr"] > 0.999
+    assert redundancy_df.loc[0, "overlap_dates"] > 0
+
+
+def test_run_alpha_research_handles_empty_outputs_and_edge_case_rejections(
+    tmp_path: Path,
+) -> None:
+    output_dir = tmp_path / "alpha_outputs"
+    feature_dir = tmp_path / "features"
+    feature_dir.mkdir(parents=True, exist_ok=True)
+
+    result = run_alpha_research(
+        symbols=["MISSING"],
+        universe=None,
+        feature_dir=feature_dir,
+        signal_family="momentum",
+        lookbacks=[5],
+        horizons=[1],
+        min_rows=20,
+        top_quantile=0.2,
+        bottom_quantile=0.2,
+        output_dir=output_dir,
+        train_size=20,
+        test_size=5,
+        step_size=5,
+    )
+
+    leaderboard_df = pd.read_csv(result["leaderboard_path"])
+    redundancy_df = pd.read_csv(result["redundancy_path"])
+
+    assert leaderboard_df.empty
+    assert redundancy_df.empty
+    assert "rejection_reason" in leaderboard_df.columns
+    assert "promotion_status" in leaderboard_df.columns
+    assert "score_corr" in redundancy_df.columns

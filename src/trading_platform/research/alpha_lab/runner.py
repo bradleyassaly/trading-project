@@ -1,5 +1,4 @@
 from __future__ import annotations
-
 import json
 from pathlib import Path
 
@@ -7,8 +6,19 @@ import pandas as pd
 
 from trading_platform.research.alpha_lab.folds import build_walk_forward_folds
 from trading_platform.research.alpha_lab.labels import add_forward_return_labels
-from trading_platform.research.alpha_lab.metrics import evaluate_cross_sectional_signal
+from trading_platform.research.alpha_lab.metrics import (
+    compute_cross_sectional_daily_metrics,
+    evaluate_cross_sectional_signal,
+)
 from trading_platform.research.alpha_lab.signals import build_signal
+
+
+MIN_PROMOTION_MEAN_SPEARMAN_IC = 0.02
+MIN_PROMOTION_FOLDS = 2
+MIN_PROMOTION_MEAN_DATES = 3.0
+MIN_PROMOTION_TOTAL_OBS = 100.0
+MAX_PROMOTION_MEAN_TURNOVER = 0.75
+MIN_PROMOTION_SYMBOLS = 2.0
 
 
 def _load_symbol_feature_data(feature_dir: Path, symbol: str) -> pd.DataFrame:
@@ -83,6 +93,165 @@ def _build_shared_folds(
     )
 
 
+def _candidate_key(signal_family: str, lookback: int, horizon: int) -> tuple[str, int, int]:
+    return signal_family, lookback, horizon
+
+
+def _safe_series_corr(left: pd.Series, right: pd.Series) -> float:
+    joined = pd.concat([left, right], axis=1).dropna()
+    if len(joined) < 2:
+        return float("nan")
+
+    left_series = joined.iloc[:, 0]
+    right_series = joined.iloc[:, 1]
+    left_unique = left_series.nunique()
+    right_unique = right_series.nunique()
+    if left_unique == 1 and right_unique == 1:
+        return 1.0 if left_series.iloc[0] == right_series.iloc[0] else float("nan")
+    if left_unique == 1 or right_unique == 1:
+        return float("nan")
+
+    corr = left_series.corr(right_series)
+    if pd.notna(corr):
+        return float(corr)
+
+    return float("nan")
+
+
+def _apply_promotion_rules(leaderboard_df: pd.DataFrame) -> pd.DataFrame:
+    if leaderboard_df.empty:
+        result = leaderboard_df.copy()
+        result["rejection_reason"] = pd.Series(dtype="object")
+        result["promotion_status"] = pd.Series(dtype="object")
+        return result
+
+    def rejection_reasons(row: pd.Series) -> str:
+        reasons: list[str] = []
+        if pd.isna(row["mean_spearman_ic"]) or row["mean_spearman_ic"] <= MIN_PROMOTION_MEAN_SPEARMAN_IC:
+            reasons.append("low_mean_rank_ic")
+        if row["symbols_tested"] < MIN_PROMOTION_SYMBOLS:
+            reasons.append("insufficient_symbols")
+        if row["folds_tested"] < MIN_PROMOTION_FOLDS:
+            reasons.append("insufficient_folds")
+        if row["mean_dates_evaluated"] < MIN_PROMOTION_MEAN_DATES:
+            reasons.append("insufficient_dates")
+        if row["total_obs"] < MIN_PROMOTION_TOTAL_OBS:
+            reasons.append("insufficient_observations")
+        if pd.isna(row["mean_turnover"]) or row["mean_turnover"] > MAX_PROMOTION_MEAN_TURNOVER:
+            reasons.append("high_turnover")
+        return ";".join(reasons)
+
+    result = leaderboard_df.copy()
+    result["rejection_reason"] = result.apply(rejection_reasons, axis=1)
+    result["promotion_status"] = result["rejection_reason"].map(
+        lambda value: "promote" if not value else "reject"
+    )
+    result.loc[result["promotion_status"] == "promote", "rejection_reason"] = "none"
+    return result
+
+
+def _compute_redundancy_diagnostics(
+    leaderboard_df: pd.DataFrame,
+    *,
+    daily_metrics_by_candidate: dict[tuple[str, int, int], pd.DataFrame],
+    score_panel_by_candidate: dict[tuple[str, int, int], pd.DataFrame],
+) -> pd.DataFrame:
+    columns = [
+        "signal_family_a",
+        "lookback_a",
+        "horizon_a",
+        "signal_family_b",
+        "lookback_b",
+        "horizon_b",
+        "overlap_dates",
+        "overlap_scores",
+        "performance_corr",
+        "rank_ic_corr",
+        "score_corr",
+    ]
+    promoted = leaderboard_df.loc[leaderboard_df["promotion_status"] == "promote"].copy()
+    if len(promoted) < 2:
+        return pd.DataFrame(columns=columns)
+
+    rows: list[dict[str, float | int | str]] = []
+    for _, left_row in promoted.iterrows():
+        for _, right_row in promoted.iterrows():
+            left_key = _candidate_key(
+                str(left_row["signal_family"]),
+                int(left_row["lookback"]),
+                int(left_row["horizon"]),
+            )
+            right_key = _candidate_key(
+                str(right_row["signal_family"]),
+                int(right_row["lookback"]),
+                int(right_row["horizon"]),
+            )
+            if left_key >= right_key:
+                continue
+
+            left_daily = daily_metrics_by_candidate.get(
+                left_key,
+                pd.DataFrame(columns=["timestamp", "long_short_spread", "spearman_ic"]),
+            ).rename(
+                columns={
+                    "long_short_spread": "long_short_spread_a",
+                    "spearman_ic": "spearman_ic_a",
+                }
+            )
+            right_daily = daily_metrics_by_candidate.get(
+                right_key,
+                pd.DataFrame(columns=["timestamp", "long_short_spread", "spearman_ic"]),
+            ).rename(
+                columns={
+                    "long_short_spread": "long_short_spread_b",
+                    "spearman_ic": "spearman_ic_b",
+                }
+            )
+            daily_overlap = left_daily.merge(right_daily, on="timestamp", how="inner")
+
+            left_scores = score_panel_by_candidate.get(
+                left_key,
+                pd.DataFrame(columns=["timestamp", "symbol", "signal"]),
+            ).rename(columns={"signal": "signal_a"})
+            right_scores = score_panel_by_candidate.get(
+                right_key,
+                pd.DataFrame(columns=["timestamp", "symbol", "signal"]),
+            ).rename(columns={"signal": "signal_b"})
+            score_overlap = left_scores.merge(
+                right_scores,
+                on=["timestamp", "symbol"],
+                how="inner",
+            )
+
+            performance_corr = _safe_series_corr(
+                daily_overlap["long_short_spread_a"],
+                daily_overlap["long_short_spread_b"],
+            )
+            rank_ic_corr = _safe_series_corr(
+                daily_overlap["spearman_ic_a"],
+                daily_overlap["spearman_ic_b"],
+            )
+            score_corr = _safe_series_corr(score_overlap["signal_a"], score_overlap["signal_b"])
+
+            rows.append(
+                {
+                    "signal_family_a": left_key[0],
+                    "lookback_a": left_key[1],
+                    "horizon_a": left_key[2],
+                    "signal_family_b": right_key[0],
+                    "lookback_b": right_key[1],
+                    "horizon_b": right_key[2],
+                    "overlap_dates": int(len(daily_overlap)),
+                    "overlap_scores": int(len(score_overlap)),
+                    "performance_corr": performance_corr,
+                    "rank_ic_corr": rank_ic_corr,
+                    "score_corr": score_corr,
+                }
+            )
+
+    return pd.DataFrame(rows, columns=columns)
+
+
 def run_alpha_research(
     *,
     symbols: list[str] | None,
@@ -129,6 +298,8 @@ def run_alpha_research(
 
     signal_cache: dict[tuple[str, int], pd.Series] = {}
     detailed_rows: list[dict] = []
+    daily_metrics_by_candidate: dict[tuple[str, int, int], list[pd.DataFrame]] = {}
+    score_panel_by_candidate: dict[tuple[str, int, int], list[pd.DataFrame]] = {}
 
     for lookback in lookbacks:
         for symbol, df in symbol_data.items():
@@ -164,11 +335,24 @@ def run_alpha_research(
                     continue
 
                 fold_panel = pd.concat(fold_frames, ignore_index=True)
+                candidate_key = _candidate_key(signal_family, lookback, horizon)
                 metrics = evaluate_cross_sectional_signal(
                     fold_panel,
                     top_quantile=top_quantile,
                     bottom_quantile=bottom_quantile,
                 )
+                daily_metrics = compute_cross_sectional_daily_metrics(
+                    fold_panel,
+                    top_quantile=top_quantile,
+                    bottom_quantile=bottom_quantile,
+                )
+
+                if not daily_metrics.empty:
+                    daily_metrics_by_candidate.setdefault(candidate_key, []).append(daily_metrics)
+
+                score_panel = fold_panel[["timestamp", "symbol", "signal"]].dropna().copy()
+                if not score_panel.empty:
+                    score_panel_by_candidate.setdefault(candidate_key, []).append(score_panel)
 
                 detailed_rows.append(
                     {
@@ -221,6 +405,7 @@ def run_alpha_research(
                 "mean_quantile_spread",
                 "mean_turnover",
                 "total_obs",
+                "rejection_reason",
                 "promotion_status",
             ]
         )
@@ -245,23 +430,41 @@ def run_alpha_research(
             )
             .reset_index(drop=True)
         )
+        leaderboard_df = _apply_promotion_rules(leaderboard_df)
 
-        leaderboard_df["promotion_status"] = (
-            (leaderboard_df["mean_spearman_ic"] > 0.02)
-            & (leaderboard_df["symbols_tested"] >= 2)
-            & (leaderboard_df["total_obs"] >= 100)
-        ).map({True: "promote", False: "reject"})
+    combined_daily_metrics = {
+        key: pd.concat(frames, ignore_index=True).sort_values("timestamp").reset_index(drop=True)
+        for key, frames in daily_metrics_by_candidate.items()
+        if frames
+    }
+    combined_score_panels = {
+        key: pd.concat(frames, ignore_index=True)
+        .drop_duplicates(subset=["timestamp", "symbol"])
+        .sort_values(["timestamp", "symbol"])
+        .reset_index(drop=True)
+        for key, frames in score_panel_by_candidate.items()
+        if frames
+    }
+    redundancy_df = _compute_redundancy_diagnostics(
+        leaderboard_df,
+        daily_metrics_by_candidate=combined_daily_metrics,
+        score_panel_by_candidate=combined_score_panels,
+    )
 
     detailed_path_csv = output_dir / "fold_results.csv"
     leaderboard_path_csv = output_dir / "leaderboard.csv"
     detailed_path_parquet = output_dir / "fold_results.parquet"
     leaderboard_path_parquet = output_dir / "leaderboard.parquet"
+    redundancy_path_csv = output_dir / "redundancy_diagnostics.csv"
+    redundancy_path_parquet = output_dir / "redundancy_diagnostics.parquet"
     diagnostics_path = output_dir / "signal_diagnostics.json"
 
     detailed_df.to_csv(detailed_path_csv, index=False)
     leaderboard_df.to_csv(leaderboard_path_csv, index=False)
+    redundancy_df.to_csv(redundancy_path_csv, index=False)
     detailed_df.to_parquet(detailed_path_parquet, index=False)
     leaderboard_df.to_parquet(leaderboard_path_parquet, index=False)
+    redundancy_df.to_parquet(redundancy_path_parquet, index=False)
 
     diagnostics = {
         "symbols_requested": resolved_symbols,
@@ -275,10 +478,19 @@ def run_alpha_research(
         "test_size": test_size,
         "step_size": step_size,
         "min_train_size": min_train_size,
+        "promotion_rules": {
+            "min_mean_spearman_ic": MIN_PROMOTION_MEAN_SPEARMAN_IC,
+            "min_folds_tested": MIN_PROMOTION_FOLDS,
+            "min_mean_dates_evaluated": MIN_PROMOTION_MEAN_DATES,
+            "min_total_obs": MIN_PROMOTION_TOTAL_OBS,
+            "max_mean_turnover": MAX_PROMOTION_MEAN_TURNOVER,
+            "min_symbols_tested": MIN_PROMOTION_SYMBOLS,
+        },
     }
     diagnostics_path.write_text(json.dumps(diagnostics, indent=2, default=str))
 
     return {
         "leaderboard_path": str(leaderboard_path_csv),
         "fold_results_path": str(detailed_path_csv),
+        "redundancy_path": str(redundancy_path_csv),
     }
