@@ -24,6 +24,7 @@ from trading_platform.cli.commands.run_walk_forward import cmd_run_walk_forward
 from trading_platform.cli.commands.paper_run import cmd_paper_run
 from trading_platform.cli.commands.daily_paper_job import cmd_daily_paper_job
 from trading_platform.cli.commands.paper_report import cmd_paper_report
+from trading_platform.cli.commands.live_dry_run import cmd_live_dry_run
 
 
 def add_execution_arguments(parser: argparse.ArgumentParser) -> None:
@@ -587,5 +588,118 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional directory to write report artifacts.",
     )
     paper_report_parser.set_defaults(func=cmd_paper_report)
+
+    live_dry_run_parser = subparsers.add_parser(
+        "live-dry-run",
+        help="Compute live broker rebalance orders without sending them.",
+    )
+    live_dry_run_parser.add_argument(
+        "--symbols",
+        nargs="+",
+        default=None,
+        help="Symbols to include in the live dry-run.",
+    )
+    live_dry_run_parser.add_argument(
+        "--universe",
+        default=None,
+        help="Named universe to trade instead of passing --symbols.",
+    )
+    live_dry_run_parser.add_argument(
+        "--strategy",
+        default="sma_cross",
+        help="Signal strategy name.",
+    )
+    live_dry_run_parser.add_argument(
+        "--fast",
+        type=int,
+        default=None,
+    )
+    live_dry_run_parser.add_argument(
+        "--slow",
+        type=int,
+        default=None,
+    )
+    live_dry_run_parser.add_argument(
+        "--lookback",
+        type=int,
+        default=None,
+    )
+    live_dry_run_parser.add_argument(
+        "--top-n",
+        type=int,
+        default=10,
+    )
+    live_dry_run_parser.add_argument(
+        "--weighting-scheme",
+        default="equal",
+    )
+    live_dry_run_parser.add_argument(
+        "--vol-window",
+        type=int,
+        default=20,
+    )
+    live_dry_run_parser.add_argument(
+        "--min-score",
+        type=float,
+        default=None,
+    )
+    live_dry_run_parser.add_argument(
+        "--max-weight",
+        type=float,
+        default=None,
+    )
+    live_dry_run_parser.add_argument(
+        "--max-names-per-group",
+        type=int,
+        default=None,
+    )
+    live_dry_run_parser.add_argument(
+        "--max-group-weight",
+        type=float,
+        default=None,
+    )
+    live_dry_run_parser.add_argument(
+        "--group-map-path",
+        default=None,
+    )
+    live_dry_run_parser.add_argument(
+        "--rebalance-frequency",
+        default="daily",
+    )
+    live_dry_run_parser.add_argument(
+        "--timing",
+        default="next_bar",
+    )
+    live_dry_run_parser.add_argument(
+        "--initial-cash",
+        type=float,
+        default=100_000.0,
+    )
+    live_dry_run_parser.add_argument(
+        "--min-trade-dollars",
+        type=float,
+        default=25.0,
+    )
+    live_dry_run_parser.add_argument(
+        "--lot-size",
+        type=int,
+        default=1,
+    )
+    live_dry_run_parser.add_argument(
+        "--reserve-cash-pct",
+        type=float,
+        default=0.0,
+    )
+    live_dry_run_parser.add_argument(
+        "--order-type",
+        default="market",
+        help="Order type for hypothetical live orders.",
+    )
+    live_dry_run_parser.add_argument(
+        "--time-in-force",
+        default="day",
+        help="Time in force for hypothetical live orders.",
+    )
+    live_dry_run_parser.set_defaults(func=cmd_live_dry_run)
 
     return parser
