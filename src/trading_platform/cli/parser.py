@@ -21,6 +21,8 @@ from trading_platform.cli.commands.portfolio_topn import cmd_portfolio_topn
 from trading_platform.cli.commands.run_job import cmd_run_job
 from trading_platform.cli.commands.run_sweep import cmd_run_sweep
 from trading_platform.cli.commands.run_walk_forward import cmd_run_walk_forward
+from trading_platform.cli.commands.paper_run import cmd_paper_run
+
 
 def add_execution_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
@@ -306,5 +308,111 @@ def build_parser() -> argparse.ArgumentParser:
         help="Path to a YAML or JSON walk-forward config file",
     )
     run_wf_parser.set_defaults(func=cmd_run_walk_forward)
+
+    paper_run_parser = subparsers.add_parser(
+        "paper-run",
+        help="Run one paper-trading cycle and write state/artifacts",
+    )
+    add_shared_symbol_args(paper_run_parser)
+    add_strategy_arguments(paper_run_parser)
+    add_execution_arguments(paper_run_parser)
+    paper_run_parser.add_argument(
+        "--top-n",
+        type=int,
+        required=True,
+        help="Number of top-ranked symbols to target",
+    )
+    paper_run_parser.add_argument(
+        "--weighting-scheme",
+        type=str,
+        default="equal",
+        choices=["equal", "inverse_vol"],
+        help="How to size selected holdings",
+    )
+    paper_run_parser.add_argument(
+        "--vol-window",
+        type=int,
+        default=20,
+        help="Rolling volatility window for inverse-vol weighting",
+    )
+    paper_run_parser.add_argument(
+        "--min-score",
+        type=float,
+        default=None,
+        help="Optional minimum score required for a symbol to be held",
+    )
+    paper_run_parser.add_argument(
+        "--max-weight",
+        type=float,
+        default=None,
+        help="Optional cap on any single position weight",
+    )
+    paper_run_parser.add_argument(
+        "--max-names-per-group",
+        type=int,
+        default=None,
+        help="Optional maximum number of holdings allowed per group",
+    )
+    paper_run_parser.add_argument(
+        "--max-group-weight",
+        type=float,
+        default=None,
+        help="Optional cap on total portfolio weight per group",
+    )
+    paper_run_parser.add_argument(
+        "--group-map-path",
+        type=str,
+        default=None,
+        help="Optional path to CSV with columns: symbol,group",
+    )
+    paper_run_parser.add_argument(
+        "--timing",
+        type=str,
+        default="next_bar",
+        choices=["same_bar", "next_bar"],
+        help="When scheduled target weights become effective",
+    )
+    paper_run_parser.add_argument(
+        "--initial-cash",
+        type=float,
+        default=100_000.0,
+        help="Starting cash used when no paper state exists yet",
+    )
+    paper_run_parser.add_argument(
+        "--min-trade-dollars",
+        type=float,
+        default=25.0,
+        help="Skip trades smaller than this dollar threshold",
+    )
+    paper_run_parser.add_argument(
+        "--lot-size",
+        type=int,
+        default=1,
+        help="Round target quantities down to this lot size",
+    )
+    paper_run_parser.add_argument(
+        "--reserve-cash-pct",
+        type=float,
+        default=0.0,
+        help="Fraction of equity to hold back as cash",
+    )
+    paper_run_parser.add_argument(
+        "--state-path",
+        type=str,
+        default="artifacts/paper/paper_state.json",
+        help="JSON file used to persist paper portfolio state",
+    )
+    paper_run_parser.add_argument(
+        "--output-dir",
+        type=str,
+        default="artifacts/paper",
+        help="Base directory for paper-run output artifacts",
+    )
+    paper_run_parser.add_argument(
+        "--auto-apply-fills",
+        action="store_true",
+        help="Immediately apply simulated fills and update positions/cash",
+    )
+    paper_run_parser.set_defaults(func=cmd_paper_run)
 
     return parser
