@@ -3,6 +3,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from trading_platform.features.registry import FEATURE_BUILDERS
+from dataclasses import dataclass
+from pathlib import Path
+
+import pandas as pd
+
 
 VALID_INTERVALS = {
     "1d",
@@ -315,3 +320,46 @@ class WalkForwardConfig:
                     raise ValueError(
                         "optimize momentum walk-forward requires lookback_values"
                     )
+
+@dataclass
+class UniverseConfig:
+    symbols: list[str]
+    rebalance_frequency: str = "M"
+    min_required_bars: int = 252
+
+
+@dataclass
+class PortfolioConstructionConfig:
+    method: str = "top_n"
+    top_n: int = 10
+    long_short: bool = False
+    bottom_n: int = 0
+    max_weight: float = 0.10
+    gross_target: float = 1.0
+    net_target: float = 1.0
+    transaction_cost_bps: float = 0.0
+
+
+@dataclass
+class UniverseWalkForwardConfig:
+    feature_path: Path
+    universe: UniverseConfig
+    walk_forward: "WalkForwardConfig"
+    backtest: "BacktestConfig"
+    portfolio: PortfolioConstructionConfig
+    output_dir: Path | None = None
+
+
+@dataclass
+class PortfolioConstructionResult:
+    weights_df: pd.DataFrame
+    portfolio_returns_df: pd.DataFrame
+    summary: dict
+
+
+@dataclass
+class UniverseWalkForwardResult:
+    fold_results_df: pd.DataFrame
+    oos_scores_df: pd.DataFrame
+    portfolio_result: PortfolioConstructionResult
+    summary: dict
