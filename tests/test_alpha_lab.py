@@ -7,6 +7,7 @@ import pytest
 
 from trading_platform.research.alpha_lab.labels import add_forward_return_labels
 from trading_platform.research.alpha_lab.metrics import (
+    evaluate_cross_sectional_signal,
     compute_turnover,
     evaluate_signal,
 )
@@ -80,6 +81,78 @@ def test_compute_turnover_zero_for_constant_signal() -> None:
     assert turnover == pytest.approx(0.0)
 
 
+def test_evaluate_cross_sectional_signal_ranks_symbols_per_date() -> None:
+    panel = pd.DataFrame(
+        {
+            "timestamp": [
+                pd.Timestamp("2024-01-01"),
+                pd.Timestamp("2024-01-01"),
+                pd.Timestamp("2024-01-01"),
+                pd.Timestamp("2024-01-02"),
+                pd.Timestamp("2024-01-02"),
+                pd.Timestamp("2024-01-02"),
+            ],
+            "symbol": ["AAPL", "MSFT", "NVDA", "AAPL", "MSFT", "NVDA"],
+            "signal": [1.0, 2.0, 3.0, 3.0, 2.0, 1.0],
+            "forward_return": [0.01, 0.02, 0.03, 0.03, 0.02, 0.01],
+        }
+    )
+
+    metrics = evaluate_cross_sectional_signal(panel)
+
+    assert metrics["dates_evaluated"] == 2
+    assert metrics["symbols_evaluated"] == 3
+    assert metrics["pearson_ic"] == pytest.approx(1.0)
+    assert metrics["spearman_ic"] == pytest.approx(1.0)
+    assert metrics["long_short_spread"] == pytest.approx(0.02)
+    assert metrics["quantile_spread"] == pytest.approx(metrics["long_short_spread"])
+    assert metrics["turnover"] > 0.0
+
+
+def test_evaluate_cross_sectional_signal_uses_rank_buckets_per_date() -> None:
+    panel = pd.DataFrame(
+        {
+            "timestamp": [
+                pd.Timestamp("2024-01-01"),
+                pd.Timestamp("2024-01-01"),
+                pd.Timestamp("2024-01-01"),
+                pd.Timestamp("2024-01-01"),
+                pd.Timestamp("2024-01-01"),
+                pd.Timestamp("2024-01-02"),
+                pd.Timestamp("2024-01-02"),
+                pd.Timestamp("2024-01-02"),
+                pd.Timestamp("2024-01-02"),
+                pd.Timestamp("2024-01-02"),
+            ],
+            "symbol": [
+                "AAPL",
+                "MSFT",
+                "NVDA",
+                "AMZN",
+                "META",
+                "AAPL",
+                "MSFT",
+                "NVDA",
+                "AMZN",
+                "META",
+            ],
+            "signal": [1.0, 2.0, 3.0, 4.0, 5.0, 5.0, 4.0, 3.0, 2.0, 1.0],
+            "forward_return": [0.00, 0.01, 0.02, 0.03, 0.04, 0.04, 0.03, 0.02, 0.01, 0.00],
+        }
+    )
+
+    metrics = evaluate_cross_sectional_signal(
+        panel,
+        top_quantile=0.4,
+        bottom_quantile=0.4,
+    )
+
+    assert metrics["dates_evaluated"] == 2
+    assert metrics["n_obs"] == pytest.approx(10.0)
+    assert metrics["long_short_spread"] == pytest.approx(0.03)
+    assert metrics["quantile_spread"] == pytest.approx(0.03)
+
+
 def test_run_alpha_research_writes_leaderboard_and_fold_results(tmp_path: Path) -> None:
     feature_dir = tmp_path / "features"
     output_dir = tmp_path / "alpha_outputs"
@@ -138,11 +211,14 @@ def test_run_alpha_research_writes_leaderboard_and_fold_results(tmp_path: Path) 
     assert "lookback" in leaderboard_df.columns
     assert "horizon" in leaderboard_df.columns
     assert "mean_spearman_ic" in leaderboard_df.columns
+    assert "mean_long_short_spread" in leaderboard_df.columns
 
-    assert "symbol" in fold_results_df.columns
+    assert "symbols_evaluated" in fold_results_df.columns
+    assert "dates_evaluated" in fold_results_df.columns
     assert "pearson_ic" in fold_results_df.columns
     assert "spearman_ic" in fold_results_df.columns
-    assert set(fold_results_df["symbol"]) == {"AAPL", "MSFT"}
+    assert "long_short_spread" in fold_results_df.columns
+    assert fold_results_df["symbols_evaluated"].max() == pytest.approx(2.0)
 
 def test_add_forward_return_labels_does_not_use_current_bar_as_future_return() -> None:
     df = pd.DataFrame({"close": [100.0, 110.0, 121.0]})

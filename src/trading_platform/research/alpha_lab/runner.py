@@ -7,7 +7,7 @@ import pandas as pd
 
 from trading_platform.research.alpha_lab.folds import build_walk_forward_folds
 from trading_platform.research.alpha_lab.labels import add_forward_return_labels
-from trading_platform.research.alpha_lab.metrics import evaluate_signal
+from trading_platform.research.alpha_lab.metrics import evaluate_cross_sectional_signal
 from trading_platform.research.alpha_lab.signals import build_signal
 
 
@@ -53,6 +53,36 @@ def _slice_fold(
     return df.loc[mask].copy()
 
 
+def _build_shared_folds(
+    symbol_data: dict[str, pd.DataFrame],
+    *,
+    train_size: int,
+    test_size: int,
+    step_size: int | None,
+    min_train_size: int | None,
+) -> list:
+    if not symbol_data:
+        return []
+
+    timestamps = pd.Series(
+        sorted(
+            {
+                timestamp
+                for df in symbol_data.values()
+                for timestamp in pd.to_datetime(df["timestamp"]).tolist()
+            }
+        )
+    )
+
+    return build_walk_forward_folds(
+        timestamps,
+        train_size=train_size,
+        test_size=test_size,
+        step_size=step_size,
+        min_train_size=min_train_size,
+    )
+
+
 def run_alpha_research(
     *,
     symbols: list[str] | None,
@@ -73,7 +103,7 @@ def run_alpha_research(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     resolved_symbols = _resolve_symbols(symbols, universe)
-    detailed_rows: list[dict] = []
+    symbol_data: dict[str, pd.DataFrame] = {}
 
     for symbol in resolved_symbols:
         try:
@@ -87,57 +117,74 @@ def run_alpha_research(
         if "timestamp" not in df.columns:
             raise ValueError(f"{symbol} feature data must include a 'timestamp' column.")
 
-        df = add_forward_return_labels(df, horizons=horizons)
+        symbol_data[symbol] = add_forward_return_labels(df, horizons=horizons)
 
-        folds = build_walk_forward_folds(
-            df["timestamp"],
-            train_size=train_size,
-            test_size=test_size,
-            step_size=step_size,
-            min_train_size=min_train_size,
-        )
+    folds = _build_shared_folds(
+        symbol_data,
+        train_size=train_size,
+        test_size=test_size,
+        step_size=step_size,
+        min_train_size=min_train_size,
+    )
 
-        for lookback in lookbacks:
-            signal = build_signal(
+    signal_cache: dict[tuple[str, int], pd.Series] = {}
+    detailed_rows: list[dict] = []
+
+    for lookback in lookbacks:
+        for symbol, df in symbol_data.items():
+            signal_cache[(symbol, lookback)] = build_signal(
                 df,
                 signal_family=signal_family,
                 lookback=lookback,
             )
 
-            for horizon in horizons:
-                label_col = f"fwd_return_{horizon}d"
+        for horizon in horizons:
+            label_col = f"fwd_return_{horizon}d"
 
-                for fold in folds:
+            for fold in folds:
+                fold_frames: list[pd.DataFrame] = []
+
+                for symbol, df in symbol_data.items():
                     test_df = _slice_fold(
-                        df.assign(_signal=signal),
+                        df.assign(_signal=signal_cache[(symbol, lookback)]),
                         test_start=fold.test_start,
                         test_end=fold.test_end,
                     )
 
-                    metrics = evaluate_signal(
-                        test_df["_signal"],
-                        test_df[label_col],
-                        top_quantile=top_quantile,
-                        bottom_quantile=bottom_quantile,
+                    if test_df.empty:
+                        continue
+
+                    fold_frames.append(
+                        test_df[["timestamp", "symbol", "_signal", label_col]].rename(
+                            columns={"_signal": "signal", label_col: "forward_return"}
+                        )
                     )
 
-                    detailed_rows.append(
-                        {
-                            "symbol": symbol,
-                            "signal_family": signal_family,
-                            "lookback": lookback,
-                            "horizon": horizon,
-                            "fold_id": fold.fold_id,
-                            "train_start": fold.train_start,
-                            "train_end": fold.train_end,
-                            "test_start": fold.test_start,
-                            "test_end": fold.test_end,
-                            **metrics,
-                        }
-                    )
+                if not fold_frames:
+                    continue
+
+                fold_panel = pd.concat(fold_frames, ignore_index=True)
+                metrics = evaluate_cross_sectional_signal(
+                    fold_panel,
+                    top_quantile=top_quantile,
+                    bottom_quantile=bottom_quantile,
+                )
+
+                detailed_rows.append(
+                    {
+                        "signal_family": signal_family,
+                        "lookback": lookback,
+                        "horizon": horizon,
+                        "fold_id": fold.fold_id,
+                        "train_start": fold.train_start,
+                        "train_end": fold.train_end,
+                        "test_start": fold.test_start,
+                        "test_end": fold.test_end,
+                        **metrics,
+                    }
+                )
 
     detailed_columns = [
-        "symbol",
         "signal_family",
         "lookback",
         "horizon",
@@ -146,10 +193,13 @@ def run_alpha_research(
         "train_end",
         "test_start",
         "test_end",
+        "dates_evaluated",
+        "symbols_evaluated",
         "n_obs",
         "pearson_ic",
         "spearman_ic",
         "hit_rate",
+        "long_short_spread",
         "quantile_spread",
         "turnover",
     ]
@@ -163,9 +213,11 @@ def run_alpha_research(
                 "horizon",
                 "symbols_tested",
                 "folds_tested",
+                "mean_dates_evaluated",
                 "mean_pearson_ic",
                 "mean_spearman_ic",
                 "mean_hit_rate",
+                "mean_long_short_spread",
                 "mean_quantile_spread",
                 "mean_turnover",
                 "total_obs",
@@ -176,11 +228,13 @@ def run_alpha_research(
         leaderboard_df = (
             detailed_df.groupby(["signal_family", "lookback", "horizon"], as_index=False)
             .agg(
-                symbols_tested=("symbol", "nunique"),
+                symbols_tested=("symbols_evaluated", "max"),
                 folds_tested=("fold_id", "nunique"),
+                mean_dates_evaluated=("dates_evaluated", "mean"),
                 mean_pearson_ic=("pearson_ic", "mean"),
                 mean_spearman_ic=("spearman_ic", "mean"),
                 mean_hit_rate=("hit_rate", "mean"),
+                mean_long_short_spread=("long_short_spread", "mean"),
                 mean_quantile_spread=("quantile_spread", "mean"),
                 mean_turnover=("turnover", "mean"),
                 total_obs=("n_obs", "sum"),
@@ -216,6 +270,7 @@ def run_alpha_research(
         "horizons": horizons,
         "min_rows": min_rows,
         "feature_dir": str(feature_dir),
+        "evaluation_mode": "cross_sectional_long_short",
         "train_size": train_size,
         "test_size": test_size,
         "step_size": step_size,

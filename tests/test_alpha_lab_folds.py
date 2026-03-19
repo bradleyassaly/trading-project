@@ -73,5 +73,8 @@ def test_run_alpha_research_writes_fold_level_walk_forward_results(tmp_path: Pat
     assert "train_end" in fold_results.columns
     assert "test_start" in fold_results.columns
     assert "test_end" in fold_results.columns
+    assert "symbols_evaluated" in fold_results.columns
+    assert "long_short_spread" in fold_results.columns
 
     assert "folds_tested" in leaderboard.columns
+    assert "mean_long_short_spread" in leaderboard.columns
