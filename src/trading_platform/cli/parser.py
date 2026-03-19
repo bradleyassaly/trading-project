@@ -23,6 +23,7 @@ from trading_platform.cli.commands.run_sweep import cmd_run_sweep
 from trading_platform.cli.commands.run_walk_forward import cmd_run_walk_forward
 from trading_platform.cli.commands.paper_run import cmd_paper_run
 from trading_platform.cli.commands.daily_paper_job import cmd_daily_paper_job
+from trading_platform.cli.commands.paper_report import cmd_paper_report
 
 
 def add_execution_arguments(parser: argparse.ArgumentParser) -> None:
@@ -570,5 +571,21 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Named universe to trade instead of passing --symbols.",
     )
+
+    paper_report_parser = subparsers.add_parser(
+        "paper-report",
+        help="Build a summary report from paper trading ledgers.",
+    )
+    paper_report_parser.add_argument(
+        "--account-dir",
+        required=True,
+        help="Base paper account directory containing ledgers/.",
+    )
+    paper_report_parser.add_argument(
+        "--output-dir",
+        default=None,
+        help="Optional directory to write report artifacts.",
+    )
+    paper_report_parser.set_defaults(func=cmd_paper_report)
 
     return parser
