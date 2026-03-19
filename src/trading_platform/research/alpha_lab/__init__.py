@@ -1,0 +1,1 @@
+"""Alpha research tools for evaluating predictive signals."""

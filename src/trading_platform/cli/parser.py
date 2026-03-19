@@ -25,7 +25,7 @@ from trading_platform.cli.commands.paper_run import cmd_paper_run
 from trading_platform.cli.commands.daily_paper_job import cmd_daily_paper_job
 from trading_platform.cli.commands.paper_report import cmd_paper_report
 from trading_platform.cli.commands.live_dry_run import cmd_live_dry_run
-
+from trading_platform.cli.commands.alpha_research import cmd_alpha_research
 
 def add_execution_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
@@ -709,5 +709,103 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     live_dry_run_parser.set_defaults(func=cmd_live_dry_run)
+
+    alpha_research_parser = subparsers.add_parser(
+        "alpha-research",
+        help="Run cross-sectional alpha signal research across a universe",
+    )
+    alpha_research_parser.add_argument(
+        "--symbols",
+        nargs="+",
+        default=None,
+        help="Symbols to include in the alpha research run.",
+    )
+    alpha_research_parser.add_argument(
+        "--universe",
+        type=str,
+        default=None,
+        help="Named universe to evaluate instead of passing --symbols.",
+    )
+    alpha_research_parser.add_argument(
+        "--feature-dir",
+        type=str,
+        default="data/features",
+        help="Directory containing per-symbol feature parquet files.",
+    )
+    alpha_research_parser.add_argument(
+        "--signal-family",
+        type=str,
+        default="momentum",
+        choices=[
+            "momentum",
+            "short_term_reversal",
+            "vol_adjusted_momentum",
+        ],
+        help="Signal family to evaluate.",
+    )
+    alpha_research_parser.add_argument(
+        "--lookbacks",
+        type=int,
+        nargs="+",
+        default=[5, 10, 20, 60],
+        help="Lookback windows to test.",
+    )
+    alpha_research_parser.add_argument(
+        "--horizons",
+        type=int,
+        nargs="+",
+        default=[1, 5, 20],
+        help="Forward return horizons to test.",
+    )
+    alpha_research_parser.add_argument(
+        "--min-rows",
+        type=int,
+        default=126,
+        help="Minimum number of usable rows required per symbol.",
+    )
+    alpha_research_parser.add_argument(
+        "--top-quantile",
+        type=float,
+        default=0.2,
+        help="Top quantile threshold used for spread metrics.",
+    )
+    alpha_research_parser.add_argument(
+        "--bottom-quantile",
+        type=float,
+        default=0.2,
+        help="Bottom quantile threshold used for spread metrics.",
+    )
+    alpha_research_parser.add_argument(
+        "--output-dir",
+        type=str,
+        default="artifacts/alpha_research",
+        help="Directory where alpha research artifacts will be written.",
+    )
+
+    alpha_research_parser.add_argument(
+        "--train-size",
+        type=int,
+        default=756,
+        help="Number of rows in each training window.",
+    )
+    alpha_research_parser.add_argument(
+        "--test-size",
+        type=int,
+        default=63,
+        help="Number of rows in each test window.",
+    )
+    alpha_research_parser.add_argument(
+        "--step-size",
+        type=int,
+        default=None,
+        help="Number of rows to advance after each fold. Defaults to test-size.",
+    )
+    alpha_research_parser.add_argument(
+        "--min-train-size",
+        type=int,
+        default=None,
+        help="Optional minimum train window size.",
+    )
+    alpha_research_parser.set_defaults(func=cmd_alpha_research)
 
     return parser

@@ -21,6 +21,7 @@ dependencies = [
   "backtesting>=0.3",
   "pyarrow>=14.0",
     "alpaca-py",
+    "scipy"
 ]
 
 [tool.setuptools]
