@@ -26,6 +26,7 @@ from trading_platform.cli.commands.daily_paper_job import cmd_daily_paper_job
 from trading_platform.cli.commands.paper_report import cmd_paper_report
 from trading_platform.cli.commands.live_dry_run import cmd_live_dry_run
 from trading_platform.cli.commands.alpha_research import cmd_alpha_research
+from trading_platform.cli.commands.alpha_research_loop import cmd_alpha_research_loop
 
 def add_execution_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
@@ -965,5 +966,110 @@ def build_parser() -> argparse.ArgumentParser:
         help="Additional slippage in basis points that scales with fraction of ADV traded.",
     )
     alpha_research_parser.set_defaults(func=cmd_alpha_research)
+
+    alpha_research_loop_parser = subparsers.add_parser(
+        "alpha-research-loop",
+        help="Run the automated alpha research loop over candidate signal families and ranges",
+    )
+    alpha_research_loop_parser.add_argument(
+        "--symbols",
+        nargs="+",
+        default=None,
+        help="Symbols to include in the automated alpha research loop.",
+    )
+    alpha_research_loop_parser.add_argument(
+        "--universe",
+        type=str,
+        default=None,
+        help="Named universe to evaluate instead of passing --symbols.",
+    )
+    alpha_research_loop_parser.add_argument(
+        "--feature-dir",
+        type=str,
+        default="data/features",
+        help="Directory containing per-symbol feature parquet files.",
+    )
+    alpha_research_loop_parser.add_argument(
+        "--signal-families",
+        type=str,
+        nargs="+",
+        default=["momentum", "short_term_reversal", "vol_adjusted_momentum"],
+        help="Signal families to generate and test.",
+    )
+    alpha_research_loop_parser.add_argument(
+        "--lookbacks",
+        type=int,
+        nargs="+",
+        default=[5, 10, 20, 60],
+        help="Lookback windows to test for each family.",
+    )
+    alpha_research_loop_parser.add_argument(
+        "--horizons",
+        type=int,
+        nargs="+",
+        default=[1, 5, 20],
+        help="Forward return horizons to test for each family.",
+    )
+    alpha_research_loop_parser.add_argument(
+        "--min-rows",
+        type=int,
+        default=126,
+        help="Minimum number of usable rows required per symbol.",
+    )
+    alpha_research_loop_parser.add_argument(
+        "--top-quantile",
+        type=float,
+        default=0.2,
+        help="Top quantile threshold used for spread metrics.",
+    )
+    alpha_research_loop_parser.add_argument(
+        "--bottom-quantile",
+        type=float,
+        default=0.2,
+        help="Bottom quantile threshold used for spread metrics.",
+    )
+    alpha_research_loop_parser.add_argument(
+        "--output-dir",
+        type=str,
+        default="artifacts/alpha_research_loop",
+        help="Directory where automated research artifacts will be written.",
+    )
+    alpha_research_loop_parser.add_argument(
+        "--train-size",
+        type=int,
+        default=756,
+        help="Number of rows in each training window.",
+    )
+    alpha_research_loop_parser.add_argument(
+        "--test-size",
+        type=int,
+        default=63,
+        help="Number of rows in each test window.",
+    )
+    alpha_research_loop_parser.add_argument(
+        "--step-size",
+        type=int,
+        default=None,
+        help="Number of rows to advance after each fold. Defaults to test-size.",
+    )
+    alpha_research_loop_parser.add_argument(
+        "--min-train-size",
+        type=int,
+        default=None,
+        help="Optional minimum train window size.",
+    )
+    alpha_research_loop_parser.add_argument(
+        "--schedule-frequency",
+        type=str,
+        default="manual",
+        choices=["manual", "daily", "weekly"],
+        help="Scheduling hook used to decide when the loop is due to run.",
+    )
+    alpha_research_loop_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Run immediately even if the schedule metadata says the loop is not due.",
+    )
+    alpha_research_loop_parser.set_defaults(func=cmd_alpha_research_loop)
 
     return parser
