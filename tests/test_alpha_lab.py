@@ -15,6 +15,7 @@ from trading_platform.research.alpha_lab.composite_portfolio import (
     CompositePortfolioConfig,
     build_composite_portfolio_weights,
     build_long_short_quantile_weights,
+    run_stress_tests,
     run_composite_portfolio_backtest,
 )
 from trading_platform.research.alpha_lab.metrics import (
@@ -441,6 +442,57 @@ def test_composite_portfolio_backtest_uses_next_bar_execution_timing() -> None:
     assert second_weight_date == pd.Timestamp("2024-01-02")
 
 
+def test_run_stress_tests_reduces_performance_vs_baseline() -> None:
+    composite_scores_df = pd.DataFrame(
+        {
+            "timestamp": [
+                pd.Timestamp("2024-01-01"),
+                pd.Timestamp("2024-01-01"),
+                pd.Timestamp("2024-01-02"),
+                pd.Timestamp("2024-01-02"),
+                pd.Timestamp("2024-01-03"),
+                pd.Timestamp("2024-01-03"),
+            ],
+            "symbol": ["AAPL", "MSFT", "AAPL", "MSFT", "AAPL", "MSFT"],
+            "horizon": [1, 1, 1, 1, 1, 1],
+            "weighting_scheme": ["equal"] * 6,
+            "composite_score": [1.0, 0.0, 1.0, 0.0, 1.0, 0.0],
+            "component_count": [1] * 6,
+            "selected_signal_count": [1] * 6,
+        }
+    )
+    symbol_data = {
+        "AAPL": pd.DataFrame(
+            {
+                "timestamp": pd.date_range("2024-01-01", periods=4, freq="D"),
+                "close": [100.0, 110.0, 121.0, 133.1],
+            }
+        ),
+        "MSFT": pd.DataFrame(
+            {
+                "timestamp": pd.date_range("2024-01-01", periods=4, freq="D"),
+                "close": [100.0, 90.0, 81.0, 72.9],
+            }
+        ),
+    }
+
+    stress_results = run_stress_tests(
+        composite_scores_df,
+        symbol_data=symbol_data,
+        config=CompositePortfolioConfig(modes=("long_only_top_n",), top_n=1),
+    )
+
+    baseline = stress_results.loc[stress_results["stress_test"] == "baseline"]
+    shuffled = stress_results.loc[stress_results["stress_test"] == "shuffle_by_date"]
+    lagged = stress_results.loc[stress_results["stress_test"] == "lag_plus_one"]
+
+    assert not baseline.empty
+    assert not shuffled.empty
+    assert not lagged.empty
+    assert baseline["portfolio_total_return"].max() >= shuffled["portfolio_total_return"].max()
+    assert baseline["portfolio_total_return"].max() >= lagged["portfolio_total_return"].max()
+
+
 def test_run_alpha_research_writes_leaderboard_and_fold_results(tmp_path: Path) -> None:
     feature_dir = tmp_path / "features"
     output_dir = tmp_path / "alpha_outputs"
@@ -492,6 +544,9 @@ def test_run_alpha_research_writes_leaderboard_and_fold_results(tmp_path: Path) 
     portfolio_metrics_path = Path(result["portfolio_metrics_path"])
     portfolio_weights_path = Path(result["portfolio_weights_path"])
     portfolio_diagnostics_path = Path(result["portfolio_diagnostics_path"])
+    robustness_report_path = Path(result["robustness_report_path"])
+    regime_performance_path = Path(result["regime_performance_path"])
+    stress_test_results_path = Path(result["stress_test_results_path"])
 
     assert leaderboard_path.exists()
     assert fold_results_path.exists()
@@ -505,6 +560,9 @@ def test_run_alpha_research_writes_leaderboard_and_fold_results(tmp_path: Path) 
     assert portfolio_metrics_path.exists()
     assert portfolio_weights_path.exists()
     assert portfolio_diagnostics_path.exists()
+    assert robustness_report_path.exists()
+    assert regime_performance_path.exists()
+    assert stress_test_results_path.exists()
     assert (output_dir / "leaderboard.parquet").exists()
     assert (output_dir / "fold_results.parquet").exists()
     assert (output_dir / "promoted_signals.parquet").exists()
@@ -517,6 +575,9 @@ def test_run_alpha_research_writes_leaderboard_and_fold_results(tmp_path: Path) 
     assert (output_dir / "portfolio_metrics.parquet").exists()
     assert (output_dir / "portfolio_weights.parquet").exists()
     assert (output_dir / "portfolio_diagnostics.json").exists()
+    assert (output_dir / "robustness_report.parquet").exists()
+    assert (output_dir / "regime_performance.parquet").exists()
+    assert (output_dir / "stress_test_results.parquet").exists()
     assert (output_dir / "signal_diagnostics.json").exists()
 
     leaderboard_df = pd.read_csv(leaderboard_path)
@@ -528,6 +589,9 @@ def test_run_alpha_research_writes_leaderboard_and_fold_results(tmp_path: Path) 
     portfolio_returns_df = pd.read_csv(portfolio_returns_path)
     portfolio_metrics_df = pd.read_csv(portfolio_metrics_path)
     portfolio_weights_df = pd.read_csv(portfolio_weights_path)
+    robustness_report_df = pd.read_csv(robustness_report_path)
+    regime_performance_df = pd.read_csv(regime_performance_path)
+    stress_test_results_df = pd.read_csv(stress_test_results_path)
 
     assert not leaderboard_df.empty
     assert not fold_results_df.empty
@@ -537,6 +601,9 @@ def test_run_alpha_research_writes_leaderboard_and_fold_results(tmp_path: Path) 
     assert portfolio_returns_df.empty
     assert portfolio_metrics_df.empty
     assert portfolio_weights_df.empty
+    assert robustness_report_df.empty
+    assert regime_performance_df.empty
+    assert stress_test_results_df.empty
     assert "performance_corr" in redundancy_df.columns
 
     assert "signal_family" in leaderboard_df.columns
@@ -656,6 +723,9 @@ def test_run_alpha_research_adds_promotion_and_redundancy_outputs(tmp_path: Path
     portfolio_returns_df = pd.read_csv(result["portfolio_returns_path"])
     portfolio_metrics_df = pd.read_csv(result["portfolio_metrics_path"])
     portfolio_weights_df = pd.read_csv(result["portfolio_weights_path"])
+    robustness_report_df = pd.read_csv(result["robustness_report_path"])
+    regime_performance_df = pd.read_csv(result["regime_performance_path"])
+    stress_test_results_df = pd.read_csv(result["stress_test_results_path"])
 
     assert set(leaderboard_df["promotion_status"]) == {"promote"}
     assert set(leaderboard_df["rejection_reason"]) == {"none"}
@@ -668,10 +738,19 @@ def test_run_alpha_research_adds_promotion_and_redundancy_outputs(tmp_path: Path
     assert not portfolio_returns_df.empty
     assert not portfolio_metrics_df.empty
     assert not portfolio_weights_df.empty
+    assert not robustness_report_df.empty
+    assert not regime_performance_df.empty
+    assert not stress_test_results_df.empty
     assert set(composite_scores_df["weighting_scheme"]) == {"equal", "quality"}
     assert set(portfolio_weights_df["portfolio_mode"]) == {
         "long_only_top_n",
         "long_short_quantile",
+    }
+    assert "portfolio_max_drawdown_duration" in robustness_report_df.columns
+    assert set(stress_test_results_df["stress_test"]) == {
+        "baseline",
+        "shuffle_by_date",
+        "lag_plus_one",
     }
     assert redundancy_df.loc[0, "score_corr"] > 0.999
     assert redundancy_df.loc[0, "performance_corr"] > 0.999
@@ -710,6 +789,9 @@ def test_run_alpha_research_handles_empty_outputs_and_edge_case_rejections(
     portfolio_returns_df = pd.read_csv(result["portfolio_returns_path"])
     portfolio_metrics_df = pd.read_csv(result["portfolio_metrics_path"])
     portfolio_weights_df = pd.read_csv(result["portfolio_weights_path"])
+    robustness_report_df = pd.read_csv(result["robustness_report_path"])
+    regime_performance_df = pd.read_csv(result["regime_performance_path"])
+    stress_test_results_df = pd.read_csv(result["stress_test_results_path"])
 
     assert leaderboard_df.empty
     assert promoted_signals_df.empty
@@ -720,6 +802,9 @@ def test_run_alpha_research_handles_empty_outputs_and_edge_case_rejections(
     assert portfolio_returns_df.empty
     assert portfolio_metrics_df.empty
     assert portfolio_weights_df.empty
+    assert robustness_report_df.empty
+    assert regime_performance_df.empty
+    assert stress_test_results_df.empty
     assert "rejection_reason" in leaderboard_df.columns
     assert "promotion_status" in leaderboard_df.columns
     assert "score_corr" in redundancy_df.columns

@@ -72,6 +72,9 @@ def test_run_alpha_research_writes_fold_level_walk_forward_results(tmp_path: Pat
     portfolio_returns = pd.read_csv(output_dir / "portfolio_returns.csv")
     portfolio_metrics = pd.read_csv(output_dir / "portfolio_metrics.csv")
     portfolio_weights = pd.read_csv(output_dir / "portfolio_weights.csv")
+    robustness_report = pd.read_csv(output_dir / "robustness_report.csv")
+    regime_performance = pd.read_csv(output_dir / "regime_performance.csv")
+    stress_test_results = pd.read_csv(output_dir / "stress_test_results.csv")
 
     assert not fold_results.empty
     assert not leaderboard.empty
@@ -83,6 +86,9 @@ def test_run_alpha_research_writes_fold_level_walk_forward_results(tmp_path: Pat
     assert portfolio_returns.empty
     assert portfolio_metrics.empty
     assert portfolio_weights.empty
+    assert robustness_report.empty
+    assert regime_performance.empty
+    assert stress_test_results.empty
 
     assert "fold_id" in fold_results.columns
     assert "train_start" in fold_results.columns

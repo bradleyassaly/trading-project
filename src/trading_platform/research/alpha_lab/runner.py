@@ -14,7 +14,10 @@ from trading_platform.research.alpha_lab.composite import (
 from trading_platform.research.alpha_lab.composite_portfolio import (
     DEFAULT_COMPOSITE_PORTFOLIO_CONFIG,
     CompositePortfolioConfig,
+    build_regime_performance_report,
+    build_robustness_report,
     run_composite_portfolio_backtest,
+    run_stress_tests,
 )
 from trading_platform.research.alpha_lab.folds import build_walk_forward_folds
 from trading_platform.research.alpha_lab.labels import add_forward_return_labels
@@ -514,6 +517,25 @@ def run_alpha_research(
         symbol_data=symbol_data,
         config=portfolio_config,
     )
+    asset_returns_matrix = (
+        composite_portfolio_diagnostics.get("asset_returns_matrix")
+        if isinstance(composite_portfolio_diagnostics, dict)
+        else None
+    )
+    robustness_report_df = build_robustness_report(
+        composite_portfolio_returns_df,
+        composite_portfolio_weights_df,
+        folds=folds,
+    )
+    regime_performance_df = build_regime_performance_report(
+        composite_portfolio_returns_df,
+        asset_returns=asset_returns_matrix if isinstance(asset_returns_matrix, pd.DataFrame) else pd.DataFrame(),
+    )
+    stress_test_results_df = run_stress_tests(
+        composite_scores_df,
+        symbol_data=symbol_data,
+        config=portfolio_config,
+    )
 
     detailed_path_csv = output_dir / "fold_results.csv"
     leaderboard_path_csv = output_dir / "leaderboard.csv"
@@ -537,6 +559,12 @@ def run_alpha_research(
     portfolio_weights_path_csv = output_dir / "portfolio_weights.csv"
     portfolio_weights_path_parquet = output_dir / "portfolio_weights.parquet"
     portfolio_diagnostics_path = output_dir / "portfolio_diagnostics.json"
+    robustness_report_path_csv = output_dir / "robustness_report.csv"
+    robustness_report_path_parquet = output_dir / "robustness_report.parquet"
+    regime_performance_path_csv = output_dir / "regime_performance.csv"
+    regime_performance_path_parquet = output_dir / "regime_performance.parquet"
+    stress_test_results_path_csv = output_dir / "stress_test_results.csv"
+    stress_test_results_path_parquet = output_dir / "stress_test_results.parquet"
     diagnostics_path = output_dir / "signal_diagnostics.json"
 
     detailed_df.to_csv(detailed_path_csv, index=False)
@@ -549,6 +577,9 @@ def run_alpha_research(
     composite_portfolio_returns_df.to_csv(portfolio_returns_path_csv, index=False)
     composite_portfolio_metrics_df.to_csv(portfolio_metrics_path_csv, index=False)
     composite_portfolio_weights_df.to_csv(portfolio_weights_path_csv, index=False)
+    robustness_report_df.to_csv(robustness_report_path_csv, index=False)
+    regime_performance_df.to_csv(regime_performance_path_csv, index=False)
+    stress_test_results_df.to_csv(stress_test_results_path_csv, index=False)
     detailed_df.to_parquet(detailed_path_parquet, index=False)
     leaderboard_df.to_parquet(leaderboard_path_parquet, index=False)
     promoted_signals_df.to_parquet(promoted_signals_path_parquet, index=False)
@@ -559,9 +590,20 @@ def run_alpha_research(
     composite_portfolio_returns_df.to_parquet(portfolio_returns_path_parquet, index=False)
     composite_portfolio_metrics_df.to_parquet(portfolio_metrics_path_parquet, index=False)
     composite_portfolio_weights_df.to_parquet(portfolio_weights_path_parquet, index=False)
+    robustness_report_df.to_parquet(robustness_report_path_parquet, index=False)
+    regime_performance_df.to_parquet(regime_performance_path_parquet, index=False)
+    stress_test_results_df.to_parquet(stress_test_results_path_parquet, index=False)
     composite_diagnostics_path.write_text(json.dumps(composite_diagnostics, indent=2, default=str))
     portfolio_diagnostics_path.write_text(
-        json.dumps(composite_portfolio_diagnostics, indent=2, default=str)
+        json.dumps(
+            {
+                key: value
+                for key, value in composite_portfolio_diagnostics.items()
+                if key != "asset_returns_matrix"
+            },
+            indent=2,
+            default=str,
+        )
     )
 
     diagnostics = {
@@ -594,4 +636,7 @@ def run_alpha_research(
         "portfolio_metrics_path": str(portfolio_metrics_path_csv),
         "portfolio_weights_path": str(portfolio_weights_path_csv),
         "portfolio_diagnostics_path": str(portfolio_diagnostics_path),
+        "robustness_report_path": str(robustness_report_path_csv),
+        "regime_performance_path": str(regime_performance_path_csv),
+        "stress_test_results_path": str(stress_test_results_path_csv),
     }
