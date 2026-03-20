@@ -806,6 +806,30 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Optional minimum train window size.",
     )
+    alpha_research_parser.add_argument(
+        "--portfolio-top-n",
+        type=int,
+        default=10,
+        help="Top-N size used for the composite long-only portfolio.",
+    )
+    alpha_research_parser.add_argument(
+        "--portfolio-long-quantile",
+        type=float,
+        default=0.2,
+        help="Top quantile used for the composite long-short portfolio.",
+    )
+    alpha_research_parser.add_argument(
+        "--portfolio-short-quantile",
+        type=float,
+        default=0.2,
+        help="Bottom quantile used for the composite long-short portfolio.",
+    )
+    alpha_research_parser.add_argument(
+        "--commission",
+        type=float,
+        default=0.0,
+        help="Turnover-based transaction cost used in the composite portfolio backtest.",
+    )
     alpha_research_parser.set_defaults(func=cmd_alpha_research)
 
     return parser

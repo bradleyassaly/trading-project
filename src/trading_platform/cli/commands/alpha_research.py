@@ -21,8 +21,13 @@ def cmd_alpha_research(args) -> None:
         test_size=args.test_size,
         step_size=args.step_size,
         min_train_size=args.min_train_size,
+        portfolio_top_n=args.portfolio_top_n,
+        portfolio_long_quantile=args.portfolio_long_quantile,
+        portfolio_short_quantile=args.portfolio_short_quantile,
+        commission=args.commission,
     )
 
     print("Alpha research complete.")
     print(f"Leaderboard: {result['leaderboard_path']}")
     print(f"Detailed results: {result['fold_results_path']}")
+    print(f"Composite portfolio returns: {result['portfolio_returns_path']}")

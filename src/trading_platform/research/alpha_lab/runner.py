@@ -11,6 +11,11 @@ from trading_platform.research.alpha_lab.composite import (
     evaluate_composite_scores,
     select_low_redundancy_signals,
 )
+from trading_platform.research.alpha_lab.composite_portfolio import (
+    DEFAULT_COMPOSITE_PORTFOLIO_CONFIG,
+    CompositePortfolioConfig,
+    run_composite_portfolio_backtest,
+)
 from trading_platform.research.alpha_lab.folds import build_walk_forward_folds
 from trading_platform.research.alpha_lab.labels import add_forward_return_labels
 from trading_platform.research.alpha_lab.metrics import (
@@ -239,6 +244,10 @@ def run_alpha_research(
     test_size: int = 63,
     step_size: int | None = None,
     min_train_size: int | None = None,
+    portfolio_top_n: int = DEFAULT_COMPOSITE_PORTFOLIO_CONFIG.top_n,
+    portfolio_long_quantile: float = DEFAULT_COMPOSITE_PORTFOLIO_CONFIG.long_quantile,
+    portfolio_short_quantile: float = DEFAULT_COMPOSITE_PORTFOLIO_CONFIG.short_quantile,
+    commission: float = DEFAULT_COMPOSITE_PORTFOLIO_CONFIG.commission,
 ) -> dict[str, str]:
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -489,6 +498,22 @@ def run_alpha_research(
         top_quantile=top_quantile,
         bottom_quantile=bottom_quantile,
     )
+    portfolio_config = CompositePortfolioConfig(
+        top_n=portfolio_top_n,
+        long_quantile=portfolio_long_quantile,
+        short_quantile=portfolio_short_quantile,
+        commission=commission,
+    )
+    (
+        composite_portfolio_returns_df,
+        composite_portfolio_metrics_df,
+        composite_portfolio_weights_df,
+        composite_portfolio_diagnostics,
+    ) = run_composite_portfolio_backtest(
+        composite_scores_df,
+        symbol_data=symbol_data,
+        config=portfolio_config,
+    )
 
     detailed_path_csv = output_dir / "fold_results.csv"
     leaderboard_path_csv = output_dir / "leaderboard.csv"
@@ -505,6 +530,13 @@ def run_alpha_research(
     composite_leaderboard_path_csv = output_dir / "composite_leaderboard.csv"
     composite_leaderboard_path_parquet = output_dir / "composite_leaderboard.parquet"
     composite_diagnostics_path = output_dir / "composite_diagnostics.json"
+    portfolio_returns_path_csv = output_dir / "portfolio_returns.csv"
+    portfolio_returns_path_parquet = output_dir / "portfolio_returns.parquet"
+    portfolio_metrics_path_csv = output_dir / "portfolio_metrics.csv"
+    portfolio_metrics_path_parquet = output_dir / "portfolio_metrics.parquet"
+    portfolio_weights_path_csv = output_dir / "portfolio_weights.csv"
+    portfolio_weights_path_parquet = output_dir / "portfolio_weights.parquet"
+    portfolio_diagnostics_path = output_dir / "portfolio_diagnostics.json"
     diagnostics_path = output_dir / "signal_diagnostics.json"
 
     detailed_df.to_csv(detailed_path_csv, index=False)
@@ -514,6 +546,9 @@ def run_alpha_research(
     redundancy_df.to_csv(redundancy_path_csv, index=False)
     composite_scores_df.to_csv(composite_scores_path_csv, index=False)
     composite_leaderboard_df.to_csv(composite_leaderboard_path_csv, index=False)
+    composite_portfolio_returns_df.to_csv(portfolio_returns_path_csv, index=False)
+    composite_portfolio_metrics_df.to_csv(portfolio_metrics_path_csv, index=False)
+    composite_portfolio_weights_df.to_csv(portfolio_weights_path_csv, index=False)
     detailed_df.to_parquet(detailed_path_parquet, index=False)
     leaderboard_df.to_parquet(leaderboard_path_parquet, index=False)
     promoted_signals_df.to_parquet(promoted_signals_path_parquet, index=False)
@@ -521,7 +556,13 @@ def run_alpha_research(
     redundancy_df.to_parquet(redundancy_path_parquet, index=False)
     composite_scores_df.to_parquet(composite_scores_path_parquet, index=False)
     composite_leaderboard_df.to_parquet(composite_leaderboard_path_parquet, index=False)
+    composite_portfolio_returns_df.to_parquet(portfolio_returns_path_parquet, index=False)
+    composite_portfolio_metrics_df.to_parquet(portfolio_metrics_path_parquet, index=False)
+    composite_portfolio_weights_df.to_parquet(portfolio_weights_path_parquet, index=False)
     composite_diagnostics_path.write_text(json.dumps(composite_diagnostics, indent=2, default=str))
+    portfolio_diagnostics_path.write_text(
+        json.dumps(composite_portfolio_diagnostics, indent=2, default=str)
+    )
 
     diagnostics = {
         "symbols_requested": resolved_symbols,
@@ -536,6 +577,7 @@ def run_alpha_research(
         "step_size": step_size,
         "min_train_size": min_train_size,
         "promotion_rules": DEFAULT_PROMOTION_THRESHOLDS.to_dict(),
+        "composite_portfolio": portfolio_config.to_dict(),
     }
     diagnostics_path.write_text(json.dumps(diagnostics, indent=2, default=str))
 
@@ -548,4 +590,8 @@ def run_alpha_research(
         "composite_scores_path": str(composite_scores_path_csv),
         "composite_leaderboard_path": str(composite_leaderboard_path_csv),
         "composite_diagnostics_path": str(composite_diagnostics_path),
+        "portfolio_returns_path": str(portfolio_returns_path_csv),
+        "portfolio_metrics_path": str(portfolio_metrics_path_csv),
+        "portfolio_weights_path": str(portfolio_weights_path_csv),
+        "portfolio_diagnostics_path": str(portfolio_diagnostics_path),
     }

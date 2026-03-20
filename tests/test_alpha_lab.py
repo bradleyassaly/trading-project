@@ -11,6 +11,12 @@ from trading_platform.research.alpha_lab.composite import (
     normalize_signal_by_date,
     select_low_redundancy_signals,
 )
+from trading_platform.research.alpha_lab.composite_portfolio import (
+    CompositePortfolioConfig,
+    build_composite_portfolio_weights,
+    build_long_short_quantile_weights,
+    run_composite_portfolio_backtest,
+)
 from trading_platform.research.alpha_lab.metrics import (
     evaluate_cross_sectional_signal,
     compute_turnover,
@@ -286,6 +292,155 @@ def test_build_composite_scores_combines_available_components() -> None:
     assert composite_scores.loc[composite_scores["symbol"] == "MSFT", "composite_score"].iloc[0] == pytest.approx(1.0)
 
 
+def test_build_composite_portfolio_weights_selects_top_n_and_normalizes_weights() -> None:
+    composite_scores_df = pd.DataFrame(
+        {
+            "timestamp": [pd.Timestamp("2024-01-01")] * 3,
+            "symbol": ["AAPL", "MSFT", "NVDA"],
+            "horizon": [1, 1, 1],
+            "weighting_scheme": ["equal"] * 3,
+            "composite_score": [0.1, 0.3, 0.2],
+            "component_count": [2, 2, 2],
+            "selected_signal_count": [2, 2, 2],
+        }
+    )
+
+    weights_df = build_composite_portfolio_weights(
+        composite_scores_df,
+        config=CompositePortfolioConfig(modes=("long_only_top_n",), top_n=2),
+    )
+
+    assert set(weights_df["symbol"]) == {"MSFT", "NVDA"}
+    assert weights_df["weight"].sum() == pytest.approx(1.0)
+    assert (weights_df["weight"] > 0).all()
+
+
+def test_build_long_short_quantile_weights_balances_long_and_short_legs() -> None:
+    scores_df = pd.DataFrame(
+        {
+            "timestamp": [pd.Timestamp("2024-01-01")] * 4,
+            "symbol": ["AAPL", "MSFT", "NVDA", "AMZN"],
+            "score": [0.4, 0.3, 0.2, 0.1],
+        }
+    )
+
+    weights_df = build_long_short_quantile_weights(
+        scores_df,
+        long_quantile=0.25,
+        short_quantile=0.25,
+        gross_target=1.0,
+        net_target=0.0,
+    )
+
+    assert set(weights_df["symbol"]) == {"AAPL", "AMZN"}
+    assert weights_df["weight"].abs().sum() == pytest.approx(1.0)
+    assert weights_df["weight"].sum() == pytest.approx(0.0)
+
+
+def test_composite_portfolio_backtest_turnover_and_cost_reduce_returns() -> None:
+    composite_scores_df = pd.DataFrame(
+        {
+            "timestamp": [
+                pd.Timestamp("2024-01-01"),
+                pd.Timestamp("2024-01-01"),
+                pd.Timestamp("2024-01-02"),
+                pd.Timestamp("2024-01-02"),
+            ],
+            "symbol": ["AAPL", "MSFT", "AAPL", "MSFT"],
+            "horizon": [1, 1, 1, 1],
+            "weighting_scheme": ["equal"] * 4,
+            "composite_score": [1.0, 0.0, 0.0, 1.0],
+            "component_count": [1, 1, 1, 1],
+            "selected_signal_count": [1, 1, 1, 1],
+        }
+    )
+    symbol_data = {
+        "AAPL": pd.DataFrame(
+            {
+                "timestamp": pd.date_range("2024-01-01", periods=3, freq="D"),
+                "close": [100.0, 110.0, 121.0],
+            }
+        ),
+        "MSFT": pd.DataFrame(
+            {
+                "timestamp": pd.date_range("2024-01-01", periods=3, freq="D"),
+                "close": [100.0, 90.0, 81.0],
+            }
+        ),
+    }
+
+    no_cost_returns, _, _, _ = run_composite_portfolio_backtest(
+        composite_scores_df,
+        symbol_data=symbol_data,
+        config=CompositePortfolioConfig(
+            modes=("long_only_top_n",),
+            top_n=1,
+            commission=0.0,
+        ),
+    )
+    cost_returns, _, _, _ = run_composite_portfolio_backtest(
+        composite_scores_df,
+        symbol_data=symbol_data,
+        config=CompositePortfolioConfig(
+            modes=("long_only_top_n",),
+            top_n=1,
+            commission=0.01,
+        ),
+    )
+
+    assert (no_cost_returns["turnover"] >= 0.0).all()
+    assert cost_returns["portfolio_return_net"].sum() < no_cost_returns["portfolio_return_net"].sum()
+
+
+def test_composite_portfolio_backtest_uses_next_bar_execution_timing() -> None:
+    composite_scores_df = pd.DataFrame(
+        {
+            "timestamp": [
+                pd.Timestamp("2024-01-01"),
+                pd.Timestamp("2024-01-01"),
+                pd.Timestamp("2024-01-02"),
+                pd.Timestamp("2024-01-02"),
+            ],
+            "symbol": ["AAPL", "MSFT", "AAPL", "MSFT"],
+            "horizon": [1, 1, 1, 1],
+            "weighting_scheme": ["equal"] * 4,
+            "composite_score": [1.0, 0.0, 0.0, 1.0],
+            "component_count": [1, 1, 1, 1],
+            "selected_signal_count": [1, 1, 1, 1],
+        }
+    )
+    symbol_data = {
+        "AAPL": pd.DataFrame(
+            {
+                "timestamp": pd.date_range("2024-01-01", periods=3, freq="D"),
+                "close": [100.0, 110.0, 99.0],
+            }
+        ),
+        "MSFT": pd.DataFrame(
+            {
+                "timestamp": pd.date_range("2024-01-01", periods=3, freq="D"),
+                "close": [100.0, 100.0, 120.0],
+            }
+        ),
+    }
+
+    portfolio_returns_df, _, portfolio_weights_df, _ = run_composite_portfolio_backtest(
+        composite_scores_df,
+        symbol_data=symbol_data,
+        config=CompositePortfolioConfig(
+            modes=("long_only_top_n",),
+            top_n=1,
+            commission=0.0,
+        ),
+    )
+
+    first_return = portfolio_returns_df.sort_values("timestamp").iloc[0]
+    second_weight_date = portfolio_weights_df.sort_values("timestamp")["timestamp"].iloc[1]
+
+    assert first_return["portfolio_return_net"] == pytest.approx(0.0)
+    assert second_weight_date == pd.Timestamp("2024-01-02")
+
+
 def test_run_alpha_research_writes_leaderboard_and_fold_results(tmp_path: Path) -> None:
     feature_dir = tmp_path / "features"
     output_dir = tmp_path / "alpha_outputs"
@@ -333,6 +488,10 @@ def test_run_alpha_research_writes_leaderboard_and_fold_results(tmp_path: Path) 
     composite_scores_path = Path(result["composite_scores_path"])
     composite_leaderboard_path = Path(result["composite_leaderboard_path"])
     composite_diagnostics_path = Path(result["composite_diagnostics_path"])
+    portfolio_returns_path = Path(result["portfolio_returns_path"])
+    portfolio_metrics_path = Path(result["portfolio_metrics_path"])
+    portfolio_weights_path = Path(result["portfolio_weights_path"])
+    portfolio_diagnostics_path = Path(result["portfolio_diagnostics_path"])
 
     assert leaderboard_path.exists()
     assert fold_results_path.exists()
@@ -342,6 +501,10 @@ def test_run_alpha_research_writes_leaderboard_and_fold_results(tmp_path: Path) 
     assert composite_scores_path.exists()
     assert composite_leaderboard_path.exists()
     assert composite_diagnostics_path.exists()
+    assert portfolio_returns_path.exists()
+    assert portfolio_metrics_path.exists()
+    assert portfolio_weights_path.exists()
+    assert portfolio_diagnostics_path.exists()
     assert (output_dir / "leaderboard.parquet").exists()
     assert (output_dir / "fold_results.parquet").exists()
     assert (output_dir / "promoted_signals.parquet").exists()
@@ -350,6 +513,10 @@ def test_run_alpha_research_writes_leaderboard_and_fold_results(tmp_path: Path) 
     assert (output_dir / "composite_scores.parquet").exists()
     assert (output_dir / "composite_leaderboard.parquet").exists()
     assert (output_dir / "composite_diagnostics.json").exists()
+    assert (output_dir / "portfolio_returns.parquet").exists()
+    assert (output_dir / "portfolio_metrics.parquet").exists()
+    assert (output_dir / "portfolio_weights.parquet").exists()
+    assert (output_dir / "portfolio_diagnostics.json").exists()
     assert (output_dir / "signal_diagnostics.json").exists()
 
     leaderboard_df = pd.read_csv(leaderboard_path)
@@ -358,12 +525,18 @@ def test_run_alpha_research_writes_leaderboard_and_fold_results(tmp_path: Path) 
     redundancy_df = pd.read_csv(redundancy_path)
     composite_scores_df = pd.read_csv(composite_scores_path)
     composite_leaderboard_df = pd.read_csv(composite_leaderboard_path)
+    portfolio_returns_df = pd.read_csv(portfolio_returns_path)
+    portfolio_metrics_df = pd.read_csv(portfolio_metrics_path)
+    portfolio_weights_df = pd.read_csv(portfolio_weights_path)
 
     assert not leaderboard_df.empty
     assert not fold_results_df.empty
     assert promoted_signals_df.empty
     assert composite_scores_df.empty
     assert composite_leaderboard_df.empty
+    assert portfolio_returns_df.empty
+    assert portfolio_metrics_df.empty
+    assert portfolio_weights_df.empty
     assert "performance_corr" in redundancy_df.columns
 
     assert "signal_family" in leaderboard_df.columns
@@ -480,6 +653,9 @@ def test_run_alpha_research_adds_promotion_and_redundancy_outputs(tmp_path: Path
     redundancy_df = pd.read_csv(result["redundancy_path"])
     composite_scores_df = pd.read_csv(result["composite_scores_path"])
     composite_leaderboard_df = pd.read_csv(result["composite_leaderboard_path"])
+    portfolio_returns_df = pd.read_csv(result["portfolio_returns_path"])
+    portfolio_metrics_df = pd.read_csv(result["portfolio_metrics_path"])
+    portfolio_weights_df = pd.read_csv(result["portfolio_weights_path"])
 
     assert set(leaderboard_df["promotion_status"]) == {"promote"}
     assert set(leaderboard_df["rejection_reason"]) == {"none"}
@@ -489,7 +665,14 @@ def test_run_alpha_research_adds_promotion_and_redundancy_outputs(tmp_path: Path
     assert len(redundancy_df) == 1
     assert not composite_scores_df.empty
     assert not composite_leaderboard_df.empty
+    assert not portfolio_returns_df.empty
+    assert not portfolio_metrics_df.empty
+    assert not portfolio_weights_df.empty
     assert set(composite_scores_df["weighting_scheme"]) == {"equal", "quality"}
+    assert set(portfolio_weights_df["portfolio_mode"]) == {
+        "long_only_top_n",
+        "long_short_quantile",
+    }
     assert redundancy_df.loc[0, "score_corr"] > 0.999
     assert redundancy_df.loc[0, "performance_corr"] > 0.999
     assert redundancy_df.loc[0, "overlap_dates"] > 0
@@ -524,6 +707,9 @@ def test_run_alpha_research_handles_empty_outputs_and_edge_case_rejections(
     redundancy_df = pd.read_csv(result["redundancy_path"])
     composite_scores_df = pd.read_csv(result["composite_scores_path"])
     composite_leaderboard_df = pd.read_csv(result["composite_leaderboard_path"])
+    portfolio_returns_df = pd.read_csv(result["portfolio_returns_path"])
+    portfolio_metrics_df = pd.read_csv(result["portfolio_metrics_path"])
+    portfolio_weights_df = pd.read_csv(result["portfolio_weights_path"])
 
     assert leaderboard_df.empty
     assert promoted_signals_df.empty
@@ -531,6 +717,9 @@ def test_run_alpha_research_handles_empty_outputs_and_edge_case_rejections(
     assert redundancy_df.empty
     assert composite_scores_df.empty
     assert composite_leaderboard_df.empty
+    assert portfolio_returns_df.empty
+    assert portfolio_metrics_df.empty
+    assert portfolio_weights_df.empty
     assert "rejection_reason" in leaderboard_df.columns
     assert "promotion_status" in leaderboard_df.columns
     assert "score_corr" in redundancy_df.columns
