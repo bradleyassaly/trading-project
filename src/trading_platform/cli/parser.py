@@ -27,6 +27,9 @@ from trading_platform.cli.commands.paper_report import cmd_paper_report
 from trading_platform.cli.commands.live_dry_run import cmd_live_dry_run
 from trading_platform.cli.commands.alpha_research import cmd_alpha_research
 from trading_platform.cli.commands.alpha_research_loop import cmd_alpha_research_loop
+from trading_platform.cli.commands.experiments_dashboard import cmd_experiments_dashboard
+from trading_platform.cli.commands.experiments_latest_model import cmd_experiments_latest_model
+from trading_platform.cli.commands.experiments_list import cmd_experiments_list
 
 def add_execution_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
@@ -119,6 +122,15 @@ def add_composite_paper_arguments(parser: argparse.ArgumentParser) -> None:
         type=float,
         default=None,
         help="Optional max notional per name used in composite implementability constraints.",
+    )
+
+
+def add_experiment_tracker_argument(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--experiment-tracker-dir",
+        type=str,
+        default=None,
+        help="Optional directory used to persist the shared experiment registry and reports.",
     )
 
 def build_parser() -> argparse.ArgumentParser:
@@ -405,6 +417,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_strategy_arguments(paper_run_parser)
     add_execution_arguments(paper_run_parser)
     add_composite_paper_arguments(paper_run_parser)
+    add_experiment_tracker_argument(paper_run_parser)
     paper_run_parser.add_argument(
         "--top-n",
         type=int,
@@ -801,6 +814,7 @@ def build_parser() -> argparse.ArgumentParser:
         "alpha-research",
         help="Run cross-sectional alpha signal research across a universe",
     )
+    add_experiment_tracker_argument(alpha_research_parser)
     alpha_research_parser.add_argument(
         "--symbols",
         nargs="+",
@@ -965,6 +979,53 @@ def build_parser() -> argparse.ArgumentParser:
         default=10.0,
         help="Additional slippage in basis points that scales with fraction of ADV traded.",
     )
+    alpha_research_parser.add_argument(
+        "--dynamic-recent-quality-window",
+        type=int,
+        default=20,
+        help="Lookback window in out-of-sample dates used for dynamic signal weighting.",
+    )
+    alpha_research_parser.add_argument(
+        "--dynamic-min-history",
+        type=int,
+        default=5,
+        help="Minimum out-of-sample dates before lifecycle rules move beyond promote state.",
+    )
+    alpha_research_parser.add_argument(
+        "--dynamic-downweight-mean-rank-ic",
+        type=float,
+        default=0.01,
+        help="Recent mean rank IC threshold below which active signals are downweighted.",
+    )
+    alpha_research_parser.add_argument(
+        "--dynamic-deactivate-mean-rank-ic",
+        type=float,
+        default=-0.02,
+        help="Recent mean rank IC threshold below which signals are deactivated.",
+    )
+    alpha_research_parser.add_argument(
+        "--regime-aware-enabled",
+        action="store_true",
+        help="Enable regime-aware signal weighting on top of the dynamic lifecycle weights.",
+    )
+    alpha_research_parser.add_argument(
+        "--regime-min-history",
+        type=int,
+        default=5,
+        help="Minimum same-regime out-of-sample observations before regime-aware weighting reacts.",
+    )
+    alpha_research_parser.add_argument(
+        "--regime-underweight-mean-rank-ic",
+        type=float,
+        default=0.01,
+        help="Same-regime mean rank IC threshold below which signals are underweighted.",
+    )
+    alpha_research_parser.add_argument(
+        "--regime-exclude-mean-rank-ic",
+        type=float,
+        default=-0.01,
+        help="Same-regime mean rank IC threshold below which signals are excluded.",
+    )
     alpha_research_parser.set_defaults(func=cmd_alpha_research)
 
     alpha_research_loop_parser = subparsers.add_parser(
@@ -1085,5 +1146,65 @@ def build_parser() -> argparse.ArgumentParser:
         help="Run immediately even if the schedule metadata says the loop is not due.",
     )
     alpha_research_loop_parser.set_defaults(func=cmd_alpha_research_loop)
+
+    experiments_list_parser = subparsers.add_parser(
+        "experiments-list",
+        help="List recent tracked research and paper trading experiments",
+    )
+    experiments_list_parser.add_argument(
+        "--tracker-dir",
+        type=str,
+        default="artifacts/experiment_tracking",
+        help="Directory containing the shared experiment registry.",
+    )
+    experiments_list_parser.add_argument(
+        "--limit",
+        type=int,
+        default=10,
+        help="Maximum number of experiments to print.",
+    )
+    experiments_list_parser.set_defaults(func=cmd_experiments_list)
+
+    experiments_latest_model_parser = subparsers.add_parser(
+        "experiments-latest-model",
+        help="Show the latest approved composite/research configuration snapshot",
+    )
+    experiments_latest_model_parser.add_argument(
+        "--tracker-dir",
+        type=str,
+        default="artifacts/experiment_tracking",
+        help="Directory containing the shared experiment registry.",
+    )
+    experiments_latest_model_parser.set_defaults(func=cmd_experiments_latest_model)
+
+    experiments_dashboard_parser = subparsers.add_parser(
+        "experiments-dashboard",
+        help="Build a summary dashboard artifact from tracked experiments",
+    )
+    experiments_dashboard_parser.add_argument(
+        "--tracker-dir",
+        type=str,
+        default="artifacts/experiment_tracking",
+        help="Directory containing the shared experiment registry.",
+    )
+    experiments_dashboard_parser.add_argument(
+        "--output-dir",
+        type=str,
+        default=None,
+        help="Optional directory where the dashboard artifacts should be written.",
+    )
+    experiments_dashboard_parser.add_argument(
+        "--top-metric",
+        type=str,
+        default="portfolio_sharpe",
+        help="Registry metric used to rank top experiments in the dashboard.",
+    )
+    experiments_dashboard_parser.add_argument(
+        "--limit",
+        type=int,
+        default=10,
+        help="Maximum number of top experiments to include.",
+    )
+    experiments_dashboard_parser.set_defaults(func=cmd_experiments_dashboard)
 
     return parser

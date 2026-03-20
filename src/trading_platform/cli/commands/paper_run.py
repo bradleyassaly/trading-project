@@ -8,6 +8,10 @@ from trading_platform.paper.service import (
     run_paper_trading_cycle,
     write_paper_trading_artifacts,
 )
+from trading_platform.research.experiment_tracking import (
+    build_paper_experiment_record,
+    register_experiment,
+)
 from trading_platform.universes.registry import get_universe_symbols
 
 
@@ -77,6 +81,13 @@ def cmd_paper_run(args) -> None:
         result=result,
         output_dir=Path(args.output_dir),
     )
+    output_dir = Path(args.output_dir)
+    tracker_dir_arg = getattr(args, "experiment_tracker_dir", None)
+    tracker_dir = Path(tracker_dir_arg) if tracker_dir_arg else output_dir.parent / "experiment_tracking"
+    registry_paths = register_experiment(
+        build_paper_experiment_record(output_dir),
+        tracker_dir=tracker_dir,
+    )
 
     print(f"As of: {result.as_of}")
     print(f"Orders: {len(result.orders)}")
@@ -86,6 +97,7 @@ def cmd_paper_run(args) -> None:
     print("Artifacts:")
     for name, path in sorted(artifact_paths.items()):
         print(f"  {name}: {path}")
+    print(f"  experiment_registry_path: {registry_paths['experiment_registry_path']}")
 
 
 def _resolve_run_output_dir(base_dir: str | Path, as_of: str) -> Path:

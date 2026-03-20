@@ -11,9 +11,22 @@ from trading_platform.research.alpha_lab.composite import (
     evaluate_composite_scores,
     select_low_redundancy_signals,
 )
+from trading_platform.research.alpha_lab.lifecycle import (
+    DEFAULT_SIGNAL_LIFECYCLE_CONFIG,
+    SignalLifecycleConfig,
+    build_dynamic_signal_weights,
+)
+from trading_platform.research.alpha_lab.regime import (
+    DEFAULT_REGIME_CONFIG,
+    RegimeConfig,
+    build_regime_aware_signal_weights,
+    build_regime_labels_by_date,
+    compute_signal_performance_by_regime,
+)
 from trading_platform.research.alpha_lab.composite_portfolio import (
     DEFAULT_COMPOSITE_PORTFOLIO_CONFIG,
     CompositePortfolioConfig,
+    build_asset_return_matrix,
     build_regime_performance_report,
     build_robustness_report,
     run_composite_portfolio_backtest,
@@ -259,6 +272,14 @@ def run_alpha_research(
     max_notional_per_name: float | None = DEFAULT_COMPOSITE_PORTFOLIO_CONFIG.max_notional_per_name,
     slippage_bps_per_turnover: float = DEFAULT_COMPOSITE_PORTFOLIO_CONFIG.slippage_bps_per_turnover,
     slippage_bps_per_adv: float = DEFAULT_COMPOSITE_PORTFOLIO_CONFIG.slippage_bps_per_adv,
+    dynamic_recent_quality_window: int = DEFAULT_SIGNAL_LIFECYCLE_CONFIG.recent_quality_window,
+    dynamic_min_history: int = DEFAULT_SIGNAL_LIFECYCLE_CONFIG.min_history,
+    dynamic_downweight_mean_rank_ic: float = DEFAULT_SIGNAL_LIFECYCLE_CONFIG.downweight_mean_rank_ic,
+    dynamic_deactivate_mean_rank_ic: float = DEFAULT_SIGNAL_LIFECYCLE_CONFIG.deactivate_mean_rank_ic,
+    regime_aware_enabled: bool = DEFAULT_REGIME_CONFIG.enabled,
+    regime_min_history: int = DEFAULT_REGIME_CONFIG.min_history,
+    regime_underweight_mean_rank_ic: float = DEFAULT_REGIME_CONFIG.underweight_mean_rank_ic,
+    regime_exclude_mean_rank_ic: float = DEFAULT_REGIME_CONFIG.exclude_mean_rank_ic,
 ) -> dict[str, str]:
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -450,6 +471,17 @@ def run_alpha_research(
         for horizon, frames in label_panel_by_horizon.items()
         if frames
     }
+    asset_returns_matrix = build_asset_return_matrix(symbol_data)
+    regime_config = RegimeConfig(
+        enabled=regime_aware_enabled,
+        min_history=regime_min_history,
+        underweight_mean_rank_ic=regime_underweight_mean_rank_ic,
+        exclude_mean_rank_ic=regime_exclude_mean_rank_ic,
+    )
+    regime_labels_df = build_regime_labels_by_date(
+        asset_returns_matrix,
+        config=regime_config,
+    )
     redundancy_df = _compute_redundancy_diagnostics(
         leaderboard_df,
         daily_metrics_by_candidate=combined_daily_metrics,
@@ -458,9 +490,24 @@ def run_alpha_research(
     promoted_signals_df = leaderboard_df.loc[
         leaderboard_df["promotion_status"] == "promote"
     ].reset_index(drop=True)
+    lifecycle_config = SignalLifecycleConfig(
+        recent_quality_window=dynamic_recent_quality_window,
+        min_history=dynamic_min_history,
+        downweight_mean_rank_ic=dynamic_downweight_mean_rank_ic,
+        deactivate_mean_rank_ic=dynamic_deactivate_mean_rank_ic,
+    )
     composite_score_frames: list[pd.DataFrame] = []
+    dynamic_weight_frames: list[pd.DataFrame] = []
+    active_signal_frames: list[pd.DataFrame] = []
+    deactivated_signal_frames: list[pd.DataFrame] = []
+    lifecycle_report_frames: list[pd.DataFrame] = []
+    signal_performance_by_regime_frames: list[pd.DataFrame] = []
+    regime_aware_weight_frames: list[pd.DataFrame] = []
+    regime_selection_report_frames: list[pd.DataFrame] = []
     composite_diagnostics: dict[str, object] = {
         "config": DEFAULT_COMPOSITE_CONFIG.to_dict(),
+        "signal_lifecycle": lifecycle_config.to_dict(),
+        "regime": regime_config.to_dict(),
         "horizons": {},
     }
     for horizon in sorted(promoted_signals_df["horizon"].unique().tolist()) if not promoted_signals_df.empty else []:
@@ -476,17 +523,185 @@ def run_alpha_research(
             ].to_dict(orient="records"),
             "excluded_signals": excluded_rows,
         }
-        for weighting_scheme in DEFAULT_COMPOSITE_CONFIG.weighting_schemes:
+        dynamic_weights_df, active_signals_df, deactivated_signals_df, lifecycle_report_df = build_dynamic_signal_weights(
+            selected_signals_df,
+            daily_metrics_by_candidate=combined_daily_metrics,
+            horizon=int(horizon),
+            config=lifecycle_config,
+        )
+        if not dynamic_weights_df.empty:
+            dynamic_weight_frames.append(dynamic_weights_df)
+        if not active_signals_df.empty:
+            active_signal_frames.append(active_signals_df)
+        if not deactivated_signals_df.empty:
+            deactivated_signal_frames.append(deactivated_signals_df)
+        if not lifecycle_report_df.empty:
+            lifecycle_report_frames.append(lifecycle_report_df)
+        signal_performance_by_regime_df = compute_signal_performance_by_regime(
+            selected_signals_df,
+            daily_metrics_by_candidate=combined_daily_metrics,
+            regime_labels_df=regime_labels_df,
+            horizon=int(horizon),
+        )
+        if not signal_performance_by_regime_df.empty:
+            signal_performance_by_regime_frames.append(signal_performance_by_regime_df)
+        regime_aware_weights_df, regime_selection_report_df = build_regime_aware_signal_weights(
+            dynamic_weights_df,
+            daily_metrics_by_candidate=combined_daily_metrics,
+            regime_labels_df=regime_labels_df,
+            horizon=int(horizon),
+            config=regime_config,
+        )
+        if not regime_aware_weights_df.empty:
+            regime_aware_weight_frames.append(regime_aware_weights_df)
+        if not regime_selection_report_df.empty:
+            regime_selection_report_frames.append(regime_selection_report_df)
+        composite_diagnostics["horizons"][str(int(horizon))]["dynamic_weighting"] = {
+            "active_dates": int(active_signals_df["timestamp"].nunique()) if not active_signals_df.empty else 0,
+            "deactivated_dates": int(deactivated_signals_df["timestamp"].nunique()) if not deactivated_signals_df.empty else 0,
+            "weighting_schemes": lifecycle_config.weighting_schemes,
+        }
+        for weighting_scheme in lifecycle_config.weighting_schemes:
             composite_scores = build_composite_scores(
                 selected_signals_df,
                 score_panel_by_candidate=combined_score_panels,
                 weighting_scheme=weighting_scheme,
                 quality_metric=DEFAULT_COMPOSITE_CONFIG.quality_metric,
+                dynamic_signal_weights_df=dynamic_weights_df.loc[
+                    dynamic_weights_df["weighting_scheme"] == weighting_scheme
+                ].copy(),
             )
             if composite_scores.empty:
                 continue
             composite_score_frames.append(composite_scores)
+        if regime_config.enabled:
+            composite_scores = build_composite_scores(
+                selected_signals_df,
+                score_panel_by_candidate=combined_score_panels,
+                weighting_scheme="regime_aware",
+                quality_metric=DEFAULT_COMPOSITE_CONFIG.quality_metric,
+                dynamic_signal_weights_df=regime_aware_weights_df,
+            )
+            if not composite_scores.empty:
+                composite_score_frames.append(composite_scores)
 
+    dynamic_signal_weights_df = (
+        pd.concat(dynamic_weight_frames, ignore_index=True)
+        if dynamic_weight_frames
+        else pd.DataFrame(
+            columns=[
+                "timestamp",
+                "candidate_id",
+                "signal_family",
+                "lookback",
+                "horizon",
+                "weighting_scheme",
+                "lifecycle_status",
+                "lifecycle_reason",
+                "recent_obs",
+                "recent_mean_rank_ic",
+                "recent_rank_ic_std",
+                "recent_worst_rank_ic",
+                "recent_rank_ic_trend",
+                "raw_weight",
+                "signal_weight",
+            ]
+        )
+    )
+    active_signals_by_date_df = (
+        pd.concat(active_signal_frames, ignore_index=True)
+        if active_signal_frames
+        else dynamic_signal_weights_df.iloc[0:0].copy()
+    )
+    deactivated_signals_df = (
+        pd.concat(deactivated_signal_frames, ignore_index=True)
+        if deactivated_signal_frames
+        else dynamic_signal_weights_df.iloc[0:0].copy()
+    )
+    signal_lifecycle_report_df = (
+        pd.concat(lifecycle_report_frames, ignore_index=True)
+        if lifecycle_report_frames
+        else pd.DataFrame(
+            columns=[
+                "report_type",
+                "horizon",
+                "weighting_scheme",
+                "candidate_id",
+                "signal_family",
+                "lookback",
+                "entry_date",
+                "exit_date",
+                "deactivation_date",
+                "active_dates",
+                "mean_weight",
+                "max_weight",
+                "weight_drift",
+                "mean_top_weight",
+                "max_top_weight",
+                "mean_effective_component_count",
+            ]
+        )
+    )
+    signal_performance_by_regime_df = (
+        pd.concat(signal_performance_by_regime_frames, ignore_index=True)
+        if signal_performance_by_regime_frames
+        else pd.DataFrame(
+            columns=[
+                "candidate_id",
+                "signal_family",
+                "lookback",
+                "horizon",
+                "regime_key",
+                "volatility_regime",
+                "trend_regime",
+                "dispersion_regime",
+                "dates_evaluated",
+                "mean_spearman_ic",
+                "mean_long_short_spread",
+            ]
+        )
+    )
+    regime_aware_signal_weights_df = (
+        pd.concat(regime_aware_weight_frames, ignore_index=True)
+        if regime_aware_weight_frames
+        else pd.DataFrame(
+            columns=[
+                "timestamp",
+                "candidate_id",
+                "signal_family",
+                "lookback",
+                "horizon",
+                "weighting_scheme",
+                "lifecycle_status",
+                "lifecycle_reason",
+                "regime_key",
+                "volatility_regime",
+                "trend_regime",
+                "dispersion_regime",
+                "regime_obs",
+                "regime_mean_rank_ic",
+                "regime_multiplier",
+                "signal_weight",
+            ]
+        )
+    )
+    regime_selection_report_df = (
+        pd.concat(regime_selection_report_frames, ignore_index=True)
+        if regime_selection_report_frames
+        else pd.DataFrame(
+            columns=[
+                "report_type",
+                "horizon",
+                "weighting_scheme",
+                "regime_key",
+                "candidate_id",
+                "mean_weight",
+                "max_weight",
+                "mean_regime_multiplier",
+                "regime_dates",
+            ]
+        )
+    )
     composite_scores_df = (
         pd.concat(composite_score_frames, ignore_index=True)
         if composite_score_frames
@@ -579,6 +794,22 @@ def run_alpha_research(
     composite_scores_path_parquet = output_dir / "composite_scores.parquet"
     composite_leaderboard_path_csv = output_dir / "composite_leaderboard.csv"
     composite_leaderboard_path_parquet = output_dir / "composite_leaderboard.parquet"
+    dynamic_signal_weights_path_csv = output_dir / "dynamic_signal_weights.csv"
+    dynamic_signal_weights_path_parquet = output_dir / "dynamic_signal_weights.parquet"
+    active_signals_by_date_path_csv = output_dir / "active_signals_by_date.csv"
+    active_signals_by_date_path_parquet = output_dir / "active_signals_by_date.parquet"
+    deactivated_signals_path_csv = output_dir / "deactivated_signals.csv"
+    deactivated_signals_path_parquet = output_dir / "deactivated_signals.parquet"
+    signal_lifecycle_report_path_csv = output_dir / "signal_lifecycle_report.csv"
+    signal_lifecycle_report_path_parquet = output_dir / "signal_lifecycle_report.parquet"
+    regime_labels_by_date_path_csv = output_dir / "regime_labels_by_date.csv"
+    regime_labels_by_date_path_parquet = output_dir / "regime_labels_by_date.parquet"
+    signal_performance_by_regime_path_csv = output_dir / "signal_performance_by_regime.csv"
+    signal_performance_by_regime_path_parquet = output_dir / "signal_performance_by_regime.parquet"
+    regime_aware_signal_weights_path_csv = output_dir / "regime_aware_signal_weights.csv"
+    regime_aware_signal_weights_path_parquet = output_dir / "regime_aware_signal_weights.parquet"
+    regime_selection_report_path_csv = output_dir / "regime_selection_report.csv"
+    regime_selection_report_path_parquet = output_dir / "regime_selection_report.parquet"
     composite_diagnostics_path = output_dir / "composite_diagnostics.json"
     portfolio_returns_path_csv = output_dir / "portfolio_returns.csv"
     portfolio_returns_path_parquet = output_dir / "portfolio_returns.parquet"
@@ -608,6 +839,14 @@ def run_alpha_research(
     redundancy_df.to_csv(redundancy_path_csv, index=False)
     composite_scores_df.to_csv(composite_scores_path_csv, index=False)
     composite_leaderboard_df.to_csv(composite_leaderboard_path_csv, index=False)
+    dynamic_signal_weights_df.to_csv(dynamic_signal_weights_path_csv, index=False)
+    active_signals_by_date_df.to_csv(active_signals_by_date_path_csv, index=False)
+    deactivated_signals_df.to_csv(deactivated_signals_path_csv, index=False)
+    signal_lifecycle_report_df.to_csv(signal_lifecycle_report_path_csv, index=False)
+    regime_labels_df.to_csv(regime_labels_by_date_path_csv, index=False)
+    signal_performance_by_regime_df.to_csv(signal_performance_by_regime_path_csv, index=False)
+    regime_aware_signal_weights_df.to_csv(regime_aware_signal_weights_path_csv, index=False)
+    regime_selection_report_df.to_csv(regime_selection_report_path_csv, index=False)
     composite_portfolio_returns_df.to_csv(portfolio_returns_path_csv, index=False)
     composite_portfolio_metrics_df.to_csv(portfolio_metrics_path_csv, index=False)
     composite_portfolio_weights_df.to_csv(portfolio_weights_path_csv, index=False)
@@ -624,6 +863,14 @@ def run_alpha_research(
     redundancy_df.to_parquet(redundancy_path_parquet, index=False)
     composite_scores_df.to_parquet(composite_scores_path_parquet, index=False)
     composite_leaderboard_df.to_parquet(composite_leaderboard_path_parquet, index=False)
+    dynamic_signal_weights_df.to_parquet(dynamic_signal_weights_path_parquet, index=False)
+    active_signals_by_date_df.to_parquet(active_signals_by_date_path_parquet, index=False)
+    deactivated_signals_df.to_parquet(deactivated_signals_path_parquet, index=False)
+    signal_lifecycle_report_df.to_parquet(signal_lifecycle_report_path_parquet, index=False)
+    regime_labels_df.to_parquet(regime_labels_by_date_path_parquet, index=False)
+    signal_performance_by_regime_df.to_parquet(signal_performance_by_regime_path_parquet, index=False)
+    regime_aware_signal_weights_df.to_parquet(regime_aware_signal_weights_path_parquet, index=False)
+    regime_selection_report_df.to_parquet(regime_selection_report_path_parquet, index=False)
     composite_portfolio_returns_df.to_parquet(portfolio_returns_path_parquet, index=False)
     composite_portfolio_metrics_df.to_parquet(portfolio_metrics_path_parquet, index=False)
     composite_portfolio_weights_df.to_parquet(portfolio_weights_path_parquet, index=False)
@@ -663,6 +910,8 @@ def run_alpha_research(
         "step_size": step_size,
         "min_train_size": min_train_size,
         "promotion_rules": DEFAULT_PROMOTION_THRESHOLDS.to_dict(),
+        "signal_lifecycle": lifecycle_config.to_dict(),
+        "regime": regime_config.to_dict(),
         "composite_portfolio": portfolio_config.to_dict(),
     }
     diagnostics_path.write_text(json.dumps(diagnostics, indent=2, default=str))
@@ -675,6 +924,14 @@ def run_alpha_research(
         "redundancy_path": str(redundancy_path_csv),
         "composite_scores_path": str(composite_scores_path_csv),
         "composite_leaderboard_path": str(composite_leaderboard_path_csv),
+        "dynamic_signal_weights_path": str(dynamic_signal_weights_path_csv),
+        "active_signals_by_date_path": str(active_signals_by_date_path_csv),
+        "deactivated_signals_path": str(deactivated_signals_path_csv),
+        "signal_lifecycle_report_path": str(signal_lifecycle_report_path_csv),
+        "regime_labels_by_date_path": str(regime_labels_by_date_path_csv),
+        "signal_performance_by_regime_path": str(signal_performance_by_regime_path_csv),
+        "regime_aware_signal_weights_path": str(regime_aware_signal_weights_path_csv),
+        "regime_selection_report_path": str(regime_selection_report_path_csv),
         "composite_diagnostics_path": str(composite_diagnostics_path),
         "portfolio_returns_path": str(portfolio_returns_path_csv),
         "portfolio_metrics_path": str(portfolio_metrics_path_csv),

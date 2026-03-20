@@ -2,10 +2,15 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from trading_platform.research.experiment_tracking import (
+    build_alpha_experiment_record,
+    register_experiment,
+)
 from trading_platform.research.alpha_lab.runner import run_alpha_research
 
 
 def cmd_alpha_research(args) -> None:
+    output_dir = Path(args.output_dir)
     result = run_alpha_research(
         symbols=args.symbols,
         universe=args.universe,
@@ -16,7 +21,7 @@ def cmd_alpha_research(args) -> None:
         min_rows=args.min_rows,
         top_quantile=args.top_quantile,
         bottom_quantile=args.bottom_quantile,
-        output_dir=Path(args.output_dir),
+        output_dir=output_dir,
         train_size=args.train_size,
         test_size=args.test_size,
         step_size=args.step_size,
@@ -33,6 +38,20 @@ def cmd_alpha_research(args) -> None:
         max_notional_per_name=args.max_notional_per_name,
         slippage_bps_per_turnover=args.slippage_bps_per_turnover,
         slippage_bps_per_adv=args.slippage_bps_per_adv,
+        dynamic_recent_quality_window=args.dynamic_recent_quality_window,
+        dynamic_min_history=args.dynamic_min_history,
+        dynamic_downweight_mean_rank_ic=args.dynamic_downweight_mean_rank_ic,
+        dynamic_deactivate_mean_rank_ic=args.dynamic_deactivate_mean_rank_ic,
+        regime_aware_enabled=args.regime_aware_enabled,
+        regime_min_history=args.regime_min_history,
+        regime_underweight_mean_rank_ic=args.regime_underweight_mean_rank_ic,
+        regime_exclude_mean_rank_ic=args.regime_exclude_mean_rank_ic,
+    )
+    tracker_dir_arg = getattr(args, "experiment_tracker_dir", None)
+    tracker_dir = Path(tracker_dir_arg) if tracker_dir_arg else output_dir.parent / "experiment_tracking"
+    registry_paths = register_experiment(
+        build_alpha_experiment_record(output_dir),
+        tracker_dir=tracker_dir,
     )
 
     print("Alpha research complete.")
@@ -40,3 +59,4 @@ def cmd_alpha_research(args) -> None:
     print(f"Detailed results: {result['fold_results_path']}")
     print(f"Composite portfolio returns: {result['portfolio_returns_path']}")
     print(f"Implementability report: {result['implementability_report_path']}")
+    print(f"Experiment registry: {registry_paths['experiment_registry_path']}")

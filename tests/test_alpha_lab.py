@@ -11,6 +11,15 @@ from trading_platform.research.alpha_lab.composite import (
     normalize_signal_by_date,
     select_low_redundancy_signals,
 )
+from trading_platform.research.alpha_lab.lifecycle import (
+    SignalLifecycleConfig,
+    build_dynamic_signal_weights,
+)
+from trading_platform.research.alpha_lab.regime import (
+    RegimeConfig,
+    build_regime_aware_signal_weights,
+    build_regime_labels_by_date,
+)
 from trading_platform.research.alpha_lab.composite_portfolio import (
     CompositePortfolioConfig,
     apply_liquidity_filters,
@@ -294,6 +303,243 @@ def test_build_composite_scores_combines_available_components() -> None:
     assert composite_scores["component_count"].tolist() == [2, 2]
     assert composite_scores.loc[composite_scores["symbol"] == "AAPL", "composite_score"].iloc[0] == pytest.approx(0.0)
     assert composite_scores.loc[composite_scores["symbol"] == "MSFT", "composite_score"].iloc[0] == pytest.approx(1.0)
+
+
+def test_build_dynamic_signal_weights_downweights_and_deactivates() -> None:
+    selected_signals_df = pd.DataFrame(
+        [
+            {"candidate_id": "momentum|5|1", "signal_family": "momentum", "lookback": 5, "horizon": 1},
+            {"candidate_id": "momentum|10|1", "signal_family": "momentum", "lookback": 10, "horizon": 1},
+        ]
+    )
+    daily_metrics_by_candidate = {
+        ("momentum", 5, 1): pd.DataFrame(
+            {
+                "timestamp": pd.date_range("2024-01-01", periods=5, freq="D"),
+                "spearman_ic": [0.06, 0.05, 0.04, 0.03, 0.02],
+            }
+        ),
+        ("momentum", 10, 1): pd.DataFrame(
+            {
+                "timestamp": pd.date_range("2024-01-01", periods=5, freq="D"),
+                "spearman_ic": [0.03, 0.00, -0.01, -0.03, -0.15],
+            }
+        ),
+    }
+
+    dynamic_weights, active_signals, deactivated_signals, lifecycle_report = build_dynamic_signal_weights(
+        selected_signals_df,
+        daily_metrics_by_candidate=daily_metrics_by_candidate,
+        horizon=1,
+        config=SignalLifecycleConfig(
+            min_history=2,
+            recent_quality_window=3,
+            downweight_mean_rank_ic=0.02,
+            deactivate_mean_rank_ic=-0.01,
+        ),
+    )
+
+    assert not dynamic_weights.empty
+    assert not active_signals.empty
+    assert not deactivated_signals.empty
+    latest_equal = dynamic_weights.loc[
+        (dynamic_weights["timestamp"] == pd.Timestamp("2024-01-05"))
+        & (dynamic_weights["weighting_scheme"] == "equal")
+    ].sort_values("candidate_id")
+    assert latest_equal["candidate_id"].tolist() == ["momentum|10|1", "momentum|5|1"]
+    assert latest_equal["signal_weight"].tolist() == pytest.approx([0.0, 1.0])
+    assert "weight_concentration_summary" in set(lifecycle_report["report_type"])
+
+
+def test_build_dynamic_signal_weights_uses_only_prior_dates() -> None:
+    selected_signals_df = pd.DataFrame(
+        [
+            {"candidate_id": "momentum|5|1", "signal_family": "momentum", "lookback": 5, "horizon": 1},
+        ]
+    )
+    daily_metrics_by_candidate = {
+        ("momentum", 5, 1): pd.DataFrame(
+            {
+                "timestamp": pd.date_range("2024-01-01", periods=4, freq="D"),
+                "spearman_ic": [0.01, 0.01, 0.01, 1.00],
+            }
+        ),
+    }
+
+    dynamic_weights, _, _, _ = build_dynamic_signal_weights(
+        selected_signals_df,
+        daily_metrics_by_candidate=daily_metrics_by_candidate,
+        horizon=1,
+        config=SignalLifecycleConfig(
+            min_history=1,
+            recent_quality_window=2,
+        ),
+    )
+
+    decision_row = dynamic_weights.loc[
+        (dynamic_weights["timestamp"] == pd.Timestamp("2024-01-04"))
+        & (dynamic_weights["weighting_scheme"] == "recent_quality")
+    ].iloc[0]
+    assert decision_row["recent_mean_rank_ic"] == pytest.approx(0.01)
+
+
+def test_build_composite_scores_uses_dynamic_weights_by_date() -> None:
+    selected_signals_df = pd.DataFrame(
+        [
+            {"candidate_id": "momentum|5|1", "signal_family": "momentum", "lookback": 5, "horizon": 1, "mean_spearman_ic": 0.05},
+            {"candidate_id": "momentum|10|1", "signal_family": "momentum", "lookback": 10, "horizon": 1, "mean_spearman_ic": 0.04},
+        ]
+    )
+    score_panel_by_candidate = {
+        ("momentum", 5, 1): pd.DataFrame(
+            {
+                "timestamp": [pd.Timestamp("2024-01-02"), pd.Timestamp("2024-01-02")],
+                "symbol": ["AAPL", "MSFT"],
+                "signal": [1.0, 3.0],
+            }
+        ),
+        ("momentum", 10, 1): pd.DataFrame(
+            {
+                "timestamp": [pd.Timestamp("2024-01-02"), pd.Timestamp("2024-01-02")],
+                "symbol": ["AAPL", "MSFT"],
+                "signal": [3.0, 1.0],
+            }
+        ),
+    }
+    dynamic_signal_weights_df = pd.DataFrame(
+        {
+            "timestamp": [pd.Timestamp("2024-01-02"), pd.Timestamp("2024-01-02")],
+            "candidate_id": ["momentum|5|1", "momentum|10|1"],
+            "signal_weight": [1.0, 0.0],
+            "weighting_scheme": ["equal", "equal"],
+        }
+    )
+
+    composite_scores = build_composite_scores(
+        selected_signals_df,
+        score_panel_by_candidate=score_panel_by_candidate,
+        weighting_scheme="equal",
+        quality_metric="mean_spearman_ic",
+        dynamic_signal_weights_df=dynamic_signal_weights_df,
+    )
+
+    assert composite_scores.loc[composite_scores["symbol"] == "AAPL", "composite_score"].iloc[0] == pytest.approx(0.0)
+    assert composite_scores.loc[composite_scores["symbol"] == "MSFT", "composite_score"].iloc[0] == pytest.approx(1.0)
+
+
+def test_build_dynamic_signal_weights_handles_empty_inputs() -> None:
+    dynamic_weights, active_signals, deactivated_signals, lifecycle_report = build_dynamic_signal_weights(
+        pd.DataFrame(columns=["candidate_id", "signal_family", "lookback", "horizon"]),
+        daily_metrics_by_candidate={},
+        horizon=1,
+    )
+
+    assert dynamic_weights.empty
+    assert active_signals.empty
+    assert deactivated_signals.empty
+    assert lifecycle_report.empty
+
+
+def test_build_regime_labels_by_date_classifies_simple_regimes() -> None:
+    asset_returns = pd.DataFrame(
+        {
+            "AAPL": [0.01, 0.01, -0.02, -0.03, 0.04, 0.05],
+            "MSFT": [0.01, 0.00, -0.01, -0.04, 0.03, 0.06],
+            "NVDA": [0.02, 0.01, -0.03, -0.05, 0.05, 0.08],
+        },
+        index=pd.date_range("2024-01-01", periods=6, freq="D"),
+    )
+
+    labels = build_regime_labels_by_date(
+        asset_returns,
+        config=RegimeConfig(
+            enabled=True,
+            volatility_window=2,
+            trend_window=2,
+            dispersion_window=2,
+            min_history=2,
+        ),
+    )
+
+    assert not labels.empty
+    assert "regime_key" in labels.columns
+    assert set(labels["volatility_regime"]) <= {"high_vol", "low_vol"}
+    assert set(labels["trend_regime"]) <= {"uptrend", "downtrend"}
+    assert set(labels["dispersion_regime"]) <= {"high_dispersion", "low_dispersion"}
+
+
+def test_build_regime_aware_signal_weights_changes_by_regime_without_lookahead() -> None:
+    base_dynamic_weights_df = pd.DataFrame(
+        {
+            "timestamp": [pd.Timestamp("2024-01-01"), pd.Timestamp("2024-01-01"), pd.Timestamp("2024-01-02"), pd.Timestamp("2024-01-02"), pd.Timestamp("2024-01-03"), pd.Timestamp("2024-01-03")],
+            "candidate_id": ["momentum|5|1", "momentum|10|1"] * 3,
+            "signal_family": ["momentum", "momentum"] * 3,
+            "lookback": [5, 10] * 3,
+            "horizon": [1, 1] * 3,
+            "weighting_scheme": ["stability_decay", "stability_decay"] * 3,
+            "lifecycle_status": ["active", "active"] * 3,
+            "lifecycle_reason": ["none", "none"] * 3,
+            "signal_weight": [0.5, 0.5] * 3,
+        }
+    )
+    daily_metrics_by_candidate = {
+        ("momentum", 5, 1): pd.DataFrame(
+            {
+                "timestamp": pd.date_range("2024-01-01", periods=3, freq="D"),
+                "spearman_ic": [0.05, 0.06, 0.07],
+                "long_short_spread": [0.02, 0.03, 0.03],
+            }
+        ),
+        ("momentum", 10, 1): pd.DataFrame(
+            {
+                "timestamp": pd.date_range("2024-01-01", periods=3, freq="D"),
+                "spearman_ic": [0.02, -0.06, -0.03],
+                "long_short_spread": [0.01, -0.01, -0.01],
+            }
+        ),
+    }
+    regime_labels_df = pd.DataFrame(
+        {
+            "timestamp": pd.date_range("2024-01-01", periods=3, freq="D"),
+            "regime_key": ["high_vol|downtrend|high_dispersion"] * 3,
+            "volatility_regime": ["high_vol"] * 3,
+            "trend_regime": ["downtrend"] * 3,
+            "dispersion_regime": ["high_dispersion"] * 3,
+        }
+    )
+
+    regime_weights, report = build_regime_aware_signal_weights(
+        base_dynamic_weights_df,
+        daily_metrics_by_candidate=daily_metrics_by_candidate,
+        regime_labels_df=regime_labels_df,
+        horizon=1,
+        config=RegimeConfig(
+            enabled=True,
+            min_history=1,
+            underweight_mean_rank_ic=0.01,
+            exclude_mean_rank_ic=-0.01,
+        ),
+    )
+
+    day_two = regime_weights.loc[regime_weights["timestamp"] == pd.Timestamp("2024-01-02")].sort_values("candidate_id")
+    day_three = regime_weights.loc[regime_weights["timestamp"] == pd.Timestamp("2024-01-03")].sort_values("candidate_id")
+    assert day_two["signal_weight"].sum() == pytest.approx(1.0)
+    assert day_two["signal_weight"].iloc[1] > day_two["signal_weight"].iloc[0]
+    assert day_three["signal_weight"].tolist() == pytest.approx([0.0, 1.0])
+    assert day_two.loc[day_two["candidate_id"] == "momentum|10|1", "regime_mean_rank_ic"].iloc[0] == pytest.approx(0.02)
+    assert "regime_frequency_summary" in set(report["report_type"])
+
+
+def test_build_regime_aware_signal_weights_handles_empty_inputs() -> None:
+    regime_weights, report = build_regime_aware_signal_weights(
+        pd.DataFrame(),
+        daily_metrics_by_candidate={},
+        regime_labels_df=pd.DataFrame(),
+        horizon=1,
+    )
+
+    assert regime_weights.empty
+    assert report.empty
 
 
 def test_build_composite_portfolio_weights_selects_top_n_and_normalizes_weights() -> None:
@@ -691,6 +937,14 @@ def test_run_alpha_research_writes_leaderboard_and_fold_results(tmp_path: Path) 
     redundancy_path = Path(result["redundancy_path"])
     composite_scores_path = Path(result["composite_scores_path"])
     composite_leaderboard_path = Path(result["composite_leaderboard_path"])
+    dynamic_signal_weights_path = Path(result["dynamic_signal_weights_path"])
+    active_signals_by_date_path = Path(result["active_signals_by_date_path"])
+    deactivated_signals_path = Path(result["deactivated_signals_path"])
+    signal_lifecycle_report_path = Path(result["signal_lifecycle_report_path"])
+    regime_labels_by_date_path = Path(result["regime_labels_by_date_path"])
+    signal_performance_by_regime_path = Path(result["signal_performance_by_regime_path"])
+    regime_aware_signal_weights_path = Path(result["regime_aware_signal_weights_path"])
+    regime_selection_report_path = Path(result["regime_selection_report_path"])
     composite_diagnostics_path = Path(result["composite_diagnostics_path"])
     portfolio_returns_path = Path(result["portfolio_returns_path"])
     portfolio_metrics_path = Path(result["portfolio_metrics_path"])
@@ -710,6 +964,14 @@ def test_run_alpha_research_writes_leaderboard_and_fold_results(tmp_path: Path) 
     assert redundancy_path.exists()
     assert composite_scores_path.exists()
     assert composite_leaderboard_path.exists()
+    assert dynamic_signal_weights_path.exists()
+    assert active_signals_by_date_path.exists()
+    assert deactivated_signals_path.exists()
+    assert signal_lifecycle_report_path.exists()
+    assert regime_labels_by_date_path.exists()
+    assert signal_performance_by_regime_path.exists()
+    assert regime_aware_signal_weights_path.exists()
+    assert regime_selection_report_path.exists()
     assert composite_diagnostics_path.exists()
     assert portfolio_returns_path.exists()
     assert portfolio_metrics_path.exists()
@@ -728,6 +990,14 @@ def test_run_alpha_research_writes_leaderboard_and_fold_results(tmp_path: Path) 
     assert (output_dir / "redundancy_diagnostics.parquet").exists()
     assert (output_dir / "composite_scores.parquet").exists()
     assert (output_dir / "composite_leaderboard.parquet").exists()
+    assert (output_dir / "dynamic_signal_weights.parquet").exists()
+    assert (output_dir / "active_signals_by_date.parquet").exists()
+    assert (output_dir / "deactivated_signals.parquet").exists()
+    assert (output_dir / "signal_lifecycle_report.parquet").exists()
+    assert (output_dir / "regime_labels_by_date.parquet").exists()
+    assert (output_dir / "signal_performance_by_regime.parquet").exists()
+    assert (output_dir / "regime_aware_signal_weights.parquet").exists()
+    assert (output_dir / "regime_selection_report.parquet").exists()
     assert (output_dir / "composite_diagnostics.json").exists()
     assert (output_dir / "portfolio_returns.parquet").exists()
     assert (output_dir / "portfolio_metrics.parquet").exists()
@@ -747,6 +1017,14 @@ def test_run_alpha_research_writes_leaderboard_and_fold_results(tmp_path: Path) 
     redundancy_df = pd.read_csv(redundancy_path)
     composite_scores_df = pd.read_csv(composite_scores_path)
     composite_leaderboard_df = pd.read_csv(composite_leaderboard_path)
+    dynamic_signal_weights_df = pd.read_csv(dynamic_signal_weights_path)
+    active_signals_by_date_df = pd.read_csv(active_signals_by_date_path)
+    deactivated_signals_df = pd.read_csv(deactivated_signals_path)
+    signal_lifecycle_report_df = pd.read_csv(signal_lifecycle_report_path)
+    regime_labels_by_date_df = pd.read_csv(regime_labels_by_date_path)
+    signal_performance_by_regime_df = pd.read_csv(signal_performance_by_regime_path)
+    regime_aware_signal_weights_df = pd.read_csv(regime_aware_signal_weights_path)
+    regime_selection_report_df = pd.read_csv(regime_selection_report_path)
     portfolio_returns_df = pd.read_csv(portfolio_returns_path)
     portfolio_metrics_df = pd.read_csv(portfolio_metrics_path)
     portfolio_weights_df = pd.read_csv(portfolio_weights_path)
@@ -762,6 +1040,14 @@ def test_run_alpha_research_writes_leaderboard_and_fold_results(tmp_path: Path) 
     assert promoted_signals_df.empty
     assert composite_scores_df.empty
     assert composite_leaderboard_df.empty
+    assert dynamic_signal_weights_df.empty
+    assert active_signals_by_date_df.empty
+    assert deactivated_signals_df.empty
+    assert signal_lifecycle_report_df.empty
+    assert not regime_labels_by_date_df.empty
+    assert signal_performance_by_regime_df.empty
+    assert regime_aware_signal_weights_df.empty
+    assert regime_selection_report_df.empty
     assert portfolio_returns_df.empty
     assert portfolio_metrics_df.empty
     assert portfolio_weights_df.empty
@@ -879,6 +1165,8 @@ def test_run_alpha_research_adds_promotion_and_redundancy_outputs(tmp_path: Path
         train_size=20,
         test_size=10,
         step_size=10,
+        regime_aware_enabled=True,
+        regime_min_history=1,
     )
 
     leaderboard_df = pd.read_csv(result["leaderboard_path"])
@@ -887,6 +1175,14 @@ def test_run_alpha_research_adds_promotion_and_redundancy_outputs(tmp_path: Path
     redundancy_df = pd.read_csv(result["redundancy_path"])
     composite_scores_df = pd.read_csv(result["composite_scores_path"])
     composite_leaderboard_df = pd.read_csv(result["composite_leaderboard_path"])
+    dynamic_signal_weights_df = pd.read_csv(result["dynamic_signal_weights_path"])
+    active_signals_by_date_df = pd.read_csv(result["active_signals_by_date_path"])
+    deactivated_signals_df = pd.read_csv(result["deactivated_signals_path"])
+    signal_lifecycle_report_df = pd.read_csv(result["signal_lifecycle_report_path"])
+    regime_labels_by_date_df = pd.read_csv(result["regime_labels_by_date_path"])
+    signal_performance_by_regime_df = pd.read_csv(result["signal_performance_by_regime_path"])
+    regime_aware_signal_weights_df = pd.read_csv(result["regime_aware_signal_weights_path"])
+    regime_selection_report_df = pd.read_csv(result["regime_selection_report_path"])
     portfolio_returns_df = pd.read_csv(result["portfolio_returns_path"])
     portfolio_metrics_df = pd.read_csv(result["portfolio_metrics_path"])
     portfolio_weights_df = pd.read_csv(result["portfolio_weights_path"])
@@ -905,6 +1201,13 @@ def test_run_alpha_research_adds_promotion_and_redundancy_outputs(tmp_path: Path
     assert len(redundancy_df) == 1
     assert not composite_scores_df.empty
     assert not composite_leaderboard_df.empty
+    assert not dynamic_signal_weights_df.empty
+    assert not active_signals_by_date_df.empty
+    assert not signal_lifecycle_report_df.empty
+    assert not regime_labels_by_date_df.empty
+    assert not signal_performance_by_regime_df.empty
+    assert not regime_aware_signal_weights_df.empty
+    assert not regime_selection_report_df.empty
     assert not portfolio_returns_df.empty
     assert not portfolio_metrics_df.empty
     assert not portfolio_weights_df.empty
@@ -914,7 +1217,12 @@ def test_run_alpha_research_adds_promotion_and_redundancy_outputs(tmp_path: Path
     assert not implementability_report_df.empty
     assert not liquidity_filtered_metrics_df.empty
     assert not capacity_scenarios_df.empty
-    assert set(composite_scores_df["weighting_scheme"]) == {"equal", "quality"}
+    assert set(composite_scores_df["weighting_scheme"]) == {"equal", "recent_quality", "stability_decay", "regime_aware"}
+    assert set(dynamic_signal_weights_df["weighting_scheme"]) == {"equal", "recent_quality", "stability_decay"}
+    assert set(regime_aware_signal_weights_df["weighting_scheme"]) == {"regime_aware"}
+    assert set(signal_lifecycle_report_df["report_type"]) == {"signal_summary", "weight_concentration_summary"}
+    assert {"signal_regime_weight_summary", "regime_frequency_summary"} <= set(regime_selection_report_df["report_type"])
+    assert deactivated_signals_df.empty or "lifecycle_reason" in deactivated_signals_df.columns
     assert set(portfolio_weights_df["portfolio_mode"]) == {
         "long_only_top_n",
         "long_short_quantile",
@@ -963,6 +1271,14 @@ def test_run_alpha_research_handles_empty_outputs_and_edge_case_rejections(
     redundancy_df = pd.read_csv(result["redundancy_path"])
     composite_scores_df = pd.read_csv(result["composite_scores_path"])
     composite_leaderboard_df = pd.read_csv(result["composite_leaderboard_path"])
+    dynamic_signal_weights_df = pd.read_csv(result["dynamic_signal_weights_path"])
+    active_signals_by_date_df = pd.read_csv(result["active_signals_by_date_path"])
+    deactivated_signals_df = pd.read_csv(result["deactivated_signals_path"])
+    signal_lifecycle_report_df = pd.read_csv(result["signal_lifecycle_report_path"])
+    regime_labels_by_date_df = pd.read_csv(result["regime_labels_by_date_path"])
+    signal_performance_by_regime_df = pd.read_csv(result["signal_performance_by_regime_path"])
+    regime_aware_signal_weights_df = pd.read_csv(result["regime_aware_signal_weights_path"])
+    regime_selection_report_df = pd.read_csv(result["regime_selection_report_path"])
     portfolio_returns_df = pd.read_csv(result["portfolio_returns_path"])
     portfolio_metrics_df = pd.read_csv(result["portfolio_metrics_path"])
     portfolio_weights_df = pd.read_csv(result["portfolio_weights_path"])
@@ -979,6 +1295,14 @@ def test_run_alpha_research_handles_empty_outputs_and_edge_case_rejections(
     assert redundancy_df.empty
     assert composite_scores_df.empty
     assert composite_leaderboard_df.empty
+    assert dynamic_signal_weights_df.empty
+    assert active_signals_by_date_df.empty
+    assert deactivated_signals_df.empty
+    assert signal_lifecycle_report_df.empty
+    assert regime_labels_by_date_df.empty
+    assert signal_performance_by_regime_df.empty
+    assert regime_aware_signal_weights_df.empty
+    assert regime_selection_report_df.empty
     assert portfolio_returns_df.empty
     assert portfolio_metrics_df.empty
     assert portfolio_weights_df.empty

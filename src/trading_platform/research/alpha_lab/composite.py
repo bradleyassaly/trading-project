@@ -156,6 +156,7 @@ def build_composite_scores(
     score_panel_by_candidate: dict[tuple[str, int, int], pd.DataFrame],
     weighting_scheme: str,
     quality_metric: str,
+    dynamic_signal_weights_df: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     if selected_signals_df.empty:
         return pd.DataFrame(
@@ -183,6 +184,7 @@ def build_composite_scores(
             int(row["lookback"]),
             int(row["horizon"]),
         )
+        signal_candidate_id = row.get("candidate_id", candidate_id(*candidate_key))
         score_panel = score_panel_by_candidate.get(candidate_key)
         if score_panel is None or score_panel.empty:
             continue
@@ -192,11 +194,21 @@ def build_composite_scores(
         if normalized.empty:
             continue
 
-        normalized["component_weight"] = float(row["component_weight"])
+        if dynamic_signal_weights_df is not None:
+            signal_weights = dynamic_signal_weights_df.loc[
+                dynamic_signal_weights_df["candidate_id"] == signal_candidate_id,
+                ["timestamp", "signal_weight"],
+            ].rename(columns={"signal_weight": "component_weight"})
+            normalized = normalized.merge(signal_weights, on="timestamp", how="inner")
+            normalized = normalized.loc[normalized["component_weight"] > 0.0].copy()
+            if normalized.empty:
+                continue
+        else:
+            normalized["component_weight"] = float(row["component_weight"])
         normalized["weighted_score"] = (
             normalized["normalized_signal"] * normalized["component_weight"]
         )
-        normalized["candidate_id"] = candidate_id(*candidate_key)
+        normalized["candidate_id"] = signal_candidate_id
         component_frames.append(normalized)
 
     if not component_frames:

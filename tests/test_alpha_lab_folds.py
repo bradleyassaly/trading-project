@@ -69,6 +69,14 @@ def test_run_alpha_research_writes_fold_level_walk_forward_results(tmp_path: Pat
     redundancy = pd.read_csv(output_dir / "redundancy_diagnostics.csv")
     composite_scores = pd.read_csv(output_dir / "composite_scores.csv")
     composite_leaderboard = pd.read_csv(output_dir / "composite_leaderboard.csv")
+    dynamic_signal_weights = pd.read_csv(output_dir / "dynamic_signal_weights.csv")
+    active_signals_by_date = pd.read_csv(output_dir / "active_signals_by_date.csv")
+    deactivated_signals = pd.read_csv(output_dir / "deactivated_signals.csv")
+    signal_lifecycle_report = pd.read_csv(output_dir / "signal_lifecycle_report.csv")
+    regime_labels_by_date = pd.read_csv(output_dir / "regime_labels_by_date.csv")
+    signal_performance_by_regime = pd.read_csv(output_dir / "signal_performance_by_regime.csv")
+    regime_aware_signal_weights = pd.read_csv(output_dir / "regime_aware_signal_weights.csv")
+    regime_selection_report = pd.read_csv(output_dir / "regime_selection_report.csv")
     portfolio_returns = pd.read_csv(output_dir / "portfolio_returns.csv")
     portfolio_metrics = pd.read_csv(output_dir / "portfolio_metrics.csv")
     portfolio_weights = pd.read_csv(output_dir / "portfolio_weights.csv")
@@ -86,6 +94,14 @@ def test_run_alpha_research_writes_fold_level_walk_forward_results(tmp_path: Pat
     assert redundancy.empty
     assert composite_scores.empty
     assert composite_leaderboard.empty
+    assert dynamic_signal_weights.empty
+    assert active_signals_by_date.empty
+    assert deactivated_signals.empty
+    assert signal_lifecycle_report.empty
+    assert not regime_labels_by_date.empty
+    assert signal_performance_by_regime.empty
+    assert regime_aware_signal_weights.empty
+    assert regime_selection_report.empty
     assert portfolio_returns.empty
     assert portfolio_metrics.empty
     assert portfolio_weights.empty
