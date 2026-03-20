@@ -4,26 +4,24 @@ from pathlib import Path
 
 from trading_platform.research.alpha_lab.automation import (
     AutomatedAlphaResearchConfig,
-    SignalSearchSpace,
     run_automated_alpha_research_loop,
 )
+from trading_platform.research.alpha_lab.generation import SignalGenerationConfig
 
 
 def cmd_alpha_research_loop(args) -> None:
-    search_spaces = tuple(
-        SignalSearchSpace(
-            signal_family=signal_family,
-            lookbacks=tuple(args.lookbacks),
-            horizons=tuple(args.horizons),
-        )
-        for signal_family in args.signal_families
-    )
     config = AutomatedAlphaResearchConfig(
         symbols=args.symbols,
         universe=args.universe,
         feature_dir=Path(args.feature_dir),
         output_dir=Path(args.output_dir),
-        search_spaces=search_spaces,
+        generation_config=SignalGenerationConfig(
+            signal_families=tuple(args.signal_families),
+            lookbacks=tuple(args.lookbacks),
+            vol_windows=tuple(args.vol_windows),
+            combo_thresholds=tuple(args.combo_thresholds),
+            horizons=tuple(args.horizons),
+        ),
         min_rows=args.min_rows,
         top_quantile=args.top_quantile,
         bottom_quantile=args.bottom_quantile,

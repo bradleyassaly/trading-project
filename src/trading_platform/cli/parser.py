@@ -993,7 +993,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--signal-families",
         type=str,
         nargs="+",
-        default=["momentum", "short_term_reversal", "vol_adjusted_momentum"],
+        default=["momentum", "mean_reversion", "volatility", "feature_combo"],
         help="Signal families to generate and test.",
     )
     alpha_research_loop_parser.add_argument(
@@ -1009,6 +1009,20 @@ def build_parser() -> argparse.ArgumentParser:
         nargs="+",
         default=[1, 5, 20],
         help="Forward return horizons to test for each family.",
+    )
+    alpha_research_loop_parser.add_argument(
+        "--vol-windows",
+        type=int,
+        nargs="+",
+        default=[10, 20, 60],
+        help="Volatility windows to test for volatility-based signals.",
+    )
+    alpha_research_loop_parser.add_argument(
+        "--combo-thresholds",
+        type=float,
+        nargs="+",
+        default=[0.5, 1.0],
+        help="Threshold multipliers used for simple feature-combination signals.",
     )
     alpha_research_loop_parser.add_argument(
         "--min-rows",

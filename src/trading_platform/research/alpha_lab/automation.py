@@ -10,17 +10,20 @@ import pandas as pd
 
 from trading_platform.research.alpha_lab.composite import (
     DEFAULT_COMPOSITE_CONFIG,
-    candidate_id,
     select_low_redundancy_signals,
 )
 from trading_platform.research.alpha_lab.folds import build_walk_forward_folds
+from trading_platform.research.alpha_lab.generation import (
+    SignalGenerationConfig,
+    build_generated_signal,
+    generate_candidate_signals,
+)
 from trading_platform.research.alpha_lab.labels import add_forward_return_labels
 from trading_platform.research.alpha_lab.metrics import (
     compute_cross_sectional_daily_metrics,
     evaluate_cross_sectional_signal,
 )
 from trading_platform.research.alpha_lab.promotion import apply_promotion_rules
-from trading_platform.research.alpha_lab.signals import build_signal
 
 
 @dataclass(frozen=True)
@@ -39,7 +42,8 @@ class AutomatedAlphaResearchConfig:
     universe: str | None
     feature_dir: Path
     output_dir: Path
-    search_spaces: tuple[SignalSearchSpace, ...]
+    search_spaces: tuple[SignalSearchSpace, ...] = ()
+    generation_config: SignalGenerationConfig | None = None
     min_rows: int = 126
     top_quantile: float = 0.2
     bottom_quantile: float = 0.2
@@ -59,8 +63,14 @@ class AutomatedAlphaResearchConfig:
 
 REGISTRY_COLUMNS = [
     "candidate_id",
+    "signal_name",
     "signal_family",
+    "parameters_json",
     "lookback",
+    "window",
+    "threshold",
+    "feature_a",
+    "feature_b",
     "horizon",
     "symbols_tested",
     "folds_tested",
@@ -82,8 +92,14 @@ REGISTRY_COLUMNS = [
 HISTORY_COLUMNS = [
     "run_id",
     "candidate_id",
+    "signal_name",
     "signal_family",
+    "parameters_json",
     "lookback",
+    "window",
+    "threshold",
+    "feature_a",
+    "feature_b",
     "horizon",
     "evaluation_status",
     "promotion_status",
@@ -92,17 +108,33 @@ HISTORY_COLUMNS = [
 
 
 def generate_candidate_configs(
-    search_spaces: Iterable[SignalSearchSpace],
+    search_spaces: Iterable[SignalSearchSpace] | None = None,
+    *,
+    generation_config: SignalGenerationConfig | None = None,
+    feature_columns: list[str] | None = None,
 ) -> pd.DataFrame:
+    if generation_config is not None:
+        return generate_candidate_signals(
+            generation_config,
+            feature_columns=feature_columns,
+        )
+
     rows: list[dict[str, object]] = []
-    for space in search_spaces:
+    for space in search_spaces or ():
         for lookback in space.lookbacks:
             for horizon in space.horizons:
+                params = {"lookback": int(lookback)}
                 rows.append(
                     {
-                        "candidate_id": candidate_id(space.signal_family, int(lookback), int(horizon)),
+                        "candidate_id": f"{space.signal_family}|horizon={int(horizon)}|lookback={int(lookback)}",
+                        "signal_name": space.signal_family,
                         "signal_family": space.signal_family,
+                        "parameters_json": json.dumps(params, sort_keys=True),
                         "lookback": int(lookback),
+                        "window": pd.NA,
+                        "threshold": pd.NA,
+                        "feature_a": pd.NA,
+                        "feature_b": pd.NA,
                         "horizon": int(horizon),
                     }
                 )
@@ -242,6 +274,12 @@ def _safe_series_corr(left: pd.Series, right: pd.Series) -> float:
     return float(corr) if pd.notna(corr) else float("nan")
 
 
+def _optional_int(value: object) -> int | None:
+    if pd.isna(value):
+        return None
+    return int(value)
+
+
 def _candidate_dir(base_dir: Path, candidate_key: str) -> Path:
     return base_dir / "candidate_details" / candidate_key.replace("|", "__")
 
@@ -281,8 +319,13 @@ def evaluate_candidate_signal(
     top_quantile: float,
     bottom_quantile: float,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    signal_name = str(candidate_row["signal_name"])
     signal_family = str(candidate_row["signal_family"])
-    lookback = int(candidate_row["lookback"])
+    lookback = int(candidate_row["lookback"]) if pd.notna(candidate_row.get("lookback")) else pd.NA
+    window = int(candidate_row["window"]) if pd.notna(candidate_row.get("window")) else pd.NA
+    threshold = float(candidate_row["threshold"]) if pd.notna(candidate_row.get("threshold")) else pd.NA
+    feature_a = candidate_row.get("feature_a", pd.NA)
+    feature_b = candidate_row.get("feature_b", pd.NA)
     horizon = int(candidate_row["horizon"])
     label_col = f"fwd_return_{horizon}d"
 
@@ -292,7 +335,7 @@ def evaluate_candidate_signal(
     for fold in folds:
         fold_frames: list[pd.DataFrame] = []
         for symbol, df in symbol_data.items():
-            signal = build_signal(df, signal_family=signal_family, lookback=lookback)
+            signal = build_generated_signal(df, candidate_row)
             test_df = _slice_fold(
                 df.assign(_signal=signal),
                 test_start=fold.test_start,
@@ -325,8 +368,14 @@ def evaluate_candidate_signal(
             score_frames.append(score_panel)
         fold_rows.append(
             {
+                "candidate_id": str(candidate_row["candidate_id"]),
+                "signal_name": signal_name,
                 "signal_family": signal_family,
                 "lookback": lookback,
+                "window": window,
+                "threshold": threshold,
+                "feature_a": feature_a,
+                "feature_b": feature_b,
                 "horizon": horizon,
                 "fold_id": fold.fold_id,
                 "train_start": fold.train_start,
@@ -340,8 +389,14 @@ def evaluate_candidate_signal(
     fold_results_df = pd.DataFrame(
         fold_rows,
         columns=[
+            "candidate_id",
+            "signal_name",
             "signal_family",
             "lookback",
+            "window",
+            "threshold",
+            "feature_a",
+            "feature_b",
             "horizon",
             "fold_id",
             "train_start",
@@ -376,7 +431,21 @@ def evaluate_candidate_signal(
         leaderboard_df = pd.DataFrame(columns=REGISTRY_COLUMNS)
     else:
         leaderboard_df = (
-            fold_results_df.groupby(["signal_family", "lookback", "horizon"], as_index=False)
+            fold_results_df.groupby(
+                [
+                    "candidate_id",
+                    "signal_name",
+                    "signal_family",
+                    "lookback",
+                    "window",
+                    "threshold",
+                    "feature_a",
+                    "feature_b",
+                    "horizon",
+                ],
+                as_index=False,
+                dropna=False,
+            )
             .agg(
                 symbols_tested=("symbols_evaluated", "max"),
                 folds_tested=("fold_id", "nunique"),
@@ -393,7 +462,7 @@ def evaluate_candidate_signal(
             .reset_index(drop=True)
         )
         leaderboard_df = apply_promotion_rules(leaderboard_df)
-        leaderboard_df["candidate_id"] = candidate_row["candidate_id"]
+        leaderboard_df["parameters_json"] = candidate_row["parameters_json"]
         leaderboard_df["evaluation_status"] = "completed"
         leaderboard_df["last_evaluated_at"] = datetime.now(UTC).isoformat()
         leaderboard_df = leaderboard_df[REGISTRY_COLUMNS]
@@ -407,9 +476,11 @@ def _compute_redundancy_diagnostics(
     score_panel_by_candidate: dict[str, pd.DataFrame],
 ) -> pd.DataFrame:
     columns = [
+        "candidate_id_a",
         "signal_family_a",
         "lookback_a",
         "horizon_a",
+        "candidate_id_b",
         "signal_family_b",
         "lookback_b",
         "horizon_b",
@@ -448,11 +519,13 @@ def _compute_redundancy_diagnostics(
             score_overlap = left_scores.merge(right_scores, on=["timestamp", "symbol"], how="inner")
             rows.append(
                 {
+                    "candidate_id_a": left_key,
                     "signal_family_a": str(left_row["signal_family"]),
-                    "lookback_a": int(left_row["lookback"]),
+                    "lookback_a": _optional_int(left_row["lookback"]),
                     "horizon_a": int(left_row["horizon"]),
+                    "candidate_id_b": right_key,
                     "signal_family_b": str(right_row["signal_family"]),
-                    "lookback_b": int(right_row["lookback"]),
+                    "lookback_b": _optional_int(right_row["lookback"]),
                     "horizon_b": int(right_row["horizon"]),
                     "overlap_dates": int(len(daily_overlap)),
                     "overlap_scores": int(len(score_overlap)),
@@ -485,8 +558,15 @@ def aggregate_research_registry(
         promoted = apply_promotion_rules(
             leaderboard_df[
                 [
+                    "candidate_id",
+                    "signal_name",
                     "signal_family",
+                    "parameters_json",
                     "lookback",
+                    "window",
+                    "threshold",
+                    "feature_a",
+                    "feature_b",
                     "horizon",
                     "symbols_tested",
                     "folds_tested",
@@ -502,12 +582,13 @@ def aggregate_research_registry(
                 ]
             ].copy()
         )
-        leaderboard_df = leaderboard_df[
+        metadata_df = leaderboard_df[
             ["candidate_id", "last_evaluated_at", "evaluation_status"]
-        ]
-        leaderboard_df = pd.concat(
-            [promoted.reset_index(drop=True), leaderboard_df.reset_index(drop=True)],
-            axis=1,
+        ].drop_duplicates(subset=["candidate_id"], keep="last")
+        leaderboard_df = promoted.merge(
+            metadata_df,
+            on="candidate_id",
+            how="left",
         )
         leaderboard_df = leaderboard_df[REGISTRY_COLUMNS]
 
@@ -535,21 +616,26 @@ def aggregate_research_registry(
             redundancy_corr_threshold=DEFAULT_COMPOSITE_CONFIG.redundancy_corr_threshold,
         )
         composite_inputs["horizons"][str(int(horizon))] = {
-            "selected_signals": selected_df[["candidate_id", "signal_family", "lookback", "horizon"]].to_dict(orient="records"),
+            "selected_signals": selected_df[
+                ["candidate_id", "signal_name", "signal_family", "lookback", "window", "threshold", "feature_a", "feature_b", "horizon"]
+            ].to_dict(orient="records"),
             "excluded_signals": excluded_rows,
         }
 
     leaderboard_path = output_dir / "leaderboard.csv"
     promoted_path = output_dir / "promoted_signals.csv"
+    rejected_path = output_dir / "rejected_signals.csv"
     redundancy_path = output_dir / "redundancy_report.csv"
     composite_inputs_path = output_dir / "composite_inputs.json"
     leaderboard_df.to_csv(leaderboard_path, index=False)
     promoted_signals_df.to_csv(promoted_path, index=False)
+    leaderboard_df.loc[leaderboard_df["promotion_status"] != "promote"].to_csv(rejected_path, index=False)
     redundancy_df.to_csv(redundancy_path, index=False)
     composite_inputs_path.write_text(json.dumps(composite_inputs, indent=2, default=str), encoding="utf-8")
     return {
         "leaderboard_path": str(leaderboard_path),
         "promoted_signals_path": str(promoted_path),
+        "rejected_signals_path": str(rejected_path),
         "redundancy_report_path": str(redundancy_path),
         "composite_inputs_path": str(composite_inputs_path),
     }
@@ -562,6 +648,7 @@ def run_automated_alpha_research_loop(
     output_dir = config.output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
     registry_path = output_dir / "research_registry.csv"
+    signal_registry_path = output_dir / "signal_registry.csv"
     history_path = output_dir / "research_history.csv"
     schedule_path = output_dir / "research_schedule.json"
 
@@ -577,18 +664,29 @@ def run_automated_alpha_research_loop(
             "schedule_path": str(schedule_path),
         }
 
-    candidates_df = generate_candidate_configs(config.search_spaces)
+    resolved_symbols = _resolve_symbols(config.symbols, config.universe)
+    feature_columns: list[str] = []
+    candidate_feature_columns: list[str] | None = None
+    for symbol in resolved_symbols:
+        try:
+            df = _load_symbol_feature_data(config.feature_dir, symbol)
+        except FileNotFoundError:
+            continue
+        feature_columns = [column for column in df.columns if column not in {"timestamp", "symbol"}]
+        candidate_feature_columns = feature_columns
+        break
+
+    candidates_df = generate_candidate_configs(
+        config.search_spaces,
+        generation_config=config.generation_config,
+        feature_columns=candidate_feature_columns,
+    )
     registry_df = load_research_registry(registry_path)
     history_df = load_research_history(history_path)
     pending_candidates_df = select_untested_candidates(candidates_df, registry_df)
 
-    resolved_symbols = _resolve_symbols(config.symbols, config.universe)
     unique_horizons = sorted(
-        {
-            int(horizon)
-            for search_space in config.search_spaces
-            for horizon in search_space.horizons
-        }
+        set(candidates_df.get("horizon", pd.Series(dtype="int64")).dropna().astype(int).tolist())
     )
     symbol_data: dict[str, pd.DataFrame] = {}
     if not pending_candidates_df.empty:
@@ -623,8 +721,14 @@ def run_automated_alpha_research_loop(
         if leaderboard_df.empty:
             row = {
                 "candidate_id": candidate_row["candidate_id"],
+                "signal_name": candidate_row["signal_name"],
                 "signal_family": candidate_row["signal_family"],
-                "lookback": int(candidate_row["lookback"]),
+                "parameters_json": candidate_row["parameters_json"],
+                "lookback": int(candidate_row["lookback"]) if pd.notna(candidate_row["lookback"]) else pd.NA,
+                "window": int(candidate_row["window"]) if pd.notna(candidate_row["window"]) else pd.NA,
+                "threshold": float(candidate_row["threshold"]) if pd.notna(candidate_row["threshold"]) else pd.NA,
+                "feature_a": candidate_row["feature_a"],
+                "feature_b": candidate_row["feature_b"],
                 "horizon": int(candidate_row["horizon"]),
                 "symbols_tested": 0.0,
                 "folds_tested": 0.0,
@@ -655,8 +759,14 @@ def run_automated_alpha_research_loop(
             {
                 "run_id": run_id,
                 "candidate_id": str(candidate_row["candidate_id"]),
+                "signal_name": str(candidate_row["signal_name"]),
                 "signal_family": str(candidate_row["signal_family"]),
-                "lookback": int(candidate_row["lookback"]),
+                "parameters_json": str(candidate_row["parameters_json"]),
+                "lookback": int(candidate_row["lookback"]) if pd.notna(candidate_row["lookback"]) else pd.NA,
+                "window": int(candidate_row["window"]) if pd.notna(candidate_row["window"]) else pd.NA,
+                "threshold": float(candidate_row["threshold"]) if pd.notna(candidate_row["threshold"]) else pd.NA,
+                "feature_a": candidate_row["feature_a"],
+                "feature_b": candidate_row["feature_b"],
                 "horizon": int(candidate_row["horizon"]),
                 "evaluation_status": str(leaderboard_df["evaluation_status"].iloc[0]),
                 "promotion_status": str(leaderboard_df["promotion_status"].iloc[0]),
@@ -676,6 +786,7 @@ def run_automated_alpha_research_loop(
         )
     updated_registry = updated_registry.reindex(columns=REGISTRY_COLUMNS)
     updated_registry.to_csv(registry_path, index=False)
+    updated_registry.to_csv(signal_registry_path, index=False)
 
     if history_rows:
         updated_history = pd.concat([history_df, pd.DataFrame(history_rows, columns=HISTORY_COLUMNS)], ignore_index=True)
@@ -700,6 +811,7 @@ def run_automated_alpha_research_loop(
     return {
         "status": "completed",
         "registry_path": str(registry_path),
+        "signal_registry_path": str(signal_registry_path),
         "history_path": str(history_path),
         "schedule_path": str(schedule_path),
         "config_path": str(config_path),

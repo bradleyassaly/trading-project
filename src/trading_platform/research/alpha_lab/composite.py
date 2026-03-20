@@ -61,27 +61,32 @@ def select_low_redundancy_signals(
         ["mean_spearman_ic", "mean_long_short_spread"],
         ascending=[False, False],
     ).reset_index(drop=True)
-    promoted["candidate_id"] = promoted.apply(
-        lambda row: candidate_id(
-            str(row["signal_family"]),
-            int(row["lookback"]),
-            int(row["horizon"]),
-        ),
-        axis=1,
-    )
+    if "candidate_id" not in promoted.columns:
+        promoted["candidate_id"] = promoted.apply(
+            lambda row: candidate_id(
+                str(row["signal_family"]),
+                int(row["lookback"]),
+                int(row["horizon"]),
+            ),
+            axis=1,
+        )
 
     pair_corr: dict[frozenset[str], float] = {}
     for _, row in redundancy_df.iterrows():
-        left_id = candidate_id(
-            str(row["signal_family_a"]),
-            int(row["lookback_a"]),
-            int(row["horizon_a"]),
-        )
-        right_id = candidate_id(
-            str(row["signal_family_b"]),
-            int(row["lookback_b"]),
-            int(row["horizon_b"]),
-        )
+        left_id = row.get("candidate_id_a")
+        if pd.isna(left_id):
+            left_id = candidate_id(
+                str(row["signal_family_a"]),
+                int(row["lookback_a"]),
+                int(row["horizon_a"]),
+            )
+        right_id = row.get("candidate_id_b")
+        if pd.isna(right_id):
+            right_id = candidate_id(
+                str(row["signal_family_b"]),
+                int(row["lookback_b"]),
+                int(row["horizon_b"]),
+            )
         corr_value = row["score_corr"]
         if pd.isna(corr_value):
             corr_value = row["performance_corr"]
