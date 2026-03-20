@@ -36,6 +36,90 @@ def add_execution_arguments(parser: argparse.ArgumentParser) -> None:
         help="How often to refresh positions/weights",
     )
 
+
+def add_composite_paper_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--signal-source",
+        type=str,
+        default="legacy",
+        choices=["legacy", "composite"],
+        help="Choose legacy strategy scores or the approved composite alpha signal.",
+    )
+    parser.add_argument(
+        "--composite-artifact-dir",
+        type=str,
+        default=None,
+        help="Alpha research artifact directory containing promoted_signals and redundancy outputs.",
+    )
+    parser.add_argument(
+        "--composite-horizon",
+        type=int,
+        default=1,
+        help="Approved composite horizon to trade.",
+    )
+    parser.add_argument(
+        "--composite-weighting-scheme",
+        type=str,
+        default="equal",
+        choices=["equal", "quality"],
+        help="Composite component weighting scheme.",
+    )
+    parser.add_argument(
+        "--composite-portfolio-mode",
+        type=str,
+        default="long_only_top_n",
+        choices=["long_only_top_n", "long_short_quantile"],
+        help="Composite portfolio construction mode.",
+    )
+    parser.add_argument(
+        "--composite-long-quantile",
+        type=float,
+        default=0.2,
+        help="Long quantile used when composite portfolio mode is long_short_quantile.",
+    )
+    parser.add_argument(
+        "--composite-short-quantile",
+        type=float,
+        default=0.2,
+        help="Short quantile used when composite portfolio mode is long_short_quantile.",
+    )
+    parser.add_argument(
+        "--min-price",
+        type=float,
+        default=None,
+        help="Optional minimum price required for composite eligibility.",
+    )
+    parser.add_argument(
+        "--min-volume",
+        type=float,
+        default=None,
+        help="Optional minimum raw share volume required for composite eligibility.",
+    )
+    parser.add_argument(
+        "--min-avg-dollar-volume",
+        type=float,
+        default=None,
+        help="Optional minimum rolling average dollar volume required for composite eligibility.",
+    )
+    parser.add_argument(
+        "--max-adv-participation",
+        type=float,
+        default=0.05,
+        help="Maximum ADV participation used in composite implementability constraints.",
+    )
+    parser.add_argument(
+        "--max-position-pct-of-adv",
+        type=float,
+        default=0.1,
+        help="Maximum single-name position size as a fraction of ADV.",
+    )
+    parser.add_argument(
+        "--max-notional-per-name",
+        type=float,
+        default=None,
+        help="Optional max notional per name used in composite implementability constraints.",
+    )
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="trading_platform.cli",
@@ -319,6 +403,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_shared_symbol_args(paper_run_parser)
     add_strategy_arguments(paper_run_parser)
     add_execution_arguments(paper_run_parser)
+    add_composite_paper_arguments(paper_run_parser)
     paper_run_parser.add_argument(
         "--top-n",
         type=int,
@@ -422,6 +507,7 @@ def build_parser() -> argparse.ArgumentParser:
         "daily-paper-job",
         help="Run the daily paper trading workflow.",
     )
+    add_composite_paper_arguments(daily_paper_parser)
 
 
     daily_paper_parser.add_argument(

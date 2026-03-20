@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 from trading_platform.execution.transforms import build_executed_weights
 from trading_platform.execution.policies import ExecutionPolicy
@@ -21,6 +22,7 @@ from trading_platform.paper.service import (
     apply_filled_orders,
     generate_rebalance_orders,
     run_paper_trading_cycle,
+    write_paper_trading_artifacts,
 )
 
 
@@ -121,3 +123,242 @@ def test_execution_policy_shift_is_reflected_in_effective_weights() -> None:
     )
     assert effective_weights.iloc[0].sum() == 0.0
     assert effective_weights.iloc[1]["AAPL"] == 1.0
+
+
+def test_run_paper_trading_cycle_selects_composite_mode(monkeypatch, tmp_path: Path) -> None:
+    artifact_dir = tmp_path / "alpha"
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(
+        [
+            {
+                "signal_family": "momentum",
+                "lookback": 1,
+                "horizon": 1,
+                "mean_spearman_ic": 0.1,
+                "mean_long_short_spread": 0.05,
+                "promotion_status": "promote",
+            }
+        ]
+    ).to_csv(artifact_dir / "promoted_signals.csv", index=False)
+    pd.DataFrame(
+        columns=[
+            "signal_family_a",
+            "lookback_a",
+            "horizon_a",
+            "signal_family_b",
+            "lookback_b",
+            "horizon_b",
+            "score_corr",
+            "performance_corr",
+            "rank_ic_corr",
+        ]
+    ).to_csv(artifact_dir / "redundancy_report.csv", index=False)
+
+    def fake_load_feature_frame(symbol: str) -> pd.DataFrame:
+        closes = {
+            "AAPL": [100.0, 105.0, 110.0],
+            "MSFT": [100.0, 100.0, 100.0],
+            "NVDA": [100.0, 95.0, 90.0],
+        }
+        return pd.DataFrame(
+            {
+                "timestamp": pd.date_range("2025-01-01", periods=3, freq="D"),
+                "close": closes[symbol],
+                "volume": [1_000_000.0] * 3,
+            }
+        )
+
+    monkeypatch.setattr("trading_platform.paper.composite.load_feature_frame", fake_load_feature_frame)
+
+    state_store = JsonPaperStateStore(tmp_path / "paper_state.json")
+    config = PaperTradingConfig(
+        symbols=["AAPL", "MSFT", "NVDA"],
+        signal_source="composite",
+        composite_artifact_dir=str(artifact_dir),
+        composite_horizon=1,
+        composite_weighting_scheme="equal",
+        composite_portfolio_mode="long_only_top_n",
+        top_n=1,
+        initial_cash=10_000.0,
+        min_trade_dollars=1.0,
+    )
+
+    result = run_paper_trading_cycle(
+        config=config,
+        state_store=state_store,
+        auto_apply_fills=False,
+    )
+
+    assert result.diagnostics["signal_source"] == "composite"
+    assert result.latest_target_weights == {"AAPL": pytest.approx(1.0)}
+    assert set(result.latest_scores) == {"AAPL", "MSFT", "NVDA"}
+    assert len(result.orders) == 1
+    assert result.orders[0].symbol == "AAPL"
+
+
+def test_composite_paper_trading_applies_implementability_filters_before_orders(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    artifact_dir = tmp_path / "alpha"
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(
+        [
+            {
+                "signal_family": "momentum",
+                "lookback": 1,
+                "horizon": 1,
+                "mean_spearman_ic": 0.1,
+                "mean_long_short_spread": 0.05,
+                "promotion_status": "promote",
+            }
+        ]
+    ).to_csv(artifact_dir / "promoted_signals.csv", index=False)
+    pd.DataFrame().to_csv(artifact_dir / "redundancy_report.csv", index=False)
+
+    def fake_load_feature_frame(symbol: str) -> pd.DataFrame:
+        closes = {
+            "AAPL": [100.0, 105.0, 110.0],
+            "MSFT": [100.0, 100.0, 100.0],
+        }
+        volumes = {
+            "AAPL": [10.0, 10.0, 10.0],
+            "MSFT": [1_000_000.0, 1_000_000.0, 1_000_000.0],
+        }
+        return pd.DataFrame(
+            {
+                "timestamp": pd.date_range("2025-01-01", periods=3, freq="D"),
+                "close": closes[symbol],
+                "volume": volumes[symbol],
+            }
+        )
+
+    monkeypatch.setattr("trading_platform.paper.composite.load_feature_frame", fake_load_feature_frame)
+
+    state_store = JsonPaperStateStore(tmp_path / "paper_state.json")
+    config = PaperTradingConfig(
+        symbols=["AAPL", "MSFT"],
+        signal_source="composite",
+        composite_artifact_dir=str(artifact_dir),
+        top_n=1,
+        initial_cash=10_000.0,
+        min_trade_dollars=1.0,
+        min_volume=100.0,
+    )
+
+    result = run_paper_trading_cycle(
+        config=config,
+        state_store=state_store,
+        auto_apply_fills=False,
+    )
+
+    assert result.latest_target_weights == {}
+    assert result.orders == []
+    assert result.diagnostics["target_construction"]["reason"] == "no_eligible_names"
+    assert result.diagnostics["liquidity_exclusions"]
+
+
+def test_composite_order_generation_matches_target_weights(monkeypatch, tmp_path: Path) -> None:
+    artifact_dir = tmp_path / "alpha"
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(
+        [
+            {
+                "signal_family": "momentum",
+                "lookback": 1,
+                "horizon": 1,
+                "mean_spearman_ic": 0.1,
+                "mean_long_short_spread": 0.05,
+                "promotion_status": "promote",
+            }
+        ]
+    ).to_csv(artifact_dir / "promoted_signals.csv", index=False)
+    pd.DataFrame().to_csv(artifact_dir / "redundancy_report.csv", index=False)
+
+    def fake_load_feature_frame(symbol: str) -> pd.DataFrame:
+        closes = {
+            "AAPL": [100.0, 105.0, 110.0],
+            "MSFT": [100.0, 100.0, 100.0],
+        }
+        return pd.DataFrame(
+            {
+                "timestamp": pd.date_range("2025-01-01", periods=3, freq="D"),
+                "close": closes[symbol],
+                "volume": [1_000_000.0] * 3,
+            }
+        )
+
+    monkeypatch.setattr("trading_platform.paper.composite.load_feature_frame", fake_load_feature_frame)
+
+    state_store = JsonPaperStateStore(tmp_path / "paper_state.json")
+    config = PaperTradingConfig(
+        symbols=["AAPL", "MSFT"],
+        signal_source="composite",
+        composite_artifact_dir=str(artifact_dir),
+        top_n=1,
+        initial_cash=10_000.0,
+        min_trade_dollars=1.0,
+    )
+
+    result = run_paper_trading_cycle(
+        config=config,
+        state_store=state_store,
+        auto_apply_fills=False,
+    )
+
+    assert result.latest_target_weights == {"AAPL": pytest.approx(1.0)}
+    assert len(result.orders) == 1
+    assert result.orders[0].symbol == "AAPL"
+    assert result.orders[0].target_quantity == 90
+    assert result.orders[0].target_weight == pytest.approx(1.0)
+
+
+def test_composite_paper_trading_handles_no_approved_signals(monkeypatch, tmp_path: Path) -> None:
+    artifact_dir = tmp_path / "alpha"
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(
+        columns=[
+            "signal_family",
+            "lookback",
+            "horizon",
+            "mean_spearman_ic",
+            "mean_long_short_spread",
+            "promotion_status",
+        ]
+    ).to_csv(artifact_dir / "promoted_signals.csv", index=False)
+    pd.DataFrame().to_csv(artifact_dir / "redundancy_report.csv", index=False)
+
+    def fake_load_feature_frame(symbol: str) -> pd.DataFrame:
+        return pd.DataFrame(
+            {
+                "timestamp": pd.date_range("2025-01-01", periods=3, freq="D"),
+                "close": [100.0, 101.0, 102.0],
+                "volume": [1_000_000.0] * 3,
+            }
+        )
+
+    monkeypatch.setattr("trading_platform.paper.composite.load_feature_frame", fake_load_feature_frame)
+
+    state_store = JsonPaperStateStore(tmp_path / "paper_state.json")
+    config = PaperTradingConfig(
+        symbols=["AAPL"],
+        signal_source="composite",
+        composite_artifact_dir=str(artifact_dir),
+        initial_cash=10_000.0,
+        min_trade_dollars=1.0,
+    )
+
+    result = run_paper_trading_cycle(
+        config=config,
+        state_store=state_store,
+        auto_apply_fills=False,
+    )
+
+    assert result.latest_target_weights == {}
+    assert result.orders == []
+    assert result.diagnostics["reason"] == "no_approved_signals"
+
+    paths = write_paper_trading_artifacts(result=result, output_dir=tmp_path / "artifacts")
+    assert paths["daily_composite_scores_path"].exists()
+    assert paths["approved_target_weights_path"].exists()
+    assert paths["composite_diagnostics_path"].exists()

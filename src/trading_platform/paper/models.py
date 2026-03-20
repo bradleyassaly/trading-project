@@ -10,6 +10,7 @@ import pandas as pd
 @dataclass(frozen=True)
 class PaperTradingConfig:
     symbols: list[str]
+    signal_source: str = "legacy"
     strategy: str = "sma_cross"
     fast: int | None = None
     slow: int | None = None
@@ -28,6 +29,18 @@ class PaperTradingConfig:
     min_trade_dollars: float = 25.0
     lot_size: int = 1
     reserve_cash_pct: float = 0.0
+    composite_artifact_dir: str | None = None
+    composite_horizon: int = 1
+    composite_weighting_scheme: str = "equal"
+    composite_portfolio_mode: str = "long_only_top_n"
+    composite_long_quantile: float = 0.2
+    composite_short_quantile: float = 0.2
+    min_price: float | None = None
+    min_volume: float | None = None
+    min_avg_dollar_volume: float | None = None
+    max_adv_participation: float = 0.05
+    max_position_pct_of_adv: float = 0.1
+    max_notional_per_name: float | None = None
 
 
 @dataclass
@@ -91,6 +104,7 @@ class PaperSignalSnapshot:
     scores: pd.DataFrame
     closes: pd.DataFrame
     skipped_symbols: list[str]
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass

@@ -29,6 +29,7 @@ def cmd_paper_run(args) -> None:
 
     config = PaperTradingConfig(
         symbols=symbols,
+        signal_source=args.signal_source,
         strategy=args.strategy,
         fast=args.fast,
         slow=args.slow,
@@ -47,6 +48,18 @@ def cmd_paper_run(args) -> None:
         min_trade_dollars=args.min_trade_dollars,
         lot_size=args.lot_size,
         reserve_cash_pct=args.reserve_cash_pct,
+        composite_artifact_dir=args.composite_artifact_dir,
+        composite_horizon=args.composite_horizon,
+        composite_weighting_scheme=args.composite_weighting_scheme,
+        composite_portfolio_mode=args.composite_portfolio_mode,
+        composite_long_quantile=args.composite_long_quantile,
+        composite_short_quantile=args.composite_short_quantile,
+        min_price=args.min_price,
+        min_volume=args.min_volume,
+        min_avg_dollar_volume=args.min_avg_dollar_volume,
+        max_adv_participation=args.max_adv_participation,
+        max_position_pct_of_adv=args.max_position_pct_of_adv,
+        max_notional_per_name=args.max_notional_per_name,
     )
 
     print(

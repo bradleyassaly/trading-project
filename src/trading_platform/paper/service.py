@@ -25,6 +25,10 @@ from trading_platform.paper.models import (
     PaperTradingConfig,
     PaperTradingRunResult,
 )
+from trading_platform.paper.composite import (
+    build_composite_paper_snapshot,
+    compute_latest_composite_target_weights,
+)
 from trading_platform.paper.ledger import append_equity_snapshot, append_fills
 
 
@@ -335,32 +339,50 @@ def run_paper_trading_cycle(
     if state.cash <= 0 and not state.positions:
         state = bootstrap_paper_portfolio_state(initial_cash=config.initial_cash)
 
-    snapshot = load_signal_snapshot(
-        symbols=config.symbols,
-        strategy=config.strategy,
-        fast=config.fast,
-        slow=config.slow,
-        lookback=config.lookback,
-    )
-
-    latest_prices = {
-        symbol: float(price)
-        for symbol, price in snapshot.closes.iloc[-1].fillna(0.0).items()
-        if float(price) > 0.0
-    }
-    latest_scores = {
-        symbol: float(score)
-        for symbol, score in snapshot.scores.iloc[-1].fillna(0.0).items()
-    }
-
-    state = sync_state_prices(state, latest_prices)
-
-    as_of, latest_scheduled_weights, latest_effective_weights, target_diagnostics = (
-        compute_latest_target_weights(
+    if config.signal_source == "composite":
+        snapshot, snapshot_diagnostics = build_composite_paper_snapshot(config=config)
+        composite_targets = compute_latest_composite_target_weights(
             config=config,
             snapshot=snapshot,
+            snapshot_diagnostics=snapshot_diagnostics,
         )
-    )
+        as_of = composite_targets.as_of
+        latest_prices = composite_targets.latest_prices
+        latest_scores = composite_targets.latest_scores
+        latest_scheduled_weights = composite_targets.scheduled_target_weights
+        latest_effective_weights = composite_targets.effective_target_weights
+        target_diagnostics = composite_targets.diagnostics.get("target_construction", {})
+        extra_diagnostics = {
+            key: value
+            for key, value in composite_targets.diagnostics.items()
+            if key != "target_construction"
+        }
+    else:
+        snapshot = load_signal_snapshot(
+            symbols=config.symbols,
+            strategy=config.strategy,
+            fast=config.fast,
+            slow=config.slow,
+            lookback=config.lookback,
+        )
+        latest_prices = {
+            symbol: float(price)
+            for symbol, price in snapshot.closes.iloc[-1].fillna(0.0).items()
+            if float(price) > 0.0
+        }
+        latest_scores = {
+            symbol: float(score)
+            for symbol, score in snapshot.scores.iloc[-1].fillna(0.0).items()
+        }
+        as_of, latest_scheduled_weights, latest_effective_weights, target_diagnostics = (
+            compute_latest_target_weights(
+                config=config,
+                snapshot=snapshot,
+            )
+        )
+        extra_diagnostics = {}
+
+    state = sync_state_prices(state, latest_prices)
 
     order_result = generate_rebalance_orders(
         state=state,
@@ -410,6 +432,7 @@ def run_paper_trading_cycle(
     state_store.save(state)
 
     diagnostics = {
+        "signal_source": config.signal_source,
         "target_construction": target_diagnostics,
         "order_generation": order_result.diagnostics,
         "risk_checks": {
@@ -418,6 +441,7 @@ def run_paper_trading_cycle(
         },
         "fill_count": len(fills),
     }
+    diagnostics.update(extra_diagnostics)
 
     return PaperTradingRunResult(
         as_of=as_of,
@@ -466,6 +490,40 @@ def write_paper_trading_artifacts(
         ]
     ).to_csv(targets_path, index=False)
 
+    extra_paths: dict[str, Path] = {}
+    if result.diagnostics.get("signal_source") == "composite":
+        composite_scores_path = output_path / "daily_composite_scores.csv"
+        approved_targets_path = output_path / "approved_target_weights.csv"
+        composite_diagnostics_path = output_path / "composite_diagnostics.json"
+        pd.DataFrame(
+            result.diagnostics.get("latest_composite_scores", []),
+        ).to_csv(composite_scores_path, index=False)
+        pd.DataFrame(
+            result.diagnostics.get("approved_target_weights", []),
+        ).to_csv(approved_targets_path, index=False)
+        composite_diagnostics_path.write_text(
+            json.dumps(
+                {
+                    "selected_signals": result.diagnostics.get("selected_signals", []),
+                    "excluded_signals": result.diagnostics.get("excluded_signals", []),
+                    "latest_component_scores": result.diagnostics.get("latest_component_scores", []),
+                    "liquidity_exclusions": result.diagnostics.get("liquidity_exclusions", []),
+                    "artifact_dir": result.diagnostics.get("artifact_dir"),
+                    "weighting_scheme": result.diagnostics.get("weighting_scheme"),
+                    "portfolio_mode": result.diagnostics.get("portfolio_mode"),
+                    "horizon": result.diagnostics.get("horizon"),
+                },
+                indent=2,
+                default=str,
+            ),
+            encoding="utf-8",
+        )
+        extra_paths = {
+            "daily_composite_scores_path": composite_scores_path,
+            "approved_target_weights_path": approved_targets_path,
+            "composite_diagnostics_path": composite_diagnostics_path,
+        }
+
     pd.DataFrame(
         [
             {
@@ -500,7 +558,7 @@ def write_paper_trading_artifacts(
     }
     summary_path.write_text(json.dumps(summary_payload, indent=2), encoding="utf-8")
 
-    return {
+    paths = {
         "orders_path": orders_path,
         "fills_path": fills_path,
         "equity_curve_path": equity_curve_path,
@@ -508,4 +566,6 @@ def write_paper_trading_artifacts(
         "targets_path": targets_path,
         "summary_path": summary_path,
     }
+    paths.update(extra_paths)
+    return paths
 
