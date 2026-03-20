@@ -1265,6 +1265,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Run immediately even if the schedule metadata says the loop is not due.",
     )
+    alpha_research_loop_parser.add_argument(
+        "--max-iterations",
+        type=int,
+        default=1,
+        help="Maximum number of loop iterations to run in one invocation. Use 0 for no work, default is 1 for safety.",
+    )
     alpha_research_loop_parser.set_defaults(func=cmd_alpha_research_loop)
 
     experiments_list_parser = subparsers.add_parser(

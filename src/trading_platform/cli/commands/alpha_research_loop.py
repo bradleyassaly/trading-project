@@ -31,6 +31,7 @@ def cmd_alpha_research_loop(args) -> None:
         min_train_size=args.min_train_size,
         schedule_frequency=args.schedule_frequency,
         force=args.force,
+        max_iterations=args.max_iterations,
     )
     result = run_automated_alpha_research_loop(config=config)
     print(f"Automated alpha research loop: {result['status']}")

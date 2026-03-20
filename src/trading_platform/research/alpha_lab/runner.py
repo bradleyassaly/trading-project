@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 import pandas as pd
+from trading_platform.research.alpha_lab.data_loading import load_symbol_feature_data
 
 from trading_platform.research.alpha_lab.composite import (
     DEFAULT_COMPOSITE_CONFIG,
@@ -45,53 +46,8 @@ from trading_platform.research.alpha_lab.promotion import (
 from trading_platform.research.alpha_lab.signals import build_signal
 
 
-def _normalize_timestamp_column(df: pd.DataFrame) -> pd.DataFrame:
-    normalized = df.copy()
-    if "timestamp" in normalized.columns:
-        normalized["timestamp"] = pd.to_datetime(normalized["timestamp"], errors="coerce")
-    elif "date" in normalized.columns:
-        normalized["timestamp"] = pd.to_datetime(normalized["date"], errors="coerce")
-    elif "Date" in normalized.columns:
-        normalized["timestamp"] = pd.to_datetime(normalized["Date"], errors="coerce")
-    elif isinstance(normalized.index, pd.DatetimeIndex):
-        normalized = normalized.reset_index()
-        index_name = normalized.columns[0]
-        normalized["timestamp"] = pd.to_datetime(normalized[index_name], errors="coerce")
-        if index_name != "timestamp":
-            normalized = normalized.drop(columns=[index_name])
-    else:
-        raise ValueError("feature data must include a 'timestamp', 'date', or 'Date' column, or use a DatetimeIndex.")
-
-    normalized = normalized.dropna(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
-    return normalized
-
-
-def _normalize_close_column(df: pd.DataFrame) -> pd.DataFrame:
-    normalized = df.copy()
-    if "close" in normalized.columns:
-        return normalized
-
-    close_candidates = ("Close", "adj_close", "Adj Close", "adj close", "adjusted_close", "Adjusted Close")
-    for column in close_candidates:
-        if column in normalized.columns:
-            normalized["close"] = pd.to_numeric(normalized[column], errors="coerce")
-            return normalized
-
-    raise ValueError("feature data must include a 'close' column or a supported close-like variant.")
-
-
 def _load_symbol_feature_data(feature_dir: Path, symbol: str) -> pd.DataFrame:
-    parquet_path = feature_dir / f"{symbol}.parquet"
-    if not parquet_path.exists():
-        raise FileNotFoundError(f"Feature file not found for {symbol}: {parquet_path}")
-
-    df = _normalize_timestamp_column(pd.read_parquet(parquet_path))
-    df = _normalize_close_column(df)
-
-    if "symbol" not in df.columns:
-        df["symbol"] = symbol
-
-    return df
+    return load_symbol_feature_data(feature_dir, symbol)
 
 
 def _resolve_symbols(symbols: list[str] | None, universe: str | None) -> list[str]:

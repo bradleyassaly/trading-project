@@ -13,11 +13,18 @@ class SignalGenerationConfig:
         "momentum",
         "mean_reversion",
         "volatility",
+        "market_residual_momentum",
         "residual_momentum",
         "sector_relative_momentum",
+        "cross_sectional_rank_momentum",
+        "cross_sectional_zscore_momentum",
+        "vol_adjusted_momentum",
         "vol_adjusted_reversal",
         "breakout_distance",
+        "extreme_move",
         "volume_surprise",
+        "interaction_momentum_volatility",
+        "interaction_reversal_volume_spike",
         "feature_combo",
     )
     lookbacks: tuple[int, ...] = (5, 10, 20, 60)
@@ -31,6 +38,48 @@ class SignalGenerationConfig:
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
+
+
+CROSS_SECTIONAL_TRANSFORMS = {
+    "cross_sectional_rank_momentum": "rank",
+    "cross_sectional_zscore_momentum": "zscore",
+}
+
+
+def _safe_numeric_series(df: pd.DataFrame, column: str) -> pd.Series | None:
+    if column not in df.columns:
+        return None
+    return pd.to_numeric(df[column], errors="coerce")
+
+
+def _rolling_zscore(series: pd.Series, window: int) -> pd.Series:
+    rolling_mean = series.rolling(window).mean()
+    rolling_std = series.rolling(window).std()
+    return (series - rolling_mean) / rolling_std.replace(0.0, np.nan)
+
+
+def apply_cross_sectional_transform(panel: pd.DataFrame, *, method: str) -> pd.DataFrame:
+    if panel.empty:
+        return panel.copy()
+
+    transformed = panel.copy()
+    signal = pd.to_numeric(transformed["signal"], errors="coerce")
+    transformed["signal"] = signal
+
+    if method == "rank":
+        transformed["signal"] = transformed.groupby("timestamp")["signal"].transform(
+            lambda values: values.rank(method="average", pct=True)
+        )
+        return transformed
+
+    if method == "zscore":
+        grouped = transformed.groupby("timestamp")["signal"]
+        mean = grouped.transform("mean")
+        std = grouped.transform("std").replace(0.0, np.nan)
+        transformed["signal"] = (signal - mean) / std
+        return transformed
+
+    raise ValueError(f"Unsupported cross-sectional transform: {method}")
 
 
 def build_candidate_signal_id(
@@ -110,6 +159,24 @@ def generate_candidate_signals(
                             "parameters_json": json.dumps(params, sort_keys=True),
                         }
                     )
+        elif signal_family == "market_residual_momentum":
+            for lookback in config.lookbacks:
+                for horizon in config.horizons:
+                    params = {"lookback": int(lookback)}
+                    rows.append(
+                        {
+                            "candidate_id": build_candidate_signal_id("market_residual_momentum", horizon=int(horizon), params=params),
+                            "signal_name": "market_residual_momentum",
+                            "signal_family": "market_residual_momentum",
+                            "lookback": int(lookback),
+                            "window": pd.NA,
+                            "threshold": pd.NA,
+                            "feature_a": pd.NA,
+                            "feature_b": pd.NA,
+                            "horizon": int(horizon),
+                            "parameters_json": json.dumps(params, sort_keys=True),
+                        }
+                    )
         elif signal_family == "residual_momentum":
             for lookback in config.lookbacks:
                 for horizon in config.horizons:
@@ -160,6 +227,60 @@ def generate_candidate_signals(
                                 "parameters_json": json.dumps(params, sort_keys=True),
                             }
                         )
+        elif signal_family == "cross_sectional_rank_momentum":
+            for lookback in config.lookbacks:
+                for horizon in config.horizons:
+                    params = {"lookback": int(lookback)}
+                    rows.append(
+                        {
+                            "candidate_id": build_candidate_signal_id("cross_sectional_rank_momentum", horizon=int(horizon), params=params),
+                            "signal_name": "cross_sectional_rank_momentum",
+                            "signal_family": "cross_sectional_rank_momentum",
+                            "lookback": int(lookback),
+                            "window": pd.NA,
+                            "threshold": pd.NA,
+                            "feature_a": pd.NA,
+                            "feature_b": pd.NA,
+                            "horizon": int(horizon),
+                            "parameters_json": json.dumps(params, sort_keys=True),
+                        }
+                    )
+        elif signal_family == "cross_sectional_zscore_momentum":
+            for lookback in config.lookbacks:
+                for horizon in config.horizons:
+                    params = {"lookback": int(lookback)}
+                    rows.append(
+                        {
+                            "candidate_id": build_candidate_signal_id("cross_sectional_zscore_momentum", horizon=int(horizon), params=params),
+                            "signal_name": "cross_sectional_zscore_momentum",
+                            "signal_family": "cross_sectional_zscore_momentum",
+                            "lookback": int(lookback),
+                            "window": pd.NA,
+                            "threshold": pd.NA,
+                            "feature_a": pd.NA,
+                            "feature_b": pd.NA,
+                            "horizon": int(horizon),
+                            "parameters_json": json.dumps(params, sort_keys=True),
+                        }
+                    )
+        elif signal_family == "vol_adjusted_momentum":
+            for lookback in config.lookbacks:
+                for horizon in config.horizons:
+                    params = {"lookback": int(lookback)}
+                    rows.append(
+                        {
+                            "candidate_id": build_candidate_signal_id("vol_adjusted_momentum", horizon=int(horizon), params=params),
+                            "signal_name": "vol_adjusted_momentum",
+                            "signal_family": "vol_adjusted_momentum",
+                            "lookback": int(lookback),
+                            "window": pd.NA,
+                            "threshold": pd.NA,
+                            "feature_a": pd.NA,
+                            "feature_b": pd.NA,
+                            "horizon": int(horizon),
+                            "parameters_json": json.dumps(params, sort_keys=True),
+                        }
+                    )
         elif signal_family == "vol_adjusted_reversal":
             for lookback in config.lookbacks:
                 for horizon in config.horizons:
@@ -196,6 +317,24 @@ def generate_candidate_signals(
                             "parameters_json": json.dumps(params, sort_keys=True),
                         }
                     )
+        elif signal_family == "extreme_move":
+            for window in config.vol_windows:
+                for horizon in config.horizons:
+                    params = {"window": int(window)}
+                    rows.append(
+                        {
+                            "candidate_id": build_candidate_signal_id("extreme_move", horizon=int(horizon), params=params),
+                            "signal_name": "extreme_move",
+                            "signal_family": "extreme_move",
+                            "lookback": pd.NA,
+                            "window": int(window),
+                            "threshold": pd.NA,
+                            "feature_a": pd.NA,
+                            "feature_b": pd.NA,
+                            "horizon": int(horizon),
+                            "parameters_json": json.dumps(params, sort_keys=True),
+                        }
+                    )
         elif signal_family == "volume_surprise":
             if not feature_column_set or {"volume", "dollar_volume", "avg_dollar_volume_20"} & feature_column_set:
                 for window in config.vol_windows:
@@ -208,6 +347,43 @@ def generate_candidate_signals(
                                 "signal_family": "volume_surprise",
                                 "lookback": pd.NA,
                                 "window": int(window),
+                                "threshold": pd.NA,
+                                "feature_a": pd.NA,
+                                "feature_b": pd.NA,
+                                "horizon": int(horizon),
+                                "parameters_json": json.dumps(params, sort_keys=True),
+                        }
+                    )
+        elif signal_family == "interaction_momentum_volatility":
+            for lookback in config.lookbacks:
+                for horizon in config.horizons:
+                    params = {"lookback": int(lookback)}
+                    rows.append(
+                        {
+                            "candidate_id": build_candidate_signal_id("interaction_momentum_volatility", horizon=int(horizon), params=params),
+                            "signal_name": "interaction_momentum_volatility",
+                            "signal_family": "interaction_momentum_volatility",
+                            "lookback": int(lookback),
+                            "window": pd.NA,
+                            "threshold": pd.NA,
+                            "feature_a": pd.NA,
+                            "feature_b": pd.NA,
+                            "horizon": int(horizon),
+                            "parameters_json": json.dumps(params, sort_keys=True),
+                        }
+                    )
+        elif signal_family == "interaction_reversal_volume_spike":
+            if not feature_column_set or {"volume", "dollar_volume", "avg_dollar_volume_20"} & feature_column_set:
+                for lookback in config.lookbacks:
+                    for horizon in config.horizons:
+                        params = {"lookback": int(lookback)}
+                        rows.append(
+                            {
+                                "candidate_id": build_candidate_signal_id("interaction_reversal_volume_spike", horizon=int(horizon), params=params),
+                                "signal_name": "interaction_reversal_volume_spike",
+                                "signal_family": "interaction_reversal_volume_spike",
+                                "lookback": int(lookback),
+                                "window": pd.NA,
                                 "threshold": pd.NA,
                                 "feature_a": pd.NA,
                                 "feature_b": pd.NA,
@@ -265,6 +441,9 @@ def build_generated_signal(
     signal_name = str(candidate_row["signal_name"])
     close = pd.to_numeric(df["close"], errors="coerce")
     returns = close.pct_change()
+    volume = _safe_numeric_series(df, "volume")
+    if volume is None:
+        volume = _safe_numeric_series(df, "dollar_volume")
 
     if signal_name == "momentum":
         lookback = int(candidate_row["lookback"])
@@ -282,6 +461,18 @@ def build_generated_signal(
         window = int(candidate_row["window"])
         return -returns.rolling(window).std()
 
+    if signal_name == "market_residual_momentum":
+        lookback = int(candidate_row["lookback"])
+        raw_momentum = close.pct_change(lookback)
+        market_series = None
+        for column in (f"market_return_{lookback}", "market_return", f"benchmark_return_{lookback}", "benchmark_return"):
+            market_series = _safe_numeric_series(df, column)
+            if market_series is not None:
+                break
+        if market_series is None:
+            market_series = returns.rolling(lookback).mean()
+        return raw_momentum - market_series
+
     if signal_name == "vol_adjusted_momentum":
         lookback = int(candidate_row["lookback"])
         vol = returns.rolling(lookback).std()
@@ -298,6 +489,8 @@ def build_generated_signal(
         lookback = int(candidate_row["lookback"])
         raw_momentum = close.pct_change(lookback)
         baseline_columns = [
+            f"sector_mean_return_{lookback}",
+            "sector_mean_return",
             f"sector_momentum_{lookback}",
             f"group_momentum_{lookback}",
             f"industry_momentum_{lookback}",
@@ -315,6 +508,14 @@ def build_generated_signal(
             return pd.Series(index=df.index, dtype="float64")
         return raw_momentum - baseline_series
 
+    if signal_name == "cross_sectional_rank_momentum":
+        lookback = int(candidate_row["lookback"])
+        return close.pct_change(lookback)
+
+    if signal_name == "cross_sectional_zscore_momentum":
+        lookback = int(candidate_row["lookback"])
+        return close.pct_change(lookback)
+
     if signal_name == "vol_adjusted_reversal":
         lookback = int(candidate_row["lookback"])
         raw_reversal = -close.pct_change(lookback)
@@ -329,14 +530,34 @@ def build_generated_signal(
         low_distance = close / rolling_low - 1.0
         return high_distance + low_distance
 
+    if signal_name == "extreme_move":
+        window = int(candidate_row["window"])
+        move = returns
+        rolling_rank = move.rolling(window).rank(pct=True)
+        extreme_high = (rolling_rank >= 0.9).astype(float)
+        extreme_low = (rolling_rank <= 0.1).astype(float)
+        return extreme_high - extreme_low
+
     if signal_name == "volume_surprise":
         window = int(candidate_row["window"])
-        volume_column = "volume" if "volume" in df.columns else "dollar_volume" if "dollar_volume" in df.columns else None
-        if volume_column is None:
+        if volume is None:
             return pd.Series(index=df.index, dtype="float64")
-        volume = pd.to_numeric(df[volume_column], errors="coerce")
         trailing_volume = volume.rolling(window).mean()
         return volume / trailing_volume.replace(0.0, np.nan) - 1.0
+
+    if signal_name == "interaction_momentum_volatility":
+        lookback = int(candidate_row["lookback"])
+        momentum = close.pct_change(lookback)
+        volatility = returns.rolling(lookback).std()
+        return momentum * _rolling_zscore(volatility, lookback)
+
+    if signal_name == "interaction_reversal_volume_spike":
+        lookback = int(candidate_row["lookback"])
+        reversal = -close.pct_change(lookback)
+        if volume is None:
+            return pd.Series(index=df.index, dtype="float64")
+        volume_spike = volume / volume.rolling(lookback).mean().replace(0.0, np.nan) - 1.0
+        return reversal * volume_spike
 
     if signal_name == "feature_combo":
         feature_a = str(candidate_row["feature_a"])

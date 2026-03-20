@@ -157,6 +157,21 @@ def test_load_symbol_feature_data_normalizes_adj_close_with_space(tmp_path: Path
     assert result["close"].tolist() == pytest.approx([100.0, 101.0, 102.0])
 
 
+def test_load_symbol_feature_data_normalizes_adjusted_close_column(tmp_path: Path) -> None:
+    feature_dir = tmp_path / "features"
+    feature_dir.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(
+        {
+            "timestamp": pd.date_range("2024-01-01", periods=3, freq="D"),
+            "adjusted_close": [100.0, 101.0, 102.0],
+        }
+    ).to_parquet(feature_dir / "AAPL.parquet", index=False)
+
+    result = _load_symbol_feature_data(feature_dir, "AAPL")
+
+    assert result["close"].tolist() == pytest.approx([100.0, 101.0, 102.0])
+
+
 def test_load_symbol_feature_data_raises_for_missing_date_like_field(tmp_path: Path) -> None:
     feature_dir = tmp_path / "features"
     feature_dir.mkdir(parents=True, exist_ok=True)
