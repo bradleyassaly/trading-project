@@ -6,6 +6,11 @@ import pandas as pd
 import pytest
 
 from trading_platform.research.alpha_lab.labels import add_forward_return_labels
+from trading_platform.research.alpha_lab.composite import (
+    build_composite_scores,
+    normalize_signal_by_date,
+    select_low_redundancy_signals,
+)
 from trading_platform.research.alpha_lab.metrics import (
     evaluate_cross_sectional_signal,
     compute_turnover,
@@ -157,6 +162,130 @@ def test_evaluate_cross_sectional_signal_uses_rank_buckets_per_date() -> None:
     assert metrics["quantile_spread"] == pytest.approx(0.03)
 
 
+def test_normalize_signal_by_date_centers_ranks_within_each_date() -> None:
+    panel = pd.DataFrame(
+        {
+            "timestamp": [
+                pd.Timestamp("2024-01-01"),
+                pd.Timestamp("2024-01-01"),
+                pd.Timestamp("2024-01-01"),
+                pd.Timestamp("2024-01-02"),
+                pd.Timestamp("2024-01-02"),
+            ],
+            "symbol": ["AAPL", "MSFT", "NVDA", "AAPL", "MSFT"],
+            "signal": [1.0, 2.0, 3.0, 10.0, 20.0],
+        }
+    )
+
+    normalized = normalize_signal_by_date(panel)
+
+    first_day = normalized.loc[normalized["timestamp"] == pd.Timestamp("2024-01-01")]
+    second_day = normalized.loc[normalized["timestamp"] == pd.Timestamp("2024-01-02")]
+
+    assert first_day["normalized_signal"].tolist() == pytest.approx(
+        [-0.3333333333, 0.3333333333, 1.0]
+    )
+    assert second_day["normalized_signal"].tolist() == pytest.approx([0.0, 1.0])
+
+
+def test_select_low_redundancy_signals_filters_highly_correlated_candidates() -> None:
+    promoted_signals_df = pd.DataFrame(
+        [
+            {
+                "signal_family": "momentum",
+                "lookback": 5,
+                "horizon": 1,
+                "mean_spearman_ic": 0.08,
+                "mean_long_short_spread": 0.03,
+            },
+            {
+                "signal_family": "momentum",
+                "lookback": 10,
+                "horizon": 1,
+                "mean_spearman_ic": 0.07,
+                "mean_long_short_spread": 0.025,
+            },
+        ]
+    )
+    redundancy_df = pd.DataFrame(
+        [
+            {
+                "signal_family_a": "momentum",
+                "lookback_a": 5,
+                "horizon_a": 1,
+                "signal_family_b": "momentum",
+                "lookback_b": 10,
+                "horizon_b": 1,
+                "score_corr": 0.95,
+                "performance_corr": 0.90,
+                "rank_ic_corr": 0.85,
+            }
+        ]
+    )
+
+    selected, excluded = select_low_redundancy_signals(
+        promoted_signals_df,
+        redundancy_df,
+        horizon=1,
+        redundancy_corr_threshold=0.8,
+    )
+
+    assert len(selected) == 1
+    assert int(selected.loc[0, "lookback"]) == 5
+    assert len(excluded) == 1
+    assert excluded[0]["candidate_id"].endswith("|10|1")
+
+
+def test_build_composite_scores_combines_available_components() -> None:
+    selected_signals_df = pd.DataFrame(
+        [
+            {
+                "signal_family": "momentum",
+                "lookback": 5,
+                "horizon": 1,
+                "mean_spearman_ic": 0.08,
+                "mean_long_short_spread": 0.03,
+            },
+            {
+                "signal_family": "momentum",
+                "lookback": 10,
+                "horizon": 1,
+                "mean_spearman_ic": 0.04,
+                "mean_long_short_spread": 0.02,
+            },
+        ]
+    )
+    score_panel_by_candidate = {
+        ("momentum", 5, 1): pd.DataFrame(
+            {
+                "timestamp": [pd.Timestamp("2024-01-01"), pd.Timestamp("2024-01-01")],
+                "symbol": ["AAPL", "MSFT"],
+                "signal": [1.0, 3.0],
+            }
+        ),
+        ("momentum", 10, 1): pd.DataFrame(
+            {
+                "timestamp": [pd.Timestamp("2024-01-01"), pd.Timestamp("2024-01-01")],
+                "symbol": ["AAPL", "MSFT"],
+                "signal": [2.0, 4.0],
+            }
+        ),
+    }
+
+    composite_scores = build_composite_scores(
+        selected_signals_df,
+        score_panel_by_candidate=score_panel_by_candidate,
+        weighting_scheme="equal",
+        quality_metric="mean_spearman_ic",
+    )
+
+    assert len(composite_scores) == 2
+    assert set(composite_scores["symbol"]) == {"AAPL", "MSFT"}
+    assert composite_scores["component_count"].tolist() == [2, 2]
+    assert composite_scores.loc[composite_scores["symbol"] == "AAPL", "composite_score"].iloc[0] == pytest.approx(0.0)
+    assert composite_scores.loc[composite_scores["symbol"] == "MSFT", "composite_score"].iloc[0] == pytest.approx(1.0)
+
+
 def test_run_alpha_research_writes_leaderboard_and_fold_results(tmp_path: Path) -> None:
     feature_dir = tmp_path / "features"
     output_dir = tmp_path / "alpha_outputs"
@@ -201,27 +330,40 @@ def test_run_alpha_research_writes_leaderboard_and_fold_results(tmp_path: Path) 
     promoted_signals_path = Path(result["promoted_signals_path"])
     redundancy_report_path = Path(result["redundancy_report_path"])
     redundancy_path = Path(result["redundancy_path"])
+    composite_scores_path = Path(result["composite_scores_path"])
+    composite_leaderboard_path = Path(result["composite_leaderboard_path"])
+    composite_diagnostics_path = Path(result["composite_diagnostics_path"])
 
     assert leaderboard_path.exists()
     assert fold_results_path.exists()
     assert promoted_signals_path.exists()
     assert redundancy_report_path.exists()
     assert redundancy_path.exists()
+    assert composite_scores_path.exists()
+    assert composite_leaderboard_path.exists()
+    assert composite_diagnostics_path.exists()
     assert (output_dir / "leaderboard.parquet").exists()
     assert (output_dir / "fold_results.parquet").exists()
     assert (output_dir / "promoted_signals.parquet").exists()
     assert (output_dir / "redundancy_report.parquet").exists()
     assert (output_dir / "redundancy_diagnostics.parquet").exists()
+    assert (output_dir / "composite_scores.parquet").exists()
+    assert (output_dir / "composite_leaderboard.parquet").exists()
+    assert (output_dir / "composite_diagnostics.json").exists()
     assert (output_dir / "signal_diagnostics.json").exists()
 
     leaderboard_df = pd.read_csv(leaderboard_path)
     fold_results_df = pd.read_csv(fold_results_path)
     promoted_signals_df = pd.read_csv(promoted_signals_path)
     redundancy_df = pd.read_csv(redundancy_path)
+    composite_scores_df = pd.read_csv(composite_scores_path)
+    composite_leaderboard_df = pd.read_csv(composite_leaderboard_path)
 
     assert not leaderboard_df.empty
     assert not fold_results_df.empty
     assert promoted_signals_df.empty
+    assert composite_scores_df.empty
+    assert composite_leaderboard_df.empty
     assert "performance_corr" in redundancy_df.columns
 
     assert "signal_family" in leaderboard_df.columns
@@ -336,6 +478,8 @@ def test_run_alpha_research_adds_promotion_and_redundancy_outputs(tmp_path: Path
     promoted_signals_df = pd.read_csv(result["promoted_signals_path"])
     redundancy_report_df = pd.read_csv(result["redundancy_report_path"])
     redundancy_df = pd.read_csv(result["redundancy_path"])
+    composite_scores_df = pd.read_csv(result["composite_scores_path"])
+    composite_leaderboard_df = pd.read_csv(result["composite_leaderboard_path"])
 
     assert set(leaderboard_df["promotion_status"]) == {"promote"}
     assert set(leaderboard_df["rejection_reason"]) == {"none"}
@@ -343,6 +487,9 @@ def test_run_alpha_research_adds_promotion_and_redundancy_outputs(tmp_path: Path
     assert set(promoted_signals_df["promotion_status"]) == {"promote"}
     assert len(redundancy_report_df) == 1
     assert len(redundancy_df) == 1
+    assert not composite_scores_df.empty
+    assert not composite_leaderboard_df.empty
+    assert set(composite_scores_df["weighting_scheme"]) == {"equal", "quality"}
     assert redundancy_df.loc[0, "score_corr"] > 0.999
     assert redundancy_df.loc[0, "performance_corr"] > 0.999
     assert redundancy_df.loc[0, "overlap_dates"] > 0
@@ -375,11 +522,15 @@ def test_run_alpha_research_handles_empty_outputs_and_edge_case_rejections(
     promoted_signals_df = pd.read_csv(result["promoted_signals_path"])
     redundancy_report_df = pd.read_csv(result["redundancy_report_path"])
     redundancy_df = pd.read_csv(result["redundancy_path"])
+    composite_scores_df = pd.read_csv(result["composite_scores_path"])
+    composite_leaderboard_df = pd.read_csv(result["composite_leaderboard_path"])
 
     assert leaderboard_df.empty
     assert promoted_signals_df.empty
     assert redundancy_report_df.empty
     assert redundancy_df.empty
+    assert composite_scores_df.empty
+    assert composite_leaderboard_df.empty
     assert "rejection_reason" in leaderboard_df.columns
     assert "promotion_status" in leaderboard_df.columns
     assert "score_corr" in redundancy_df.columns

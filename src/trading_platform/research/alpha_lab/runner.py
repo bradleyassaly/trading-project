@@ -5,6 +5,12 @@ from pathlib import Path
 
 import pandas as pd
 
+from trading_platform.research.alpha_lab.composite import (
+    DEFAULT_COMPOSITE_CONFIG,
+    build_composite_scores,
+    evaluate_composite_scores,
+    select_low_redundancy_signals,
+)
 from trading_platform.research.alpha_lab.folds import build_walk_forward_folds
 from trading_platform.research.alpha_lab.labels import add_forward_return_labels
 from trading_platform.research.alpha_lab.metrics import (
@@ -265,6 +271,7 @@ def run_alpha_research(
     detailed_rows: list[dict] = []
     daily_metrics_by_candidate: dict[tuple[str, int, int], list[pd.DataFrame]] = {}
     score_panel_by_candidate: dict[tuple[str, int, int], list[pd.DataFrame]] = {}
+    label_panel_by_horizon: dict[int, list[pd.DataFrame]] = {}
 
     for lookback in lookbacks:
         for symbol, df in symbol_data.items():
@@ -318,6 +325,9 @@ def run_alpha_research(
                 score_panel = fold_panel[["timestamp", "symbol", "signal"]].dropna().copy()
                 if not score_panel.empty:
                     score_panel_by_candidate.setdefault(candidate_key, []).append(score_panel)
+                label_panel = fold_panel[["timestamp", "symbol", "forward_return"]].dropna().copy()
+                if not label_panel.empty:
+                    label_panel_by_horizon.setdefault(horizon, []).append(label_panel)
 
                 detailed_rows.append(
                     {
@@ -412,6 +422,14 @@ def run_alpha_research(
         for key, frames in score_panel_by_candidate.items()
         if frames
     }
+    combined_label_panels = {
+        horizon: pd.concat(frames, ignore_index=True)
+        .drop_duplicates(subset=["timestamp", "symbol"])
+        .sort_values(["timestamp", "symbol"])
+        .reset_index(drop=True)
+        for horizon, frames in label_panel_by_horizon.items()
+        if frames
+    }
     redundancy_df = _compute_redundancy_diagnostics(
         leaderboard_df,
         daily_metrics_by_candidate=combined_daily_metrics,
@@ -420,6 +438,57 @@ def run_alpha_research(
     promoted_signals_df = leaderboard_df.loc[
         leaderboard_df["promotion_status"] == "promote"
     ].reset_index(drop=True)
+    composite_score_frames: list[pd.DataFrame] = []
+    composite_diagnostics: dict[str, object] = {
+        "config": DEFAULT_COMPOSITE_CONFIG.to_dict(),
+        "horizons": {},
+    }
+    for horizon in sorted(promoted_signals_df["horizon"].unique().tolist()) if not promoted_signals_df.empty else []:
+        selected_signals_df, excluded_rows = select_low_redundancy_signals(
+            promoted_signals_df,
+            redundancy_df,
+            horizon=int(horizon),
+            redundancy_corr_threshold=DEFAULT_COMPOSITE_CONFIG.redundancy_corr_threshold,
+        )
+        composite_diagnostics["horizons"][str(int(horizon))] = {
+            "selected_signals": selected_signals_df[
+                ["signal_family", "lookback", "horizon"]
+            ].to_dict(orient="records"),
+            "excluded_signals": excluded_rows,
+        }
+        for weighting_scheme in DEFAULT_COMPOSITE_CONFIG.weighting_schemes:
+            composite_scores = build_composite_scores(
+                selected_signals_df,
+                score_panel_by_candidate=combined_score_panels,
+                weighting_scheme=weighting_scheme,
+                quality_metric=DEFAULT_COMPOSITE_CONFIG.quality_metric,
+            )
+            if composite_scores.empty:
+                continue
+            composite_score_frames.append(composite_scores)
+
+    composite_scores_df = (
+        pd.concat(composite_score_frames, ignore_index=True)
+        if composite_score_frames
+        else pd.DataFrame(
+            columns=[
+                "timestamp",
+                "symbol",
+                "horizon",
+                "weighting_scheme",
+                "composite_score",
+                "component_count",
+                "selected_signal_count",
+            ]
+        )
+    )
+    composite_leaderboard_df = evaluate_composite_scores(
+        composite_scores_df,
+        label_panel_by_horizon=combined_label_panels,
+        folds=folds,
+        top_quantile=top_quantile,
+        bottom_quantile=bottom_quantile,
+    )
 
     detailed_path_csv = output_dir / "fold_results.csv"
     leaderboard_path_csv = output_dir / "leaderboard.csv"
@@ -431,6 +500,11 @@ def run_alpha_research(
     redundancy_report_path_parquet = output_dir / "redundancy_report.parquet"
     redundancy_path_csv = output_dir / "redundancy_diagnostics.csv"
     redundancy_path_parquet = output_dir / "redundancy_diagnostics.parquet"
+    composite_scores_path_csv = output_dir / "composite_scores.csv"
+    composite_scores_path_parquet = output_dir / "composite_scores.parquet"
+    composite_leaderboard_path_csv = output_dir / "composite_leaderboard.csv"
+    composite_leaderboard_path_parquet = output_dir / "composite_leaderboard.parquet"
+    composite_diagnostics_path = output_dir / "composite_diagnostics.json"
     diagnostics_path = output_dir / "signal_diagnostics.json"
 
     detailed_df.to_csv(detailed_path_csv, index=False)
@@ -438,11 +512,16 @@ def run_alpha_research(
     promoted_signals_df.to_csv(promoted_signals_path_csv, index=False)
     redundancy_df.to_csv(redundancy_report_path_csv, index=False)
     redundancy_df.to_csv(redundancy_path_csv, index=False)
+    composite_scores_df.to_csv(composite_scores_path_csv, index=False)
+    composite_leaderboard_df.to_csv(composite_leaderboard_path_csv, index=False)
     detailed_df.to_parquet(detailed_path_parquet, index=False)
     leaderboard_df.to_parquet(leaderboard_path_parquet, index=False)
     promoted_signals_df.to_parquet(promoted_signals_path_parquet, index=False)
     redundancy_df.to_parquet(redundancy_report_path_parquet, index=False)
     redundancy_df.to_parquet(redundancy_path_parquet, index=False)
+    composite_scores_df.to_parquet(composite_scores_path_parquet, index=False)
+    composite_leaderboard_df.to_parquet(composite_leaderboard_path_parquet, index=False)
+    composite_diagnostics_path.write_text(json.dumps(composite_diagnostics, indent=2, default=str))
 
     diagnostics = {
         "symbols_requested": resolved_symbols,
@@ -466,4 +545,7 @@ def run_alpha_research(
         "promoted_signals_path": str(promoted_signals_path_csv),
         "redundancy_report_path": str(redundancy_report_path_csv),
         "redundancy_path": str(redundancy_path_csv),
+        "composite_scores_path": str(composite_scores_path_csv),
+        "composite_leaderboard_path": str(composite_leaderboard_path_csv),
+        "composite_diagnostics_path": str(composite_diagnostics_path),
     }
