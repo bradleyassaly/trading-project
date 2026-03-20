@@ -52,6 +52,7 @@ def cmd_paper_run(args) -> None:
         min_trade_dollars=args.min_trade_dollars,
         lot_size=args.lot_size,
         reserve_cash_pct=args.reserve_cash_pct,
+        approved_model_state_path=getattr(args, "approved_model_state", None),
         composite_artifact_dir=args.composite_artifact_dir,
         composite_horizon=args.composite_horizon,
         composite_weighting_scheme=args.composite_weighting_scheme,

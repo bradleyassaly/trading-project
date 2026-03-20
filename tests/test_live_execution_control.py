@@ -119,3 +119,23 @@ def test_empty_portfolio_or_no_trades_aborts_cleanly(tmp_path: Path, monkeypatch
     assert result.decision == "abort"
     assert "no_orders" in result.reason_codes
     assert pretrade_payload["critical_violations"]
+
+
+def test_approved_model_state_satisfies_approval_gate(tmp_path: Path, monkeypatch) -> None:
+    _patch_simple_targets(monkeypatch)
+    approved_model_state_path = tmp_path / "approved_model_state.json"
+    approved_model_state_path.write_text(
+        json.dumps({"artifact_type": "approved_model_state", "approval_status": "approved", "approved_at": "2026-03-19T00:00:00Z"}),
+        encoding="utf-8",
+    )
+
+    result = run_live_execution_control(
+        config=LiveExecutionControlConfig(
+            symbols=["AAPL"],
+            approved_model_state_path=str(approved_model_state_path),
+            output_dir=tmp_path,
+        ),
+        execute=True,
+    )
+
+    assert "missing_approval" not in result.reason_codes

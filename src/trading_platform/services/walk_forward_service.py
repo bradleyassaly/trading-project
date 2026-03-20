@@ -11,6 +11,7 @@ from trading_platform.config.models import (
     ResearchWorkflowConfig,
     WalkForwardConfig,
 )
+from trading_platform.data.canonical import load_research_frame_from_parquet
 from trading_platform.data.providers.base import BarDataProvider
 from trading_platform.services.parameter_sweep_service import run_parameter_sweep
 from trading_platform.services.research_service import run_research_workflow
@@ -82,10 +83,7 @@ def _prepare_feature_data(
 
     feature_path = str(prep_outputs["features_path"])
 
-    df = pd.read_parquet(feature_path)
-    if "timestamp" not in df.columns:
-        raise ValueError("Feature data must include a timestamp column for walk-forward evaluation")
-
+    df = load_research_frame_from_parquet(feature_path, symbol=config.symbol)
     timestamps = sorted(pd.to_datetime(df["timestamp"]).tolist())
 
     if len(timestamps) < config.min_required_bars:

@@ -53,6 +53,7 @@ class LiveExecutionControlConfig:
     min_trade_dollars: float = 25.0
     lot_size: int = 1
     reserve_cash_pct: float = 0.0
+    approved_model_state_path: str | None = None
     composite_artifact_dir: str | None = None
     composite_horizon: int = 1
     composite_weighting_scheme: str = "equal"
@@ -217,6 +218,7 @@ def _build_paper_config(config: LiveExecutionControlConfig, symbols: list[str]) 
         min_trade_dollars=config.min_trade_dollars,
         lot_size=config.lot_size,
         reserve_cash_pct=config.reserve_cash_pct,
+        approved_model_state_path=config.approved_model_state_path,
         composite_artifact_dir=config.composite_artifact_dir,
         composite_horizon=config.composite_horizon,
         composite_weighting_scheme=config.composite_weighting_scheme,
@@ -333,14 +335,18 @@ def _group_exposures(weights: dict[str, float], *, symbols: list[str], group_map
 
 
 def _approval_status(config: LiveExecutionControlConfig) -> dict[str, object]:
+    approval_source_path = config.approval_artifact_path or config.approved_model_state_path
     artifact_payload = {}
     artifact_approved = False
-    if config.approval_artifact_path:
-        artifact_payload = _safe_read_json(Path(config.approval_artifact_path))
-        artifact_approved = bool(artifact_payload.get("approved", False))
+    if approval_source_path:
+        artifact_payload = _safe_read_json(Path(approval_source_path))
+        artifact_approved = bool(
+            artifact_payload.get("approved", False)
+            or artifact_payload.get("approval_status") == "approved"
+        )
     return {
         "approved_flag": bool(config.approved),
-        "approval_artifact_path": config.approval_artifact_path or "",
+        "approval_artifact_path": approval_source_path or "",
         "approval_artifact": artifact_payload,
         "approved": bool(config.approved or artifact_approved),
     }
@@ -350,10 +356,15 @@ def _config_age_violation(
     *,
     config: LiveExecutionControlConfig,
 ) -> str | None:
-    if config.max_config_staleness_days is None or not config.approval_artifact_path:
+    approval_source_path = config.approval_artifact_path or config.approved_model_state_path
+    if config.max_config_staleness_days is None or not approval_source_path:
         return None
-    approval_payload = _safe_read_json(Path(config.approval_artifact_path))
-    approved_at = approval_payload.get("approved_at") or approval_payload.get("snapshot_timestamp")
+    approval_payload = _safe_read_json(Path(approval_source_path))
+    approved_at = (
+        approval_payload.get("approved_at")
+        or approval_payload.get("snapshot_timestamp")
+        or approval_payload.get("approval_metadata", {}).get("approved_at")
+    )
     if not approved_at:
         return "stale_config_missing_timestamp"
     approved_timestamp = pd.to_datetime(approved_at, errors="coerce", utc=True)

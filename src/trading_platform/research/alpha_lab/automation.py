@@ -32,6 +32,7 @@ from trading_platform.research.alpha_lab.promotion import (
     DEFAULT_PROMOTION_THRESHOLDS,
     apply_promotion_rules,
 )
+from trading_platform.research.approved_model_state import write_approved_model_state
 
 
 @dataclass(frozen=True)
@@ -1156,6 +1157,7 @@ def aggregate_research_registry(
         json.dumps(promotion_threshold_diagnostics, indent=2, default=str),
         encoding="utf-8",
     )
+    approved_model_state_paths = write_approved_model_state(artifact_dir=output_dir)
     return {
         "leaderboard_path": str(leaderboard_path),
         "promoted_signals_path": str(promoted_path),
@@ -1165,6 +1167,7 @@ def aggregate_research_registry(
         "redundancy_report_path": str(redundancy_path),
         "composite_inputs_path": str(composite_inputs_path),
         "promotion_threshold_diagnostics_path": str(promotion_threshold_diagnostics_path),
+        **approved_model_state_paths,
     }
 
 

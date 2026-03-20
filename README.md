@@ -142,451 +142,144 @@ python -m trading_platform.cli --help
 
 ## CLI Command Reference
 
-All commands below come from `src/trading_platform/cli/parser.py`.
+The CLI now uses grouped command families:
 
-### Core Data And Research Commands
+- `data`
+- `research`
+- `portfolio`
+- `paper`
+- `live`
+- `experiments`
 
-#### `ingest`
-
-Purpose: download raw OHLCV data for explicit symbols or a named universe.
-
-Important arguments: `--symbols` or `--universe`, `--start`
-
-Example:
-
-```bash
-trading-cli ingest --universe magnificent7 --start 2020-01-01
-```
-
-#### `features`
-
-Purpose: build feature datasets used by legacy research and `alpha_lab`.
-
-Important arguments: `--symbols` or `--universe`, `--feature-groups`
-
-Example:
+Examples:
 
 ```bash
-trading-cli features --universe magnificent7 --feature-groups trend momentum volatility volume
+trading-cli data ingest --universe magnificent7 --start 2020-01-01
+trading-cli data features --universe magnificent7 --feature-groups trend momentum volatility volume
+trading-cli data universes list
+trading-cli research run --symbols AAPL MSFT NVDA --strategy sma_cross --fast 20 --slow 100 --engine vectorized --output-dir artifacts/research
+trading-cli research sweep --symbols AAPL MSFT NVDA --strategy sma_cross --fast-values 10 20 30 --slow-values 50 100 150
+trading-cli research walkforward --universe magnificent7 --strategy sma_cross --fast-values 10 20 --slow-values 50 100
+trading-cli research alpha --universe magnificent7 --feature-dir data/features --signal-family momentum --lookbacks 5 10 20 60 --horizons 1 5 20 --output-dir artifacts/alpha_research
+trading-cli research loop --universe nasdaq100 --feature-dir data/features --signal-families momentum mean_reversion volatility feature_combo --max-iterations 1
+trading-cli research multi-universe --universes sp500 nasdaq100 liquid_top_100 --feature-dir data/features --signal-family momentum
+trading-cli research refresh --universe sp500 --feature-dir data/features --stale-after-days 30
+trading-cli research monitor --tracker-dir artifacts/experiment_tracking --snapshot-dir artifacts/research_refresh/approved_configuration_snapshots
+trading-cli portfolio backtest --universe magnificent7 --strategy sma_cross --rebalance-frequency weekly --output-dir artifacts/portfolio
+trading-cli portfolio topn --universe magnificent7 --strategy momentum_hold --lookback 20 --top-n 3 --weighting-scheme inverse_vol
+trading-cli paper run --symbols AAPL MSFT NVDA --signal-source composite --approved-model-state artifacts/alpha_research/approved/approved_model_state.json --top-n 5 --state-path artifacts/paper/paper_state.json --output-dir artifacts/paper
+trading-cli paper daily --universe magnificent7 --signal-source composite --approved-model-state artifacts/alpha_research/approved/approved_model_state.json --state-path artifacts/paper/paper_state.json --output-dir artifacts/paper
+trading-cli paper report --account-dir artifacts/paper --output-dir artifacts/paper/report
+trading-cli live dry-run --universe magnificent7 --strategy sma_cross --top-n 5 --broker mock
+trading-cli live validate --universe magnificent7 --signal-source composite --approved-model-state artifacts/alpha_research/approved/approved_model_state.json --approval-artifact artifacts/research_refresh/approved_configuration_snapshots/latest_approved_configuration.json --output-dir artifacts/live_execution
+trading-cli live execute --universe magnificent7 --signal-source composite --approved-model-state artifacts/alpha_research/approved/approved_model_state.json --approved --output-dir artifacts/live_execution
+trading-cli experiments list --tracker-dir artifacts/experiment_tracking --limit 10
+trading-cli experiments latest --tracker-dir artifacts/experiment_tracking
+trading-cli experiments dashboard --tracker-dir artifacts/experiment_tracking --output-dir artifacts/experiment_tracking --top-metric portfolio_sharpe
+trading-cli experiments diff --snapshot-dir artifacts/research_refresh/approved_configuration_snapshots
 ```
 
-#### `research`
-
-Purpose: run legacy strategy backtests.
-
-Important arguments: `--symbols` or `--universe`, `--strategy`, `--fast`, `--slow`, `--lookback`, `--rebalance-frequency`, `--engine`, `--output-dir`
-
-Example:
-
-```bash
-trading-cli research --symbols AAPL MSFT NVDA --strategy sma_cross --fast 20 --slow 100 --engine vectorized --output-dir artifacts/research
-```
-
-#### `pipeline`
-
-Purpose: run ingest, feature generation, and legacy research in one command.
-
-Important arguments: `--symbols` or `--universe`, `--start`, `--feature-groups`, `--strategy`
-
-Example:
-
-```bash
-trading-cli pipeline --universe magnificent7 --start 2018-01-01 --feature-groups trend momentum volatility volume --strategy sma_cross
-```
-
-### Discovery And Registry Commands
-
-#### `list-universes`
-
-Purpose: print the named universe registry.
-
-Important arguments: none
-
-Example:
-
-```bash
-trading-cli list-universes
-```
-
-#### `export-universes`
-
-Purpose: export the static universe definitions to JSON for inspection or reuse.
-
-Important arguments: `--output`
-
-Example:
-
-```bash
-trading-cli export-universes --output artifacts/universes/universes.json
-```
-
-#### `list-strategies`
-
-Purpose: print the registered legacy strategies.
-
-Important arguments: none
-
-Example:
-
-```bash
-trading-cli list-strategies
-```
-
-### Legacy Parameter Search Commands
-
-#### `sweep`
-
-Purpose: run a parameter sweep for a legacy strategy.
-
-Important arguments: `--symbols` or `--universe`, `--strategy`, `--fast-values`, `--slow-values`, `--lookback-values`, `--engine`, `--output`
-
-Example:
-
-```bash
-trading-cli sweep --symbols AAPL MSFT NVDA --strategy sma_cross --fast-values 10 20 30 --slow-values 50 100 150 --engine vectorized --output artifacts/experiments/sma_sweep.csv
-```
-
-#### `walkforward`
-
-Purpose: run legacy walk-forward validation.
-
-Important arguments: `--symbols` or `--universe`, `--strategy`, `--train-years`, `--test-years`, `--select-by`, `--engine`, `--output`
-
-Example:
-
-```bash
-trading-cli walkforward --universe magnificent7 --strategy sma_cross --fast-values 10 20 --slow-values 50 100 --train-years 5 --test-years 1 --engine vectorized --output artifacts/experiments/walkforward.csv
-```
-
-### Portfolio Commands
-
-#### `portfolio`
-
-Purpose: run an equal-weight multi-symbol portfolio backtest using a legacy strategy.
-
-Important arguments: `--symbols` or `--universe`, `--strategy`, `--rebalance-frequency`, `--output-dir`
-
-Example:
-
-```bash
-trading-cli portfolio --universe magnificent7 --strategy sma_cross --rebalance-frequency weekly --output-dir artifacts/portfolio
-```
-
-#### `portfolio-topn`
-
-Purpose: run a cross-sectional top-N legacy portfolio backtest.
-
-Important arguments: `--symbols` or `--universe`, `--strategy`, `--top-n`, `--weighting-scheme`, `--vol-window`, `--group-map-path`, `--output-dir`
-
-Example:
-
-```bash
-trading-cli portfolio-topn --universe magnificent7 --strategy momentum_hold --lookback 20 --top-n 3 --weighting-scheme inverse_vol --vol-window 20 --output-dir artifacts/portfolio_topn
-```
-
-### Config-Driven Batch Commands
-
-#### `run-job`
-
-Purpose: run a research workflow from a YAML or JSON config file.
-
-Important arguments: `--config`, `--symbols`, `--fail-fast`
-
-Example:
-
-```bash
-trading-cli run-job --config configs/research_job.yaml --fail-fast
-```
-
-#### `run-sweep`
-
-Purpose: run a sweep from a YAML or JSON config file.
-
-Important arguments: `--config`, `--fail-fast`
-
-Example:
-
-```bash
-trading-cli run-sweep --config configs/sweep_job.yaml
-```
-
-#### `run-walk-forward`
-
-Purpose: run walk-forward evaluation from a YAML or JSON config file.
-
-Important arguments: `--config`
-
-Example:
-
-```bash
-trading-cli run-walk-forward --config configs/walkforward_job.yaml
-```
-
-### Paper Trading And Broker Preview Commands
-
-#### `paper-run`
-
-Purpose: run one paper-trading cycle, update paper state, and write artifacts.
-
-Important arguments: `--symbols` or `--universe`, `--signal-source`, `--strategy`, `--top-n`, `--timing`, `--state-path`, `--output-dir`, `--auto-apply-fills`, `--composite-artifact-dir`
-
-Example:
-
-```bash
-trading-cli paper-run --symbols AAPL MSFT NVDA --signal-source composite --composite-artifact-dir artifacts/alpha_research --top-n 5 --timing next_bar --state-path artifacts/paper/paper_state.json --output-dir artifacts/paper --auto-apply-fills
-```
-
-#### `daily-paper-job`
-
-Purpose: run the daily paper workflow for a legacy or composite-driven strategy.
-
-Important arguments: `--symbols` or `--universe`, `--signal-source`, `--strategy`, `--top-n`, `--timing`, `--state-path`, `--output-dir`
-
-Example:
-
-```bash
-trading-cli daily-paper-job --universe magnificent7 --signal-source composite --composite-artifact-dir artifacts/alpha_research --top-n 5 --state-path artifacts/paper/paper_state.json --output-dir artifacts/paper --timing next_bar
-```
-
-#### `paper-report`
-
-Purpose: summarize a paper-trading account directory and optionally write report artifacts.
-
-Important arguments: `--account-dir`, `--output-dir`
-
-Example:
-
-```bash
-trading-cli paper-report --account-dir artifacts/paper --output-dir artifacts/paper/report
-```
-
-#### `live-dry-run`
-
-Purpose: compute live broker rebalance orders without sending them.
-
-Important arguments: `--symbols` or `--universe`, `--strategy`, `--top-n`, `--broker`, `--mock-equity`, `--mock-cash`, `--mock-positions-path`, `--order-type`, `--time-in-force`
-
-Example:
-
-```bash
-trading-cli live-dry-run --universe magnificent7 --strategy sma_cross --top-n 5 --broker mock --mock-equity 100000 --mock-cash 100000 --order-type market --time-in-force day
-```
-
-### Alpha Research Commands
-
-#### `alpha-research`
-
-Purpose: run the full cross-sectional alpha workflow for one universe or symbol set, including evaluation, promotion, redundancy filtering, composite construction, portfolio backtest, robustness, implementability, and experiment registration.
-
-Important arguments: `--symbols` or `--universe`, `--feature-dir`, `--signal-family`, `--lookbacks`, `--horizons`, `--portfolio-top-n`, `--commission`, `--min-price`, `--min-avg-dollar-volume`, `--regime-aware-enabled`, `--output-dir`, `--experiment-tracker-dir`
-
-Example:
-
-```bash
-trading-cli alpha-research --universe magnificent7 --feature-dir data/features --signal-family momentum --lookbacks 5 10 20 60 --horizons 1 5 20 --portfolio-top-n 5 --commission 0.001 --min-price 5 --min-avg-dollar-volume 5000000 --regime-aware-enabled --output-dir artifacts/alpha_research --experiment-tracker-dir artifacts/experiment_tracking
-```
-
-#### `alpha-research-loop`
-
-Purpose: run the automated alpha discovery loop with candidate generation, deduplication, promotion, and registry updates.
-
-Important arguments: `--symbols` or `--universe`, `--feature-dir`, `--signal-families`, `--lookbacks`, `--horizons`, `--vol-windows`, `--combo-thresholds`, `--schedule-frequency`, `--force`, `--max-iterations`, `--output-dir`
-
-Example:
-
-```bash
-trading-cli alpha-research-loop --universe nasdaq100 --feature-dir data/features --signal-families momentum mean_reversion volatility feature_combo --lookbacks 5 10 20 60 --vol-windows 10 20 60 --combo-thresholds 0.5 1.0 --horizons 1 5 20 --schedule-frequency daily --max-iterations 1 --output-dir artifacts/alpha_research_loop
-```
-
-### Experiment Tracking Commands
-
-#### `experiments-list`
-
-Purpose: list recent research and paper-trading experiments from the shared registry.
-
-Important arguments: `--tracker-dir`, `--limit`
-
-Example:
-
-```bash
-trading-cli experiments-list --tracker-dir artifacts/experiment_tracking --limit 10
-```
-
-#### `experiments-latest-model`
-
-Purpose: show the latest approved research or composite configuration snapshot from the experiment tracker.
-
-Important arguments: `--tracker-dir`
-
-Example:
-
-```bash
-trading-cli experiments-latest-model --tracker-dir artifacts/experiment_tracking
-```
-
-#### `experiments-dashboard`
-
-Purpose: build a summary dashboard artifact from the experiment registry.
-
-Important arguments: `--tracker-dir`, `--output-dir`, `--top-metric`, `--limit`
-
-Example:
-
-```bash
-trading-cli experiments-dashboard --tracker-dir artifacts/experiment_tracking --output-dir artifacts/experiment_tracking --top-metric portfolio_sharpe --limit 10
-```
-
-### Scheduled Research Operations Commands
-
-#### `research-refresh`
-
-Purpose: run the scheduled research refresh, evaluate new or stale candidates, and persist a new approved configuration snapshot.
-
-Important arguments: `--symbols` or `--universe`, `--feature-dir`, `--signal-families`, `--schedule-frequency`, `--stale-after-days`, `--tracker-dir`, `--force`, `--output-dir`
-
-Example:
-
-```bash
-trading-cli research-refresh --universe sp500 --feature-dir data/features --signal-families momentum mean_reversion volatility feature_combo --lookbacks 5 10 20 60 --horizons 1 5 20 --schedule-frequency daily --stale-after-days 30 --tracker-dir artifacts/experiment_tracking --output-dir artifacts/research_refresh
-```
-
-#### `research-monitor`
-
-Purpose: build a monitoring report and drift alerts from recent alpha and paper-trading artifacts.
-
-Important arguments: `--tracker-dir`, `--snapshot-dir`, `--output-dir`, `--recent-paper-runs`, `--performance-degradation-buffer`, `--turnover-spike-multiple`, `--concentration-spike-multiple`, `--signal-churn-threshold`
-
-Example:
-
-```bash
-trading-cli research-monitor --tracker-dir artifacts/experiment_tracking --snapshot-dir artifacts/research_refresh/approved_configuration_snapshots --output-dir artifacts/research_monitoring --recent-paper-runs 10
-```
-
-#### `approved-config-diff`
-
-Purpose: compare the latest approved configuration snapshot with the previous one.
-
-Important arguments: `--snapshot-dir`
-
-Example:
-
-```bash
-trading-cli approved-config-diff --snapshot-dir artifacts/research_refresh/approved_configuration_snapshots
-```
-
-### Multi-Universe Commands
-
-#### `multi-universe-alpha-research`
-
-Purpose: run the alpha research workflow across multiple named universes and build comparison artifacts.
-
-Important arguments: `--universes`, `--feature-dir`, `--signal-family`, `--lookbacks`, `--horizons`, `--portfolio-top-n`, `--regime-aware-enabled`, `--output-dir`, `--experiment-tracker-dir`
-
-Example:
-
-```bash
-trading-cli multi-universe-alpha-research --universes sp500 nasdaq100 liquid_top_100 --feature-dir data/features --signal-family momentum --lookbacks 5 10 20 60 --horizons 1 5 20 --portfolio-top-n 10 --regime-aware-enabled --output-dir artifacts/multi_universe_alpha_research --experiment-tracker-dir artifacts/experiment_tracking
-```
-
-#### `multi-universe-report`
-
-Purpose: rebuild a comparison report from existing per-universe research outputs.
-
-Important arguments: `--output-dir`
-
-Example:
-
-```bash
-trading-cli multi-universe-report --output-dir artifacts/multi_universe_alpha_research
-```
-
-### Live Control Commands
-
-#### `validate-live`
-
-Purpose: run live execution control checks and write artifacts without sending orders.
-
-Important arguments: `--symbols` or `--universe`, `--signal-source`, `--composite-artifact-dir`, `--approval-artifact`, `--max-gross-exposure`, `--max-order-notional`, `--max-daily-turnover`, `--min-cash-reserve`, `--drift-alerts-path`, `--output-dir`
-
-Example:
-
-```bash
-trading-cli validate-live --universe magnificent7 --signal-source composite --composite-artifact-dir artifacts/alpha_research --top-n 5 --broker mock --approval-artifact artifacts/research_refresh/approved_configuration_snapshots/latest_approved_configuration.json --drift-alerts-path artifacts/research_monitoring/drift_alerts.csv --max-gross-exposure 1.0 --max-order-notional 25000 --max-daily-turnover 0.5 --min-cash-reserve 0.05 --output-dir artifacts/live_execution
-```
-
-#### `execute-live`
-
-Purpose: run the same live control checks and only submit orders when approval and safety conditions are satisfied.
-
-Important arguments: `--symbols` or `--universe`, `--signal-source`, `--composite-artifact-dir`, `--approved`, `--approval-artifact`, `--kill-switch`, `--blocked-symbols`, `--output-dir`
-
-Example:
-
-```bash
-trading-cli execute-live --universe magnificent7 --signal-source composite --composite-artifact-dir artifacts/alpha_research --top-n 5 --broker mock --approved --approval-artifact artifacts/research_refresh/approved_configuration_snapshots/latest_approved_configuration.json --output-dir artifacts/live_execution
-```
+Config-driven reproducible mode is now folded into grouped commands where practical:
+
+- `trading-cli research run --config ...`
+- `trading-cli research sweep --config ...`
+- `trading-cli research walkforward --config ...`
+
+## Migration Notes
+
+Legacy flat commands still work through compatibility rewrites and print a deprecation note on use. Common mappings:
+
+- `ingest` -> `data ingest`
+- `features` -> `data features`
+- `list-universes` -> `data universes list`
+- `export-universes` -> `data universes export`
+- `research` -> `research run`
+- `sweep` -> `research sweep`
+- `walkforward` -> `research walkforward`
+- `pipeline` -> `research pipeline`
+- `alpha-research` -> `research alpha`
+- `alpha-research-loop` -> `research loop`
+- `multi-universe-alpha-research` -> `research multi-universe`
+- `multi-universe-report` -> `research multi-universe-report`
+- `paper-run` -> `paper run`
+- `daily-paper-job` -> `paper daily`
+- `paper-report` -> `paper report`
+- `live-dry-run` -> `live dry-run`
+- `validate-live` -> `live validate`
+- `execute-live` -> `live execute`
+- `experiments-list` -> `experiments list`
+- `experiments-latest-model` -> `experiments latest`
+- `experiments-dashboard` -> `experiments dashboard`
+- `approved-config-diff` -> `experiments diff`
+
+## Canonical Schema Contract
+
+Research-facing data loading now uses a shared canonical schema normalization layer in `src/trading_platform/data/canonical.py`.
+
+Expected internal columns:
+
+- required: `timestamp`, `close`, `symbol`
+- optional when available: `open`, `high`, `low`, `volume`, `dollar_volume`
+
+Normalization rules:
+
+- `timestamp`, `date`, `Date`, and `DatetimeIndex` are normalized to `timestamp`
+- `close`, `Close`, `adj_close`, `Adj Close`, and `adjusted_close` are normalized to `close`
+- common OHLCV aliases are normalized to lowercase canonical names
+- `symbol` is injected when missing
+- extra columns are preserved
+
+This canonical loader is used by `alpha_lab`, research prep paths, and signal-loading paths so schema quirks are handled once instead of in multiple ad hoc readers.
 
 ## Typical Workflows
 
 ### Basic Research Workflow
 
-1. Run `ingest` for a universe or explicit symbols.
-2. Run `features` to build parquet feature datasets.
-3. Run `research`, `sweep`, `walkforward`, `portfolio`, or `portfolio-topn` for legacy strategies.
-4. Inspect outputs under `artifacts/` or a command-specific output directory.
+1. Run `data ingest` for a universe or explicit symbols.
+2. Run `data features` to build parquet feature datasets.
+3. Run `research run`, `research sweep`, `research walkforward`, `portfolio backtest`, or `portfolio topn`.
+4. Inspect artifacts under the selected output directory.
 
 ### Alpha Discovery Workflow
 
-1. Build feature parquet files with `features`.
-2. Run `alpha-research` for focused cross-sectional evaluation.
-3. Run `alpha-research-loop` to discover new candidates incrementally.
-4. Review `leaderboard.csv`, `promoted_signals.csv`, `rejected_signals.csv`, `near_miss_signals.csv`, `signal_family_summary.csv`, and `feature_availability_report.csv`.
-5. Register and compare runs with `experiments-list` and `experiments-dashboard`.
+1. Build features with `data features`.
+2. Run `research alpha` for focused cross-sectional evaluation.
+3. Run `research loop` for incremental candidate discovery and registry updates.
+4. Review `leaderboard.csv`, `promoted_signals.csv`, `near_miss_signals.csv`, `signal_family_summary.csv`, and `feature_availability_report.csv`.
+5. Register and compare runs with `experiments list` and `experiments dashboard`.
 
-### Multi-Universe Workflow
+### Deployment Workflow
 
-1. Ensure named universes exist in the registry with `list-universes`.
-2. Run `multi-universe-alpha-research`.
-3. Review per-universe subdirectories and the cross-universe comparison files in the root output directory.
-4. Rebuild the comparison-only summary later with `multi-universe-report`.
-
-### Paper Trading Workflow
-
-1. Produce approved alpha artifacts with `alpha-research` or an approved configuration snapshot with `research-refresh`.
-2. Run `paper-run` or `daily-paper-job` with `--signal-source composite` and `--composite-artifact-dir`.
-3. Inspect `paper_orders.csv`, `approved_target_weights.csv`, `paper_summary.json`, and paper ledgers.
-4. Use `paper-report` to summarize account behavior over time.
-
-### Live Validation Workflow
-
-1. Run `research-monitor` and review `drift_alerts.csv`.
-2. Run `validate-live` to generate a pre-trade decision without sending orders.
-3. Review `pretrade_risk_report.json`, `blocked_orders_report.csv`, `live_execution_decision.json`, and `approval_status_snapshot.json`.
-4. Only run `execute-live` when the approval artifact is current and all critical checks pass.
+1. Produce research outputs with `research alpha` or `research refresh`.
+2. Use the deployment-facing artifact `approved/approved_model_state.json` for paper and live workflows.
+3. Run `paper run` or `paper daily` with `--approved-model-state`.
+4. Run `live validate` before any `live execute` invocation.
 
 ## Artifacts And Outputs
+
+Research outputs remain in the main artifact directory, while deployment-facing artifacts are separated under `approved/` where supported.
 
 Common output locations:
 
 - `data/features/*.parquet`: feature datasets
-- `artifacts/alpha_research/`: leaderboard, folds, promoted and rejected signals, redundancy reports, composite scores, dynamic weights, regime outputs, portfolio outputs, robustness, implementability, and diagnostics JSON
-- `artifacts/alpha_research_loop/`: signal registry, research history, promoted and rejected signals, near-miss diagnostics, feature availability diagnostics, and schedule metadata
+- `artifacts/alpha_research/`: exploratory research outputs such as leaderboards, folds, diagnostics, portfolio results, robustness, and implementability reports
+- `artifacts/alpha_research/approved/approved_model_state.json`: deployment-facing approved model-state package
+- `artifacts/alpha_research_loop/`: signal registry, history, promoted/rejected signals, near-miss diagnostics, and schedule metadata
+- `artifacts/alpha_research_loop/approved/approved_model_state.json`: approved deployment package built from loop outputs
 - `artifacts/experiment_tracking/`: experiment registry, dashboard summary, and latest model state
-- `artifacts/research_refresh/`: refresh history and approved configuration snapshots
-- `artifacts/research_monitoring/`: monitoring report and drift alerts
-- `artifacts/multi_universe_alpha_research/`: per-universe result folders and cross-universe comparison artifacts
-- `artifacts/paper/`: paper state, orders, target weights, fills, summaries, and optional composite diagnostics
+- `artifacts/research_refresh/approved_configuration_snapshots/`: scheduled approval snapshots and diffs
+- `artifacts/paper/`: paper state, orders, target weights, fills, summaries, and composite diagnostics
 - `artifacts/live_execution/`: validation or execution-control reports
 
 Useful files to inspect first:
 
 - `leaderboard.csv`
 - `promoted_signals.csv`
-- `rejected_signals.csv`
 - `near_miss_signals.csv`
 - `portfolio_metrics.csv`
 - `robustness_report.csv`
 - `implementability_report.csv`
+- `approved/approved_model_state.json`
 - `experiment_registry.csv`
 - `monitoring_report.json`
 - `drift_alerts.csv`

@@ -33,6 +33,7 @@ from trading_platform.research.alpha_lab.composite_portfolio import (
     run_composite_portfolio_backtest,
     run_stress_tests,
 )
+from trading_platform.research.approved_model_state import write_approved_model_state
 from trading_platform.research.alpha_lab.folds import build_walk_forward_folds
 from trading_platform.research.alpha_lab.labels import add_forward_return_labels
 from trading_platform.research.alpha_lab.metrics import (
@@ -903,6 +904,7 @@ def run_alpha_research(
         "composite_portfolio": portfolio_config.to_dict(),
     }
     diagnostics_path.write_text(json.dumps(diagnostics, indent=2, default=str))
+    approved_model_state_paths = write_approved_model_state(artifact_dir=output_dir)
 
     return {
         "leaderboard_path": str(leaderboard_path_csv),
@@ -931,4 +933,5 @@ def run_alpha_research(
         "implementability_report_path": str(implementability_report_path_csv),
         "liquidity_filtered_portfolio_metrics_path": str(liquidity_filtered_metrics_path_csv),
         "capacity_scenarios_path": str(capacity_scenarios_path_csv),
+        **approved_model_state_paths,
     }

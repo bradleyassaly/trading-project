@@ -9,6 +9,7 @@ import pandas as pd
 from trading_platform.execution.policies import ExecutionPolicy
 from trading_platform.execution.transforms import build_executed_weights
 from trading_platform.paper.models import PaperTradingConfig, PaperSignalSnapshot
+from trading_platform.research.approved_model_state import load_approved_model_state
 from trading_platform.research.alpha_lab.composite import (
     DEFAULT_COMPOSITE_CONFIG,
     build_component_weights,
@@ -159,13 +160,32 @@ def build_composite_paper_snapshot(
     config: PaperTradingConfig,
 ) -> tuple[PaperSignalSnapshot, dict[str, Any]]:
     artifact_dir = Path(config.composite_artifact_dir) if config.composite_artifact_dir else None
-    if artifact_dir is None:
-        raise ValueError("Composite paper trading requires composite_artifact_dir")
+    approved_model_state: dict[str, Any] = {}
+    approved_model_state_path = config.approved_model_state_path
 
-    promoted_signals_df = _read_artifact_csv(artifact_dir, "promoted_signals.csv")
-    redundancy_df = _read_artifact_csv(artifact_dir, "redundancy_report.csv")
-    if redundancy_df.empty:
-        redundancy_df = _read_artifact_csv(artifact_dir, "redundancy_diagnostics.csv")
+    if approved_model_state_path:
+        approved_model_state = load_approved_model_state(approved_model_state_path)
+        if artifact_dir is None and approved_model_state.get("source_artifact_dir"):
+            artifact_dir = Path(str(approved_model_state["source_artifact_dir"]))
+    elif artifact_dir is not None:
+        try:
+            approved_model_state = load_approved_model_state(artifact_dir)
+            approved_model_state_path = str((artifact_dir / "approved" / "approved_model_state.json"))
+        except FileNotFoundError:
+            approved_model_state = {}
+
+    if artifact_dir is None and not approved_model_state:
+        raise ValueError("Composite paper trading requires approved_model_state or composite_artifact_dir")
+
+    promoted_signals_df = pd.DataFrame(approved_model_state.get("promoted_signals", []))
+    if promoted_signals_df.empty and artifact_dir is not None:
+        promoted_signals_df = _read_artifact_csv(artifact_dir, "promoted_signals.csv")
+
+    redundancy_df = pd.DataFrame(approved_model_state.get("redundancy_report", []))
+    if redundancy_df.empty and artifact_dir is not None:
+        redundancy_df = _read_artifact_csv(artifact_dir, "redundancy_report.csv")
+        if redundancy_df.empty:
+            redundancy_df = _read_artifact_csv(artifact_dir, "redundancy_diagnostics.csv")
 
     feature_data_by_symbol: dict[str, pd.DataFrame] = {}
     skipped_symbols: list[str] = []
@@ -220,12 +240,30 @@ def build_composite_paper_snapshot(
             diagnostics,
         )
 
-    selected_signals_df, excluded_rows = select_low_redundancy_signals(
-        promoted_signals_df,
-        redundancy_df,
-        horizon=int(config.composite_horizon),
-        redundancy_corr_threshold=DEFAULT_COMPOSITE_CONFIG.redundancy_corr_threshold,
+    composite_inputs = approved_model_state.get("composite_inputs", {})
+    selected_signals_records = (
+        composite_inputs.get("horizons", {})
+        .get(str(int(config.composite_horizon)), {})
+        .get("selected_signals", [])
+        if isinstance(composite_inputs, dict)
+        else []
     )
+    excluded_rows = (
+        composite_inputs.get("horizons", {})
+        .get(str(int(config.composite_horizon)), {})
+        .get("excluded_signals", [])
+        if isinstance(composite_inputs, dict)
+        else []
+    )
+    if selected_signals_records:
+        selected_signals_df = pd.DataFrame(selected_signals_records)
+    else:
+        selected_signals_df, excluded_rows = select_low_redundancy_signals(
+            promoted_signals_df,
+            redundancy_df,
+            horizon=int(config.composite_horizon),
+            redundancy_corr_threshold=DEFAULT_COMPOSITE_CONFIG.redundancy_corr_threshold,
+        )
     score_panel_by_candidate, _ = _build_component_panel(
         selected_signals_df,
         feature_data_by_symbol=feature_data_by_symbol,
@@ -263,7 +301,8 @@ def build_composite_paper_snapshot(
     ].copy()
     diagnostics = {
         "signal_source": "composite",
-        "artifact_dir": str(artifact_dir),
+        "artifact_dir": str(artifact_dir) if artifact_dir is not None else "",
+        "approved_model_state_path": approved_model_state_path or "",
         "selected_signals": selected_signals_df[
             ["signal_family", "lookback", "horizon"]
         ].to_dict(orient="records")

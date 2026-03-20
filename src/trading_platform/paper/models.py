@@ -29,6 +29,7 @@ class PaperTradingConfig:
     min_trade_dollars: float = 25.0
     lot_size: int = 1
     reserve_cash_pct: float = 0.0
+    approved_model_state_path: str | None = None
     composite_artifact_dir: str | None = None
     composite_horizon: int = 1
     composite_weighting_scheme: str = "equal"

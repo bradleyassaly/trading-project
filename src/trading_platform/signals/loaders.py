@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from trading_platform.data.canonical import load_research_frame_from_parquet
 from trading_platform.settings import FEATURES_DIR
 
 
@@ -17,4 +18,4 @@ def load_feature_frame(symbol: str) -> pd.DataFrame:
     if path is None:
         raise FileNotFoundError(f"Feature file not found for {symbol} in {FEATURES_DIR}")
 
-    return pd.read_parquet(path)
+    return load_research_frame_from_parquet(path, symbol=symbol)
