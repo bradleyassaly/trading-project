@@ -25,9 +25,18 @@ def cmd_alpha_research(args) -> None:
         portfolio_long_quantile=args.portfolio_long_quantile,
         portfolio_short_quantile=args.portfolio_short_quantile,
         commission=args.commission,
+        min_price=args.min_price,
+        min_volume=args.min_volume,
+        min_avg_dollar_volume=args.min_avg_dollar_volume,
+        max_adv_participation=args.max_adv_participation,
+        max_position_pct_of_adv=args.max_position_pct_of_adv,
+        max_notional_per_name=args.max_notional_per_name,
+        slippage_bps_per_turnover=args.slippage_bps_per_turnover,
+        slippage_bps_per_adv=args.slippage_bps_per_adv,
     )
 
     print("Alpha research complete.")
     print(f"Leaderboard: {result['leaderboard_path']}")
     print(f"Detailed results: {result['fold_results_path']}")
     print(f"Composite portfolio returns: {result['portfolio_returns_path']}")
+    print(f"Implementability report: {result['implementability_report_path']}")

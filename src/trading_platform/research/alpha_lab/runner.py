@@ -251,6 +251,14 @@ def run_alpha_research(
     portfolio_long_quantile: float = DEFAULT_COMPOSITE_PORTFOLIO_CONFIG.long_quantile,
     portfolio_short_quantile: float = DEFAULT_COMPOSITE_PORTFOLIO_CONFIG.short_quantile,
     commission: float = DEFAULT_COMPOSITE_PORTFOLIO_CONFIG.commission,
+    min_price: float | None = DEFAULT_COMPOSITE_PORTFOLIO_CONFIG.min_price,
+    min_volume: float | None = DEFAULT_COMPOSITE_PORTFOLIO_CONFIG.min_volume,
+    min_avg_dollar_volume: float | None = DEFAULT_COMPOSITE_PORTFOLIO_CONFIG.min_avg_dollar_volume,
+    max_adv_participation: float = DEFAULT_COMPOSITE_PORTFOLIO_CONFIG.max_adv_participation,
+    max_position_pct_of_adv: float = DEFAULT_COMPOSITE_PORTFOLIO_CONFIG.max_position_pct_of_adv,
+    max_notional_per_name: float | None = DEFAULT_COMPOSITE_PORTFOLIO_CONFIG.max_notional_per_name,
+    slippage_bps_per_turnover: float = DEFAULT_COMPOSITE_PORTFOLIO_CONFIG.slippage_bps_per_turnover,
+    slippage_bps_per_adv: float = DEFAULT_COMPOSITE_PORTFOLIO_CONFIG.slippage_bps_per_adv,
 ) -> dict[str, str]:
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -506,6 +514,14 @@ def run_alpha_research(
         long_quantile=portfolio_long_quantile,
         short_quantile=portfolio_short_quantile,
         commission=commission,
+        min_price=min_price,
+        min_volume=min_volume,
+        min_avg_dollar_volume=min_avg_dollar_volume,
+        max_adv_participation=max_adv_participation,
+        max_position_pct_of_adv=max_position_pct_of_adv,
+        max_notional_per_name=max_notional_per_name,
+        slippage_bps_per_turnover=slippage_bps_per_turnover,
+        slippage_bps_per_adv=slippage_bps_per_adv,
     )
     (
         composite_portfolio_returns_df,
@@ -536,6 +552,18 @@ def run_alpha_research(
         symbol_data=symbol_data,
         config=portfolio_config,
     )
+    implementability_report_df = composite_portfolio_diagnostics.get(
+        "implementability_report",
+        pd.DataFrame(),
+    )
+    liquidity_filtered_portfolio_metrics_df = composite_portfolio_diagnostics.get(
+        "liquidity_filtered_portfolio_metrics",
+        pd.DataFrame(),
+    )
+    capacity_scenarios_df = composite_portfolio_diagnostics.get(
+        "capacity_scenarios",
+        pd.DataFrame(),
+    )
 
     detailed_path_csv = output_dir / "fold_results.csv"
     leaderboard_path_csv = output_dir / "leaderboard.csv"
@@ -565,6 +593,12 @@ def run_alpha_research(
     regime_performance_path_parquet = output_dir / "regime_performance.parquet"
     stress_test_results_path_csv = output_dir / "stress_test_results.csv"
     stress_test_results_path_parquet = output_dir / "stress_test_results.parquet"
+    implementability_report_path_csv = output_dir / "implementability_report.csv"
+    implementability_report_path_parquet = output_dir / "implementability_report.parquet"
+    liquidity_filtered_metrics_path_csv = output_dir / "liquidity_filtered_portfolio_metrics.csv"
+    liquidity_filtered_metrics_path_parquet = output_dir / "liquidity_filtered_portfolio_metrics.parquet"
+    capacity_scenarios_path_csv = output_dir / "capacity_scenarios.csv"
+    capacity_scenarios_path_parquet = output_dir / "capacity_scenarios.parquet"
     diagnostics_path = output_dir / "signal_diagnostics.json"
 
     detailed_df.to_csv(detailed_path_csv, index=False)
@@ -580,6 +614,9 @@ def run_alpha_research(
     robustness_report_df.to_csv(robustness_report_path_csv, index=False)
     regime_performance_df.to_csv(regime_performance_path_csv, index=False)
     stress_test_results_df.to_csv(stress_test_results_path_csv, index=False)
+    implementability_report_df.to_csv(implementability_report_path_csv, index=False)
+    liquidity_filtered_portfolio_metrics_df.to_csv(liquidity_filtered_metrics_path_csv, index=False)
+    capacity_scenarios_df.to_csv(capacity_scenarios_path_csv, index=False)
     detailed_df.to_parquet(detailed_path_parquet, index=False)
     leaderboard_df.to_parquet(leaderboard_path_parquet, index=False)
     promoted_signals_df.to_parquet(promoted_signals_path_parquet, index=False)
@@ -593,14 +630,21 @@ def run_alpha_research(
     robustness_report_df.to_parquet(robustness_report_path_parquet, index=False)
     regime_performance_df.to_parquet(regime_performance_path_parquet, index=False)
     stress_test_results_df.to_parquet(stress_test_results_path_parquet, index=False)
+    implementability_report_df.to_parquet(implementability_report_path_parquet, index=False)
+    liquidity_filtered_portfolio_metrics_df.to_parquet(liquidity_filtered_metrics_path_parquet, index=False)
+    capacity_scenarios_df.to_parquet(capacity_scenarios_path_parquet, index=False)
     composite_diagnostics_path.write_text(json.dumps(composite_diagnostics, indent=2, default=str))
+    portfolio_diagnostics_payload: dict[str, object] = {}
+    for key, value in composite_portfolio_diagnostics.items():
+        if key == "asset_returns_matrix":
+            continue
+        if isinstance(value, pd.DataFrame):
+            portfolio_diagnostics_payload[key] = value.to_dict(orient="records")
+        else:
+            portfolio_diagnostics_payload[key] = value
     portfolio_diagnostics_path.write_text(
         json.dumps(
-            {
-                key: value
-                for key, value in composite_portfolio_diagnostics.items()
-                if key != "asset_returns_matrix"
-            },
+            portfolio_diagnostics_payload,
             indent=2,
             default=str,
         )
@@ -639,4 +683,7 @@ def run_alpha_research(
         "robustness_report_path": str(robustness_report_path_csv),
         "regime_performance_path": str(regime_performance_path_csv),
         "stress_test_results_path": str(stress_test_results_path_csv),
+        "implementability_report_path": str(implementability_report_path_csv),
+        "liquidity_filtered_portfolio_metrics_path": str(liquidity_filtered_metrics_path_csv),
+        "capacity_scenarios_path": str(capacity_scenarios_path_csv),
     }

@@ -830,6 +830,54 @@ def build_parser() -> argparse.ArgumentParser:
         default=0.0,
         help="Turnover-based transaction cost used in the composite portfolio backtest.",
     )
+    alpha_research_parser.add_argument(
+        "--min-price",
+        type=float,
+        default=None,
+        help="Optional minimum price required for a name to remain investable.",
+    )
+    alpha_research_parser.add_argument(
+        "--min-volume",
+        type=float,
+        default=None,
+        help="Optional minimum raw share volume required for a name to remain investable.",
+    )
+    alpha_research_parser.add_argument(
+        "--min-avg-dollar-volume",
+        type=float,
+        default=None,
+        help="Optional minimum rolling average dollar volume required for a name to remain investable.",
+    )
+    alpha_research_parser.add_argument(
+        "--max-adv-participation",
+        type=float,
+        default=0.05,
+        help="Maximum participation rate used in capacity estimates.",
+    )
+    alpha_research_parser.add_argument(
+        "--max-position-pct-of-adv",
+        type=float,
+        default=0.1,
+        help="Maximum single-name position size as a fraction of average dollar volume.",
+    )
+    alpha_research_parser.add_argument(
+        "--max-notional-per-name",
+        type=float,
+        default=None,
+        help="Optional notional cap per name used in capacity estimates.",
+    )
+    alpha_research_parser.add_argument(
+        "--slippage-bps-per-turnover",
+        type=float,
+        default=0.0,
+        help="Linear slippage in basis points per unit of turnover.",
+    )
+    alpha_research_parser.add_argument(
+        "--slippage-bps-per-adv",
+        type=float,
+        default=10.0,
+        help="Additional slippage in basis points that scales with fraction of ADV traded.",
+    )
     alpha_research_parser.set_defaults(func=cmd_alpha_research)
 
     return parser
