@@ -30,6 +30,15 @@ from trading_platform.cli.commands.alpha_research_loop import cmd_alpha_research
 from trading_platform.cli.commands.experiments_dashboard import cmd_experiments_dashboard
 from trading_platform.cli.commands.experiments_latest_model import cmd_experiments_latest_model
 from trading_platform.cli.commands.experiments_list import cmd_experiments_list
+from trading_platform.cli.commands.research_refresh import cmd_research_refresh
+from trading_platform.cli.commands.research_monitor import cmd_research_monitor
+from trading_platform.cli.commands.approved_config_diff import cmd_approved_config_diff
+from trading_platform.cli.commands.multi_universe_alpha_research import (
+    cmd_multi_universe_alpha_research,
+)
+from trading_platform.cli.commands.multi_universe_report import cmd_multi_universe_report
+from trading_platform.cli.commands.validate_live import cmd_validate_live
+from trading_platform.cli.commands.execute_live import cmd_execute_live
 
 def add_execution_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
@@ -131,6 +140,104 @@ def add_experiment_tracker_argument(parser: argparse.ArgumentParser) -> None:
         type=str,
         default=None,
         help="Optional directory used to persist the shared experiment registry and reports.",
+    )
+
+
+def add_live_control_arguments(parser: argparse.ArgumentParser) -> None:
+    add_composite_paper_arguments(parser)
+    parser.add_argument(
+        "--kill-switch",
+        action="store_true",
+        help="Abort before submission regardless of target portfolio state.",
+    )
+    parser.add_argument(
+        "--kill-switch-path",
+        type=str,
+        default=None,
+        help="Abort if this file exists.",
+    )
+    parser.add_argument(
+        "--blocked-symbols",
+        nargs="*",
+        default=None,
+        help="Optional list of symbols that must never be traded.",
+    )
+    parser.add_argument(
+        "--max-gross-exposure",
+        type=float,
+        default=1.0,
+        help="Maximum allowed gross exposure after trades.",
+    )
+    parser.add_argument(
+        "--max-net-exposure",
+        type=float,
+        default=1.0,
+        help="Maximum allowed absolute net exposure after trades.",
+    )
+    parser.add_argument(
+        "--max-position-weight-limit",
+        type=float,
+        default=None,
+        help="Maximum allowed absolute single-name target weight after trades.",
+    )
+    parser.add_argument(
+        "--max-group-exposure",
+        type=float,
+        default=None,
+        help="Maximum allowed aggregate exposure per symbol group where mappings exist.",
+    )
+    parser.add_argument(
+        "--max-order-notional",
+        type=float,
+        default=None,
+        help="Maximum allowed single-order notional.",
+    )
+    parser.add_argument(
+        "--max-daily-turnover",
+        type=float,
+        default=None,
+        help="Maximum allowed turnover estimate for the rebalance.",
+    )
+    parser.add_argument(
+        "--min-cash-reserve",
+        type=float,
+        default=0.0,
+        help="Minimum required cash reserve fraction after trades.",
+    )
+    parser.add_argument(
+        "--max-data-staleness-days",
+        type=int,
+        default=3,
+        help="Maximum allowed age of the latest signal/price timestamp.",
+    )
+    parser.add_argument(
+        "--max-config-staleness-days",
+        type=int,
+        default=30,
+        help="Maximum allowed age of the approval/config snapshot artifact.",
+    )
+    parser.add_argument(
+        "--approval-artifact",
+        type=str,
+        default=None,
+        help="Optional approval artifact JSON with fields such as approved and approved_at.",
+    )
+    parser.add_argument(
+        "--approved",
+        action="store_true",
+        help="Explicitly mark this run as approved for live execution.",
+    )
+    parser.add_argument(
+        "--drift-alerts-path",
+        type=str,
+        default=None,
+        help="Optional drift alerts CSV used to block execution on high-severity alerts.",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=str,
+        default="artifacts/live_execution",
+        help="Directory for live execution control artifacts.",
     )
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1206,5 +1313,499 @@ def build_parser() -> argparse.ArgumentParser:
         help="Maximum number of top experiments to include.",
     )
     experiments_dashboard_parser.set_defaults(func=cmd_experiments_dashboard)
+
+    research_refresh_parser = subparsers.add_parser(
+        "research-refresh",
+        help="Run the scheduled alpha discovery refresh and persist a new approved configuration snapshot",
+    )
+    research_refresh_parser.add_argument(
+        "--symbols",
+        nargs="+",
+        default=None,
+        help="Symbols to include in the automated alpha refresh.",
+    )
+    research_refresh_parser.add_argument(
+        "--universe",
+        type=str,
+        default=None,
+        help="Named universe to evaluate instead of passing --symbols.",
+    )
+    research_refresh_parser.add_argument(
+        "--feature-dir",
+        type=str,
+        default="data/features",
+        help="Directory containing per-symbol feature parquet files.",
+    )
+    research_refresh_parser.add_argument(
+        "--signal-families",
+        type=str,
+        nargs="+",
+        default=["momentum", "mean_reversion", "volatility", "feature_combo"],
+        help="Signal families to generate and test.",
+    )
+    research_refresh_parser.add_argument(
+        "--lookbacks",
+        type=int,
+        nargs="+",
+        default=[5, 10, 20, 60],
+        help="Lookback windows to test for each family.",
+    )
+    research_refresh_parser.add_argument(
+        "--horizons",
+        type=int,
+        nargs="+",
+        default=[1, 5, 20],
+        help="Forward return horizons to test for each family.",
+    )
+    research_refresh_parser.add_argument(
+        "--vol-windows",
+        type=int,
+        nargs="+",
+        default=[10, 20, 60],
+        help="Volatility windows to test for volatility-based signals.",
+    )
+    research_refresh_parser.add_argument(
+        "--combo-thresholds",
+        type=float,
+        nargs="+",
+        default=[0.5, 1.0],
+        help="Threshold multipliers used for simple feature-combination signals.",
+    )
+    research_refresh_parser.add_argument(
+        "--min-rows",
+        type=int,
+        default=126,
+        help="Minimum number of usable rows required per symbol.",
+    )
+    research_refresh_parser.add_argument(
+        "--top-quantile",
+        type=float,
+        default=0.2,
+        help="Top quantile threshold used for spread metrics.",
+    )
+    research_refresh_parser.add_argument(
+        "--bottom-quantile",
+        type=float,
+        default=0.2,
+        help="Bottom quantile threshold used for spread metrics.",
+    )
+    research_refresh_parser.add_argument(
+        "--output-dir",
+        type=str,
+        default="artifacts/research_refresh",
+        help="Directory where refresh artifacts will be written.",
+    )
+    research_refresh_parser.add_argument(
+        "--train-size",
+        type=int,
+        default=756,
+        help="Number of rows in each training window.",
+    )
+    research_refresh_parser.add_argument(
+        "--test-size",
+        type=int,
+        default=63,
+        help="Number of rows in each test window.",
+    )
+    research_refresh_parser.add_argument(
+        "--step-size",
+        type=int,
+        default=None,
+        help="Number of rows to advance after each fold. Defaults to test-size.",
+    )
+    research_refresh_parser.add_argument(
+        "--min-train-size",
+        type=int,
+        default=None,
+        help="Optional minimum train window size.",
+    )
+    research_refresh_parser.add_argument(
+        "--schedule-frequency",
+        type=str,
+        default="daily",
+        choices=["manual", "daily", "weekly"],
+        help="Scheduling hook used to decide when the refresh is due to run.",
+    )
+    research_refresh_parser.add_argument(
+        "--stale-after-days",
+        type=int,
+        default=None,
+        help="Optional age threshold for re-evaluating stale signal candidates.",
+    )
+    research_refresh_parser.add_argument(
+        "--tracker-dir",
+        type=str,
+        default="artifacts/experiment_tracking",
+        help="Optional experiment tracker directory used to enrich approved snapshots.",
+    )
+    research_refresh_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Run immediately even if the refresh schedule metadata says the loop is not due.",
+    )
+    research_refresh_parser.set_defaults(func=cmd_research_refresh)
+
+    research_monitor_parser = subparsers.add_parser(
+        "research-monitor",
+        help="Generate a file-based monitoring report and drift alerts from recent alpha and paper artifacts",
+    )
+    research_monitor_parser.add_argument(
+        "--tracker-dir",
+        type=str,
+        default="artifacts/experiment_tracking",
+        help="Directory containing the shared experiment registry.",
+    )
+    research_monitor_parser.add_argument(
+        "--output-dir",
+        type=str,
+        default="artifacts/research_monitoring",
+        help="Directory where monitoring artifacts will be written.",
+    )
+    research_monitor_parser.add_argument(
+        "--snapshot-dir",
+        type=str,
+        default="artifacts/research_refresh/approved_configuration_snapshots",
+        help="Directory containing approved configuration snapshots.",
+    )
+    research_monitor_parser.add_argument(
+        "--alpha-artifact-dir",
+        type=str,
+        default=None,
+        help="Optional alpha artifact directory override.",
+    )
+    research_monitor_parser.add_argument(
+        "--paper-artifact-dir",
+        type=str,
+        default=None,
+        help="Optional paper artifact directory override.",
+    )
+    research_monitor_parser.add_argument(
+        "--recent-paper-runs",
+        type=int,
+        default=10,
+        help="Number of recent paper runs to use for realized diagnostics.",
+    )
+    research_monitor_parser.add_argument(
+        "--performance-degradation-buffer",
+        type=float,
+        default=0.002,
+        help="Absolute buffer before recent paper returns trigger a degradation alert.",
+    )
+    research_monitor_parser.add_argument(
+        "--turnover-spike-multiple",
+        type=float,
+        default=1.5,
+        help="Multiple of expected turnover that triggers a turnover spike alert.",
+    )
+    research_monitor_parser.add_argument(
+        "--concentration-spike-multiple",
+        type=float,
+        default=1.5,
+        help="Multiple of expected top-position weight that triggers a concentration alert.",
+    )
+    research_monitor_parser.add_argument(
+        "--signal-churn-threshold",
+        type=int,
+        default=3,
+        help="Number of approved-signal additions/removals that triggers a churn alert.",
+    )
+    research_monitor_parser.set_defaults(func=cmd_research_monitor)
+
+    approved_config_diff_parser = subparsers.add_parser(
+        "approved-config-diff",
+        help="Show the current approved configuration versus the prior approved snapshot",
+    )
+    approved_config_diff_parser.add_argument(
+        "--snapshot-dir",
+        type=str,
+        default="artifacts/research_refresh/approved_configuration_snapshots",
+        help="Directory containing approved configuration snapshots.",
+    )
+    approved_config_diff_parser.set_defaults(func=cmd_approved_config_diff)
+
+    multi_universe_alpha_research_parser = subparsers.add_parser(
+        "multi-universe-alpha-research",
+        help="Run the full alpha research workflow across multiple named universes",
+    )
+    add_experiment_tracker_argument(multi_universe_alpha_research_parser)
+    multi_universe_alpha_research_parser.add_argument(
+        "--universes",
+        nargs="+",
+        required=True,
+        help="Named universes to evaluate in one job.",
+    )
+    multi_universe_alpha_research_parser.add_argument(
+        "--feature-dir",
+        type=str,
+        default="data/features",
+        help="Directory containing per-symbol feature parquet files.",
+    )
+    multi_universe_alpha_research_parser.add_argument(
+        "--signal-family",
+        type=str,
+        default="momentum",
+        choices=["momentum", "short_term_reversal", "vol_adjusted_momentum"],
+        help="Signal family to evaluate in each universe.",
+    )
+    multi_universe_alpha_research_parser.add_argument(
+        "--lookbacks",
+        type=int,
+        nargs="+",
+        default=[5, 10, 20, 60],
+        help="Lookback windows to test.",
+    )
+    multi_universe_alpha_research_parser.add_argument(
+        "--horizons",
+        type=int,
+        nargs="+",
+        default=[1, 5, 20],
+        help="Forward return horizons to test.",
+    )
+    multi_universe_alpha_research_parser.add_argument(
+        "--min-rows",
+        type=int,
+        default=126,
+        help="Minimum number of usable rows required per symbol.",
+    )
+    multi_universe_alpha_research_parser.add_argument(
+        "--top-quantile",
+        type=float,
+        default=0.2,
+        help="Top quantile threshold used for spread metrics.",
+    )
+    multi_universe_alpha_research_parser.add_argument(
+        "--bottom-quantile",
+        type=float,
+        default=0.2,
+        help="Bottom quantile threshold used for spread metrics.",
+    )
+    multi_universe_alpha_research_parser.add_argument(
+        "--output-dir",
+        type=str,
+        default="artifacts/multi_universe_alpha_research",
+        help="Directory where per-universe and comparison artifacts will be written.",
+    )
+    multi_universe_alpha_research_parser.add_argument(
+        "--train-size",
+        type=int,
+        default=756,
+        help="Number of rows in each training window.",
+    )
+    multi_universe_alpha_research_parser.add_argument(
+        "--test-size",
+        type=int,
+        default=63,
+        help="Number of rows in each test window.",
+    )
+    multi_universe_alpha_research_parser.add_argument(
+        "--step-size",
+        type=int,
+        default=None,
+        help="Number of rows to advance after each fold. Defaults to test-size.",
+    )
+    multi_universe_alpha_research_parser.add_argument(
+        "--min-train-size",
+        type=int,
+        default=None,
+        help="Optional minimum train window size.",
+    )
+    multi_universe_alpha_research_parser.add_argument(
+        "--portfolio-top-n",
+        type=int,
+        default=10,
+        help="Top-N size used for the composite long-only portfolio.",
+    )
+    multi_universe_alpha_research_parser.add_argument(
+        "--portfolio-long-quantile",
+        type=float,
+        default=0.2,
+        help="Top quantile used for the composite long-short portfolio.",
+    )
+    multi_universe_alpha_research_parser.add_argument(
+        "--portfolio-short-quantile",
+        type=float,
+        default=0.2,
+        help="Bottom quantile used for the composite long-short portfolio.",
+    )
+    multi_universe_alpha_research_parser.add_argument(
+        "--commission",
+        type=float,
+        default=0.0,
+        help="Turnover-based transaction cost used in the composite portfolio backtest.",
+    )
+    multi_universe_alpha_research_parser.add_argument(
+        "--min-price",
+        type=float,
+        default=None,
+        help="Optional minimum price required for a name to remain investable.",
+    )
+    multi_universe_alpha_research_parser.add_argument(
+        "--min-volume",
+        type=float,
+        default=None,
+        help="Optional minimum raw share volume required for a name to remain investable.",
+    )
+    multi_universe_alpha_research_parser.add_argument(
+        "--min-avg-dollar-volume",
+        type=float,
+        default=None,
+        help="Optional minimum rolling average dollar volume required for a name to remain investable.",
+    )
+    multi_universe_alpha_research_parser.add_argument(
+        "--max-adv-participation",
+        type=float,
+        default=0.05,
+        help="Maximum participation rate used in capacity estimates.",
+    )
+    multi_universe_alpha_research_parser.add_argument(
+        "--max-position-pct-of-adv",
+        type=float,
+        default=0.1,
+        help="Maximum single-name position size as a fraction of average dollar volume.",
+    )
+    multi_universe_alpha_research_parser.add_argument(
+        "--max-notional-per-name",
+        type=float,
+        default=None,
+        help="Optional notional cap per name used in capacity estimates.",
+    )
+    multi_universe_alpha_research_parser.add_argument(
+        "--slippage-bps-per-turnover",
+        type=float,
+        default=0.0,
+        help="Linear slippage in basis points per unit of turnover.",
+    )
+    multi_universe_alpha_research_parser.add_argument(
+        "--slippage-bps-per-adv",
+        type=float,
+        default=10.0,
+        help="Additional slippage in basis points that scales with fraction of ADV traded.",
+    )
+    multi_universe_alpha_research_parser.add_argument(
+        "--dynamic-recent-quality-window",
+        type=int,
+        default=20,
+        help="Lookback window in out-of-sample dates used for dynamic signal weighting.",
+    )
+    multi_universe_alpha_research_parser.add_argument(
+        "--dynamic-min-history",
+        type=int,
+        default=5,
+        help="Minimum out-of-sample dates before lifecycle rules move beyond promote state.",
+    )
+    multi_universe_alpha_research_parser.add_argument(
+        "--dynamic-downweight-mean-rank-ic",
+        type=float,
+        default=0.01,
+        help="Recent mean rank IC threshold below which active signals are downweighted.",
+    )
+    multi_universe_alpha_research_parser.add_argument(
+        "--dynamic-deactivate-mean-rank-ic",
+        type=float,
+        default=-0.02,
+        help="Recent mean rank IC threshold below which signals are deactivated.",
+    )
+    multi_universe_alpha_research_parser.add_argument(
+        "--regime-aware-enabled",
+        action="store_true",
+        help="Enable regime-aware signal weighting on top of the dynamic lifecycle weights.",
+    )
+    multi_universe_alpha_research_parser.add_argument(
+        "--regime-min-history",
+        type=int,
+        default=5,
+        help="Minimum same-regime out-of-sample observations before regime-aware weighting reacts.",
+    )
+    multi_universe_alpha_research_parser.add_argument(
+        "--regime-underweight-mean-rank-ic",
+        type=float,
+        default=0.01,
+        help="Same-regime mean rank IC threshold below which signals are underweighted.",
+    )
+    multi_universe_alpha_research_parser.add_argument(
+        "--regime-exclude-mean-rank-ic",
+        type=float,
+        default=-0.01,
+        help="Same-regime mean rank IC threshold below which signals are excluded.",
+    )
+    multi_universe_alpha_research_parser.set_defaults(func=cmd_multi_universe_alpha_research)
+
+    multi_universe_report_parser = subparsers.add_parser(
+        "multi-universe-report",
+        help="Build a cross-universe comparison report from existing per-universe alpha artifacts",
+    )
+    multi_universe_report_parser.add_argument(
+        "--output-dir",
+        type=str,
+        default="artifacts/multi_universe_alpha_research",
+        help="Directory containing per-universe outputs and the comparison artifacts.",
+    )
+    multi_universe_report_parser.set_defaults(func=cmd_multi_universe_report)
+
+    validate_live_parser = subparsers.add_parser(
+        "validate-live",
+        help="Run live execution control checks and write artifacts without submitting orders",
+    )
+    validate_live_parser.add_argument("--symbols", nargs="+", default=None, help="Symbols to include in the validation run.")
+    validate_live_parser.add_argument("--universe", default=None, help="Named universe to trade instead of passing --symbols.")
+    validate_live_parser.add_argument("--strategy", default="sma_cross", help="Signal strategy name.")
+    validate_live_parser.add_argument("--fast", type=int, default=None)
+    validate_live_parser.add_argument("--slow", type=int, default=None)
+    validate_live_parser.add_argument("--lookback", type=int, default=None)
+    validate_live_parser.add_argument("--top-n", type=int, default=10)
+    validate_live_parser.add_argument("--weighting-scheme", default="equal")
+    validate_live_parser.add_argument("--vol-window", type=int, default=20)
+    validate_live_parser.add_argument("--min-score", type=float, default=None)
+    validate_live_parser.add_argument("--max-weight", type=float, default=None)
+    validate_live_parser.add_argument("--max-names-per-group", type=int, default=None)
+    validate_live_parser.add_argument("--max-group-weight", type=float, default=None)
+    validate_live_parser.add_argument("--group-map-path", default=None)
+    validate_live_parser.add_argument("--rebalance-frequency", default="daily")
+    validate_live_parser.add_argument("--timing", default="next_bar")
+    validate_live_parser.add_argument("--initial-cash", type=float, default=100_000.0)
+    validate_live_parser.add_argument("--min-trade-dollars", type=float, default=25.0)
+    validate_live_parser.add_argument("--lot-size", type=int, default=1)
+    validate_live_parser.add_argument("--reserve-cash-pct", type=float, default=0.0)
+    validate_live_parser.add_argument("--order-type", default="market")
+    validate_live_parser.add_argument("--time-in-force", default="day")
+    validate_live_parser.add_argument("--broker", default="mock", choices=["mock", "alpaca"])
+    validate_live_parser.add_argument("--mock-equity", type=float, default=100_000.0)
+    validate_live_parser.add_argument("--mock-cash", type=float, default=100_000.0)
+    validate_live_parser.add_argument("--mock-positions-path", default=None)
+    add_live_control_arguments(validate_live_parser)
+    validate_live_parser.set_defaults(func=cmd_validate_live)
+
+    execute_live_parser = subparsers.add_parser(
+        "execute-live",
+        help="Run live execution control checks and only submit orders if approved and safe",
+    )
+    execute_live_parser.add_argument("--symbols", nargs="+", default=None, help="Symbols to include in the execution run.")
+    execute_live_parser.add_argument("--universe", default=None, help="Named universe to trade instead of passing --symbols.")
+    execute_live_parser.add_argument("--strategy", default="sma_cross", help="Signal strategy name.")
+    execute_live_parser.add_argument("--fast", type=int, default=None)
+    execute_live_parser.add_argument("--slow", type=int, default=None)
+    execute_live_parser.add_argument("--lookback", type=int, default=None)
+    execute_live_parser.add_argument("--top-n", type=int, default=10)
+    execute_live_parser.add_argument("--weighting-scheme", default="equal")
+    execute_live_parser.add_argument("--vol-window", type=int, default=20)
+    execute_live_parser.add_argument("--min-score", type=float, default=None)
+    execute_live_parser.add_argument("--max-weight", type=float, default=None)
+    execute_live_parser.add_argument("--max-names-per-group", type=int, default=None)
+    execute_live_parser.add_argument("--max-group-weight", type=float, default=None)
+    execute_live_parser.add_argument("--group-map-path", default=None)
+    execute_live_parser.add_argument("--rebalance-frequency", default="daily")
+    execute_live_parser.add_argument("--timing", default="next_bar")
+    execute_live_parser.add_argument("--initial-cash", type=float, default=100_000.0)
+    execute_live_parser.add_argument("--min-trade-dollars", type=float, default=25.0)
+    execute_live_parser.add_argument("--lot-size", type=int, default=1)
+    execute_live_parser.add_argument("--reserve-cash-pct", type=float, default=0.0)
+    execute_live_parser.add_argument("--order-type", default="market")
+    execute_live_parser.add_argument("--time-in-force", default="day")
+    execute_live_parser.add_argument("--broker", default="mock", choices=["mock", "alpaca"])
+    execute_live_parser.add_argument("--mock-equity", type=float, default=100_000.0)
+    execute_live_parser.add_argument("--mock-cash", type=float, default=100_000.0)
+    execute_live_parser.add_argument("--mock-positions-path", default=None)
+    add_live_control_arguments(execute_live_parser)
+    execute_live_parser.set_defaults(func=cmd_execute_live)
 
     return parser

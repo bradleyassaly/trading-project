@@ -53,6 +53,7 @@ class AutomatedAlphaResearchConfig:
     min_train_size: int | None = None
     schedule_frequency: str = "manual"
     force: bool = False
+    stale_after_days: int | None = None
 
     def to_dict(self) -> dict[str, object]:
         payload = asdict(self)
@@ -157,13 +158,48 @@ def select_untested_candidates(
     candidates_df: pd.DataFrame,
     registry_df: pd.DataFrame,
 ) -> pd.DataFrame:
+    return select_candidates_for_evaluation(
+        candidates_df,
+        registry_df,
+        stale_after_days=None,
+    )
+
+
+def select_candidates_for_evaluation(
+    candidates_df: pd.DataFrame,
+    registry_df: pd.DataFrame,
+    *,
+    stale_after_days: int | None,
+    now: datetime | None = None,
+) -> pd.DataFrame:
     if candidates_df.empty:
         return candidates_df.copy()
     if registry_df.empty or "candidate_id" not in registry_df.columns:
         return candidates_df.copy()
 
-    tested = set(registry_df.loc[registry_df["evaluation_status"] == "completed", "candidate_id"])
-    return candidates_df.loc[~candidates_df["candidate_id"].isin(tested)].reset_index(drop=True)
+    completed = registry_df.loc[registry_df["evaluation_status"] == "completed"].copy()
+    tested = set(completed["candidate_id"].tolist())
+    pending_mask = ~candidates_df["candidate_id"].isin(tested)
+
+    if stale_after_days is None:
+        return candidates_df.loc[pending_mask].reset_index(drop=True)
+
+    completed["last_evaluated_at"] = pd.to_datetime(
+        completed.get("last_evaluated_at"),
+        errors="coerce",
+        utc=True,
+    )
+    cutoff = pd.Timestamp(now or datetime.now(UTC)) - pd.Timedelta(days=int(stale_after_days))
+    stale_ids = set(
+        completed.loc[
+            completed["last_evaluated_at"].notna()
+            & (completed["last_evaluated_at"] <= cutoff),
+            "candidate_id",
+        ].tolist()
+    )
+    return candidates_df.loc[
+        pending_mask | candidates_df["candidate_id"].isin(stale_ids)
+    ].reset_index(drop=True)
 
 
 def should_run_scheduled_loop(
@@ -683,7 +719,11 @@ def run_automated_alpha_research_loop(
     )
     registry_df = load_research_registry(registry_path)
     history_df = load_research_history(history_path)
-    pending_candidates_df = select_untested_candidates(candidates_df, registry_df)
+    pending_candidates_df = select_candidates_for_evaluation(
+        candidates_df,
+        registry_df,
+        stale_after_days=config.stale_after_days,
+    )
 
     unique_horizons = sorted(
         set(candidates_df.get("horizon", pd.Series(dtype="int64")).dropna().astype(int).tolist())
