@@ -5,13 +5,9 @@ import pandas as pd
 
 from trading_platform.features.registry import DEFAULT_FEATURE_GROUPS, FEATURE_BUILDERS
 from trading_platform.strategies.registry import STRATEGY_REGISTRY
+from trading_platform.universes.definitions import UNIVERSE_DEFINITIONS
 
-# keep your existing universe definitions here
-UNIVERSES = {
-    # keep whatever you already had here
-    # example:
-    # "mag7": ["AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL", "TSLA"],
-}
+UNIVERSES = UNIVERSE_DEFINITIONS
 
 
 def add_strategy_choice_argument(

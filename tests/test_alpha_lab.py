@@ -39,8 +39,150 @@ from trading_platform.research.alpha_lab.promotion import (
     DEFAULT_PROMOTION_THRESHOLDS,
     apply_promotion_rules,
 )
-from trading_platform.research.alpha_lab.runner import run_alpha_research
+from trading_platform.research.alpha_lab.runner import (
+    _load_symbol_feature_data,
+    run_alpha_research,
+)
 from trading_platform.research.alpha_lab.signals import build_signal
+
+
+def test_load_symbol_feature_data_preserves_existing_timestamp_column(tmp_path: Path) -> None:
+    feature_dir = tmp_path / "features"
+    feature_dir.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(
+        {
+            "timestamp": pd.date_range("2024-01-01", periods=3, freq="D"),
+            "close": [100.0, 101.0, 102.0],
+        }
+    ).to_parquet(feature_dir / "AAPL.parquet", index=False)
+
+    result = _load_symbol_feature_data(feature_dir, "AAPL")
+
+    assert "timestamp" in result.columns
+    assert result["timestamp"].is_monotonic_increasing
+    assert result["symbol"].tolist() == ["AAPL", "AAPL", "AAPL"]
+    assert result["close"].tolist() == pytest.approx([100.0, 101.0, 102.0])
+
+
+def test_load_symbol_feature_data_normalizes_lowercase_date_column(tmp_path: Path) -> None:
+    feature_dir = tmp_path / "features"
+    feature_dir.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(
+        {
+            "date": pd.date_range("2024-01-01", periods=3, freq="D"),
+            "close": [100.0, 101.0, 102.0],
+        }
+    ).to_parquet(feature_dir / "AAPL.parquet", index=False)
+
+    result = _load_symbol_feature_data(feature_dir, "AAPL")
+
+    assert "timestamp" in result.columns
+    assert result["timestamp"].iloc[0] == pd.Timestamp("2024-01-01")
+
+
+def test_load_symbol_feature_data_normalizes_capitalized_date_column(tmp_path: Path) -> None:
+    feature_dir = tmp_path / "features"
+    feature_dir.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(
+        {
+            "Date": pd.date_range("2024-01-01", periods=3, freq="D"),
+            "close": [100.0, 101.0, 102.0],
+        }
+    ).to_parquet(feature_dir / "AAPL.parquet", index=False)
+
+    result = _load_symbol_feature_data(feature_dir, "AAPL")
+
+    assert "timestamp" in result.columns
+    assert result["timestamp"].iloc[-1] == pd.Timestamp("2024-01-03")
+
+
+def test_load_symbol_feature_data_normalizes_datetime_index(tmp_path: Path) -> None:
+    feature_dir = tmp_path / "features"
+    feature_dir.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(
+        {
+            "close": [100.0, 101.0, 102.0],
+        },
+        index=pd.date_range("2024-01-01", periods=3, freq="D"),
+    ).to_parquet(feature_dir / "AAPL.parquet")
+
+    result = _load_symbol_feature_data(feature_dir, "AAPL")
+
+    assert "timestamp" in result.columns
+    assert result["timestamp"].tolist() == list(pd.date_range("2024-01-01", periods=3, freq="D"))
+
+
+def test_load_symbol_feature_data_normalizes_capitalized_close_column(tmp_path: Path) -> None:
+    feature_dir = tmp_path / "features"
+    feature_dir.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(
+        {
+            "timestamp": pd.date_range("2024-01-01", periods=3, freq="D"),
+            "Close": [100.0, 101.0, 102.0],
+        }
+    ).to_parquet(feature_dir / "AAPL.parquet", index=False)
+
+    result = _load_symbol_feature_data(feature_dir, "AAPL")
+
+    assert result["close"].tolist() == pytest.approx([100.0, 101.0, 102.0])
+
+
+def test_load_symbol_feature_data_normalizes_adj_close_column(tmp_path: Path) -> None:
+    feature_dir = tmp_path / "features"
+    feature_dir.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(
+        {
+            "timestamp": pd.date_range("2024-01-01", periods=3, freq="D"),
+            "adj_close": [100.0, 101.0, 102.0],
+        }
+    ).to_parquet(feature_dir / "AAPL.parquet", index=False)
+
+    result = _load_symbol_feature_data(feature_dir, "AAPL")
+
+    assert result["close"].tolist() == pytest.approx([100.0, 101.0, 102.0])
+
+
+def test_load_symbol_feature_data_normalizes_adj_close_with_space(tmp_path: Path) -> None:
+    feature_dir = tmp_path / "features"
+    feature_dir.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(
+        {
+            "timestamp": pd.date_range("2024-01-01", periods=3, freq="D"),
+            "Adj Close": [100.0, 101.0, 102.0],
+        }
+    ).to_parquet(feature_dir / "AAPL.parquet", index=False)
+
+    result = _load_symbol_feature_data(feature_dir, "AAPL")
+
+    assert result["close"].tolist() == pytest.approx([100.0, 101.0, 102.0])
+
+
+def test_load_symbol_feature_data_raises_for_missing_date_like_field(tmp_path: Path) -> None:
+    feature_dir = tmp_path / "features"
+    feature_dir.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(
+        {
+            "close": [100.0, 101.0, 102.0],
+            "volume": [1, 2, 3],
+        }
+    ).to_parquet(feature_dir / "AAPL.parquet", index=False)
+
+    with pytest.raises(ValueError, match="timestamp"):
+        _load_symbol_feature_data(feature_dir, "AAPL")
+
+
+def test_load_symbol_feature_data_raises_for_missing_close_like_field(tmp_path: Path) -> None:
+    feature_dir = tmp_path / "features"
+    feature_dir.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(
+        {
+            "timestamp": pd.date_range("2024-01-01", periods=3, freq="D"),
+            "open": [99.0, 100.0, 101.0],
+        }
+    ).to_parquet(feature_dir / "AAPL.parquet", index=False)
+
+    with pytest.raises(ValueError, match="close"):
+        _load_symbol_feature_data(feature_dir, "AAPL")
 
 
 def test_add_forward_return_labels_aligns_1d_and_5d_correctly() -> None:

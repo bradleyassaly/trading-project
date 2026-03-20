@@ -23,7 +23,10 @@ from trading_platform.research.alpha_lab.metrics import (
     compute_cross_sectional_daily_metrics,
     evaluate_cross_sectional_signal,
 )
-from trading_platform.research.alpha_lab.promotion import apply_promotion_rules
+from trading_platform.research.alpha_lab.promotion import (
+    DEFAULT_PROMOTION_THRESHOLDS,
+    apply_promotion_rules,
+)
 
 
 @dataclass(frozen=True)
@@ -106,6 +109,69 @@ HISTORY_COLUMNS = [
     "promotion_status",
     "last_evaluated_at",
 ]
+
+
+def build_top_rejected_signals_report(
+    leaderboard_df: pd.DataFrame,
+    *,
+    universe: str | None,
+) -> pd.DataFrame:
+    columns = [
+        "candidate_id",
+        "universe",
+        "mean_spearman_ic",
+        "folds_tested",
+        "mean_turnover",
+        "rejection_reason",
+        "distance_mean_rank_ic",
+        "distance_folds_tested",
+        "distance_dates_evaluated",
+        "distance_turnover_headroom",
+        "distance_worst_fold_rank_ic",
+        "distance_total_obs",
+        "distance_symbols_tested",
+    ]
+    if leaderboard_df.empty:
+        return pd.DataFrame(columns=columns)
+
+    rejected_df = leaderboard_df.loc[leaderboard_df["promotion_status"] != "promote"].copy()
+    if rejected_df.empty:
+        return pd.DataFrame(columns=columns)
+
+    rejected_df["universe"] = universe or "custom"
+    rejected_df["distance_mean_rank_ic"] = (
+        pd.to_numeric(rejected_df["mean_spearman_ic"], errors="coerce")
+        - DEFAULT_PROMOTION_THRESHOLDS.min_mean_spearman_ic
+    )
+    rejected_df["distance_folds_tested"] = (
+        pd.to_numeric(rejected_df["folds_tested"], errors="coerce")
+        - DEFAULT_PROMOTION_THRESHOLDS.min_folds_tested
+    )
+    rejected_df["distance_dates_evaluated"] = (
+        pd.to_numeric(rejected_df["mean_dates_evaluated"], errors="coerce")
+        - DEFAULT_PROMOTION_THRESHOLDS.min_mean_dates_evaluated
+    )
+    rejected_df["distance_turnover_headroom"] = (
+        DEFAULT_PROMOTION_THRESHOLDS.max_mean_turnover
+        - pd.to_numeric(rejected_df["mean_turnover"], errors="coerce")
+    )
+    rejected_df["distance_worst_fold_rank_ic"] = (
+        pd.to_numeric(rejected_df["worst_fold_spearman_ic"], errors="coerce")
+        - DEFAULT_PROMOTION_THRESHOLDS.min_worst_fold_spearman_ic
+    )
+    rejected_df["distance_total_obs"] = (
+        pd.to_numeric(rejected_df["total_obs"], errors="coerce")
+        - DEFAULT_PROMOTION_THRESHOLDS.min_total_obs
+    )
+    rejected_df["distance_symbols_tested"] = (
+        pd.to_numeric(rejected_df["symbols_tested"], errors="coerce")
+        - DEFAULT_PROMOTION_THRESHOLDS.min_symbols_tested
+    )
+    rejected_df = rejected_df.sort_values(
+        ["mean_spearman_ic", "mean_long_short_spread", "folds_tested"],
+        ascending=[False, False, False],
+    ).reset_index(drop=True)
+    return rejected_df[columns]
 
 
 def generate_candidate_configs(
@@ -586,6 +652,7 @@ def aggregate_research_registry(
     registry_df: pd.DataFrame,
     *,
     output_dir: Path,
+    universe: str | None = None,
 ) -> dict[str, str]:
     leaderboard_df = registry_df.copy()
     if leaderboard_df.empty:
@@ -643,6 +710,10 @@ def aggregate_research_registry(
         score_panel_by_candidate=score_panel_by_candidate,
     )
     promoted_signals_df = leaderboard_df.loc[leaderboard_df["promotion_status"] == "promote"].reset_index(drop=True)
+    top_rejected_signals_df = build_top_rejected_signals_report(
+        leaderboard_df,
+        universe=universe,
+    )
     composite_inputs: dict[str, object] = {"horizons": {}}
     for horizon in sorted(promoted_signals_df["horizon"].dropna().unique().tolist()) if not promoted_signals_df.empty else []:
         selected_df, excluded_rows = select_low_redundancy_signals(
@@ -661,17 +732,20 @@ def aggregate_research_registry(
     leaderboard_path = output_dir / "leaderboard.csv"
     promoted_path = output_dir / "promoted_signals.csv"
     rejected_path = output_dir / "rejected_signals.csv"
+    top_rejected_path = output_dir / "top_rejected_signals.csv"
     redundancy_path = output_dir / "redundancy_report.csv"
     composite_inputs_path = output_dir / "composite_inputs.json"
     leaderboard_df.to_csv(leaderboard_path, index=False)
     promoted_signals_df.to_csv(promoted_path, index=False)
     leaderboard_df.loc[leaderboard_df["promotion_status"] != "promote"].to_csv(rejected_path, index=False)
+    top_rejected_signals_df.to_csv(top_rejected_path, index=False)
     redundancy_df.to_csv(redundancy_path, index=False)
     composite_inputs_path.write_text(json.dumps(composite_inputs, indent=2, default=str), encoding="utf-8")
     return {
         "leaderboard_path": str(leaderboard_path),
         "promoted_signals_path": str(promoted_path),
         "rejected_signals_path": str(rejected_path),
+        "top_rejected_signals_path": str(top_rejected_path),
         "redundancy_report_path": str(redundancy_path),
         "composite_inputs_path": str(composite_inputs_path),
     }
@@ -834,7 +908,11 @@ def run_automated_alpha_research_loop(
         updated_history = history_df.reindex(columns=HISTORY_COLUMNS)
     updated_history.to_csv(history_path, index=False)
 
-    aggregate_paths = aggregate_research_registry(updated_registry, output_dir=output_dir)
+    aggregate_paths = aggregate_research_registry(
+        updated_registry,
+        output_dir=output_dir,
+        universe=config.universe,
+    )
     now = datetime.now(UTC)
     schedule_payload = {
         "last_run_at": now.isoformat(),

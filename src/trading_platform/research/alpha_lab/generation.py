@@ -13,6 +13,11 @@ class SignalGenerationConfig:
         "momentum",
         "mean_reversion",
         "volatility",
+        "residual_momentum",
+        "sector_relative_momentum",
+        "vol_adjusted_reversal",
+        "breakout_distance",
+        "volume_surprise",
         "feature_combo",
     )
     lookbacks: tuple[int, ...] = (5, 10, 20, 60)
@@ -105,6 +110,111 @@ def generate_candidate_signals(
                             "parameters_json": json.dumps(params, sort_keys=True),
                         }
                     )
+        elif signal_family == "residual_momentum":
+            for lookback in config.lookbacks:
+                for horizon in config.horizons:
+                    params = {"lookback": int(lookback)}
+                    rows.append(
+                        {
+                            "candidate_id": build_candidate_signal_id("residual_momentum", horizon=int(horizon), params=params),
+                            "signal_name": "residual_momentum",
+                            "signal_family": "residual_momentum",
+                            "lookback": int(lookback),
+                            "window": pd.NA,
+                            "threshold": pd.NA,
+                            "feature_a": pd.NA,
+                            "feature_b": pd.NA,
+                            "horizon": int(horizon),
+                            "parameters_json": json.dumps(params, sort_keys=True),
+                        }
+                    )
+        elif signal_family == "sector_relative_momentum":
+            sector_feature_prefixes = (
+                "sector_momentum_",
+                "group_momentum_",
+                "industry_momentum_",
+                "benchmark_momentum_",
+                "sector_return_",
+                "group_return_",
+                "industry_return_",
+            )
+            mappings_exist = any(
+                any(column.startswith(prefix) for prefix in sector_feature_prefixes)
+                for column in feature_column_set
+            ) or {"sector", "group", "industry"} & feature_column_set
+            if not feature_column_set or mappings_exist:
+                for lookback in config.lookbacks:
+                    for horizon in config.horizons:
+                        params = {"lookback": int(lookback)}
+                        rows.append(
+                            {
+                                "candidate_id": build_candidate_signal_id("sector_relative_momentum", horizon=int(horizon), params=params),
+                                "signal_name": "sector_relative_momentum",
+                                "signal_family": "sector_relative_momentum",
+                                "lookback": int(lookback),
+                                "window": pd.NA,
+                                "threshold": pd.NA,
+                                "feature_a": pd.NA,
+                                "feature_b": pd.NA,
+                                "horizon": int(horizon),
+                                "parameters_json": json.dumps(params, sort_keys=True),
+                            }
+                        )
+        elif signal_family == "vol_adjusted_reversal":
+            for lookback in config.lookbacks:
+                for horizon in config.horizons:
+                    params = {"lookback": int(lookback)}
+                    rows.append(
+                        {
+                            "candidate_id": build_candidate_signal_id("vol_adjusted_reversal", horizon=int(horizon), params=params),
+                            "signal_name": "vol_adjusted_reversal",
+                            "signal_family": "vol_adjusted_reversal",
+                            "lookback": int(lookback),
+                            "window": pd.NA,
+                            "threshold": pd.NA,
+                            "feature_a": pd.NA,
+                            "feature_b": pd.NA,
+                            "horizon": int(horizon),
+                            "parameters_json": json.dumps(params, sort_keys=True),
+                        }
+                    )
+        elif signal_family == "breakout_distance":
+            for window in config.lookbacks:
+                for horizon in config.horizons:
+                    params = {"window": int(window)}
+                    rows.append(
+                        {
+                            "candidate_id": build_candidate_signal_id("breakout_distance", horizon=int(horizon), params=params),
+                            "signal_name": "breakout_distance",
+                            "signal_family": "breakout_distance",
+                            "lookback": pd.NA,
+                            "window": int(window),
+                            "threshold": pd.NA,
+                            "feature_a": pd.NA,
+                            "feature_b": pd.NA,
+                            "horizon": int(horizon),
+                            "parameters_json": json.dumps(params, sort_keys=True),
+                        }
+                    )
+        elif signal_family == "volume_surprise":
+            if not feature_column_set or {"volume", "dollar_volume", "avg_dollar_volume_20"} & feature_column_set:
+                for window in config.vol_windows:
+                    for horizon in config.horizons:
+                        params = {"window": int(window)}
+                        rows.append(
+                            {
+                                "candidate_id": build_candidate_signal_id("volume_surprise", horizon=int(horizon), params=params),
+                                "signal_name": "volume_surprise",
+                                "signal_family": "volume_surprise",
+                                "lookback": pd.NA,
+                                "window": int(window),
+                                "threshold": pd.NA,
+                                "feature_a": pd.NA,
+                                "feature_b": pd.NA,
+                                "horizon": int(horizon),
+                                "parameters_json": json.dumps(params, sort_keys=True),
+                            }
+                        )
         elif signal_family == "feature_combo":
             for feature_a, feature_b in config.combo_pairs:
                 if feature_column_set and ({feature_a, feature_b} - feature_column_set):
@@ -154,6 +264,7 @@ def build_generated_signal(
 ) -> pd.Series:
     signal_name = str(candidate_row["signal_name"])
     close = pd.to_numeric(df["close"], errors="coerce")
+    returns = close.pct_change()
 
     if signal_name == "momentum":
         lookback = int(candidate_row["lookback"])
@@ -169,14 +280,63 @@ def build_generated_signal(
 
     if signal_name == "volatility":
         window = int(candidate_row["window"])
-        return -close.pct_change().rolling(window).std()
+        return -returns.rolling(window).std()
 
     if signal_name == "vol_adjusted_momentum":
         lookback = int(candidate_row["lookback"])
-        returns = close.pct_change()
         vol = returns.rolling(lookback).std()
         raw_momentum = close.pct_change(lookback)
         return raw_momentum / vol.replace(0.0, np.nan)
+
+    if signal_name == "residual_momentum":
+        lookback = int(candidate_row["lookback"])
+        raw_momentum = close.pct_change(lookback)
+        trailing_baseline = returns.rolling(lookback).mean() * float(lookback)
+        return raw_momentum - trailing_baseline
+
+    if signal_name == "sector_relative_momentum":
+        lookback = int(candidate_row["lookback"])
+        raw_momentum = close.pct_change(lookback)
+        baseline_columns = [
+            f"sector_momentum_{lookback}",
+            f"group_momentum_{lookback}",
+            f"industry_momentum_{lookback}",
+            f"benchmark_momentum_{lookback}",
+            f"sector_return_{lookback}",
+            f"group_return_{lookback}",
+            f"industry_return_{lookback}",
+        ]
+        baseline_series = None
+        for column in baseline_columns:
+            if column in df.columns:
+                baseline_series = pd.to_numeric(df[column], errors="coerce")
+                break
+        if baseline_series is None:
+            return pd.Series(index=df.index, dtype="float64")
+        return raw_momentum - baseline_series
+
+    if signal_name == "vol_adjusted_reversal":
+        lookback = int(candidate_row["lookback"])
+        raw_reversal = -close.pct_change(lookback)
+        vol = returns.rolling(lookback).std()
+        return raw_reversal / vol.replace(0.0, np.nan)
+
+    if signal_name == "breakout_distance":
+        window = int(candidate_row["window"])
+        rolling_high = close.rolling(window).max()
+        rolling_low = close.rolling(window).min()
+        high_distance = close / rolling_high - 1.0
+        low_distance = close / rolling_low - 1.0
+        return high_distance + low_distance
+
+    if signal_name == "volume_surprise":
+        window = int(candidate_row["window"])
+        volume_column = "volume" if "volume" in df.columns else "dollar_volume" if "dollar_volume" in df.columns else None
+        if volume_column is None:
+            return pd.Series(index=df.index, dtype="float64")
+        volume = pd.to_numeric(df[volume_column], errors="coerce")
+        trailing_volume = volume.rolling(window).mean()
+        return volume / trailing_volume.replace(0.0, np.nan) - 1.0
 
     if signal_name == "feature_combo":
         feature_a = str(candidate_row["feature_a"])

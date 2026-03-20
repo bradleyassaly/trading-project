@@ -39,6 +39,7 @@ from trading_platform.cli.commands.multi_universe_alpha_research import (
 from trading_platform.cli.commands.multi_universe_report import cmd_multi_universe_report
 from trading_platform.cli.commands.validate_live import cmd_validate_live
 from trading_platform.cli.commands.execute_live import cmd_execute_live
+from trading_platform.cli.commands.export_universes import cmd_export_universes
 
 def add_execution_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
@@ -301,6 +302,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="Show available named universes",
     )
     universes_parser.set_defaults(func=cmd_list_universes)
+
+    export_universes_parser = subparsers.add_parser(
+        "export-universes",
+        help="Export the current static universe definitions to a JSON file",
+    )
+    export_universes_parser.add_argument(
+        "--output",
+        type=str,
+        default="artifacts/universes/universes.json",
+        help="Path where the universe definitions JSON should be written.",
+    )
+    export_universes_parser.set_defaults(func=cmd_export_universes)
 
     strategies_parser = subparsers.add_parser(
         "list-strategies",
