@@ -51,6 +51,70 @@ Live dry-run is broker-safe. It loads broker/account state, builds deploy target
 
 The strategy registry is the governance layer above research outputs and above the multi-strategy allocator. It tracks which versioned strategies exist, what stage each strategy is in, what artifacts support it, and whether objective rules currently support promotion, continued paper testing, approval, live disablement, or retirement.
 
+### Orchestration Runner
+
+The orchestration runner is the reproducible scheduling layer above data, research, governance, portfolio allocation, paper trading, and live dry-run. It exists to make the daily or weekly operating cycle explicit, auditable, and file-backed instead of relying on ad hoc command ordering.
+
+What it does:
+
+- runs enabled stages in a configured order
+- captures per-stage status, timestamps, outputs, and failures
+- preserves artifact paths from underlying services
+- optionally continues after failures when configured
+- writes one timestamped run directory with machine-readable and human-readable summaries
+
+Typical usage:
+
+- `daily`: refresh data, refresh features, evaluate candidates, build the approved multi-strategy book, run paper, run live dry-run, write one operator summary
+- `weekly`: run a heavier governance or research cycle before rebuilding the registry-backed portfolio
+- `ad_hoc`: replay or test a specific stage combination with the same explicit config model
+
+### Pipeline Config Example
+
+```yaml
+run_name: daily_governance
+schedule_type: daily
+universes:
+  - nasdaq100
+preset_filters:
+  - xsec_nasdaq100_momentum_v1_deploy
+registry_path: artifacts/strategy_registry.json
+governance_config_path: configs/governance.yaml
+multi_strategy_output_path: artifacts/generated_registry_multi_strategy.yaml
+paper_state_path: artifacts/paper/multi_strategy_state.json
+output_root_dir: artifacts/orchestration
+fail_fast: false
+continue_on_stage_error: true
+max_parallel_jobs: 1
+tags: [daily, governance]
+notes: Daily registry-backed portfolio refresh.
+stages:
+  data_refresh: true
+  feature_generation: true
+  research: false
+  promotion_evaluation: true
+  registry_mutation: true
+  multi_strategy_config_generation: true
+  portfolio_allocation: true
+  paper_trading: true
+  live_dry_run: true
+  reporting: true
+auto_promote_qualifying_candidates: true
+registry_include_paper_strategies: false
+registry_selection_weighting_scheme: equal
+```
+
+Key fields:
+
+- `schedule_type`: `daily`, `weekly`, or `ad_hoc`
+- `stages`: explicit booleans for every stage so skipped behavior is visible in config and artifacts
+- `fail_fast`: stop on the first failed enabled stage
+- `continue_on_stage_error`: continue later enabled stages even after a failure
+- `registry_path` / `governance_config_path`: inputs for candidate evaluation and optional registry mutation
+- `multi_strategy_output_path`: generated config artifact that feeds the existing multi-strategy allocator
+- `paper_state_path`: persistent state file reused by the paper trading stage
+- `max_parallel_jobs`: reserved for future scheduler/parallelization support; currently kept explicit for config stability
+
 ## Presets
 
 Two versioned presets are the main operational entrypoints:
@@ -314,7 +378,94 @@ Registry-driven workflow:
 5. Build a multi-strategy config directly from all `approved` entries, or `approved` plus `paper`, with `registry build-multi-strategy-config`.
 6. Feed that generated config into `portfolio allocate-multi-strategy`, `paper run-multi-strategy`, or `live dry-run-multi-strategy`.
 
+Pipeline-runner workflow:
+
+1. Define a pipeline config with the exact stages, paths, and failure policy you want.
+2. Run `pipeline run`, `pipeline run-daily`, or `pipeline run-weekly`.
+3. Inspect the timestamped run directory under the configured output root.
+4. Review `run_summary.md` first, then `stage_status.csv`, then any stage-specific artifacts for failures or promotions.
+5. Reuse the generated multi-strategy config and allocation artifacts for downstream inspection when needed.
+
 The registry-backed config builder supports reproducible selection filters such as `--universe`, `--family`, `--tag`, `--deployment-stage`, `--max-strategies`, and sleeve weighting via `--weighting-scheme equal|score_weighted`.
+
+### Pipeline Commands
+
+```bash
+trading-cli pipeline run --config configs/pipeline.yaml
+trading-cli pipeline run-daily --config configs/pipeline_daily.yaml
+trading-cli pipeline run-weekly --config configs/pipeline_weekly.yaml
+```
+
+Behavior:
+
+- `pipeline run` executes exactly what the config declares
+- `pipeline run-daily` validates `schedule_type: daily`
+- `pipeline run-weekly` validates `schedule_type: weekly`
+- every run writes a timestamped artifact directory
+- the terminal prints a concise stage-by-stage status summary
+
+### Pipeline Artifacts
+
+Each run writes a directory shaped like:
+
+```text
+artifacts/orchestration/<run_name>/<timestamp>/
+  run_summary.json
+  run_summary.md
+  stage_status.csv
+  pipeline_config_snapshot.json
+  errors.json
+  promotion_evaluation/
+  registry_mutation/
+  portfolio_allocation/
+  paper_trading/
+  live_dry_run/
+```
+
+Core top-level files:
+
+- `run_summary.json`: machine-readable run result with stage records and selected outputs
+- `run_summary.md`: operator-facing markdown summary for terminal or git review
+- `stage_status.csv`: one row per stage with timestamps, status, duration, inputs, outputs, and error text
+- `pipeline_config_snapshot.json`: exact resolved config used for the run
+- `errors.json`: emitted only when one or more stages fail
+
+Candidate-promotion batch artifacts:
+
+- `promotion_batch_summary.csv`
+- `promoted_strategies.csv`
+- `rejected_strategies.csv`
+
+The orchestrator preserves lower-level artifacts from existing services rather than replacing them, so allocation, paper, and live outputs remain inspectable in their native schemas.
+
+### Daily Vs Weekly Guidance
+
+Daily workflow is usually the lighter operational path:
+
+- data refresh
+- feature generation
+- promotion evaluation
+- optional registry mutation
+- registry-backed multi-strategy config generation
+- allocation
+- paper run
+- live dry-run
+
+Weekly workflow is usually the heavier governance path:
+
+- broader research refresh
+- promotion/degradation review
+- registry mutation after review
+- rebuilt portfolio composition
+- optional paper/live validation afterward
+
+### Operational Safety Notes
+
+- start with `registry_mutation: false` until the evaluation artifacts look correct
+- use `continue_on_stage_error: true` only when partial downstream artifacts are operationally useful
+- treat `live_dry_run` as preview-only; it does not submit orders
+- prefer relative artifact paths rooted in the repo or explicit absolute paths to avoid ambiguous scheduler environments
+- check `pipeline_config_snapshot.json` into review when changing automation behavior so scheduling changes stay auditable
 
 ## Research Vs Deploy Insight
 

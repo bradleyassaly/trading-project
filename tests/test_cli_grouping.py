@@ -714,3 +714,51 @@ def test_grouped_registry_build_multi_strategy_config_command_parses() -> None:
     assert args.registry_command == "build-multi-strategy-config"
     assert args.include_paper is True
     assert args.weighting_scheme == "score_weighted"
+
+
+def test_grouped_pipeline_run_command_parses() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "pipeline",
+            "run",
+            "--config",
+            "configs/pipeline.yaml",
+        ]
+    )
+
+    assert args.command_family == "pipeline"
+    assert args.pipeline_command == "run"
+    assert args.config == "configs/pipeline.yaml"
+
+
+def test_grouped_pipeline_run_daily_command_parses() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "pipeline",
+            "run-daily",
+            "--config",
+            "configs/pipeline_daily.yaml",
+        ]
+    )
+
+    assert args.command_family == "pipeline"
+    assert args.pipeline_command == "run-daily"
+    assert args.config == "configs/pipeline_daily.yaml"
+
+
+def test_grouped_pipeline_run_weekly_command_parses() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "pipeline",
+            "run-weekly",
+            "--config",
+            "configs/pipeline_weekly.yaml",
+        ]
+    )
+
+    assert args.command_family == "pipeline"
+    assert args.pipeline_command == "run-weekly"
+    assert args.config == "configs/pipeline_weekly.yaml"

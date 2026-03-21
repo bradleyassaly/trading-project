@@ -29,6 +29,11 @@ from trading_platform.cli.commands.paper_run import cmd_paper_run
 from trading_platform.cli.commands.paper_run_multi_strategy import cmd_paper_run_multi_strategy
 from trading_platform.cli.commands.paper_run_scheduled import cmd_paper_run_scheduled
 from trading_platform.cli.commands.pipeline import cmd_pipeline
+from trading_platform.cli.commands.pipeline_run import (
+    cmd_pipeline_run,
+    cmd_pipeline_run_daily,
+    cmd_pipeline_run_weekly,
+)
 from trading_platform.cli.commands.portfolio import cmd_portfolio
 from trading_platform.cli.commands.portfolio_allocate_multi_strategy import cmd_portfolio_allocate_multi_strategy
 from trading_platform.cli.commands.portfolio_topn import cmd_portfolio_topn
@@ -736,5 +741,17 @@ def build_parser() -> argparse.ArgumentParser:
     registry_build.add_argument("--max-strategies", type=int, default=None, help="Optional maximum number of strategies to include.")
     registry_build.add_argument("--weighting-scheme", type=str, default="equal", choices=["equal", "score_weighted"], help="How to assign sleeve capital weights.")
     registry_build.set_defaults(func=cmd_registry_build_multi_strategy_config)
+
+    pipeline_parser = subparsers.add_parser("pipeline", help="Scheduled orchestration and governance runner")
+    pipeline_subparsers = pipeline_parser.add_subparsers(dest="pipeline_command", required=True)
+    pipeline_run = pipeline_subparsers.add_parser("run", help="Run the orchestration pipeline exactly as specified in the config")
+    pipeline_run.add_argument("--config", type=str, required=True, help="Path to the pipeline JSON/YAML config.")
+    pipeline_run.set_defaults(func=cmd_pipeline_run)
+    pipeline_run_daily = pipeline_subparsers.add_parser("run-daily", help="Run a daily pipeline config and validate schedule_type=daily")
+    pipeline_run_daily.add_argument("--config", type=str, required=True, help="Path to the pipeline JSON/YAML config.")
+    pipeline_run_daily.set_defaults(func=cmd_pipeline_run_daily)
+    pipeline_run_weekly = pipeline_subparsers.add_parser("run-weekly", help="Run a weekly pipeline config and validate schedule_type=weekly")
+    pipeline_run_weekly.add_argument("--config", type=str, required=True, help="Path to the pipeline JSON/YAML config.")
+    pipeline_run_weekly.set_defaults(func=cmd_pipeline_run_weekly)
 
     return parser

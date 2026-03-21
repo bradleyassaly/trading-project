@@ -12,6 +12,10 @@ from trading_platform.config.models import (
     ResearchWorkflowConfig,
     WalkForwardConfig,
 )
+from trading_platform.orchestration.models import (
+    OrchestrationStageToggles,
+    PipelineRunConfig,
+)
 
 try:
     import yaml
@@ -68,3 +72,10 @@ def load_multi_strategy_portfolio_config(path: str | Path) -> MultiStrategyPortf
     payload["sleeves"] = sleeves
     payload["sector_caps"] = sector_caps
     return MultiStrategyPortfolioConfig(**payload)
+
+
+def load_pipeline_run_config(path: str | Path) -> PipelineRunConfig:
+    data = _read_config_file(Path(path))
+    payload = dict(data)
+    payload["stages"] = OrchestrationStageToggles(**payload.get("stages", {}))
+    return PipelineRunConfig(**payload)
