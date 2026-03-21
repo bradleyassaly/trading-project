@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 import pandas as pd
 
 from trading_platform.features.registry import DEFAULT_FEATURE_GROUPS, FEATURE_BUILDERS
+from trading_platform.signals.loaders import load_feature_frame, resolve_feature_frame_path
 from trading_platform.strategies.registry import STRATEGY_REGISTRY
 from trading_platform.universes.definitions import UNIVERSE_DEFINITIONS
 
 UNIVERSES = UNIVERSE_DEFINITIONS
+XSEC_RESEARCH_STRATEGIES = {"xsec_momentum_topn"}
 
 
 def add_strategy_choice_argument(
@@ -15,12 +18,13 @@ def add_strategy_choice_argument(
     *,
     help_text: str,
     default: str = "sma_cross",
+    include_xsec: bool = False,
 ) -> None:
     parser.add_argument(
         "--strategy",
         type=str,
         default=default,
-        choices=sorted(STRATEGY_REGISTRY.keys()),
+        choices=get_strategy_choices(include_xsec=include_xsec),
         help=help_text,
     )
 
@@ -38,13 +42,19 @@ def add_symbol_arguments(parser: argparse.ArgumentParser) -> None:
     )
 
 def resolve_symbols(args: argparse.Namespace) -> list[str]:
-    if getattr(args, "symbols", None):
+    has_symbols = bool(getattr(args, "symbols", None))
+    has_universe = bool(getattr(args, "universe", None))
+
+    if has_symbols == has_universe:
+        raise SystemExit("Provide exactly one of --symbols or --universe")
+
+    if has_symbols:
         return list(dict.fromkeys([s.upper() for s in args.symbols]))
 
-    if getattr(args, "universe", None):
+    if has_universe:
         return UNIVERSES[args.universe]
 
-    raise SystemExit("Provide either --symbols or --universe")
+    raise SystemExit("Provide exactly one of --symbols or --universe")
 
 def print_symbol_list(symbols: list[str], max_items: int = 10) -> str:
     if len(symbols) <= max_items:
@@ -64,17 +74,20 @@ def add_shared_symbol_args(parser) -> None:
         help="Named universe to trade instead of passing --symbols.",
     )
 
-def add_strategy_arguments(parser: argparse.ArgumentParser) -> None:
+def add_strategy_arguments(parser: argparse.ArgumentParser, *, include_xsec: bool = False) -> None:
     parser.add_argument(
         "--strategy",
         type=str,
         default="sma_cross",
-        choices=sorted(STRATEGY_REGISTRY.keys()),
+        choices=get_strategy_choices(include_xsec=include_xsec),
         help="Strategy to run",
     )
     parser.add_argument("--fast", type=int, default=20, help="Fast SMA window")
     parser.add_argument("--slow", type=int, default=100, help="Slow SMA window")
     parser.add_argument("--lookback", type=int, default=20, help="Momentum lookback")
+    parser.add_argument("--entry-lookback", type=int, default=55, help="Breakout entry lookback in bars")
+    parser.add_argument("--exit-lookback", type=int, default=20, help="Breakout exit lookback in bars")
+    parser.add_argument("--momentum-lookback", type=int, default=None, help="Optional breakout momentum filter lookback in bars")
     parser.add_argument("--cash", type=float, default=10_000, help="Starting cash")
     parser.add_argument(
         "--commission",
@@ -82,6 +95,39 @@ def add_strategy_arguments(parser: argparse.ArgumentParser) -> None:
         default=0.001,
         help="Commission rate",
     )
+
+
+def build_strategy_params(args: argparse.Namespace) -> dict[str, int | None]:
+    return {
+        "fast": getattr(args, "fast", 20),
+        "slow": getattr(args, "slow", 100),
+        "lookback": getattr(args, "lookback", 20),
+        "lookback_bars": getattr(args, "lookback_bars", 126),
+        "skip_bars": getattr(args, "skip_bars", 0),
+        "top_n": getattr(args, "top_n", 3),
+        "rebalance_bars": getattr(args, "rebalance_bars", 21),
+        "entry_lookback": getattr(args, "entry_lookback", 55),
+        "exit_lookback": getattr(args, "exit_lookback", 20),
+        "momentum_lookback": getattr(args, "momentum_lookback", None),
+    }
+
+
+def get_strategy_choices(*, include_xsec: bool = False) -> list[str]:
+    choices = set(STRATEGY_REGISTRY.keys())
+    if include_xsec:
+        choices.update(XSEC_RESEARCH_STRATEGIES)
+    return sorted(choices)
+
+
+def add_xsec_research_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--lookback-bars", type=int, default=126, help="Cross-sectional momentum lookback in bars")
+    parser.add_argument("--skip-bars", type=int, default=0, help="Bars to skip before measuring trailing momentum")
+    parser.add_argument("--top-n", type=int, default=3, help="Number of symbols to hold for cross-sectional top-N research")
+    parser.add_argument("--rebalance-bars", type=int, default=21, help="Rebalance interval in bars for cross-sectional top-N research")
+
+def add_date_range_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--start", type=str, default=None, help="Optional inclusive start date in YYYY-MM-DD format")
+    parser.add_argument("--end", type=str, default=None, help="Optional inclusive end date in YYYY-MM-DD format")
 
 def add_feature_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
@@ -126,3 +172,46 @@ def compute_buy_and_hold_return_pct(df: pd.DataFrame) -> float:
         return float("nan")
 
     return (close.iloc[-1] / close.iloc[0] - 1.0) * 100.0
+
+def prepare_research_frame(
+    symbol: str,
+    *,
+    start: str | None = None,
+    end: str | None = None,
+) -> dict[str, object]:
+    feature_path = resolve_feature_frame_path(symbol)
+    df = load_feature_frame(symbol)
+    working = df.copy()
+
+    if "Date" in working.columns:
+        working["Date"] = pd.to_datetime(working["Date"])
+        date_col = "Date"
+    elif "timestamp" in working.columns:
+        working["timestamp"] = pd.to_datetime(working["timestamp"])
+        date_col = "timestamp"
+    else:
+        working.index = pd.to_datetime(working.index)
+        working = working.reset_index().rename(columns={"index": "Date"})
+        date_col = "Date"
+
+    working = working.sort_values(date_col).reset_index(drop=True)
+    if start:
+        working = working[working[date_col] >= pd.Timestamp(start)]
+    if end:
+        working = working[working[date_col] <= pd.Timestamp(end)]
+    working = working.reset_index(drop=True)
+    if working.empty:
+        raise ValueError(
+            f"No rows available for {symbol} after applying date range start={start!r} end={end!r}"
+        )
+
+    effective_start = pd.Timestamp(working[date_col].min()).date().isoformat()
+    effective_end = pd.Timestamp(working[date_col].max()).date().isoformat()
+    return {
+        "df": working,
+        "path": Path(feature_path),
+        "date_col": date_col,
+        "effective_start": effective_start,
+        "effective_end": effective_end,
+        "rows": int(len(working)),
+    }

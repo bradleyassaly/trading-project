@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import pandas as pd
 
 from trading_platform.signals.loaders import load_feature_frame
+from trading_platform.research.diagnostics import diagnostics_from_timeseries
 from trading_platform.signals.registry import SIGNAL_REGISTRY
 from trading_platform.simulation.contracts import SingleAssetSimulationResult
 from trading_platform.simulation.single_asset import simulate_single_asset
@@ -27,6 +28,13 @@ def run_vectorized_research(
     fast: int = 20,
     slow: int = 100,
     lookback: int = 20,
+    lookback_bars: int = 126,
+    skip_bars: int = 0,
+    top_n: int = 3,
+    rebalance_bars: int = 21,
+    entry_lookback: int = 55,
+    exit_lookback: int = 20,
+    momentum_lookback: int | None = None,
     cost_per_turnover: float = 0.0,
     initial_equity: float = 1.0,
     execution_policy: ExecutionPolicy | None = None,
@@ -43,6 +51,13 @@ def run_vectorized_research(
         fast=fast,
         slow=slow,
         lookback=lookback,
+        lookback_bars=lookback_bars,
+        skip_bars=skip_bars,
+        top_n=top_n,
+        rebalance_bars=rebalance_bars,
+        entry_lookback=entry_lookback,
+        exit_lookback=exit_lookback,
+        momentum_lookback=momentum_lookback,
     )
 
     simulation = simulate_single_asset(
@@ -67,6 +82,13 @@ def to_legacy_stats(
     fast: int | None = None,
     slow: int | None = None,
     lookback: int | None = None,
+    lookback_bars: int | None = None,
+    skip_bars: int | None = None,
+    top_n: int | None = None,
+    rebalance_bars: int | None = None,
+    entry_lookback: int | None = None,
+    exit_lookback: int | None = None,
+    momentum_lookback: int | None = None,
     cash: float | None = None,
     commission: float | None = None,
 ) -> dict[str, object]:
@@ -78,6 +100,13 @@ def to_legacy_stats(
         "fast": fast,
         "slow": slow,
         "lookback": lookback,
+        "lookback_bars": lookback_bars,
+        "skip_bars": skip_bars,
+        "top_n": top_n,
+        "rebalance_bars": rebalance_bars,
+        "entry_lookback": entry_lookback,
+        "exit_lookback": exit_lookback,
+        "momentum_lookback": momentum_lookback,
         "cash": cash,
         "commission": commission,
         "Return [%]": (
@@ -102,6 +131,7 @@ def to_legacy_stats(
             else float("nan")
         ),
     }
+    stats.update(diagnostics_from_timeseries(result.simulation.timeseries))
 
     return stats
 
@@ -113,6 +143,13 @@ def run_vectorized_research_on_df(
     fast: int = 20,
     slow: int = 100,
     lookback: int = 20,
+    lookback_bars: int = 126,
+    skip_bars: int = 0,
+    top_n: int = 3,
+    rebalance_bars: int = 21,
+    entry_lookback: int = 55,
+    exit_lookback: int = 20,
+    momentum_lookback: int | None = None,
     cost_per_turnover: float = 0.0,
     initial_equity: float = 1.0,
     execution_policy: ExecutionPolicy | None = None,
@@ -127,6 +164,13 @@ def run_vectorized_research_on_df(
         fast=fast,
         slow=slow,
         lookback=lookback,
+        lookback_bars=lookback_bars,
+        skip_bars=skip_bars,
+        top_n=top_n,
+        rebalance_bars=rebalance_bars,
+        entry_lookback=entry_lookback,
+        exit_lookback=exit_lookback,
+        momentum_lookback=momentum_lookback,
     )
 
     simulation = simulate_single_asset(

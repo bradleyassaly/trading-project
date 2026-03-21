@@ -4,12 +4,16 @@ from collections.abc import Callable
 
 import pandas as pd
 
+from trading_platform.signals.breakout_hold import generate_signal_frame as breakout_hold_signal_frame
 from trading_platform.signals.momentum_hold import generate_signal_frame as momentum_hold_signal_frame
 from trading_platform.signals.sma_cross import generate_signal_frame as sma_cross_signal_frame
+from trading_platform.signals.xsec_momentum_topn import generate_signal_frame as xsec_momentum_topn_signal_frame
 
 SignalGenerator = Callable[..., pd.DataFrame]
 
 SIGNAL_REGISTRY: dict[str, SignalGenerator] = {
     "sma_cross": sma_cross_signal_frame,
     "momentum_hold": momentum_hold_signal_frame,
+    "breakout_hold": breakout_hold_signal_frame,
+    "xsec_momentum_topn": xsec_momentum_topn_signal_frame,
 }

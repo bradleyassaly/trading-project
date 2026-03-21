@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 from itertools import product
 from pathlib import Path
 
@@ -8,8 +9,10 @@ import pandas as pd
 
 from trading_platform.backtests.engine import run_backtest_on_df
 from trading_platform.cli.common import (
+    build_strategy_params,
     compound_return_pct,
     compute_buy_and_hold_return_pct,
+    prepare_research_frame,
     print_symbol_list,
     resolve_symbols,
 )
@@ -18,282 +21,395 @@ from trading_platform.experiments.reporting import (
     save_walkforward_param_plot,
     save_walkforward_return_plot,
 )
+from trading_platform.research.diagnostics import activity_note
 from trading_platform.research.service import (
     run_vectorized_research_on_df,
     to_legacy_stats,
 )
-from trading_platform.signals.loaders import load_feature_frame
+from trading_platform.research.xsec_momentum import build_close_panel, run_xsec_momentum_topn
 
 
-def cmd_walkforward(args: argparse.Namespace) -> None:
-    symbols = resolve_symbols(args)
-    results: list[dict[str, object]] = []
+def _build_param_grid(args: argparse.Namespace) -> tuple[list[dict[str, int | None]], list[str]]:
+    if args.strategy == "sma_cross":
+        if not args.fast_values or not args.slow_values:
+            raise SystemExit(
+                "walkforward with sma_cross requires --fast-values and --slow-values"
+            )
+        invalid: list[str] = []
+        param_grid = []
+        for fast, slow in product(args.fast_values, args.slow_values):
+            if fast >= slow:
+                invalid.append(f"Skipping invalid combination fast={fast}, slow={slow}")
+                continue
+            param_grid.append({"fast": fast, "slow": slow, "lookback": None})
+        if not param_grid:
+            raise SystemExit("No valid walk-forward parameter combinations remain after filtering fast >= slow")
+        return param_grid, invalid
 
-    print(
-        f"Running walk-forward for {len(symbols)} symbol(s): "
-        f"{print_symbol_list(symbols)}"
-    )
+    if args.strategy == "momentum_hold":
+        if not args.lookback_values:
+            raise SystemExit(
+                "walkforward with momentum_hold requires --lookback-values"
+            )
+        return [{"fast": None, "slow": None, "lookback": lb} for lb in args.lookback_values], []
 
-    for symbol in symbols:
+    if args.strategy == "breakout_hold":
+        if not args.entry_lookback_values or not args.exit_lookback_values:
+            raise SystemExit(
+                "walkforward with breakout_hold requires --entry-lookback-values and --exit-lookback-values"
+            )
+        momentum_values = args.momentum_lookback_values or [None]
+        return [
+            {
+                "fast": None,
+                "slow": None,
+                "lookback": None,
+                "entry_lookback": entry_lookback,
+                "exit_lookback": exit_lookback,
+                "momentum_lookback": momentum_lookback,
+            }
+            for entry_lookback, exit_lookback, momentum_lookback in product(
+                args.entry_lookback_values,
+                args.exit_lookback_values,
+                momentum_values,
+            )
+            if entry_lookback > 0 and exit_lookback > 0
+        ], []
+
+    if args.strategy == "xsec_momentum_topn":
+        if not args.lookback_bars_values or not args.top_n_values or not args.rebalance_bars_values:
+            raise SystemExit(
+                "walkforward with xsec_momentum_topn requires --lookback-bars-values, --top-n-values, and --rebalance-bars-values"
+            )
+        skip_values = args.skip_bars_values or [0]
+        return [
+            {
+                "lookback_bars": lookback_bars,
+                "skip_bars": skip_bars,
+                "top_n": top_n,
+                "rebalance_bars": rebalance_bars,
+            }
+            for lookback_bars, skip_bars, top_n, rebalance_bars in product(
+                args.lookback_bars_values,
+                skip_values,
+                args.top_n_values,
+                args.rebalance_bars_values,
+            )
+            if lookback_bars > 0 and skip_bars >= 0 and top_n > 0 and rebalance_bars > 0
+        ], []
+
+    raise SystemExit(f"Unsupported strategy for walkforward: {args.strategy}")
+
+
+TRADING_BARS_PER_YEAR = 252
+
+
+def _resolve_window_spec(args: argparse.Namespace) -> dict[str, object]:
+    train_bars = getattr(args, "train_bars", None)
+    test_bars = getattr(args, "test_bars", None)
+    step_bars = getattr(args, "step_bars", None)
+
+    compat_train_days = getattr(args, "train_period_days", None)
+    compat_test_days = getattr(args, "test_period_days", None)
+    compat_step_days = getattr(args, "step_days", None)
+
+    aliases_used: list[str] = []
+    derived_from_years: list[str] = []
+
+    if train_bars is None:
+        if compat_train_days is not None:
+            train_bars = compat_train_days
+            aliases_used.append("train_period_days->train_bars")
+        else:
+            train_bars = int(args.train_years) * TRADING_BARS_PER_YEAR
+            derived_from_years.append("train_years")
+
+    if test_bars is None:
+        if compat_test_days is not None:
+            test_bars = compat_test_days
+            aliases_used.append("test_period_days->test_bars")
+        else:
+            test_bars = int(args.test_years) * TRADING_BARS_PER_YEAR
+            derived_from_years.append("test_years")
+
+    if step_bars is None:
+        if compat_step_days is not None:
+            step_bars = compat_step_days
+            aliases_used.append("step_days->step_bars")
+        else:
+            step_bars = test_bars
+            if compat_test_days is not None:
+                aliases_used.append("test_period_days->step_bars(default)")
+            elif getattr(args, "step_bars", None) is None:
+                derived_from_years.append("step_bars_defaulted_to_test_bars")
+
+    for name, value in (
+        ("train_bars", train_bars),
+        ("test_bars", test_bars),
+        ("step_bars", step_bars),
+    ):
+        if value is None or int(value) <= 0:
+            raise SystemExit(f"{name} must be a positive integer")
+
+    return {
+        "train_bars": int(train_bars),
+        "test_bars": int(test_bars),
+        "step_bars": int(step_bars),
+        "window_units": "bars",
+        "aliases_used": aliases_used,
+        "derived_from_years": derived_from_years,
+    }
+
+
+def _iter_row_windows(
+    df: pd.DataFrame,
+    *,
+    date_col: str,
+    train_bars: int,
+    test_bars: int,
+    step_bars: int,
+) -> list[dict[str, object]]:
+    windows: list[dict[str, object]] = []
+    total_rows = len(df)
+    train_start_idx = 0
+    window_index = 0
+
+    while train_start_idx < total_rows:
+        window_index += 1
+        train_end_exclusive = min(train_start_idx + train_bars, total_rows)
+        test_start_idx = train_end_exclusive
+        test_end_exclusive = min(test_start_idx + test_bars, total_rows)
+
+        train_df = df.iloc[train_start_idx:train_end_exclusive].copy()
+        test_df = df.iloc[test_start_idx:test_end_exclusive].copy()
+
+        train_rows = int(len(train_df))
+        test_rows = int(len(test_df))
+
+        if train_rows > 0:
+            train_start = pd.Timestamp(train_df[date_col].iloc[0]).date().isoformat()
+            train_end = pd.Timestamp(train_df[date_col].iloc[-1]).date().isoformat()
+        else:
+            train_start = None
+            train_end = None
+
+        if test_rows > 0:
+            test_start = pd.Timestamp(test_df[date_col].iloc[0]).date().isoformat()
+            test_end = pd.Timestamp(test_df[date_col].iloc[-1]).date().isoformat()
+        else:
+            test_start = None
+            test_end = None
+
+        windows.append(
+            {
+                "window_index": window_index,
+                "train_start_idx": int(train_start_idx),
+                "train_end_exclusive": int(train_end_exclusive),
+                "test_start_idx": int(test_start_idx),
+                "test_end_exclusive": int(test_end_exclusive),
+                "train_start": train_start,
+                "train_end": train_end,
+                "test_start": test_start,
+                "test_end": test_end,
+                "train_rows": train_rows,
+                "test_rows": test_rows,
+                "train_df": train_df,
+                "test_df": test_df,
+            }
+        )
+
+        if test_rows < test_bars:
+            break
+
+        train_start_idx += step_bars
+
+    return windows
+
+
+def _run_stats(
+    *,
+    args: argparse.Namespace,
+    df: pd.DataFrame,
+    symbol: str,
+    params: dict[str, int | None],
+) -> dict[str, object]:
+    strategy_params = build_strategy_params(args) | params
+    if args.engine == "legacy":
+        return run_backtest_on_df(
+            df=df,
+            symbol=symbol,
+            strategy=args.strategy,
+            **strategy_params,
+            cash=args.cash,
+            commission=args.commission,
+        )
+
+    if args.engine == "vectorized":
+        result = run_vectorized_research_on_df(
+            df=df,
+            symbol=symbol,
+            strategy=args.strategy,
+            **strategy_params,
+            cost_per_turnover=args.commission,
+            initial_equity=args.cash,
+        )
+        return to_legacy_stats(
+            result,
+            symbol=symbol,
+            strategy=args.strategy,
+            fast=params.get("fast"),
+            slow=params.get("slow"),
+            lookback=params.get("lookback"),
+            entry_lookback=params.get("entry_lookback"),
+            exit_lookback=params.get("exit_lookback"),
+            momentum_lookback=params.get("momentum_lookback"),
+            cash=args.cash,
+            commission=args.commission,
+        )
+
+    raise SystemExit(f"Unsupported engine: {args.engine}")
+
+
+def _score_candidates(
+    *,
+    args: argparse.Namespace,
+    train_df: pd.DataFrame,
+    symbol: str,
+    param_grid: list[dict[str, int | None]],
+) -> tuple[dict[str, int | None] | None, float | None, dict[str, object] | None, list[dict[str, object]]]:
+    candidates: list[dict[str, object]] = []
+    best_params = None
+    best_score = None
+    best_train_stats = None
+
+    for params in param_grid:
         try:
-            df = load_feature_frame(symbol)
-        except Exception as e:
-            print(f"[ERROR] {symbol}: failed to load feature frame -> {e}")
+            train_stats = _run_stats(
+                args=args,
+                df=train_df,
+                symbol=symbol,
+                params=params,
+            )
+        except Exception as exc:
+            candidates.append(
+                {
+                    "params": params,
+                    "score": None,
+                    "status": "error",
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
+            )
             continue
 
-        if "Date" in df.columns:
-            df["Date"] = pd.to_datetime(df["Date"])
-            date_col = "Date"
-        elif "timestamp" in df.columns:
-            df["timestamp"] = pd.to_datetime(df["timestamp"])
-            date_col = "timestamp"
-        else:
-            df = df.copy()
-            df.index = pd.to_datetime(df.index)
-            df = df.reset_index().rename(columns={"index": "Date"})
-            date_col = "Date"
-
-        df = df.sort_values(date_col).reset_index(drop=True)
-
-        start_date = df[date_col].min()
-        train_offset = pd.DateOffset(years=args.train_years)
-        test_offset = pd.DateOffset(years=args.test_years)
-
-        if args.strategy == "sma_cross":
-            if not args.fast_values or not args.slow_values:
-                raise SystemExit(
-                    "walkforward with sma_cross requires --fast-values and --slow-values"
-                )
-            param_grid = [
-                {"fast": fast, "slow": slow}
-                for fast, slow in product(args.fast_values, args.slow_values)
-                if fast < slow
-            ]
-
-        elif args.strategy == "momentum_hold":
-            if not args.lookback_values:
-                raise SystemExit(
-                    "walkforward with momentum_hold requires --lookback-values"
-                )
-            param_grid = [{"lookback": lb} for lb in args.lookback_values]
-
-        else:
-            raise SystemExit(f"Unsupported strategy for walkforward: {args.strategy}")
-
-        current_train_start = start_date
-
-        while True:
-            train_end = current_train_start + train_offset
-            test_end = train_end + test_offset
-
-            train_df = df[(df[date_col] >= current_train_start) & (df[date_col] < train_end)]
-            test_df = df[(df[date_col] >= train_end) & (df[date_col] < test_end)]
-
-            if len(train_df) < args.min_train_rows or len(test_df) < args.min_test_rows:
-                break
-
-            best_train = None
-            best_train_score = None
-
-            for params in param_grid:
-                try:
-                    if args.engine == "legacy":
-                        train_stats = run_backtest_on_df(
-                            df=train_df,
-                            symbol=symbol,
-                            strategy=args.strategy,
-                            fast=params.get("fast", 20),
-                            slow=params.get("slow", 100),
-                            lookback=params.get("lookback", 20),
-                            cash=args.cash,
-                            commission=args.commission,
-                        )
-                    elif args.engine == "vectorized":
-                        train_result = run_vectorized_research_on_df(
-                            df=train_df,
-                            symbol=symbol,
-                            strategy=args.strategy,
-                            fast=params.get("fast", 20),
-                            slow=params.get("slow", 100),
-                            lookback=params.get("lookback", 20),
-                            cost_per_turnover=args.commission,
-                            initial_equity=args.cash,
-                        )
-                        train_stats = to_legacy_stats(
-                            train_result,
-                            symbol=symbol,
-                            strategy=args.strategy,
-                            fast=params.get("fast"),
-                            slow=params.get("slow"),
-                            lookback=params.get("lookback"),
-                            cash=args.cash,
-                            commission=args.commission,
-                        )
-                    else:
-                        raise SystemExit(f"Unsupported engine: {args.engine}")
-
-                    score = train_stats.get(args.select_by)
-
-                    if score is None or pd.isna(score):
-                        continue
-
-                    if best_train_score is None or score > best_train_score:
-                        best_train_score = score
-                        best_train = {
-                            "params": params,
-                            "train_stats": train_stats,
-                        }
-
-                except Exception as e:
-                    print(
-                        f"[WARN] {symbol}: train window "
-                        f"{current_train_start.date()} -> {train_end.date()} "
-                        f"params={params} failed: {e}"
-                    )
-
-            if best_train is None:
-                print(
-                    f"[WARN] {symbol}: no valid params found for train window "
-                    f"{current_train_start.date()} -> {train_end.date()}"
-                )
-                current_train_start = current_train_start + test_offset
-                continue
-
-            selected_params = best_train["params"]
-
-            try:
-                if args.engine == "legacy":
-                    test_stats = run_backtest_on_df(
-                        df=test_df,
-                        symbol=symbol,
-                        strategy=args.strategy,
-                        fast=selected_params.get("fast", 20),
-                        slow=selected_params.get("slow", 100),
-                        lookback=selected_params.get("lookback", 20),
-                        cash=args.cash,
-                        commission=args.commission,
-                    )
-                elif args.engine == "vectorized":
-                    test_result = run_vectorized_research_on_df(
-                        df=test_df,
-                        symbol=symbol,
-                        strategy=args.strategy,
-                        fast=selected_params.get("fast", 20),
-                        slow=selected_params.get("slow", 100),
-                        lookback=selected_params.get("lookback", 20),
-                        cost_per_turnover=args.commission,
-                        initial_equity=args.cash,
-                    )
-                    test_stats = to_legacy_stats(
-                        test_result,
-                        symbol=symbol,
-                        strategy=args.strategy,
-                        fast=selected_params.get("fast"),
-                        slow=selected_params.get("slow"),
-                        lookback=selected_params.get("lookback"),
-                        cash=args.cash,
-                        commission=args.commission,
-                    )
-                else:
-                    raise SystemExit(f"Unsupported engine: {args.engine}")
-
-            except Exception as e:
-                print(
-                    f"[WARN] {symbol}: test window "
-                    f"{train_end.date()} -> {test_end.date()} failed: {e}"
-                )
-                current_train_start = current_train_start + test_offset
-                continue
-
-            benchmark_return_pct = compute_buy_and_hold_return_pct(test_df)
-            test_return_pct = test_stats.get("Return [%]")
-
-            if (
-                test_return_pct is not None
-                and not pd.isna(test_return_pct)
-                and not pd.isna(benchmark_return_pct)
-            ):
-                excess_return_pct = test_return_pct - benchmark_return_pct
-            else:
-                excess_return_pct = float("nan")
-
-            row = {
-                "symbol": symbol,
-                "strategy": args.strategy,
-                "engine": args.engine,
-                "train_start": current_train_start.date().isoformat(),
-                "train_end": train_end.date().isoformat(),
-                "test_start": train_end.date().isoformat(),
-                "test_end": test_end.date().isoformat(),
-                "selected_by": args.select_by,
-                "selected_train_score": best_train_score,
-                "fast": selected_params.get("fast"),
-                "slow": selected_params.get("slow"),
-                "lookback": selected_params.get("lookback"),
-                "train_return_pct": best_train["train_stats"].get("Return [%]"),
-                "train_sharpe": best_train["train_stats"].get("Sharpe Ratio"),
-                "train_max_drawdown_pct": best_train["train_stats"].get("Max. Drawdown [%]"),
-                "test_return_pct": test_return_pct,
-                "test_sharpe": test_stats.get("Sharpe Ratio"),
-                "test_max_drawdown_pct": test_stats.get("Max. Drawdown [%]"),
-                "benchmark_return_pct": benchmark_return_pct,
-                "excess_return_pct": excess_return_pct,
+        score = train_stats.get(args.select_by)
+        score_value = None if score is None or pd.isna(score) else float(score)
+        candidates.append(
+            {
+                "params": params,
+                "score": score_value,
+                "status": "ok",
+                "return_pct": train_stats.get("Return [%]"),
+                "sharpe": train_stats.get("Sharpe Ratio"),
+                "max_drawdown_pct": train_stats.get("Max. Drawdown [%]"),
             }
-            results.append(row)
+        )
+        if score_value is None:
+            continue
+        if best_score is None or score_value > best_score:
+            best_score = score_value
+            best_params = params
+            best_train_stats = train_stats
 
-            print(
-                f"[OK] {symbol}: "
-                f"engine={args.engine} | "
-                f"train {row['train_start']}->{row['train_end']} | "
-                f"test {row['test_start']}->{row['test_end']} | "
-                f"params fast={row['fast']} slow={row['slow']} lookback={row['lookback']} | "
-                f"test Return[%]={row['test_return_pct']} | "
-                f"benchmark Return[%]={row['benchmark_return_pct']} | "
-                f"excess Return[%]={row['excess_return_pct']} | "
-                f"test Sharpe={row['test_sharpe']}"
-            )
+    return best_params, best_score, best_train_stats, candidates
 
-            current_train_start = current_train_start + test_offset
 
-    if not results:
-        print("No walk-forward results generated.")
-        return
+def _candidate_snapshot(candidates: list[dict[str, object]], top_n: int = 3) -> str:
+    successful = [candidate for candidate in candidates if candidate.get("status") == "ok" and candidate.get("score") is not None]
+    successful = sorted(successful, key=lambda item: float(item["score"]), reverse=True)[:top_n]
+    payload = []
+    for candidate in successful:
+        payload.append(
+            {
+                "fast": candidate["params"].get("fast"),
+                "slow": candidate["params"].get("slow"),
+                "lookback": candidate["params"].get("lookback"),
+                "lookback_bars": candidate["params"].get("lookback_bars"),
+                "skip_bars": candidate["params"].get("skip_bars"),
+                "top_n": candidate["params"].get("top_n"),
+                "rebalance_bars": candidate["params"].get("rebalance_bars"),
+                "entry_lookback": candidate["params"].get("entry_lookback"),
+                "exit_lookback": candidate["params"].get("exit_lookback"),
+                "momentum_lookback": candidate["params"].get("momentum_lookback"),
+                "score": candidate.get("score"),
+                "return_pct": candidate.get("return_pct"),
+                "sharpe": candidate.get("sharpe"),
+            }
+        )
+    return json.dumps(payload)
 
-    out_df = pd.DataFrame(results)
 
-    print("\nWalk-forward window results:")
-    print(out_df.to_string(index=False))
-
+def _build_summary_rows(window_df: pd.DataFrame, *, strategy: str, engine: str) -> pd.DataFrame:
     summary_rows: list[dict[str, object]] = []
-
-    for symbol in sorted(out_df["symbol"].dropna().unique()):
-        symbol_df = out_df[out_df["symbol"] == symbol].copy()
+    for symbol in sorted(window_df["symbol"].dropna().unique()):
+        symbol_df = window_df[window_df["symbol"] == symbol].copy()
+        completed_df = symbol_df[symbol_df["window_status"] == "completed"].copy()
+        skipped_df = symbol_df[symbol_df["window_status"] != "completed"].copy()
 
         row: dict[str, object] = {
             "symbol": symbol,
-            "strategy": args.strategy,
-            "engine": args.engine,
-            "windows": len(symbol_df),
-            "avg_test_return_pct": symbol_df["test_return_pct"].mean(),
-            "median_test_return_pct": symbol_df["test_return_pct"].median(),
-            "compounded_test_return_pct": compound_return_pct(symbol_df["test_return_pct"]),
-            "avg_benchmark_return_pct": symbol_df["benchmark_return_pct"].mean(),
-            "median_benchmark_return_pct": symbol_df["benchmark_return_pct"].median(),
-            "compounded_benchmark_return_pct": compound_return_pct(symbol_df["benchmark_return_pct"]),
-            "avg_excess_return_pct": symbol_df["excess_return_pct"].mean(),
-            "median_excess_return_pct": symbol_df["excess_return_pct"].median(),
-            "compounded_excess_return_pct": (
-                compound_return_pct(symbol_df["test_return_pct"])
-                - compound_return_pct(symbol_df["benchmark_return_pct"])
+            "strategy": strategy,
+            "engine": engine,
+            "effective_start_date": symbol_df["effective_start_date"].iloc[0],
+            "effective_end_date": symbol_df["effective_end_date"].iloc[0],
+            "candidate_windows": int(len(symbol_df)),
+            "completed_windows": int(len(completed_df)),
+            "skipped_windows": int(len(skipped_df)),
+            "percent_positive_windows": (
+                float((completed_df["test_return_pct"] > 0).mean() * 100.0)
+                if not completed_df.empty
+                else float("nan")
             ),
-            "avg_test_sharpe": symbol_df["test_sharpe"].mean(),
-            "median_test_sharpe": symbol_df["test_sharpe"].median(),
-            "worst_test_max_drawdown_pct": symbol_df["test_max_drawdown_pct"].min(),
+            "avg_test_return_pct": completed_df["test_return_pct"].mean(),
+            "median_test_return_pct": completed_df["test_return_pct"].median(),
+            "compounded_test_return_pct": compound_return_pct(completed_df["test_return_pct"]) if not completed_df.empty else float("nan"),
+            "avg_benchmark_return_pct": completed_df["benchmark_return_pct"].mean(),
+            "median_benchmark_return_pct": completed_df["benchmark_return_pct"].median(),
+            "compounded_benchmark_return_pct": compound_return_pct(completed_df["benchmark_return_pct"]) if not completed_df.empty else float("nan"),
+            "avg_excess_return_pct": completed_df["excess_return_pct"].mean(),
+            "median_excess_return_pct": completed_df["excess_return_pct"].median(),
+            "compounded_excess_return_pct": (
+                compound_return_pct(completed_df["test_return_pct"]) - compound_return_pct(completed_df["benchmark_return_pct"])
+                if not completed_df.empty
+                else float("nan")
+            ),
+            "worst_excess_return_pct": completed_df["excess_return_pct"].min(),
+            "best_excess_return_pct": completed_df["excess_return_pct"].max(),
+            "avg_test_sharpe": completed_df["test_sharpe"].mean(),
+            "median_test_sharpe": completed_df["test_sharpe"].median(),
+            "worst_test_max_drawdown_pct": completed_df["test_max_drawdown_pct"].min(),
+            "total_trade_count": completed_df["trade_count"].fillna(0).sum() if "trade_count" in completed_df.columns else 0,
+            "total_entry_count": completed_df["entry_count"].fillna(0).sum() if "entry_count" in completed_df.columns else 0,
+            "total_exit_count": completed_df["exit_count"].fillna(0).sum() if "exit_count" in completed_df.columns else 0,
+            "mean_percent_time_in_market": completed_df["percent_time_in_market"].mean() if "percent_time_in_market" in completed_df.columns else float("nan"),
+            "mean_average_holding_period_bars": completed_df["average_holding_period_bars"].mean() if "average_holding_period_bars" in completed_df.columns else float("nan"),
+            "mean_final_position_size": completed_df["final_position_size"].mean() if "final_position_size" in completed_df.columns else float("nan"),
+            "mean_average_number_of_holdings": completed_df["average_number_of_holdings"].mean() if "average_number_of_holdings" in completed_df.columns else float("nan"),
+            "total_rebalance_count": completed_df["rebalance_count"].fillna(0).sum() if "rebalance_count" in completed_df.columns else 0,
+            "mean_turnover": completed_df["mean_turnover"].mean() if "mean_turnover" in completed_df.columns else float("nan"),
+            "mean_percent_invested": completed_df["percent_invested"].mean() if "percent_invested" in completed_df.columns else float("nan"),
+            "mean_average_gross_exposure": completed_df["average_gross_exposure"].mean() if "average_gross_exposure" in completed_df.columns else float("nan"),
+            "mean_initial_equity": completed_df["initial_equity"].mean() if "initial_equity" in completed_df.columns else float("nan"),
+            "mean_final_equity": completed_df["final_equity"].mean() if "final_equity" in completed_df.columns else float("nan"),
+            "percent_windows_ended_in_cash": (
+                float(completed_df["ended_in_cash"].fillna(False).astype(bool).mean() * 100.0)
+                if "ended_in_cash" in completed_df.columns and not completed_df.empty
+                else float("nan")
+            ),
         }
 
-        if args.strategy == "sma_cross":
+        if strategy == "sma_cross" and not completed_df.empty:
             param_counts = (
-                symbol_df.groupby(["fast", "slow"])
+                completed_df.groupby(["fast", "slow"])
                 .size()
                 .reset_index(name="count")
                 .sort_values(["count", "fast", "slow"], ascending=[False, True, True])
@@ -303,10 +419,9 @@ def cmd_walkforward(args: argparse.Namespace) -> None:
                 row["most_selected_fast"] = best_params["fast"]
                 row["most_selected_slow"] = best_params["slow"]
                 row["most_selected_count"] = best_params["count"]
-
-        elif args.strategy == "momentum_hold":
+        elif strategy == "momentum_hold" and not completed_df.empty:
             param_counts = (
-                symbol_df.groupby(["lookback"])
+                completed_df.groupby(["lookback"])
                 .size()
                 .reset_index(name="count")
                 .sort_values(["count", "lookback"], ascending=[False, True])
@@ -315,11 +430,517 @@ def cmd_walkforward(args: argparse.Namespace) -> None:
                 best_params = param_counts.iloc[0]
                 row["most_selected_lookback"] = best_params["lookback"]
                 row["most_selected_count"] = best_params["count"]
+        elif strategy == "breakout_hold" and not completed_df.empty:
+            param_counts = (
+                completed_df.groupby(["entry_lookback", "exit_lookback", "momentum_lookback"], dropna=False)
+                .size()
+                .reset_index(name="count")
+                .sort_values(
+                    ["count", "entry_lookback", "exit_lookback", "momentum_lookback"],
+                    ascending=[False, True, True, True],
+                )
+            )
+            if not param_counts.empty:
+                best_params = param_counts.iloc[0]
+                row["most_selected_entry_lookback"] = best_params["entry_lookback"]
+                row["most_selected_exit_lookback"] = best_params["exit_lookback"]
+                row["most_selected_momentum_lookback"] = best_params["momentum_lookback"]
+                row["most_selected_count"] = best_params["count"]
+        elif strategy == "xsec_momentum_topn" and not completed_df.empty:
+            param_counts = (
+                completed_df.groupby(["lookback_bars", "skip_bars", "top_n", "rebalance_bars"], dropna=False)
+                .size()
+                .reset_index(name="count")
+                .sort_values(["count", "lookback_bars", "skip_bars", "top_n", "rebalance_bars"], ascending=[False, True, True, True, True])
+            )
+            if not param_counts.empty:
+                best_params = param_counts.iloc[0]
+                row["most_selected_lookback_bars"] = best_params["lookback_bars"]
+                row["most_selected_skip_bars"] = best_params["skip_bars"]
+                row["most_selected_top_n"] = best_params["top_n"]
+                row["most_selected_rebalance_bars"] = best_params["rebalance_bars"]
+                row["most_selected_count"] = best_params["count"]
 
         summary_rows.append(row)
 
-    summary_df = pd.DataFrame(summary_rows)
+    return pd.DataFrame(summary_rows)
 
+
+def _build_overall_universe_summary(summary_df: pd.DataFrame) -> pd.DataFrame:
+    if summary_df.empty:
+        return pd.DataFrame(
+            [
+                {
+                    "symbols": 0,
+                    "completed_windows": 0,
+                    "skipped_windows": 0,
+                    "mean_avg_test_return_pct": float("nan"),
+                    "mean_avg_excess_return_pct": float("nan"),
+                    "best_symbol_by_avg_excess_return": None,
+                    "worst_symbol_by_avg_excess_return": None,
+                }
+            ]
+        )
+
+    best_symbol = None
+    worst_symbol = None
+    if summary_df["avg_excess_return_pct"].notna().any():
+        best_symbol = summary_df.loc[summary_df["avg_excess_return_pct"].idxmax(), "symbol"]
+        worst_symbol = summary_df.loc[summary_df["avg_excess_return_pct"].idxmin(), "symbol"]
+
+    return pd.DataFrame(
+        [
+            {
+                "symbols": int(len(summary_df)),
+                "completed_windows": int(summary_df["completed_windows"].sum()),
+                "skipped_windows": int(summary_df["skipped_windows"].sum()),
+                "mean_avg_test_return_pct": summary_df["avg_test_return_pct"].mean(),
+                "mean_avg_excess_return_pct": summary_df["avg_excess_return_pct"].mean(),
+                "best_symbol_by_avg_excess_return": best_symbol,
+                "worst_symbol_by_avg_excess_return": worst_symbol,
+            }
+        ]
+    )
+
+
+def cmd_walkforward(args: argparse.Namespace) -> None:
+    symbols = resolve_symbols(args)
+    param_grid, invalid_warnings = _build_param_grid(args)
+    window_spec = _resolve_window_spec(args)
+    all_rows: list[dict[str, object]] = []
+
+    print(
+        f"Running walk-forward for {len(symbols)} symbol(s): {print_symbol_list(symbols)} | "
+        f"param_combinations={len(param_grid)} | requested_range={args.start or 'full'}->{args.end or 'full'} | "
+        f"engine={args.engine} | window_units={window_spec['window_units']} | "
+        f"train_bars={window_spec['train_bars']} test_bars={window_spec['test_bars']} step_bars={window_spec['step_bars']}"
+    )
+    for warning in invalid_warnings:
+        print(f"[SKIP] {warning}")
+    if window_spec["aliases_used"]:
+        print(f"[INFO] Compatibility aliases applied: {', '.join(window_spec['aliases_used'])}")
+    if window_spec["derived_from_years"]:
+        print(
+            "[INFO] Derived walk-forward bar counts from year defaults: "
+            f"{', '.join(window_spec['derived_from_years'])}"
+        )
+
+    if args.strategy == "xsec_momentum_topn":
+        prepared_frames = {
+            symbol: prepare_research_frame(symbol, start=args.start, end=args.end)
+            for symbol in symbols
+        }
+        close_panel, _ = build_close_panel(prepared_frames)
+        effective_start = str(pd.Timestamp(close_panel.index.min()).date())
+        effective_end = str(pd.Timestamp(close_panel.index.max()).date())
+        working_df = close_panel.reset_index().rename(columns={"index": "timestamp"})
+        candidate_windows = _iter_row_windows(
+            working_df,
+            date_col="timestamp",
+            train_bars=window_spec["train_bars"],
+            test_bars=window_spec["test_bars"],
+            step_bars=window_spec["step_bars"],
+        )
+        universe_rows: list[dict[str, object]] = []
+        for window in candidate_windows:
+            base_row = {
+                "window_index": window["window_index"],
+                "symbol": "UNIVERSE",
+                "symbols": ",".join(symbols),
+                "symbol_count": len(symbols),
+                "strategy": args.strategy,
+                "engine": args.engine,
+                "window_units": window_spec["window_units"],
+                "train_bars_requested": window_spec["train_bars"],
+                "test_bars_requested": window_spec["test_bars"],
+                "step_bars_requested": window_spec["step_bars"],
+                "train_rows": window["train_rows"],
+                "test_rows": window["test_rows"],
+                "effective_start_date": effective_start,
+                "effective_end_date": effective_end,
+                "train_start": window["train_start"],
+                "train_end": window["train_end"],
+                "test_start": window["test_start"],
+                "test_end": window["test_end"],
+                "selected_by": args.select_by,
+                "selected_train_score": None,
+                "selected_candidate_count": 0,
+                "top_candidate_scores": "[]",
+                "fast": None,
+                "slow": None,
+                "lookback": None,
+                "lookback_bars": None,
+                "skip_bars": None,
+                "top_n": None,
+                "rebalance_bars": None,
+                "entry_lookback": None,
+                "exit_lookback": None,
+                "momentum_lookback": None,
+                "train_return_pct": None,
+                "train_sharpe": None,
+                "train_max_drawdown_pct": None,
+                "test_return_pct": None,
+                "test_sharpe": None,
+                "test_max_drawdown_pct": None,
+                "trade_count": None,
+                "entry_count": None,
+                "exit_count": None,
+                "percent_time_in_market": None,
+                "average_holding_period_bars": None,
+                "final_position_size": None,
+                "ended_in_cash": None,
+                "average_number_of_holdings": None,
+                "rebalance_count": None,
+                "mean_turnover": None,
+                "percent_invested": None,
+                "initial_equity": None,
+                "final_equity": None,
+                "average_gross_exposure": None,
+                "benchmark_return_pct": None,
+                "excess_return_pct": None,
+                "window_status": "skipped",
+                "skip_reason": None,
+            }
+            if base_row["train_rows"] < args.min_train_rows:
+                base_row["skip_reason"] = f"insufficient_train_rows:{base_row['train_rows']}<{args.min_train_rows}"
+                universe_rows.append(base_row)
+                continue
+            if base_row["test_rows"] < args.min_test_rows:
+                base_row["skip_reason"] = f"insufficient_test_rows:{base_row['test_rows']}<{args.min_test_rows}"
+                universe_rows.append(base_row)
+                continue
+
+            train_prepared = {
+                symbol: {
+                    **prepared,
+                    "df": prepared["df"].iloc[window["train_start_idx"]:window["train_end_exclusive"]].copy(),
+                }
+                for symbol, prepared in prepared_frames.items()
+            }
+            test_prepared = {
+                symbol: {
+                    **prepared,
+                    "df": prepared["df"].iloc[window["test_start_idx"]:window["test_end_exclusive"]].copy(),
+                }
+                for symbol, prepared in prepared_frames.items()
+            }
+
+            candidates: list[dict[str, object]] = []
+            best_params = None
+            best_score = None
+            best_train_stats = None
+            for params in param_grid:
+                try:
+                    train_result = run_xsec_momentum_topn(
+                        prepared_frames=train_prepared,
+                        lookback_bars=int(params["lookback_bars"] or 126),
+                        skip_bars=int(params["skip_bars"] or 0),
+                        top_n=int(params["top_n"] or 1),
+                        rebalance_bars=int(params["rebalance_bars"] or 21),
+                        commission=args.commission,
+                        cash=args.cash,
+                    )
+                    train_stats = train_result.summary
+                except Exception as exc:
+                    candidates.append({"params": params, "score": None, "status": "error", "error": f"{type(exc).__name__}: {exc}"})
+                    continue
+                score = train_stats.get(args.select_by)
+                score_value = None if score is None or pd.isna(score) else float(score)
+                candidates.append(
+                    {
+                        "params": params,
+                        "score": score_value,
+                        "status": "ok",
+                        "return_pct": train_stats.get("Return [%]"),
+                        "sharpe": train_stats.get("Sharpe Ratio"),
+                        "max_drawdown_pct": train_stats.get("Max. Drawdown [%]"),
+                    }
+                )
+                if score_value is not None and (best_score is None or score_value > best_score):
+                    best_score = score_value
+                    best_params = params
+                    best_train_stats = train_stats
+            base_row["selected_candidate_count"] = sum(1 for item in candidates if item.get("status") == "ok")
+            base_row["top_candidate_scores"] = _candidate_snapshot(candidates)
+            if best_params is None or best_train_stats is None:
+                base_row["skip_reason"] = "no_valid_train_candidates"
+                universe_rows.append(base_row)
+                continue
+            test_result = run_xsec_momentum_topn(
+                prepared_frames=test_prepared,
+                lookback_bars=int(best_params["lookback_bars"] or 126),
+                skip_bars=int(best_params["skip_bars"] or 0),
+                top_n=int(best_params["top_n"] or 1),
+                rebalance_bars=int(best_params["rebalance_bars"] or 21),
+                commission=args.commission,
+                cash=args.cash,
+            )
+            test_stats = test_result.summary
+            base_row.update(
+                {
+                    "selected_train_score": best_score,
+                    "lookback_bars": best_params.get("lookback_bars"),
+                    "skip_bars": best_params.get("skip_bars"),
+                    "top_n": best_params.get("top_n"),
+                    "rebalance_bars": best_params.get("rebalance_bars"),
+                    "train_return_pct": best_train_stats.get("Return [%]"),
+                    "train_sharpe": best_train_stats.get("Sharpe Ratio"),
+                    "train_max_drawdown_pct": best_train_stats.get("Max. Drawdown [%]"),
+                    "test_return_pct": test_stats.get("Return [%]"),
+                    "test_sharpe": test_stats.get("Sharpe Ratio"),
+                    "test_max_drawdown_pct": test_stats.get("Max. Drawdown [%]"),
+                    "trade_count": test_stats.get("trade_count"),
+                    "entry_count": test_stats.get("entry_count"),
+                    "exit_count": test_stats.get("exit_count"),
+                    "percent_time_in_market": test_stats.get("percent_time_in_market"),
+                    "average_holding_period_bars": test_stats.get("average_holding_period_bars"),
+                    "final_position_size": test_stats.get("final_position_size"),
+                    "ended_in_cash": test_stats.get("ended_in_cash"),
+                    "average_number_of_holdings": test_stats.get("average_number_of_holdings"),
+                    "rebalance_count": test_stats.get("rebalance_count"),
+                    "mean_turnover": test_stats.get("mean_turnover"),
+                    "percent_invested": test_stats.get("percent_invested"),
+                    "initial_equity": test_stats.get("initial_equity"),
+                    "final_equity": test_stats.get("final_equity"),
+                    "average_gross_exposure": test_stats.get("average_gross_exposure"),
+                    "benchmark_return_pct": test_stats.get("benchmark_return_pct"),
+                    "excess_return_pct": test_stats.get("excess_return_pct"),
+                    "window_status": "completed",
+                    "skip_reason": "",
+                }
+            )
+            universe_rows.append(base_row)
+            print(
+                f"[OK] universe: effective {effective_start}->{effective_end} | "
+                f"window {window['window_index']} train {base_row['train_start']}->{base_row['train_end']} ({base_row['train_rows']} rows) | "
+                f"test {base_row['test_start']}->{base_row['test_end']} ({base_row['test_rows']} rows) | "
+                f"params lookback_bars={base_row['lookback_bars']} skip_bars={base_row['skip_bars']} top_n={base_row['top_n']} "
+                f"rebalance_bars={base_row['rebalance_bars']} | selected_by={args.select_by} score={best_score} | "
+                f"test Return[%]={base_row['test_return_pct']} | avg_holdings={base_row['average_number_of_holdings']} | "
+                f"percent_invested={base_row['percent_invested']} | initial_equity={base_row['initial_equity']} "
+                f"final_equity={base_row['final_equity']} | avg_gross_exposure={base_row['average_gross_exposure']} | "
+                f"activity={activity_note(base_row)} | "
+                f"benchmark Return[%]={base_row['benchmark_return_pct']} | excess Return[%]={base_row['excess_return_pct']}"
+            )
+
+        out_df = pd.DataFrame(universe_rows)
+        completed_out_df = out_df[out_df["window_status"] == "completed"].copy()
+        print("\nWalk-forward window results:")
+        print(out_df.to_string(index=False))
+        summary_df = _build_summary_rows(out_df, strategy=args.strategy, engine=args.engine)
+        print("\nWalk-forward aggregate summary:")
+        print(summary_df.to_string(index=False))
+        output_path = Path(args.output)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        out_df.to_csv(output_path, index=False)
+        summary_path = output_path.with_name(output_path.stem + "_summary.csv")
+        summary_df.to_csv(summary_path, index=False)
+        plot_source_df = completed_out_df if not completed_out_df.empty else out_df.iloc[0:0].copy()
+        returns_plot_path = save_walkforward_return_plot(plot_source_df, output_path)
+        params_plot_path = save_walkforward_param_plot(plot_source_df, output_path)
+        report_path = save_walkforward_html_report(
+            window_df=out_df,
+            summary_df=summary_df,
+            output_path=output_path,
+            returns_plot_path=returns_plot_path,
+            params_plot_path=params_plot_path,
+        )
+        print(f"Saved walk-forward returns plot to {returns_plot_path}")
+        if params_plot_path is not None:
+            print(f"Saved walk-forward parameter plot to {params_plot_path}")
+        print(f"Saved walk-forward HTML report to {report_path}")
+        print(f"\nSaved walk-forward window results to {output_path}")
+        print(f"Saved walk-forward summary to {summary_path}")
+        return
+
+    for symbol in symbols:
+        try:
+            prepared = prepare_research_frame(symbol, start=args.start, end=args.end)
+            df = prepared["df"]
+        except Exception as exc:
+            print(f"[ERROR] {symbol}: failed to load feature frame -> {exc}")
+            continue
+
+        date_col = str(prepared["date_col"])
+        effective_start = str(prepared["effective_start"])
+        effective_end = str(prepared["effective_end"])
+        symbol_rows: list[dict[str, object]] = []
+        candidate_windows = _iter_row_windows(
+            df,
+            date_col=date_col,
+            train_bars=window_spec["train_bars"],
+            test_bars=window_spec["test_bars"],
+            step_bars=window_spec["step_bars"],
+        )
+
+        for window in candidate_windows:
+            train_df = window["train_df"]
+            test_df = window["test_df"]
+            base_row = {
+                "window_index": window["window_index"],
+                "symbol": symbol,
+                "strategy": args.strategy,
+                "engine": args.engine,
+                "window_units": window_spec["window_units"],
+                "train_bars_requested": window_spec["train_bars"],
+                "test_bars_requested": window_spec["test_bars"],
+                "step_bars_requested": window_spec["step_bars"],
+                "train_rows": window["train_rows"],
+                "test_rows": window["test_rows"],
+                "effective_start_date": effective_start,
+                "effective_end_date": effective_end,
+                "train_start": window["train_start"],
+                "train_end": window["train_end"],
+                "test_start": window["test_start"],
+                "test_end": window["test_end"],
+                "selected_by": args.select_by,
+                "selected_train_score": None,
+                "selected_candidate_count": 0,
+                "top_candidate_scores": "[]",
+                "fast": None,
+                "slow": None,
+                "lookback": None,
+                "entry_lookback": None,
+                "exit_lookback": None,
+                "momentum_lookback": None,
+                "train_return_pct": None,
+                "train_sharpe": None,
+                "train_max_drawdown_pct": None,
+                "test_return_pct": None,
+                "test_sharpe": None,
+                "test_max_drawdown_pct": None,
+                "trade_count": None,
+                "entry_count": None,
+                "exit_count": None,
+                "percent_time_in_market": None,
+                "average_holding_period_bars": None,
+                "final_position_size": None,
+                "ended_in_cash": None,
+                "benchmark_return_pct": None,
+                "excess_return_pct": None,
+                "window_status": "skipped",
+                "skip_reason": None,
+            }
+
+            if base_row["train_rows"] < args.min_train_rows:
+                base_row["skip_reason"] = f"insufficient_train_rows:{base_row['train_rows']}<{args.min_train_rows}"
+                symbol_rows.append(base_row)
+                continue
+
+            if base_row["test_rows"] < args.min_test_rows:
+                base_row["skip_reason"] = f"insufficient_test_rows:{base_row['test_rows']}<{args.min_test_rows}"
+                symbol_rows.append(base_row)
+                continue
+
+            best_params, best_score, best_train_stats, candidates = _score_candidates(
+                args=args,
+                train_df=train_df,
+                symbol=symbol,
+                param_grid=param_grid,
+            )
+            base_row["selected_candidate_count"] = sum(1 for item in candidates if item.get("status") == "ok")
+            base_row["top_candidate_scores"] = _candidate_snapshot(candidates)
+
+            if best_params is None or best_train_stats is None:
+                base_row["skip_reason"] = "no_valid_train_candidates"
+                symbol_rows.append(base_row)
+                continue
+
+            try:
+                test_stats = _run_stats(
+                    args=args,
+                    df=test_df,
+                    symbol=symbol,
+                    params=best_params,
+                )
+            except Exception as exc:
+                base_row["skip_reason"] = f"test_eval_failed:{type(exc).__name__}"
+                symbol_rows.append(base_row)
+                continue
+
+            benchmark_return_pct = compute_buy_and_hold_return_pct(test_df)
+            test_return_pct = test_stats.get("Return [%]")
+            if (
+                test_return_pct is not None
+                and not pd.isna(test_return_pct)
+                and not pd.isna(benchmark_return_pct)
+            ):
+                excess_return_pct = test_return_pct - benchmark_return_pct
+            else:
+                excess_return_pct = float("nan")
+
+            base_row.update(
+                {
+                    "selected_train_score": best_score,
+                    "fast": best_params.get("fast"),
+                    "slow": best_params.get("slow"),
+                    "lookback": best_params.get("lookback"),
+                    "entry_lookback": best_params.get("entry_lookback"),
+                    "exit_lookback": best_params.get("exit_lookback"),
+                    "momentum_lookback": best_params.get("momentum_lookback"),
+                    "train_return_pct": best_train_stats.get("Return [%]"),
+                    "train_sharpe": best_train_stats.get("Sharpe Ratio"),
+                    "train_max_drawdown_pct": best_train_stats.get("Max. Drawdown [%]"),
+                    "test_return_pct": test_return_pct,
+                    "test_sharpe": test_stats.get("Sharpe Ratio"),
+                    "test_max_drawdown_pct": test_stats.get("Max. Drawdown [%]"),
+                    "trade_count": test_stats.get("trade_count"),
+                    "entry_count": test_stats.get("entry_count"),
+                    "exit_count": test_stats.get("exit_count"),
+                    "percent_time_in_market": test_stats.get("percent_time_in_market"),
+                    "average_holding_period_bars": test_stats.get("average_holding_period_bars"),
+                    "final_position_size": test_stats.get("final_position_size"),
+                    "ended_in_cash": test_stats.get("ended_in_cash"),
+                    "benchmark_return_pct": benchmark_return_pct,
+                    "excess_return_pct": excess_return_pct,
+                    "window_status": "completed",
+                    "skip_reason": "",
+                }
+            )
+            symbol_rows.append(base_row)
+
+            print(
+                f"[OK] {symbol}: effective {effective_start}->{effective_end} | "
+                f"window {window['window_index']} train {base_row['train_start']}->{base_row['train_end']} "
+                f"({base_row['train_rows']} rows) | "
+                f"test {base_row['test_start']}->{base_row['test_end']} "
+                f"({base_row['test_rows']} rows) | "
+                f"params fast={base_row['fast']} slow={base_row['slow']} lookback={base_row['lookback']} | "
+                f"entry_lookback={base_row['entry_lookback']} exit_lookback={base_row['exit_lookback']} "
+                f"momentum_lookback={base_row['momentum_lookback']} | "
+                f"selected_by={args.select_by} score={best_score} | "
+                f"test Return[%]={base_row['test_return_pct']} | "
+                f"trade_count={base_row['trade_count']} | "
+                f"time_in_market[%]={base_row['percent_time_in_market']} | "
+                f"activity={activity_note(base_row)} | "
+                f"benchmark Return[%]={base_row['benchmark_return_pct']} | "
+                f"excess Return[%]={base_row['excess_return_pct']}"
+            )
+
+        symbol_window_df = pd.DataFrame(symbol_rows)
+        candidate_window_count = int(len(symbol_window_df))
+        completed_windows = int((symbol_window_df["window_status"] == "completed").sum()) if not symbol_window_df.empty else 0
+        skipped_windows = candidate_window_count - completed_windows
+        print(
+            f"{symbol}: effective_range={effective_start}->{effective_end}, "
+            f"param_combinations={len(param_grid)}, candidate_windows={candidate_window_count}, "
+            f"completed_windows={completed_windows}, skipped_windows={skipped_windows}, "
+            f"window_units={window_spec['window_units']}, "
+            f"train_bars={window_spec['train_bars']}, test_bars={window_spec['test_bars']}, step_bars={window_spec['step_bars']}"
+        )
+        all_rows.extend(symbol_rows)
+
+    if not all_rows:
+        print("No walk-forward results generated.")
+        return
+
+    out_df = pd.DataFrame(all_rows)
+    completed_out_df = out_df[out_df["window_status"] == "completed"].copy()
+
+    print("\nWalk-forward window results:")
+    print(out_df.to_string(index=False))
+
+    summary_df = _build_summary_rows(out_df, strategy=args.strategy, engine=args.engine)
     print("\nWalk-forward aggregate summary:")
     print(summary_df.to_string(index=False))
 
@@ -330,8 +951,15 @@ def cmd_walkforward(args: argparse.Namespace) -> None:
     summary_path = output_path.with_name(output_path.stem + "_summary.csv")
     summary_df.to_csv(summary_path, index=False)
 
-    returns_plot_path = save_walkforward_return_plot(out_df, output_path)
-    params_plot_path = save_walkforward_param_plot(out_df, output_path)
+    overall_summary_path = None
+    if len(summary_df) > 1:
+        overall_summary_df = _build_overall_universe_summary(summary_df)
+        overall_summary_path = output_path.with_name(output_path.stem + "_overall_summary.csv")
+        overall_summary_df.to_csv(overall_summary_path, index=False)
+
+    plot_source_df = completed_out_df if not completed_out_df.empty else out_df.iloc[0:0].copy()
+    returns_plot_path = save_walkforward_return_plot(plot_source_df, output_path)
+    params_plot_path = save_walkforward_param_plot(plot_source_df, output_path)
     report_path = save_walkforward_html_report(
         window_df=out_df,
         summary_df=summary_df,
@@ -344,6 +972,7 @@ def cmd_walkforward(args: argparse.Namespace) -> None:
     if params_plot_path is not None:
         print(f"Saved walk-forward parameter plot to {params_plot_path}")
     print(f"Saved walk-forward HTML report to {report_path}")
-
     print(f"\nSaved walk-forward window results to {output_path}")
     print(f"Saved walk-forward summary to {summary_path}")
+    if overall_summary_path is not None:
+        print(f"Saved walk-forward overall universe summary to {overall_summary_path}")

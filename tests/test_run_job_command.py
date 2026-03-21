@@ -171,3 +171,52 @@ def test_cmd_run_job_uses_symbol_override(monkeypatch) -> None:
     cmd_run_job(args)
 
     assert captured["symbols"] == ["MSFT", "NVDA"]
+
+
+def test_cmd_run_job_uses_universe_override(monkeypatch) -> None:
+    fake_config = make_config()
+    captured: dict[str, object] = {}
+
+    def fake_run_universe_research_workflow(*, symbols, base_config, continue_on_error):
+        captured["symbols"] = symbols
+        return {"results": {}, "errors": {}}
+
+    monkeypatch.setattr(
+        "trading_platform.cli.commands.run_job.load_research_workflow_config",
+        lambda path: fake_config,
+    )
+    monkeypatch.setattr(
+        "trading_platform.cli.commands.run_job.run_universe_research_workflow",
+        fake_run_universe_research_workflow,
+    )
+    monkeypatch.setattr(
+        "trading_platform.cli.commands.run_job.make_job_artifact_stem",
+        lambda: "job_test",
+    )
+    monkeypatch.setattr(
+        "trading_platform.cli.commands.run_job.build_universe_leaderboard",
+        lambda outputs: object(),
+    )
+    monkeypatch.setattr(
+        "trading_platform.cli.commands.run_job.save_leaderboard_csv",
+        lambda leaderboard, stem: Path("artifacts/jobs/job_test.leaderboard.csv"),
+    )
+    monkeypatch.setattr(
+        "trading_platform.cli.commands.run_job.build_job_summary",
+        lambda *, config, symbols, outputs, leaderboard_csv_path: {"ok": True},
+    )
+    monkeypatch.setattr(
+        "trading_platform.cli.commands.run_job.save_job_summary",
+        lambda summary, stem: Path("artifacts/jobs/job_test.json"),
+    )
+
+    args = argparse.Namespace(
+        config="configs/research/test.yaml",
+        symbols=None,
+        universe="test_largecap",
+        fail_fast=False,
+    )
+
+    cmd_run_job(args)
+
+    assert captured["symbols"] == ["AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL"]

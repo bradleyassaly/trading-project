@@ -158,8 +158,18 @@ trading-cli data ingest --universe magnificent7 --start 2020-01-01
 trading-cli data features --universe magnificent7 --feature-groups trend momentum volatility volume
 trading-cli data universes list
 trading-cli research run --symbols AAPL MSFT NVDA --strategy sma_cross --fast 20 --slow 100 --engine vectorized --output-dir artifacts/research
+trading-cli research run --symbols AAPL --strategy momentum_hold --lookback 20 --start 2020-01-01 --end 2024-12-31 --output-dir artifacts/research/aapl
+trading-cli research run --symbols AAPL --strategy breakout_hold --entry-lookback 55 --exit-lookback 20 --momentum-lookback 63 --start 2020-01-01 --end 2024-12-31 --output-dir artifacts/research/aapl_breakout
+trading-cli research run --universe magnificent7 --strategy xsec_momentum_topn --lookback-bars 126 --skip-bars 5 --top-n 3 --rebalance-bars 21 --start 2020-01-01 --end 2024-12-31 --output-dir artifacts/research/mag7_xsec_momentum
+trading-cli research validate-signal --symbols AAPL --strategy sma_cross --fast 20 --slow 100 --output-dir artifacts/validate_signal/aapl
+trading-cli research validate-signal --universe debug_liquid10 --strategy sma_cross --fast 20 --slow 100 --output-dir artifacts/validate_signal/debug_liquid10
+trading-cli research validate-signal --universe debug_liquid10 --strategy sma_cross --fast 20 --slow 100 --fast-values 10 20 30 --slow-values 50 100 150 --output-dir artifacts/validate_signal/debug_liquid10_sweep
 trading-cli research sweep --symbols AAPL MSFT NVDA --strategy sma_cross --fast-values 10 20 30 --slow-values 50 100 150
-trading-cli research walkforward --universe magnificent7 --strategy sma_cross --fast-values 10 20 --slow-values 50 100
+trading-cli research sweep --symbols AAPL --strategy breakout_hold --entry-lookback-values 20 55 100 --exit-lookback-values 10 20 50 --momentum-lookback-values 63
+trading-cli research sweep --universe magnificent7 --strategy xsec_momentum_topn --lookback-bars-values 63 126 252 --skip-bars-values 0 5 --top-n-values 2 3 5 --rebalance-bars-values 5 21
+trading-cli research walkforward --universe magnificent7 --strategy sma_cross --fast-values 10 20 --slow-values 50 100 --train-bars 756 --test-bars 126 --step-bars 126
+trading-cli research walkforward --symbols AAPL --strategy breakout_hold --entry-lookback-values 20 55 100 --exit-lookback-values 10 20 50 --momentum-lookback-values 63 --train-bars 756 --test-bars 126 --step-bars 126
+trading-cli research walkforward --universe magnificent7 --strategy xsec_momentum_topn --lookback-bars-values 126 252 --skip-bars-values 0 5 --top-n-values 3 5 --rebalance-bars-values 5 21 --train-bars 756 --test-bars 126 --step-bars 126
 trading-cli research alpha --universe magnificent7 --feature-dir data/features --signal-family momentum --lookbacks 5 10 20 60 --horizons 1 5 20 --output-dir artifacts/alpha_research
 trading-cli research loop --universe nasdaq100 --feature-dir data/features --signal-families momentum mean_reversion volatility feature_combo --max-iterations 1
 trading-cli research multi-universe --universes sp500 nasdaq100 liquid_top_100 --feature-dir data/features --signal-family momentum
@@ -237,8 +247,56 @@ This canonical loader is used by `alpha_lab`, research prep paths, and signal-lo
 
 1. Run `data ingest` for a universe or explicit symbols.
 2. Run `data features` to build parquet feature datasets.
-3. Run `research run`, `research sweep`, `research walkforward`, `portfolio backtest`, or `portfolio topn`.
+3. Run `research validate-signal`, `research run`, `research sweep`, `research walkforward`, `portfolio backtest`, or `portfolio topn`.
 4. Inspect artifacts under the selected output directory.
+
+Date-bounded legacy research example:
+
+```bash
+trading-cli research run --symbols AAPL --strategy sma_cross --fast 20 --slow 100 --start 2020-01-01 --end 2024-12-31 --output-dir artifacts/research/aapl_2020_2024
+```
+
+`breakout_hold` supports an optional momentum confirmation filter. When `--momentum-lookback` is provided, the strategy only enters a breakout if trailing return over that lookback is positive. Exits still follow the breakout exit rule independently of the momentum filter.
+
+`xsec_momentum_topn` is a relative-strength portfolio strategy for small universes. On each rebalance date it ranks symbols by trailing return over `--lookback-bars`, optionally skips the most recent `--skip-bars`, selects the top `--top-n`, and holds them equally weighted until the next `--rebalance-bars` interval.
+
+### Signal Validation Commands
+
+Use `research validate-signal` when you want a trust-oriented validation pass on a single ticker or a small universe. The command checks feature availability, runs vectorized in-sample research, writes a parameter sweep when applicable, runs walk-forward validation, then writes per-symbol summaries, a combined leaderboard, and a JSON pass/fail report.
+
+Single ticker validation:
+
+```bash
+trading-cli research validate-signal --symbols AAPL --strategy sma_cross --fast 20 --slow 100 --output-dir artifacts/validate_signal/aapl
+```
+
+Universe validation with the built-in debug universe:
+
+```bash
+trading-cli research validate-signal --universe debug_liquid10 --strategy sma_cross --fast 20 --slow 100 --output-dir artifacts/validate_signal/debug_liquid10
+```
+
+Validation with an explicit sweep grid:
+
+```bash
+trading-cli research validate-signal --universe debug_liquid10 --strategy sma_cross --fast 20 --slow 100 --fast-values 10 20 30 --slow-values 50 100 150 --output-dir artifacts/validate_signal/debug_liquid10_sweep
+```
+
+Standalone walk-forward command:
+
+```bash
+trading-cli research walkforward --universe debug_liquid10 --strategy sma_cross --fast-values 10 20 30 --slow-values 50 100 150 --train-bars 756 --test-bars 126 --step-bars 126 --engine vectorized --output artifacts/experiments/debug_liquid10_walkforward.csv
+```
+
+For daily legacy research, `--train-bars`, `--test-bars`, and `--step-bars` refer to trading bars/rows, not calendar days. The older `--train-period-days`, `--test-period-days`, and `--step-days` flags remain as compatibility aliases and now map to those same row counts.
+
+One walk-forward window is only a basic sanity check. Prefer multi-window validation so the command can evaluate several rolling out-of-sample periods and report completed versus skipped windows across the effective date range.
+
+The walk-forward CSV and summary outputs now include activity diagnostics such as `trade_count`, `entry_count`, `exit_count`, `percent_time_in_market`, and `average_holding_period_bars`. Use these fields to interpret flat `0.0%` test windows:
+
+- `trade_count=0` and `percent_time_in_market=0` usually means the strategy was inactive in that window.
+- low `percent_time_in_market` means the result came from brief exposure, so underperformance versus buy-and-hold may reflect low participation rather than only poor trade quality.
+- nonzero trades with weak returns point more directly to poor timing or weak signal quality out of sample.
 
 ### Alpha Discovery Workflow
 

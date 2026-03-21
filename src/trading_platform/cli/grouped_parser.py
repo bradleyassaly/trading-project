@@ -32,12 +32,16 @@ from trading_platform.cli.commands.run_job import cmd_run_job
 from trading_platform.cli.commands.run_sweep import cmd_run_sweep
 from trading_platform.cli.commands.run_walk_forward import cmd_run_walk_forward
 from trading_platform.cli.commands.sweep import cmd_sweep
+from trading_platform.cli.commands.validate_signal import cmd_validate_signal
 from trading_platform.cli.commands.validate_live import cmd_validate_live
 from trading_platform.cli.commands.walkforward import cmd_walkforward
 from trading_platform.cli.common import (
+    add_date_range_arguments,
     add_feature_arguments,
     add_shared_symbol_args,
     add_strategy_arguments,
+    add_xsec_research_arguments,
+    get_strategy_choices,
 )
 from trading_platform.strategies.registry import STRATEGY_REGISTRY
 
@@ -76,6 +80,7 @@ _RESEARCH_GROUP_COMMANDS = {
     "run",
     "sweep",
     "walkforward",
+    "validate-signal",
     "alpha",
     "loop",
     "multi-universe",
@@ -192,13 +197,27 @@ def _add_common_portfolio_selection_arguments(parser: argparse.ArgumentParser, *
 def _add_walkforward_arguments(parser: argparse.ArgumentParser) -> None:
     add_shared_symbol_args(parser)
     parser.add_argument("--config", type=str, default=None, help="Optional YAML or JSON config file for reproducible walk-forward jobs.")
-    parser.add_argument("--strategy", type=str, default="sma_cross", choices=sorted(STRATEGY_REGISTRY.keys()), help="Strategy to validate")
+    parser.add_argument("--strategy", type=str, default="sma_cross", choices=get_strategy_choices(include_xsec=True), help="Strategy to validate")
+    add_date_range_arguments(parser)
     add_execution_arguments(parser)
     parser.add_argument("--fast-values", type=int, nargs="+")
     parser.add_argument("--slow-values", type=int, nargs="+")
     parser.add_argument("--lookback-values", type=int, nargs="+")
+    parser.add_argument("--lookback-bars-values", type=int, nargs="+")
+    parser.add_argument("--skip-bars-values", type=int, nargs="+")
+    parser.add_argument("--top-n-values", type=int, nargs="+")
+    parser.add_argument("--rebalance-bars-values", type=int, nargs="+")
+    parser.add_argument("--entry-lookback-values", type=int, nargs="+")
+    parser.add_argument("--exit-lookback-values", type=int, nargs="+")
+    parser.add_argument("--momentum-lookback-values", type=int, nargs="+")
     parser.add_argument("--train-years", type=int, default=5)
     parser.add_argument("--test-years", type=int, default=1)
+    parser.add_argument("--train-bars", type=int, default=None, help="Training window length in bars/rows. For daily data, this means trading days.")
+    parser.add_argument("--test-bars", type=int, default=None, help="Test window length in bars/rows. For daily data, this means trading days.")
+    parser.add_argument("--step-bars", type=int, default=None, help="Step size between windows in bars/rows. Defaults to test-bars.")
+    parser.add_argument("--train-period-days", type=int, default=None, help="Compatibility alias for --train-bars in daily walk-forward research.")
+    parser.add_argument("--test-period-days", type=int, default=None, help="Compatibility alias for --test-bars in daily walk-forward research.")
+    parser.add_argument("--step-days", type=int, default=None, help="Compatibility alias for --step-bars in daily walk-forward research.")
     parser.add_argument("--min-train-rows", type=int, default=252)
     parser.add_argument("--min-test-rows", type=int, default=126)
     parser.add_argument("--select-by", type=str, default="Sharpe Ratio", choices=["Sharpe Ratio", "Return [%]"], help="Metric used to choose best params on the train window")
@@ -206,6 +225,26 @@ def _add_walkforward_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--commission", type=float, default=0.001)
     parser.add_argument("--output", type=str, default="artifacts/experiments/walkforward_results.csv", help="CSV output path")
     parser.add_argument("--engine", type=str, default="legacy", choices=["legacy", "vectorized"], help="Backtest engine to use")
+
+
+def _add_validate_signal_arguments(parser: argparse.ArgumentParser) -> None:
+    add_shared_symbol_args(parser)
+    parser.add_argument("--strategy", type=str, default="sma_cross", choices=sorted(STRATEGY_REGISTRY.keys()), help="Strategy to validate")
+    add_execution_arguments(parser)
+    parser.add_argument("--fast", type=int, default=20, help="Fast SMA window used for the baseline in-sample run")
+    parser.add_argument("--slow", type=int, default=100, help="Slow SMA window used for the baseline in-sample run")
+    parser.add_argument("--lookback", type=int, default=20, help="Lookback used for the baseline in-sample run")
+    parser.add_argument("--fast-values", type=int, nargs="+", default=None, help="Optional fast windows used in the validation sweep and walk-forward selection")
+    parser.add_argument("--slow-values", type=int, nargs="+", default=None, help="Optional slow windows used in the validation sweep and walk-forward selection")
+    parser.add_argument("--lookback-values", type=int, nargs="+", default=None, help="Optional lookbacks used in the validation sweep and walk-forward selection")
+    parser.add_argument("--select-by", type=str, default="Sharpe Ratio", choices=["Sharpe Ratio", "Return [%]"], help="Metric used to choose walk-forward parameters on each train window")
+    parser.add_argument("--train-years", type=int, default=5, help="Training window size in years")
+    parser.add_argument("--test-years", type=int, default=1, help="Test window size in years")
+    parser.add_argument("--min-train-rows", type=int, default=252, help="Minimum train rows required for a walk-forward window")
+    parser.add_argument("--min-test-rows", type=int, default=126, help="Minimum test rows required for a walk-forward window")
+    parser.add_argument("--cash", type=float, default=10_000, help="Starting equity used by the vectorized simulation")
+    parser.add_argument("--commission", type=float, default=0.001, help="Linear turnover cost used by the vectorized simulation")
+    parser.add_argument("--output-dir", type=str, default="artifacts/validate_signal", help="Directory where validation artifacts will be written")
 
 
 def _add_alpha_research_arguments(parser: argparse.ArgumentParser) -> None:
@@ -387,7 +426,9 @@ def build_parser() -> argparse.ArgumentParser:
     research_subparsers = research_parser.add_subparsers(dest="research_command", required=True)
     research_run = research_subparsers.add_parser("run", help="Run backtests directly or from a config file")
     add_shared_symbol_args(research_run)
-    add_strategy_arguments(research_run)
+    add_strategy_arguments(research_run, include_xsec=True)
+    add_xsec_research_arguments(research_run)
+    add_date_range_arguments(research_run)
     add_execution_arguments(research_run)
     research_run.add_argument("--engine", type=str, default="legacy", choices=["legacy", "vectorized"], help="Backtest engine to use")
     research_run.add_argument("--output-dir", type=str, default=None, help="Optional directory to save vectorized research outputs")
@@ -396,11 +437,19 @@ def build_parser() -> argparse.ArgumentParser:
     research_run.set_defaults(func=_cmd_research_run)
     research_sweep = research_subparsers.add_parser("sweep", help="Run parameter sweeps directly or from a config file")
     add_shared_symbol_args(research_sweep)
+    add_date_range_arguments(research_sweep)
     add_execution_arguments(research_sweep)
-    research_sweep.add_argument("--strategy", type=str, default="sma_cross", choices=sorted(STRATEGY_REGISTRY.keys()), help="Strategy to sweep")
+    research_sweep.add_argument("--strategy", type=str, default="sma_cross", choices=get_strategy_choices(include_xsec=True), help="Strategy to sweep")
     research_sweep.add_argument("--fast-values", type=int, nargs="+")
     research_sweep.add_argument("--slow-values", type=int, nargs="+")
     research_sweep.add_argument("--lookback-values", type=int, nargs="+")
+    research_sweep.add_argument("--lookback-bars-values", type=int, nargs="+")
+    research_sweep.add_argument("--skip-bars-values", type=int, nargs="+")
+    research_sweep.add_argument("--top-n-values", type=int, nargs="+")
+    research_sweep.add_argument("--rebalance-bars-values", type=int, nargs="+")
+    research_sweep.add_argument("--entry-lookback-values", type=int, nargs="+")
+    research_sweep.add_argument("--exit-lookback-values", type=int, nargs="+")
+    research_sweep.add_argument("--momentum-lookback-values", type=int, nargs="+")
     research_sweep.add_argument("--cash", type=float, default=10_000)
     research_sweep.add_argument("--commission", type=float, default=0.001)
     research_sweep.add_argument("--output", type=str, default="artifacts/experiments/sweep_results.csv", help="CSV output path for sweep summary")
@@ -411,6 +460,9 @@ def build_parser() -> argparse.ArgumentParser:
     research_walkforward = research_subparsers.add_parser("walkforward", help="Run walk-forward validation directly or from a config file")
     _add_walkforward_arguments(research_walkforward)
     research_walkforward.set_defaults(func=_cmd_research_walkforward)
+    research_validate_signal = research_subparsers.add_parser("validate-signal", help="Validate a signal on one ticker or a small universe with per-symbol reports")
+    _add_validate_signal_arguments(research_validate_signal)
+    research_validate_signal.set_defaults(func=cmd_validate_signal)
     research_pipeline = research_subparsers.add_parser("pipeline", help="Run ingest, features, and legacy research in one command")
     add_shared_symbol_args(research_pipeline)
     add_feature_arguments(research_pipeline)

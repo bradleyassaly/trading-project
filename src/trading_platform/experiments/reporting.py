@@ -41,8 +41,12 @@ def save_walkforward_param_plot(df: pd.DataFrame, output_path: Path) -> Path | N
     has_fast = "fast" in working.columns and working["fast"].notna().any()
     has_slow = "slow" in working.columns and working["slow"].notna().any()
     has_lookback = "lookback" in working.columns and working["lookback"].notna().any()
+    has_lookback_bars = "lookback_bars" in working.columns and working["lookback_bars"].notna().any()
+    has_skip_bars = "skip_bars" in working.columns and working["skip_bars"].notna().any()
+    has_top_n = "top_n" in working.columns and working["top_n"].notna().any()
+    has_rebalance_bars = "rebalance_bars" in working.columns and working["rebalance_bars"].notna().any()
 
-    if not (has_fast or has_slow or has_lookback):
+    if not (has_fast or has_slow or has_lookback or has_lookback_bars or has_skip_bars or has_top_n or has_rebalance_bars):
         return None
 
     fig, ax = plt.subplots(figsize=(10, 6))
@@ -53,6 +57,14 @@ def save_walkforward_param_plot(df: pd.DataFrame, output_path: Path) -> Path | N
         ax.plot(working["test_start"], working["slow"], label="slow")
     if has_lookback:
         ax.plot(working["test_start"], working["lookback"], label="lookback")
+    if has_lookback_bars:
+        ax.plot(working["test_start"], working["lookback_bars"], label="lookback_bars")
+    if has_skip_bars:
+        ax.plot(working["test_start"], working["skip_bars"], label="skip_bars")
+    if has_top_n:
+        ax.plot(working["test_start"], working["top_n"], label="top_n")
+    if has_rebalance_bars:
+        ax.plot(working["test_start"], working["rebalance_bars"], label="rebalance_bars")
 
     ax.set_title("Selected Parameters Across Walk-Forward Windows")
     ax.set_xlabel("Test Window Start")

@@ -29,6 +29,10 @@ def load_universe_definitions() -> dict[str, list[str]]:
         "test_largecap": _normalized([
             "AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL",
         ]),
+        "debug_liquid10": _normalized([
+            "AAPL", "MSFT", "NVDA", "AMZN", "META",
+            "GOOGL", "JPM", "XOM", "UNH", "COST",
+        ]),
         "nasdaq100": _normalized([
             "AAPL", "ABNB", "ADBE", "ADI", "ADP", "ADSK", "AEP", "AMAT", "AMD", "AMGN",
             "AMZN", "ANSS", "APP", "ARM", "ASML", "AVGO", "AXON", "AZN", "BIIB", "BKNG",

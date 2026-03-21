@@ -40,6 +40,7 @@ def summarize_equity_curve(
     *,
     prefix: str = "",
 ) -> dict[str, float]:
+    clean_returns = returns.dropna()
     ann_return = annualized_return(returns)
     ann_vol = annualized_volatility(returns)
 
@@ -50,11 +51,16 @@ def summarize_equity_curve(
     )
 
     name = (lambda s: f"{prefix}{s}" if prefix else s)
+    total_return = float((1.0 + clean_returns).prod() - 1.0) if not clean_returns.empty else float("nan")
+    initial_equity = float(equity.iloc[0] / (1.0 + returns.iloc[0])) if not equity.empty and not returns.empty and pd.notna(returns.iloc[0]) else float("nan")
+    final_equity = float(equity.iloc[-1]) if not equity.empty else float("nan")
 
     return {
-        name("total_return"): float(equity.iloc[-1] - 1.0) if not equity.empty else float("nan"),
+        name("total_return"): total_return,
         name("annual_return"): float(ann_return),
         name("annual_vol"): float(ann_vol),
         name("sharpe"): sharpe,
         name("max_drawdown"): max_drawdown(equity) if not equity.empty else float("nan"),
+        name("initial_equity"): initial_equity,
+        name("final_equity"): final_equity,
     }

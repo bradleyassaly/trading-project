@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from trading_platform.cli.common import resolve_symbols
 from trading_platform.research.experiment_tracking import (
     build_alpha_experiment_record,
     register_experiment,
@@ -11,9 +12,10 @@ from trading_platform.research.alpha_lab.runner import run_alpha_research
 
 def cmd_alpha_research(args) -> None:
     output_dir = Path(args.output_dir)
+    symbols = resolve_symbols(args)
     result = run_alpha_research(
-        symbols=args.symbols,
-        universe=args.universe,
+        symbols=symbols,
+        universe=None,
         feature_dir=Path(args.feature_dir),
         signal_family=args.signal_family,
         lookbacks=args.lookbacks,

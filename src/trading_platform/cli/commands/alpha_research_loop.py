@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from trading_platform.cli.common import resolve_symbols
 from trading_platform.research.alpha_lab.automation import (
     AutomatedAlphaResearchConfig,
     run_automated_alpha_research_loop,
@@ -10,9 +11,10 @@ from trading_platform.research.alpha_lab.generation import SignalGenerationConfi
 
 
 def cmd_alpha_research_loop(args) -> None:
+    symbols = resolve_symbols(args)
     config = AutomatedAlphaResearchConfig(
-        symbols=args.symbols,
-        universe=args.universe,
+        symbols=symbols,
+        universe=None,
         feature_dir=Path(args.feature_dir),
         output_dir=Path(args.output_dir),
         generation_config=SignalGenerationConfig(

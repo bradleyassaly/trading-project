@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 import pandas as pd
 
+from trading_platform.cli.common import resolve_symbols
 from trading_platform.broker.alpaca_broker import AlpacaBroker, AlpacaBrokerConfig
 from trading_platform.broker.live_models import BrokerAccount, LiveBrokerPosition
 from trading_platform.execution.reconciliation import (
@@ -14,7 +15,6 @@ from trading_platform.paper.service import (
     compute_latest_target_weights,
     load_signal_snapshot,
 )
-from trading_platform.universes.registry import get_universe_symbols
 from trading_platform.execution.open_order_adjustment import adjust_orders_for_open_orders
 from trading_platform.broker.live_models import BrokerAccount, LiveBrokerPosition, LiveBrokerOrderStatus
 
@@ -48,19 +48,6 @@ def _load_mock_positions(path: str | None) -> dict[str, LiveBrokerPosition]:
 
     return positions
 
-def _resolve_symbols(args) -> list[str]:
-    has_symbols = bool(getattr(args, "symbols", None))
-    has_universe = bool(getattr(args, "universe", None))
-
-    if has_symbols == has_universe:
-        raise ValueError("Provide exactly one of --symbols or --universe")
-
-    if has_universe:
-        return get_universe_symbols(args.universe)
-
-    return list(args.symbols)
-
-
 @dataclass(frozen=True)
 class MockBrokerConfig:
     equity: float = 100_000.0
@@ -89,7 +76,7 @@ class MockBroker:
 
 
 def cmd_live_dry_run(args) -> None:
-    symbols = _resolve_symbols(args)
+    symbols = resolve_symbols(args)
 
     config = PaperTradingConfig(
         symbols=symbols,

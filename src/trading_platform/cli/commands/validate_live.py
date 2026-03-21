@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from trading_platform.cli.common import resolve_symbols
 from trading_platform.live.control import (
     LiveExecutionControlConfig,
     run_live_execution_control,
@@ -9,9 +10,10 @@ from trading_platform.live.control import (
 
 
 def _build_config(args) -> LiveExecutionControlConfig:
+    symbols = resolve_symbols(args)
     return LiveExecutionControlConfig(
-        symbols=args.symbols,
-        universe=args.universe,
+        symbols=symbols,
+        universe=None,
         signal_source=args.signal_source,
         strategy=args.strategy,
         fast=args.fast,

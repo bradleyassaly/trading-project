@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from trading_platform.cli.common import resolve_symbols
 from trading_platform.paper.models import PaperTradingConfig
 from trading_platform.paper.service import (
     JsonPaperStateStore,
@@ -12,24 +13,10 @@ from trading_platform.research.experiment_tracking import (
     build_paper_experiment_record,
     register_experiment,
 )
-from trading_platform.universes.registry import get_universe_symbols
-
-
-def _resolve_symbols(args) -> list[str]:
-    has_symbols = bool(getattr(args, "symbols", None))
-    has_universe = bool(getattr(args, "universe", None))
-
-    if has_symbols == has_universe:
-        raise ValueError("Provide exactly one of --symbols or --universe")
-
-    if has_universe:
-        return get_universe_symbols(args.universe)
-
-    return list(args.symbols)
 
 
 def cmd_paper_run(args) -> None:
-    symbols = _resolve_symbols(args)
+    symbols = resolve_symbols(args)
 
     config = PaperTradingConfig(
         symbols=symbols,

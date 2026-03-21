@@ -8,6 +8,7 @@ from trading_platform.universes.registry import get_universe_symbols, list_unive
 def test_list_universes_contains_expected_names() -> None:
     universes = list_universes()
     assert "dow30" in universes
+    assert "debug_liquid10" in universes
     assert "magnificent7" in universes
     assert "test_largecap" in universes
     assert "sp500" in universes
@@ -21,6 +22,15 @@ def test_get_universe_symbols_returns_expected_members() -> None:
     assert "MSFT" in symbols
     assert "NVDA" in symbols
     assert len(symbols) == 7
+
+
+def test_get_debug_universe_symbols_returns_expected_members() -> None:
+    symbols = get_universe_symbols("debug_liquid10")
+
+    assert len(symbols) == 10
+    assert symbols[:3] == ["AAPL", "MSFT", "NVDA"]
+    assert "JPM" in symbols
+    assert "COST" in symbols
 
 
 def test_get_real_universes_returns_expected_members() -> None:

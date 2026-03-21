@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 
+from trading_platform.cli.common import resolve_symbols
 from trading_platform.config.loader import load_research_workflow_config
 from trading_platform.services.job_artifact_service import (
     build_job_summary,
@@ -20,7 +21,10 @@ from trading_platform.services.universe_summary_service import (
 def cmd_run_job(args: argparse.Namespace) -> None:
     config = load_research_workflow_config(args.config)
 
-    symbols = args.symbols or [config.symbol]
+    try:
+        symbols = resolve_symbols(args)
+    except SystemExit:
+        symbols = [config.symbol]
 
     print(f"Running job from config: {args.config}")
     print(f"Symbols: {', '.join(symbols)}")

@@ -5,6 +5,7 @@ from typing import Any
 import pandas as pd
 from backtesting import Backtest
 
+from trading_platform.research.diagnostics import diagnostics_from_legacy_stats
 from trading_platform.settings import FEATURES_DIR
 from trading_platform.strategies.registry import STRATEGY_REGISTRY
 
@@ -14,6 +15,13 @@ def _validate_strategy_params(
     fast: int,
     slow: int,
     lookback: int,
+    lookback_bars: int,
+    skip_bars: int,
+    top_n: int,
+    rebalance_bars: int,
+    entry_lookback: int,
+    exit_lookback: int,
+    momentum_lookback: int | None,
     cash: float,
     commission: float,
 ) -> None:
@@ -32,6 +40,13 @@ def _validate_strategy_params(
     elif strategy == "momentum_hold":
         if lookback <= 0:
             raise ValueError("lookback must be > 0")
+    elif strategy == "breakout_hold":
+        if entry_lookback <= 0:
+            raise ValueError("entry_lookback must be > 0")
+        if exit_lookback <= 0:
+            raise ValueError("exit_lookback must be > 0")
+        if momentum_lookback is not None and momentum_lookback <= 0:
+            raise ValueError("momentum_lookback must be > 0 when provided")
 
     if strategy not in STRATEGY_REGISTRY:
         raise ValueError(
@@ -86,6 +101,13 @@ def run_backtest_on_df(
     fast: int = 20,
     slow: int = 100,
     lookback: int = 20,
+    lookback_bars: int = 126,
+    skip_bars: int = 0,
+    top_n: int = 3,
+    rebalance_bars: int = 21,
+    entry_lookback: int = 55,
+    exit_lookback: int = 20,
+    momentum_lookback: int | None = None,
     cash: float = 10_000,
     commission: float = 0.001,
 ) -> dict[str, Any]:
@@ -94,6 +116,13 @@ def run_backtest_on_df(
         fast=fast,
         slow=slow,
         lookback=lookback,
+        lookback_bars=lookback_bars,
+        skip_bars=skip_bars,
+        top_n=top_n,
+        rebalance_bars=rebalance_bars,
+        entry_lookback=entry_lookback,
+        exit_lookback=exit_lookback,
+        momentum_lookback=momentum_lookback,
         cash=cash,
         commission=commission,
     )
@@ -107,12 +136,19 @@ def run_backtest_on_df(
         cash=cash,
         commission=commission,
         exclusive_orders=True,
+        finalize_trades=True,
     )
 
     if strategy == "sma_cross":
         stats = bt.run(fast=fast, slow=slow)
     elif strategy == "momentum_hold":
         stats = bt.run(lookback=lookback)
+    elif strategy == "breakout_hold":
+        stats = bt.run(
+            entry_lookback=entry_lookback,
+            exit_lookback=exit_lookback,
+            momentum_lookback=momentum_lookback,
+        )
     else:
         stats = bt.run()
 
@@ -122,8 +158,16 @@ def run_backtest_on_df(
     result["fast"] = fast
     result["slow"] = slow
     result["lookback"] = lookback
+    result["lookback_bars"] = lookback_bars
+    result["skip_bars"] = skip_bars
+    result["top_n"] = top_n
+    result["rebalance_bars"] = rebalance_bars
+    result["entry_lookback"] = entry_lookback
+    result["exit_lookback"] = exit_lookback
+    result["momentum_lookback"] = momentum_lookback
     result["cash"] = cash
     result["commission"] = commission
+    result.update(diagnostics_from_legacy_stats(result))
     return result
 
 
@@ -133,6 +177,13 @@ def run_backtest(
     fast: int = 20,
     slow: int = 100,
     lookback: int = 20,
+    lookback_bars: int = 126,
+    skip_bars: int = 0,
+    top_n: int = 3,
+    rebalance_bars: int = 21,
+    entry_lookback: int = 55,
+    exit_lookback: int = 20,
+    momentum_lookback: int | None = None,
     cash: float = 10_000,
     commission: float = 0.001,
 ) -> dict[str, Any]:
@@ -150,6 +201,13 @@ def run_backtest(
         fast=fast,
         slow=slow,
         lookback=lookback,
+        lookback_bars=lookback_bars,
+        skip_bars=skip_bars,
+        top_n=top_n,
+        rebalance_bars=rebalance_bars,
+        entry_lookback=entry_lookback,
+        exit_lookback=exit_lookback,
+        momentum_lookback=momentum_lookback,
         cash=cash,
         commission=commission,
     )

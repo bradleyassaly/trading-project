@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from trading_platform.cli.common import resolve_symbols
 from trading_platform.research.alpha_lab.automation import AutomatedAlphaResearchConfig
 from trading_platform.research.alpha_lab.generation import SignalGenerationConfig
 from trading_platform.research.refresh_monitoring import (
@@ -11,9 +12,10 @@ from trading_platform.research.refresh_monitoring import (
 
 
 def cmd_research_refresh(args) -> None:
+    symbols = resolve_symbols(args)
     alpha_config = AutomatedAlphaResearchConfig(
-        symbols=args.symbols,
-        universe=args.universe,
+        symbols=symbols,
+        universe=None,
         feature_dir=Path(args.feature_dir),
         output_dir=Path(args.output_dir),
         generation_config=SignalGenerationConfig(
