@@ -8,6 +8,7 @@ This repository is an end-to-end research to deploy trading system. It covers:
 - alpha research and walk-forward validation
 - preset-driven research vs deploy workflows
 - constrained portfolio construction for deployable implementations
+- multi-strategy portfolio allocation across approved deploy sleeves
 - stateful paper trading with scheduled daily runs
 - broker-safe live dry-run previews with reconciliation and health checks
 
@@ -65,6 +66,66 @@ Interpretation:
 
 Presets populate validated defaults but still allow explicit CLI overrides.
 
+## Multi-Strategy Allocation
+
+Multi-strategy allocation is a portfolio layer above individual approved deploy presets. Each preset still owns its own target construction. The allocator treats each preset as a sleeve, scales sleeves by capital weight, nets overlapping symbols, applies portfolio-level caps, and preserves sleeve provenance in auditable artifacts.
+
+Why it exists:
+
+- research diagnostics for combined sleeves instead of isolated single-strategy targets
+- paper trading of the actual unified book
+- live dry-run of one reconciled broker-order preview for the combined portfolio
+- stable sleeve attribution, overlap, and concentration reporting
+
+### Multi-Strategy Config Example
+
+```yaml
+gross_leverage_cap: 1.0
+net_exposure_cap: 1.0
+max_position_weight: 0.15
+max_symbol_concentration: 0.20
+turnover_cap: 0.25
+cash_reserve_pct: 0.05
+group_map_path: metadata/symbol_groups.csv
+sector_caps:
+  - group: Technology
+    max_weight: 0.45
+  - group: Healthcare
+    max_weight: 0.25
+sleeves:
+  - sleeve_name: core_momentum
+    preset_name: xsec_nasdaq100_momentum_v1_deploy
+    target_capital_weight: 0.70
+    enabled: true
+    min_capital_weight: 0.50
+    max_capital_weight: 0.80
+    rebalance_priority: 1
+    tags: [core, deploy]
+    notes: Primary validated deploy sleeve.
+  - sleeve_name: research_overlay
+    preset_name: xsec_nasdaq100_momentum_v1_research
+    target_capital_weight: 0.30
+    enabled: true
+    rebalance_priority: 2
+    tags: [satellite]
+```
+
+Key config fields:
+
+- `sleeve_name`: artifact-facing sleeve identifier
+- `preset_name`: existing preset used to build that sleeve's standalone target portfolio
+- `target_capital_weight`: desired sleeve capital share; enabled sleeve weights are normalized if they do not sum to `1.0`
+- `enabled`: keep a sleeve in config without including it in the run
+- `min_capital_weight` / `max_capital_weight`: optional validation bounds
+- `rebalance_priority`, `notes`, `tags`: optional audit metadata
+- `gross_leverage_cap`: cap on total absolute final exposure
+- `net_exposure_cap`: cap on absolute final net exposure
+- `max_position_weight`: cap on final net single-name weight
+- `max_symbol_concentration`: cap on gross sleeve overlap allocated to one symbol before final netting
+- `sector_caps`: optional group caps applied with the configured symbol-group map
+- `turnover_cap`: combined-portfolio turnover diagnostic threshold
+- `cash_reserve_pct`: cash fraction preserved by paper/live reconciliation
+
 ## Key Commands
 
 ### Research
@@ -81,6 +142,7 @@ trading-cli research decision-memo --preset xsec_nasdaq100_momentum_v1_research 
 ```bash
 trading-cli paper run --preset xsec_nasdaq100_momentum_v1_deploy --state-path artifacts/paper/nasdaq100_xsec_state.json --output-dir artifacts/paper/nasdaq100_xsec
 trading-cli paper run-preset-scheduled --preset xsec_nasdaq100_momentum_v1_deploy --state-path artifacts/paper/nasdaq100_xsec_state.json --output-dir artifacts/paper/nasdaq100_xsec
+trading-cli paper run-multi-strategy --config configs/multi_strategy.yaml --state-path artifacts/paper/multi_strategy_state.json --output-dir artifacts/paper/multi_strategy
 ```
 
 ### Live Preview
@@ -88,6 +150,13 @@ trading-cli paper run-preset-scheduled --preset xsec_nasdaq100_momentum_v1_deplo
 ```bash
 trading-cli live dry-run --preset xsec_nasdaq100_momentum_v1_deploy --broker mock --output-dir artifacts/live_dry_run/nasdaq100_xsec
 trading-cli live run-preset-scheduled --preset xsec_nasdaq100_momentum_v1_deploy --broker mock --output-dir artifacts/live_dry_run/nasdaq100_xsec
+trading-cli live dry-run-multi-strategy --config configs/multi_strategy.yaml --broker mock --output-dir artifacts/live_dry_run/multi_strategy
+```
+
+### Portfolio Allocation Only
+
+```bash
+trading-cli portfolio allocate-multi-strategy --config configs/multi_strategy.yaml --output-dir artifacts/portfolio/multi_strategy
 ```
 
 ## Paper Trading Outputs
@@ -103,6 +172,17 @@ Daily paper trading writes durable local artifacts such as:
 - `paper_health_checks.csv`
 
 Use them to inspect equity continuity, realized holdings, generated orders, and pass/warn/fail operational checks across repeated runs.
+
+Multi-strategy paper and allocation runs also write:
+
+- `combined_target_weights.csv`
+- `sleeve_target_weights.csv`
+- `symbol_overlap_report.csv`
+- `allocation_summary.json`
+- `allocation_summary.md`
+- `sleeve_attribution.csv`
+- `portfolio_diagnostics.csv`
+- `overlap_matrix.csv`
 
 ## Live Dry-Run Outputs
 
@@ -136,6 +216,14 @@ The intended daily process is:
    - health checks
 4. Future step: guarded live execution once the execution path is promoted.
 
+Multi-strategy workflow:
+
+1. Approve and stabilize the underlying deploy presets first.
+2. Define a multi-strategy config that references those presets as sleeves.
+3. Run `portfolio allocate-multi-strategy` to inspect overlap, concentration, sleeve attribution, and constraint bindings without mutating any state.
+4. Run `paper run-multi-strategy` to simulate the unified combined portfolio.
+5. Run `live dry-run-multi-strategy` to preview one reconciled order package for the combined portfolio without submitting anything.
+
 ## Research Vs Deploy Insight
 
 - `pure_topn` = research truth
@@ -149,7 +237,6 @@ This distinction is deliberate. Research determines whether the signal family is
 
 - guarded live order execution
 - intraday support
-- multi-strategy portfolio construction
 - explicit risk overlays
 
 ## Current Architecture
@@ -328,12 +415,15 @@ trading-cli research refresh --universe sp500 --feature-dir data/features --stal
 trading-cli research monitor --tracker-dir artifacts/experiment_tracking --snapshot-dir artifacts/research_refresh/approved_configuration_snapshots
 trading-cli portfolio backtest --universe magnificent7 --strategy sma_cross --rebalance-frequency weekly --output-dir artifacts/portfolio
 trading-cli portfolio topn --universe magnificent7 --strategy momentum_hold --lookback 20 --top-n 3 --weighting-scheme inverse_vol
+trading-cli portfolio allocate-multi-strategy --config configs/multi_strategy.yaml --output-dir artifacts/portfolio/multi_strategy
 trading-cli paper run --symbols AAPL MSFT NVDA --signal-source composite --approved-model-state artifacts/alpha_research/approved/approved_model_state.json --top-n 5 --state-path artifacts/paper/paper_state.json --output-dir artifacts/paper
 trading-cli paper run --preset xsec_nasdaq100_momentum_v1_deploy --state-path artifacts/paper/nasdaq100_xsec_state.json --output-dir artifacts/paper/nasdaq100_xsec
+trading-cli paper run-multi-strategy --config configs/multi_strategy.yaml --state-path artifacts/paper/multi_strategy_state.json --output-dir artifacts/paper/multi_strategy
 trading-cli paper run-preset-scheduled --preset xsec_nasdaq100_momentum_v1_deploy --state-path artifacts/paper/nasdaq100_xsec_state.json --output-dir artifacts/paper/nasdaq100_xsec
 trading-cli paper daily --universe magnificent7 --signal-source composite --approved-model-state artifacts/alpha_research/approved/approved_model_state.json --state-path artifacts/paper/paper_state.json --output-dir artifacts/paper
 trading-cli paper report --account-dir artifacts/paper --output-dir artifacts/paper/report
 trading-cli live dry-run --universe magnificent7 --strategy sma_cross --top-n 5 --broker mock
+trading-cli live dry-run-multi-strategy --config configs/multi_strategy.yaml --broker mock --output-dir artifacts/live_dry_run/multi_strategy
 trading-cli live validate --universe magnificent7 --signal-source composite --approved-model-state artifacts/alpha_research/approved/approved_model_state.json --approval-artifact artifacts/research_refresh/approved_configuration_snapshots/latest_approved_configuration.json --output-dir artifacts/live_execution
 trading-cli live execute --universe magnificent7 --signal-source composite --approved-model-state artifacts/alpha_research/approved/approved_model_state.json --approved --output-dir artifacts/live_execution
 trading-cli experiments list --tracker-dir artifacts/experiment_tracking --limit 10
@@ -471,6 +561,28 @@ The xsec workflow also supports an optional constrained portfolio layer:
 `transition` is the explicit deployable overlay for low-turnover portfolios. In that mode, realized holdings can temporarily exceed `top_n` while the portfolio moves gradually toward the target. Use this mode when you want to understand how real-world turnover controls, liquidity filters, and partial transitions change the clean research baseline.
 
 Diagnostics now report the distinction explicitly with `portfolio_construction_mode`, target selected count, realized holdings count, holdings-to-top-N ratio, turnover-cap bindings, turnover-buffer blocks, liquidity/sector exclusions, and semantic-warning fields.
+
+## Multi-Strategy Artifacts
+
+`portfolio allocate-multi-strategy`, `paper run-multi-strategy`, and `live dry-run-multi-strategy` all write the same allocation-layer audit package:
+
+- `combined_target_weights.csv`: final symbol-level target weights after sleeve scaling, netting, and portfolio constraints
+- `sleeve_target_weights.csv`: per-sleeve symbol targets before final netting, including sleeve provenance
+- `symbol_overlap_report.csv`: per-symbol sleeve overlap and long/short conflict report
+- `allocation_summary.json`: machine-readable exposure, turnover, normalization, and constraint summary
+- `allocation_summary.md`: concise human-readable summary
+- `sleeve_attribution.csv`: gross, net, and final matched contribution by sleeve
+- `portfolio_diagnostics.csv`: stable metric table for gross/net exposure, overlap concentration, turnover, and effective counts
+- `overlap_matrix.csv`: pairwise sleeve overlap matrix
+
+The most important allocation diagnostics are:
+
+- gross and net exposure before and after constraints
+- sleeve capital weights before and after normalization
+- per-symbol overlap and long/short conflicts
+- turnover estimate at the combined-portfolio level
+- symbols clipped by position, concentration, group, gross, or net caps
+- effective number of sleeves and effective number of positions
 
 Use `trading-cli research compare-xsec-construction` when you want the platform to run both modes side by side from the same xsec walk-forward configuration and write a compact comparison summary, per-window deltas, and an HTML report. This command is intentionally explicit about the semantic split:
 

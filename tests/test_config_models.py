@@ -6,6 +6,8 @@ from trading_platform.config.models import (
     BacktestConfig,
     FeatureConfig,
     IngestConfig,
+    MultiStrategyPortfolioConfig,
+    MultiStrategySleeveConfig,
     ParameterSweepConfig,
     ResearchWorkflowConfig,
     WalkForwardConfig,
@@ -112,4 +114,19 @@ def test_walk_forward_config_rejects_optimize_mode_without_sweep_values() -> Non
             walk_forward_mode="optimize",
             fast_values=[],
             slow_values=[],
+        )
+
+
+def test_multi_strategy_config_rejects_empty_sleeves() -> None:
+    with pytest.raises(ValueError, match="at least one sleeve"):
+        MultiStrategyPortfolioConfig(sleeves=[])
+
+
+def test_multi_strategy_sleeve_rejects_weight_outside_bounds() -> None:
+    with pytest.raises(ValueError, match="<= max_capital_weight"):
+        MultiStrategySleeveConfig(
+            sleeve_name="core",
+            preset_name="xsec_nasdaq100_momentum_v1_deploy",
+            target_capital_weight=0.8,
+            max_capital_weight=0.5,
         )

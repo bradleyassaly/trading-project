@@ -18,6 +18,7 @@ from trading_platform.cli.commands.ingest import cmd_ingest
 from trading_platform.cli.commands.list_strategies import cmd_list_strategies
 from trading_platform.cli.commands.list_universes import cmd_list_universes
 from trading_platform.cli.commands.live_dry_run import cmd_live_dry_run
+from trading_platform.cli.commands.live_dry_run_multi_strategy import cmd_live_dry_run_multi_strategy
 from trading_platform.cli.commands.live_run_scheduled import cmd_live_run_scheduled
 from trading_platform.cli.commands.multi_universe_alpha_research import (
     cmd_multi_universe_alpha_research,
@@ -25,9 +26,11 @@ from trading_platform.cli.commands.multi_universe_alpha_research import (
 from trading_platform.cli.commands.multi_universe_report import cmd_multi_universe_report
 from trading_platform.cli.commands.paper_report import cmd_paper_report
 from trading_platform.cli.commands.paper_run import cmd_paper_run
+from trading_platform.cli.commands.paper_run_multi_strategy import cmd_paper_run_multi_strategy
 from trading_platform.cli.commands.paper_run_scheduled import cmd_paper_run_scheduled
 from trading_platform.cli.commands.pipeline import cmd_pipeline
 from trading_platform.cli.commands.portfolio import cmd_portfolio
+from trading_platform.cli.commands.portfolio_allocate_multi_strategy import cmd_portfolio_allocate_multi_strategy
 from trading_platform.cli.commands.portfolio_topn import cmd_portfolio_topn
 from trading_platform.cli.commands.research import cmd_research
 from trading_platform.cli.commands.research_monitor import cmd_research_monitor
@@ -100,7 +103,7 @@ _RESEARCH_GROUP_COMMANDS = {
     "pipeline",
     "strategies",
 }
-_PORTFOLIO_GROUP_COMMANDS = {"backtest", "topn"}
+_PORTFOLIO_GROUP_COMMANDS = {"backtest", "topn", "allocate-multi-strategy"}
 
 
 def rewrite_legacy_cli_args(argv: list[str]) -> tuple[list[str], str | None]:
@@ -586,12 +589,21 @@ def build_parser() -> argparse.ArgumentParser:
     _add_common_portfolio_selection_arguments(portfolio_topn, required_top_n=True)
     portfolio_topn.add_argument("--output-dir", type=str, default="data/experiments/portfolio_topn", help="Directory for portfolio outputs")
     portfolio_topn.set_defaults(func=cmd_portfolio_topn)
+    portfolio_multi = portfolio_subparsers.add_parser("allocate-multi-strategy", help="Allocate multiple approved deploy sleeves into one combined target portfolio")
+    portfolio_multi.add_argument("--config", type=str, required=True, help="Path to the multi-strategy portfolio YAML/JSON config.")
+    portfolio_multi.add_argument("--output-dir", type=str, required=True, help="Directory where allocation artifacts will be written.")
+    portfolio_multi.set_defaults(func=cmd_portfolio_allocate_multi_strategy)
 
     paper_parser = subparsers.add_parser("paper", help="Paper trading workflows")
     paper_subparsers = paper_parser.add_subparsers(dest="paper_command", required=True)
     paper_run = paper_subparsers.add_parser("run", help="Run one paper-trading cycle and write state/artifacts")
     _add_paper_run_arguments(paper_run)
     paper_run.set_defaults(func=cmd_paper_run)
+    paper_multi = paper_subparsers.add_parser("run-multi-strategy", help="Run one paper-trading cycle from a combined multi-strategy allocation config")
+    paper_multi.add_argument("--config", type=str, required=True, help="Path to the multi-strategy portfolio YAML/JSON config.")
+    paper_multi.add_argument("--state-path", type=str, required=True, help="JSON file used to persist paper portfolio state")
+    paper_multi.add_argument("--output-dir", type=str, required=True, help="Directory for paper-run and allocation artifacts")
+    paper_multi.set_defaults(func=cmd_paper_run_multi_strategy)
     paper_run_scheduled = paper_subparsers.add_parser("run-preset-scheduled", help="Task-Scheduler-friendly wrapper around paper run for versioned presets")
     _add_paper_run_arguments(paper_run_scheduled)
     paper_run_scheduled.set_defaults(func=cmd_paper_run_scheduled)
@@ -636,6 +648,11 @@ def build_parser() -> argparse.ArgumentParser:
     add_xsec_live_arguments(live_dry_run)
     live_dry_run.add_argument("--output-dir", default="artifacts/live_dry_run", help="Directory for live dry-run preview artifacts.")
     live_dry_run.set_defaults(func=cmd_live_dry_run)
+    live_multi = live_subparsers.add_parser("dry-run-multi-strategy", help="Compute live broker rebalance preview orders from a combined multi-strategy allocation config")
+    live_multi.add_argument("--config", type=str, required=True, help="Path to the multi-strategy portfolio YAML/JSON config.")
+    live_multi.add_argument("--broker", type=str, default="mock", choices=["mock", "alpaca"], help="Broker backend to preview against.")
+    live_multi.add_argument("--output-dir", type=str, required=True, help="Directory for live dry-run and allocation artifacts.")
+    live_multi.set_defaults(func=cmd_live_dry_run_multi_strategy)
     live_run_scheduled = live_subparsers.add_parser("run-preset-scheduled", help="Task-Scheduler-friendly wrapper around live dry-run for versioned presets")
     _add_live_base_arguments(live_run_scheduled)
     add_preset_argument(live_run_scheduled, help_text="Versioned preset used for the scheduled live dry-run workflow.")

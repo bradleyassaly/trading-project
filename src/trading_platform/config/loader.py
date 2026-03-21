@@ -5,6 +5,9 @@ from pathlib import Path
 from typing import Any
 
 from trading_platform.config.models import (
+    MultiStrategyGroupCap,
+    MultiStrategyPortfolioConfig,
+    MultiStrategySleeveConfig,
     ParameterSweepConfig,
     ResearchWorkflowConfig,
     WalkForwardConfig,
@@ -49,3 +52,19 @@ def load_parameter_sweep_config(path: str | Path) -> ParameterSweepConfig:
 def load_walk_forward_config(path: str | Path) -> WalkForwardConfig:
     data = _read_config_file(Path(path))
     return WalkForwardConfig(**data)
+
+
+def load_multi_strategy_portfolio_config(path: str | Path) -> MultiStrategyPortfolioConfig:
+    data = _read_config_file(Path(path))
+    sleeves = [
+        MultiStrategySleeveConfig(**item)
+        for item in data.get("sleeves", [])
+    ]
+    sector_caps = [
+        MultiStrategyGroupCap(**item)
+        for item in data.get("sector_caps", [])
+    ]
+    payload = dict(data)
+    payload["sleeves"] = sleeves
+    payload["sector_caps"] = sector_caps
+    return MultiStrategyPortfolioConfig(**payload)

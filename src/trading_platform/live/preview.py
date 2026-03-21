@@ -385,6 +385,23 @@ def _build_reconciliation_rows(
 
 def run_live_dry_run_preview(config: LivePreviewConfig) -> LivePreviewResult:
     as_of, target_weights, latest_prices, target_diagnostics = _build_target_preview(config)
+    return run_live_dry_run_preview_for_targets(
+        config=config,
+        as_of=as_of,
+        target_weights=target_weights,
+        latest_prices=latest_prices,
+        target_diagnostics=target_diagnostics,
+    )
+
+
+def run_live_dry_run_preview_for_targets(
+    *,
+    config: LivePreviewConfig,
+    as_of: str,
+    target_weights: dict[str, float],
+    latest_prices: dict[str, float],
+    target_diagnostics: dict[str, Any],
+) -> LivePreviewResult:
     broker = _resolve_broker(config)
     account = broker.get_account()
     positions = broker.get_positions()

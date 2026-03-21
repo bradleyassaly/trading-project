@@ -332,6 +332,25 @@ def test_grouped_paper_run_preset_scheduled_command_parses() -> None:
     assert args.preset == "xsec_nasdaq100_momentum_v1_deploy"
 
 
+def test_grouped_paper_run_multi_strategy_command_parses() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "paper",
+            "run-multi-strategy",
+            "--config",
+            "configs/multi_strategy.json",
+            "--state-path",
+            "artifacts/paper/state.json",
+            "--output-dir",
+            "artifacts/paper/multi",
+        ]
+    )
+
+    assert args.paper_command == "run-multi-strategy"
+    assert args.config == "configs/multi_strategy.json"
+
+
 def test_grouped_live_dry_run_command_parses_preset_and_output_dir() -> None:
     parser = build_parser()
     args = parser.parse_args(
@@ -371,6 +390,26 @@ def test_grouped_live_run_preset_scheduled_command_parses() -> None:
     assert args.live_command == "run-preset-scheduled"
     assert args.preset == "xsec_nasdaq100_momentum_v1_deploy"
     assert args.output_dir == "artifacts/live_dry_run"
+
+
+def test_grouped_live_dry_run_multi_strategy_command_parses() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "live",
+            "dry-run-multi-strategy",
+            "--config",
+            "configs/multi_strategy.json",
+            "--broker",
+            "mock",
+            "--output-dir",
+            "artifacts/live_dry_run/multi",
+        ]
+    )
+
+    assert args.live_command == "dry-run-multi-strategy"
+    assert args.config == "configs/multi_strategy.json"
+    assert args.output_dir == "artifacts/live_dry_run/multi"
 
 
 def test_legacy_alpha_command_rewrites_cleanly() -> None:
@@ -607,3 +646,20 @@ def test_grouped_research_walkforward_command_parses_compatibility_day_aliases()
     assert args.train_period_days == 365
     assert args.test_period_days == 90
     assert args.step_days == 90
+
+
+def test_grouped_portfolio_allocate_multi_strategy_command_parses() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "portfolio",
+            "allocate-multi-strategy",
+            "--config",
+            "configs/multi_strategy.json",
+            "--output-dir",
+            "artifacts/portfolio/multi",
+        ]
+    )
+
+    assert args.portfolio_command == "allocate-multi-strategy"
+    assert args.config == "configs/multi_strategy.json"

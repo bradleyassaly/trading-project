@@ -363,3 +363,86 @@ class UniverseWalkForwardResult:
     oos_scores_df: pd.DataFrame
     portfolio_result: PortfolioConstructionResult
     summary: dict
+
+
+@dataclass(frozen=True)
+class MultiStrategySleeveConfig:
+    sleeve_name: str
+    preset_name: str
+    target_capital_weight: float
+    enabled: bool = True
+    min_capital_weight: float | None = None
+    max_capital_weight: float | None = None
+    rebalance_priority: int | None = None
+    notes: str | None = None
+    tags: list[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        if not self.sleeve_name or not self.sleeve_name.strip():
+            raise ValueError("sleeve_name must be a non-empty string")
+        if not self.preset_name or not self.preset_name.strip():
+            raise ValueError("preset_name must be a non-empty string")
+        if self.target_capital_weight < 0:
+            raise ValueError("target_capital_weight must be >= 0")
+        if self.min_capital_weight is not None and self.min_capital_weight < 0:
+            raise ValueError("min_capital_weight must be >= 0")
+        if self.max_capital_weight is not None and self.max_capital_weight < 0:
+            raise ValueError("max_capital_weight must be >= 0")
+        if (
+            self.min_capital_weight is not None
+            and self.max_capital_weight is not None
+            and self.min_capital_weight > self.max_capital_weight
+        ):
+            raise ValueError("min_capital_weight must be <= max_capital_weight")
+        if self.min_capital_weight is not None and self.target_capital_weight < self.min_capital_weight:
+            raise ValueError("target_capital_weight must be >= min_capital_weight")
+        if self.max_capital_weight is not None and self.target_capital_weight > self.max_capital_weight:
+            raise ValueError("target_capital_weight must be <= max_capital_weight")
+
+
+@dataclass(frozen=True)
+class MultiStrategyGroupCap:
+    group: str
+    max_weight: float
+
+    def __post_init__(self) -> None:
+        if not self.group or not self.group.strip():
+            raise ValueError("group must be a non-empty string")
+        if self.max_weight < 0:
+            raise ValueError("max_weight must be >= 0")
+
+
+@dataclass(frozen=True)
+class MultiStrategyPortfolioConfig:
+    sleeves: list[MultiStrategySleeveConfig]
+    gross_leverage_cap: float = 1.0
+    net_exposure_cap: float = 1.0
+    max_position_weight: float = 1.0
+    max_symbol_concentration: float = 1.0
+    sector_caps: list[MultiStrategyGroupCap] = field(default_factory=list)
+    turnover_cap: float | None = None
+    cash_reserve_pct: float = 0.0
+    group_map_path: str | None = None
+    rebalance_timestamp: str | None = None
+    notes: str | None = None
+    tags: list[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        if not self.sleeves:
+            raise ValueError("sleeves must contain at least one sleeve")
+        if self.gross_leverage_cap < 0:
+            raise ValueError("gross_leverage_cap must be >= 0")
+        if self.net_exposure_cap < 0:
+            raise ValueError("net_exposure_cap must be >= 0")
+        if self.max_position_weight < 0:
+            raise ValueError("max_position_weight must be >= 0")
+        if self.max_symbol_concentration < 0:
+            raise ValueError("max_symbol_concentration must be >= 0")
+        if self.turnover_cap is not None and self.turnover_cap < 0:
+            raise ValueError("turnover_cap must be >= 0")
+        if not 0.0 <= self.cash_reserve_pct < 1.0:
+            raise ValueError("cash_reserve_pct must be in [0, 1)")
+
+    @property
+    def enabled_sleeves(self) -> list[MultiStrategySleeveConfig]:
+        return [sleeve for sleeve in self.sleeves if sleeve.enabled]
