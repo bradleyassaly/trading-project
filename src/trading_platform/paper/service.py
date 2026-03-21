@@ -8,10 +8,18 @@ from typing import Any
 import pandas as pd
 
 import trading_platform.services.target_construction_service as target_construction_service
-from trading_platform.broker.base import BrokerOrder
+from trading_platform.broker.base import BrokerFill, BrokerOrder
 from trading_platform.broker.paper_broker import PaperBroker, PaperBrokerConfig
 from trading_platform.cli.common import normalize_paper_weighting_scheme
 from trading_platform.construction.service import build_top_n_portfolio_weights
+from trading_platform.execution.realism import (
+    ExecutableOrder,
+    ExecutionSimulationResult,
+    ExecutionConfig,
+    ExecutionOrderRequest,
+    simulate_execution,
+    write_execution_artifacts,
+)
 from trading_platform.execution.policies import ExecutionPolicy
 from trading_platform.execution.transforms import build_executed_weights
 from trading_platform.metadata.groups import build_group_series
@@ -218,6 +226,55 @@ def generate_rebalance_orders(
     )
 
 
+def _simulate_execution_for_paper_orders(
+    *,
+    orders: list[PaperOrder],
+    execution_config: ExecutionConfig,
+    latest_target_weights: dict[str, float],
+) -> tuple[list[PaperOrder], dict[str, Any]]:
+    requests = [
+        ExecutionOrderRequest(
+            symbol=order.symbol,
+            side=order.side,
+            requested_quantity=order.quantity,
+            reference_price=order.reference_price,
+            target_weight=latest_target_weights.get(order.symbol, order.target_weight),
+            current_quantity=order.current_quantity,
+            target_quantity=order.target_quantity,
+        )
+        for order in orders
+    ]
+    simulation = simulate_execution(requests=requests, config=execution_config)
+    order_map = {(order.symbol, order.side, order.quantity): order for order in orders}
+    executable_orders: list[PaperOrder] = []
+    for executable in simulation.executable_orders:
+        original = order_map[(executable.symbol, executable.side, executable.requested_quantity)]
+        executable_orders.append(
+            PaperOrder(
+                symbol=original.symbol,
+                side=original.side,
+                quantity=executable.adjusted_quantity,
+                reference_price=original.reference_price,
+                target_weight=original.target_weight,
+                current_quantity=original.current_quantity,
+                target_quantity=original.current_quantity + (executable.adjusted_quantity if original.side == "BUY" else -executable.adjusted_quantity),
+                notional=executable.estimated_notional_traded,
+                reason=executable.clipping_reason or original.reason,
+                expected_fill_price=executable.expected_fill_price,
+                expected_fees=executable.expected_fees,
+                expected_slippage_bps=executable.expected_slippage_bps,
+            )
+        )
+    diagnostics = {
+        "execution_summary": simulation.summary,
+        "rejected_orders": [order.to_dict() for order in simulation.rejected_orders],
+        "executable_orders": [order.to_dict() for order in simulation.executable_orders],
+        "liquidity_constraints_report": simulation.liquidity_rows,
+        "turnover_summary": simulation.turnover_rows,
+    }
+    return executable_orders, diagnostics
+
+
 def apply_filled_orders(
     *,
     state: PaperPortfolioState,
@@ -258,6 +315,49 @@ def apply_filled_orders(
     return state
 
 
+def _apply_execution_orders_to_state(
+    *,
+    state: PaperPortfolioState,
+    orders: list[PaperOrder],
+) -> tuple[PaperPortfolioState, list]:
+    fills = []
+    for order in orders:
+        fill_price = float(order.expected_fill_price or order.reference_price)
+        signed_qty = order.quantity if order.side == "BUY" else -order.quantity
+        state.cash += (-signed_qty * fill_price) - float(order.expected_fees)
+
+        current = state.positions.get(order.symbol)
+        prior_quantity = current.quantity if current else 0
+        new_quantity = prior_quantity + signed_qty
+        if new_quantity == 0:
+            state.positions.pop(order.symbol, None)
+        else:
+            if current is None:
+                avg_price = fill_price
+            elif signed_qty > 0 and prior_quantity >= 0:
+                avg_price = (((current.avg_price * prior_quantity) + (fill_price * signed_qty)) / new_quantity)
+            else:
+                avg_price = current.avg_price
+            state.positions[order.symbol] = PaperPosition(
+                symbol=order.symbol,
+                quantity=new_quantity,
+                avg_price=float(avg_price),
+                last_price=fill_price,
+            )
+        fills.append(
+            BrokerFill(
+                symbol=order.symbol,
+                side=order.side,
+                quantity=order.quantity,
+                fill_price=fill_price,
+                notional=float(order.quantity) * fill_price,
+                commission=float(order.expected_fees),
+                slippage_bps=float(order.expected_slippage_bps),
+            )
+        )
+    return state, fills
+
+
 def run_paper_trading_cycle_for_targets(
     *,
     config: PaperTradingConfig,
@@ -270,6 +370,7 @@ def run_paper_trading_cycle_for_targets(
     target_diagnostics: dict[str, Any],
     skipped_symbols: list[str],
     extra_diagnostics: dict[str, Any] | None = None,
+    execution_config: ExecutionConfig | None = None,
     auto_apply_fills: bool = False,
 ) -> PaperTradingRunResult:
     state = state_store.load()
@@ -287,15 +388,24 @@ def run_paper_trading_cycle_for_targets(
         reserve_cash_pct=config.reserve_cash_pct,
     )
 
+    execution_diagnostics: dict[str, Any] = {}
+    executable_orders = order_result.orders
+    if execution_config is not None:
+        executable_orders, execution_diagnostics = _simulate_execution_for_paper_orders(
+            orders=order_result.orders,
+            execution_config=execution_config,
+            latest_target_weights=latest_effective_weights,
+        )
+
     broker_orders = [
         BrokerOrder(
             symbol=order.symbol,
             side=order.side,
             quantity=order.quantity,
-            reference_price=order.reference_price,
+            reference_price=order.expected_fill_price or order.reference_price,
             reason=order.reason,
         )
-        for order in order_result.orders
+        for order in executable_orders
     ]
 
     risk_result = validate_orders(
@@ -309,15 +419,21 @@ def run_paper_trading_cycle_for_targets(
         raise ValueError(f"Pre-trade checks failed: {risk_result.violations}")
 
     fills = []
-    if auto_apply_fills and broker_orders:
-        broker = PaperBroker(
-            state=state,
-            config=PaperBrokerConfig(
-                commission_per_order=0.0,
-                slippage_bps=0.0,
-            ),
-        )
-        fills = broker.submit_orders(broker_orders)
+    if auto_apply_fills and executable_orders:
+        if execution_config is not None:
+            state, fills = _apply_execution_orders_to_state(
+                state=state,
+                orders=executable_orders,
+            )
+        else:
+            broker = PaperBroker(
+                state=state,
+                config=PaperBrokerConfig(
+                    commission_per_order=0.0,
+                    slippage_bps=0.0,
+                ),
+            )
+            fills = broker.submit_orders(broker_orders)
         state = sync_state_prices(state, latest_prices)
 
     state.as_of = as_of
@@ -334,6 +450,7 @@ def run_paper_trading_cycle_for_targets(
             "violations": risk_result.violations,
         },
         "fill_count": len(fills),
+        "execution": execution_diagnostics,
     }
     diagnostics.update(extra_diagnostics or {})
 
@@ -344,7 +461,7 @@ def run_paper_trading_cycle_for_targets(
         latest_scores=latest_scores,
         latest_target_weights=latest_effective_weights,
         scheduled_target_weights=latest_scheduled_weights,
-        orders=order_result.orders,
+        orders=executable_orders,
         fills=fills,
         skipped_symbols=skipped_symbols,
         diagnostics=diagnostics,
@@ -543,6 +660,17 @@ def write_paper_trading_artifacts(
         "targets_path": targets_path,
         "summary_path": summary_path,
     }
+    execution_payload = result.diagnostics.get("execution", {})
+    if execution_payload.get("execution_summary"):
+        simulation_result = ExecutionSimulationResult(
+            executable_orders=[ExecutableOrder(**row) for row in execution_payload.get("executable_orders", [])],
+            rejected_orders=[ExecutableOrder(**row) for row in execution_payload.get("rejected_orders", [])],
+            summary=execution_payload.get("execution_summary", {}),
+            liquidity_rows=execution_payload.get("liquidity_constraints_report", []),
+            turnover_rows=execution_payload.get("turnover_summary", []),
+        )
+        execution_paths = write_execution_artifacts(simulation_result, output_path)
+        paths.update(execution_paths)
     paths.update(extra_paths)
     return paths
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 
 from trading_platform.config.loader import (
+    load_execution_config,
     load_monitoring_config,
     load_notification_config,
     load_pipeline_run_config,
@@ -103,6 +104,9 @@ maximum_benchmark_underperformance: 0.05
 maximum_missing_data_incidents: 1
 maximum_zero_weight_runs: 0
 max_drift_between_sleeve_target_and_final_combined_weight: 0.1
+maximum_rejected_order_count: 2
+maximum_liquidity_breaches: 3
+maximum_short_availability_failures: 1
 """.strip(),
         encoding="utf-8",
     )
@@ -112,6 +116,9 @@ max_drift_between_sleeve_target_and_final_combined_weight: 0.1
     assert config.maximum_failed_stages == 0
     assert config.minimum_generated_position_count == 2
     assert config.maximum_symbol_concentration == 0.3
+    assert config.maximum_rejected_order_count == 2
+    assert config.maximum_liquidity_breaches == 3
+    assert config.maximum_short_availability_failures == 1
 
 
 def test_load_notification_config_from_yaml(tmp_path) -> None:
@@ -135,3 +142,36 @@ channels:
     assert config.smtp_host == "smtp.example.com"
     assert config.min_severity == "warning"
     assert config.channels[0].channel_type == "email"
+
+
+def test_load_execution_config_from_yaml(tmp_path) -> None:
+    path = tmp_path / "execution.yaml"
+    path.write_text(
+        """
+commission_per_share: 0.005
+commission_bps: 1.0
+slippage_model_type: spread_plus_impact
+spread_proxy_bps: 2.0
+market_impact_proxy_bps: 5.0
+max_participation_rate: 0.05
+minimum_average_dollar_volume: 1000000
+minimum_price: 5
+lot_size: 10
+minimum_trade_notional: 100
+max_turnover_per_rebalance: 0.5
+short_selling_allowed: false
+short_borrow_availability: false
+max_borrow_utilization: 0.1
+price_source_assumption: close
+partial_fill_behavior: clip
+missing_liquidity_behavior: reject
+""".strip(),
+        encoding="utf-8",
+    )
+
+    config = load_execution_config(path)
+
+    assert config.commission_per_share == 0.005
+    assert config.commission_bps == 1.0
+    assert config.lot_size == 10
+    assert config.short_selling_allowed is False

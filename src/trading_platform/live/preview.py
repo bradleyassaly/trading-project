@@ -14,6 +14,14 @@ from trading_platform.broker.live_models import (
     LiveBrokerOrderStatus,
     LiveBrokerPosition,
 )
+from trading_platform.execution.realism import (
+    ExecutableOrder,
+    ExecutionConfig,
+    ExecutionOrderRequest,
+    ExecutionSimulationResult,
+    simulate_execution,
+    write_execution_artifacts,
+)
 from trading_platform.execution.open_order_adjustment import adjust_orders_for_open_orders
 from trading_platform.execution.reconciliation import (
     ReconciliationResult,
@@ -87,6 +95,7 @@ class LivePreviewResult:
     reconciliation: ReconciliationResult
     adjusted_orders: list[LiveBrokerOrderRequest]
     order_adjustment_diagnostics: dict[str, Any]
+    execution_result: ExecutionSimulationResult | None
     reconciliation_rows: list[dict[str, Any]]
     health_checks: list[LivePreviewHealthCheck]
     artifacts: dict[str, Path] = field(default_factory=dict)
@@ -383,6 +392,45 @@ def _build_reconciliation_rows(
     return rows
 
 
+def _simulate_execution_for_live_orders(
+    *,
+    config: LivePreviewConfig,
+    positions: dict[str, LiveBrokerPosition],
+    latest_prices: dict[str, float],
+    target_weights: dict[str, float],
+    reconciliation: ReconciliationResult,
+    execution_config: ExecutionConfig,
+) -> tuple[list[LiveBrokerOrderRequest], ExecutionSimulationResult]:
+    requests = []
+    for order in reconciliation.orders:
+        current_quantity = int(positions[order.symbol].quantity) if order.symbol in positions else 0
+        target_quantity = int(reconciliation.target_quantities.get(order.symbol, current_quantity))
+        requests.append(
+            ExecutionOrderRequest(
+                symbol=order.symbol,
+                side=order.side,
+                requested_quantity=order.quantity,
+                reference_price=float(latest_prices.get(order.symbol, 0.0)),
+                target_weight=float(target_weights.get(order.symbol, 0.0)),
+                current_quantity=current_quantity,
+                target_quantity=target_quantity,
+            )
+        )
+    execution_result = simulate_execution(requests=requests, config=execution_config)
+    executable_orders = [
+        LiveBrokerOrderRequest(
+            symbol=order.symbol,
+            side=order.side,
+            quantity=order.adjusted_quantity,
+            order_type="market",
+            time_in_force="day",
+            reason=order.clipping_reason or "rebalance_to_target",
+        )
+        for order in execution_result.executable_orders
+    ]
+    return executable_orders, execution_result
+
+
 def run_live_dry_run_preview(config: LivePreviewConfig) -> LivePreviewResult:
     as_of, target_weights, latest_prices, target_diagnostics = _build_target_preview(config)
     return run_live_dry_run_preview_for_targets(
@@ -401,6 +449,7 @@ def run_live_dry_run_preview_for_targets(
     target_weights: dict[str, float],
     latest_prices: dict[str, float],
     target_diagnostics: dict[str, Any],
+    execution_config: ExecutionConfig | None = None,
 ) -> LivePreviewResult:
     broker = _resolve_broker(config)
     account = broker.get_account()
@@ -417,8 +466,19 @@ def run_live_dry_run_preview_for_targets(
         order_type=config.order_type,
         time_in_force=config.time_in_force,
     )
+    execution_result = None
+    proposed_orders = reconciliation.orders
+    if execution_config is not None:
+        proposed_orders, execution_result = _simulate_execution_for_live_orders(
+            config=config,
+            positions=positions,
+            latest_prices=latest_prices,
+            target_weights=target_weights,
+            reconciliation=reconciliation,
+            execution_config=execution_config,
+        )
     adjustment = adjust_orders_for_open_orders(
-        proposed_orders=reconciliation.orders,
+        proposed_orders=proposed_orders,
         open_orders=open_orders,
     )
     reconciliation_rows = _build_reconciliation_rows(
@@ -458,6 +518,7 @@ def run_live_dry_run_preview_for_targets(
         reconciliation=reconciliation,
         adjusted_orders=adjustment.adjusted_orders,
         order_adjustment_diagnostics=adjustment.diagnostics,
+        execution_result=execution_result,
         reconciliation_rows=reconciliation_rows,
         health_checks=health_checks,
     )
@@ -582,6 +643,8 @@ def write_live_dry_run_artifacts(result: LivePreviewResult) -> dict[str, Path]:
         "reconciliation_diagnostics": result.reconciliation.diagnostics,
         "order_adjustment_diagnostics": result.order_adjustment_diagnostics,
     }
+    if result.execution_result is not None:
+        summary_payload["execution_summary"] = result.execution_result.summary
     output_check = _health_check(
         name="output_files",
         status="pass",
@@ -596,7 +659,7 @@ def write_live_dry_run_artifacts(result: LivePreviewResult) -> dict[str, Path]:
     summary_json_path.write_text(json.dumps(summary_payload, indent=2, default=str), encoding="utf-8")
     summary_md_path.write_text(_write_markdown_summary(summary_payload, health_check_rows), encoding="utf-8")
 
-    return {
+    paths = {
         "summary_json_path": summary_json_path,
         "summary_md_path": summary_md_path,
         "target_positions_path": target_positions_path,
@@ -605,3 +668,7 @@ def write_live_dry_run_artifacts(result: LivePreviewResult) -> dict[str, Path]:
         "reconciliation_path": reconciliation_path,
         "health_checks_path": health_checks_path,
     }
+    if result.execution_result is not None:
+        execution_paths = write_execution_artifacts(result.execution_result, output_dir)
+        paths.update(execution_paths)
+    return paths

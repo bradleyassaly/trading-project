@@ -127,6 +127,7 @@ def _result(tmp_path, *, statuses: list[tuple[str, str, str]]) -> LivePreviewRes
         reconciliation=reconciliation,
         adjusted_orders=orders,
         order_adjustment_diagnostics={"open_order_count": 0},
+        execution_result=None,
         reconciliation_rows=[
             {
                 "symbol": "MU",

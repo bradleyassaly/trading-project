@@ -230,6 +230,17 @@ def _selection_instability(paper_summary_df: pd.DataFrame) -> float | None:
     return float(len(prev ^ current) / len(union))
 
 
+def _load_execution_summary(run_dir: Path) -> dict[str, Any]:
+    for candidate in [
+        run_dir / "paper_trading" / "execution_summary.json",
+        run_dir / "live_dry_run" / "execution_summary.json",
+    ]:
+        payload = _safe_read_json(candidate)
+        if payload:
+            return payload
+    return {}
+
+
 def _evaluate_run_health_payload(
     *,
     run_dir: Path,
@@ -313,6 +324,9 @@ def _evaluate_run_health_payload(
     zero_weight_rows = 0
     approved_strategy_count = len(outputs.get("multi_strategy_selected_strategies", []))
     live_order_count = None
+    execution_rejected_order_count = 0
+    execution_liquidity_breach_count = 0
+    execution_short_availability_failures = 0
 
     allocation_summary = _safe_read_json(run_dir / "portfolio_allocation" / "allocation_summary.json")
     combined_targets = _safe_read_csv(run_dir / "portfolio_allocation" / "combined_target_weights.csv")
@@ -472,6 +486,63 @@ def _evaluate_run_health_payload(
         )
     if live_summary:
         live_order_count = int(live_summary.get("adjusted_order_count", 0) or 0)
+    execution_summary = _load_execution_summary(run_dir)
+    if execution_summary:
+        execution_rejected_order_count = int(execution_summary.get("rejected_order_count", 0) or 0)
+        execution_liquidity_breach_count = int(execution_summary.get("liquidity_breach_count", 0) or 0)
+        execution_short_availability_failures = int(execution_summary.get("short_availability_failures", 0) or 0)
+
+    if (
+        config.maximum_rejected_order_count is not None
+        and execution_rejected_order_count > config.maximum_rejected_order_count
+    ):
+        alerts.append(
+            Alert(
+                code="rejected_orders",
+                severity="warning",
+                message=f"rejected_order_count={execution_rejected_order_count} exceeds maximum_rejected_order_count={config.maximum_rejected_order_count}",
+                timestamp=evaluated_at,
+                entity_type="run",
+                entity_id=run_payload.get("run_name", run_dir.name),
+                metric_value=execution_rejected_order_count,
+                threshold_value=config.maximum_rejected_order_count,
+                artifact_path=str(run_dir / "paper_trading" / "execution_summary.json"),
+            )
+        )
+    if (
+        config.maximum_liquidity_breaches is not None
+        and execution_liquidity_breach_count > config.maximum_liquidity_breaches
+    ):
+        alerts.append(
+            Alert(
+                code="liquidity_breaches",
+                severity="warning",
+                message=f"liquidity_breach_count={execution_liquidity_breach_count} exceeds maximum_liquidity_breaches={config.maximum_liquidity_breaches}",
+                timestamp=evaluated_at,
+                entity_type="run",
+                entity_id=run_payload.get("run_name", run_dir.name),
+                metric_value=execution_liquidity_breach_count,
+                threshold_value=config.maximum_liquidity_breaches,
+                artifact_path=str(run_dir / "paper_trading" / "execution_summary.json"),
+            )
+        )
+    if (
+        config.maximum_short_availability_failures is not None
+        and execution_short_availability_failures > config.maximum_short_availability_failures
+    ):
+        alerts.append(
+            Alert(
+                code="short_availability_failures",
+                severity="critical",
+                message=f"short_availability_failures={execution_short_availability_failures} exceeds maximum_short_availability_failures={config.maximum_short_availability_failures}",
+                timestamp=evaluated_at,
+                entity_type="run",
+                entity_id=run_payload.get("run_name", run_dir.name),
+                metric_value=execution_short_availability_failures,
+                threshold_value=config.maximum_short_availability_failures,
+                artifact_path=str(run_dir / "paper_trading" / "execution_summary.json"),
+            )
+        )
 
     metrics = {
         "failed_stage_count": failed_stage_count,
@@ -485,6 +556,9 @@ def _evaluate_run_health_payload(
         "max_drift_between_sleeve_target_and_final_combined_weight": max_drift,
         "zero_weight_rows": zero_weight_rows,
         "live_order_count": live_order_count,
+        "execution_rejected_order_count": execution_rejected_order_count,
+        "execution_liquidity_breach_count": execution_liquidity_breach_count,
+        "execution_short_availability_failures": execution_short_availability_failures,
     }
     report = RunHealthReport(
         run_dir=str(run_dir),
@@ -519,6 +593,8 @@ def _evaluate_run_health_payload(
                 "net_exposure": net_exposure,
                 "critical_alert_count": report.alert_counts["critical"],
                 "warning_alert_count": report.alert_counts["warning"],
+                "execution_rejected_order_count": execution_rejected_order_count,
+                "execution_liquidity_breach_count": execution_liquidity_breach_count,
             }
         ],
         [
@@ -532,6 +608,8 @@ def _evaluate_run_health_payload(
             "net_exposure",
             "critical_alert_count",
             "warning_alert_count",
+            "execution_rejected_order_count",
+            "execution_liquidity_breach_count",
         ],
     )
     return report, paths

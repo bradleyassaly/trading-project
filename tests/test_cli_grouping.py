@@ -351,6 +351,26 @@ def test_grouped_paper_run_multi_strategy_command_parses() -> None:
     assert args.config == "configs/multi_strategy.json"
 
 
+def test_grouped_paper_run_multi_strategy_command_parses_execution_config() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "paper",
+            "run-multi-strategy",
+            "--config",
+            "configs/multi_strategy.json",
+            "--execution-config",
+            "configs/execution.json",
+            "--state-path",
+            "artifacts/paper/state.json",
+            "--output-dir",
+            "artifacts/paper/multi",
+        ]
+    )
+
+    assert args.execution_config == "configs/execution.json"
+
+
 def test_grouped_live_dry_run_command_parses_preset_and_output_dir() -> None:
     parser = build_parser()
     args = parser.parse_args(
@@ -410,6 +430,26 @@ def test_grouped_live_dry_run_multi_strategy_command_parses() -> None:
     assert args.live_command == "dry-run-multi-strategy"
     assert args.config == "configs/multi_strategy.json"
     assert args.output_dir == "artifacts/live_dry_run/multi"
+
+
+def test_grouped_live_dry_run_multi_strategy_command_parses_execution_config() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "live",
+            "dry-run-multi-strategy",
+            "--config",
+            "configs/multi_strategy.json",
+            "--execution-config",
+            "configs/execution.json",
+            "--broker",
+            "mock",
+            "--output-dir",
+            "artifacts/live_dry_run/multi",
+        ]
+    )
+
+    assert args.execution_config == "configs/execution.json"
 
 
 def test_legacy_alpha_command_rewrites_cleanly() -> None:
@@ -665,6 +705,26 @@ def test_grouped_portfolio_allocate_multi_strategy_command_parses() -> None:
     assert args.config == "configs/multi_strategy.json"
 
 
+def test_grouped_portfolio_apply_execution_constraints_command_parses() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "portfolio",
+            "apply-execution-constraints",
+            "--config",
+            "configs/execution.json",
+            "--allocation-dir",
+            "artifacts/portfolio/multi",
+            "--output-dir",
+            "artifacts/execution",
+        ]
+    )
+
+    assert args.portfolio_command == "apply-execution-constraints"
+    assert args.config == "configs/execution.json"
+    assert args.allocation_dir == "artifacts/portfolio/multi"
+
+
 def test_grouped_registry_list_command_parses() -> None:
     parser = build_parser()
     args = parser.parse_args(["registry", "list", "--registry", "artifacts/registry.json"])
@@ -838,3 +898,23 @@ def test_grouped_monitor_notify_command_parses() -> None:
 
     assert args.monitor_command == "notify"
     assert args.alerts == "artifacts/monitoring/alerts.json"
+
+
+def test_grouped_execution_simulate_command_parses() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "execution",
+            "simulate",
+            "--config",
+            "configs/execution.yaml",
+            "--targets",
+            "artifacts/targets.csv",
+            "--output-dir",
+            "artifacts/execution",
+        ]
+    )
+
+    assert args.command_family == "execution"
+    assert args.execution_command == "simulate"
+    assert args.targets == "artifacts/targets.csv"

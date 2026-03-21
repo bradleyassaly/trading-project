@@ -498,6 +498,100 @@ def test_pipeline_paper_and_live_integration_through_orchestrator(monkeypatch, t
     assert "live_summary" in result.outputs
 
 
+def test_pipeline_passes_execution_config_to_paper_and_live(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr("trading_platform.orchestration.service._now_utc", lambda: "2025-01-02T00:00:00Z")
+    monkeypatch.setattr("trading_platform.orchestration.service.perf_counter", lambda: 1.0)
+    execution_config = object()
+    captured: dict[str, object] = {}
+    config = _pipeline_config(
+        tmp_path,
+        execution_config_path=str(tmp_path / "execution.json"),
+        stages=OrchestrationStageToggles(
+            multi_strategy_config_generation=True,
+            paper_trading=True,
+            live_dry_run=True,
+            reporting=True,
+        ),
+        stage_order=[
+            "multi_strategy_config_generation",
+            "paper_trading",
+            "live_dry_run",
+            "reporting",
+        ],
+    )
+    _write_governance_config(Path(config.governance_config_path))
+    _write_registry(tmp_path, status="approved")
+    monkeypatch.setattr("trading_platform.orchestration.service._union_symbols", lambda universes: ["AAPL"])
+    monkeypatch.setattr("trading_platform.orchestration.service.load_execution_config", lambda path: execution_config)
+
+    def fake_paper_run(**kwargs):
+        captured["paper_execution_config"] = kwargs["execution_config"]
+        return type(
+            "PaperResult",
+            (),
+            {
+                "as_of": "2025-01-02",
+                "state": type("State", (), {"cash": 100000.0, "equity": 100000.0, "gross_market_value": 0.0, "positions": {}})(),
+                "orders": [],
+                "fills": [],
+                "latest_prices": kwargs["latest_prices"],
+                "latest_scores": {},
+                "latest_target_weights": kwargs["latest_effective_weights"],
+                "scheduled_target_weights": kwargs["latest_scheduled_weights"],
+                "skipped_symbols": [],
+                "diagnostics": {},
+            },
+        )()
+
+    def fake_live_run(**kwargs):
+        captured["live_execution_config"] = kwargs["execution_config"]
+        return type("LiveResult", (), {"config": kwargs["config"]})()
+
+    monkeypatch.setattr(
+        "trading_platform.orchestration.service.run_paper_trading_cycle_for_targets",
+        fake_paper_run,
+    )
+    monkeypatch.setattr(
+        "trading_platform.orchestration.service.write_paper_trading_artifacts",
+        lambda **kwargs: {"summary_path": Path(kwargs["output_dir"]) / "paper_summary.json"},
+    )
+    monkeypatch.setattr(
+        "trading_platform.orchestration.service.persist_paper_run_outputs",
+        lambda **kwargs: (
+            {"paper_run_summary_latest_json_path": Path(kwargs["output_dir"]) / "paper_run_summary_latest.json"},
+            [],
+            {"current_equity": 100000.0, "gross_exposure": 1.0, "turnover_estimate": 0.1},
+        ),
+    )
+    monkeypatch.setattr(
+        "trading_platform.orchestration.service.register_experiment",
+        lambda record, tracker_dir: {"experiment_registry_path": str(tracker_dir / "experiment_registry.csv")},
+    )
+    monkeypatch.setattr(
+        "trading_platform.orchestration.service.build_paper_experiment_record",
+        lambda output_dir: {},
+    )
+    monkeypatch.setattr(
+        "trading_platform.orchestration.service.run_live_dry_run_preview_for_targets",
+        fake_live_run,
+    )
+    monkeypatch.setattr(
+        "trading_platform.orchestration.service.write_live_dry_run_artifacts",
+        lambda result: {"summary_json_path": Path(result.config.output_dir) / "live_dry_run_summary.json"},
+    )
+    live_dir = Path(config.output_root_dir) / config.run_name / "2025-01-02T00-00-00Z" / "live_dry_run"
+    live_dir.mkdir(parents=True, exist_ok=True)
+    (live_dir / "live_dry_run_summary.json").write_text(
+        json.dumps({"adjusted_order_count": 0, "gross_exposure": 1.0}),
+        encoding="utf-8",
+    )
+
+    run_orchestration_pipeline(config)
+
+    assert captured["paper_execution_config"] is execution_config
+    assert captured["live_execution_config"] is execution_config
+
+
 def test_pipeline_config_rejects_invalid_stage_ordering(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="must come before"):
         _pipeline_config(

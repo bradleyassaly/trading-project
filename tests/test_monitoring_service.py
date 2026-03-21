@@ -84,6 +84,24 @@ def _write_run_dir(
         json.dumps({"summary": {"current_equity": 100000.0, "gross_exposure": 0.9}}, indent=2),
         encoding="utf-8",
     )
+    (paper_dir / "execution_summary.json").write_text(
+        json.dumps(
+            {
+                "requested_order_count": 2,
+                "executable_order_count": 2,
+                "rejected_order_count": 0,
+                "requested_notional": 10000.0,
+                "executed_notional": 10000.0,
+                "expected_total_cost": 12.5,
+                "turnover_before_constraints": 10000.0,
+                "turnover_after_constraints": 10000.0,
+                "liquidity_breach_count": 0,
+                "short_availability_failures": 0,
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
     live_dir = run_dir / "live_dry_run"
     live_dir.mkdir(parents=True, exist_ok=True)
     (live_dir / "live_dry_run_summary.json").write_text(
@@ -199,6 +217,36 @@ def test_run_health_empty_portfolio_case(tmp_path: Path) -> None:
     )
 
     assert any(alert.code == "empty_or_small_portfolio" for alert in report.alerts)
+
+
+def test_run_health_execution_breach_case(tmp_path: Path) -> None:
+    run_dir = _write_run_dir(tmp_path)
+    (run_dir / "paper_trading" / "execution_summary.json").write_text(
+        json.dumps(
+            {
+                "requested_order_count": 4,
+                "executable_order_count": 1,
+                "rejected_order_count": 3,
+                "liquidity_breach_count": 2,
+                "short_availability_failures": 1,
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    report, _paths = evaluate_run_health(
+        run_dir=run_dir,
+        config=MonitoringConfig(
+            maximum_rejected_order_count=1,
+            maximum_liquidity_breaches=1,
+            maximum_short_availability_failures=0,
+        ),
+    )
+
+    assert any(alert.code == "rejected_orders" for alert in report.alerts)
+    assert any(alert.code == "liquidity_breaches" for alert in report.alerts)
+    assert any(alert.code == "short_availability_failures" for alert in report.alerts)
 
 
 def test_portfolio_health_concentration_breach_case(tmp_path: Path) -> None:

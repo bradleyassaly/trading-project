@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from trading_platform.config.loader import load_multi_strategy_portfolio_config
+from trading_platform.config.loader import load_execution_config, load_multi_strategy_portfolio_config
 from trading_platform.paper.models import PaperTradingConfig
 from trading_platform.paper.persistence import persist_paper_run_outputs
 from trading_platform.paper.service import (
@@ -34,6 +34,7 @@ def _build_multi_strategy_paper_config(result, reserve_cash_pct: float) -> Paper
 
 def cmd_paper_run_multi_strategy(args) -> None:
     portfolio_config = load_multi_strategy_portfolio_config(args.config)
+    execution_config = load_execution_config(args.execution_config) if getattr(args, "execution_config", None) else None
     allocation_result = allocate_multi_strategy_portfolio(portfolio_config)
     allocation_paths = write_multi_strategy_artifacts(allocation_result, Path(args.output_dir))
 
@@ -86,6 +87,7 @@ def cmd_paper_run_multi_strategy(args) -> None:
         target_diagnostics=target_diagnostics,
         skipped_symbols=[],
         extra_diagnostics={"multi_strategy_allocation": allocation_result.summary},
+        execution_config=execution_config,
         auto_apply_fills=False,
     )
     paper_paths = write_paper_trading_artifacts(result=result, output_dir=Path(args.output_dir))
@@ -108,6 +110,11 @@ def cmd_paper_run_multi_strategy(args) -> None:
     print(f"Equity: {result.state.equity:,.2f}")
     print(f"Gross exposure: {allocation_result.summary['gross_exposure_after_constraints']:.6f}")
     print(f"Turnover estimate: {allocation_result.summary['turnover_estimate']:.6f}")
+    execution_summary = result.diagnostics.get("execution", {}).get("execution_summary", {})
+    if execution_summary:
+        print(f"Executable orders: {execution_summary.get('executable_order_count', 0)}")
+        print(f"Rejected orders: {execution_summary.get('rejected_order_count', 0)}")
+        print(f"Expected total cost: {execution_summary.get('expected_total_cost', 0.0):.6f}")
     print("Artifacts:")
     combined_paths = {**allocation_paths, **paper_paths, **persistence_paths}
     for name, path in sorted(combined_paths.items()):

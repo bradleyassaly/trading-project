@@ -116,6 +116,7 @@ Key fields:
 - `registry_path` / `governance_config_path`: inputs for candidate evaluation and optional registry mutation
 - `monitoring_config_path`: thresholds for the final monitoring stage and standalone monitor commands
 - `notification_config_path`: optional SMTP/SMS notification settings used after monitoring completes
+- `execution_config_path`: optional execution-realism config applied by paper and live dry-run stages
 - `multi_strategy_output_path`: generated config artifact that feeds the existing multi-strategy allocator
 - `paper_state_path`: persistent state file reused by the paper trading stage
 - `max_parallel_jobs`: reserved for future scheduler/parallelization support; currently kept explicit for config stability
@@ -463,6 +464,12 @@ Primary monitoring outputs:
 - `portfolio_health.csv` / `portfolio_health.json` / `portfolio_health.md`: combined-portfolio metrics and alerts
 - `run_history.csv`, `strategy_health_history.csv`, `portfolio_health_history.csv`: append-only trend histories for later dashboards
 
+Execution-aware monitoring can also alert on:
+
+- rejected order count above threshold
+- liquidity breach count above threshold
+- short-availability failures
+
 ### Notifications
 
 The notification layer is intentionally simple. It reads monitoring alerts, filters by `min_severity`, aggregates them into one message, and sends them synchronously.
@@ -795,14 +802,16 @@ trading-cli research monitor --tracker-dir artifacts/experiment_tracking --snaps
 trading-cli portfolio backtest --universe magnificent7 --strategy sma_cross --rebalance-frequency weekly --output-dir artifacts/portfolio
 trading-cli portfolio topn --universe magnificent7 --strategy momentum_hold --lookback 20 --top-n 3 --weighting-scheme inverse_vol
 trading-cli portfolio allocate-multi-strategy --config configs/multi_strategy.yaml --output-dir artifacts/portfolio/multi_strategy
+trading-cli portfolio apply-execution-constraints --config configs/execution.yaml --allocation-dir artifacts/portfolio/multi_strategy --output-dir artifacts/execution/multi_strategy
+trading-cli execution simulate --config configs/execution.yaml --targets artifacts/execution/requested_orders.csv --output-dir artifacts/execution/simulated
 trading-cli paper run --symbols AAPL MSFT NVDA --signal-source composite --approved-model-state artifacts/alpha_research/approved/approved_model_state.json --top-n 5 --state-path artifacts/paper/paper_state.json --output-dir artifacts/paper
 trading-cli paper run --preset xsec_nasdaq100_momentum_v1_deploy --state-path artifacts/paper/nasdaq100_xsec_state.json --output-dir artifacts/paper/nasdaq100_xsec
-trading-cli paper run-multi-strategy --config configs/multi_strategy.yaml --state-path artifacts/paper/multi_strategy_state.json --output-dir artifacts/paper/multi_strategy
+trading-cli paper run-multi-strategy --config configs/multi_strategy.yaml --execution-config configs/execution.yaml --state-path artifacts/paper/multi_strategy_state.json --output-dir artifacts/paper/multi_strategy
 trading-cli paper run-preset-scheduled --preset xsec_nasdaq100_momentum_v1_deploy --state-path artifacts/paper/nasdaq100_xsec_state.json --output-dir artifacts/paper/nasdaq100_xsec
 trading-cli paper daily --universe magnificent7 --signal-source composite --approved-model-state artifacts/alpha_research/approved/approved_model_state.json --state-path artifacts/paper/paper_state.json --output-dir artifacts/paper
 trading-cli paper report --account-dir artifacts/paper --output-dir artifacts/paper/report
 trading-cli live dry-run --universe magnificent7 --strategy sma_cross --top-n 5 --broker mock
-trading-cli live dry-run-multi-strategy --config configs/multi_strategy.yaml --broker mock --output-dir artifacts/live_dry_run/multi_strategy
+trading-cli live dry-run-multi-strategy --config configs/multi_strategy.yaml --execution-config configs/execution.yaml --broker mock --output-dir artifacts/live_dry_run/multi_strategy
 trading-cli live validate --universe magnificent7 --signal-source composite --approved-model-state artifacts/alpha_research/approved/approved_model_state.json --approval-artifact artifacts/research_refresh/approved_configuration_snapshots/latest_approved_configuration.json --output-dir artifacts/live_execution
 trading-cli live execute --universe magnificent7 --signal-source composite --approved-model-state artifacts/alpha_research/approved/approved_model_state.json --approved --output-dir artifacts/live_execution
 trading-cli experiments list --tracker-dir artifacts/experiment_tracking --limit 10
@@ -968,6 +977,63 @@ The most important allocation diagnostics are:
 - turnover estimate at the combined-portfolio level
 - symbols clipped by position, concentration, group, gross, or net caps
 - effective number of sleeves and effective number of positions
+
+## Execution Realism
+
+Execution realism sits between ideal target weights and anything you would actually trade. The goal is to make frictions and practical constraints explicit, deterministic, and auditable rather than to imply broker-grade fill precision.
+
+The execution layer supports:
+
+- commissions per share and/or bps
+- fixed-bps or spread-plus-impact slippage proxies
+- minimum price and minimum average dollar volume filters
+- ADV participation caps
+- lot-size rounding and minimum trade-notional filtering
+- turnover caps at the rebalance level
+- short-selling and borrow-availability checks
+- expected fill-price, fee, slippage, and participation diagnostics
+
+Example execution config:
+
+```yaml
+commission_per_share: 0.005
+commission_bps: 0.5
+slippage_model_type: spread_plus_impact
+spread_proxy_bps: 2.0
+market_impact_proxy_bps: 5.0
+max_participation_rate: 0.05
+minimum_average_dollar_volume: 1000000
+minimum_price: 5.0
+lot_size: 1
+minimum_trade_notional: 50.0
+max_turnover_per_rebalance: 0.5
+short_selling_allowed: true
+short_borrow_availability: true
+max_borrow_utilization: 0.1
+price_source_assumption: close
+partial_fill_behavior: clip
+missing_liquidity_behavior: reject
+```
+
+Primary execution artifacts:
+
+- `executable_orders.csv`: requested versus adjusted executable orders, fill-price proxy, fees, and slippage
+- `rejected_orders.csv`: orders rejected by liquidity, price, short, or turnover constraints
+- `execution_summary.json` / `execution_summary.md`: total counts, turnover before/after constraints, and expected aggregate cost
+- `liquidity_constraints_report.csv`: symbol-level liquidity and participation diagnostics
+- `turnover_summary.csv`: per-symbol traded-notional and fee summary
+
+Paper and live dry-run accept an optional execution config:
+
+- `paper run-multi-strategy --execution-config ...` filters and clips orders before paper-state application and records estimated cost
+- `live dry-run-multi-strategy --execution-config ...` previews executable orders rather than idealized target deltas
+- `execution_config_path` on the pipeline config forwards the same assumptions into orchestration-driven paper and live dry-run stages
+
+Current limitations:
+
+- costs are proxies, not broker-quality transaction-cost analysis
+- liquidity checks use only available artifact fields and reject explicitly when required inputs are missing
+- `portfolio apply-execution-constraints` is intended as a diagnostic helper and uses simple quantity proxies from allocation artifacts
 
 ## Governance Criteria
 

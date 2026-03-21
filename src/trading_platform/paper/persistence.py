@@ -62,6 +62,8 @@ def _summary_markdown(summary: dict[str, Any], health_checks: list[dict[str, Any
         f"- Selected names: `{summary['selected_names']}`",
         f"- Target names: `{summary['target_names']}`",
         f"- Turnover estimate: `{summary['turnover_estimate']}`",
+        f"- Estimated execution cost: `{summary.get('estimated_execution_cost', 0.0)}`",
+        f"- Rejected order count: `{summary.get('rejected_order_count', 0)}`",
         f"- Turnover cap binding count: `{summary['turnover_cap_binding_count']}`",
         f"- Liquidity excluded count: `{summary['liquidity_excluded_count']}`",
         f"- Sector cap excluded count: `{summary['sector_cap_excluded_count']}`",
@@ -197,6 +199,8 @@ def persist_paper_run_outputs(
     selected_names = str(target_diag.get("selected_symbols", "") or "").strip()
     target_names = str(target_diag.get("target_selected_symbols", "") or "").strip()
     summary_stats = dict(target_diag.get("summary", {}))
+    execution_diag = dict(result.diagnostics.get("execution", {}))
+    execution_summary = dict(execution_diag.get("execution_summary", {}))
     timestamp = result.as_of
     rebalance_timestamp = str(target_diag.get("rebalance_timestamp", timestamp))
     gross_exposure = target_diag.get("average_gross_exposure")
@@ -230,6 +234,8 @@ def persist_paper_run_outputs(
         "semantic_warning": str(target_diag.get("semantic_warning", "") or ""),
         "data_quality_warnings": json.dumps(skip_reasons, sort_keys=True) if skip_reasons else "",
         "skipped_symbol_count": int(len(result.skipped_symbols)),
+        "estimated_execution_cost": float(execution_summary.get("expected_total_cost", 0.0) or 0.0),
+        "rejected_order_count": int(execution_summary.get("rejected_order_count", 0) or 0),
     }
 
     health_checks = _health_checks(

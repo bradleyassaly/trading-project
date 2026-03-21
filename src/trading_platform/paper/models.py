@@ -78,6 +78,9 @@ class PaperOrder:
     target_quantity: int
     notional: float
     reason: str
+    expected_fill_price: float | None = None
+    expected_fees: float = 0.0
+    expected_slippage_bps: float = 0.0
 
 
 @dataclass

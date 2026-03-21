@@ -62,6 +62,7 @@ class PipelineRunConfig:
     governance_config_path: str | None = None
     monitoring_config_path: str | None = None
     notification_config_path: str | None = None
+    execution_config_path: str | None = None
     multi_strategy_output_path: str | None = None
     paper_state_path: str | None = None
     live_broker: str = "mock"

@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from trading_platform.config.loader import load_multi_strategy_portfolio_config
+from trading_platform.config.loader import load_execution_config, load_multi_strategy_portfolio_config
 from trading_platform.live.preview import (
     LivePreviewConfig,
     run_live_dry_run_preview_for_targets,
@@ -17,6 +17,7 @@ from trading_platform.portfolio.multi_strategy import (
 
 def cmd_live_dry_run_multi_strategy(args) -> None:
     portfolio_config = load_multi_strategy_portfolio_config(args.config)
+    execution_config = load_execution_config(args.execution_config) if getattr(args, "execution_config", None) else None
     allocation_result = allocate_multi_strategy_portfolio(portfolio_config)
     allocation_paths = write_multi_strategy_artifacts(allocation_result, Path(args.output_dir))
 
@@ -63,6 +64,7 @@ def cmd_live_dry_run_multi_strategy(args) -> None:
         target_weights=allocation_result.combined_target_weights,
         latest_prices=allocation_result.latest_prices,
         target_diagnostics=target_diagnostics,
+        execution_config=execution_config,
     )
     live_paths = write_live_dry_run_artifacts(result)
 
@@ -72,6 +74,10 @@ def cmd_live_dry_run_multi_strategy(args) -> None:
     print(f"Enabled sleeves: {allocation_result.summary['enabled_sleeve_count']}")
     print(f"Adjusted proposed orders: {summary_payload['adjusted_order_count']}")
     print(f"Gross exposure: {allocation_result.summary['gross_exposure_after_constraints']:.6f}")
+    if "execution_summary" in summary_payload:
+        print(f"Executable orders: {summary_payload['execution_summary'].get('executable_order_count', 0)}")
+        print(f"Rejected orders: {summary_payload['execution_summary'].get('rejected_order_count', 0)}")
+        print(f"Expected total cost: {summary_payload['execution_summary'].get('expected_total_cost', 0.0):.6f}")
     print("Artifacts:")
     combined_paths = {**allocation_paths, **live_paths}
     for name, path in sorted(combined_paths.items()):

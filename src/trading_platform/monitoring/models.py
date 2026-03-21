@@ -60,6 +60,9 @@ class MonitoringConfig:
     maximum_zero_weight_runs: int | None = None
     max_drift_between_sleeve_target_and_final_combined_weight: float | None = None
     unusual_order_count_change_multiple: float | None = None
+    maximum_rejected_order_count: int | None = None
+    maximum_liquidity_breaches: int | None = None
+    maximum_short_availability_failures: int | None = None
 
     def __post_init__(self) -> None:
         if self.maximum_failed_stages < 0:
@@ -81,6 +84,9 @@ class MonitoringConfig:
             "max_drift_between_sleeve_target_and_final_combined_weight",
         )
         _validate_nonnegative_optional(self.unusual_order_count_change_multiple, "unusual_order_count_change_multiple")
+        _validate_nonnegative_optional(self.maximum_rejected_order_count, "maximum_rejected_order_count")
+        _validate_nonnegative_optional(self.maximum_liquidity_breaches, "maximum_liquidity_breaches")
+        _validate_nonnegative_optional(self.maximum_short_availability_failures, "maximum_short_availability_failures")
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

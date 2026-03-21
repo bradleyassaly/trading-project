@@ -130,6 +130,7 @@ def test_cmd_live_dry_run_multi_strategy_uses_combined_targets(monkeypatch, tmp_
             reconciliation=SimpleNamespace(orders=[], diagnostics={"investable_equity": 90_000.0}),
             adjusted_orders=[],
             order_adjustment_diagnostics={},
+            execution_result=None,
             reconciliation_rows=[],
             health_checks=[],
         )
@@ -159,3 +160,132 @@ def test_cmd_live_dry_run_multi_strategy_uses_combined_targets(monkeypatch, tmp_
     assert isinstance(captured["config"], LivePreviewConfig)
     assert captured["config"].reserve_cash_pct == 0.1
     assert "Enabled sleeves: 2" in capsys.readouterr().out
+
+
+def test_cmd_paper_run_multi_strategy_loads_execution_config(monkeypatch, tmp_path: Path) -> None:
+    captured: dict[str, object] = {}
+    execution_config = object()
+    monkeypatch.setattr(
+        "trading_platform.cli.commands.paper_run_multi_strategy.load_multi_strategy_portfolio_config",
+        lambda path: SimpleNamespace(cash_reserve_pct=0.05),
+    )
+    monkeypatch.setattr(
+        "trading_platform.cli.commands.paper_run_multi_strategy.load_execution_config",
+        lambda path: execution_config,
+    )
+    monkeypatch.setattr(
+        "trading_platform.cli.commands.paper_run_multi_strategy.allocate_multi_strategy_portfolio",
+        lambda config: _allocation_result(),
+    )
+    monkeypatch.setattr(
+        "trading_platform.cli.commands.paper_run_multi_strategy.write_multi_strategy_artifacts",
+        lambda result, output_dir: {},
+    )
+    monkeypatch.setattr(
+        "trading_platform.cli.commands.paper_run_multi_strategy.write_paper_trading_artifacts",
+        lambda *, result, output_dir: {},
+    )
+    monkeypatch.setattr(
+        "trading_platform.cli.commands.paper_run_multi_strategy.persist_paper_run_outputs",
+        lambda **kwargs: ({}, [], {}),
+    )
+    monkeypatch.setattr(
+        "trading_platform.cli.commands.paper_run_multi_strategy.register_experiment",
+        lambda record, tracker_dir: {"experiment_registry_path": tracker_dir / "registry.csv"},
+    )
+    monkeypatch.setattr(
+        "trading_platform.cli.commands.paper_run_multi_strategy.build_paper_experiment_record",
+        lambda output_dir: {},
+    )
+
+    def fake_run(**kwargs):
+        captured["execution_config"] = kwargs["execution_config"]
+        return PaperTradingRunResult(
+            as_of="2025-01-04",
+            state=PaperPortfolioState(cash=100_000.0),
+            latest_prices={"AAPL": 100.0},
+            latest_scores={},
+            latest_target_weights={"AAPL": 1.0},
+            scheduled_target_weights={"AAPL": 1.0},
+            orders=[],
+            fills=[],
+            diagnostics={},
+        )
+
+    monkeypatch.setattr(
+        "trading_platform.cli.commands.paper_run_multi_strategy.run_paper_trading_cycle_for_targets",
+        fake_run,
+    )
+
+    args = SimpleNamespace(
+        config=str(tmp_path / "portfolio.json"),
+        execution_config=str(tmp_path / "execution.json"),
+        state_path=str(tmp_path / "paper_state.json"),
+        output_dir=str(tmp_path / "paper"),
+    )
+    cmd_paper_run_multi_strategy(args)
+
+    assert captured["execution_config"] is execution_config
+
+
+def test_cmd_live_dry_run_multi_strategy_loads_execution_config(monkeypatch, tmp_path: Path) -> None:
+    captured: dict[str, object] = {}
+    execution_config = object()
+    monkeypatch.setattr(
+        "trading_platform.cli.commands.live_dry_run_multi_strategy.load_multi_strategy_portfolio_config",
+        lambda path: SimpleNamespace(cash_reserve_pct=0.05),
+    )
+    monkeypatch.setattr(
+        "trading_platform.cli.commands.live_dry_run_multi_strategy.load_execution_config",
+        lambda path: execution_config,
+    )
+    monkeypatch.setattr(
+        "trading_platform.cli.commands.live_dry_run_multi_strategy.allocate_multi_strategy_portfolio",
+        lambda config: _allocation_result(),
+    )
+    monkeypatch.setattr(
+        "trading_platform.cli.commands.live_dry_run_multi_strategy.write_multi_strategy_artifacts",
+        lambda result, output_dir: {},
+    )
+
+    def fake_preview(**kwargs):
+        captured["execution_config"] = kwargs["execution_config"]
+        return LivePreviewResult(
+            run_id="multi_strategy|2025-01-04",
+            as_of="2025-01-04",
+            config=kwargs["config"],
+            account=BrokerAccount(account_id="acct-1", cash=100_000.0, equity=100_000.0, buying_power=100_000.0),
+            positions={},
+            open_orders=[],
+            latest_prices=kwargs["latest_prices"],
+            target_weights=kwargs["target_weights"],
+            target_diagnostics=kwargs["target_diagnostics"],
+            reconciliation=SimpleNamespace(orders=[], diagnostics={"investable_equity": 90_000.0}),
+            adjusted_orders=[],
+            order_adjustment_diagnostics={},
+            execution_result=None,
+            reconciliation_rows=[],
+            health_checks=[],
+        )
+
+    monkeypatch.setattr(
+        "trading_platform.cli.commands.live_dry_run_multi_strategy.run_live_dry_run_preview_for_targets",
+        fake_preview,
+    )
+    monkeypatch.setattr(
+        "trading_platform.cli.commands.live_dry_run_multi_strategy.write_live_dry_run_artifacts",
+        lambda result: {"summary_json_path": Path(result.config.output_dir) / "live_dry_run_summary.json"},
+    )
+    output_dir = tmp_path / "live"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / "live_dry_run_summary.json").write_text('{"adjusted_order_count": 0}', encoding="utf-8")
+
+    args = SimpleNamespace(
+        config=str(tmp_path / "portfolio.json"),
+        execution_config=str(tmp_path / "execution.json"),
+        broker="mock",
+        output_dir=str(output_dir),
+    )
+    cmd_live_dry_run_multi_strategy(args)
+
+    assert captured["execution_config"] is execution_config

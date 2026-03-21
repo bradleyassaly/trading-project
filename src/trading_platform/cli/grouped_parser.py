@@ -9,6 +9,7 @@ from trading_platform.cli.commands.compare_xsec_construction import cmd_compare_
 from trading_platform.cli.commands.daily_paper_job import cmd_daily_paper_job
 from trading_platform.cli.commands.decision_memo import cmd_decision_memo
 from trading_platform.cli.commands.execute_live import cmd_execute_live
+from trading_platform.cli.commands.execution_simulate import cmd_execution_simulate
 from trading_platform.cli.commands.experiments_dashboard import cmd_experiments_dashboard
 from trading_platform.cli.commands.experiments_latest_model import cmd_experiments_latest_model
 from trading_platform.cli.commands.experiments_list import cmd_experiments_list
@@ -41,6 +42,7 @@ from trading_platform.cli.commands.pipeline_run import (
     cmd_pipeline_run_weekly,
 )
 from trading_platform.cli.commands.portfolio import cmd_portfolio
+from trading_platform.cli.commands.portfolio_apply_execution_constraints import cmd_portfolio_apply_execution_constraints
 from trading_platform.cli.commands.portfolio_allocate_multi_strategy import cmd_portfolio_allocate_multi_strategy
 from trading_platform.cli.commands.portfolio_topn import cmd_portfolio_topn
 from trading_platform.cli.commands.research import cmd_research
@@ -610,6 +612,11 @@ def build_parser() -> argparse.ArgumentParser:
     portfolio_multi.add_argument("--config", type=str, required=True, help="Path to the multi-strategy portfolio YAML/JSON config.")
     portfolio_multi.add_argument("--output-dir", type=str, required=True, help="Directory where allocation artifacts will be written.")
     portfolio_multi.set_defaults(func=cmd_portfolio_allocate_multi_strategy)
+    portfolio_exec = portfolio_subparsers.add_parser("apply-execution-constraints", help="Apply execution realism constraints to an allocation artifact directory")
+    portfolio_exec.add_argument("--config", type=str, required=True, help="Path to the execution-config JSON/YAML file.")
+    portfolio_exec.add_argument("--allocation-dir", type=str, required=True, help="Directory containing allocation artifacts.")
+    portfolio_exec.add_argument("--output-dir", type=str, required=True, help="Directory where execution realism artifacts will be written.")
+    portfolio_exec.set_defaults(func=cmd_portfolio_apply_execution_constraints)
 
     paper_parser = subparsers.add_parser("paper", help="Paper trading workflows")
     paper_subparsers = paper_parser.add_subparsers(dest="paper_command", required=True)
@@ -618,6 +625,7 @@ def build_parser() -> argparse.ArgumentParser:
     paper_run.set_defaults(func=cmd_paper_run)
     paper_multi = paper_subparsers.add_parser("run-multi-strategy", help="Run one paper-trading cycle from a combined multi-strategy allocation config")
     paper_multi.add_argument("--config", type=str, required=True, help="Path to the multi-strategy portfolio YAML/JSON config.")
+    paper_multi.add_argument("--execution-config", type=str, default=None, help="Optional execution realism JSON/YAML config.")
     paper_multi.add_argument("--state-path", type=str, required=True, help="JSON file used to persist paper portfolio state")
     paper_multi.add_argument("--output-dir", type=str, required=True, help="Directory for paper-run and allocation artifacts")
     paper_multi.set_defaults(func=cmd_paper_run_multi_strategy)
@@ -667,6 +675,7 @@ def build_parser() -> argparse.ArgumentParser:
     live_dry_run.set_defaults(func=cmd_live_dry_run)
     live_multi = live_subparsers.add_parser("dry-run-multi-strategy", help="Compute live broker rebalance preview orders from a combined multi-strategy allocation config")
     live_multi.add_argument("--config", type=str, required=True, help="Path to the multi-strategy portfolio YAML/JSON config.")
+    live_multi.add_argument("--execution-config", type=str, default=None, help="Optional execution realism JSON/YAML config.")
     live_multi.add_argument("--broker", type=str, default="mock", choices=["mock", "alpaca"], help="Broker backend to preview against.")
     live_multi.add_argument("--output-dir", type=str, required=True, help="Directory for live dry-run and allocation artifacts.")
     live_multi.set_defaults(func=cmd_live_dry_run_multi_strategy)
@@ -759,6 +768,14 @@ def build_parser() -> argparse.ArgumentParser:
     pipeline_run_weekly = pipeline_subparsers.add_parser("run-weekly", help="Run a weekly pipeline config and validate schedule_type=weekly")
     pipeline_run_weekly.add_argument("--config", type=str, required=True, help="Path to the pipeline JSON/YAML config.")
     pipeline_run_weekly.set_defaults(func=cmd_pipeline_run_weekly)
+
+    execution_parser = subparsers.add_parser("execution", help="Execution realism simulation commands")
+    execution_subparsers = execution_parser.add_subparsers(dest="execution_command", required=True)
+    execution_simulate = execution_subparsers.add_parser("simulate", help="Simulate executable orders from target/order CSV inputs")
+    execution_simulate.add_argument("--config", type=str, required=True, help="Path to the execution-config JSON/YAML file.")
+    execution_simulate.add_argument("--targets", type=str, required=True, help="CSV containing requested execution orders.")
+    execution_simulate.add_argument("--output-dir", type=str, required=True, help="Directory where execution artifacts will be written.")
+    execution_simulate.set_defaults(func=cmd_execution_simulate)
 
     monitor_parser = subparsers.add_parser("monitor", help="Operational monitoring and alerting commands")
     monitor_subparsers = monitor_parser.add_subparsers(dest="monitor_command", required=True)

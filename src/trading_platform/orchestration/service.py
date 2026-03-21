@@ -10,6 +10,7 @@ from typing import Any, Callable
 import pandas as pd
 
 from trading_platform.config.loader import (
+    load_execution_config,
     load_monitoring_config,
     load_multi_strategy_portfolio_config,
     load_notification_config,
@@ -445,6 +446,7 @@ def _run_paper_stage(config: PipelineRunConfig, run_dir: Path, context: dict[str
     )
     paper_output_dir = run_dir / "paper_trading"
     paper_output_dir.mkdir(parents=True, exist_ok=True)
+    execution_config = load_execution_config(config.execution_config_path) if config.execution_config_path else None
     paper_config = _build_multi_strategy_paper_config(
         allocation_result,
         reserve_cash_pct=portfolio_config.cash_reserve_pct,
@@ -463,6 +465,7 @@ def _run_paper_stage(config: PipelineRunConfig, run_dir: Path, context: dict[str
         target_diagnostics=_build_multi_strategy_target_diagnostics(allocation_result),
         skipped_symbols=[],
         extra_diagnostics={"multi_strategy_allocation": allocation_result.summary},
+        execution_config=execution_config,
         auto_apply_fills=False,
     )
     paper_paths = write_paper_trading_artifacts(result=result, output_dir=paper_output_dir)
@@ -495,6 +498,7 @@ def _run_live_stage(config: PipelineRunConfig, run_dir: Path, context: dict[str,
         allocation_result,
         run_dir / "portfolio_allocation",
     )
+    execution_config = load_execution_config(config.execution_config_path) if config.execution_config_path else None
     target_diagnostics = _build_multi_strategy_target_diagnostics(allocation_result)
     preview_config = LivePreviewConfig(
         symbols=sorted(allocation_result.combined_target_weights),
@@ -511,6 +515,7 @@ def _run_live_stage(config: PipelineRunConfig, run_dir: Path, context: dict[str,
         target_weights=allocation_result.combined_target_weights,
         latest_prices=allocation_result.latest_prices,
         target_diagnostics=target_diagnostics,
+        execution_config=execution_config,
     )
     live_paths = write_live_dry_run_artifacts(result)
     summary_payload = json.loads(
