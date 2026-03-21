@@ -62,8 +62,13 @@ def _summary_markdown(summary: dict[str, Any], health_checks: list[dict[str, Any
         f"- Selected names: `{summary['selected_names']}`",
         f"- Target names: `{summary['target_names']}`",
         f"- Turnover estimate: `{summary['turnover_estimate']}`",
+        f"- Requested order count: `{summary.get('requested_order_count', 0)}`",
+        f"- Executable order count: `{summary.get('executable_order_count', 0)}`",
         f"- Estimated execution cost: `{summary.get('estimated_execution_cost', 0.0)}`",
+        f"- Estimated slippage cost: `{summary.get('estimated_slippage_cost', 0.0)}`",
         f"- Rejected order count: `{summary.get('rejected_order_count', 0)}`",
+        f"- Turnover before execution constraints: `{summary.get('turnover_before_execution_constraints', 0.0)}`",
+        f"- Turnover after execution constraints: `{summary.get('turnover_after_execution_constraints', 0.0)}`",
         f"- Turnover cap binding count: `{summary['turnover_cap_binding_count']}`",
         f"- Liquidity excluded count: `{summary['liquidity_excluded_count']}`",
         f"- Sector cap excluded count: `{summary['sector_cap_excluded_count']}`",
@@ -235,7 +240,12 @@ def persist_paper_run_outputs(
         "data_quality_warnings": json.dumps(skip_reasons, sort_keys=True) if skip_reasons else "",
         "skipped_symbol_count": int(len(result.skipped_symbols)),
         "estimated_execution_cost": float(execution_summary.get("expected_total_cost", 0.0) or 0.0),
+        "estimated_slippage_cost": float(execution_summary.get("expected_slippage_cost_total", 0.0) or 0.0),
         "rejected_order_count": int(execution_summary.get("rejected_order_count", 0) or 0),
+        "requested_order_count": int(execution_summary.get("requested_order_count", 0) or len(result.orders)),
+        "executable_order_count": int(execution_summary.get("executable_order_count", 0) or len(result.orders)),
+        "turnover_before_execution_constraints": float(execution_summary.get("turnover_before_constraints", 0.0) or 0.0),
+        "turnover_after_execution_constraints": float(execution_summary.get("turnover_after_constraints", 0.0) or 0.0),
     }
 
     health_checks = _health_checks(

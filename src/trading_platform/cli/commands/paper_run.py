@@ -4,6 +4,7 @@ from pathlib import Path
 
 from trading_platform.cli.common import normalize_paper_weighting_scheme, resolve_symbols
 from trading_platform.cli.presets import apply_cli_preset
+from trading_platform.config.loader import load_execution_config
 from trading_platform.paper.models import PaperTradingConfig
 from trading_platform.paper.persistence import persist_paper_run_outputs
 from trading_platform.paper.service import (
@@ -75,12 +76,14 @@ def cmd_paper_run(args) -> None:
     if config.preset_name:
         print(f"Preset: {config.preset_name}")
 
+    execution_config = load_execution_config(args.execution_config) if getattr(args, "execution_config", None) else None
     state_path = Path(args.state_path)
     state_file_preexisting = state_path.exists()
     state_store = JsonPaperStateStore(state_path)
     result = run_paper_trading_cycle(
         config=config,
         state_store=state_store,
+        execution_config=execution_config,
         auto_apply_fills=args.auto_apply_fills,
     )
     artifact_paths = write_paper_trading_artifacts(
@@ -120,6 +123,12 @@ def cmd_paper_run(args) -> None:
         print(f"turnover_cap_binding_count: {target_diagnostics.get('turnover_cap_binding_count')}")
         print(f"turnover_buffer_blocked_replacements: {target_diagnostics.get('turnover_buffer_blocked_replacements')}")
         print(f"semantic_warning: {target_diagnostics.get('semantic_warning') or 'none'}")
+    execution_summary = result.diagnostics.get("execution", {}).get("execution_summary", {})
+    if execution_summary:
+        print(f"Requested orders: {execution_summary.get('requested_order_count', 0)}")
+        print(f"Executable orders: {execution_summary.get('executable_order_count', 0)}")
+        print(f"Rejected orders: {execution_summary.get('rejected_order_count', 0)}")
+        print(f"Expected total cost: {execution_summary.get('expected_total_cost', 0.0):.6f}")
     health_counts = {
         "pass": sum(1 for item in health_checks if item["status"] == "pass"),
         "warn": sum(1 for item in health_checks if item["status"] == "warn"),

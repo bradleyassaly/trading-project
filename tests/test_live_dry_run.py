@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pandas as pd
@@ -256,3 +257,51 @@ def test_cmd_live_dry_run_with_mock_broker_never_submits(monkeypatch, tmp_path) 
     payload = json.loads((tmp_path / "live_dry_run_summary.json").read_text(encoding="utf-8"))
     assert payload["adjusted_order_count"] >= 0
     assert payload["broker"] == "mock"
+
+
+def test_cmd_live_dry_run_loads_execution_config(monkeypatch, tmp_path) -> None:
+    execution_config = object()
+    captured: dict[str, object] = {}
+    monkeypatch.setattr("trading_platform.cli.commands.live_dry_run.load_execution_config", lambda path: execution_config)
+
+    class DummyResult:
+        def __init__(self):
+            self.as_of = "2025-01-04"
+            self.account = BrokerAccount(account_id="acct-1", cash=100_000.0, equity=100_000.0, buying_power=100_000.0)
+            self.positions = {}
+            self.open_orders = []
+            self.reconciliation = SimpleNamespace(orders=[])
+            self.adjusted_orders = []
+            self.target_diagnostics = {
+                "rebalance_timestamp": "2025-01-04",
+                "selected_symbols": "AAPL",
+                "target_selected_symbols": "AAPL",
+                "realized_holdings_count": 1,
+                "realized_holdings_minus_top_n": 0,
+                "average_gross_exposure": 1.0,
+                "liquidity_excluded_count": 0,
+                "sector_cap_excluded_count": 0,
+                "turnover_cap_binding_count": 0,
+                "turnover_buffer_blocked_replacements": 0,
+                "semantic_warning": "",
+            }
+            self.health_checks = []
+            self.execution_result = None
+
+    def fake_run(config, execution_config=None):
+        captured["execution_config"] = execution_config
+        return DummyResult()
+
+    monkeypatch.setattr(
+        "trading_platform.cli.commands.live_dry_run.run_live_dry_run_preview",
+        fake_run,
+    )
+    monkeypatch.setattr(
+        "trading_platform.cli.commands.live_dry_run.write_live_dry_run_artifacts",
+        lambda result: {"summary_json_path": Path(tmp_path) / "live_dry_run_summary.json"},
+    )
+
+    args = _base_args(tmp_path, execution_config=str(tmp_path / "execution.json"))
+    cmd_live_dry_run(args)
+
+    assert captured["execution_config"] is execution_config

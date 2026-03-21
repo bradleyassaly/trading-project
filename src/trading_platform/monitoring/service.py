@@ -327,6 +327,12 @@ def _evaluate_run_health_payload(
     execution_rejected_order_count = 0
     execution_liquidity_breach_count = 0
     execution_short_availability_failures = 0
+    execution_clipped_order_count = 0
+    execution_rejected_order_ratio = 0.0
+    execution_clipped_order_ratio = 0.0
+    execution_turnover_after_constraints = 0.0
+    execution_total_cost = 0.0
+    zero_executable_orders = 0
 
     allocation_summary = _safe_read_json(run_dir / "portfolio_allocation" / "allocation_summary.json")
     combined_targets = _safe_read_csv(run_dir / "portfolio_allocation" / "combined_target_weights.csv")
@@ -489,8 +495,14 @@ def _evaluate_run_health_payload(
     execution_summary = _load_execution_summary(run_dir)
     if execution_summary:
         execution_rejected_order_count = int(execution_summary.get("rejected_order_count", 0) or 0)
-        execution_liquidity_breach_count = int(execution_summary.get("liquidity_breach_count", 0) or 0)
-        execution_short_availability_failures = int(execution_summary.get("short_availability_failures", 0) or 0)
+        execution_liquidity_breach_count = int(execution_summary.get("liquidity_failure_count", execution_summary.get("liquidity_breach_count", 0)) or 0)
+        execution_short_availability_failures = int(execution_summary.get("short_borrow_failure_count", execution_summary.get("short_availability_failures", 0)) or 0)
+        execution_clipped_order_count = int(execution_summary.get("clipped_order_count", 0) or 0)
+        execution_rejected_order_ratio = float(execution_summary.get("rejected_order_ratio", 0.0) or 0.0)
+        execution_clipped_order_ratio = float(execution_summary.get("clipped_order_ratio", 0.0) or 0.0)
+        execution_turnover_after_constraints = float(execution_summary.get("turnover_after_constraints", 0.0) or 0.0)
+        execution_total_cost = float(execution_summary.get("expected_total_cost", 0.0) or 0.0)
+        zero_executable_orders = int(bool(execution_summary.get("zero_executable_orders", False)))
 
     if (
         config.maximum_rejected_order_count is not None
@@ -543,6 +555,92 @@ def _evaluate_run_health_payload(
                 artifact_path=str(run_dir / "paper_trading" / "execution_summary.json"),
             )
         )
+    if (
+        config.maximum_rejected_order_ratio is not None
+        and execution_rejected_order_ratio > config.maximum_rejected_order_ratio
+    ):
+        alerts.append(
+            Alert(
+                code="rejected_order_ratio",
+                severity="warning",
+                message=f"rejected_order_ratio={execution_rejected_order_ratio} exceeds maximum_rejected_order_ratio={config.maximum_rejected_order_ratio}",
+                timestamp=evaluated_at,
+                entity_type="run",
+                entity_id=run_payload.get("run_name", run_dir.name),
+                metric_value=execution_rejected_order_ratio,
+                threshold_value=config.maximum_rejected_order_ratio,
+                artifact_path=str(run_dir / "paper_trading" / "execution_summary.json"),
+            )
+        )
+    if (
+        config.maximum_clipped_order_ratio is not None
+        and execution_clipped_order_ratio > config.maximum_clipped_order_ratio
+    ):
+        alerts.append(
+            Alert(
+                code="clipped_order_ratio",
+                severity="warning",
+                message=f"clipped_order_ratio={execution_clipped_order_ratio} exceeds maximum_clipped_order_ratio={config.maximum_clipped_order_ratio}",
+                timestamp=evaluated_at,
+                entity_type="run",
+                entity_id=run_payload.get("run_name", run_dir.name),
+                metric_value=execution_clipped_order_ratio,
+                threshold_value=config.maximum_clipped_order_ratio,
+                artifact_path=str(run_dir / "paper_trading" / "execution_summary.json"),
+            )
+        )
+    if (
+        config.maximum_turnover_after_execution is not None
+        and execution_turnover_after_constraints > config.maximum_turnover_after_execution
+    ):
+        alerts.append(
+            Alert(
+                code="turnover_after_execution",
+                severity="warning",
+                message=f"turnover_after_constraints={execution_turnover_after_constraints} exceeds maximum_turnover_after_execution={config.maximum_turnover_after_execution}",
+                timestamp=evaluated_at,
+                entity_type="run",
+                entity_id=run_payload.get("run_name", run_dir.name),
+                metric_value=execution_turnover_after_constraints,
+                threshold_value=config.maximum_turnover_after_execution,
+                artifact_path=str(run_dir / "paper_trading" / "execution_summary.json"),
+            )
+        )
+    if (
+        config.maximum_execution_cost is not None
+        and execution_total_cost > config.maximum_execution_cost
+    ):
+        alerts.append(
+            Alert(
+                code="execution_cost",
+                severity="warning",
+                message=f"expected_total_cost={execution_total_cost} exceeds maximum_execution_cost={config.maximum_execution_cost}",
+                timestamp=evaluated_at,
+                entity_type="run",
+                entity_id=run_payload.get("run_name", run_dir.name),
+                metric_value=execution_total_cost,
+                threshold_value=config.maximum_execution_cost,
+                artifact_path=str(run_dir / "paper_trading" / "execution_summary.json"),
+            )
+        )
+    if (
+        config.maximum_zero_executable_order_runs is not None
+        and zero_executable_orders > config.maximum_zero_executable_order_runs
+        and generated_position_count > 0
+    ):
+        alerts.append(
+            Alert(
+                code="zero_executable_orders",
+                severity="critical",
+                message=f"zero_executable_orders={zero_executable_orders} exceeds maximum_zero_executable_order_runs={config.maximum_zero_executable_order_runs}",
+                timestamp=evaluated_at,
+                entity_type="run",
+                entity_id=run_payload.get("run_name", run_dir.name),
+                metric_value=zero_executable_orders,
+                threshold_value=config.maximum_zero_executable_order_runs,
+                artifact_path=str(run_dir / "paper_trading" / "execution_summary.json"),
+            )
+        )
 
     metrics = {
         "failed_stage_count": failed_stage_count,
@@ -557,8 +655,14 @@ def _evaluate_run_health_payload(
         "zero_weight_rows": zero_weight_rows,
         "live_order_count": live_order_count,
         "execution_rejected_order_count": execution_rejected_order_count,
+        "execution_clipped_order_count": execution_clipped_order_count,
+        "execution_rejected_order_ratio": execution_rejected_order_ratio,
+        "execution_clipped_order_ratio": execution_clipped_order_ratio,
         "execution_liquidity_breach_count": execution_liquidity_breach_count,
         "execution_short_availability_failures": execution_short_availability_failures,
+        "execution_turnover_after_constraints": execution_turnover_after_constraints,
+        "execution_total_cost": execution_total_cost,
+        "zero_executable_orders": zero_executable_orders,
     }
     report = RunHealthReport(
         run_dir=str(run_dir),
@@ -595,6 +699,7 @@ def _evaluate_run_health_payload(
                 "warning_alert_count": report.alert_counts["warning"],
                 "execution_rejected_order_count": execution_rejected_order_count,
                 "execution_liquidity_breach_count": execution_liquidity_breach_count,
+                "execution_total_cost": execution_total_cost,
             }
         ],
         [
@@ -610,6 +715,7 @@ def _evaluate_run_health_payload(
             "warning_alert_count",
             "execution_rejected_order_count",
             "execution_liquidity_breach_count",
+            "execution_total_cost",
         ],
     )
     return report, paths

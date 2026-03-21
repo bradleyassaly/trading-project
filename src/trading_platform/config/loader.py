@@ -12,7 +12,7 @@ from trading_platform.config.models import (
     ResearchWorkflowConfig,
     WalkForwardConfig,
 )
-from trading_platform.execution.realism import ExecutionConfig
+from trading_platform.execution.models import ExecutionConfig
 from trading_platform.monitoring.models import MonitoringConfig, NotificationChannel, NotificationConfig
 from trading_platform.orchestration.models import (
     OrchestrationStageToggles,
@@ -97,4 +97,26 @@ def load_notification_config(path: str | Path) -> NotificationConfig:
 
 def load_execution_config(path: str | Path) -> ExecutionConfig:
     data = _read_config_file(Path(path))
-    return ExecutionConfig(**data)
+    payload = dict(data)
+    compatibility_map = {
+        "spread_proxy_bps": "half_spread_bps",
+        "market_impact_proxy_bps": "liquidity_slippage_bps",
+        "max_participation_rate": "max_participation_of_adv",
+        "minimum_average_dollar_volume": "min_average_dollar_volume",
+        "minimum_price": "min_price",
+        "minimum_trade_notional": "min_trade_notional",
+        "short_selling_allowed": "allow_shorts",
+        "short_borrow_availability": "enforce_short_borrow_proxy",
+        "stale_quote_behavior": "stale_market_data_behavior",
+    }
+    for old_key, new_key in compatibility_map.items():
+        if old_key in payload and new_key not in payload:
+            payload[new_key] = payload.pop(old_key)
+    payload.pop("max_borrow_utilization", None)
+    if payload.get("slippage_model_type") == "spread_plus_impact":
+        payload["slippage_model_type"] = "liquidity_scaled"
+    if "commission_per_share" in payload and "commission_model_type" not in payload:
+        payload["commission_model_type"] = "per_share"
+    elif "flat_commission_per_order" in payload and "commission_model_type" not in payload:
+        payload["commission_model_type"] = "flat"
+    return ExecutionConfig(**payload)

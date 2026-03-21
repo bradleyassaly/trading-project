@@ -19,6 +19,9 @@ from trading_platform.execution.realism import (
     ExecutionConfig,
     ExecutionOrderRequest,
     ExecutionSimulationResult,
+    ExecutionSummary,
+    LiquidityDiagnostic,
+    RejectedOrder,
     simulate_execution,
     write_execution_artifacts,
 )
@@ -395,6 +398,7 @@ def _build_reconciliation_rows(
 def _simulate_execution_for_live_orders(
     *,
     config: LivePreviewConfig,
+    account: BrokerAccount,
     positions: dict[str, LiveBrokerPosition],
     latest_prices: dict[str, float],
     target_weights: dict[str, float],
@@ -409,19 +413,25 @@ def _simulate_execution_for_live_orders(
             ExecutionOrderRequest(
                 symbol=order.symbol,
                 side=order.side,
-                requested_quantity=order.quantity,
-                reference_price=float(latest_prices.get(order.symbol, 0.0)),
+                requested_shares=order.quantity,
+                requested_notional=float(order.quantity) * float(latest_prices.get(order.symbol, 0.0)),
+                price=float(latest_prices.get(order.symbol, 0.0)),
                 target_weight=float(target_weights.get(order.symbol, 0.0)),
-                current_quantity=current_quantity,
-                target_quantity=target_quantity,
+                current_shares=current_quantity,
+                target_shares=target_quantity,
             )
         )
-    execution_result = simulate_execution(requests=requests, config=execution_config)
+    execution_result = simulate_execution(
+        requests=requests,
+        config=execution_config,
+        current_cash=float(account.cash),
+        current_equity=float(account.equity),
+    )
     executable_orders = [
         LiveBrokerOrderRequest(
             symbol=order.symbol,
             side=order.side,
-            quantity=order.adjusted_quantity,
+            quantity=order.adjusted_shares,
             order_type="market",
             time_in_force="day",
             reason=order.clipping_reason or "rebalance_to_target",
@@ -431,7 +441,10 @@ def _simulate_execution_for_live_orders(
     return executable_orders, execution_result
 
 
-def run_live_dry_run_preview(config: LivePreviewConfig) -> LivePreviewResult:
+def run_live_dry_run_preview(
+    config: LivePreviewConfig,
+    execution_config: ExecutionConfig | None = None,
+) -> LivePreviewResult:
     as_of, target_weights, latest_prices, target_diagnostics = _build_target_preview(config)
     return run_live_dry_run_preview_for_targets(
         config=config,
@@ -439,6 +452,7 @@ def run_live_dry_run_preview(config: LivePreviewConfig) -> LivePreviewResult:
         target_weights=target_weights,
         latest_prices=latest_prices,
         target_diagnostics=target_diagnostics,
+        execution_config=execution_config,
     )
 
 
@@ -471,6 +485,7 @@ def run_live_dry_run_preview_for_targets(
     if execution_config is not None:
         proposed_orders, execution_result = _simulate_execution_for_live_orders(
             config=config,
+            account=account,
             positions=positions,
             latest_prices=latest_prices,
             target_weights=target_weights,
@@ -558,6 +573,8 @@ def write_live_dry_run_artifacts(result: LivePreviewResult) -> dict[str, Path]:
     health_checks_path = output_dir / "live_dry_run_health_checks.csv"
     summary_json_path = output_dir / "live_dry_run_summary.json"
     summary_md_path = output_dir / "live_dry_run_summary.md"
+    preview_summary_json_path = output_dir / "live_execution_preview_summary.json"
+    preview_summary_md_path = output_dir / "live_execution_preview_summary.md"
 
     current_positions_rows = [
         {
@@ -644,7 +661,7 @@ def write_live_dry_run_artifacts(result: LivePreviewResult) -> dict[str, Path]:
         "order_adjustment_diagnostics": result.order_adjustment_diagnostics,
     }
     if result.execution_result is not None:
-        summary_payload["execution_summary"] = result.execution_result.summary
+        summary_payload["execution_summary"] = result.execution_result.summary.to_dict()
     output_check = _health_check(
         name="output_files",
         status="pass",
@@ -658,10 +675,14 @@ def write_live_dry_run_artifacts(result: LivePreviewResult) -> dict[str, Path]:
     summary_payload["health_checks"] = health_check_rows
     summary_json_path.write_text(json.dumps(summary_payload, indent=2, default=str), encoding="utf-8")
     summary_md_path.write_text(_write_markdown_summary(summary_payload, health_check_rows), encoding="utf-8")
+    preview_summary_json_path.write_text(json.dumps(summary_payload, indent=2, default=str), encoding="utf-8")
+    preview_summary_md_path.write_text(_write_markdown_summary(summary_payload, health_check_rows), encoding="utf-8")
 
     paths = {
         "summary_json_path": summary_json_path,
         "summary_md_path": summary_md_path,
+        "live_execution_preview_summary_json_path": preview_summary_json_path,
+        "live_execution_preview_summary_md_path": preview_summary_md_path,
         "target_positions_path": target_positions_path,
         "current_positions_path": current_positions_path,
         "proposed_orders_path": proposed_orders_path,

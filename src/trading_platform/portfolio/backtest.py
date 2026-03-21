@@ -2,11 +2,15 @@ from __future__ import annotations
 
 import pandas as pd
 
+from trading_platform.execution.models import ExecutionConfig
+from trading_platform.execution.service import estimate_backtest_transaction_cost_bps
+
 
 def backtest_portfolio_from_weights(
     weights_df: pd.DataFrame,
     forward_returns_df: pd.DataFrame,
     transaction_cost_bps: float = 0.0,
+    execution_config: ExecutionConfig | None = None,
 ) -> pd.DataFrame:
     """
     Minimal portfolio backtest from target weights and realized forward returns.
@@ -80,7 +84,13 @@ def backtest_portfolio_from_weights(
 
     result = gross_returns_df.merge(turnover_df, on="timestamp", how="left")
     result["turnover"] = result["turnover"].fillna(0.0)
-    result["cost"] = result["turnover"] * transaction_cost_bps / 10000.0
+    effective_transaction_cost_bps = (
+        estimate_backtest_transaction_cost_bps(execution_config)
+        if execution_config is not None
+        else transaction_cost_bps
+    )
+    result["cost"] = result["turnover"] * effective_transaction_cost_bps / 10000.0
     result["net_return"] = result["gross_return"] - result["cost"]
+    result["transaction_cost_bps"] = effective_transaction_cost_bps
 
     return result

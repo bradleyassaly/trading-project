@@ -316,6 +316,13 @@ def test_grouped_paper_run_command_parses() -> None:
     assert args.top_n == 1
 
 
+def test_grouped_paper_run_command_parses_execution_config() -> None:
+    parser = build_parser()
+    args = parser.parse_args(["paper", "run", "--symbols", "AAPL", "--execution-config", "configs/execution.yaml"])
+
+    assert args.execution_config == "configs/execution.yaml"
+
+
 def test_grouped_paper_run_command_parses_preset() -> None:
     parser = build_parser()
     args = parser.parse_args(["paper", "run", "--preset", "xsec_nasdaq100_momentum_v1_deploy"])
@@ -390,6 +397,22 @@ def test_grouped_live_dry_run_command_parses_preset_and_output_dir() -> None:
     assert args.preset == "xsec_nasdaq100_momentum_v1_deploy"
     assert args.broker == "mock"
     assert args.output_dir == "artifacts/live_dry_run"
+
+
+def test_grouped_live_dry_run_command_parses_execution_config() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "live",
+            "dry-run",
+            "--symbols",
+            "AAPL",
+            "--execution-config",
+            "configs/execution.yaml",
+        ]
+    )
+
+    assert args.execution_config == "configs/execution.yaml"
 
 
 def test_grouped_live_run_preset_scheduled_command_parses() -> None:

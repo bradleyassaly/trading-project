@@ -4,6 +4,7 @@ from pathlib import Path
 
 from trading_platform.cli.common import resolve_symbols
 from trading_platform.cli.presets import apply_cli_preset
+from trading_platform.config.loader import load_execution_config
 from trading_platform.live.preview import (
     LivePreviewConfig,
     run_live_dry_run_preview,
@@ -53,7 +54,8 @@ def cmd_live_dry_run(args) -> None:
     config = _build_config(args)
     print(f"Running live dry-run for {len(config.symbols)} symbol(s): {', '.join(config.symbols)}")
 
-    result = run_live_dry_run_preview(config)
+    execution_config = load_execution_config(args.execution_config) if getattr(args, "execution_config", None) else None
+    result = run_live_dry_run_preview(config, execution_config=execution_config) if execution_config is not None else run_live_dry_run_preview(config)
     artifact_paths = write_live_dry_run_artifacts(result)
 
     print(f"As of: {result.as_of}")
@@ -66,6 +68,11 @@ def cmd_live_dry_run(args) -> None:
     print(f"Open orders: {len(result.open_orders)}")
     print(f"Raw computed orders: {len(result.reconciliation.orders)}")
     print(f"Adjusted proposed orders: {len(result.adjusted_orders)}")
+    if result.execution_result is not None:
+        print(f"Requested orders: {result.execution_result.summary.requested_order_count}")
+        print(f"Executable orders: {result.execution_result.summary.executable_order_count}")
+        print(f"Rejected orders: {result.execution_result.summary.rejected_order_count}")
+        print(f"Expected total cost: {result.execution_result.summary.expected_total_cost:.6f}")
 
     target = result.target_diagnostics
     print(f"portfolio_construction_mode: {config.portfolio_construction_mode}")

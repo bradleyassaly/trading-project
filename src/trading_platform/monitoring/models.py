@@ -63,6 +63,11 @@ class MonitoringConfig:
     maximum_rejected_order_count: int | None = None
     maximum_liquidity_breaches: int | None = None
     maximum_short_availability_failures: int | None = None
+    maximum_rejected_order_ratio: float | None = None
+    maximum_clipped_order_ratio: float | None = None
+    maximum_turnover_after_execution: float | None = None
+    maximum_execution_cost: float | None = None
+    maximum_zero_executable_order_runs: int | None = None
 
     def __post_init__(self) -> None:
         if self.maximum_failed_stages < 0:
@@ -87,6 +92,11 @@ class MonitoringConfig:
         _validate_nonnegative_optional(self.maximum_rejected_order_count, "maximum_rejected_order_count")
         _validate_nonnegative_optional(self.maximum_liquidity_breaches, "maximum_liquidity_breaches")
         _validate_nonnegative_optional(self.maximum_short_availability_failures, "maximum_short_availability_failures")
+        _validate_nonnegative_optional(self.maximum_rejected_order_ratio, "maximum_rejected_order_ratio")
+        _validate_nonnegative_optional(self.maximum_clipped_order_ratio, "maximum_clipped_order_ratio")
+        _validate_nonnegative_optional(self.maximum_turnover_after_execution, "maximum_turnover_after_execution")
+        _validate_nonnegative_optional(self.maximum_execution_cost, "maximum_execution_cost")
+        _validate_nonnegative_optional(self.maximum_zero_executable_order_runs, "maximum_zero_executable_order_runs")
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

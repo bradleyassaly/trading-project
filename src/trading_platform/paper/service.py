@@ -17,6 +17,10 @@ from trading_platform.execution.realism import (
     ExecutionSimulationResult,
     ExecutionConfig,
     ExecutionOrderRequest,
+    ExecutionSummary,
+    LiquidityDiagnostic,
+    RejectedOrder,
+    build_execution_requests_from_target_weights,
     simulate_execution,
     write_execution_artifacts,
 )
@@ -173,40 +177,29 @@ def generate_rebalance_orders(
         "current_cash": state.cash,
     }
     orders: list[PaperOrder] = []
-
-    for symbol in all_symbols:
-        price = float(latest_prices.get(symbol, 0.0))
-        if price <= 0:
-            continue
-
-        target_weight = float(latest_target_weights.get(symbol, 0.0))
-        target_notional = investable_equity * target_weight
-        raw_target_quantity = int(target_notional / price)
-        target_quantity = (raw_target_quantity // lot_size) * lot_size
-
-        current_position = state.positions.get(symbol)
-        current_quantity = int(current_position.quantity) if current_position else 0
-        delta_quantity = target_quantity - current_quantity
-        if delta_quantity == 0:
-            continue
-
-        notional = abs(delta_quantity) * price
+    execution_requests = build_execution_requests_from_target_weights(
+        target_weights=latest_target_weights,
+        current_positions=state.positions,
+        latest_prices=latest_prices,
+        portfolio_equity=equity,
+        reserve_cash_pct=reserve_cash_pct,
+    )
+    for request in execution_requests:
+        notional = float(request.requested_notional)
         if notional < min_trade_dollars:
             continue
-
-        side = "BUY" if delta_quantity > 0 else "SELL"
-        reason = "rebalance_to_target"
+        target_quantity = (int(request.target_shares) // lot_size) * lot_size if lot_size > 0 else int(request.target_shares)
         orders.append(
             PaperOrder(
-                symbol=symbol,
-                side=side,
-                quantity=abs(delta_quantity),
-                reference_price=price,
-                target_weight=target_weight,
-                current_quantity=current_quantity,
-                target_quantity=target_quantity,
+                symbol=request.symbol,
+                side=request.side,
+                quantity=int(request.requested_shares),
+                reference_price=float(request.price),
+                target_weight=float(request.target_weight),
+                current_quantity=int(request.current_shares),
+                target_quantity=int(target_quantity),
                 notional=notional,
-                reason=reason,
+                reason="rebalance_to_target",
             )
         )
 
@@ -231,46 +224,56 @@ def _simulate_execution_for_paper_orders(
     orders: list[PaperOrder],
     execution_config: ExecutionConfig,
     latest_target_weights: dict[str, float],
+    current_cash: float,
+    current_equity: float,
 ) -> tuple[list[PaperOrder], dict[str, Any]]:
     requests = [
         ExecutionOrderRequest(
             symbol=order.symbol,
             side=order.side,
-            requested_quantity=order.quantity,
-            reference_price=order.reference_price,
+            requested_shares=order.quantity,
+            requested_notional=float(order.quantity) * float(order.reference_price),
+            price=order.reference_price,
             target_weight=latest_target_weights.get(order.symbol, order.target_weight),
-            current_quantity=order.current_quantity,
-            target_quantity=order.target_quantity,
+            current_shares=order.current_quantity,
+            target_shares=order.target_quantity,
         )
         for order in orders
     ]
-    simulation = simulate_execution(requests=requests, config=execution_config)
+    simulation = simulate_execution(
+        requests=requests,
+        config=execution_config,
+        current_cash=current_cash,
+        current_equity=current_equity,
+    )
     order_map = {(order.symbol, order.side, order.quantity): order for order in orders}
     executable_orders: list[PaperOrder] = []
     for executable in simulation.executable_orders:
-        original = order_map[(executable.symbol, executable.side, executable.requested_quantity)]
+        original = order_map[(executable.symbol, executable.side, executable.requested_shares)]
         executable_orders.append(
             PaperOrder(
                 symbol=original.symbol,
                 side=original.side,
-                quantity=executable.adjusted_quantity,
+                quantity=executable.adjusted_shares,
                 reference_price=original.reference_price,
                 target_weight=original.target_weight,
                 current_quantity=original.current_quantity,
-                target_quantity=original.current_quantity + (executable.adjusted_quantity if original.side == "BUY" else -executable.adjusted_quantity),
-                notional=executable.estimated_notional_traded,
+                target_quantity=original.current_quantity + (executable.adjusted_shares if original.side == "BUY" else -executable.adjusted_shares),
+                notional=executable.adjusted_notional,
                 reason=executable.clipping_reason or original.reason,
-                expected_fill_price=executable.expected_fill_price,
-                expected_fees=executable.expected_fees,
-                expected_slippage_bps=executable.expected_slippage_bps,
+                expected_fill_price=executable.estimated_fill_price,
+                expected_fees=executable.commission,
+                expected_slippage_bps=executable.slippage_bps,
             )
         )
     diagnostics = {
-        "execution_summary": simulation.summary,
+        "execution_summary": simulation.summary.to_dict(),
+        "requested_orders": [order.to_dict() for order in simulation.requested_orders],
         "rejected_orders": [order.to_dict() for order in simulation.rejected_orders],
         "executable_orders": [order.to_dict() for order in simulation.executable_orders],
-        "liquidity_constraints_report": simulation.liquidity_rows,
+        "liquidity_constraints_report": [row.to_dict() for row in simulation.liquidity_diagnostics],
         "turnover_summary": simulation.turnover_rows,
+        "symbol_tradeability_report": simulation.symbol_tradeability_rows,
     }
     return executable_orders, diagnostics
 
@@ -395,6 +398,8 @@ def run_paper_trading_cycle_for_targets(
             orders=order_result.orders,
             execution_config=execution_config,
             latest_target_weights=latest_effective_weights,
+            current_cash=state.cash,
+            current_equity=state.equity,
         )
 
     broker_orders = [
@@ -472,6 +477,7 @@ def run_paper_trading_cycle(
     *,
     config: PaperTradingConfig,
     state_store: JsonPaperStateStore,
+    execution_config: ExecutionConfig | None = None,
     auto_apply_fills: bool = False,
 ) -> PaperTradingRunResult:
     if config.signal_source == "composite":
@@ -487,6 +493,7 @@ def run_paper_trading_cycle(
             target_diagnostics=target_result.target_diagnostics,
             skipped_symbols=target_result.skipped_symbols,
             extra_diagnostics=target_result.extra_diagnostics,
+            execution_config=execution_config,
             auto_apply_fills=auto_apply_fills,
         )
 
@@ -511,6 +518,7 @@ def run_paper_trading_cycle(
             target_diagnostics=target_diagnostics,
             skipped_symbols=skipped_symbols,
             extra_diagnostics={},
+            execution_config=execution_config,
             auto_apply_fills=auto_apply_fills,
         )
 
@@ -547,6 +555,7 @@ def run_paper_trading_cycle(
         target_diagnostics=target_diagnostics,
         skipped_symbols=snapshot.skipped_symbols,
         extra_diagnostics={},
+        execution_config=execution_config,
         auto_apply_fills=auto_apply_fills,
     )
 
@@ -663,11 +672,13 @@ def write_paper_trading_artifacts(
     execution_payload = result.diagnostics.get("execution", {})
     if execution_payload.get("execution_summary"):
         simulation_result = ExecutionSimulationResult(
+            requested_orders=[ExecutionOrderRequest(**row) for row in execution_payload.get("requested_orders", [])],
             executable_orders=[ExecutableOrder(**row) for row in execution_payload.get("executable_orders", [])],
-            rejected_orders=[ExecutableOrder(**row) for row in execution_payload.get("rejected_orders", [])],
-            summary=execution_payload.get("execution_summary", {}),
-            liquidity_rows=execution_payload.get("liquidity_constraints_report", []),
+            rejected_orders=[RejectedOrder(**row) for row in execution_payload.get("rejected_orders", [])],
+            summary=ExecutionSummary(**execution_payload.get("execution_summary", {})),
+            liquidity_diagnostics=[LiquidityDiagnostic(**row) for row in execution_payload.get("liquidity_constraints_report", [])],
             turnover_rows=execution_payload.get("turnover_summary", []),
+            symbol_tradeability_rows=execution_payload.get("symbol_tradeability_report", []),
         )
         execution_paths = write_execution_artifacts(simulation_result, output_path)
         paths.update(execution_paths)

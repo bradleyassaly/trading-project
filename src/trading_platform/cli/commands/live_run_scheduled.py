@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from trading_platform.cli.commands.live_dry_run import _build_config
 from trading_platform.cli.presets import apply_cli_preset
+from trading_platform.config.loader import load_execution_config
 from trading_platform.live.persistence import persist_live_scheduled_outputs
 from trading_platform.live.preview import run_live_dry_run_preview, write_live_dry_run_artifacts
 
@@ -13,7 +14,8 @@ def cmd_live_run_scheduled(args) -> None:
         raise SystemExit("Scheduled live dry-run requires --preset")
 
     config = _build_config(args)
-    result = run_live_dry_run_preview(config)
+    execution_config = load_execution_config(args.execution_config) if getattr(args, "execution_config", None) else None
+    result = run_live_dry_run_preview(config, execution_config=execution_config) if execution_config is not None else run_live_dry_run_preview(config)
     preview_paths = write_live_dry_run_artifacts(result)
     scheduled_paths, health_checks, summary = persist_live_scheduled_outputs(
         result=result,

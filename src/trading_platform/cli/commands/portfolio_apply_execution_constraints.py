@@ -16,21 +16,23 @@ def cmd_portfolio_apply_execution_constraints(args) -> None:
         ExecutionOrderRequest(
             symbol=str(row["symbol"]),
             side="BUY" if float(row["target_weight"]) >= 0 else "SELL",
-            requested_quantity=max(int(abs(float(row["target_weight"])) * 100), 1),
-            reference_price=float(row["latest_price"]) if pd.notna(row.get("latest_price")) else 1.0,
+            requested_shares=max(int(abs(float(row["target_weight"])) * 100), 1),
+            requested_notional=max(int(abs(float(row["target_weight"])) * 100), 1) * (
+                float(row["latest_price"]) if pd.notna(row.get("latest_price")) else 1.0
+            ),
+            price=float(row["latest_price"]) if pd.notna(row.get("latest_price")) else 1.0,
             target_weight=float(row["target_weight"]),
-            target_quantity=int(float(row["target_weight"]) * 100),
-            average_dollar_volume=float(row["average_dollar_volume"])
+            target_shares=int(float(row["target_weight"]) * 100),
+            average_daily_dollar_volume=float(row["average_dollar_volume"])
             if pd.notna(row.get("average_dollar_volume"))
             else None,
-            reason="allocation_target",
         )
         for row in combined.to_dict(orient="records")
     ]
     result = simulate_execution(requests=requests, config=config)
     paths = write_execution_artifacts(result, Path(args.output_dir))
-    print(f"Executable orders: {result.summary['executable_order_count']}")
-    print(f"Rejected orders: {result.summary['rejected_order_count']}")
+    print(f"Executable orders: {result.summary.executable_order_count}")
+    print(f"Rejected orders: {result.summary.rejected_order_count}")
     print("Artifacts:")
     for name, path in sorted(paths.items()):
         print(f"  {name}: {path}")

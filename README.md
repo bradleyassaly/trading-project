@@ -161,6 +161,11 @@ maximum_missing_data_incidents: 1
 maximum_zero_weight_runs: 0
 max_drift_between_sleeve_target_and_final_combined_weight: 0.10
 unusual_order_count_change_multiple: 3.0
+maximum_rejected_order_ratio: 0.25
+maximum_clipped_order_ratio: 0.25
+maximum_turnover_after_execution: 0.30
+maximum_execution_cost: 250.0
+maximum_zero_executable_order_runs: 0
 ```
 
 Thresholds stay explicit in config so changes to operating policy are reviewable in git.
@@ -804,13 +809,13 @@ trading-cli portfolio topn --universe magnificent7 --strategy momentum_hold --lo
 trading-cli portfolio allocate-multi-strategy --config configs/multi_strategy.yaml --output-dir artifacts/portfolio/multi_strategy
 trading-cli portfolio apply-execution-constraints --config configs/execution.yaml --allocation-dir artifacts/portfolio/multi_strategy --output-dir artifacts/execution/multi_strategy
 trading-cli execution simulate --config configs/execution.yaml --targets artifacts/execution/requested_orders.csv --output-dir artifacts/execution/simulated
-trading-cli paper run --symbols AAPL MSFT NVDA --signal-source composite --approved-model-state artifacts/alpha_research/approved/approved_model_state.json --top-n 5 --state-path artifacts/paper/paper_state.json --output-dir artifacts/paper
+trading-cli paper run --symbols AAPL MSFT NVDA --signal-source composite --approved-model-state artifacts/alpha_research/approved/approved_model_state.json --top-n 5 --execution-config configs/execution.yaml --state-path artifacts/paper/paper_state.json --output-dir artifacts/paper
 trading-cli paper run --preset xsec_nasdaq100_momentum_v1_deploy --state-path artifacts/paper/nasdaq100_xsec_state.json --output-dir artifacts/paper/nasdaq100_xsec
 trading-cli paper run-multi-strategy --config configs/multi_strategy.yaml --execution-config configs/execution.yaml --state-path artifacts/paper/multi_strategy_state.json --output-dir artifacts/paper/multi_strategy
 trading-cli paper run-preset-scheduled --preset xsec_nasdaq100_momentum_v1_deploy --state-path artifacts/paper/nasdaq100_xsec_state.json --output-dir artifacts/paper/nasdaq100_xsec
 trading-cli paper daily --universe magnificent7 --signal-source composite --approved-model-state artifacts/alpha_research/approved/approved_model_state.json --state-path artifacts/paper/paper_state.json --output-dir artifacts/paper
 trading-cli paper report --account-dir artifacts/paper --output-dir artifacts/paper/report
-trading-cli live dry-run --universe magnificent7 --strategy sma_cross --top-n 5 --broker mock
+trading-cli live dry-run --universe magnificent7 --strategy sma_cross --top-n 5 --execution-config configs/execution.yaml --broker mock
 trading-cli live dry-run-multi-strategy --config configs/multi_strategy.yaml --execution-config configs/execution.yaml --broker mock --output-dir artifacts/live_dry_run/multi_strategy
 trading-cli live validate --universe magnificent7 --signal-source composite --approved-model-state artifacts/alpha_research/approved/approved_model_state.json --approval-artifact artifacts/research_refresh/approved_configuration_snapshots/latest_approved_configuration.json --output-dir artifacts/live_execution
 trading-cli live execute --universe magnificent7 --signal-source composite --approved-model-state artifacts/alpha_research/approved/approved_model_state.json --approved --output-dir artifacts/live_execution
@@ -984,56 +989,83 @@ Execution realism sits between ideal target weights and anything you would actua
 
 The execution layer supports:
 
-- commissions per share and/or bps
-- fixed-bps or spread-plus-impact slippage proxies
-- minimum price and minimum average dollar volume filters
-- ADV participation caps
-- lot-size rounding and minimum trade-notional filtering
-- turnover caps at the rebalance level
-- short-selling and borrow-availability checks
-- expected fill-price, fee, slippage, and participation diagnostics
+- reusable target-weight to desired-order conversion from current positions, prices, equity, and reserve cash
+- commissions via `per_share`, `bps`, or `flat` models
+- slippage proxies via `fixed_bps`, `spread_plus_bps`, or `liquidity_scaled`
+- minimum price and minimum average dollar volume tradeability filters
+- lot-size rounding, minimum trade-notional filtering, and per-name notional-change caps
+- ADV participation caps and configurable partial-fill behavior
+- short-selling, short-borrow proxy, and max short-gross checks
+- turnover caps, cash-buffer affordability checks, and explicit missing-liquidity handling
+- expected fill-price, fee, slippage, participation, and rejection/clipping diagnostics
 
 Example execution config:
 
 ```yaml
+enabled: true
+price_source_assumption: close
+commission_model_type: per_share
 commission_per_share: 0.005
 commission_bps: 0.5
-slippage_model_type: spread_plus_impact
-spread_proxy_bps: 2.0
-market_impact_proxy_bps: 5.0
-max_participation_rate: 0.05
-minimum_average_dollar_volume: 1000000
-minimum_price: 5.0
+flat_commission_per_order: 0.0
+slippage_model_type: liquidity_scaled
+fixed_slippage_bps: 1.0
+half_spread_bps: 2.0
+liquidity_slippage_bps: 5.0
+max_participation_of_adv: 0.05
+min_average_dollar_volume: 1000000
+min_price: 5.0
+min_trade_notional: 50.0
 lot_size: 1
-minimum_trade_notional: 50.0
 max_turnover_per_rebalance: 0.5
-short_selling_allowed: true
-short_borrow_availability: true
-max_borrow_utilization: 0.1
-price_source_assumption: close
-partial_fill_behavior: clip
-missing_liquidity_behavior: reject
+max_position_notional_change: 25000
+allow_shorts: true
+enforce_short_borrow_proxy: true
+max_short_gross_exposure: 0.30
+short_borrow_blocklist: [GME]
+partial_fill_behavior: allow_partial
+missing_liquidity_behavior: warn_and_clip
+stale_market_data_behavior: warn
+cash_buffer_bps: 25
+tags: [paper, live]
 ```
 
 Primary execution artifacts:
 
-- `executable_orders.csv`: requested versus adjusted executable orders, fill-price proxy, fees, and slippage
-- `rejected_orders.csv`: orders rejected by liquidity, price, short, or turnover constraints
-- `execution_summary.json` / `execution_summary.md`: total counts, turnover before/after constraints, and expected aggregate cost
-- `liquidity_constraints_report.csv`: symbol-level liquidity and participation diagnostics
-- `turnover_summary.csv`: per-symbol traded-notional and fee summary
+- `requested_orders.csv`: raw desired orders derived from target deltas before execution constraints
+- `executable_orders.csv`: requested versus adjusted executable orders, fill-price proxy, fees, slippage, fill fraction, and provenance
+- `rejected_orders.csv`: orders rejected by tradeability, liquidity, short, turnover, or affordability constraints
+- `execution_summary.json` / `execution_summary.md`: total counts, turnover before/after constraints, expected aggregate cost, and rejection/clipping totals
+- `liquidity_constraints_report.csv`: symbol-level liquidity, participation, stale-data, and borrow diagnostics
+- `turnover_summary.csv`: requested versus executed notional and turnover summary
+- `symbol_tradeability_report.csv`: per-symbol tradeability checks even when no final executable order survives
 
 Paper and live dry-run accept an optional execution config:
 
+- `paper run --execution-config ...` applies the same execution layer to single-strategy paper workflows
 - `paper run-multi-strategy --execution-config ...` filters and clips orders before paper-state application and records estimated cost
+- `live dry-run --execution-config ...` previews executable orders rather than idealized target deltas for single-strategy workflows
 - `live dry-run-multi-strategy --execution-config ...` previews executable orders rather than idealized target deltas
 - `execution_config_path` on the pipeline config forwards the same assumptions into orchestration-driven paper and live dry-run stages
+
+Requested vs executable orders:
+
+- requested orders reflect the ideal portfolio delta implied by target weights and current holdings
+- executable orders reflect what remains after tradeability, rounding, participation, turnover, short, and cash checks
+- rejected orders are first-class artifacts with human-readable reasons instead of silent drops
+
+Optional research/backtest seam:
+
+- `portfolio backtest` remains backward compatible by default
+- when an execution config is supplied through the shared service seam, backtest summaries can use a deterministic transaction-cost estimate derived from the same execution assumptions
+- this is intentionally a lightweight friction overlay, not a full intraday fill simulator
 
 Current limitations:
 
 - costs are proxies, not broker-quality transaction-cost analysis
 - liquidity checks use only available artifact fields and reject explicitly when required inputs are missing
 - `portfolio apply-execution-constraints` is intended as a diagnostic helper and uses simple quantity proxies from allocation artifacts
+- price-source assumptions are coarse (`close`, `next_open`, `vwap_proxy`) and do not imply intraday execution precision
 
 ## Governance Criteria
 

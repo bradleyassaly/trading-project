@@ -122,7 +122,7 @@ _RESEARCH_GROUP_COMMANDS = {
     "pipeline",
     "strategies",
 }
-_PORTFOLIO_GROUP_COMMANDS = {"backtest", "topn", "allocate-multi-strategy"}
+_PORTFOLIO_GROUP_COMMANDS = {"backtest", "topn", "allocate-multi-strategy", "apply-execution-constraints"}
 
 
 def rewrite_legacy_cli_args(argv: list[str]) -> tuple[list[str], str | None]:
@@ -242,6 +242,7 @@ def _add_paper_run_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--min-trade-dollars", type=float, default=25.0, help="Skip trades smaller than this dollar threshold")
     parser.add_argument("--lot-size", type=int, default=1, help="Round target quantities down to this lot size")
     parser.add_argument("--reserve-cash-pct", type=float, default=0.0, help="Fraction of equity to hold back as cash")
+    parser.add_argument("--execution-config", type=str, default=None, help="Optional execution realism JSON/YAML config.")
     parser.add_argument("--state-path", type=str, default="artifacts/paper/paper_state.json", help="JSON file used to persist paper portfolio state")
     parser.add_argument("--output-dir", type=str, default="artifacts/paper", help="Base directory for paper-run output artifacts")
     parser.add_argument("--auto-apply-fills", action="store_true", help="Immediately apply simulated fills and update positions/cash")
@@ -428,6 +429,7 @@ def _add_live_base_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--min-trade-dollars", type=float, default=25.0)
     parser.add_argument("--lot-size", type=int, default=1)
     parser.add_argument("--reserve-cash-pct", type=float, default=0.0)
+    parser.add_argument("--execution-config", type=str, default=None, help="Optional execution realism JSON/YAML config.")
     parser.add_argument("--order-type", default="market")
     parser.add_argument("--time-in-force", default="day")
     parser.add_argument("--broker", default="mock", choices=["mock", "alpaca"])

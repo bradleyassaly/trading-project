@@ -90,13 +90,19 @@ def _write_run_dir(
                 "requested_order_count": 2,
                 "executable_order_count": 2,
                 "rejected_order_count": 0,
+                "clipped_order_count": 0,
                 "requested_notional": 10000.0,
                 "executed_notional": 10000.0,
                 "expected_total_cost": 12.5,
+                "expected_commission_total": 5.0,
+                "expected_slippage_cost_total": 7.5,
                 "turnover_before_constraints": 10000.0,
                 "turnover_after_constraints": 10000.0,
-                "liquidity_breach_count": 0,
-                "short_availability_failures": 0,
+                "rejected_order_ratio": 0.0,
+                "clipped_order_ratio": 0.0,
+                "liquidity_failure_count": 0,
+                "short_borrow_failure_count": 0,
+                "zero_executable_orders": False,
             },
             indent=2,
         ),
@@ -227,8 +233,14 @@ def test_run_health_execution_breach_case(tmp_path: Path) -> None:
                 "requested_order_count": 4,
                 "executable_order_count": 1,
                 "rejected_order_count": 3,
-                "liquidity_breach_count": 2,
-                "short_availability_failures": 1,
+                "clipped_order_count": 1,
+                "rejected_order_ratio": 0.75,
+                "clipped_order_ratio": 0.25,
+                "expected_total_cost": 150.0,
+                "turnover_after_constraints": 4000.0,
+                "liquidity_failure_count": 2,
+                "short_borrow_failure_count": 1,
+                "zero_executable_orders": False,
             },
             indent=2,
         ),
@@ -241,12 +253,20 @@ def test_run_health_execution_breach_case(tmp_path: Path) -> None:
             maximum_rejected_order_count=1,
             maximum_liquidity_breaches=1,
             maximum_short_availability_failures=0,
+            maximum_rejected_order_ratio=0.5,
+            maximum_clipped_order_ratio=0.2,
+            maximum_turnover_after_execution=3000.0,
+            maximum_execution_cost=100.0,
         ),
     )
 
     assert any(alert.code == "rejected_orders" for alert in report.alerts)
     assert any(alert.code == "liquidity_breaches" for alert in report.alerts)
     assert any(alert.code == "short_availability_failures" for alert in report.alerts)
+    assert any(alert.code == "rejected_order_ratio" for alert in report.alerts)
+    assert any(alert.code == "clipped_order_ratio" for alert in report.alerts)
+    assert any(alert.code == "turnover_after_execution" for alert in report.alerts)
+    assert any(alert.code == "execution_cost" for alert in report.alerts)
 
 
 def test_portfolio_health_concentration_breach_case(tmp_path: Path) -> None:

@@ -107,6 +107,11 @@ max_drift_between_sleeve_target_and_final_combined_weight: 0.1
 maximum_rejected_order_count: 2
 maximum_liquidity_breaches: 3
 maximum_short_availability_failures: 1
+maximum_rejected_order_ratio: 0.5
+maximum_clipped_order_ratio: 0.25
+maximum_turnover_after_execution: 0.3
+maximum_execution_cost: 100
+maximum_zero_executable_order_runs: 0
 """.strip(),
         encoding="utf-8",
     )
@@ -119,6 +124,10 @@ maximum_short_availability_failures: 1
     assert config.maximum_rejected_order_count == 2
     assert config.maximum_liquidity_breaches == 3
     assert config.maximum_short_availability_failures == 1
+    assert config.maximum_rejected_order_ratio == 0.5
+    assert config.maximum_clipped_order_ratio == 0.25
+    assert config.maximum_turnover_after_execution == 0.3
+    assert config.maximum_execution_cost == 100
 
 
 def test_load_notification_config_from_yaml(tmp_path) -> None:
@@ -174,4 +183,8 @@ missing_liquidity_behavior: reject
     assert config.commission_per_share == 0.005
     assert config.commission_bps == 1.0
     assert config.lot_size == 10
-    assert config.short_selling_allowed is False
+    assert config.allow_shorts is False
+    assert config.enforce_short_borrow_proxy is False
+    assert config.slippage_model_type == "liquidity_scaled"
+    assert config.half_spread_bps == 2.0
+    assert config.liquidity_slippage_bps == 5.0
