@@ -12,6 +12,7 @@ from trading_platform.config.models import (
     ResearchWorkflowConfig,
     WalkForwardConfig,
 )
+from trading_platform.monitoring.models import MonitoringConfig
 from trading_platform.orchestration.models import (
     OrchestrationStageToggles,
     PipelineRunConfig,
@@ -79,3 +80,8 @@ def load_pipeline_run_config(path: str | Path) -> PipelineRunConfig:
     payload = dict(data)
     payload["stages"] = OrchestrationStageToggles(**payload.get("stages", {}))
     return PipelineRunConfig(**payload)
+
+
+def load_monitoring_config(path: str | Path) -> MonitoringConfig:
+    data = _read_config_file(Path(path))
+    return MonitoringConfig(**data)

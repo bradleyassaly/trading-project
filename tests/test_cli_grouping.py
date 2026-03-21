@@ -762,3 +762,62 @@ def test_grouped_pipeline_run_weekly_command_parses() -> None:
     assert args.command_family == "pipeline"
     assert args.pipeline_command == "run-weekly"
     assert args.config == "configs/pipeline_weekly.yaml"
+
+
+def test_grouped_monitor_run_health_command_parses() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "monitor",
+            "run-health",
+            "--run-dir",
+            "artifacts/orchestration/run_a",
+            "--config",
+            "configs/monitoring.yaml",
+        ]
+    )
+
+    assert args.command_family == "monitor"
+    assert args.monitor_command == "run-health"
+    assert args.run_dir == "artifacts/orchestration/run_a"
+
+
+def test_grouped_monitor_strategy_health_command_parses() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "monitor",
+            "strategy-health",
+            "--registry",
+            "artifacts/registry.json",
+            "--artifacts-root",
+            "artifacts",
+            "--config",
+            "configs/monitoring.yaml",
+            "--output-dir",
+            "artifacts/monitoring/strategy",
+        ]
+    )
+
+    assert args.monitor_command == "strategy-health"
+    assert args.registry == "artifacts/registry.json"
+    assert args.artifacts_root == "artifacts"
+
+
+def test_grouped_monitor_latest_command_parses() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "monitor",
+            "latest",
+            "--pipeline-root",
+            "artifacts/orchestration",
+            "--config",
+            "configs/monitoring.yaml",
+            "--output-dir",
+            "artifacts/monitoring/latest",
+        ]
+    )
+
+    assert args.monitor_command == "latest"
+    assert args.pipeline_root == "artifacts/orchestration"

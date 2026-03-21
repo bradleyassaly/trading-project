@@ -80,6 +80,7 @@ preset_filters:
   - xsec_nasdaq100_momentum_v1_deploy
 registry_path: artifacts/strategy_registry.json
 governance_config_path: configs/governance.yaml
+monitoring_config_path: configs/monitoring.yaml
 multi_strategy_output_path: artifacts/generated_registry_multi_strategy.yaml
 paper_state_path: artifacts/paper/multi_strategy_state.json
 output_root_dir: artifacts/orchestration
@@ -99,6 +100,7 @@ stages:
   paper_trading: true
   live_dry_run: true
   reporting: true
+  monitoring: true
 auto_promote_qualifying_candidates: true
 registry_include_paper_strategies: false
 registry_selection_weighting_scheme: equal
@@ -111,9 +113,54 @@ Key fields:
 - `fail_fast`: stop on the first failed enabled stage
 - `continue_on_stage_error`: continue later enabled stages even after a failure
 - `registry_path` / `governance_config_path`: inputs for candidate evaluation and optional registry mutation
+- `monitoring_config_path`: thresholds for the final monitoring stage and standalone monitor commands
 - `multi_strategy_output_path`: generated config artifact that feeds the existing multi-strategy allocator
 - `paper_state_path`: persistent state file reused by the paper trading stage
 - `max_parallel_jobs`: reserved for future scheduler/parallelization support; currently kept explicit for config stability
+
+### Monitoring And Alerts
+
+The monitoring layer sits after orchestration and evaluates three things independently:
+
+- run health: did the pipeline complete cleanly and write the artifacts it should have written
+- strategy health: are registered strategies still behaving acceptably in paper and live-preview diagnostics
+- portfolio health: does the combined portfolio remain inside explicit exposure, concentration, turnover, and diversification expectations
+
+Everything is file-based and deterministic. Monitoring reads artifacts that already exist; it does not recompute target portfolios or strategy logic.
+
+Health statuses:
+
+- `healthy`: no warning or critical alerts
+- `warning`: one or more warning alerts and no critical alerts
+- `critical`: one or more critical alerts
+
+Alert severities:
+
+- `info`: informational audit signal only
+- `warning`: degradation or unusual behavior worth review
+- `critical`: material problem, missing artifact, or threshold breach
+
+### Monitoring Config Example
+
+```yaml
+maximum_failed_stages: 0
+stale_artifact_max_age_hours: 24
+minimum_approved_strategy_count: 1
+minimum_generated_position_count: 2
+maximum_gross_exposure: 1.0
+maximum_net_exposure: 1.0
+maximum_symbol_concentration: 0.20
+maximum_turnover: 0.25
+maximum_drawdown: 0.20
+minimum_rolling_sharpe: 0.50
+maximum_benchmark_underperformance: 0.05
+maximum_missing_data_incidents: 1
+maximum_zero_weight_runs: 0
+max_drift_between_sleeve_target_and_final_combined_weight: 0.10
+unusual_order_count_change_multiple: 3.0
+```
+
+Thresholds stay explicit in config so changes to operating policy are reviewable in git.
 
 ## Presets
 
@@ -396,6 +443,23 @@ trading-cli pipeline run-daily --config configs/pipeline_daily.yaml
 trading-cli pipeline run-weekly --config configs/pipeline_weekly.yaml
 ```
 
+### Monitoring Commands
+
+```bash
+trading-cli monitor run-health --run-dir artifacts/orchestration/daily_governance/2026-03-21T00-00-00+00-00 --config configs/monitoring.yaml
+trading-cli monitor strategy-health --registry artifacts/strategy_registry.json --artifacts-root artifacts --config configs/monitoring.yaml --output-dir artifacts/monitoring/strategy
+trading-cli monitor portfolio-health --allocation-dir artifacts/portfolio/multi_strategy --config configs/monitoring.yaml --output-dir artifacts/monitoring/portfolio
+trading-cli monitor latest --pipeline-root artifacts/orchestration --config configs/monitoring.yaml --output-dir artifacts/monitoring/latest
+trading-cli monitor build-dashboard-data --pipeline-root artifacts/orchestration --output-dir artifacts/monitoring/dashboard
+```
+
+Primary monitoring outputs:
+
+- `run_health.json` / `run_health.md`: pipeline-level status, counts, and alerts
+- `strategy_health.csv` / `strategy_health.json` / `strategy_alerts.md`: per-strategy metrics and alerts
+- `portfolio_health.csv` / `portfolio_health.json` / `portfolio_health.md`: combined-portfolio metrics and alerts
+- `run_history.csv`, `strategy_health_history.csv`, `portfolio_health_history.csv`: append-only trend histories for later dashboards
+
 Behavior:
 
 - `pipeline run` executes exactly what the config declares
@@ -403,6 +467,12 @@ Behavior:
 - `pipeline run-weekly` validates `schedule_type: weekly`
 - every run writes a timestamped artifact directory
 - the terminal prints a concise stage-by-stage status summary
+
+If the optional `monitoring` stage is enabled in the pipeline config, the final run summary also includes:
+
+- overall monitoring health status
+- alert counts by severity
+- critical alert messages when present
 
 ### Pipeline Artifacts
 
@@ -438,6 +508,14 @@ Candidate-promotion batch artifacts:
 
 The orchestrator preserves lower-level artifacts from existing services rather than replacing them, so allocation, paper, and live outputs remain inspectable in their native schemas.
 
+When pipeline monitoring is enabled, the run also writes:
+
+- `monitoring/run_health.json`
+- `monitoring/run_health.md`
+- `monitoring/alerts.json`
+- `monitoring/alerts.csv`
+- `monitoring/run_history.csv`
+
 ### Daily Vs Weekly Guidance
 
 Daily workflow is usually the lighter operational path:
@@ -466,6 +544,7 @@ Weekly workflow is usually the heavier governance path:
 - treat `live_dry_run` as preview-only; it does not submit orders
 - prefer relative artifact paths rooted in the repo or explicit absolute paths to avoid ambiguous scheduler environments
 - check `pipeline_config_snapshot.json` into review when changing automation behavior so scheduling changes stay auditable
+- treat `critical` monitoring alerts as blockers until the artifact or threshold breach is explained
 
 ## Research Vs Deploy Insight
 

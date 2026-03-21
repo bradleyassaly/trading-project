@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import json
 
-from trading_platform.config.loader import load_pipeline_run_config, load_research_workflow_config
+from trading_platform.config.loader import (
+    load_monitoring_config,
+    load_pipeline_run_config,
+    load_research_workflow_config,
+)
 
 
 def test_load_research_workflow_config_from_json(tmp_path) -> None:
@@ -78,3 +82,32 @@ stages:
     assert config.schedule_type == "daily"
     assert config.stages.promotion_evaluation is True
     assert config.stages.reporting is True
+
+
+def test_load_monitoring_config_from_yaml(tmp_path) -> None:
+    path = tmp_path / "monitoring.yaml"
+    path.write_text(
+        """
+maximum_failed_stages: 0
+stale_artifact_max_age_hours: 24
+minimum_approved_strategy_count: 1
+minimum_generated_position_count: 2
+maximum_gross_exposure: 1.0
+maximum_net_exposure: 1.0
+maximum_symbol_concentration: 0.3
+maximum_turnover: 0.25
+maximum_drawdown: 0.2
+minimum_rolling_sharpe: 0.5
+maximum_benchmark_underperformance: 0.05
+maximum_missing_data_incidents: 1
+maximum_zero_weight_runs: 0
+max_drift_between_sleeve_target_and_final_combined_weight: 0.1
+""".strip(),
+        encoding="utf-8",
+    )
+
+    config = load_monitoring_config(path)
+
+    assert config.maximum_failed_stages == 0
+    assert config.minimum_generated_position_count == 2
+    assert config.maximum_symbol_concentration == 0.3

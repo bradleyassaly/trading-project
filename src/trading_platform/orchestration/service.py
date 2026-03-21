@@ -9,7 +9,7 @@ from typing import Any, Callable
 
 import pandas as pd
 
-from trading_platform.config.loader import load_multi_strategy_portfolio_config
+from trading_platform.config.loader import load_monitoring_config, load_multi_strategy_portfolio_config
 from trading_platform.config.models import FeatureConfig, IngestConfig, ResearchWorkflowConfig
 from trading_platform.governance.models import RegistrySelectionOptions
 from trading_platform.governance.persistence import (
@@ -30,6 +30,7 @@ from trading_platform.live.preview import (
     run_live_dry_run_preview_for_targets,
     write_live_dry_run_artifacts,
 )
+from trading_platform.monitoring.service import evaluate_run_health_snapshot
 from trading_platform.orchestration.models import (
     PIPELINE_STAGE_NAMES,
     PipelineRunConfig,
@@ -176,6 +177,22 @@ def _render_run_summary_markdown(result: PipelineRunResult) -> str:
                 f"- Gross exposure: `{live_summary.get('gross_exposure')}`",
             ]
         )
+    monitoring_health = result.outputs.get("monitoring_health_status")
+    if monitoring_health:
+        alert_counts = result.outputs.get("monitoring_alert_counts", {})
+        critical_alerts = result.outputs.get("monitoring_critical_alerts", [])
+        lines.extend(
+            [
+                "",
+                "## Monitoring",
+                f"- Health status: `{monitoring_health}`",
+                f"- Alert counts: `info={alert_counts.get('info', 0)} warning={alert_counts.get('warning', 0)} critical={alert_counts.get('critical', 0)}`",
+            ]
+        )
+        if critical_alerts:
+            lines.append("- Critical alerts:")
+            for message in critical_alerts:
+                lines.append(f"  - {message}")
     return "\n".join(lines) + "\n"
 
 
@@ -514,6 +531,49 @@ def _run_reporting_stage(config: PipelineRunConfig, run_dir: Path, context: dict
     return {"reporting_context_path": str(report_path)}
 
 
+def _run_monitoring_stage(config: PipelineRunConfig, run_dir: Path, context: dict[str, Any]) -> dict[str, Any]:
+    monitoring_config = load_monitoring_config(config.monitoring_config_path)
+    stage_snapshot = [
+        record.to_dict()
+        for record in context.get("stage_records_snapshot", [])
+        if record.stage_name != "monitoring"
+    ]
+    run_payload = {
+        "run_name": config.run_name,
+        "schedule_type": config.schedule_type,
+        "started_at": context.get("run_started_at"),
+        "ended_at": _now_utc(),
+        "status": "failed" if context.get("pipeline_errors") else "succeeded",
+        "run_dir": str(run_dir),
+        "stage_records": stage_snapshot,
+        "errors": context.get("pipeline_errors", []),
+        "outputs": {
+            **context.get("pipeline_outputs", {}),
+            "promoted_strategy_ids": context.get("promoted_strategy_ids", []),
+            "multi_strategy_selected_strategies": context.get("multi_strategy_selected_strategies", []),
+            "paper_summary": context.get("paper_summary", {}),
+            "live_summary": context.get("live_summary", {}),
+        },
+    }
+    report, paths = evaluate_run_health_snapshot(
+        run_dir=run_dir,
+        run_payload=run_payload,
+        config=monitoring_config,
+        output_dir=run_dir / "monitoring",
+    )
+    context["monitoring_health_status"] = report.status
+    context["monitoring_alert_counts"] = report.alert_counts
+    context["monitoring_critical_alerts"] = [
+        alert.message for alert in report.alerts if alert.severity == "critical"
+    ]
+    return {
+        **{name: str(path) for name, path in paths.items()},
+        "monitoring_health_status": report.status,
+        "monitoring_alert_counts": report.alert_counts,
+        "monitoring_critical_alerts": context["monitoring_critical_alerts"],
+    }
+
+
 STAGE_HANDLERS: dict[str, Callable[[PipelineRunConfig, Path, dict[str, Any]], dict[str, Any]]] = {
     "data_refresh": _run_data_refresh_stage,
     "feature_generation": _run_feature_generation_stage,
@@ -525,6 +585,7 @@ STAGE_HANDLERS: dict[str, Callable[[PipelineRunConfig, Path, dict[str, Any]], di
     "paper_trading": _run_paper_stage,
     "live_dry_run": _run_live_stage,
     "reporting": _run_reporting_stage,
+    "monitoring": _run_monitoring_stage,
 }
 
 
@@ -532,7 +593,10 @@ def run_orchestration_pipeline(config: PipelineRunConfig) -> tuple[PipelineRunRe
     started_at = _now_utc()
     run_dir = Path(config.output_root_dir) / config.run_name / _sanitize_timestamp(started_at)
     run_dir.mkdir(parents=True, exist_ok=True)
-    context: dict[str, Any] = {"symbols": _union_symbols(config.universes)}
+    context: dict[str, Any] = {
+        "symbols": _union_symbols(config.universes),
+        "run_started_at": started_at,
+    }
     stage_records = [PipelineStageRecord(stage_name=stage_name) for stage_name in config.stage_order]
     errors: list[dict[str, Any]] = []
     outputs: dict[str, Any] = {}
@@ -546,6 +610,9 @@ def run_orchestration_pipeline(config: PipelineRunConfig) -> tuple[PipelineRunRe
         handler = STAGE_HANDLERS[record.stage_name]
         record.status = "running"
         record.started_at = _now_utc()
+        context["stage_records_snapshot"] = stage_records
+        context["pipeline_errors"] = errors
+        context["pipeline_outputs"] = outputs
         record.inputs = {
             "run_dir": str(run_dir),
             "symbols": context.get("symbols", []),
@@ -565,6 +632,9 @@ def run_orchestration_pipeline(config: PipelineRunConfig) -> tuple[PipelineRunRe
                             "promoted_strategy_ids",
                             "paper_summary",
                             "live_summary",
+                            "monitoring_health_status",
+                            "monitoring_alert_counts",
+                            "monitoring_critical_alerts",
                         }
                     }
                 )
@@ -609,6 +679,9 @@ def run_orchestration_pipeline(config: PipelineRunConfig) -> tuple[PipelineRunRe
             "multi_strategy_selected_strategies": context.get("multi_strategy_selected_strategies", []),
             "paper_summary": context.get("paper_summary", {}),
             "live_summary": context.get("live_summary", {}),
+            "monitoring_health_status": context.get("monitoring_health_status"),
+            "monitoring_alert_counts": context.get("monitoring_alert_counts", {}),
+            "monitoring_critical_alerts": context.get("monitoring_critical_alerts", []),
         },
     )
     artifact_paths = _write_pipeline_artifacts(config=config, result=result, run_dir=run_dir)

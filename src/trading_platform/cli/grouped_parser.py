@@ -24,6 +24,11 @@ from trading_platform.cli.commands.multi_universe_alpha_research import (
     cmd_multi_universe_alpha_research,
 )
 from trading_platform.cli.commands.multi_universe_report import cmd_multi_universe_report
+from trading_platform.cli.commands.monitor_build_dashboard_data import cmd_monitor_build_dashboard_data
+from trading_platform.cli.commands.monitor_latest import cmd_monitor_latest
+from trading_platform.cli.commands.monitor_portfolio_health import cmd_monitor_portfolio_health
+from trading_platform.cli.commands.monitor_run_health import cmd_monitor_run_health
+from trading_platform.cli.commands.monitor_strategy_health import cmd_monitor_strategy_health
 from trading_platform.cli.commands.paper_report import cmd_paper_report
 from trading_platform.cli.commands.paper_run import cmd_paper_run
 from trading_platform.cli.commands.paper_run_multi_strategy import cmd_paper_run_multi_strategy
@@ -753,5 +758,32 @@ def build_parser() -> argparse.ArgumentParser:
     pipeline_run_weekly = pipeline_subparsers.add_parser("run-weekly", help="Run a weekly pipeline config and validate schedule_type=weekly")
     pipeline_run_weekly.add_argument("--config", type=str, required=True, help="Path to the pipeline JSON/YAML config.")
     pipeline_run_weekly.set_defaults(func=cmd_pipeline_run_weekly)
+
+    monitor_parser = subparsers.add_parser("monitor", help="Operational monitoring and alerting commands")
+    monitor_subparsers = monitor_parser.add_subparsers(dest="monitor_command", required=True)
+    monitor_run = monitor_subparsers.add_parser("run-health", help="Evaluate run health for a completed pipeline run")
+    monitor_run.add_argument("--run-dir", type=str, required=True, help="Path to a completed pipeline run directory.")
+    monitor_run.add_argument("--config", type=str, required=True, help="Path to the monitoring JSON/YAML config.")
+    monitor_run.set_defaults(func=cmd_monitor_run_health)
+    monitor_strategy = monitor_subparsers.add_parser("strategy-health", help="Evaluate per-strategy health from registry and paper/live artifacts")
+    monitor_strategy.add_argument("--registry", type=str, required=True, help="Path to the strategy registry JSON/YAML file.")
+    monitor_strategy.add_argument("--artifacts-root", type=str, required=True, help="Root directory used to resolve relative artifact paths.")
+    monitor_strategy.add_argument("--config", type=str, required=True, help="Path to the monitoring JSON/YAML config.")
+    monitor_strategy.add_argument("--output-dir", type=str, required=True, help="Directory where strategy health artifacts will be written.")
+    monitor_strategy.set_defaults(func=cmd_monitor_strategy_health)
+    monitor_portfolio = monitor_subparsers.add_parser("portfolio-health", help="Evaluate health for combined portfolio allocation artifacts")
+    monitor_portfolio.add_argument("--allocation-dir", type=str, required=True, help="Directory containing multi-strategy allocation artifacts.")
+    monitor_portfolio.add_argument("--config", type=str, required=True, help="Path to the monitoring JSON/YAML config.")
+    monitor_portfolio.add_argument("--output-dir", type=str, required=True, help="Directory where portfolio health artifacts will be written.")
+    monitor_portfolio.set_defaults(func=cmd_monitor_portfolio_health)
+    monitor_latest = monitor_subparsers.add_parser("latest", help="Locate the newest pipeline run and evaluate run health")
+    monitor_latest.add_argument("--pipeline-root", type=str, required=True, help="Root directory containing timestamped pipeline runs.")
+    monitor_latest.add_argument("--config", type=str, required=True, help="Path to the monitoring JSON/YAML config.")
+    monitor_latest.add_argument("--output-dir", type=str, required=True, help="Directory where latest-run monitoring artifacts will be written.")
+    monitor_latest.set_defaults(func=cmd_monitor_latest)
+    monitor_dashboard = monitor_subparsers.add_parser("build-dashboard-data", help="Build compact dashboard-ready monitoring data from pipeline runs")
+    monitor_dashboard.add_argument("--pipeline-root", type=str, required=True, help="Root directory containing timestamped pipeline runs.")
+    monitor_dashboard.add_argument("--output-dir", type=str, required=True, help="Directory where dashboard-ready JSON/CSV artifacts will be written.")
+    monitor_dashboard.set_defaults(func=cmd_monitor_build_dashboard_data)
 
     return parser

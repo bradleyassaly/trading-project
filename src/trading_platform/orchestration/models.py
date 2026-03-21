@@ -15,6 +15,7 @@ PIPELINE_STAGE_NAMES = [
     "paper_trading",
     "live_dry_run",
     "reporting",
+    "monitoring",
 ]
 PIPELINE_STAGE_DEPENDENCIES: dict[str, list[str]] = {
     "feature_generation": ["data_refresh"],
@@ -24,6 +25,7 @@ PIPELINE_STAGE_DEPENDENCIES: dict[str, list[str]] = {
     "paper_trading": ["multi_strategy_config_generation"],
     "live_dry_run": ["multi_strategy_config_generation"],
     "reporting": [],
+    "monitoring": ["reporting"],
 }
 PIPELINE_STAGE_STATUSES = {"pending", "skipped", "running", "succeeded", "failed"}
 
@@ -40,6 +42,7 @@ class OrchestrationStageToggles:
     paper_trading: bool = False
     live_dry_run: bool = False
     reporting: bool = True
+    monitoring: bool = False
 
     def enabled_stage_names(self) -> list[str]:
         return [
@@ -57,6 +60,7 @@ class PipelineRunConfig:
     preset_filters: list[str] = field(default_factory=list)
     registry_path: str | None = None
     governance_config_path: str | None = None
+    monitoring_config_path: str | None = None
     multi_strategy_output_path: str | None = None
     paper_state_path: str | None = None
     live_broker: str = "mock"
@@ -136,6 +140,8 @@ class PipelineRunConfig:
             )
         if self.stages.paper_trading and not self.paper_state_path:
             raise ValueError("paper_state_path is required when paper_trading is enabled")
+        if self.stages.monitoring and not self.monitoring_config_path:
+            raise ValueError("monitoring_config_path is required when monitoring is enabled")
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
