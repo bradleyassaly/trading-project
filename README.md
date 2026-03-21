@@ -284,6 +284,7 @@ trading-cli research run --symbols AAPL --strategy sma_cross --fast 20 --slow 10
 
 The xsec workflow also supports an optional constrained portfolio layer:
 
+- `--portfolio-construction-mode pure_topn|transition`: `pure_topn` keeps realized holdings tied to the current selected top-N set and is the research-clean baseline. `transition` allows gradual movement from the current portfolio toward the target and can temporarily carry more names than `top_n`.
 - `--max-position-weight`: cap target weight per name after the target portfolio is built.
 - `--min-avg-dollar-volume`: require rolling average dollar volume before a symbol is eligible.
 - `--max-names-per-sector`: cap selected names per sector/group when metadata is available.
@@ -292,7 +293,9 @@ The xsec workflow also supports an optional constrained portfolio layer:
 - `--weighting-scheme equal|inv_vol`: choose equal-weight or inverse-vol target weights.
 - `--vol-lookback-bars`: realized-vol lookback used by `inv_vol`.
 
-When these controls are unset, the legacy xsec behavior is unchanged. When a turnover cap is active, the portfolio can temporarily hold more than `top_n` names because it moves gradually toward the new top-N target instead of jumping all at once. Diagnostics now report that transition behavior explicitly with turnover, gross exposure, eligible counts, selected counts, turnover-cap bindings, and liquidity/sector exclusions.
+`pure_topn` is now the default because it preserves the original research meaning of `xsec_momentum_topn`. In this mode, realized holdings stay tied to the feasible selected set up to `top_n`; stale names are not allowed to linger just because turnover is capped. `transition` is the explicit deployable overlay for low-turnover portfolios. In that mode, realized holdings can temporarily exceed `top_n` while the portfolio moves gradually toward the target.
+
+Diagnostics now report the distinction explicitly with `portfolio_construction_mode`, target selected count, realized holdings count, holdings-to-top-N ratio, turnover-cap bindings, turnover-buffer blocks, liquidity/sector exclusions, and semantic-warning fields.
 
 Recommended validation ladder for this strategy:
 
@@ -317,7 +320,8 @@ Constrained xsec examples:
 
 ```bash
 trading-cli research walkforward --universe nasdaq100 --strategy xsec_momentum_topn --lookback-bars-values 84 --skip-bars-values 21 --top-n-values 2 --rebalance-bars-values 21 --benchmark equal_weight --start 2020-01-01 --train-bars 756 --test-bars 126 --step-bars 126 --cost-bps 10 --output artifacts/experiments/nasdaq100_xsec_baseline_walkforward.csv
-trading-cli research walkforward --universe nasdaq100 --strategy xsec_momentum_topn --lookback-bars-values 84 --skip-bars-values 21 --top-n-values 2 --rebalance-bars-values 21 --benchmark equal_weight --start 2020-01-01 --train-bars 756 --test-bars 126 --step-bars 126 --cost-bps 10 --max-position-weight 0.5 --min-avg-dollar-volume 50000000 --weighting-scheme inv_vol --vol-lookback-bars 20 --max-turnover-per-rebalance 0.5 --turnover-buffer-bps 0 --output artifacts/experiments/nasdaq100_xsec_constrained_walkforward.csv
+trading-cli research walkforward --universe nasdaq100 --strategy xsec_momentum_topn --lookback-bars-values 84 --skip-bars-values 21 --top-n-values 2 --rebalance-bars-values 21 --benchmark equal_weight --start 2020-01-01 --train-bars 756 --test-bars 126 --step-bars 126 --cost-bps 10 --portfolio-construction-mode pure_topn --output artifacts/experiments/nasdaq100_xsec_baseline_walkforward.csv
+trading-cli research walkforward --universe nasdaq100 --strategy xsec_momentum_topn --lookback-bars-values 84 --skip-bars-values 21 --top-n-values 2 --rebalance-bars-values 21 --benchmark equal_weight --start 2020-01-01 --train-bars 756 --test-bars 126 --step-bars 126 --cost-bps 10 --portfolio-construction-mode transition --max-position-weight 0.5 --min-avg-dollar-volume 50000000 --weighting-scheme inv_vol --vol-lookback-bars 20 --max-turnover-per-rebalance 0.5 --turnover-buffer-bps 0 --output artifacts/experiments/nasdaq100_xsec_constrained_walkforward.csv
 ```
 
 Compare constrained versus unconstrained runs with:

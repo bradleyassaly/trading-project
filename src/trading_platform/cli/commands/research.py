@@ -118,6 +118,7 @@ def _run_xsec_research(args: argparse.Namespace, symbols: list[str]) -> None:
         max_turnover_per_rebalance=strategy_params["max_turnover_per_rebalance"],
         weighting_scheme=strategy_params["weighting_scheme"],
         vol_lookback_bars=int(strategy_params["vol_lookback_bars"] or 20),
+        portfolio_construction_mode=strategy_params["portfolio_construction_mode"],
         benchmark_type=args.benchmark,
     )
     stats = result.summary
@@ -147,6 +148,7 @@ def _run_xsec_research(args: argparse.Namespace, symbols: list[str]) -> None:
         f"range={effective_start}->{effective_end}, rows={rows_used}, "
         f"lookback_bars={strategy_params['lookback_bars']}, skip_bars={strategy_params['skip_bars']}, "
         f"top_n={strategy_params['top_n']}, rebalance_bars={strategy_params['rebalance_bars']}, "
+        f"portfolio_construction_mode={strategy_params['portfolio_construction_mode']}, "
         f"weighting_scheme={strategy_params['weighting_scheme']}, vol_lookback_bars={strategy_params['vol_lookback_bars']}, "
         f"max_position_weight={strategy_params['max_position_weight']}, min_avg_dollar_volume={strategy_params['min_avg_dollar_volume']}, "
         f"max_names_per_sector={strategy_params['max_names_per_sector']}, turnover_buffer_bps={strategy_params['turnover_buffer_bps']}, "
@@ -156,6 +158,10 @@ def _run_xsec_research(args: argparse.Namespace, symbols: list[str]) -> None:
         f"MaxDD[%]={stats.get('Max. Drawdown [%]', 'n/a')}, trade_count={stats.get('trade_count', 'n/a')}, "
         f"time_in_market[%]={stats.get('percent_time_in_market', 'n/a')}, "
         f"avg_holdings={stats.get('average_number_of_holdings', 'n/a')}, "
+        f"avg_target_selected={stats.get('average_target_selected_count', 'n/a')}, "
+        f"avg_realized_holdings={stats.get('average_realized_holdings_count', 'n/a')}, "
+        f"holdings_to_top_n={stats.get('average_holdings_ratio_to_top_n', 'n/a')}, "
+        f"exceeded_top_n={stats.get('realized_holdings_exceeded_top_n', False)}, "
         f"rebalance_count={stats.get('rebalance_count', 'n/a')}, "
         f"avg_turnover={stats.get('mean_turnover', 'n/a')}, annualized_turnover={stats.get('annualized_turnover', 'n/a')}, "
         f"mean_transaction_cost={stats.get('mean_transaction_cost', 'n/a')}, total_transaction_cost={stats.get('total_transaction_cost', 'n/a')}, "
@@ -171,6 +177,7 @@ def _run_xsec_research(args: argparse.Namespace, symbols: list[str]) -> None:
         f"sector_cap_excluded={stats.get('total_sector_cap_excluded_symbols', 0)}, "
         f"turnover_cap_bindings={stats.get('turnover_cap_binding_count', 0)}, "
         f"buffer_blocked={stats.get('turnover_buffer_blocked_replacements', 0)}, "
+        f"semantic_warning={stats.get('semantic_warning', '') or 'none'}, "
         f"empty_rebalances[%]={stats.get('percent_empty_rebalances', 'n/a')}, "
         f"cost_bps={getattr(args, 'cost_bps', None) if getattr(args, 'cost_bps', None) is not None else resolve_turnover_cost(args) * 10000.0}, "
         f"activity={activity_note(stats)}, Experiment={exp_id}"

@@ -115,6 +115,7 @@ def cmd_sweep(args: argparse.Namespace) -> None:
                     max_turnover_per_rebalance=strategy_params["max_turnover_per_rebalance"],
                     weighting_scheme=strategy_params["weighting_scheme"],
                     vol_lookback_bars=int(strategy_params["vol_lookback_bars"] or 20),
+                    portfolio_construction_mode=strategy_params["portfolio_construction_mode"],
                     benchmark_type=args.benchmark,
                 )
                 stats = result.summary
@@ -135,6 +136,7 @@ def cmd_sweep(args: argparse.Namespace) -> None:
                     "skip_bars": params.get("skip_bars"),
                     "top_n": params.get("top_n"),
                     "rebalance_bars": params.get("rebalance_bars"),
+                    "portfolio_construction_mode": stats.get("portfolio_construction_mode"),
                     "weighting_scheme": stats.get("weighting_scheme"),
                     "vol_lookback_bars": stats.get("vol_lookback_bars"),
                     "max_position_weight": stats.get("max_position_weight"),
@@ -160,6 +162,12 @@ def cmd_sweep(args: argparse.Namespace) -> None:
                     "final_position_size": stats.get("final_position_size"),
                     "ended_in_cash": stats.get("ended_in_cash"),
                     "average_number_of_holdings": stats.get("average_number_of_holdings"),
+                    "average_target_selected_count": stats.get("average_target_selected_count"),
+                    "average_realized_holdings_count": stats.get("average_realized_holdings_count"),
+                    "average_realized_holdings_minus_top_n": stats.get("average_realized_holdings_minus_top_n"),
+                    "average_holdings_ratio_to_top_n": stats.get("average_holdings_ratio_to_top_n"),
+                    "realized_holdings_exceeded_top_n": stats.get("realized_holdings_exceeded_top_n"),
+                    "semantic_warning": stats.get("semantic_warning"),
                     "average_available_symbols": stats.get("average_available_symbols"),
                     "average_eligible_symbols": stats.get("average_eligible_symbols"),
                     "average_selected_symbols": stats.get("average_selected_symbols"),
@@ -195,16 +203,20 @@ def cmd_sweep(args: argparse.Namespace) -> None:
                     f"[OK] universe: symbols={len(symbols)} ({print_symbol_list(symbols)}), "
                     f"range={effective_start}->{effective_end}, lookback_bars={row['lookback_bars']}, "
                     f"skip_bars={row['skip_bars']}, top_n={row['top_n']}, rebalance_bars={row['rebalance_bars']}, "
+                    f"portfolio_construction_mode={row['portfolio_construction_mode']}, "
                     f"weighting_scheme={row['weighting_scheme']}, max_position_weight={row['max_position_weight']}, "
                     f"min_avg_dollar_volume={row['min_avg_dollar_volume']}, max_names_per_sector={row['max_names_per_sector']}, "
                     f"turnover_buffer_bps={row['turnover_buffer_bps']}, max_turnover_per_rebalance={row['max_turnover_per_rebalance']}, benchmark={row['benchmark_type']}, "
                     f"gross_return[%]={row['gross_return_pct']}, net_return[%]={row['net_return_pct']}, cost_drag[%]={row['cost_drag_return_pct']}, "
                     f"Sharpe={row['sharpe']}, MaxDD[%]={row['max_drawdown_pct']}, "
                     f"trade_count={row['trade_count']}, percent_invested={row['percent_invested']}, "
-                    f"avg_holdings={row['average_number_of_holdings']}, avg_available={row['average_available_symbols']}, avg_eligible={row['average_eligible_symbols']}, "
+                    f"avg_holdings={row['average_number_of_holdings']}, avg_target_selected={row['average_target_selected_count']}, "
+                    f"avg_realized_holdings={row['average_realized_holdings_count']}, holdings_to_top_n={row['average_holdings_ratio_to_top_n']}, "
+                    f"exceeded_top_n={row['realized_holdings_exceeded_top_n']}, avg_available={row['average_available_symbols']}, avg_eligible={row['average_eligible_symbols']}, "
                     f"avg_selected={row['average_selected_symbols']}, empty_rebalances[%]={row['percent_empty_rebalances']}, "
                     f"liquidity_excluded={row['total_liquidity_excluded_symbols']}, sector_cap_excluded={row['total_sector_cap_excluded_symbols']}, "
                     f"turnover_cap_bindings={row['turnover_cap_binding_count']}, buffer_blocked={row['turnover_buffer_blocked_replacements']}, "
+                    f"semantic_warning={row['semantic_warning'] or 'none'}, "
                     f"avg_turnover={row['mean_turnover']}, annualized_turnover={row['annualized_turnover']}, "
                     f"mean_transaction_cost={row['mean_transaction_cost']}, total_transaction_cost={row['total_transaction_cost']}, cost_bps={row['cost_bps']}, "
                     f"initial_equity={row['initial_equity']}, "
@@ -229,6 +241,7 @@ def cmd_sweep(args: argparse.Namespace) -> None:
                         "skip_bars": params.get("skip_bars"),
                         "top_n": params.get("top_n"),
                         "rebalance_bars": params.get("rebalance_bars"),
+                        "portfolio_construction_mode": strategy_params["portfolio_construction_mode"],
                         "weighting_scheme": strategy_params["weighting_scheme"],
                         "vol_lookback_bars": strategy_params["vol_lookback_bars"],
                         "max_position_weight": strategy_params["max_position_weight"],
@@ -254,6 +267,12 @@ def cmd_sweep(args: argparse.Namespace) -> None:
                         "final_position_size": None,
                         "ended_in_cash": None,
                         "average_number_of_holdings": None,
+                        "average_target_selected_count": None,
+                        "average_realized_holdings_count": None,
+                        "average_realized_holdings_minus_top_n": None,
+                        "average_holdings_ratio_to_top_n": None,
+                        "realized_holdings_exceeded_top_n": None,
+                        "semantic_warning": None,
                         "average_available_symbols": None,
                         "average_eligible_symbols": None,
                         "average_selected_symbols": None,

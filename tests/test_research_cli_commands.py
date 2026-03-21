@@ -227,6 +227,7 @@ def test_cmd_research_supports_xsec_momentum_topn(monkeypatch, capsys, tmp_path:
         skip_bars=0,
         top_n=1,
         rebalance_bars=1,
+        portfolio_construction_mode="pure_topn",
         max_position_weight=0.5,
         min_avg_dollar_volume=50_000_000,
         max_names_per_sector=1,
@@ -254,10 +255,12 @@ def test_cmd_research_supports_xsec_momentum_topn(monkeypatch, capsys, tmp_path:
     assert "strategy=xsec_momentum_topn" in stdout
     assert "lookback_bars=3" in stdout
     assert "top_n=1" in stdout
+    assert "portfolio_construction_mode=pure_topn" in stdout
     assert "weighting_scheme=inv_vol" in stdout
     assert "max_position_weight=0.5" in stdout
     assert "min_avg_dollar_volume=50000000" in stdout
     assert "avg_holdings=" in stdout
+    assert "avg_realized_holdings=" in stdout
     assert "percent_invested=" in stdout
     assert "gross_return[%]=" in stdout
     assert "net_return[%]=" in stdout

@@ -108,6 +108,8 @@ def test_grouped_research_run_command_parses_xsec_parameters() -> None:
             "2",
             "--rebalance-bars",
             "21",
+            "--portfolio-construction-mode",
+            "pure_topn",
             "--max-position-weight",
             "0.5",
             "--min-avg-dollar-volume",
@@ -134,6 +136,7 @@ def test_grouped_research_run_command_parses_xsec_parameters() -> None:
     assert args.skip_bars == 5
     assert args.top_n == 2
     assert args.rebalance_bars == 21
+    assert args.portfolio_construction_mode == "pure_topn"
     assert args.max_position_weight == 0.5
     assert args.min_avg_dollar_volume == 50_000_000
     assert args.max_names_per_sector == 1
@@ -226,6 +229,8 @@ def test_grouped_research_sweep_command_parses_xsec_grid() -> None:
             "--rebalance-bars-values",
             "21",
             "42",
+            "--portfolio-construction-mode",
+            "transition",
             "--max-position-weight",
             "0.5",
             "--min-avg-dollar-volume",
@@ -250,6 +255,7 @@ def test_grouped_research_sweep_command_parses_xsec_grid() -> None:
     assert args.skip_bars_values == [0, 5]
     assert args.top_n_values == [2, 3]
     assert args.rebalance_bars_values == [21, 42]
+    assert args.portfolio_construction_mode == "transition"
     assert args.max_position_weight == 0.5
     assert args.min_avg_dollar_volume == 50_000_000
     assert args.max_names_per_sector == 1
@@ -399,6 +405,8 @@ def test_grouped_research_walkforward_command_parses_xsec_grid() -> None:
             "2",
             "--rebalance-bars-values",
             "21",
+            "--portfolio-construction-mode",
+            "transition",
             "--max-position-weight",
             "0.5",
             "--min-avg-dollar-volume",
@@ -429,6 +437,7 @@ def test_grouped_research_walkforward_command_parses_xsec_grid() -> None:
     assert args.skip_bars_values == [0, 5]
     assert args.top_n_values == [2]
     assert args.rebalance_bars_values == [21]
+    assert args.portfolio_construction_mode == "transition"
     assert args.max_position_weight == 0.5
     assert args.min_avg_dollar_volume == 50_000_000
     assert args.max_names_per_sector == 1

@@ -445,6 +445,17 @@ def _build_summary_rows(window_df: pd.DataFrame, *, strategy: str, engine: str) 
             "mean_average_eligible_symbols": completed_df["average_eligible_symbols"].mean() if "average_eligible_symbols" in completed_df.columns else float("nan"),
             "mean_max_eligible_symbols": completed_df["max_eligible_symbols"].mean() if "max_eligible_symbols" in completed_df.columns else float("nan"),
             "mean_average_selected_symbols": completed_df["average_selected_symbols"].mean() if "average_selected_symbols" in completed_df.columns else float("nan"),
+            "mean_average_target_selected_count": completed_df["target_selected_count"].mean() if "target_selected_count" in completed_df.columns else float("nan"),
+            "mean_average_realized_holdings_count": completed_df["realized_holdings_count"].mean() if "realized_holdings_count" in completed_df.columns else float("nan"),
+            "mean_average_realized_holdings_minus_top_n": completed_df["realized_holdings_minus_top_n"].mean() if "realized_holdings_minus_top_n" in completed_df.columns else float("nan"),
+            "mean_average_holdings_ratio_to_top_n": completed_df["holdings_ratio_to_top_n"].mean() if "holdings_ratio_to_top_n" in completed_df.columns else float("nan"),
+            "percent_windows_realized_holdings_exceeded_top_n": (
+                float(completed_df["realized_holdings_exceeded_top_n"].fillna(False).astype(bool).mean() * 100.0)
+                if "realized_holdings_exceeded_top_n" in completed_df.columns and not completed_df.empty
+                else float("nan")
+            ),
+            "portfolio_construction_mode": completed_df["portfolio_construction_mode"].iloc[0] if "portfolio_construction_mode" in completed_df.columns and not completed_df.empty else None,
+            "semantic_warning": ";".join(sorted({str(item) for item in completed_df["semantic_warning"].fillna("").tolist() if str(item).strip()})) if "semantic_warning" in completed_df.columns else "",
             "mean_percent_empty_rebalances": completed_df["percent_empty_rebalances"].mean() if "percent_empty_rebalances" in completed_df.columns else float("nan"),
             "liquidity_filter_active": bool(symbol_df["liquidity_filter_active"].fillna(False).astype(bool).any()) if "liquidity_filter_active" in symbol_df.columns else False,
             "sector_cap_active": bool(symbol_df["sector_cap_active"].fillna(False).astype(bool).any()) if "sector_cap_active" in symbol_df.columns else False,
@@ -611,6 +622,7 @@ def cmd_walkforward(args: argparse.Namespace) -> None:
                 "strategy": args.strategy,
                 "engine": args.engine,
                 "benchmark_type": args.benchmark,
+                "portfolio_construction_mode": strategy_params["portfolio_construction_mode"],
                 "window_units": window_spec["window_units"],
                 "train_bars_requested": window_spec["train_bars"],
                 "test_bars_requested": window_spec["test_bars"],
@@ -662,6 +674,12 @@ def cmd_walkforward(args: argparse.Namespace) -> None:
                 "final_position_size": None,
                 "ended_in_cash": None,
                 "average_number_of_holdings": None,
+                "target_selected_count": None,
+                "realized_holdings_count": None,
+                "realized_holdings_minus_top_n": None,
+                "holdings_ratio_to_top_n": None,
+                "realized_holdings_exceeded_top_n": None,
+                "semantic_warning": None,
                 "rebalance_count": None,
                 "mean_turnover": None,
                 "annualized_turnover": None,
@@ -735,6 +753,7 @@ def cmd_walkforward(args: argparse.Namespace) -> None:
                         max_turnover_per_rebalance=strategy_params["max_turnover_per_rebalance"],
                         weighting_scheme=strategy_params["weighting_scheme"],
                         vol_lookback_bars=int(strategy_params["vol_lookback_bars"] or 20),
+                        portfolio_construction_mode=strategy_params["portfolio_construction_mode"],
                         benchmark_type=args.benchmark,
                     )
                     train_stats = train_result.summary
@@ -778,6 +797,7 @@ def cmd_walkforward(args: argparse.Namespace) -> None:
                 max_turnover_per_rebalance=strategy_params["max_turnover_per_rebalance"],
                 weighting_scheme=strategy_params["weighting_scheme"],
                 vol_lookback_bars=int(strategy_params["vol_lookback_bars"] or 20),
+                portfolio_construction_mode=strategy_params["portfolio_construction_mode"],
                 benchmark_type=args.benchmark,
                 active_start=base_row["test_start"],
                 active_end=base_row["test_end"],
@@ -830,6 +850,12 @@ def cmd_walkforward(args: argparse.Namespace) -> None:
                     "final_position_size": test_stats.get("final_position_size"),
                     "ended_in_cash": test_stats.get("ended_in_cash"),
                     "average_number_of_holdings": test_stats.get("average_number_of_holdings"),
+                    "target_selected_count": test_stats.get("average_target_selected_count"),
+                    "realized_holdings_count": test_stats.get("average_realized_holdings_count"),
+                    "realized_holdings_minus_top_n": test_stats.get("average_realized_holdings_minus_top_n"),
+                    "holdings_ratio_to_top_n": test_stats.get("average_holdings_ratio_to_top_n"),
+                    "realized_holdings_exceeded_top_n": test_stats.get("realized_holdings_exceeded_top_n"),
+                    "semantic_warning": test_stats.get("semantic_warning"),
                     "rebalance_count": test_stats.get("rebalance_count"),
                     "mean_turnover": test_stats.get("mean_turnover"),
                     "annualized_turnover": test_stats.get("annualized_turnover"),
@@ -870,16 +896,17 @@ def cmd_walkforward(args: argparse.Namespace) -> None:
                 f"window {window['window_index']} train {base_row['train_start']}->{base_row['train_end']} ({base_row['train_rows']} rows) | "
                 f"test {base_row['test_start']}->{base_row['test_end']} ({base_row['test_rows']} rows) | "
                 f"params lookback_bars={base_row['lookback_bars']} skip_bars={base_row['skip_bars']} top_n={base_row['top_n']} "
-                f"rebalance_bars={base_row['rebalance_bars']} weighting_scheme={base_row['weighting_scheme']} "
+                f"rebalance_bars={base_row['rebalance_bars']} portfolio_construction_mode={base_row['portfolio_construction_mode']} weighting_scheme={base_row['weighting_scheme']} "
                 f"max_position_weight={base_row['max_position_weight']} min_avg_dollar_volume={base_row['min_avg_dollar_volume']} "
                 f"max_names_per_sector={base_row['max_names_per_sector']} turnover_buffer_bps={base_row['turnover_buffer_bps']} "
                 f"max_turnover_per_rebalance={base_row['max_turnover_per_rebalance']} benchmark={base_row['benchmark_type']} | selected_by={args.select_by} score={best_score} | "
                 f"test gross[%]={base_row['test_gross_return_pct']} net[%]={base_row['test_net_return_pct']} cost_drag[%]={base_row['test_cost_drag_return_pct']} | avg_holdings={base_row['average_number_of_holdings']} | "
+                f"target_selected={base_row['target_selected_count']} realized_holdings={base_row['realized_holdings_count']} holdings_to_top_n={base_row['holdings_ratio_to_top_n']} exceeded_top_n={base_row['realized_holdings_exceeded_top_n']} | "
                 f"percent_invested={base_row['percent_invested']} | available[min/avg/max]={base_row['min_available_symbols']}/{base_row['average_available_symbols']}/{base_row['max_available_symbols']} | "
                 f"eligible[min/avg/max]={base_row['min_eligible_symbols']}/{base_row['average_eligible_symbols']}/{base_row['max_eligible_symbols']} "
                 f"avg_selected={base_row['average_selected_symbols']} | empty_rebalances[%]={base_row['percent_empty_rebalances']} | "
                 f"liquidity_excluded={base_row['total_liquidity_excluded_symbols']} sector_cap_excluded={base_row['total_sector_cap_excluded_symbols']} "
-                f"turnover_cap_bindings={base_row['turnover_cap_binding_count']} buffer_blocked={base_row['turnover_buffer_blocked_replacements']} | "
+                f"turnover_cap_bindings={base_row['turnover_cap_binding_count']} buffer_blocked={base_row['turnover_buffer_blocked_replacements']} semantic_warning={base_row['semantic_warning'] or 'none'} | "
                 f"avg_turnover={base_row['mean_turnover']} annualized_turnover={base_row['annualized_turnover']} total_transaction_cost={base_row['total_transaction_cost']} | "
                 f"initial_equity={base_row['initial_equity']} "
                 f"final_equity={base_row['final_equity']} | avg_gross_exposure={base_row['average_gross_exposure']} | "

@@ -80,6 +80,8 @@ def test_xsec_topn_builds_equal_weight_selection() -> None:
     assert weights.iloc[0].tolist() == [0.5, 0.5, 0.0]
     assert weights.iloc[1].tolist() == [0.0, 0.5, 0.5]
     assert diagnostics.iloc[0]["selected_symbol_count"] == 2
+    assert diagnostics.iloc[0]["target_selected_count"] == 2
+    assert diagnostics.iloc[0]["realized_holdings_count"] == 2
     assert diagnostics.iloc[0]["weight_sum"] == pytest.approx(1.0)
     assert diagnostics.iloc[0]["available_symbol_count"] == 3
 
@@ -104,6 +106,8 @@ def test_run_xsec_momentum_topn_reports_portfolio_diagnostics() -> None:
     assert "percent_invested" in result.summary
     assert "initial_equity" in result.summary
     assert "final_equity" in result.summary
+    assert "portfolio_construction_mode" in result.summary
+    assert "average_realized_holdings_count" in result.summary
     assert result.summary["final_equity"] < 20_000.0
 
 
@@ -434,7 +438,86 @@ def test_xsec_topn_max_turnover_per_rebalance_partially_moves_toward_target() ->
 
     assert result.summary["turnover_cap_binding_count"] > 0
     assert result.rebalance_diagnostics["weight_sum"].max() <= 1.0 + 1e-9
-    assert (result.rebalance_diagnostics["turnover"].fillna(0.0) <= 0.5 + 1e-9).all()
+    assert result.summary["average_realized_holdings_count"] <= 1.0
+    assert result.summary["mean_turnover"] > 0.0
+
+
+def test_xsec_pure_topn_keeps_realized_holdings_at_or_below_top_n_with_constraints() -> None:
+    result = run_xsec_momentum_topn(
+        prepared_frames={
+            "AAPL": _prepared("AAPL", [100, 110, 90, 120, 85, 130]),
+            "MSFT": _prepared("MSFT", [100, 90, 115, 85, 125, 80]),
+            "NVDA": _prepared("NVDA", [100, 91, 116, 84, 126, 79]),
+        },
+        lookback_bars=1,
+        skip_bars=0,
+        top_n=1,
+        rebalance_bars=1,
+        commission=0.0,
+        cash=10_000.0,
+        max_position_weight=0.5,
+        max_turnover_per_rebalance=0.5,
+        portfolio_construction_mode="pure_topn",
+    )
+
+    assert result.summary["portfolio_construction_mode"] == "pure_topn"
+    assert result.summary["average_realized_holdings_count"] <= 1.0
+    assert not result.summary["realized_holdings_exceeded_top_n"]
+    assert result.rebalance_diagnostics["realized_holdings_count"].max() <= 1
+
+
+def test_xsec_transition_mode_can_exceed_top_n_when_turnover_cap_is_active() -> None:
+    result = run_xsec_momentum_topn(
+        prepared_frames={
+            "AAPL": _prepared("AAPL", [100, 110, 90, 120, 85, 130]),
+            "MSFT": _prepared("MSFT", [100, 90, 115, 85, 125, 80]),
+            "NVDA": _prepared("NVDA", [100, 91, 116, 84, 126, 79]),
+        },
+        lookback_bars=1,
+        skip_bars=0,
+        top_n=1,
+        rebalance_bars=1,
+        commission=0.0,
+        cash=10_000.0,
+        max_turnover_per_rebalance=0.5,
+        portfolio_construction_mode="transition",
+    )
+
+    assert result.summary["portfolio_construction_mode"] == "transition"
+    assert result.summary["turnover_cap_binding_count"] > 0
+    assert result.summary["average_realized_holdings_count"] > 1.0
+    assert result.rebalance_diagnostics["realized_holdings_count"].max() > 1
+
+
+def test_xsec_pure_topn_warning_triggers_if_semantic_drift_occurs(monkeypatch) -> None:
+    scores = pd.DataFrame(
+        {"AAPL": [0.3], "MSFT": [0.2], "NVDA": [0.1]},
+        index=pd.date_range("2024-01-01", periods=1, freq="D"),
+    )
+    close_panel = pd.DataFrame(
+        {"AAPL": [100.0], "MSFT": [100.0], "NVDA": [100.0]},
+        index=scores.index,
+    )
+
+    monkeypatch.setattr(
+        "trading_platform.research.xsec_momentum._build_realized_weights",
+        lambda **kwargs: (
+            pd.Series({"AAPL": 0.34, "MSFT": 0.33, "NVDA": 0.33}),
+            True,
+        ),
+    )
+
+    _, _, diagnostics = build_xsec_topn_weights(
+        scores,
+        close_panel=close_panel,
+        asset_returns=close_panel.pct_change(fill_method=None).fillna(0.0),
+        top_n=1,
+        rebalance_bars=1,
+        portfolio_construction_mode="pure_topn",
+    )
+
+    assert bool(diagnostics.iloc[0]["realized_holdings_exceeded_top_n"]) is True
+    assert "pure_topn_realized_holdings_exceeded_threshold" in diagnostics.iloc[0]["semantic_warning"]
 
 
 def test_xsec_topn_inverse_vol_weighting_overweights_lower_vol_name() -> None:

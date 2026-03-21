@@ -29,6 +29,14 @@ class XsecMomentumResult:
     summary: dict[str, object]
 
 
+def _empty_selection_diagnostics() -> dict[str, object]:
+    return {
+        "buffer_blocked_replacements": 0,
+        "sector_cap_excluded_count": 0,
+        "excluded_by_sector": [],
+    }
+
+
 def build_close_panel(prepared_frames: dict[str, dict[str, object]]) -> tuple[pd.DataFrame, dict[str, Path]]:
     close_frames: list[pd.Series] = []
     feature_paths: dict[str, Path] = {}
@@ -253,6 +261,34 @@ def _apply_turnover_cap(
     return capped.astype(float), True
 
 
+def _apply_turnover_cap_pure_topn(
+    previous_weights: pd.Series,
+    target_weights: pd.Series,
+    *,
+    max_turnover_per_rebalance: float | None,
+) -> tuple[pd.Series, bool]:
+    target_symbols = target_weights[target_weights > POSITION_EPSILON].index.tolist()
+    if not target_symbols:
+        return target_weights.astype(float), False
+    if max_turnover_per_rebalance is None:
+        return target_weights.astype(float), False
+    if max_turnover_per_rebalance < 0:
+        raise ValueError("max_turnover_per_rebalance must be >= 0")
+
+    previous_on_target = previous_weights.reindex(target_weights.index).fillna(0.0).astype(float)
+    previous_on_target.loc[~previous_on_target.index.isin(target_symbols)] = 0.0
+
+    turnover = float((target_weights - previous_on_target).abs().sum())
+    if turnover <= max_turnover_per_rebalance + 1e-12 or turnover <= 0.0:
+        return target_weights.astype(float), False
+
+    scale = float(max_turnover_per_rebalance) / turnover
+    capped = previous_on_target + (target_weights - previous_on_target) * scale
+    capped.loc[~capped.index.isin(target_symbols)] = 0.0
+    capped = capped.clip(lower=0.0)
+    return capped.astype(float), True
+
+
 def _apply_max_position_weight(
     weight_row: pd.Series,
     *,
@@ -282,6 +318,125 @@ def _apply_max_position_weight(
     return capped
 
 
+def _compute_eligibility(
+    *,
+    timestamp: pd.Timestamp,
+    scores: pd.DataFrame,
+    close_panel: pd.DataFrame,
+    avg_dollar_volume_panel: pd.DataFrame | None,
+    min_avg_dollar_volume: float | None,
+) -> tuple[pd.Series, pd.Series, pd.Series, pd.Series]:
+    score_row = scores.loc[timestamp]
+    close_row = close_panel.loc[timestamp].reindex(scores.columns)
+    available_mask = close_row.notna()
+    adv_row = (
+        avg_dollar_volume_panel.loc[timestamp].reindex(scores.columns)
+        if avg_dollar_volume_panel is not None and not avg_dollar_volume_panel.empty and timestamp in avg_dollar_volume_panel.index
+        else pd.Series(float("nan"), index=scores.columns)
+    )
+    liquidity_excluded = pd.Series(False, index=scores.columns, dtype=bool)
+    if min_avg_dollar_volume is not None:
+        liquidity_excluded = available_mask & (adv_row.isna() | (adv_row < min_avg_dollar_volume))
+    eligible_mask = available_mask & score_row.notna() & ~liquidity_excluded
+    row_scores = score_row[eligible_mask].sort_values(ascending=False)
+    return score_row, available_mask, liquidity_excluded, row_scores
+
+
+def _build_excluded_reasons(
+    *,
+    symbols: list[str],
+    selected_symbols: list[str],
+    available_mask: pd.Series,
+    liquidity_excluded: pd.Series,
+    score_row: pd.Series,
+    eligible_count: int,
+    min_eligible_symbols: int,
+    excluded_by_sector: list[str],
+) -> dict[str, str]:
+    excluded_reasons: dict[str, str] = {}
+    for symbol in symbols:
+        if symbol in selected_symbols:
+            excluded_reasons[symbol] = "selected"
+        elif not bool(available_mask.get(symbol, False)):
+            excluded_reasons[symbol] = "no_price"
+        elif bool(liquidity_excluded.get(symbol, False)):
+            excluded_reasons[symbol] = "liquidity_filter"
+        elif pd.isna(score_row.get(symbol)):
+            excluded_reasons[symbol] = "insufficient_history"
+        elif eligible_count < min_eligible_symbols:
+            excluded_reasons[symbol] = "below_min_eligible"
+        elif symbol in excluded_by_sector:
+            excluded_reasons[symbol] = "sector_cap"
+        else:
+            excluded_reasons[symbol] = "not_top_n"
+    return excluded_reasons
+
+
+def _build_target_weights(
+    *,
+    timestamp: pd.Timestamp,
+    row_scores: pd.Series,
+    previous_realized_weights: pd.Series,
+    asset_returns: pd.DataFrame,
+    top_n: int,
+    min_eligible_symbols: int,
+    turnover_buffer_bps: float,
+    sector_map: dict[str, str] | None,
+    sector_cap_active: bool,
+    max_names_per_sector: int | None,
+    weighting_scheme: str,
+    vol_lookback_bars: int,
+    max_position_weight: float | None,
+) -> tuple[list[str], pd.Series, dict[str, object]]:
+    eligible_count = int(len(row_scores))
+    selected_symbols: list[str] = []
+    selection_diagnostics = _empty_selection_diagnostics()
+    if eligible_count >= min_eligible_symbols:
+        selected_symbols, selection_diagnostics = _select_symbols_for_rebalance(
+            row_scores=row_scores,
+            previous_weights=previous_realized_weights,
+            top_n=top_n,
+            turnover_buffer_bps=turnover_buffer_bps,
+            sector_map=sector_map if sector_cap_active else None,
+            max_names_per_sector=max_names_per_sector if sector_cap_active else None,
+        )
+
+    ideal_target_weights = _compute_weight_row(
+        timestamp=timestamp,
+        selected=selected_symbols,
+        asset_returns=asset_returns,
+        weighting_scheme=weighting_scheme,
+        vol_lookback_bars=vol_lookback_bars,
+    )
+    ideal_target_weights = _apply_max_position_weight(
+        ideal_target_weights,
+        max_position_weight=max_position_weight,
+    )
+    return selected_symbols, ideal_target_weights, selection_diagnostics
+
+
+def _build_realized_weights(
+    *,
+    previous_realized_weights: pd.Series,
+    target_weights: pd.Series,
+    portfolio_construction_mode: str,
+    max_turnover_per_rebalance: float | None,
+) -> tuple[pd.Series, bool]:
+    if portfolio_construction_mode == "pure_topn":
+        return _apply_turnover_cap_pure_topn(
+            previous_realized_weights,
+            target_weights,
+            max_turnover_per_rebalance=max_turnover_per_rebalance,
+        )
+    if portfolio_construction_mode == "transition":
+        return _apply_turnover_cap(
+            previous_realized_weights,
+            target_weights,
+            max_turnover_per_rebalance=max_turnover_per_rebalance,
+        )
+    raise ValueError(f"Unsupported portfolio_construction_mode: {portfolio_construction_mode}")
+
+
 def build_xsec_topn_weights(
     scores: pd.DataFrame,
     *,
@@ -298,6 +453,7 @@ def build_xsec_topn_weights(
     max_turnover_per_rebalance: float | None = None,
     weighting_scheme: str = "equal",
     vol_lookback_bars: int = 20,
+    portfolio_construction_mode: str = "pure_topn",
     sector_map: dict[str, str] | None = None,
     sector_warning: str | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
@@ -311,7 +467,7 @@ def build_xsec_topn_weights(
     selection_rows: list[dict[str, float]] = []
     weight_rows: list[pd.Series] = []
     diagnostics_rows: list[dict[str, object]] = []
-    previous_weights = pd.Series(0.0, index=scores.columns, dtype=float)
+    previous_realized_weights = pd.Series(0.0, index=scores.columns, dtype=float)
     liquidity_filter_active = min_avg_dollar_volume is not None
     sector_cap_active = max_names_per_sector is not None and sector_map is not None
 
@@ -319,91 +475,92 @@ def build_xsec_topn_weights(
         if row_number % rebalance_bars != 0:
             continue
 
-        score_row = scores.loc[timestamp]
-        close_row = close_panel.loc[timestamp].reindex(scores.columns)
-        available_mask = close_row.notna()
-        adv_row = (
-            avg_dollar_volume_panel.loc[timestamp].reindex(scores.columns)
-            if avg_dollar_volume_panel is not None and not avg_dollar_volume_panel.empty and timestamp in avg_dollar_volume_panel.index
-            else pd.Series(float("nan"), index=scores.columns)
-        )
-        liquidity_excluded = pd.Series(False, index=scores.columns, dtype=bool)
-        if min_avg_dollar_volume is not None:
-            liquidity_excluded = available_mask & (adv_row.isna() | (adv_row < min_avg_dollar_volume))
-
-        eligible_mask = available_mask & score_row.notna() & ~liquidity_excluded
-        row_scores = score_row[eligible_mask].sort_values(ascending=False)
-        eligible_count = int(len(row_scores))
-        selected: list[str] = []
-        selection_diagnostics = {
-            "buffer_blocked_replacements": 0,
-            "sector_cap_excluded_count": 0,
-            "excluded_by_sector": [],
-        }
-        if eligible_count >= min_eligible_symbols:
-            selected, selection_diagnostics = _select_symbols_for_rebalance(
-                row_scores=row_scores,
-                previous_weights=previous_weights,
-                top_n=top_n,
-                turnover_buffer_bps=turnover_buffer_bps,
-                sector_map=sector_map if sector_cap_active else None,
-                max_names_per_sector=max_names_per_sector if sector_cap_active else None,
-            )
-
-        excluded_reasons: dict[str, str] = {}
-        for symbol in scores.columns:
-            if symbol in selected:
-                excluded_reasons[symbol] = "selected"
-            elif not bool(available_mask.get(symbol, False)):
-                excluded_reasons[symbol] = "no_price"
-            elif bool(liquidity_excluded.get(symbol, False)):
-                excluded_reasons[symbol] = "liquidity_filter"
-            elif pd.isna(score_row.get(symbol)):
-                excluded_reasons[symbol] = "insufficient_history"
-            elif eligible_count < min_eligible_symbols:
-                excluded_reasons[symbol] = "below_min_eligible"
-            elif symbol in selection_diagnostics["excluded_by_sector"]:
-                excluded_reasons[symbol] = "sector_cap"
-            else:
-                excluded_reasons[symbol] = "not_top_n"
-
-        ideal_weights = _compute_weight_row(
+        score_row, available_mask, liquidity_excluded, row_scores = _compute_eligibility(
             timestamp=timestamp,
-            selected=selected,
+            scores=scores,
+            close_panel=close_panel,
+            avg_dollar_volume_panel=avg_dollar_volume_panel,
+            min_avg_dollar_volume=min_avg_dollar_volume,
+        )
+        eligible_count = int(len(row_scores))
+        selected_symbols, ideal_target_weights, selection_diagnostics = _build_target_weights(
+            timestamp=timestamp,
+            row_scores=row_scores,
+            previous_realized_weights=previous_realized_weights,
             asset_returns=asset_returns,
+            top_n=top_n,
+            min_eligible_symbols=min_eligible_symbols,
+            turnover_buffer_bps=turnover_buffer_bps,
+            sector_map=sector_map,
+            sector_cap_active=sector_cap_active,
+            max_names_per_sector=max_names_per_sector,
             weighting_scheme=weighting_scheme,
             vol_lookback_bars=vol_lookback_bars,
-        )
-        ideal_weights = _apply_max_position_weight(
-            ideal_weights,
             max_position_weight=max_position_weight,
         )
-        weight_row, turnover_cap_bound = _apply_turnover_cap(
-            previous_weights,
-            ideal_weights,
+
+        realized_weights, turnover_cap_bound = _build_realized_weights(
+            previous_realized_weights=previous_realized_weights,
+            target_weights=ideal_target_weights,
+            portfolio_construction_mode=portfolio_construction_mode,
             max_turnover_per_rebalance=max_turnover_per_rebalance,
         )
-        previous_weights = weight_row.copy()
+        previous_realized_weights = realized_weights.copy()
 
-        selection_row = {symbol: 1.0 if weight_row.loc[symbol] > POSITION_EPSILON else 0.0 for symbol in scores.columns}
+        realized_selected_symbols = realized_weights[realized_weights > POSITION_EPSILON].index.tolist()
+        excluded_reasons = _build_excluded_reasons(
+            symbols=list(scores.columns),
+            selected_symbols=selected_symbols,
+            available_mask=available_mask,
+            liquidity_excluded=liquidity_excluded,
+            score_row=score_row,
+            eligible_count=eligible_count,
+            min_eligible_symbols=min_eligible_symbols,
+            excluded_by_sector=selection_diagnostics["excluded_by_sector"],
+        )
+        realized_holdings_count = int(len(realized_selected_symbols))
+        target_selected_count = int(len(selected_symbols))
+        exceeded_top_n = realized_holdings_count > top_n
+        semantic_warning = ""
+        if portfolio_construction_mode == "pure_topn" and realized_holdings_count > top_n * 2:
+            semantic_warning = (
+                f"pure_topn_realized_holdings_exceeded_threshold:{realized_holdings_count}>{top_n * 2}"
+            )
+
+        selection_row = {
+            symbol: 1.0 if realized_weights.loc[symbol] > POSITION_EPSILON else 0.0
+            for symbol in scores.columns
+        }
         selection_rows.append({"timestamp": timestamp, **selection_row})
-        weight_row.name = timestamp
-        weight_rows.append(weight_row)
+        realized_weights.name = timestamp
+        weight_rows.append(realized_weights)
         diagnostics_rows.append(
             {
                 "timestamp": timestamp,
+                "portfolio_construction_mode": portfolio_construction_mode,
                 "valid_score_count": int(row_scores.notna().sum()),
                 "available_symbol_count": int(available_mask.sum()),
                 "eligible_symbol_count": eligible_count,
-                "selected_symbol_count": int((weight_row > POSITION_EPSILON).sum()),
-                "selected_symbols": ",".join(weight_row[weight_row > POSITION_EPSILON].index.tolist()),
+                "target_selected_count": target_selected_count,
+                "selected_symbol_count": target_selected_count,
+                "realized_holdings_count": realized_holdings_count,
+                "realized_holdings_minus_top_n": int(max(0, realized_holdings_count - top_n)),
+                "holdings_ratio_to_top_n": float(realized_holdings_count / top_n) if top_n > 0 else float("nan"),
+                "realized_holdings_exceeded_top_n": bool(exceeded_top_n),
+                "semantic_warning": semantic_warning,
+                "selected_symbols": ",".join(realized_selected_symbols),
                 "selected_weights": ",".join(
-                    f"{symbol}:{weight_row.loc[symbol]:.6f}"
-                    for symbol in weight_row[weight_row > POSITION_EPSILON].index.tolist()
+                    f"{symbol}:{realized_weights.loc[symbol]:.6f}"
+                    for symbol in realized_selected_symbols
+                ),
+                "target_selected_symbols": ",".join(selected_symbols),
+                "target_selected_weights": ",".join(
+                    f"{symbol}:{ideal_target_weights.loc[symbol]:.6f}"
+                    for symbol in selected_symbols
                 ),
                 "excluded_reasons": ";".join(f"{symbol}:{reason}" for symbol, reason in excluded_reasons.items()),
-                "weight_sum": float(weight_row.sum()),
-                "empty_selection": bool(len(selected) == 0),
+                "weight_sum": float(realized_weights.sum()),
+                "empty_selection": bool(len(selected_symbols) == 0),
                 "liquidity_filter_active": liquidity_filter_active,
                 "sector_cap_active": sector_cap_active,
                 "sector_warning": sector_warning or "",
@@ -426,12 +583,21 @@ def build_xsec_topn_weights(
             [
                 {
                     "timestamp": timestamp,
+                    "portfolio_construction_mode": portfolio_construction_mode,
                     "valid_score_count": 0,
                     "available_symbol_count": 0,
                     "eligible_symbol_count": 0,
+                    "target_selected_count": 0,
                     "selected_symbol_count": 0,
+                    "realized_holdings_count": 0,
+                    "realized_holdings_minus_top_n": 0,
+                    "holdings_ratio_to_top_n": 0.0,
+                    "realized_holdings_exceeded_top_n": False,
+                    "semantic_warning": "",
                     "selected_symbols": "",
                     "selected_weights": "",
+                    "target_selected_symbols": "",
+                    "target_selected_weights": "",
                     "excluded_reasons": "",
                     "weight_sum": 0.0,
                     "empty_selection": True,
@@ -537,11 +703,23 @@ def summarize_xsec_result(
     sector_excluded = rebalance_diagnostics["sector_cap_excluded_count"] if "sector_cap_excluded_count" in rebalance_diagnostics.columns else pd.Series(dtype=float)
     buffer_blocked = rebalance_diagnostics["buffer_blocked_replacements"] if "buffer_blocked_replacements" in rebalance_diagnostics.columns else pd.Series(dtype=float)
     turnover_cap_bound = rebalance_diagnostics["turnover_cap_bound"] if "turnover_cap_bound" in rebalance_diagnostics.columns else pd.Series(dtype=bool)
+    target_selected_count = rebalance_diagnostics["target_selected_count"] if "target_selected_count" in rebalance_diagnostics.columns else pd.Series(dtype=float)
+    realized_holdings_count = rebalance_diagnostics["realized_holdings_count"] if "realized_holdings_count" in rebalance_diagnostics.columns else pd.Series(dtype=float)
+    realized_holdings_minus_top_n = rebalance_diagnostics["realized_holdings_minus_top_n"] if "realized_holdings_minus_top_n" in rebalance_diagnostics.columns else pd.Series(dtype=float)
+    holdings_ratio_to_top_n = rebalance_diagnostics["holdings_ratio_to_top_n"] if "holdings_ratio_to_top_n" in rebalance_diagnostics.columns else pd.Series(dtype=float)
+    exceeded_top_n = rebalance_diagnostics["realized_holdings_exceeded_top_n"] if "realized_holdings_exceeded_top_n" in rebalance_diagnostics.columns else pd.Series(dtype=bool)
+    semantic_warnings = rebalance_diagnostics["semantic_warning"] if "semantic_warning" in rebalance_diagnostics.columns else pd.Series(dtype=object)
     current_weighting_scheme = (
         rebalance_diagnostics["weighting_scheme"].iloc[0]
         if "weighting_scheme" in rebalance_diagnostics.columns and not rebalance_diagnostics.empty
         else "equal"
     )
+    portfolio_construction_mode = (
+        rebalance_diagnostics["portfolio_construction_mode"].iloc[0]
+        if "portfolio_construction_mode" in rebalance_diagnostics.columns and not rebalance_diagnostics.empty
+        else "pure_topn"
+    )
+    semantic_warning_text = ";".join(sorted({str(item) for item in semantic_warnings.fillna("").tolist() if str(item).strip()}))
 
     diagnostics: dict[str, object] = {
         "strategy": strategy,
@@ -551,6 +729,7 @@ def summarize_xsec_result(
         "rebalance_bars": rebalance_bars,
         "cost_per_turnover": cost_per_turnover,
         "benchmark_type": benchmark_type,
+        "portfolio_construction_mode": portfolio_construction_mode,
         "weighting_scheme": current_weighting_scheme,
         "max_position_weight": rebalance_diagnostics["max_position_weight"].iloc[0] if "max_position_weight" in rebalance_diagnostics.columns and not rebalance_diagnostics.empty else None,
         "min_avg_dollar_volume": rebalance_diagnostics["min_avg_dollar_volume"].iloc[0] if "min_avg_dollar_volume" in rebalance_diagnostics.columns and not rebalance_diagnostics.empty else None,
@@ -598,6 +777,12 @@ def summarize_xsec_result(
         "average_eligible_symbols": float(rebalance_diagnostics["eligible_symbol_count"].mean()) if not rebalance_diagnostics.empty else float("nan"),
         "max_eligible_symbols": float(eligible_symbols.max()) if not eligible_symbols.empty else float("nan"),
         "average_selected_symbols": float(rebalance_diagnostics["selected_symbol_count"].mean()) if not rebalance_diagnostics.empty else float("nan"),
+        "average_target_selected_count": float(target_selected_count.mean()) if not target_selected_count.empty else float("nan"),
+        "average_realized_holdings_count": float(realized_holdings_count.mean()) if not realized_holdings_count.empty else float("nan"),
+        "average_realized_holdings_minus_top_n": float(realized_holdings_minus_top_n.mean()) if not realized_holdings_minus_top_n.empty else float("nan"),
+        "average_holdings_ratio_to_top_n": float(holdings_ratio_to_top_n.mean()) if not holdings_ratio_to_top_n.empty else float("nan"),
+        "realized_holdings_exceeded_top_n": bool(exceeded_top_n.fillna(False).astype(bool).any()) if not exceeded_top_n.empty else False,
+        "semantic_warning": semantic_warning_text,
         "percent_empty_rebalances": float(rebalance_diagnostics["empty_selection"].astype(float).mean() * 100.0) if not rebalance_diagnostics.empty else float("nan"),
         "average_liquidity_excluded_symbols": float(liquidity_excluded.mean()) if not liquidity_excluded.empty else 0.0,
         "total_liquidity_excluded_symbols": int(liquidity_excluded.sum()) if not liquidity_excluded.empty else 0,
@@ -647,6 +832,7 @@ def run_xsec_momentum_topn(
     max_turnover_per_rebalance: float | None = None,
     weighting_scheme: str = "equal",
     vol_lookback_bars: int = 20,
+    portfolio_construction_mode: str = "pure_topn",
     benchmark_type: str = "equal_weight",
     active_start: str | pd.Timestamp | None = None,
     active_end: str | pd.Timestamp | None = None,
@@ -678,6 +864,7 @@ def run_xsec_momentum_topn(
         max_turnover_per_rebalance=max_turnover_per_rebalance,
         weighting_scheme=weighting_scheme,
         vol_lookback_bars=vol_lookback_bars,
+        portfolio_construction_mode=portfolio_construction_mode,
         sector_map=sector_map,
         sector_warning=sector_warning,
     )

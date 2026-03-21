@@ -601,6 +601,7 @@ def test_cmd_walkforward_supports_xsec_momentum_topn(monkeypatch, tmp_path: Path
         skip_bars=0,
         top_n=2,
         rebalance_bars=5,
+        portfolio_construction_mode="transition",
         max_position_weight=0.5,
         min_avg_dollar_volume=50_000_000,
         max_names_per_sector=1,
@@ -641,7 +642,7 @@ def test_cmd_walkforward_supports_xsec_momentum_topn(monkeypatch, tmp_path: Path
     assert set(completed_df["lookback_bars"]) == {10}
     assert set(window_df.loc[window_df["window_status"] == "completed", "top_n"]) == {2}
     assert set(completed_df["benchmark_type"]) == {"equal_weight"}
-    assert {"test_gross_return_pct", "test_net_return_pct", "test_cost_drag_return_pct", "annualized_turnover", "total_transaction_cost", "weighting_scheme", "max_position_weight", "min_avg_dollar_volume", "turnover_buffer_bps", "max_turnover_per_rebalance", "average_available_symbols", "turnover_cap_binding_count", "turnover_buffer_blocked_replacements"}.issubset(window_df.columns)
+    assert {"test_gross_return_pct", "test_net_return_pct", "test_cost_drag_return_pct", "annualized_turnover", "total_transaction_cost", "portfolio_construction_mode", "weighting_scheme", "max_position_weight", "min_avg_dollar_volume", "turnover_buffer_bps", "max_turnover_per_rebalance", "average_available_symbols", "turnover_cap_binding_count", "turnover_buffer_blocked_replacements", "target_selected_count", "realized_holdings_count", "holdings_ratio_to_top_n", "realized_holdings_exceeded_top_n", "semantic_warning"}.issubset(window_df.columns)
     assert (completed_df["average_selected_symbols"] >= 0.0).all()
     assert (completed_df["percent_invested"] >= 0.0).all()
     assert (completed_df["average_selected_symbols"] > 0.0).any()
@@ -651,11 +652,12 @@ def test_cmd_walkforward_supports_xsec_momentum_topn(monkeypatch, tmp_path: Path
     assert (summary_df["mean_average_selected_symbols"] > 0.0).all()
     assert (summary_df["mean_percent_empty_rebalances"] >= 0.0).all()
     assert set(summary_df["benchmark_type"]) == {"equal_weight"}
-    assert {"avg_test_gross_return_pct", "avg_test_net_return_pct", "avg_test_cost_drag_return_pct", "mean_annualized_turnover", "total_transaction_cost", "mean_average_available_symbols", "total_turnover_cap_binding_count", "total_turnover_buffer_blocked_replacements"}.issubset(summary_df.columns)
+    assert {"avg_test_gross_return_pct", "avg_test_net_return_pct", "avg_test_cost_drag_return_pct", "mean_annualized_turnover", "total_transaction_cost", "mean_average_available_symbols", "total_turnover_cap_binding_count", "total_turnover_buffer_blocked_replacements", "portfolio_construction_mode", "mean_average_target_selected_count", "mean_average_realized_holdings_count", "mean_average_holdings_ratio_to_top_n", "percent_windows_realized_holdings_exceeded_top_n", "semantic_warning"}.issubset(summary_df.columns)
     assert {"window_index", "timestamp", "selected_symbols", "selected_weights", "eligible_symbol_count", "available_symbol_count", "liquidity_excluded_count"}.issubset(diagnostics_df.columns)
     assert diagnostics_df["empty_selection"].isin([True, False]).all()
     assert diagnostics_df["empty_selection"].eq(False).any()
     assert diagnostics_df["liquidity_filter_active"].all()
+    assert (window_df["portfolio_construction_mode"] == "transition").all()
 
 
 def test_cmd_walkforward_xsec_uses_dynamic_eligibility_for_late_listings(monkeypatch, tmp_path: Path) -> None:
@@ -717,6 +719,7 @@ def test_cmd_walkforward_xsec_uses_dynamic_eligibility_for_late_listings(monkeyp
         skip_bars=0,
         top_n=2,
         rebalance_bars=5,
+        portfolio_construction_mode="pure_topn",
         benchmark="equal_weight",
         entry_lookback=55,
         exit_lookback=20,

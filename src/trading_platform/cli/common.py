@@ -12,6 +12,7 @@ from trading_platform.universes.definitions import UNIVERSE_DEFINITIONS
 UNIVERSES = UNIVERSE_DEFINITIONS
 XSEC_RESEARCH_STRATEGIES = {"xsec_momentum_topn"}
 XSEC_BENCHMARK_CHOICES = ["equal_weight"]
+XSEC_PORTFOLIO_CONSTRUCTION_MODES = ["pure_topn", "transition"]
 
 
 def add_strategy_choice_argument(
@@ -114,6 +115,7 @@ def build_strategy_params(args: argparse.Namespace) -> dict[str, object]:
         "max_turnover_per_rebalance": getattr(args, "max_turnover_per_rebalance", None),
         "weighting_scheme": getattr(args, "weighting_scheme", "equal"),
         "vol_lookback_bars": getattr(args, "vol_lookback_bars", 20),
+        "portfolio_construction_mode": getattr(args, "portfolio_construction_mode", "pure_topn"),
         "entry_lookback": getattr(args, "entry_lookback", 55),
         "exit_lookback": getattr(args, "exit_lookback", 20),
         "momentum_lookback": getattr(args, "momentum_lookback", None),
@@ -139,6 +141,7 @@ def add_xsec_research_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--skip-bars", type=int, default=0, help="Bars to skip before measuring trailing momentum")
     parser.add_argument("--top-n", type=int, default=3, help="Number of symbols to hold for cross-sectional top-N research")
     parser.add_argument("--rebalance-bars", type=int, default=21, help="Rebalance interval in bars for cross-sectional top-N research")
+    parser.add_argument("--portfolio-construction-mode", type=str, default="pure_topn", choices=XSEC_PORTFOLIO_CONSTRUCTION_MODES, help="Use pure_topn for research-clean top-N portfolios or transition for gradual deployable transitions.")
     parser.add_argument("--max-position-weight", type=float, default=None, help="Optional cap on any single xsec position weight.")
     parser.add_argument("--min-avg-dollar-volume", type=float, default=None, help="Optional minimum 20-bar average dollar volume required for xsec eligibility.")
     parser.add_argument("--max-names-per-sector", type=int, default=None, help="Optional maximum number of selected names per sector when sector metadata is available.")
