@@ -63,6 +63,21 @@ def test_grouped_research_run_command_parses_with_optional_dates() -> None:
     assert args.end == "2024-12-31"
 
 
+def test_grouped_research_run_command_parses_preset() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "research",
+            "run",
+            "--preset",
+            "xsec_nasdaq100_momentum_v1_research",
+        ]
+    )
+
+    assert args.research_command == "run"
+    assert args.preset == "xsec_nasdaq100_momentum_v1_research"
+
+
 def test_grouped_research_run_command_parses_breakout_parameters() -> None:
     parser = build_parser()
     args = parser.parse_args(
@@ -301,6 +316,63 @@ def test_grouped_paper_run_command_parses() -> None:
     assert args.top_n == 1
 
 
+def test_grouped_paper_run_command_parses_preset() -> None:
+    parser = build_parser()
+    args = parser.parse_args(["paper", "run", "--preset", "xsec_nasdaq100_momentum_v1_deploy"])
+
+    assert args.paper_command == "run"
+    assert args.preset == "xsec_nasdaq100_momentum_v1_deploy"
+
+
+def test_grouped_paper_run_preset_scheduled_command_parses() -> None:
+    parser = build_parser()
+    args = parser.parse_args(["paper", "run-preset-scheduled", "--preset", "xsec_nasdaq100_momentum_v1_deploy"])
+
+    assert args.paper_command == "run-preset-scheduled"
+    assert args.preset == "xsec_nasdaq100_momentum_v1_deploy"
+
+
+def test_grouped_live_dry_run_command_parses_preset_and_output_dir() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "live",
+            "dry-run",
+            "--preset",
+            "xsec_nasdaq100_momentum_v1_deploy",
+            "--broker",
+            "mock",
+            "--output-dir",
+            "artifacts/live_dry_run",
+        ]
+    )
+
+    assert args.live_command == "dry-run"
+    assert args.preset == "xsec_nasdaq100_momentum_v1_deploy"
+    assert args.broker == "mock"
+    assert args.output_dir == "artifacts/live_dry_run"
+
+
+def test_grouped_live_run_preset_scheduled_command_parses() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "live",
+            "run-preset-scheduled",
+            "--preset",
+            "xsec_nasdaq100_momentum_v1_deploy",
+            "--broker",
+            "mock",
+            "--output-dir",
+            "artifacts/live_dry_run",
+        ]
+    )
+
+    assert args.live_command == "run-preset-scheduled"
+    assert args.preset == "xsec_nasdaq100_momentum_v1_deploy"
+    assert args.output_dir == "artifacts/live_dry_run"
+
+
 def test_legacy_alpha_command_rewrites_cleanly() -> None:
     argv, note = rewrite_legacy_cli_args(["alpha-research", "--symbols", "AAPL"])
 
@@ -447,6 +519,66 @@ def test_grouped_research_walkforward_command_parses_xsec_grid() -> None:
     assert args.vol_lookback_bars == 20
     assert args.cost_bps == 10.0
     assert args.benchmark == "equal_weight"
+
+
+def test_grouped_research_compare_xsec_construction_command_parses() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "research",
+            "compare-xsec-construction",
+            "--universe",
+            "nasdaq100",
+            "--strategy",
+            "xsec_momentum_topn",
+            "--lookback-bars-values",
+            "84",
+            "--skip-bars-values",
+            "21",
+            "--top-n-values",
+            "2",
+            "--rebalance-bars-values",
+            "21",
+            "--train-bars",
+            "756",
+            "--test-bars",
+            "126",
+            "--step-bars",
+            "126",
+            "--portfolio-construction-mode",
+            "pure_topn",
+            "--output-dir",
+            "artifacts/experiments",
+        ]
+    )
+
+    assert args.research_command == "compare-xsec-construction"
+    assert args.universe == "nasdaq100"
+    assert args.strategy == "xsec_momentum_topn"
+    assert args.lookback_bars_values == [84]
+    assert args.skip_bars_values == [21]
+    assert args.top_n_values == [2]
+    assert args.rebalance_bars_values == [21]
+    assert args.portfolio_construction_mode == "pure_topn"
+    assert args.output_dir == "artifacts/experiments"
+
+
+def test_grouped_research_decision_memo_command_parses() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "research",
+            "decision-memo",
+            "--preset",
+            "xsec_nasdaq100_momentum_v1_research",
+            "--deploy-preset",
+            "xsec_nasdaq100_momentum_v1_deploy",
+        ]
+    )
+
+    assert args.research_command == "decision-memo"
+    assert args.preset == "xsec_nasdaq100_momentum_v1_research"
+    assert args.deploy_preset == "xsec_nasdaq100_momentum_v1_deploy"
 
 
 def test_grouped_research_walkforward_command_parses_compatibility_day_aliases() -> None:

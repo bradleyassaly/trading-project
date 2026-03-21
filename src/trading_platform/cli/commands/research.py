@@ -12,6 +12,7 @@ from trading_platform.cli.common import (
     resolve_symbols,
     resolve_turnover_cost,
 )
+from trading_platform.cli.presets import apply_cli_preset
 from trading_platform.execution.policies import ExecutionPolicy
 from trading_platform.experiments.tracker import log_experiment
 from trading_platform.research.diagnostics import activity_note
@@ -185,6 +186,7 @@ def _run_xsec_research(args: argparse.Namespace, symbols: list[str]) -> None:
 
 
 def cmd_research(args: argparse.Namespace) -> None:
+    apply_cli_preset(args)
     symbols = resolve_symbols(args)
     requested_range = f"requested_range={args.start or 'full'}->{args.end or 'full'}"
     print(

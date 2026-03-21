@@ -7,6 +7,7 @@ import pandas as pd
 
 from trading_platform.backtests.engine import run_backtest_on_df
 from trading_platform.cli.common import build_strategy_params, prepare_research_frame, print_symbol_list, resolve_symbols, resolve_turnover_cost
+from trading_platform.cli.presets import apply_cli_preset
 from trading_platform.execution.policies import ExecutionPolicy
 from trading_platform.experiments.tracker import log_experiment
 from trading_platform.research.diagnostics import activity_note
@@ -78,6 +79,7 @@ def _build_param_sets(args: argparse.Namespace) -> tuple[list[dict[str, int | No
 
 
 def cmd_sweep(args: argparse.Namespace) -> None:
+    apply_cli_preset(args)
     symbols = resolve_symbols(args)
     param_sets, grid_warnings = _build_param_sets(args)
     results: list[dict[str, object]] = []

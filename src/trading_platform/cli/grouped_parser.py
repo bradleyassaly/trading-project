@@ -5,7 +5,9 @@ import argparse
 from trading_platform.cli.commands.alpha_research import cmd_alpha_research
 from trading_platform.cli.commands.alpha_research_loop import cmd_alpha_research_loop
 from trading_platform.cli.commands.approved_config_diff import cmd_approved_config_diff
+from trading_platform.cli.commands.compare_xsec_construction import cmd_compare_xsec_construction
 from trading_platform.cli.commands.daily_paper_job import cmd_daily_paper_job
+from trading_platform.cli.commands.decision_memo import cmd_decision_memo
 from trading_platform.cli.commands.execute_live import cmd_execute_live
 from trading_platform.cli.commands.experiments_dashboard import cmd_experiments_dashboard
 from trading_platform.cli.commands.experiments_latest_model import cmd_experiments_latest_model
@@ -16,12 +18,14 @@ from trading_platform.cli.commands.ingest import cmd_ingest
 from trading_platform.cli.commands.list_strategies import cmd_list_strategies
 from trading_platform.cli.commands.list_universes import cmd_list_universes
 from trading_platform.cli.commands.live_dry_run import cmd_live_dry_run
+from trading_platform.cli.commands.live_run_scheduled import cmd_live_run_scheduled
 from trading_platform.cli.commands.multi_universe_alpha_research import (
     cmd_multi_universe_alpha_research,
 )
 from trading_platform.cli.commands.multi_universe_report import cmd_multi_universe_report
 from trading_platform.cli.commands.paper_report import cmd_paper_report
 from trading_platform.cli.commands.paper_run import cmd_paper_run
+from trading_platform.cli.commands.paper_run_scheduled import cmd_paper_run_scheduled
 from trading_platform.cli.commands.pipeline import cmd_pipeline
 from trading_platform.cli.commands.portfolio import cmd_portfolio
 from trading_platform.cli.commands.portfolio_topn import cmd_portfolio_topn
@@ -38,11 +42,15 @@ from trading_platform.cli.commands.walkforward import cmd_walkforward
 from trading_platform.cli.common import (
     add_date_range_arguments,
     add_feature_arguments,
+    add_preset_argument,
     add_shared_symbol_args,
     add_strategy_arguments,
+    add_xsec_live_arguments,
+    add_xsec_paper_arguments,
     add_xsec_research_arguments,
     get_strategy_choices,
 )
+from trading_platform.cli.presets import get_preset_choices
 from trading_platform.strategies.registry import STRATEGY_REGISTRY
 
 
@@ -80,6 +88,8 @@ _RESEARCH_GROUP_COMMANDS = {
     "run",
     "sweep",
     "walkforward",
+    "compare-xsec-construction",
+    "decision-memo",
     "validate-signal",
     "alpha",
     "loop",
@@ -187,13 +197,32 @@ def add_live_control_arguments(parser: argparse.ArgumentParser) -> None:
 
 def _add_common_portfolio_selection_arguments(parser: argparse.ArgumentParser, *, required_top_n: bool) -> None:
     parser.add_argument("--top-n", type=int, required=required_top_n, default=None if required_top_n else 10, help="Number of top-ranked symbols to target")
-    parser.add_argument("--weighting-scheme", type=str, default="equal", choices=["equal", "inverse_vol"], help="How to size selected holdings")
+    parser.add_argument("--weighting-scheme", type=str, default="equal", choices=["equal", "inverse_vol", "inv_vol"], help="How to size selected holdings")
     parser.add_argument("--vol-window", type=int, default=20, help="Rolling volatility window for inverse-vol weighting")
     parser.add_argument("--min-score", type=float, default=None, help="Optional minimum score required for a symbol to be held")
     parser.add_argument("--max-weight", type=float, default=None, help="Optional cap on any single position weight")
     parser.add_argument("--max-names-per-group", type=int, default=None, help="Optional maximum number of holdings allowed per group")
     parser.add_argument("--max-group-weight", type=float, default=None, help="Optional cap on total portfolio weight per group")
     parser.add_argument("--group-map-path", type=str, default=None, help="Optional path to CSV with columns: symbol,group")
+
+
+def _add_paper_run_arguments(parser: argparse.ArgumentParser) -> None:
+    add_shared_symbol_args(parser)
+    add_preset_argument(parser, help_text="Optional versioned preset for validated paper-trading defaults. Explicit CLI flags still override preset values.")
+    add_strategy_arguments(parser, include_xsec=True)
+    add_execution_arguments(parser)
+    add_composite_paper_arguments(parser)
+    add_experiment_tracker_argument(parser)
+    _add_common_portfolio_selection_arguments(parser, required_top_n=False)
+    add_xsec_paper_arguments(parser)
+    parser.add_argument("--timing", type=str, default="next_bar", choices=["same_bar", "next_bar"], help="When scheduled target weights become effective")
+    parser.add_argument("--initial-cash", type=float, default=100_000.0, help="Starting cash used when no paper state exists yet")
+    parser.add_argument("--min-trade-dollars", type=float, default=25.0, help="Skip trades smaller than this dollar threshold")
+    parser.add_argument("--lot-size", type=int, default=1, help="Round target quantities down to this lot size")
+    parser.add_argument("--reserve-cash-pct", type=float, default=0.0, help="Fraction of equity to hold back as cash")
+    parser.add_argument("--state-path", type=str, default="artifacts/paper/paper_state.json", help="JSON file used to persist paper portfolio state")
+    parser.add_argument("--output-dir", type=str, default="artifacts/paper", help="Base directory for paper-run output artifacts")
+    parser.add_argument("--auto-apply-fills", action="store_true", help="Immediately apply simulated fills and update positions/cash")
 
 
 def _add_walkforward_arguments(parser: argparse.ArgumentParser) -> None:
@@ -406,6 +435,10 @@ def _cmd_research_walkforward(args) -> None:
     cmd_walkforward(args)
 
 
+def _cmd_research_compare_xsec_construction(args) -> None:
+    cmd_compare_xsec_construction(args)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="trading-cli",
@@ -440,6 +473,7 @@ def build_parser() -> argparse.ArgumentParser:
     research_subparsers = research_parser.add_subparsers(dest="research_command", required=True)
     research_run = research_subparsers.add_parser("run", help="Run backtests directly or from a config file")
     add_shared_symbol_args(research_run)
+    add_preset_argument(research_run, help_text="Optional versioned preset for validated research configurations. Explicit CLI flags still override preset values.")
     add_strategy_arguments(research_run, include_xsec=True)
     add_xsec_research_arguments(research_run)
     add_date_range_arguments(research_run)
@@ -452,6 +486,7 @@ def build_parser() -> argparse.ArgumentParser:
     research_run.set_defaults(func=_cmd_research_run)
     research_sweep = research_subparsers.add_parser("sweep", help="Run parameter sweeps directly or from a config file")
     add_shared_symbol_args(research_sweep)
+    add_preset_argument(research_sweep, help_text="Optional versioned preset for validated research configurations. Explicit CLI flags still override preset values.")
     add_date_range_arguments(research_sweep)
     add_execution_arguments(research_sweep)
     research_sweep.add_argument("--strategy", type=str, default="sma_cross", choices=get_strategy_choices(include_xsec=True), help="Strategy to sweep")
@@ -483,8 +518,20 @@ def build_parser() -> argparse.ArgumentParser:
     research_sweep.add_argument("--fail-fast", action="store_true", help="Stop immediately on the first sweep error when using --config.")
     research_sweep.set_defaults(func=_cmd_research_sweep)
     research_walkforward = research_subparsers.add_parser("walkforward", help="Run walk-forward validation directly or from a config file")
+    add_preset_argument(research_walkforward, help_text="Optional versioned preset for validated research configurations. Explicit CLI flags still override preset values.")
     _add_walkforward_arguments(research_walkforward)
     research_walkforward.set_defaults(func=_cmd_research_walkforward)
+    research_compare_xsec = research_subparsers.add_parser("compare-xsec-construction", help="Compare pure_topn versus transition xsec walk-forward behavior")
+    add_preset_argument(research_compare_xsec, help_text="Optional versioned preset for the validated xsec family. Explicit CLI flags still override preset values.")
+    _add_walkforward_arguments(research_compare_xsec)
+    research_compare_xsec.add_argument("--output-dir", type=str, default="artifacts/experiments", help="Directory where xsec construction comparison artifacts will be written.")
+    research_compare_xsec.set_defaults(func=_cmd_research_compare_xsec_construction)
+    research_decision_memo = research_subparsers.add_parser("decision-memo", help="Generate a durable strategy decision memo for selected presets")
+    add_preset_argument(research_decision_memo, help_text="Research preset to document in the decision memo.")
+    research_decision_memo.add_argument("--deploy-preset", type=str, required=True, choices=get_preset_choices(), help="Deployable overlay preset to document alongside the research preset.")
+    research_decision_memo.add_argument("--output-dir", type=str, default="artifacts/experiments", help="Directory where the decision memo artifacts will be written.")
+    research_decision_memo.add_argument("--output-stem", type=str, default=None, help="Optional filename stem for the decision memo artifacts.")
+    research_decision_memo.set_defaults(func=cmd_decision_memo)
     research_validate_signal = research_subparsers.add_parser("validate-signal", help="Validate a signal on one ticker or a small universe with per-symbol reports")
     _add_validate_signal_arguments(research_validate_signal)
     research_validate_signal.set_defaults(func=cmd_validate_signal)
@@ -543,21 +590,11 @@ def build_parser() -> argparse.ArgumentParser:
     paper_parser = subparsers.add_parser("paper", help="Paper trading workflows")
     paper_subparsers = paper_parser.add_subparsers(dest="paper_command", required=True)
     paper_run = paper_subparsers.add_parser("run", help="Run one paper-trading cycle and write state/artifacts")
-    add_shared_symbol_args(paper_run)
-    add_strategy_arguments(paper_run)
-    add_execution_arguments(paper_run)
-    add_composite_paper_arguments(paper_run)
-    add_experiment_tracker_argument(paper_run)
-    _add_common_portfolio_selection_arguments(paper_run, required_top_n=True)
-    paper_run.add_argument("--timing", type=str, default="next_bar", choices=["same_bar", "next_bar"], help="When scheduled target weights become effective")
-    paper_run.add_argument("--initial-cash", type=float, default=100_000.0, help="Starting cash used when no paper state exists yet")
-    paper_run.add_argument("--min-trade-dollars", type=float, default=25.0, help="Skip trades smaller than this dollar threshold")
-    paper_run.add_argument("--lot-size", type=int, default=1, help="Round target quantities down to this lot size")
-    paper_run.add_argument("--reserve-cash-pct", type=float, default=0.0, help="Fraction of equity to hold back as cash")
-    paper_run.add_argument("--state-path", type=str, default="artifacts/paper/paper_state.json", help="JSON file used to persist paper portfolio state")
-    paper_run.add_argument("--output-dir", type=str, default="artifacts/paper", help="Base directory for paper-run output artifacts")
-    paper_run.add_argument("--auto-apply-fills", action="store_true", help="Immediately apply simulated fills and update positions/cash")
+    _add_paper_run_arguments(paper_run)
     paper_run.set_defaults(func=cmd_paper_run)
+    paper_run_scheduled = paper_subparsers.add_parser("run-preset-scheduled", help="Task-Scheduler-friendly wrapper around paper run for versioned presets")
+    _add_paper_run_arguments(paper_run_scheduled)
+    paper_run_scheduled.set_defaults(func=cmd_paper_run_scheduled)
 
     paper_daily = paper_subparsers.add_parser("daily", help="Run the daily paper trading workflow")
     add_composite_paper_arguments(paper_daily)
@@ -595,7 +632,16 @@ def build_parser() -> argparse.ArgumentParser:
     live_subparsers = live_parser.add_subparsers(dest="live_command", required=True)
     live_dry_run = live_subparsers.add_parser("dry-run", help="Compute live broker rebalance orders without sending them")
     _add_live_base_arguments(live_dry_run)
+    add_preset_argument(live_dry_run, help_text="Optional versioned preset for validated live dry-run defaults. Explicit CLI flags still override preset values.")
+    add_xsec_live_arguments(live_dry_run)
+    live_dry_run.add_argument("--output-dir", default="artifacts/live_dry_run", help="Directory for live dry-run preview artifacts.")
     live_dry_run.set_defaults(func=cmd_live_dry_run)
+    live_run_scheduled = live_subparsers.add_parser("run-preset-scheduled", help="Task-Scheduler-friendly wrapper around live dry-run for versioned presets")
+    _add_live_base_arguments(live_run_scheduled)
+    add_preset_argument(live_run_scheduled, help_text="Versioned preset used for the scheduled live dry-run workflow.")
+    add_xsec_live_arguments(live_run_scheduled)
+    live_run_scheduled.add_argument("--output-dir", default="artifacts/live_dry_run", help="Directory for scheduled live dry-run artifacts.")
+    live_run_scheduled.set_defaults(func=cmd_live_run_scheduled)
     live_validate = live_subparsers.add_parser("validate", help="Run live execution control checks and write artifacts without submitting orders")
     _add_live_base_arguments(live_validate)
     add_live_control_arguments(live_validate)

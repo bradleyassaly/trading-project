@@ -10,19 +10,30 @@ import pandas as pd
 @dataclass(frozen=True)
 class PaperTradingConfig:
     symbols: list[str]
+    preset_name: str | None = None
+    universe_name: str | None = None
     signal_source: str = "legacy"
     strategy: str = "sma_cross"
     fast: int | None = None
     slow: int | None = None
     lookback: int | None = None
+    lookback_bars: int | None = None
+    skip_bars: int = 0
     top_n: int = 10
     weighting_scheme: str = "equal"
     vol_window: int = 20
+    rebalance_bars: int | None = None
+    portfolio_construction_mode: str = "pure_topn"
+    max_position_weight: float | None = None
     min_score: float | None = None
     max_weight: float | None = None
     max_names_per_group: int | None = None
     max_group_weight: float | None = None
     group_map_path: str | None = None
+    max_names_per_sector: int | None = None
+    turnover_buffer_bps: float = 0.0
+    max_turnover_per_rebalance: float | None = None
+    benchmark: str | None = None
     rebalance_frequency: str = "daily"
     timing: str = "next_bar"
     initial_cash: float = 100_000.0

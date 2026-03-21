@@ -8,10 +8,11 @@ from typing import Any
 import pandas as pd
 
 from trading_platform.construction.service import build_top_n_portfolio_weights
+from trading_platform.cli.common import normalize_paper_weighting_scheme
 from trading_platform.execution.policies import ExecutionPolicy
 from trading_platform.execution.transforms import build_executed_weights
 from trading_platform.metadata.groups import build_group_series
-from trading_platform.signals.loaders import load_feature_frame
+from trading_platform.signals.loaders import load_feature_frame, resolve_feature_frame_path
 from trading_platform.signals.registry import SIGNAL_REGISTRY
 from trading_platform.broker.base import BrokerOrder
 from trading_platform.broker.paper_broker import PaperBroker, PaperBrokerConfig
@@ -30,6 +31,8 @@ from trading_platform.paper.composite import (
     compute_latest_composite_target_weights,
 )
 from trading_platform.paper.ledger import append_equity_snapshot, append_fills
+from trading_platform.research.xsec_momentum import run_xsec_momentum_topn
+from trading_platform.signals.common import normalize_price_frame
 
 
 class JsonPaperStateStore:
@@ -67,6 +70,106 @@ class JsonPaperStateStore:
             "last_targets": state.last_targets,
         }
         self.path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+def _load_xsec_prepared_frames(
+    symbols: list[str],
+) -> tuple[dict[str, dict[str, object]], list[str], dict[str, str]]:
+    prepared_frames: dict[str, dict[str, object]] = {}
+    skipped_symbols: list[str] = []
+    skip_reasons: dict[str, str] = {}
+
+    for symbol in symbols:
+        try:
+            prepared_frames[symbol] = {
+                "df": load_feature_frame(symbol),
+                "path": Path(resolve_feature_frame_path(symbol)),
+            }
+        except Exception as exc:
+            skipped_symbols.append(symbol)
+            skip_reasons[symbol] = repr(exc)
+
+    if not prepared_frames:
+        raise ValueError(
+            f"No valid symbol frames available for xsec paper trading. Reasons: {skip_reasons}"
+        )
+
+    return prepared_frames, skipped_symbols, skip_reasons
+
+
+def _compute_latest_xsec_target_weights(
+    *,
+    config: PaperTradingConfig,
+) -> tuple[str, dict[str, float], dict[str, float], dict[str, float], dict[str, Any], list[str]]:
+    prepared_frames, skipped_symbols, skip_reasons = _load_xsec_prepared_frames(config.symbols)
+    result = run_xsec_momentum_topn(
+        prepared_frames=prepared_frames,
+        lookback_bars=int(config.lookback_bars or 84),
+        skip_bars=int(config.skip_bars or 0),
+        top_n=int(config.top_n),
+        rebalance_bars=int(config.rebalance_bars or 21),
+        commission=0.0,
+        cash=float(config.initial_cash),
+        max_position_weight=config.max_position_weight,
+        min_avg_dollar_volume=config.min_avg_dollar_volume,
+        max_names_per_sector=config.max_names_per_sector,
+        turnover_buffer_bps=float(config.turnover_buffer_bps),
+        max_turnover_per_rebalance=config.max_turnover_per_rebalance,
+        weighting_scheme="inv_vol" if config.weighting_scheme == "inverse_vol" else config.weighting_scheme,
+        vol_lookback_bars=int(config.vol_window),
+        portfolio_construction_mode=config.portfolio_construction_mode,
+        benchmark_type="equal_weight",
+    )
+    as_of_ts = pd.Timestamp(result.target_weights.index.max())
+    as_of = as_of_ts.date().isoformat()
+    latest_target_row = result.target_weights.loc[as_of_ts].fillna(0.0)
+    latest_target_weights = {
+        symbol: float(weight)
+        for symbol, weight in latest_target_row.items()
+        if abs(float(weight)) > 0.0
+    }
+    latest_scores_row = result.scores.loc[as_of_ts].dropna()
+    latest_scores = {
+        symbol: float(score)
+        for symbol, score in latest_scores_row.items()
+    }
+    latest_prices: dict[str, float] = {}
+    for symbol, prepared in prepared_frames.items():
+        normalized = normalize_price_frame(prepared["df"])
+        latest_price = pd.to_numeric(normalized["close"], errors="coerce").dropna()
+        if not latest_price.empty:
+            latest_prices[symbol] = float(latest_price.iloc[-1])
+
+    if not result.rebalance_diagnostics.empty:
+        latest_diag_row = result.rebalance_diagnostics.loc[:as_of_ts].iloc[-1].to_dict()
+        latest_diag_timestamp = str(pd.Timestamp(result.rebalance_diagnostics.loc[:as_of_ts].index[-1]).date())
+    else:
+        latest_diag_row = {}
+        latest_diag_timestamp = as_of
+
+    target_diagnostics = {
+        "preset_name": config.preset_name,
+        "strategy": config.strategy,
+        "portfolio_construction_mode": config.portfolio_construction_mode,
+        "selected_symbols": latest_diag_row.get("selected_symbols", ""),
+        "target_selected_symbols": latest_diag_row.get("target_selected_symbols", ""),
+        "realized_holdings_count": latest_diag_row.get("realized_holdings_count"),
+        "realized_holdings_minus_top_n": latest_diag_row.get("realized_holdings_minus_top_n"),
+        "average_gross_exposure": result.summary.get("average_gross_exposure"),
+        "liquidity_excluded_count": latest_diag_row.get("liquidity_excluded_count"),
+        "sector_cap_excluded_count": latest_diag_row.get("sector_cap_excluded_count"),
+        "turnover_cap_bound": latest_diag_row.get("turnover_cap_bound"),
+        "turnover_cap_binding_count": result.summary.get("turnover_cap_binding_count"),
+        "turnover_buffer_blocked_replacements": result.summary.get("turnover_buffer_blocked_replacements"),
+        "semantic_warning": latest_diag_row.get("semantic_warning", ""),
+        "rebalance_timestamp": latest_diag_timestamp,
+        "weight_sum": latest_diag_row.get("weight_sum"),
+        "weighting_scheme": result.summary.get("weighting_scheme"),
+        "target_selected_count": latest_diag_row.get("target_selected_count"),
+        "summary": result.summary,
+        "skip_reasons": skip_reasons,
+    }
+    return as_of, latest_target_weights.copy(), latest_target_weights, latest_prices, latest_scores, target_diagnostics, skipped_symbols
 
 
 def bootstrap_paper_portfolio_state(
@@ -162,7 +265,7 @@ def compute_latest_target_weights(
         scores=snapshot.scores,
         asset_returns=snapshot.asset_returns,
         top_n=config.top_n,
-        weighting_scheme=config.weighting_scheme,
+        weighting_scheme=normalize_paper_weighting_scheme(config.weighting_scheme),
         vol_window=config.vol_window,
         min_score=config.min_score,
         max_weight=config.max_weight,
@@ -357,6 +460,24 @@ def run_paper_trading_cycle(
             for key, value in composite_targets.diagnostics.items()
             if key != "target_construction"
         }
+    elif config.strategy == "xsec_momentum_topn":
+        (
+            as_of,
+            latest_scheduled_weights,
+            latest_effective_weights,
+            latest_prices,
+            latest_scores,
+            target_diagnostics,
+            skipped_symbols,
+        ) = _compute_latest_xsec_target_weights(config=config)
+        snapshot = PaperSignalSnapshot(
+            asset_returns=pd.DataFrame(),
+            scores=pd.DataFrame(),
+            closes=pd.DataFrame(),
+            skipped_symbols=skipped_symbols,
+            metadata={"mode": "xsec"},
+        )
+        extra_diagnostics = {}
     else:
         snapshot = load_signal_snapshot(
             symbols=config.symbols,
@@ -433,6 +554,7 @@ def run_paper_trading_cycle(
 
     diagnostics = {
         "signal_source": config.signal_source,
+        "preset_name": config.preset_name,
         "target_construction": target_diagnostics,
         "order_generation": order_result.diagnostics,
         "risk_checks": {
@@ -467,7 +589,7 @@ def write_paper_trading_artifacts(
 
     orders_path = output_path / "paper_orders.csv"
     fills_path = output_path / "paper_fills.csv"
-    equity_curve_path = output_path / "paper_equity_curve.csv"
+    equity_snapshot_path = output_path / "paper_equity_snapshot.csv"
     positions_path = output_path / "paper_positions.csv"
     targets_path = output_path / "paper_target_weights.csv"
     summary_path = output_path / "paper_summary.json"
@@ -544,7 +666,7 @@ def write_paper_trading_artifacts(
                 "position_count": len(result.state.positions),
             }
         ]
-    ).to_csv(equity_curve_path, index=False)
+    ).to_csv(equity_snapshot_path, index=False)
 
     summary_payload = {
         "as_of": result.as_of,
@@ -561,7 +683,7 @@ def write_paper_trading_artifacts(
     paths = {
         "orders_path": orders_path,
         "fills_path": fills_path,
-        "equity_curve_path": equity_curve_path,
+        "equity_snapshot_path": equity_snapshot_path,
         "positions_path": positions_path,
         "targets_path": targets_path,
         "summary_path": summary_path,

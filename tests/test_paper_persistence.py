@@ -1,0 +1,139 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pandas as pd
+
+from trading_platform.paper.models import (
+    PaperOrder,
+    PaperPortfolioState,
+    PaperPosition,
+    PaperTradingConfig,
+    PaperTradingRunResult,
+)
+from trading_platform.paper.persistence import persist_paper_run_outputs
+
+
+def _build_result(*, equity: float = 10_100.0) -> PaperTradingRunResult:
+    state = PaperPortfolioState(
+        as_of="2025-01-21",
+        cash=9_000.0,
+        positions={
+            "AAPL": PaperPosition(symbol="AAPL", quantity=10, avg_price=100.0, last_price=110.0),
+        },
+    )
+    state.cash = equity - state.gross_market_value
+    return PaperTradingRunResult(
+        as_of="2025-01-21",
+        state=state,
+        latest_prices={"AAPL": 110.0, "MSFT": 200.0},
+        latest_scores={"AAPL": 0.1, "MSFT": 0.05},
+        latest_target_weights={"AAPL": 0.5, "MSFT": 0.5},
+        scheduled_target_weights={"AAPL": 0.5, "MSFT": 0.5},
+        orders=[
+            PaperOrder(
+                symbol="MSFT",
+                side="BUY",
+                quantity=5,
+                reference_price=200.0,
+                target_weight=0.5,
+                current_quantity=0,
+                target_quantity=5,
+                notional=1_000.0,
+                reason="rebalance_to_target",
+            )
+        ],
+        fills=[],
+        skipped_symbols=[],
+        diagnostics={
+            "target_construction": {
+                "rebalance_timestamp": "2025-01-21",
+                "selected_symbols": "AAPL,MSFT",
+                "target_selected_symbols": "AAPL,MSFT",
+                "realized_holdings_count": 2,
+                "target_selected_count": 2,
+                "realized_holdings_minus_top_n": 0,
+                "average_gross_exposure": 1.0,
+                "liquidity_excluded_count": 0,
+                "sector_cap_excluded_count": 0,
+                "turnover_cap_binding_count": 3,
+                "turnover_buffer_blocked_replacements": 0,
+                "semantic_warning": "",
+                "summary": {"mean_turnover": 0.12},
+                "skip_reasons": {},
+            },
+            "order_generation": {"equity": 10_000.0},
+        },
+    )
+
+
+def test_persist_paper_run_outputs_writes_ledgers_and_latest_summaries(tmp_path: Path) -> None:
+    config = PaperTradingConfig(
+        symbols=["AAPL", "MSFT"],
+        preset_name="xsec_nasdaq100_momentum_v1_deploy",
+        universe_name="nasdaq100",
+        strategy="xsec_momentum_topn",
+        top_n=2,
+        portfolio_construction_mode="transition",
+        benchmark="equal_weight",
+    )
+
+    paths, health_checks, summary = persist_paper_run_outputs(
+        result=_build_result(),
+        config=config,
+        output_dir=tmp_path,
+        state_file_preexisting=False,
+    )
+
+    assert (tmp_path / "paper_equity_curve.csv").exists()
+    assert (tmp_path / "paper_positions_history.csv").exists()
+    assert (tmp_path / "paper_orders_history.csv").exists()
+    assert (tmp_path / "paper_run_summary.csv").exists()
+    assert (tmp_path / "paper_run_summary_latest.json").exists()
+    assert (tmp_path / "paper_run_summary_latest.md").exists()
+    assert (tmp_path / "paper_health_checks.csv").exists()
+    assert summary["preset_name"] == "xsec_nasdaq100_momentum_v1_deploy"
+    assert any(item["check_name"] == "state_file" for item in health_checks)
+
+    latest_payload = json.loads((tmp_path / "paper_run_summary_latest.json").read_text(encoding="utf-8"))
+    assert latest_payload["summary"]["portfolio_construction_mode"] == "transition"
+    assert "health_checks" in latest_payload
+
+
+def test_persist_paper_run_outputs_is_idempotent_for_same_run_key(tmp_path: Path) -> None:
+    config = PaperTradingConfig(
+        symbols=["AAPL", "MSFT"],
+        preset_name="xsec_nasdaq100_momentum_v1_deploy",
+        universe_name="nasdaq100",
+        strategy="xsec_momentum_topn",
+        top_n=2,
+        portfolio_construction_mode="transition",
+        benchmark="equal_weight",
+    )
+
+    persist_paper_run_outputs(
+        result=_build_result(equity=10_100.0),
+        config=config,
+        output_dir=tmp_path,
+        state_file_preexisting=True,
+    )
+    persist_paper_run_outputs(
+        result=_build_result(equity=10_250.0),
+        config=config,
+        output_dir=tmp_path,
+        state_file_preexisting=True,
+    )
+
+    summary_df = pd.read_csv(tmp_path / "paper_run_summary.csv")
+    equity_df = pd.read_csv(tmp_path / "paper_equity_curve.csv")
+    positions_df = pd.read_csv(tmp_path / "paper_positions_history.csv")
+    orders_df = pd.read_csv(tmp_path / "paper_orders_history.csv")
+    health_df = pd.read_csv(tmp_path / "paper_health_checks.csv")
+
+    assert len(summary_df) == 1
+    assert len(equity_df) == 1
+    assert len(positions_df) == 1
+    assert len(orders_df) == 1
+    assert len(health_df["check_name"].unique()) == len(health_df)
+    assert float(summary_df.iloc[0]["current_equity"]) == 10_250.0

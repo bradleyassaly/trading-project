@@ -134,3 +134,68 @@ def save_walkforward_html_report(
 
     report_path.write_text("\n".join(parts), encoding="utf-8")
     return report_path
+
+
+def save_xsec_construction_comparison_html_report(
+    *,
+    comparison_summary_df: pd.DataFrame,
+    comparison_window_df: pd.DataFrame,
+    output_path: Path,
+    config_items: list[tuple[str, object]],
+) -> Path:
+    report_path = output_path.with_name(output_path.stem + "_report.html")
+
+    summary_html = comparison_summary_df.to_html(index=False, border=0)
+    windows_html = comparison_window_df.to_html(index=False, border=0)
+    config_html = "".join(
+        f"<li><strong>{key}</strong>: {value}</li>"
+        for key, value in config_items
+    )
+
+    def _winner(metric: str, *, higher_is_better: bool = True) -> str:
+        if metric not in comparison_summary_df.columns:
+            return "n/a"
+        working = comparison_summary_df[["portfolio_construction_mode", metric]].dropna()
+        if working.empty:
+            return "n/a"
+        idx = working[metric].idxmax() if higher_is_better else working[metric].idxmin()
+        row = working.loc[idx]
+        return f"{row['portfolio_construction_mode']} ({row[metric]})"
+
+    interpretation = [
+        f"<li>Better average excess return: {_winner('avg_excess_return_pct', higher_is_better=True)}</li>",
+        f"<li>Lower turnover: {_winner('mean_turnover', higher_is_better=False)}</li>",
+        f"<li>Lower drawdown: {_winner('worst_test_max_drawdown_pct', higher_is_better=False)}</li>",
+        f"<li>Lower realized holdings drift: {_winner('mean_average_realized_holdings_count', higher_is_better=False)}</li>",
+    ]
+
+    parts = [
+        "<html>",
+        "<head>",
+        "<title>Xsec Construction Comparison Report</title>",
+        "<style>",
+        "body { font-family: Arial, sans-serif; margin: 24px; }",
+        "h1, h2 { margin-top: 24px; }",
+        "table { border-collapse: collapse; width: 100%; margin-top: 12px; }",
+        "th, td { border: 1px solid #ccc; padding: 8px; text-align: left; }",
+        "th { background: #f5f5f5; }",
+        ".metric-win { background: #e6f4ea; }",
+        ".metric-loss { background: #fce8e6; }",
+        "</style>",
+        "</head>",
+        "<body>",
+        "<h1>Xsec Portfolio Construction Comparison</h1>",
+        "<h2>Config</h2>",
+        f"<ul>{config_html}</ul>",
+        "<h2>Aggregate Comparison</h2>",
+        summary_html,
+        "<h2>Interpretation</h2>",
+        f"<ul>{''.join(interpretation)}</ul>",
+        "<h2>Per-Window Comparison</h2>",
+        windows_html,
+        "</body>",
+        "</html>",
+    ]
+
+    report_path.write_text("\n".join(parts), encoding="utf-8")
+    return report_path

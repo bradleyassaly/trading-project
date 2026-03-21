@@ -109,6 +109,61 @@ def test_run_paper_trading_cycle_builds_orders(monkeypatch, tmp_path: Path) -> N
     assert set(result.latest_prices) == {"AAPL", "MSFT", "NVDA"}
 
 
+def test_run_paper_trading_cycle_supports_xsec_strategy(monkeypatch, tmp_path: Path) -> None:
+    def fake_load_feature_frame(symbol: str) -> pd.DataFrame:
+        dates = pd.date_range("2025-01-01", periods=40, freq="D")
+        close_map = {
+            "AAPL": [100.0 + idx for idx in range(40)],
+            "MSFT": [100.0 + (idx * 0.5) for idx in range(40)],
+            "NVDA": [100.0 + (idx * 1.5) for idx in range(40)],
+        }
+        return pd.DataFrame(
+            {
+                "timestamp": dates,
+                "close": close_map[symbol],
+                "volume": [1_000_000.0] * 40,
+            }
+        )
+
+    monkeypatch.setattr(
+        "trading_platform.paper.service.load_feature_frame",
+        fake_load_feature_frame,
+    )
+    monkeypatch.setattr(
+        "trading_platform.paper.service.resolve_feature_frame_path",
+        lambda symbol: str(tmp_path / f"{symbol}.parquet"),
+    )
+
+    state_store = JsonPaperStateStore(tmp_path / "paper_state.json")
+    config = PaperTradingConfig(
+        preset_name="xsec_nasdaq100_momentum_v1_deploy",
+        symbols=["AAPL", "MSFT", "NVDA"],
+        strategy="xsec_momentum_topn",
+        lookback_bars=5,
+        skip_bars=1,
+        top_n=2,
+        rebalance_bars=5,
+        weighting_scheme="inv_vol",
+        min_avg_dollar_volume=10_000.0,
+        max_turnover_per_rebalance=0.5,
+        portfolio_construction_mode="transition",
+        initial_cash=10_000.0,
+        min_trade_dollars=1.0,
+    )
+
+    result = run_paper_trading_cycle(
+        config=config,
+        state_store=state_store,
+        auto_apply_fills=False,
+    )
+
+    assert result.diagnostics["preset_name"] == "xsec_nasdaq100_momentum_v1_deploy"
+    assert result.diagnostics["target_construction"]["portfolio_construction_mode"] == "transition"
+    assert "rebalance_timestamp" in result.diagnostics["target_construction"]
+    assert result.latest_target_weights
+    assert set(result.latest_prices) == {"AAPL", "MSFT", "NVDA"}
+
+
 def test_execution_policy_shift_is_reflected_in_effective_weights() -> None:
     raw_weights = pd.DataFrame(
         {

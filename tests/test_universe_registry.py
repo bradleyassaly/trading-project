@@ -12,7 +12,9 @@ def test_list_universes_contains_expected_names() -> None:
     assert "magnificent7" in universes
     assert "test_largecap" in universes
     assert "sp500" in universes
+    assert "sp100" in universes
     assert "nasdaq100" in universes
+    assert "nasdaq100_current" in universes
     assert "liquid_top_100" in universes
 
 
@@ -34,9 +36,16 @@ def test_get_debug_universe_symbols_returns_expected_members() -> None:
 
 
 def test_get_real_universes_returns_expected_members() -> None:
+    sp100 = get_universe_symbols("sp100")
     sp500 = get_universe_symbols("sp500")
     nasdaq100 = get_universe_symbols("nasdaq100")
+    nasdaq100_current = get_universe_symbols("nasdaq100_current")
     liquid = get_universe_symbols("liquid_top_100")
+
+    assert "AAPL" in sp100
+    assert "MSFT" in sp100
+    assert "AMZN" in sp100
+    assert len(sp100) >= 90
 
     assert "AAPL" in sp500
     assert "MSFT" in sp500
@@ -46,7 +55,12 @@ def test_get_real_universes_returns_expected_members() -> None:
     assert "AAPL" in nasdaq100
     assert "MSFT" in nasdaq100
     assert "AMZN" in nasdaq100
-    assert len(nasdaq100) >= 90
+    assert len(nasdaq100) == 100
+
+    assert nasdaq100_current == nasdaq100
+    assert "PLTR" in nasdaq100_current
+    assert "WMT" in nasdaq100_current
+    assert "ANSS" not in nasdaq100_current
 
     assert "AAPL" in liquid
     assert "SPY" not in liquid

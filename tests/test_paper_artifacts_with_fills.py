@@ -64,10 +64,10 @@ def test_write_paper_trading_artifacts_writes_fills_and_equity_curve(tmp_path: P
     paths = write_paper_trading_artifacts(result=result, output_dir=tmp_path)
 
     assert paths["fills_path"].exists()
-    assert paths["equity_curve_path"].exists()
+    assert paths["equity_snapshot_path"].exists()
 
     fills_df = pd.read_csv(paths["fills_path"])
-    equity_df = pd.read_csv(paths["equity_curve_path"])
+    equity_df = pd.read_csv(paths["equity_snapshot_path"])
 
     assert len(fills_df) == 1
     assert fills_df.iloc[0]["symbol"] == "AAPL"

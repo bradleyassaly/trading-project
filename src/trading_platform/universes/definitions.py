@@ -17,6 +17,19 @@ def _normalized(symbols: list[str]) -> list[str]:
 
 
 def load_universe_definitions() -> dict[str, list[str]]:
+    nasdaq100_current = _normalized([
+        "AAPL", "ABNB", "ADBE", "ADI", "ADP", "ADSK", "AEP", "ALNY", "AMAT", "AMD",
+        "AMGN", "AMZN", "APP", "ARM", "ASML", "AVGO", "AXON", "AZN", "BKNG", "CCEP",
+        "CDNS", "CEG", "CHTR", "CMCSA", "COST", "CPRT", "CRWD", "CSCO", "CSGP", "CSX",
+        "CTAS", "CTSH", "DASH", "DDOG", "DXCM", "EA", "EXC", "FAST", "FER", "FTNT",
+        "GEHC", "GILD", "GOOG", "GOOGL", "HON", "IDXX", "INSM", "INTC", "INTU", "ISRG",
+        "KDP", "KHC", "KLAC", "LIN", "LRCX", "MAR", "MCHP", "MDLZ", "MELI", "META",
+        "MNST", "MPWR", "MRVL", "MSFT", "MSTR", "MU", "NFLX", "NVDA", "NXPI", "ODFL",
+        "ORLY", "PANW", "PAYX", "PCAR", "PDD", "PEP", "PLTR", "PYPL", "QCOM", "REGN",
+        "ROP", "ROST", "SBUX", "SHOP", "SNPS", "STX", "TEAM", "TMUS", "TRI", "TSLA",
+        "TTWO", "TXN", "VRSK", "VRTX", "WBD", "WDAY", "WDC", "WMT", "XEL", "ZS",
+    ])
+
     return {
         "dow30": _normalized([
             "AAPL", "AMGN", "AMZN", "AXP", "BA", "CAT", "CRM", "CSCO", "CVX", "DIS",
@@ -33,17 +46,21 @@ def load_universe_definitions() -> dict[str, list[str]]:
             "AAPL", "MSFT", "NVDA", "AMZN", "META",
             "GOOGL", "JPM", "XOM", "UNH", "COST",
         ]),
-        "nasdaq100": _normalized([
-            "AAPL", "ABNB", "ADBE", "ADI", "ADP", "ADSK", "AEP", "AMAT", "AMD", "AMGN",
-            "AMZN", "ANSS", "APP", "ARM", "ASML", "AVGO", "AXON", "AZN", "BIIB", "BKNG",
-            "CDNS", "CEG", "CHTR", "CMCSA", "COST", "CPRT", "CRWD", "CSCO", "CSX", "CTAS",
-            "CTSH", "DASH", "DDOG", "DXCM", "EA", "EXC", "FAST", "FTNT", "GEHC", "GFS",
-            "GILD", "GOOG", "GOOGL", "HON", "IDXX", "INTC", "INTU", "ISRG", "KDP", "KHC",
-            "KLAC", "LIN", "LRCX", "LULU", "MAR", "MCHP", "MDLZ", "MELI", "META", "MNST",
-            "MRVL", "MSFT", "MSTR", "MU", "NFLX", "NVDA", "NXPI", "ODFL", "ON", "ORLY",
-            "PANW", "PAYX", "PCAR", "PDD", "PEP", "PYPL", "QCOM", "REGN", "ROP", "ROST",
-            "SBUX", "SNPS", "TEAM", "TMUS", "TSLA", "TTD", "TTWO", "TXN", "VRSK", "VRTX",
-            "WBD", "WDAY", "XEL", "ZS",
+        # Current-survivor approximation of Nasdaq-100 membership.
+        # This is explicit and reproducible, but not point-in-time historical membership.
+        "nasdaq100": list(nasdaq100_current),
+        "nasdaq100_current": list(nasdaq100_current),
+        "sp100": _normalized([
+            "AAPL", "ABBV", "ABT", "ACN", "ADBE", "AIG", "AMD", "AMGN", "AMT", "AMZN",
+            "AVGO", "AXP", "BA", "BAC", "BIIB", "BK", "BKNG", "BLK", "BMY", "BRK.B",
+            "C", "CAT", "CHTR", "CL", "CMCSA", "COF", "COP", "COST", "CRM", "CSCO",
+            "CVS", "CVX", "DHR", "DIS", "DUK", "EMR", "F", "GD", "GE", "GILD",
+            "GM", "GOOG", "GOOGL", "GS", "HD", "HON", "IBM", "INTC", "INTU", "ISRG",
+            "JNJ", "JPM", "KHC", "KO", "LIN", "LLY", "LMT", "LOW", "MA", "MCD",
+            "MDLZ", "MDT", "MET", "META", "MMM", "MO", "MRK", "MS", "MSFT", "NEE",
+            "NFLX", "NKE", "NVDA", "ORCL", "PEP", "PFE", "PG", "PM", "PYPL", "QCOM",
+            "RTX", "SBUX", "SCHW", "SO", "SPG", "T", "TGT", "TMO", "TMUS", "TSLA",
+            "TXN", "UNH", "UNP", "UPS", "USB", "V", "VZ", "WFC", "WMT", "XOM",
         ]),
         "liquid_top_100": _normalized([
             "AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "TSLA", "AVGO", "BRK.B", "JPM",

@@ -4,6 +4,7 @@ import argparse
 from pathlib import Path
 import pandas as pd
 
+from trading_platform.cli.presets import get_preset_choices
 from trading_platform.features.registry import DEFAULT_FEATURE_GROUPS, FEATURE_BUILDERS
 from trading_platform.signals.loaders import load_feature_frame, resolve_feature_frame_path
 from trading_platform.strategies.registry import STRATEGY_REGISTRY
@@ -13,6 +14,16 @@ UNIVERSES = UNIVERSE_DEFINITIONS
 XSEC_RESEARCH_STRATEGIES = {"xsec_momentum_topn"}
 XSEC_BENCHMARK_CHOICES = ["equal_weight"]
 XSEC_PORTFOLIO_CONSTRUCTION_MODES = ["pure_topn", "transition"]
+
+
+def add_preset_argument(parser: argparse.ArgumentParser, *, help_text: str) -> None:
+    parser.add_argument(
+        "--preset",
+        type=str,
+        default=None,
+        choices=get_preset_choices(),
+        help=help_text,
+    )
 
 
 def add_strategy_choice_argument(
@@ -129,6 +140,12 @@ def resolve_turnover_cost(args: argparse.Namespace) -> float:
     return float(getattr(args, "commission", 0.0))
 
 
+def normalize_paper_weighting_scheme(weighting_scheme: str) -> str:
+    if weighting_scheme == "inv_vol":
+        return "inverse_vol"
+    return weighting_scheme
+
+
 def get_strategy_choices(*, include_xsec: bool = False) -> list[str]:
     choices = set(STRATEGY_REGISTRY.keys())
     if include_xsec:
@@ -150,6 +167,33 @@ def add_xsec_research_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--weighting-scheme", type=str, default="equal", choices=["equal", "inv_vol"], help="How to size selected xsec holdings.")
     parser.add_argument("--vol-lookback-bars", type=int, default=20, help="Lookback window for inverse-vol xsec weighting.")
     parser.add_argument("--benchmark", type=str, default="equal_weight", choices=XSEC_BENCHMARK_CHOICES, help="Benchmark type for cross-sectional research")
+
+
+def add_xsec_paper_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--lookback-bars", type=int, default=126, help="Cross-sectional momentum lookback in bars for paper runs")
+    parser.add_argument("--skip-bars", type=int, default=0, help="Bars to skip before measuring trailing xsec momentum in paper runs")
+    parser.add_argument("--rebalance-bars", type=int, default=21, help="Rebalance interval in bars for xsec paper runs")
+    parser.add_argument("--portfolio-construction-mode", type=str, default="pure_topn", choices=XSEC_PORTFOLIO_CONSTRUCTION_MODES, help="Use pure_topn for the research-clean baseline or transition for the deployable overlay.")
+    parser.add_argument("--max-position-weight", type=float, default=None, help="Optional cap on any single xsec position weight in paper runs.")
+    parser.add_argument("--max-names-per-sector", type=int, default=None, help="Optional maximum selected names per sector for xsec paper runs.")
+    parser.add_argument("--turnover-buffer-bps", type=float, default=0.0, help="Optional score-gap buffer, expressed in bps, required before replacing an existing xsec holding.")
+    parser.add_argument("--max-turnover-per-rebalance", type=float, default=None, help="Optional cap on absolute turnover per xsec rebalance in paper runs.")
+    parser.add_argument("--vol-lookback-bars", type=int, default=20, help="Lookback window used by inv_vol weighting for xsec paper runs.")
+    parser.add_argument("--benchmark", type=str, default=None, choices=XSEC_BENCHMARK_CHOICES, help="Optional benchmark label to persist with xsec paper-run summaries.")
+
+
+def add_xsec_live_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--lookback-bars", type=int, default=126, help="Cross-sectional momentum lookback in bars for live dry-runs")
+    parser.add_argument("--skip-bars", type=int, default=0, help="Bars to skip before measuring trailing xsec momentum in live dry-runs")
+    parser.add_argument("--rebalance-bars", type=int, default=21, help="Rebalance interval in bars for xsec live dry-runs")
+    parser.add_argument("--portfolio-construction-mode", type=str, default="pure_topn", choices=XSEC_PORTFOLIO_CONSTRUCTION_MODES, help="Use pure_topn for the research-clean baseline or transition for the deployable overlay.")
+    parser.add_argument("--max-position-weight", type=float, default=None, help="Optional cap on any single xsec position weight in live dry-runs.")
+    parser.add_argument("--min-avg-dollar-volume", type=float, default=None, help="Optional minimum average dollar volume required for xsec eligibility in live dry-runs.")
+    parser.add_argument("--max-names-per-sector", type=int, default=None, help="Optional maximum selected names per sector for xsec live dry-runs.")
+    parser.add_argument("--turnover-buffer-bps", type=float, default=0.0, help="Optional score-gap buffer, expressed in bps, required before replacing an existing xsec holding.")
+    parser.add_argument("--max-turnover-per-rebalance", type=float, default=None, help="Optional cap on absolute turnover per xsec rebalance in live dry-runs.")
+    parser.add_argument("--vol-lookback-bars", type=int, default=20, help="Lookback window used by inv_vol weighting for xsec live dry-runs.")
+    parser.add_argument("--benchmark", type=str, default=None, choices=XSEC_BENCHMARK_CHOICES, help="Optional benchmark label to persist with xsec live dry-run summaries.")
 
 def add_date_range_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--start", type=str, default=None, help="Optional inclusive start date in YYYY-MM-DD format")

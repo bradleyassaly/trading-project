@@ -9,6 +9,7 @@ def main() -> None:
     argv, deprecation_note = rewrite_legacy_cli_args(sys.argv[1:])
     parser = build_parser()
     args = parser.parse_args(argv)
+    args._cli_argv = argv
 
     if not hasattr(args, "func"):
         parser.print_help()

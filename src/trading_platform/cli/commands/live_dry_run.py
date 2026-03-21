@@ -1,214 +1,94 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from pathlib import Path
-import pandas as pd
 
 from trading_platform.cli.common import resolve_symbols
-from trading_platform.broker.alpaca_broker import AlpacaBroker, AlpacaBrokerConfig
-from trading_platform.broker.live_models import BrokerAccount, LiveBrokerPosition
-from trading_platform.execution.reconciliation import (
-    build_rebalance_orders_from_broker_state,
+from trading_platform.cli.presets import apply_cli_preset
+from trading_platform.live.preview import (
+    LivePreviewConfig,
+    run_live_dry_run_preview,
+    write_live_dry_run_artifacts,
 )
-from trading_platform.paper.models import PaperTradingConfig
-from trading_platform.paper.service import (
-    compute_latest_target_weights,
-    load_signal_snapshot,
-)
-from trading_platform.execution.open_order_adjustment import adjust_orders_for_open_orders
-from trading_platform.broker.live_models import BrokerAccount, LiveBrokerPosition, LiveBrokerOrderStatus
-
-def _load_mock_positions(path: str | None) -> dict[str, LiveBrokerPosition]:
-    if not path:
-        return {}
-
-    df = pd.read_csv(path)
-
-    required = {"symbol", "quantity", "avg_price", "market_price"}
-    missing = required - set(df.columns)
-    if missing:
-        raise ValueError(
-            f"Mock positions file missing required columns: {sorted(missing)}"
-        )
-
-    positions: dict[str, LiveBrokerPosition] = {}
-    for row in df.to_dict(orient="records"):
-        symbol = str(row["symbol"])
-        quantity = int(row["quantity"])
-        avg_price = float(row["avg_price"])
-        market_price = float(row["market_price"])
-
-        positions[symbol] = LiveBrokerPosition(
-            symbol=symbol,
-            quantity=quantity,
-            avg_price=avg_price,
-            market_price=market_price,
-            market_value=quantity * market_price,
-        )
-
-    return positions
-
-@dataclass(frozen=True)
-class MockBrokerConfig:
-    equity: float = 100_000.0
-    cash: float = 100_000.0
-    positions: dict[str, LiveBrokerPosition] | None = None
-    open_orders: list[LiveBrokerOrderStatus] | None = None
 
 
-
-class MockBroker:
-    def __init__(self, config: MockBrokerConfig) -> None:
-        self.config = config
-
-    def get_account(self) -> BrokerAccount:
-        return BrokerAccount(
-            account_id="mock-account",
-            cash=float(self.config.cash),
-            equity=float(self.config.equity),
-            buying_power=float(self.config.cash),
-            currency="USD",
-        )
-
-    def get_positions(self) -> dict[str, LiveBrokerPosition]:
-        return dict(self.config.positions or {})
-
-
-
-def cmd_live_dry_run(args) -> None:
+def _build_config(args) -> LivePreviewConfig:
     symbols = resolve_symbols(args)
-
-    config = PaperTradingConfig(
+    return LivePreviewConfig(
         symbols=symbols,
+        preset_name=getattr(args, "_resolved_preset", getattr(args, "preset", None)),
+        universe_name=getattr(args, "universe", None),
         strategy=args.strategy,
         fast=args.fast,
         slow=args.slow,
         lookback=args.lookback,
+        lookback_bars=getattr(args, "lookback_bars", None),
+        skip_bars=getattr(args, "skip_bars", 0),
         top_n=args.top_n,
         weighting_scheme=args.weighting_scheme,
-        vol_window=args.vol_window,
-        min_score=args.min_score,
-        max_weight=args.max_weight,
-        max_names_per_group=args.max_names_per_group,
-        max_group_weight=args.max_group_weight,
-        group_map_path=args.group_map_path,
-        rebalance_frequency=args.rebalance_frequency,
-        timing=args.timing,
+        vol_lookback_bars=getattr(args, "vol_lookback_bars", 20),
+        rebalance_bars=getattr(args, "rebalance_bars", None),
+        portfolio_construction_mode=getattr(args, "portfolio_construction_mode", "pure_topn"),
+        max_position_weight=getattr(args, "max_position_weight", None),
+        min_avg_dollar_volume=getattr(args, "min_avg_dollar_volume", None),
+        max_names_per_sector=getattr(args, "max_names_per_sector", None),
+        turnover_buffer_bps=getattr(args, "turnover_buffer_bps", 0.0),
+        max_turnover_per_rebalance=getattr(args, "max_turnover_per_rebalance", None),
+        benchmark=getattr(args, "benchmark", None),
         initial_cash=args.initial_cash,
         min_trade_dollars=args.min_trade_dollars,
         lot_size=args.lot_size,
         reserve_cash_pct=args.reserve_cash_pct,
-    )
-
-    print(
-        "Running live dry-run for "
-        f"{len(symbols)} symbol(s): {', '.join(symbols)}"
-    )
-
-    snapshot = load_signal_snapshot(
-        symbols=config.symbols,
-        strategy=config.strategy,
-        fast=config.fast,
-        slow=config.slow,
-        lookback=config.lookback,
-    )
-
-    latest_prices = {
-        symbol: float(price)
-        for symbol, price in snapshot.closes.iloc[-1].fillna(0.0).items()
-        if float(price) > 0.0
-    }
-
-    as_of, _, latest_effective_weights, target_diagnostics = compute_latest_target_weights(
-        config=config,
-        snapshot=snapshot,
-    )
-
-    broker_name = getattr(args, "broker", "mock")
-
-    if broker_name == "mock":
-        equity = getattr(args, "mock_equity", 100_000.0)
-        cash = getattr(args, "mock_cash", 100_000.0)
-        mock_positions = _load_mock_positions(
-            getattr(args, "mock_positions_path", None)
-        )
-        broker = MockBroker(
-            MockBrokerConfig(
-                equity=equity,
-                cash=cash,
-                positions=mock_positions,
-            )
-        )
-    else:
-        broker = AlpacaBroker(AlpacaBrokerConfig.from_env())
-
-    account = broker.get_account()
-    positions = broker.get_positions()
-    print(f"Current broker positions: {len(positions)}")
-    for symbol, position in sorted(positions.items()):
-        print(
-            f"  {symbol}: qty={position.quantity} "
-            f"price={position.market_price:.2f} "
-            f"value={position.market_value:,.2f}"
-        )
-
-    reconciliation = build_rebalance_orders_from_broker_state(
-        account=account,
-        positions=positions,
-        latest_target_weights=latest_effective_weights,
-        latest_prices=latest_prices,
-        reserve_cash_pct=config.reserve_cash_pct,
-        min_trade_dollars=config.min_trade_dollars,
-        lot_size=config.lot_size,
         order_type=args.order_type,
         time_in_force=args.time_in_force,
+        broker=args.broker,
+        mock_equity=args.mock_equity,
+        mock_cash=args.mock_cash,
+        mock_positions_path=getattr(args, "mock_positions_path", None),
+        output_dir=Path(args.output_dir),
     )
 
-    open_orders = []
-    if hasattr(broker, "list_open_orders"):
-        try:
-            open_orders = broker.list_open_orders()
-        except NotImplementedError:
-            open_orders = []
 
-    adjustment = adjust_orders_for_open_orders(
-        proposed_orders=reconciliation.orders,
-        open_orders=open_orders,
-    )
-    print(f"As of: {as_of}")
-    print(f"Broker: {broker_name}")
-    print(f"Broker equity: {account.equity:,.2f}")
-    print(f"Broker cash: {account.cash:,.2f}")
-    print(f"Current broker positions: {len(positions)}")
-    for symbol, position in sorted(positions.items()):
-        print(
-            f"  {symbol}: qty={position.quantity} "
-            f"price={position.market_price:.2f} "
-            f"value={position.market_value:,.2f}"
-        )
+def cmd_live_dry_run(args) -> None:
+    apply_cli_preset(args)
+    config = _build_config(args)
+    print(f"Running live dry-run for {len(config.symbols)} symbol(s): {', '.join(config.symbols)}")
 
-    print(f"Open orders: {len(open_orders)}")
-    for order in open_orders:
-        print(
-            f"  {order.side} {order.remaining_quantity} {order.symbol} "
-            f"status={order.status}"
-        )
+    result = run_live_dry_run_preview(config)
+    artifact_paths = write_live_dry_run_artifacts(result)
 
-    print(f"Raw computed orders: {len(reconciliation.orders)}")
-    for order in reconciliation.orders:
-        print(
-            f"  {order.side} {order.quantity} {order.symbol} "
-            f"type={order.order_type} tif={order.time_in_force}"
-        )
+    print(f"As of: {result.as_of}")
+    print(f"Broker: {config.broker}")
+    if config.preset_name:
+        print(f"Preset: {config.preset_name}")
+    print(f"Broker equity: {result.account.equity:,.2f}")
+    print(f"Broker cash: {result.account.cash:,.2f}")
+    print(f"Current broker positions: {len(result.positions)}")
+    print(f"Open orders: {len(result.open_orders)}")
+    print(f"Raw computed orders: {len(result.reconciliation.orders)}")
+    print(f"Adjusted proposed orders: {len(result.adjusted_orders)}")
 
-    print(f"Adjusted orders after open-order awareness: {len(adjustment.adjusted_orders)}")
-    for order in adjustment.adjusted_orders:
-        print(
-            f"  {order.side} {order.quantity} {order.symbol} "
-            f"type={order.order_type} tif={order.time_in_force}"
-        )
+    target = result.target_diagnostics
+    print(f"portfolio_construction_mode: {config.portfolio_construction_mode}")
+    print(f"rebalance_timestamp: {target.get('rebalance_timestamp', result.as_of)}")
+    print(f"selected_names: {target.get('selected_symbols', '')}")
+    print(f"target_names: {target.get('target_selected_symbols', '')}")
+    print(f"realized_holdings_count: {target.get('realized_holdings_count')}")
+    print(f"realized_holdings_minus_top_n: {target.get('realized_holdings_minus_top_n')}")
+    print(f"average_gross_exposure: {target.get('average_gross_exposure')}")
+    print(f"liquidity_excluded_count: {target.get('liquidity_excluded_count')}")
+    print(f"sector_cap_excluded_count: {target.get('sector_cap_excluded_count')}")
+    print(f"turnover_cap_binding_count: {target.get('turnover_cap_binding_count')}")
+    print(f"turnover_buffer_blocked_replacements: {target.get('turnover_buffer_blocked_replacements')}")
+    print(f"semantic_warning: {target.get('semantic_warning') or 'none'}")
 
-    print("Diagnostics:")
-    print(f"  target_construction: {target_diagnostics}")
-    print(f"  reconciliation: {reconciliation.diagnostics}")
-    print(f"  open_order_adjustment: {adjustment.diagnostics}")
+    pass_count = sum(1 for check in result.health_checks if check.status == "pass")
+    warn_count = sum(1 for check in result.health_checks if check.status == "warn")
+    fail_count = sum(1 for check in result.health_checks if check.status == "fail")
+    print(f"Health checks: pass={pass_count} warn={warn_count} fail={fail_count}")
+    for check in result.health_checks:
+        if check.status != "pass":
+            print(f"  {check.status}: {check.check_name} -> {check.message}")
+
+    print("Artifacts:")
+    for key, value in sorted(artifact_paths.items()):
+        print(f"  {key}: {value}")
