@@ -663,3 +663,54 @@ def test_grouped_portfolio_allocate_multi_strategy_command_parses() -> None:
 
     assert args.portfolio_command == "allocate-multi-strategy"
     assert args.config == "configs/multi_strategy.json"
+
+
+def test_grouped_registry_list_command_parses() -> None:
+    parser = build_parser()
+    args = parser.parse_args(["registry", "list", "--registry", "artifacts/registry.json"])
+
+    assert args.command_family == "registry"
+    assert args.registry_command == "list"
+    assert args.registry == "artifacts/registry.json"
+
+
+def test_grouped_registry_evaluate_promotion_command_parses() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "registry",
+            "evaluate-promotion",
+            "--registry",
+            "artifacts/registry.json",
+            "--strategy-id",
+            "xsec-v1",
+            "--config",
+            "configs/governance.json",
+            "--output-dir",
+            "artifacts/registry_eval",
+        ]
+    )
+
+    assert args.registry_command == "evaluate-promotion"
+    assert args.strategy_id == "xsec-v1"
+
+
+def test_grouped_registry_build_multi_strategy_config_command_parses() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "registry",
+            "build-multi-strategy-config",
+            "--registry",
+            "artifacts/registry.json",
+            "--output-path",
+            "artifacts/multi_strategy.json",
+            "--include-paper",
+            "--weighting-scheme",
+            "score_weighted",
+        ]
+    )
+
+    assert args.registry_command == "build-multi-strategy-config"
+    assert args.include_paper is True
+    assert args.weighting_scheme == "score_weighted"

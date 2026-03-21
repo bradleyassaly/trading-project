@@ -35,6 +35,12 @@ from trading_platform.cli.commands.portfolio_topn import cmd_portfolio_topn
 from trading_platform.cli.commands.research import cmd_research
 from trading_platform.cli.commands.research_monitor import cmd_research_monitor
 from trading_platform.cli.commands.research_refresh import cmd_research_refresh
+from trading_platform.cli.commands.registry_build_multi_strategy_config import cmd_registry_build_multi_strategy_config
+from trading_platform.cli.commands.registry_demote import cmd_registry_demote
+from trading_platform.cli.commands.registry_evaluate_degradation import cmd_registry_evaluate_degradation
+from trading_platform.cli.commands.registry_evaluate_promotion import cmd_registry_evaluate_promotion
+from trading_platform.cli.commands.registry_list import cmd_registry_list
+from trading_platform.cli.commands.registry_promote import cmd_registry_promote
 from trading_platform.cli.commands.run_job import cmd_run_job
 from trading_platform.cli.commands.run_sweep import cmd_run_sweep
 from trading_platform.cli.commands.run_walk_forward import cmd_run_walk_forward
@@ -686,5 +692,49 @@ def build_parser() -> argparse.ArgumentParser:
     experiments_diff = experiments_subparsers.add_parser("diff", help="Show the current approved configuration versus the prior approved snapshot")
     experiments_diff.add_argument("--snapshot-dir", type=str, default="artifacts/research_refresh/approved_configuration_snapshots", help="Directory containing approved configuration snapshots.")
     experiments_diff.set_defaults(func=cmd_approved_config_diff)
+
+    registry_parser = subparsers.add_parser("registry", help="Strategy registry governance commands")
+    registry_subparsers = registry_parser.add_subparsers(dest="registry_command", required=True)
+    registry_list = registry_subparsers.add_parser("list", help="List strategies in the governance registry")
+    registry_list.add_argument("--registry", type=str, required=True, help="Path to the strategy registry JSON/YAML file.")
+    registry_list.set_defaults(func=cmd_registry_list)
+
+    registry_eval_promotion = registry_subparsers.add_parser("evaluate-promotion", help="Evaluate a registry strategy against promotion criteria without mutating the registry")
+    registry_eval_promotion.add_argument("--registry", type=str, required=True, help="Path to the strategy registry JSON/YAML file.")
+    registry_eval_promotion.add_argument("--strategy-id", type=str, required=True, help="Strategy identifier in the registry.")
+    registry_eval_promotion.add_argument("--config", type=str, required=True, help="Path to the governance criteria JSON/YAML file.")
+    registry_eval_promotion.add_argument("--output-dir", type=str, required=True, help="Directory where promotion evaluation artifacts will be written.")
+    registry_eval_promotion.set_defaults(func=cmd_registry_evaluate_promotion)
+
+    registry_promote = registry_subparsers.add_parser("promote", help="Promote a registry strategy by one validated lifecycle stage and append an audit event")
+    registry_promote.add_argument("--registry", type=str, required=True, help="Path to the strategy registry JSON/YAML file.")
+    registry_promote.add_argument("--strategy-id", type=str, required=True, help="Strategy identifier in the registry.")
+    registry_promote.add_argument("--note", type=str, default=None, help="Optional audit note for this registry mutation.")
+    registry_promote.set_defaults(func=cmd_registry_promote)
+
+    registry_eval_degradation = registry_subparsers.add_parser("evaluate-degradation", help="Evaluate an active registry strategy for degradation without mutating the registry")
+    registry_eval_degradation.add_argument("--registry", type=str, required=True, help="Path to the strategy registry JSON/YAML file.")
+    registry_eval_degradation.add_argument("--strategy-id", type=str, required=True, help="Strategy identifier in the registry.")
+    registry_eval_degradation.add_argument("--config", type=str, default=None, help="Optional governance criteria JSON/YAML file. Defaults to built-in degradation thresholds.")
+    registry_eval_degradation.add_argument("--output-dir", type=str, required=True, help="Directory where degradation evaluation artifacts will be written.")
+    registry_eval_degradation.set_defaults(func=cmd_registry_evaluate_degradation)
+
+    registry_demote = registry_subparsers.add_parser("demote", help="Demote a registry strategy by one lifecycle stage and append an audit event")
+    registry_demote.add_argument("--registry", type=str, required=True, help="Path to the strategy registry JSON/YAML file.")
+    registry_demote.add_argument("--strategy-id", type=str, required=True, help="Strategy identifier in the registry.")
+    registry_demote.add_argument("--note", type=str, default=None, help="Optional audit note for this registry mutation.")
+    registry_demote.set_defaults(func=cmd_registry_demote)
+
+    registry_build = registry_subparsers.add_parser("build-multi-strategy-config", help="Build a multi-strategy portfolio config from the strategy registry")
+    registry_build.add_argument("--registry", type=str, required=True, help="Path to the strategy registry JSON/YAML file.")
+    registry_build.add_argument("--output-path", type=str, required=True, help="Path to the generated multi-strategy config JSON file.")
+    registry_build.add_argument("--include-paper", action="store_true", help="Include paper-stage strategies alongside approved strategies.")
+    registry_build.add_argument("--universe", type=str, default=None, help="Optional universe filter.")
+    registry_build.add_argument("--family", type=str, default=None, help="Optional family filter.")
+    registry_build.add_argument("--tag", type=str, default=None, help="Optional tag filter.")
+    registry_build.add_argument("--deployment-stage", type=str, default=None, help="Optional deployment-stage filter.")
+    registry_build.add_argument("--max-strategies", type=int, default=None, help="Optional maximum number of strategies to include.")
+    registry_build.add_argument("--weighting-scheme", type=str, default="equal", choices=["equal", "score_weighted"], help="How to assign sleeve capital weights.")
+    registry_build.set_defaults(func=cmd_registry_build_multi_strategy_config)
 
     return parser

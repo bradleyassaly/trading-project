@@ -9,6 +9,7 @@ This repository is an end-to-end research to deploy trading system. It covers:
 - preset-driven research vs deploy workflows
 - constrained portfolio construction for deployable implementations
 - multi-strategy portfolio allocation across approved deploy sleeves
+- strategy registry, promotion, and degradation governance
 - stateful paper trading with scheduled daily runs
 - broker-safe live dry-run previews with reconciliation and health checks
 
@@ -45,6 +46,10 @@ Paper trading is stateful. Repeated runs update a local simulated portfolio stat
 ### Live Dry-Run
 
 Live dry-run is broker-safe. It loads broker/account state, builds deploy targets, reconciles target vs current holdings, generates proposed orders, writes audit artifacts, and never submits orders.
+
+### Strategy Registry
+
+The strategy registry is the governance layer above research outputs and above the multi-strategy allocator. It tracks which versioned strategies exist, what stage each strategy is in, what artifacts support it, and whether objective rules currently support promotion, continued paper testing, approval, live disablement, or retirement.
 
 ## Presets
 
@@ -125,6 +130,82 @@ Key config fields:
 - `sector_caps`: optional group caps applied with the configured symbol-group map
 - `turnover_cap`: combined-portfolio turnover diagnostic threshold
 - `cash_reserve_pct`: cash fraction preserved by paper/live reconciliation
+
+## Strategy Registry
+
+The strategy registry is an explicit JSON/YAML file that records strategy versions and lifecycle state. It is designed to be audited directly, mutated only by explicit commands, and used as the source for registry-backed multi-strategy portfolio generation.
+
+Lifecycle statuses:
+
+- `research`: raw research output tracked but not yet staged
+- `candidate`: version is under review and eligible for further governance evaluation
+- `paper`: eligible for paper trading and further observation
+- `approved`: eligible for approved registry-backed multi-strategy selection
+- `live_disabled`: previously active but blocked from further live promotion
+- `retired`: no longer eligible for allocation or promotion
+
+Current deployment stages are tracked separately from status but use the same explicit stage labels so registry-backed selectors can filter by operational state without inferring from hidden logic.
+
+### Example Registry File
+
+```json
+{
+  "schema_version": 1,
+  "updated_at": "2026-03-21T12:00:00Z",
+  "entries": [
+    {
+      "strategy_id": "xsec_nasdaq100_momentum_v1",
+      "strategy_name": "Nasdaq-100 Cross-Sectional Momentum",
+      "family": "xsec_momentum",
+      "version": "v1",
+      "preset_name": "xsec_nasdaq100_momentum_v1_deploy",
+      "research_artifact_paths": ["artifacts/research/nasdaq100_xsec_v1_research"],
+      "created_at": "2026-03-20T18:30:00Z",
+      "status": "approved",
+      "owner": "research",
+      "source": "walkforward_validation",
+      "current_deployment_stage": "approved",
+      "notes": "Validated deploy overlay.",
+      "tags": ["core", "deploy"],
+      "universe": "nasdaq100",
+      "signal_type": "cross_sectional_momentum",
+      "rebalance_frequency": "monthly",
+      "benchmark": "equal_weight",
+      "risk_profile": "medium",
+      "paper_artifact_path": "artifacts/paper/nasdaq100_xsec",
+      "live_artifact_path": "artifacts/live_dry_run/nasdaq100_xsec"
+    }
+  ],
+  "audit_log": [
+    {
+      "timestamp": "2026-03-21T12:00:00Z",
+      "strategy_id": "xsec_nasdaq100_momentum_v1",
+      "action": "promote",
+      "from_status": "paper",
+      "to_status": "approved",
+      "note": "Promotion criteria passed."
+    }
+  ]
+}
+```
+
+### Promotion And Demotion Workflow
+
+1. Research produces stable artifacts for a versioned strategy or preset.
+2. Register that version in the strategy registry with explicit artifact paths and status.
+3. Run `registry evaluate-promotion` against a governance criteria file to generate an auditable pass/fail report.
+4. If the result is acceptable, run `registry promote` to advance the lifecycle and append an audit event.
+5. While active in `paper` or `approved`, run `registry evaluate-degradation` against paper/live diagnostics to check for objective breaches.
+6. If degradation is material, run `registry demote` to step the strategy down and preserve the transition in the audit log.
+
+### Champion / Challenger
+
+Multiple versions from the same family can coexist in the registry. Family comparison utilities identify the current champion per family, compare challengers against it, and generate:
+
+- `family_comparison.csv`
+- `champion_challenger_report.md`
+
+These are written automatically when the registry builds a multi-strategy config artifact.
 
 ## Key Commands
 
@@ -224,6 +305,17 @@ Multi-strategy workflow:
 4. Run `paper run-multi-strategy` to simulate the unified combined portfolio.
 5. Run `live dry-run-multi-strategy` to preview one reconciled order package for the combined portfolio without submitting anything.
 
+Registry-driven workflow:
+
+1. Research validates and versions a strategy/preset.
+2. Register the version and attach its research, paper, and live artifact paths.
+3. Evaluate promotion thresholds with `registry evaluate-promotion`.
+4. Promote explicitly with `registry promote`.
+5. Build a multi-strategy config directly from all `approved` entries, or `approved` plus `paper`, with `registry build-multi-strategy-config`.
+6. Feed that generated config into `portfolio allocate-multi-strategy`, `paper run-multi-strategy`, or `live dry-run-multi-strategy`.
+
+The registry-backed config builder supports reproducible selection filters such as `--universe`, `--family`, `--tag`, `--deployment-stage`, `--max-strategies`, and sleeve weighting via `--weighting-scheme equal|score_weighted`.
+
 ## Research Vs Deploy Insight
 
 - `pure_topn` = research truth
@@ -298,6 +390,7 @@ The main code lives under `src/trading_platform`:
 - `execution/`: rebalance timing, reconciliation, and open-order adjustment
 - `experiments/`: experiment-oriented helpers and artifacts
 - `features/`: feature builders and registry
+- `governance/`: strategy registry models, persistence, evaluation, and registry-backed portfolio selection
 - `jobs/`: job wrappers for repeatable workflows
 - `live/`: live execution control layer and safeguards
 - `metadata/`: metadata helpers
@@ -375,6 +468,7 @@ The CLI now uses grouped command families:
 - `paper`
 - `live`
 - `experiments`
+- `registry`
 
 Examples:
 
@@ -430,6 +524,12 @@ trading-cli experiments list --tracker-dir artifacts/experiment_tracking --limit
 trading-cli experiments latest --tracker-dir artifacts/experiment_tracking
 trading-cli experiments dashboard --tracker-dir artifacts/experiment_tracking --output-dir artifacts/experiment_tracking --top-metric portfolio_sharpe
 trading-cli experiments diff --snapshot-dir artifacts/research_refresh/approved_configuration_snapshots
+trading-cli registry list --registry artifacts/strategy_registry.json
+trading-cli registry evaluate-promotion --registry artifacts/strategy_registry.json --strategy-id xsec_nasdaq100_momentum_v1 --config configs/governance.yaml --output-dir artifacts/registry_eval/xsec_nasdaq100_momentum_v1
+trading-cli registry promote --registry artifacts/strategy_registry.json --strategy-id xsec_nasdaq100_momentum_v1
+trading-cli registry evaluate-degradation --registry artifacts/strategy_registry.json --strategy-id xsec_nasdaq100_momentum_v1 --config configs/governance.yaml --output-dir artifacts/registry_eval/xsec_nasdaq100_momentum_v1
+trading-cli registry demote --registry artifacts/strategy_registry.json --strategy-id xsec_nasdaq100_momentum_v1
+trading-cli registry build-multi-strategy-config --registry artifacts/strategy_registry.json --output-path artifacts/generated_registry_multi_strategy.json --include-paper --weighting-scheme score_weighted
 ```
 
 Config-driven reproducible mode is now folded into grouped commands where practical:
@@ -583,6 +683,38 @@ The most important allocation diagnostics are:
 - turnover estimate at the combined-portfolio level
 - symbols clipped by position, concentration, group, gross, or net caps
 - effective number of sleeves and effective number of positions
+
+## Governance Criteria
+
+Promotion criteria are explicit and file-based. The current governance config supports thresholds such as:
+
+- minimum walk-forward folds
+- minimum mean test return
+- minimum Sharpe
+- maximum drawdown
+- minimum hit rate
+- minimum IC / rank IC
+- maximum turnover
+- maximum redundancy / correlation
+- minimum paper-trading observation window
+- minimum trade count
+
+Degradation criteria support rules such as:
+
+- rolling underperformance versus benchmark
+- drawdown breach
+- excessive turnover
+- signal instability
+- missing-data failures
+- excessive live dry-run warning or fail checks
+
+Evaluation commands write deterministic audit artifacts:
+
+- `promotion_decision.json`
+- `promotion_decision.md`
+- `strategy_metrics_snapshot.json`
+- `degradation_report.json`
+- `degradation_report.md`
 
 Use `trading-cli research compare-xsec-construction` when you want the platform to run both modes side by side from the same xsec walk-forward configuration and write a compact comparison summary, per-window deltas, and an HTML report. This command is intentionally explicit about the semantic split:
 
