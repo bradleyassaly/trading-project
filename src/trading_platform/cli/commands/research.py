@@ -10,6 +10,7 @@ from trading_platform.cli.common import (
     prepare_research_frame,
     print_symbol_list,
     resolve_symbols,
+    resolve_turnover_cost,
 )
 from trading_platform.execution.policies import ExecutionPolicy
 from trading_platform.experiments.tracker import log_experiment
@@ -92,6 +93,7 @@ def _save_xsec_run_artifacts(
     result.target_weights.to_csv(output_dir / f"{strategy}_portfolio_weights.csv", index=True)
     result.positions.to_csv(output_dir / f"{strategy}_portfolio_positions.csv", index=True)
     result.scores.to_csv(output_dir / f"{strategy}_scores.csv", index=True)
+    result.rebalance_diagnostics.to_csv(output_dir / f"{strategy}_rebalance_diagnostics.csv", index=True)
     print(f"  saved summary: {metadata_path}")
 
 
@@ -107,8 +109,16 @@ def _run_xsec_research(args: argparse.Namespace, symbols: list[str]) -> None:
         skip_bars=int(strategy_params["skip_bars"] or 0),
         top_n=int(strategy_params["top_n"] or 3),
         rebalance_bars=int(strategy_params["rebalance_bars"] or 21),
-        commission=args.commission,
+        commission=resolve_turnover_cost(args),
         cash=args.cash,
+        max_position_weight=strategy_params["max_position_weight"],
+        min_avg_dollar_volume=strategy_params["min_avg_dollar_volume"],
+        max_names_per_sector=strategy_params["max_names_per_sector"],
+        turnover_buffer_bps=float(strategy_params["turnover_buffer_bps"] or 0.0),
+        max_turnover_per_rebalance=strategy_params["max_turnover_per_rebalance"],
+        weighting_scheme=strategy_params["weighting_scheme"],
+        vol_lookback_bars=int(strategy_params["vol_lookback_bars"] or 20),
+        benchmark_type=args.benchmark,
     )
     stats = result.summary
     exp_id = log_experiment(stats)
@@ -137,14 +147,32 @@ def _run_xsec_research(args: argparse.Namespace, symbols: list[str]) -> None:
         f"range={effective_start}->{effective_end}, rows={rows_used}, "
         f"lookback_bars={strategy_params['lookback_bars']}, skip_bars={strategy_params['skip_bars']}, "
         f"top_n={strategy_params['top_n']}, rebalance_bars={strategy_params['rebalance_bars']}, "
-        f"Return[%]={stats.get('Return [%]', 'n/a')}, Sharpe={stats.get('Sharpe Ratio', 'n/a')}, "
+        f"weighting_scheme={strategy_params['weighting_scheme']}, vol_lookback_bars={strategy_params['vol_lookback_bars']}, "
+        f"max_position_weight={strategy_params['max_position_weight']}, min_avg_dollar_volume={strategy_params['min_avg_dollar_volume']}, "
+        f"max_names_per_sector={strategy_params['max_names_per_sector']}, turnover_buffer_bps={strategy_params['turnover_buffer_bps']}, "
+        f"max_turnover_per_rebalance={strategy_params['max_turnover_per_rebalance']}, benchmark={stats.get('benchmark_type', 'n/a')}, "
+        f"gross_return[%]={stats.get('gross_return_pct', 'n/a')}, net_return[%]={stats.get('net_return_pct', 'n/a')}, "
+        f"cost_drag[%]={stats.get('cost_drag_return_pct', 'n/a')}, Sharpe={stats.get('Sharpe Ratio', 'n/a')}, "
         f"MaxDD[%]={stats.get('Max. Drawdown [%]', 'n/a')}, trade_count={stats.get('trade_count', 'n/a')}, "
         f"time_in_market[%]={stats.get('percent_time_in_market', 'n/a')}, "
         f"avg_holdings={stats.get('average_number_of_holdings', 'n/a')}, "
         f"rebalance_count={stats.get('rebalance_count', 'n/a')}, "
+        f"avg_turnover={stats.get('mean_turnover', 'n/a')}, annualized_turnover={stats.get('annualized_turnover', 'n/a')}, "
+        f"mean_transaction_cost={stats.get('mean_transaction_cost', 'n/a')}, total_transaction_cost={stats.get('total_transaction_cost', 'n/a')}, "
         f"initial_equity={stats.get('initial_equity', 'n/a')}, final_equity={stats.get('final_equity', 'n/a')}, "
         f"avg_gross_exposure={stats.get('average_gross_exposure', 'n/a')}, "
         f"percent_invested={stats.get('percent_invested', 'n/a')}, "
+        f"avg_available={stats.get('average_available_symbols', 'n/a')}, "
+        f"avg_eligible={stats.get('average_eligible_symbols', 'n/a')}, "
+        f"avg_selected={stats.get('average_selected_symbols', 'n/a')}, "
+        f"liquidity_filter_active={stats.get('liquidity_filter_active', False)}, "
+        f"sector_cap_active={stats.get('sector_cap_active', False)}, "
+        f"liquidity_excluded={stats.get('total_liquidity_excluded_symbols', 0)}, "
+        f"sector_cap_excluded={stats.get('total_sector_cap_excluded_symbols', 0)}, "
+        f"turnover_cap_bindings={stats.get('turnover_cap_binding_count', 0)}, "
+        f"buffer_blocked={stats.get('turnover_buffer_blocked_replacements', 0)}, "
+        f"empty_rebalances[%]={stats.get('percent_empty_rebalances', 'n/a')}, "
+        f"cost_bps={getattr(args, 'cost_bps', None) if getattr(args, 'cost_bps', None) is not None else resolve_turnover_cost(args) * 10000.0}, "
         f"activity={activity_note(stats)}, Experiment={exp_id}"
     )
 

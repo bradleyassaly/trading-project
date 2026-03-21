@@ -11,6 +11,7 @@ from trading_platform.universes.definitions import UNIVERSE_DEFINITIONS
 
 UNIVERSES = UNIVERSE_DEFINITIONS
 XSEC_RESEARCH_STRATEGIES = {"xsec_momentum_topn"}
+XSEC_BENCHMARK_CHOICES = ["equal_weight"]
 
 
 def add_strategy_choice_argument(
@@ -97,7 +98,7 @@ def add_strategy_arguments(parser: argparse.ArgumentParser, *, include_xsec: boo
     )
 
 
-def build_strategy_params(args: argparse.Namespace) -> dict[str, int | None]:
+def build_strategy_params(args: argparse.Namespace) -> dict[str, object]:
     return {
         "fast": getattr(args, "fast", 20),
         "slow": getattr(args, "slow", 100),
@@ -106,10 +107,24 @@ def build_strategy_params(args: argparse.Namespace) -> dict[str, int | None]:
         "skip_bars": getattr(args, "skip_bars", 0),
         "top_n": getattr(args, "top_n", 3),
         "rebalance_bars": getattr(args, "rebalance_bars", 21),
+        "max_position_weight": getattr(args, "max_position_weight", None),
+        "min_avg_dollar_volume": getattr(args, "min_avg_dollar_volume", None),
+        "max_names_per_sector": getattr(args, "max_names_per_sector", None),
+        "turnover_buffer_bps": getattr(args, "turnover_buffer_bps", 0.0),
+        "max_turnover_per_rebalance": getattr(args, "max_turnover_per_rebalance", None),
+        "weighting_scheme": getattr(args, "weighting_scheme", "equal"),
+        "vol_lookback_bars": getattr(args, "vol_lookback_bars", 20),
         "entry_lookback": getattr(args, "entry_lookback", 55),
         "exit_lookback": getattr(args, "exit_lookback", 20),
         "momentum_lookback": getattr(args, "momentum_lookback", None),
     }
+
+
+def resolve_turnover_cost(args: argparse.Namespace) -> float:
+    cost_bps = getattr(args, "cost_bps", None)
+    if cost_bps is not None:
+        return float(cost_bps) / 10_000.0
+    return float(getattr(args, "commission", 0.0))
 
 
 def get_strategy_choices(*, include_xsec: bool = False) -> list[str]:
@@ -124,6 +139,14 @@ def add_xsec_research_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--skip-bars", type=int, default=0, help="Bars to skip before measuring trailing momentum")
     parser.add_argument("--top-n", type=int, default=3, help="Number of symbols to hold for cross-sectional top-N research")
     parser.add_argument("--rebalance-bars", type=int, default=21, help="Rebalance interval in bars for cross-sectional top-N research")
+    parser.add_argument("--max-position-weight", type=float, default=None, help="Optional cap on any single xsec position weight.")
+    parser.add_argument("--min-avg-dollar-volume", type=float, default=None, help="Optional minimum 20-bar average dollar volume required for xsec eligibility.")
+    parser.add_argument("--max-names-per-sector", type=int, default=None, help="Optional maximum number of selected names per sector when sector metadata is available.")
+    parser.add_argument("--turnover-buffer-bps", type=float, default=0.0, help="Optional minimum momentum-score improvement, expressed in bps of score gap, required to replace an existing xsec holding.")
+    parser.add_argument("--max-turnover-per-rebalance", type=float, default=None, help="Optional cap on absolute turnover per xsec rebalance.")
+    parser.add_argument("--weighting-scheme", type=str, default="equal", choices=["equal", "inv_vol"], help="How to size selected xsec holdings.")
+    parser.add_argument("--vol-lookback-bars", type=int, default=20, help="Lookback window for inverse-vol xsec weighting.")
+    parser.add_argument("--benchmark", type=str, default="equal_weight", choices=XSEC_BENCHMARK_CHOICES, help="Benchmark type for cross-sectional research")
 
 def add_date_range_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--start", type=str, default=None, help="Optional inclusive start date in YYYY-MM-DD format")

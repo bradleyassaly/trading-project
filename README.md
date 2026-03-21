@@ -155,24 +155,32 @@ Examples:
 
 ```bash
 trading-cli data ingest --universe magnificent7 --start 2020-01-01
+trading-cli data ingest --universe nasdaq100_current --start 2020-01-01 --failure-report artifacts/ingest/nasdaq100_current_failures.csv
+trading-cli data ingest --universe nasdaq100_current --start 2020-01-01
 trading-cli data features --universe magnificent7 --feature-groups trend momentum volatility volume
+trading-cli data features --universe nasdaq100_current --feature-groups trend momentum volatility volume --failure-report artifacts/features/nasdaq100_current_failures.csv
+trading-cli features build --universe nasdaq100_current --feature-groups trend momentum volatility volume
 trading-cli data universes list
 trading-cli research run --symbols AAPL MSFT NVDA --strategy sma_cross --fast 20 --slow 100 --engine vectorized --output-dir artifacts/research
 trading-cli research run --symbols AAPL --strategy momentum_hold --lookback 20 --start 2020-01-01 --end 2024-12-31 --output-dir artifacts/research/aapl
 trading-cli research run --symbols AAPL --strategy breakout_hold --entry-lookback 55 --exit-lookback 20 --momentum-lookback 63 --start 2020-01-01 --end 2024-12-31 --output-dir artifacts/research/aapl_breakout
-trading-cli research run --universe magnificent7 --strategy xsec_momentum_topn --lookback-bars 126 --skip-bars 5 --top-n 3 --rebalance-bars 21 --start 2020-01-01 --end 2024-12-31 --output-dir artifacts/research/mag7_xsec_momentum
+trading-cli research run --universe magnificent7 --strategy xsec_momentum_topn --lookback-bars 126 --skip-bars 0 --top-n 2 --rebalance-bars 21 --benchmark equal_weight --start 2020-01-01 --end 2024-12-31 --cost-bps 10 --output-dir artifacts/research/mag7_xsec_momentum
+trading-cli research run --universe nasdaq100_current --strategy xsec_momentum_topn --lookback-bars 126 --skip-bars 0 --top-n 2 --rebalance-bars 21 --benchmark equal_weight --start 2020-01-01 --end 2024-12-31 --cost-bps 10 --output-dir artifacts/research/nasdaq100_current_xsec_momentum
 trading-cli research validate-signal --symbols AAPL --strategy sma_cross --fast 20 --slow 100 --output-dir artifacts/validate_signal/aapl
 trading-cli research validate-signal --universe debug_liquid10 --strategy sma_cross --fast 20 --slow 100 --output-dir artifacts/validate_signal/debug_liquid10
 trading-cli research validate-signal --universe debug_liquid10 --strategy sma_cross --fast 20 --slow 100 --fast-values 10 20 30 --slow-values 50 100 150 --output-dir artifacts/validate_signal/debug_liquid10_sweep
 trading-cli research sweep --symbols AAPL MSFT NVDA --strategy sma_cross --fast-values 10 20 30 --slow-values 50 100 150
 trading-cli research sweep --symbols AAPL --strategy breakout_hold --entry-lookback-values 20 55 100 --exit-lookback-values 10 20 50 --momentum-lookback-values 63
-trading-cli research sweep --universe magnificent7 --strategy xsec_momentum_topn --lookback-bars-values 63 126 252 --skip-bars-values 0 5 --top-n-values 2 3 5 --rebalance-bars-values 5 21
+trading-cli research sweep --universe magnificent7 --strategy xsec_momentum_topn --lookback-bars-values 84 126 168 --skip-bars-values 0 5 10 --top-n-values 2 3 --rebalance-bars-values 10 21 42 --benchmark equal_weight
+trading-cli research sweep --universe liquid_top_100 --strategy xsec_momentum_topn --lookback-bars-values 126 168 252 --skip-bars-values 0 5 10 21 --top-n-values 2 3 5 --rebalance-bars-values 21 42 --benchmark equal_weight
 trading-cli research walkforward --universe magnificent7 --strategy sma_cross --fast-values 10 20 --slow-values 50 100 --train-bars 756 --test-bars 126 --step-bars 126
 trading-cli research walkforward --symbols AAPL --strategy breakout_hold --entry-lookback-values 20 55 100 --exit-lookback-values 10 20 50 --momentum-lookback-values 63 --train-bars 756 --test-bars 126 --step-bars 126
-trading-cli research walkforward --universe magnificent7 --strategy xsec_momentum_topn --lookback-bars-values 126 252 --skip-bars-values 0 5 --top-n-values 3 5 --rebalance-bars-values 5 21 --train-bars 756 --test-bars 126 --step-bars 126
+trading-cli research walkforward --universe magnificent7 --strategy xsec_momentum_topn --lookback-bars-values 84 126 168 --skip-bars-values 0 5 10 --top-n-values 2 3 --rebalance-bars-values 10 21 42 --benchmark equal_weight --train-bars 756 --test-bars 126 --step-bars 126
+trading-cli research walkforward --universe nasdaq100_current --strategy xsec_momentum_topn --lookback-bars-values 126 252 --skip-bars-values 0 5 21 --top-n-values 2 3 5 --rebalance-bars-values 21 42 --benchmark equal_weight --train-bars 756 --test-bars 126 --step-bars 126
+trading-cli research walkforward --universe magnificent7 --strategy xsec_momentum_topn --lookback-bars-values 126 --skip-bars-values 0 --top-n-values 2 --rebalance-bars-values 21 --benchmark equal_weight --train-bars 756 --test-bars 126 --step-bars 126 --cost-bps 10 --output artifacts/experiments/mag7_xsec_walkforward_cost10.csv
 trading-cli research alpha --universe magnificent7 --feature-dir data/features --signal-family momentum --lookbacks 5 10 20 60 --horizons 1 5 20 --output-dir artifacts/alpha_research
-trading-cli research loop --universe nasdaq100 --feature-dir data/features --signal-families momentum mean_reversion volatility feature_combo --max-iterations 1
-trading-cli research multi-universe --universes sp500 nasdaq100 liquid_top_100 --feature-dir data/features --signal-family momentum
+trading-cli research loop --universe nasdaq100_current --feature-dir data/features --signal-families momentum mean_reversion volatility feature_combo --max-iterations 1
+trading-cli research multi-universe --universes sp500 nasdaq100_current liquid_top_100 --feature-dir data/features --signal-family momentum
 trading-cli research refresh --universe sp500 --feature-dir data/features --stale-after-days 30
 trading-cli research monitor --tracker-dir artifacts/experiment_tracking --snapshot-dir artifacts/research_refresh/approved_configuration_snapshots
 trading-cli portfolio backtest --universe magnificent7 --strategy sma_cross --rebalance-frequency weekly --output-dir artifacts/portfolio
@@ -250,6 +258,20 @@ This canonical loader is used by `alpha_lab`, research prep paths, and signal-lo
 3. Run `research validate-signal`, `research run`, `research sweep`, `research walkforward`, `portfolio backtest`, or `portfolio topn`.
 4. Inspect artifacts under the selected output directory.
 
+Universe ingest is robust by default. If one ticker fails, the batch continues and prints a final summary with success count, failure count, and failed symbols. Use `--failure-report` to save a CSV report, or `--fail-fast` if you want the old stop-on-first-error behavior.
+
+`nasdaq100` and `nasdaq100_current` currently resolve to the same explicit current-survivor ticker snapshot for reproducible present-day research. True historical point-in-time Nasdaq-100 membership is not yet implemented, so historical tests on this universe still carry survivorship bias.
+
+Feature generation commands:
+
+```bash
+trading-cli data features --symbols AAPL MSFT --feature-groups trend momentum
+trading-cli data features --universe nasdaq100_current --feature-groups trend momentum volatility volume --failure-report artifacts/features/nasdaq100_current_failures.csv
+trading-cli features build --universe nasdaq100_current --feature-groups trend momentum volatility volume
+```
+
+`trading-cli data features ...` is the canonical path. `trading-cli features build ...` is supported as a compatibility alias and rewrites to `data features`. Universe feature builds now continue past symbols with missing normalized inputs, print a final success/failure summary, and can write a CSV failure report with `--failure-report`.
+
 Date-bounded legacy research example:
 
 ```bash
@@ -258,7 +280,56 @@ trading-cli research run --symbols AAPL --strategy sma_cross --fast 20 --slow 10
 
 `breakout_hold` supports an optional momentum confirmation filter. When `--momentum-lookback` is provided, the strategy only enters a breakout if trailing return over that lookback is positive. Exits still follow the breakout exit rule independently of the momentum filter.
 
-`xsec_momentum_topn` is a relative-strength portfolio strategy for small universes. On each rebalance date it ranks symbols by trailing return over `--lookback-bars`, optionally skips the most recent `--skip-bars`, selects the top `--top-n`, and holds them equally weighted until the next `--rebalance-bars` interval.
+`xsec_momentum_topn` is a relative-strength portfolio strategy for small universes and broader liquid universes. On each rebalance date it ranks symbols by trailing return over `--lookback-bars`, optionally skips the most recent `--skip-bars`, selects the top `--top-n`, and holds them equally weighted until the next `--rebalance-bars` interval. The current benchmark option is `--benchmark equal_weight`, which compares against equal-weight buy-and-hold over the same universe and date range.
+
+The xsec workflow also supports an optional constrained portfolio layer:
+
+- `--max-position-weight`: cap target weight per name after the target portfolio is built.
+- `--min-avg-dollar-volume`: require rolling average dollar volume before a symbol is eligible.
+- `--max-names-per-sector`: cap selected names per sector/group when metadata is available.
+- `--turnover-buffer-bps`: require a replacement candidate to beat the weakest incumbent by at least this raw score gap. The implementation maps this to score units as `turnover_buffer_bps / 10000`.
+- `--max-turnover-per-rebalance`: cap gross weight traded on each rebalance and move only partway toward the ideal target when needed.
+- `--weighting-scheme equal|inv_vol`: choose equal-weight or inverse-vol target weights.
+- `--vol-lookback-bars`: realized-vol lookback used by `inv_vol`.
+
+When these controls are unset, the legacy xsec behavior is unchanged. When a turnover cap is active, the portfolio can temporarily hold more than `top_n` names because it moves gradually toward the new top-N target instead of jumping all at once. Diagnostics now report that transition behavior explicitly with turnover, gross exposure, eligible counts, selected counts, turnover-cap bindings, and liquidity/sector exclusions.
+
+Recommended validation ladder for this strategy:
+
+```bash
+trading-cli research sweep --universe magnificent7 --strategy xsec_momentum_topn --lookback-bars-values 84 126 168 --skip-bars-values 0 5 10 --top-n-values 2 3 --rebalance-bars-values 10 21 42 --benchmark equal_weight --start 2020-01-01 --end 2024-12-31 --output artifacts/experiments/mag7_xsec_sweep.csv
+trading-cli research walkforward --universe magnificent7 --strategy xsec_momentum_topn --lookback-bars-values 126 --skip-bars-values 0 --top-n-values 2 --rebalance-bars-values 21 --benchmark equal_weight --train-bars 756 --test-bars 126 --step-bars 126 --start 2020-01-01 --end 2024-12-31 --output artifacts/experiments/mag7_xsec_walkforward.csv
+trading-cli research walkforward --universe liquid_top_100 --strategy xsec_momentum_topn --lookback-bars-values 126 252 --skip-bars-values 0 5 21 --top-n-values 2 3 5 --rebalance-bars-values 21 42 --benchmark equal_weight --train-bars 756 --test-bars 126 --step-bars 126 --start 2020-01-01 --end 2024-12-31 --output artifacts/experiments/liquid_top_100_xsec_walkforward.csv
+trading-cli research walkforward --universe liquid_top_100 --strategy xsec_momentum_topn --lookback-bars-values 126 --skip-bars-values 0 --top-n-values 2 --rebalance-bars-values 21 --benchmark equal_weight --train-bars 756 --test-bars 126 --step-bars 126 --start 2020-01-01 --end 2024-12-31 --cost-bps 10 --output artifacts/experiments/liquid_top_100_xsec_walkforward_cost10.csv
+trading-cli research walkforward --universe nasdaq100_current --strategy xsec_momentum_topn --lookback-bars-values 126 252 --skip-bars-values 0 5 21 --top-n-values 2 3 5 --rebalance-bars-values 21 42 --benchmark equal_weight --train-bars 756 --test-bars 126 --step-bars 126 --start 2020-01-01 --end 2024-12-31 --cost-bps 10 --output artifacts/experiments/nasdaq100_current_xsec_walkforward_cost10.csv
+```
+
+Validation ladder:
+
+1. Start with `magnificent7` for a compact sanity check.
+2. Expand to `nasdaq100_current`, `sp100`, or `liquid_top_100` for breadth.
+3. Re-run walk-forward with `--cost-bps` to test friction sensitivity.
+4. Compare the strategy against `--benchmark equal_weight` and prioritize stable excess return.
+
+For xsec research, `--cost-bps` applies a simple linear cost on rebalance turnover. Artifacts now report `benchmark_type`, gross return, net return, cost drag, average turnover, annualized turnover, and per-rebalance transaction cost diagnostics.
+
+Constrained xsec examples:
+
+```bash
+trading-cli research walkforward --universe nasdaq100 --strategy xsec_momentum_topn --lookback-bars-values 84 --skip-bars-values 21 --top-n-values 2 --rebalance-bars-values 21 --benchmark equal_weight --start 2020-01-01 --train-bars 756 --test-bars 126 --step-bars 126 --cost-bps 10 --output artifacts/experiments/nasdaq100_xsec_baseline_walkforward.csv
+trading-cli research walkforward --universe nasdaq100 --strategy xsec_momentum_topn --lookback-bars-values 84 --skip-bars-values 21 --top-n-values 2 --rebalance-bars-values 21 --benchmark equal_weight --start 2020-01-01 --train-bars 756 --test-bars 126 --step-bars 126 --cost-bps 10 --max-position-weight 0.5 --min-avg-dollar-volume 50000000 --weighting-scheme inv_vol --vol-lookback-bars 20 --max-turnover-per-rebalance 0.5 --turnover-buffer-bps 0 --output artifacts/experiments/nasdaq100_xsec_constrained_walkforward.csv
+```
+
+Compare constrained versus unconstrained runs with:
+
+- `avg_test_return_pct`
+- `avg_excess_return_pct`
+- `worst_excess_return_pct`
+- `total_trade_count`
+- `mean_turnover`
+- `mean_annualized_turnover`
+- `worst_test_max_drawdown_pct`
+- `percent_positive_windows`
 
 ### Signal Validation Commands
 
@@ -346,6 +417,8 @@ Useful files to inspect first:
 ## Known Limitations / Current Status
 
 - Universe definitions are static snapshots in code, not live constituent feeds.
+- `nasdaq100` currently aliases `nasdaq100_current`, which is a present-day survivor universe rather than true point-in-time historical membership.
+- Backtests on current-survivor universes introduce survivorship bias unless a historical membership model is added.
 - Some advanced signal families depend on feature availability such as benchmark returns, sector/group context, or volume fields; missing inputs can degrade or skip candidates.
 - The first live execution layer is intentionally conservative and file-based. It is designed around validation, gating, and safe defaults rather than full broker automation.
 - The current broker path includes mock support and guarded integration points, but not a broad multi-broker production execution framework.

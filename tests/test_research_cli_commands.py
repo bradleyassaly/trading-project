@@ -227,11 +227,20 @@ def test_cmd_research_supports_xsec_momentum_topn(monkeypatch, capsys, tmp_path:
         skip_bars=0,
         top_n=1,
         rebalance_bars=1,
+        max_position_weight=0.5,
+        min_avg_dollar_volume=50_000_000,
+        max_names_per_sector=1,
+        turnover_buffer_bps=25.0,
+        max_turnover_per_rebalance=0.5,
+        weighting_scheme="inv_vol",
+        vol_lookback_bars=20,
+        benchmark="equal_weight",
         entry_lookback=55,
         exit_lookback=20,
         momentum_lookback=None,
         cash=10_000.0,
         commission=0.001,
+        cost_bps=10.0,
         start="2020-01-02",
         end="2020-01-07",
         engine="legacy",
@@ -245,8 +254,15 @@ def test_cmd_research_supports_xsec_momentum_topn(monkeypatch, capsys, tmp_path:
     assert "strategy=xsec_momentum_topn" in stdout
     assert "lookback_bars=3" in stdout
     assert "top_n=1" in stdout
+    assert "weighting_scheme=inv_vol" in stdout
+    assert "max_position_weight=0.5" in stdout
+    assert "min_avg_dollar_volume=50000000" in stdout
     assert "avg_holdings=" in stdout
     assert "percent_invested=" in stdout
+    assert "gross_return[%]=" in stdout
+    assert "net_return[%]=" in stdout
+    assert "cost_bps=10.0" in stdout
+    assert "benchmark=equal_weight" in stdout
 
 
 def test_cmd_sweep_skips_invalid_fast_slow_combinations_and_saves_rich_artifact(
@@ -480,6 +496,14 @@ def test_cmd_sweep_supports_xsec_momentum_topn(monkeypatch, tmp_path: Path) -> N
         skip_bars=0,
         top_n=2,
         rebalance_bars=3,
+        max_position_weight=0.5,
+        min_avg_dollar_volume=50_000_000,
+        max_names_per_sector=1,
+        turnover_buffer_bps=25.0,
+        max_turnover_per_rebalance=0.5,
+        weighting_scheme="inv_vol",
+        vol_lookback_bars=20,
+        benchmark="equal_weight",
         entry_lookback=55,
         exit_lookback=20,
         momentum_lookback=None,
@@ -488,6 +512,7 @@ def test_cmd_sweep_supports_xsec_momentum_topn(monkeypatch, tmp_path: Path) -> N
         momentum_lookback_values=None,
         cash=10_000.0,
         commission=0.001,
+        cost_bps=12.0,
         start=None,
         end=None,
         engine="legacy",
@@ -503,3 +528,7 @@ def test_cmd_sweep_supports_xsec_momentum_topn(monkeypatch, tmp_path: Path) -> N
     assert set(result_df["lookback_bars"]) == {3, 5}
     assert set(result_df["top_n"]) == {2}
     assert "average_number_of_holdings" in result_df.columns
+    assert {"weighting_scheme", "max_position_weight", "min_avg_dollar_volume", "turnover_buffer_bps", "max_turnover_per_rebalance", "average_available_symbols"}.issubset(result_df.columns)
+    assert {"gross_return_pct", "net_return_pct", "cost_drag_return_pct", "annualized_turnover", "cost_bps"}.issubset(result_df.columns)
+    assert set(result_df["cost_bps"]) == {12.0}
+    assert set(result_df["benchmark_type"]) == {"equal_weight"}

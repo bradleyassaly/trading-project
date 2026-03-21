@@ -546,7 +546,15 @@ def test_cmd_walkforward_supports_xsec_momentum_topn(monkeypatch, tmp_path: Path
             "df": pd.DataFrame(
                 {
                     "timestamp": pd.date_range("2020-01-01", periods=30, freq="B"),
-                    "Close": [100 + idx if symbol == "AAPL" else 90 + idx * 0.2 for idx in range(30)],
+                    "Close": [
+                        100 + idx * 1.8
+                        if symbol == "AAPL"
+                        else 100 + idx * (1.0 if idx % 2 == 0 else 1.4)
+                        if symbol == "MSFT"
+                        else 100 + idx * (0.3 if idx % 2 == 0 else 0.6)
+                        for idx in range(30)
+                    ],
+                    "Volume": [1_000_000 for _ in range(30)],
                 }
             ),
             "path": tmp_path / f"{symbol}.parquet",
@@ -589,26 +597,35 @@ def test_cmd_walkforward_supports_xsec_momentum_topn(monkeypatch, tmp_path: Path
         fast=20,
         slow=100,
         lookback=20,
-        lookback_bars=5,
+        lookback_bars=10,
         skip_bars=0,
         top_n=2,
         rebalance_bars=5,
+        max_position_weight=0.5,
+        min_avg_dollar_volume=50_000_000,
+        max_names_per_sector=1,
+        turnover_buffer_bps=25.0,
+        max_turnover_per_rebalance=0.5,
+        weighting_scheme="inv_vol",
+        vol_lookback_bars=20,
+        benchmark="equal_weight",
         entry_lookback=55,
         exit_lookback=20,
         momentum_lookback=None,
         fast_values=None,
         slow_values=None,
         lookback_values=None,
-        lookback_bars_values=[5],
+        lookback_bars_values=[10],
         skip_bars_values=[0],
         top_n_values=[2],
         rebalance_bars_values=[5],
         entry_lookback_values=None,
         exit_lookback_values=None,
         momentum_lookback_values=None,
-        select_by="Sharpe Ratio",
+        select_by="Return [%]",
         cash=10_000.0,
         commission=0.001,
+        cost_bps=15.0,
         engine="legacy",
         output=str(output_path),
     )
@@ -616,7 +633,125 @@ def test_cmd_walkforward_supports_xsec_momentum_topn(monkeypatch, tmp_path: Path
     cmd_walkforward(args)
 
     window_df = pd.read_csv(output_path)
+    summary_df = pd.read_csv(output_path.with_name("xsec_walkforward_summary.csv"))
+    diagnostics_df = pd.read_csv(output_path.with_name("xsec_walkforward_rebalance_diagnostics.csv"))
     assert (window_df["window_status"] == "completed").any()
     assert set(window_df.loc[window_df["window_status"] == "completed", "symbol"]) == {"UNIVERSE"}
-    assert set(window_df.loc[window_df["window_status"] == "completed", "lookback_bars"]) == {5}
+    completed_df = window_df.loc[window_df["window_status"] == "completed"].copy()
+    assert set(completed_df["lookback_bars"]) == {10}
     assert set(window_df.loc[window_df["window_status"] == "completed", "top_n"]) == {2}
+    assert set(completed_df["benchmark_type"]) == {"equal_weight"}
+    assert {"test_gross_return_pct", "test_net_return_pct", "test_cost_drag_return_pct", "annualized_turnover", "total_transaction_cost", "weighting_scheme", "max_position_weight", "min_avg_dollar_volume", "turnover_buffer_bps", "max_turnover_per_rebalance", "average_available_symbols", "turnover_cap_binding_count", "turnover_buffer_blocked_replacements"}.issubset(window_df.columns)
+    assert (completed_df["average_selected_symbols"] >= 0.0).all()
+    assert (completed_df["percent_invested"] >= 0.0).all()
+    assert (completed_df["average_selected_symbols"] > 0.0).any()
+    assert (completed_df["percent_invested"] > 0.0).any()
+    assert (completed_df["percent_empty_rebalances"] >= 0.0).all()
+    assert (completed_df["percent_empty_rebalances"] < 100.0).any()
+    assert (summary_df["mean_average_selected_symbols"] > 0.0).all()
+    assert (summary_df["mean_percent_empty_rebalances"] >= 0.0).all()
+    assert set(summary_df["benchmark_type"]) == {"equal_weight"}
+    assert {"avg_test_gross_return_pct", "avg_test_net_return_pct", "avg_test_cost_drag_return_pct", "mean_annualized_turnover", "total_transaction_cost", "mean_average_available_symbols", "total_turnover_cap_binding_count", "total_turnover_buffer_blocked_replacements"}.issubset(summary_df.columns)
+    assert {"window_index", "timestamp", "selected_symbols", "selected_weights", "eligible_symbol_count", "available_symbol_count", "liquidity_excluded_count"}.issubset(diagnostics_df.columns)
+    assert diagnostics_df["empty_selection"].isin([True, False]).all()
+    assert diagnostics_df["empty_selection"].eq(False).any()
+    assert diagnostics_df["liquidity_filter_active"].all()
+
+
+def test_cmd_walkforward_xsec_uses_dynamic_eligibility_for_late_listings(monkeypatch, tmp_path: Path) -> None:
+    def fake_prepare(symbol: str, start=None, end=None):
+        if symbol == "ARM":
+            timestamps = pd.date_range("2020-01-15", periods=18, freq="B")
+            closes = [50 + idx * 2.5 for idx in range(18)]
+        else:
+            timestamps = pd.date_range("2020-01-01", periods=30, freq="B")
+            slope = 1.8 if symbol == "AAPL" else 1.0
+            closes = [100 + idx * slope for idx in range(30)]
+        return {
+            "df": pd.DataFrame({"timestamp": timestamps, "Close": closes, "Volume": [1_000_000 for _ in range(len(timestamps))]}),
+            "path": tmp_path / f"{symbol}.parquet",
+            "date_col": "timestamp",
+            "effective_start": pd.Timestamp(timestamps.min()).date().isoformat(),
+            "effective_end": pd.Timestamp(timestamps.max()).date().isoformat(),
+            "rows": len(timestamps),
+        }
+
+    monkeypatch.setattr(
+        "trading_platform.cli.commands.walkforward.prepare_research_frame",
+        fake_prepare,
+    )
+    monkeypatch.setattr(
+        "trading_platform.cli.commands.walkforward.save_walkforward_return_plot",
+        lambda df, output_path: output_path.with_suffix(".returns.png"),
+    )
+    monkeypatch.setattr(
+        "trading_platform.cli.commands.walkforward.save_walkforward_param_plot",
+        lambda df, output_path: output_path.with_suffix(".params.png"),
+    )
+    monkeypatch.setattr(
+        "trading_platform.cli.commands.walkforward.save_walkforward_html_report",
+        lambda **kwargs: Path(str(kwargs["output_path"]).replace(".csv", ".html")),
+    )
+
+    output_path = tmp_path / "xsec_walkforward_late_listings.csv"
+    args = argparse.Namespace(
+        symbols=["AAPL", "MSFT", "ARM"],
+        universe=None,
+        strategy="xsec_momentum_topn",
+        start="2020-01-01",
+        end="2020-02-28",
+        train_years=5,
+        test_years=1,
+        train_bars=10,
+        test_bars=5,
+        step_bars=5,
+        train_period_days=None,
+        test_period_days=None,
+        step_days=None,
+        min_train_rows=5,
+        min_test_rows=3,
+        fast=20,
+        slow=100,
+        lookback=20,
+        lookback_bars=3,
+        skip_bars=0,
+        top_n=2,
+        rebalance_bars=5,
+        benchmark="equal_weight",
+        entry_lookback=55,
+        exit_lookback=20,
+        momentum_lookback=None,
+        fast_values=None,
+        slow_values=None,
+        lookback_values=None,
+        lookback_bars_values=[3],
+        skip_bars_values=[0],
+        top_n_values=[2],
+        rebalance_bars_values=[5],
+        entry_lookback_values=None,
+        exit_lookback_values=None,
+        momentum_lookback_values=None,
+        select_by="Return [%]",
+        cash=10_000.0,
+        commission=0.001,
+        cost_bps=10.0,
+        engine="legacy",
+        output=str(output_path),
+    )
+
+    cmd_walkforward(args)
+
+    window_df = pd.read_csv(output_path)
+    summary_df = pd.read_csv(output_path.with_name("xsec_walkforward_late_listings_summary.csv"))
+    diagnostics_df = pd.read_csv(output_path.with_name("xsec_walkforward_late_listings_rebalance_diagnostics.csv"))
+
+    completed_df = window_df.loc[window_df["window_status"] == "completed"].copy()
+    assert not completed_df.empty
+    assert completed_df["effective_start_date"].iloc[0] == "2020-01-01"
+    assert (completed_df["average_available_symbols"] >= 2.0).all()
+    assert (completed_df["max_available_symbols"] >= 3.0).any()
+    assert (completed_df["average_eligible_symbols"] >= 1.0).all()
+    assert {"available_symbol_count", "eligible_symbol_count", "selected_symbol_count"}.issubset(diagnostics_df.columns)
+    assert diagnostics_df["available_symbol_count"].max() == 3
+    assert summary_df.iloc[0]["mean_average_available_symbols"] >= 2.0
+    assert summary_df.iloc[0]["mean_max_available_symbols"] >= 3.0

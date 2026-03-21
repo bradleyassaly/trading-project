@@ -15,6 +15,7 @@ from trading_platform.cli.common import (
     prepare_research_frame,
     print_symbol_list,
     resolve_symbols,
+    resolve_turnover_cost,
 )
 from trading_platform.experiments.reporting import (
     save_walkforward_html_report,
@@ -337,6 +338,12 @@ def _candidate_snapshot(candidates: list[dict[str, object]], top_n: int = 3) -> 
                 "skip_bars": candidate["params"].get("skip_bars"),
                 "top_n": candidate["params"].get("top_n"),
                 "rebalance_bars": candidate["params"].get("rebalance_bars"),
+                "weighting_scheme": candidate["params"].get("weighting_scheme"),
+                "max_position_weight": candidate["params"].get("max_position_weight"),
+                "min_avg_dollar_volume": candidate["params"].get("min_avg_dollar_volume"),
+                "max_names_per_sector": candidate["params"].get("max_names_per_sector"),
+                "turnover_buffer_bps": candidate["params"].get("turnover_buffer_bps"),
+                "max_turnover_per_rebalance": candidate["params"].get("max_turnover_per_rebalance"),
                 "entry_lookback": candidate["params"].get("entry_lookback"),
                 "exit_lookback": candidate["params"].get("exit_lookback"),
                 "momentum_lookback": candidate["params"].get("momentum_lookback"),
@@ -346,6 +353,31 @@ def _candidate_snapshot(candidates: list[dict[str, object]], top_n: int = 3) -> 
             }
         )
     return json.dumps(payload)
+
+
+def _slice_prepared_frames_by_date(
+    prepared_frames: dict[str, dict[str, object]],
+    *,
+    start: str | None = None,
+    end: str | None = None,
+) -> dict[str, dict[str, object]]:
+    sliced: dict[str, dict[str, object]] = {}
+    start_ts = pd.Timestamp(start) if start is not None else None
+    end_ts = pd.Timestamp(end) if end is not None else None
+
+    for symbol, prepared in prepared_frames.items():
+        date_col = str(prepared["date_col"])
+        working = prepared["df"].copy()
+        working[date_col] = pd.to_datetime(working[date_col])
+        if start_ts is not None:
+            working = working[working[date_col] >= start_ts]
+        if end_ts is not None:
+            working = working[working[date_col] <= end_ts]
+        sliced[symbol] = {
+            **prepared,
+            "df": working.reset_index(drop=True),
+        }
+    return sliced
 
 
 def _build_summary_rows(window_df: pd.DataFrame, *, strategy: str, engine: str) -> pd.DataFrame:
@@ -359,6 +391,7 @@ def _build_summary_rows(window_df: pd.DataFrame, *, strategy: str, engine: str) 
             "symbol": symbol,
             "strategy": strategy,
             "engine": engine,
+            "benchmark_type": symbol_df["benchmark_type"].iloc[0] if "benchmark_type" in symbol_df.columns else None,
             "effective_start_date": symbol_df["effective_start_date"].iloc[0],
             "effective_end_date": symbol_df["effective_end_date"].iloc[0],
             "candidate_windows": int(len(symbol_df)),
@@ -370,6 +403,9 @@ def _build_summary_rows(window_df: pd.DataFrame, *, strategy: str, engine: str) 
                 else float("nan")
             ),
             "avg_test_return_pct": completed_df["test_return_pct"].mean(),
+            "avg_test_gross_return_pct": completed_df["test_gross_return_pct"].mean() if "test_gross_return_pct" in completed_df.columns else float("nan"),
+            "avg_test_net_return_pct": completed_df["test_net_return_pct"].mean() if "test_net_return_pct" in completed_df.columns else float("nan"),
+            "avg_test_cost_drag_return_pct": completed_df["test_cost_drag_return_pct"].mean() if "test_cost_drag_return_pct" in completed_df.columns else float("nan"),
             "median_test_return_pct": completed_df["test_return_pct"].median(),
             "compounded_test_return_pct": compound_return_pct(completed_df["test_return_pct"]) if not completed_df.empty else float("nan"),
             "avg_benchmark_return_pct": completed_df["benchmark_return_pct"].mean(),
@@ -396,10 +432,32 @@ def _build_summary_rows(window_df: pd.DataFrame, *, strategy: str, engine: str) 
             "mean_average_number_of_holdings": completed_df["average_number_of_holdings"].mean() if "average_number_of_holdings" in completed_df.columns else float("nan"),
             "total_rebalance_count": completed_df["rebalance_count"].fillna(0).sum() if "rebalance_count" in completed_df.columns else 0,
             "mean_turnover": completed_df["mean_turnover"].mean() if "mean_turnover" in completed_df.columns else float("nan"),
+            "mean_annualized_turnover": completed_df["annualized_turnover"].mean() if "annualized_turnover" in completed_df.columns else float("nan"),
+            "mean_transaction_cost": completed_df["mean_transaction_cost"].mean() if "mean_transaction_cost" in completed_df.columns else float("nan"),
+            "total_transaction_cost": completed_df["total_transaction_cost"].fillna(0).sum() if "total_transaction_cost" in completed_df.columns else 0,
             "mean_percent_invested": completed_df["percent_invested"].mean() if "percent_invested" in completed_df.columns else float("nan"),
             "mean_average_gross_exposure": completed_df["average_gross_exposure"].mean() if "average_gross_exposure" in completed_df.columns else float("nan"),
+            "mean_average_valid_scores": completed_df["average_valid_scores"].mean() if "average_valid_scores" in completed_df.columns else float("nan"),
+            "mean_min_available_symbols": completed_df["min_available_symbols"].mean() if "min_available_symbols" in completed_df.columns else float("nan"),
+            "mean_average_available_symbols": completed_df["average_available_symbols"].mean() if "average_available_symbols" in completed_df.columns else float("nan"),
+            "mean_max_available_symbols": completed_df["max_available_symbols"].mean() if "max_available_symbols" in completed_df.columns else float("nan"),
+            "mean_min_eligible_symbols": completed_df["min_eligible_symbols"].mean() if "min_eligible_symbols" in completed_df.columns else float("nan"),
+            "mean_average_eligible_symbols": completed_df["average_eligible_symbols"].mean() if "average_eligible_symbols" in completed_df.columns else float("nan"),
+            "mean_max_eligible_symbols": completed_df["max_eligible_symbols"].mean() if "max_eligible_symbols" in completed_df.columns else float("nan"),
+            "mean_average_selected_symbols": completed_df["average_selected_symbols"].mean() if "average_selected_symbols" in completed_df.columns else float("nan"),
+            "mean_percent_empty_rebalances": completed_df["percent_empty_rebalances"].mean() if "percent_empty_rebalances" in completed_df.columns else float("nan"),
+            "liquidity_filter_active": bool(symbol_df["liquidity_filter_active"].fillna(False).astype(bool).any()) if "liquidity_filter_active" in symbol_df.columns else False,
+            "sector_cap_active": bool(symbol_df["sector_cap_active"].fillna(False).astype(bool).any()) if "sector_cap_active" in symbol_df.columns else False,
+            "sector_warning": symbol_df["sector_warning"].dropna().iloc[0] if "sector_warning" in symbol_df.columns and not symbol_df["sector_warning"].dropna().empty else None,
+            "mean_average_liquidity_excluded_symbols": completed_df["average_liquidity_excluded_symbols"].mean() if "average_liquidity_excluded_symbols" in completed_df.columns else float("nan"),
+            "total_liquidity_excluded_symbols": completed_df["total_liquidity_excluded_symbols"].fillna(0).sum() if "total_liquidity_excluded_symbols" in completed_df.columns else 0,
+            "mean_average_sector_cap_excluded_symbols": completed_df["average_sector_cap_excluded_symbols"].mean() if "average_sector_cap_excluded_symbols" in completed_df.columns else float("nan"),
+            "total_sector_cap_excluded_symbols": completed_df["total_sector_cap_excluded_symbols"].fillna(0).sum() if "total_sector_cap_excluded_symbols" in completed_df.columns else 0,
+            "total_turnover_cap_binding_count": completed_df["turnover_cap_binding_count"].fillna(0).sum() if "turnover_cap_binding_count" in completed_df.columns else 0,
+            "total_turnover_buffer_blocked_replacements": completed_df["turnover_buffer_blocked_replacements"].fillna(0).sum() if "turnover_buffer_blocked_replacements" in completed_df.columns else 0,
             "mean_initial_equity": completed_df["initial_equity"].mean() if "initial_equity" in completed_df.columns else float("nan"),
             "mean_final_equity": completed_df["final_equity"].mean() if "final_equity" in completed_df.columns else float("nan"),
+            "earliest_data_date_by_symbol": symbol_df["earliest_data_date_by_symbol"].iloc[0] if "earliest_data_date_by_symbol" in symbol_df.columns else None,
             "percent_windows_ended_in_cash": (
                 float(completed_df["ended_in_cash"].fillna(False).astype(bool).mean() * 100.0)
                 if "ended_in_cash" in completed_df.columns and not completed_df.empty
@@ -530,6 +588,7 @@ def cmd_walkforward(args: argparse.Namespace) -> None:
             symbol: prepare_research_frame(symbol, start=args.start, end=args.end)
             for symbol in symbols
         }
+        strategy_params = build_strategy_params(args)
         close_panel, _ = build_close_panel(prepared_frames)
         effective_start = str(pd.Timestamp(close_panel.index.min()).date())
         effective_end = str(pd.Timestamp(close_panel.index.max()).date())
@@ -542,6 +601,7 @@ def cmd_walkforward(args: argparse.Namespace) -> None:
             step_bars=window_spec["step_bars"],
         )
         universe_rows: list[dict[str, object]] = []
+        rebalance_debug_rows: list[pd.DataFrame] = []
         for window in candidate_windows:
             base_row = {
                 "window_index": window["window_index"],
@@ -550,6 +610,7 @@ def cmd_walkforward(args: argparse.Namespace) -> None:
                 "symbol_count": len(symbols),
                 "strategy": args.strategy,
                 "engine": args.engine,
+                "benchmark_type": args.benchmark,
                 "window_units": window_spec["window_units"],
                 "train_bars_requested": window_spec["train_bars"],
                 "test_bars_requested": window_spec["test_bars"],
@@ -573,6 +634,14 @@ def cmd_walkforward(args: argparse.Namespace) -> None:
                 "skip_bars": None,
                 "top_n": None,
                 "rebalance_bars": None,
+                "weighting_scheme": strategy_params["weighting_scheme"],
+                "vol_lookback_bars": strategy_params["vol_lookback_bars"],
+                "max_position_weight": strategy_params["max_position_weight"],
+                "min_avg_dollar_volume": strategy_params["min_avg_dollar_volume"],
+                "max_names_per_sector": strategy_params["max_names_per_sector"],
+                "turnover_buffer_bps": strategy_params["turnover_buffer_bps"],
+                "turnover_buffer_score_gap": float(strategy_params["turnover_buffer_bps"] or 0.0) / 10_000.0,
+                "max_turnover_per_rebalance": strategy_params["max_turnover_per_rebalance"],
                 "entry_lookback": None,
                 "exit_lookback": None,
                 "momentum_lookback": None,
@@ -580,6 +649,9 @@ def cmd_walkforward(args: argparse.Namespace) -> None:
                 "train_sharpe": None,
                 "train_max_drawdown_pct": None,
                 "test_return_pct": None,
+                "test_gross_return_pct": None,
+                "test_net_return_pct": None,
+                "test_cost_drag_return_pct": None,
                 "test_sharpe": None,
                 "test_max_drawdown_pct": None,
                 "trade_count": None,
@@ -592,10 +664,32 @@ def cmd_walkforward(args: argparse.Namespace) -> None:
                 "average_number_of_holdings": None,
                 "rebalance_count": None,
                 "mean_turnover": None,
+                "annualized_turnover": None,
+                "mean_transaction_cost": None,
+                "total_transaction_cost": None,
                 "percent_invested": None,
                 "initial_equity": None,
                 "final_equity": None,
                 "average_gross_exposure": None,
+                "min_available_symbols": None,
+                "average_available_symbols": None,
+                "max_available_symbols": None,
+                "average_valid_scores": None,
+                "min_eligible_symbols": None,
+                "average_eligible_symbols": None,
+                "max_eligible_symbols": None,
+                "average_selected_symbols": None,
+                "percent_empty_rebalances": None,
+                "liquidity_filter_active": bool(strategy_params["min_avg_dollar_volume"] is not None),
+                "sector_cap_active": False,
+                "sector_warning": None,
+                "average_liquidity_excluded_symbols": None,
+                "total_liquidity_excluded_symbols": None,
+                "average_sector_cap_excluded_symbols": None,
+                "total_sector_cap_excluded_symbols": None,
+                "turnover_cap_binding_count": None,
+                "turnover_buffer_blocked_replacements": None,
+                "earliest_data_date_by_symbol": None,
                 "benchmark_return_pct": None,
                 "excess_return_pct": None,
                 "window_status": "skipped",
@@ -610,20 +704,15 @@ def cmd_walkforward(args: argparse.Namespace) -> None:
                 universe_rows.append(base_row)
                 continue
 
-            train_prepared = {
-                symbol: {
-                    **prepared,
-                    "df": prepared["df"].iloc[window["train_start_idx"]:window["train_end_exclusive"]].copy(),
-                }
-                for symbol, prepared in prepared_frames.items()
-            }
-            test_prepared = {
-                symbol: {
-                    **prepared,
-                    "df": prepared["df"].iloc[window["test_start_idx"]:window["test_end_exclusive"]].copy(),
-                }
-                for symbol, prepared in prepared_frames.items()
-            }
+            train_prepared = _slice_prepared_frames_by_date(
+                prepared_frames,
+                start=base_row["train_start"],
+                end=base_row["train_end"],
+            )
+            test_prepared = _slice_prepared_frames_by_date(
+                prepared_frames,
+                end=base_row["test_end"],
+            )
 
             candidates: list[dict[str, object]] = []
             best_params = None
@@ -637,8 +726,16 @@ def cmd_walkforward(args: argparse.Namespace) -> None:
                         skip_bars=int(params["skip_bars"] or 0),
                         top_n=int(params["top_n"] or 1),
                         rebalance_bars=int(params["rebalance_bars"] or 21),
-                        commission=args.commission,
+                        commission=resolve_turnover_cost(args),
                         cash=args.cash,
+                        max_position_weight=strategy_params["max_position_weight"],
+                        min_avg_dollar_volume=strategy_params["min_avg_dollar_volume"],
+                        max_names_per_sector=strategy_params["max_names_per_sector"],
+                        turnover_buffer_bps=float(strategy_params["turnover_buffer_bps"] or 0.0),
+                        max_turnover_per_rebalance=strategy_params["max_turnover_per_rebalance"],
+                        weighting_scheme=strategy_params["weighting_scheme"],
+                        vol_lookback_bars=int(strategy_params["vol_lookback_bars"] or 20),
+                        benchmark_type=args.benchmark,
                     )
                     train_stats = train_result.summary
                 except Exception as exc:
@@ -672,10 +769,35 @@ def cmd_walkforward(args: argparse.Namespace) -> None:
                 skip_bars=int(best_params["skip_bars"] or 0),
                 top_n=int(best_params["top_n"] or 1),
                 rebalance_bars=int(best_params["rebalance_bars"] or 21),
-                commission=args.commission,
+                commission=resolve_turnover_cost(args),
                 cash=args.cash,
+                max_position_weight=strategy_params["max_position_weight"],
+                min_avg_dollar_volume=strategy_params["min_avg_dollar_volume"],
+                max_names_per_sector=strategy_params["max_names_per_sector"],
+                turnover_buffer_bps=float(strategy_params["turnover_buffer_bps"] or 0.0),
+                max_turnover_per_rebalance=strategy_params["max_turnover_per_rebalance"],
+                weighting_scheme=strategy_params["weighting_scheme"],
+                vol_lookback_bars=int(strategy_params["vol_lookback_bars"] or 20),
+                benchmark_type=args.benchmark,
+                active_start=base_row["test_start"],
+                active_end=base_row["test_end"],
             )
             test_stats = test_result.summary
+            test_rebalance_debug = test_result.rebalance_diagnostics.reset_index()
+            if not test_rebalance_debug.empty:
+                context = pd.DataFrame(
+                    {
+                        "window_index": [window["window_index"]] * len(test_rebalance_debug),
+                        "symbol": ["UNIVERSE"] * len(test_rebalance_debug),
+                        "test_start": [base_row["test_start"]] * len(test_rebalance_debug),
+                        "test_end": [base_row["test_end"]] * len(test_rebalance_debug),
+                    }
+                )
+                test_rebalance_debug = pd.concat(
+                    [context.reset_index(drop=True), test_rebalance_debug.reset_index(drop=True)],
+                    axis=1,
+                )
+                rebalance_debug_rows.append(test_rebalance_debug)
             base_row.update(
                 {
                     "selected_train_score": best_score,
@@ -683,10 +805,21 @@ def cmd_walkforward(args: argparse.Namespace) -> None:
                     "skip_bars": best_params.get("skip_bars"),
                     "top_n": best_params.get("top_n"),
                     "rebalance_bars": best_params.get("rebalance_bars"),
+                    "weighting_scheme": test_stats.get("weighting_scheme"),
+                    "vol_lookback_bars": test_stats.get("vol_lookback_bars"),
+                    "max_position_weight": test_stats.get("max_position_weight"),
+                    "min_avg_dollar_volume": test_stats.get("min_avg_dollar_volume"),
+                    "max_names_per_sector": test_stats.get("max_names_per_sector"),
+                    "turnover_buffer_bps": test_stats.get("turnover_buffer_bps"),
+                    "turnover_buffer_score_gap": test_stats.get("turnover_buffer_score_gap"),
+                    "max_turnover_per_rebalance": test_stats.get("max_turnover_per_rebalance"),
                     "train_return_pct": best_train_stats.get("Return [%]"),
                     "train_sharpe": best_train_stats.get("Sharpe Ratio"),
                     "train_max_drawdown_pct": best_train_stats.get("Max. Drawdown [%]"),
                     "test_return_pct": test_stats.get("Return [%]"),
+                    "test_gross_return_pct": test_stats.get("gross_return_pct"),
+                    "test_net_return_pct": test_stats.get("net_return_pct"),
+                    "test_cost_drag_return_pct": test_stats.get("cost_drag_return_pct"),
                     "test_sharpe": test_stats.get("Sharpe Ratio"),
                     "test_max_drawdown_pct": test_stats.get("Max. Drawdown [%]"),
                     "trade_count": test_stats.get("trade_count"),
@@ -699,10 +832,32 @@ def cmd_walkforward(args: argparse.Namespace) -> None:
                     "average_number_of_holdings": test_stats.get("average_number_of_holdings"),
                     "rebalance_count": test_stats.get("rebalance_count"),
                     "mean_turnover": test_stats.get("mean_turnover"),
+                    "annualized_turnover": test_stats.get("annualized_turnover"),
+                    "mean_transaction_cost": test_stats.get("mean_transaction_cost"),
+                    "total_transaction_cost": test_stats.get("total_transaction_cost"),
                     "percent_invested": test_stats.get("percent_invested"),
                     "initial_equity": test_stats.get("initial_equity"),
                     "final_equity": test_stats.get("final_equity"),
                     "average_gross_exposure": test_stats.get("average_gross_exposure"),
+                    "min_available_symbols": test_stats.get("min_available_symbols"),
+                    "average_available_symbols": test_stats.get("average_available_symbols"),
+                    "max_available_symbols": test_stats.get("max_available_symbols"),
+                    "average_valid_scores": test_stats.get("average_valid_scores"),
+                    "min_eligible_symbols": test_stats.get("min_eligible_symbols"),
+                    "average_eligible_symbols": test_stats.get("average_eligible_symbols"),
+                    "max_eligible_symbols": test_stats.get("max_eligible_symbols"),
+                    "average_selected_symbols": test_stats.get("average_selected_symbols"),
+                    "percent_empty_rebalances": test_stats.get("percent_empty_rebalances"),
+                    "liquidity_filter_active": test_stats.get("liquidity_filter_active"),
+                    "sector_cap_active": test_stats.get("sector_cap_active"),
+                    "sector_warning": test_stats.get("sector_warning"),
+                    "average_liquidity_excluded_symbols": test_stats.get("average_liquidity_excluded_symbols"),
+                    "total_liquidity_excluded_symbols": test_stats.get("total_liquidity_excluded_symbols"),
+                    "average_sector_cap_excluded_symbols": test_stats.get("average_sector_cap_excluded_symbols"),
+                    "total_sector_cap_excluded_symbols": test_stats.get("total_sector_cap_excluded_symbols"),
+                    "turnover_cap_binding_count": test_stats.get("turnover_cap_binding_count"),
+                    "turnover_buffer_blocked_replacements": test_stats.get("turnover_buffer_blocked_replacements"),
+                    "earliest_data_date_by_symbol": test_stats.get("earliest_data_date_by_symbol"),
                     "benchmark_return_pct": test_stats.get("benchmark_return_pct"),
                     "excess_return_pct": test_stats.get("excess_return_pct"),
                     "window_status": "completed",
@@ -715,9 +870,18 @@ def cmd_walkforward(args: argparse.Namespace) -> None:
                 f"window {window['window_index']} train {base_row['train_start']}->{base_row['train_end']} ({base_row['train_rows']} rows) | "
                 f"test {base_row['test_start']}->{base_row['test_end']} ({base_row['test_rows']} rows) | "
                 f"params lookback_bars={base_row['lookback_bars']} skip_bars={base_row['skip_bars']} top_n={base_row['top_n']} "
-                f"rebalance_bars={base_row['rebalance_bars']} | selected_by={args.select_by} score={best_score} | "
-                f"test Return[%]={base_row['test_return_pct']} | avg_holdings={base_row['average_number_of_holdings']} | "
-                f"percent_invested={base_row['percent_invested']} | initial_equity={base_row['initial_equity']} "
+                f"rebalance_bars={base_row['rebalance_bars']} weighting_scheme={base_row['weighting_scheme']} "
+                f"max_position_weight={base_row['max_position_weight']} min_avg_dollar_volume={base_row['min_avg_dollar_volume']} "
+                f"max_names_per_sector={base_row['max_names_per_sector']} turnover_buffer_bps={base_row['turnover_buffer_bps']} "
+                f"max_turnover_per_rebalance={base_row['max_turnover_per_rebalance']} benchmark={base_row['benchmark_type']} | selected_by={args.select_by} score={best_score} | "
+                f"test gross[%]={base_row['test_gross_return_pct']} net[%]={base_row['test_net_return_pct']} cost_drag[%]={base_row['test_cost_drag_return_pct']} | avg_holdings={base_row['average_number_of_holdings']} | "
+                f"percent_invested={base_row['percent_invested']} | available[min/avg/max]={base_row['min_available_symbols']}/{base_row['average_available_symbols']}/{base_row['max_available_symbols']} | "
+                f"eligible[min/avg/max]={base_row['min_eligible_symbols']}/{base_row['average_eligible_symbols']}/{base_row['max_eligible_symbols']} "
+                f"avg_selected={base_row['average_selected_symbols']} | empty_rebalances[%]={base_row['percent_empty_rebalances']} | "
+                f"liquidity_excluded={base_row['total_liquidity_excluded_symbols']} sector_cap_excluded={base_row['total_sector_cap_excluded_symbols']} "
+                f"turnover_cap_bindings={base_row['turnover_cap_binding_count']} buffer_blocked={base_row['turnover_buffer_blocked_replacements']} | "
+                f"avg_turnover={base_row['mean_turnover']} annualized_turnover={base_row['annualized_turnover']} total_transaction_cost={base_row['total_transaction_cost']} | "
+                f"initial_equity={base_row['initial_equity']} "
                 f"final_equity={base_row['final_equity']} | avg_gross_exposure={base_row['average_gross_exposure']} | "
                 f"activity={activity_note(base_row)} | "
                 f"benchmark Return[%]={base_row['benchmark_return_pct']} | excess Return[%]={base_row['excess_return_pct']}"
@@ -735,6 +899,11 @@ def cmd_walkforward(args: argparse.Namespace) -> None:
         out_df.to_csv(output_path, index=False)
         summary_path = output_path.with_name(output_path.stem + "_summary.csv")
         summary_df.to_csv(summary_path, index=False)
+        rebalance_debug_path = None
+        if rebalance_debug_rows:
+            rebalance_debug_df = pd.concat(rebalance_debug_rows, ignore_index=True)
+            rebalance_debug_path = output_path.with_name(output_path.stem + "_rebalance_diagnostics.csv")
+            rebalance_debug_df.to_csv(rebalance_debug_path, index=False)
         plot_source_df = completed_out_df if not completed_out_df.empty else out_df.iloc[0:0].copy()
         returns_plot_path = save_walkforward_return_plot(plot_source_df, output_path)
         params_plot_path = save_walkforward_param_plot(plot_source_df, output_path)
@@ -751,6 +920,8 @@ def cmd_walkforward(args: argparse.Namespace) -> None:
         print(f"Saved walk-forward HTML report to {report_path}")
         print(f"\nSaved walk-forward window results to {output_path}")
         print(f"Saved walk-forward summary to {summary_path}")
+        if rebalance_debug_path is not None:
+            print(f"Saved walk-forward rebalance diagnostics to {rebalance_debug_path}")
         return
 
     for symbol in symbols:

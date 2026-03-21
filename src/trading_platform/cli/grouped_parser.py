@@ -100,6 +100,8 @@ def rewrite_legacy_cli_args(argv: list[str]) -> tuple[list[str], str | None]:
     first = argv[0]
     second = argv[1] if len(argv) > 1 else ""
 
+    if first == "features" and second == "build":
+        return ["data", "features", *argv[2:]], "Deprecated command `features build`; use `data features`."
     if first == "research" and second not in _RESEARCH_GROUP_COMMANDS:
         return ["research", "run", *argv[1:]], "Deprecated command `research`; use `research run`."
     if first == "portfolio" and second not in _PORTFOLIO_GROUP_COMMANDS:
@@ -207,6 +209,14 @@ def _add_walkforward_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--skip-bars-values", type=int, nargs="+")
     parser.add_argument("--top-n-values", type=int, nargs="+")
     parser.add_argument("--rebalance-bars-values", type=int, nargs="+")
+    parser.add_argument("--max-position-weight", type=float, default=None, help="Optional cap on any single xsec position weight.")
+    parser.add_argument("--min-avg-dollar-volume", type=float, default=None, help="Optional minimum 20-bar average dollar volume required for xsec eligibility.")
+    parser.add_argument("--max-names-per-sector", type=int, default=None, help="Optional maximum number of selected names per sector when sector metadata is available.")
+    parser.add_argument("--turnover-buffer-bps", type=float, default=0.0, help="Optional minimum momentum-score improvement, expressed in bps of score gap, required to replace an existing xsec holding.")
+    parser.add_argument("--max-turnover-per-rebalance", type=float, default=None, help="Optional cap on absolute turnover per xsec rebalance.")
+    parser.add_argument("--weighting-scheme", type=str, default="equal", choices=["equal", "inv_vol"], help="How to size selected xsec holdings.")
+    parser.add_argument("--vol-lookback-bars", type=int, default=20, help="Lookback window for inverse-vol xsec weighting.")
+    parser.add_argument("--benchmark", type=str, default="equal_weight", choices=["equal_weight"], help="Benchmark type for cross-sectional research")
     parser.add_argument("--entry-lookback-values", type=int, nargs="+")
     parser.add_argument("--exit-lookback-values", type=int, nargs="+")
     parser.add_argument("--momentum-lookback-values", type=int, nargs="+")
@@ -223,6 +233,7 @@ def _add_walkforward_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--select-by", type=str, default="Sharpe Ratio", choices=["Sharpe Ratio", "Return [%]"], help="Metric used to choose best params on the train window")
     parser.add_argument("--cash", type=float, default=10_000)
     parser.add_argument("--commission", type=float, default=0.001)
+    parser.add_argument("--cost-bps", type=float, default=None, help="Optional transaction cost in basis points per unit of turnover. Overrides --commission when provided.")
     parser.add_argument("--output", type=str, default="artifacts/experiments/walkforward_results.csv", help="CSV output path")
     parser.add_argument("--engine", type=str, default="legacy", choices=["legacy", "vectorized"], help="Backtest engine to use")
 
@@ -409,8 +420,10 @@ def build_parser() -> argparse.ArgumentParser:
     data_ingest = data_subparsers.add_parser("ingest", help="Download raw OHLCV data")
     add_shared_symbol_args(data_ingest)
     data_ingest.add_argument("--start", type=str, default="2010-01-01", help="Start date in YYYY-MM-DD format (default: 2010-01-01)")
+    data_ingest.add_argument("--fail-fast", action="store_true", help="Stop on the first ingest failure instead of continuing through the batch.")
+    data_ingest.add_argument("--failure-report", type=str, default=None, help="Optional CSV path for per-symbol ingest failures.")
     data_ingest.set_defaults(func=cmd_ingest)
-    data_features = data_subparsers.add_parser("features", help="Build feature datasets")
+    data_features = data_subparsers.add_parser("features", help="Build feature datasets. Canonical path: `trading-cli data features --symbols ...` or `--universe ...`.")
     add_shared_symbol_args(data_features)
     add_feature_arguments(data_features)
     data_features.set_defaults(func=cmd_features)
@@ -432,6 +445,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_execution_arguments(research_run)
     research_run.add_argument("--engine", type=str, default="legacy", choices=["legacy", "vectorized"], help="Backtest engine to use")
     research_run.add_argument("--output-dir", type=str, default=None, help="Optional directory to save vectorized research outputs")
+    research_run.add_argument("--cost-bps", type=float, default=None, help="Optional transaction cost in basis points per unit of turnover. Overrides --commission when provided.")
     research_run.add_argument("--config", type=str, default=None, help="Optional YAML or JSON research workflow config file.")
     research_run.add_argument("--fail-fast", action="store_true", help="Stop immediately on the first symbol error when using --config.")
     research_run.set_defaults(func=_cmd_research_run)
@@ -447,11 +461,20 @@ def build_parser() -> argparse.ArgumentParser:
     research_sweep.add_argument("--skip-bars-values", type=int, nargs="+")
     research_sweep.add_argument("--top-n-values", type=int, nargs="+")
     research_sweep.add_argument("--rebalance-bars-values", type=int, nargs="+")
+    research_sweep.add_argument("--max-position-weight", type=float, default=None, help="Optional cap on any single xsec position weight.")
+    research_sweep.add_argument("--min-avg-dollar-volume", type=float, default=None, help="Optional minimum 20-bar average dollar volume required for xsec eligibility.")
+    research_sweep.add_argument("--max-names-per-sector", type=int, default=None, help="Optional maximum number of selected names per sector when sector metadata is available.")
+    research_sweep.add_argument("--turnover-buffer-bps", type=float, default=0.0, help="Optional minimum momentum-score improvement, expressed in bps of score gap, required to replace an existing xsec holding.")
+    research_sweep.add_argument("--max-turnover-per-rebalance", type=float, default=None, help="Optional cap on absolute turnover per xsec rebalance.")
+    research_sweep.add_argument("--weighting-scheme", type=str, default="equal", choices=["equal", "inv_vol"], help="How to size selected xsec holdings.")
+    research_sweep.add_argument("--vol-lookback-bars", type=int, default=20, help="Lookback window for inverse-vol xsec weighting.")
+    research_sweep.add_argument("--benchmark", type=str, default="equal_weight", choices=["equal_weight"], help="Benchmark type for cross-sectional research")
     research_sweep.add_argument("--entry-lookback-values", type=int, nargs="+")
     research_sweep.add_argument("--exit-lookback-values", type=int, nargs="+")
     research_sweep.add_argument("--momentum-lookback-values", type=int, nargs="+")
     research_sweep.add_argument("--cash", type=float, default=10_000)
     research_sweep.add_argument("--commission", type=float, default=0.001)
+    research_sweep.add_argument("--cost-bps", type=float, default=None, help="Optional transaction cost in basis points per unit of turnover. Overrides --commission when provided.")
     research_sweep.add_argument("--output", type=str, default="artifacts/experiments/sweep_results.csv", help="CSV output path for sweep summary")
     research_sweep.add_argument("--engine", type=str, default="legacy", choices=["legacy", "vectorized"], help="Backtest engine to use")
     research_sweep.add_argument("--config", type=str, default=None, help="Optional YAML or JSON parameter sweep config file.")
