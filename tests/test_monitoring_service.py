@@ -268,9 +268,26 @@ def test_latest_run_discovery_and_dashboard(tmp_path: Path) -> None:
 def test_monitoring_pipeline_stage_integration(monkeypatch, tmp_path: Path) -> None:
     monitor_config_path = tmp_path / "monitoring.json"
     monitor_config_path.write_text(json.dumps({"maximum_failed_stages": 0}), encoding="utf-8")
+    notification_config_path = tmp_path / "notifications.json"
+    notification_config_path.write_text(
+        json.dumps(
+            {
+                "smtp_host": "smtp.example.com",
+                "smtp_port": 587,
+                "from_address": "alerts@example.com",
+                "min_severity": "warning",
+                "channels": [{"channel_type": "email", "recipients": ["ops@example.com"]}],
+            }
+        ),
+        encoding="utf-8",
+    )
     monkeypatch.setattr("trading_platform.orchestration.service._now_utc", lambda: "2026-03-21T00:00:00+00:00")
     monkeypatch.setattr("trading_platform.orchestration.service.perf_counter", lambda: 1.0)
     monkeypatch.setattr("trading_platform.orchestration.service._union_symbols", lambda universes: ["AAPL"])
+    monkeypatch.setattr(
+        "trading_platform.orchestration.service.send_notifications",
+        lambda **kwargs: {"sent": True, "filtered_alert_count": 0, "channel_results": [], "subject": None, "body": None},
+    )
 
     config = PipelineRunConfig(
         run_name="monitoring_pipeline",
@@ -278,6 +295,7 @@ def test_monitoring_pipeline_stage_integration(monkeypatch, tmp_path: Path) -> N
         universes=["nasdaq100"],
         output_root_dir=str(tmp_path / "runs"),
         monitoring_config_path=str(monitor_config_path),
+        notification_config_path=str(notification_config_path),
         stage_order=["reporting", "monitoring"],
         stages=OrchestrationStageToggles(reporting=True, monitoring=True),
     )
@@ -285,4 +303,5 @@ def test_monitoring_pipeline_stage_integration(monkeypatch, tmp_path: Path) -> N
     result, artifact_paths = run_orchestration_pipeline(config)
 
     assert result.outputs["monitoring_health_status"] == "healthy"
+    assert result.outputs["notification_sent"] is True
     assert artifact_paths["run_summary_json_path"].exists()

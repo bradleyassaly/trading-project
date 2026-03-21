@@ -12,7 +12,7 @@ from trading_platform.config.models import (
     ResearchWorkflowConfig,
     WalkForwardConfig,
 )
-from trading_platform.monitoring.models import MonitoringConfig
+from trading_platform.monitoring.models import MonitoringConfig, NotificationChannel, NotificationConfig
 from trading_platform.orchestration.models import (
     OrchestrationStageToggles,
     PipelineRunConfig,
@@ -85,3 +85,10 @@ def load_pipeline_run_config(path: str | Path) -> PipelineRunConfig:
 def load_monitoring_config(path: str | Path) -> MonitoringConfig:
     data = _read_config_file(Path(path))
     return MonitoringConfig(**data)
+
+
+def load_notification_config(path: str | Path) -> NotificationConfig:
+    data = _read_config_file(Path(path))
+    payload = dict(data)
+    payload["channels"] = [NotificationChannel(**item) for item in payload.get("channels", [])]
+    return NotificationConfig(**payload)

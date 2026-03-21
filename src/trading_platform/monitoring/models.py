@@ -6,6 +6,7 @@ from typing import Any
 
 ALERT_SEVERITIES = {"info", "warning", "critical"}
 HEALTH_STATUSES = {"healthy", "warning", "critical"}
+NOTIFICATION_CHANNELS = {"email", "sms"}
 
 
 def _validate_nonnegative_optional(value: float | int | None, field_name: str) -> None:
@@ -154,4 +155,57 @@ class PortfolioHealthReport:
             "metrics": self.metrics,
             "alert_counts": self.alert_counts,
             "alerts": [alert.to_dict() for alert in self.alerts],
+        }
+
+
+@dataclass(frozen=True)
+class NotificationChannel:
+    channel_type: str
+    recipients: list[str]
+
+    def __post_init__(self) -> None:
+        if self.channel_type not in NOTIFICATION_CHANNELS:
+            raise ValueError(f"Unsupported notification channel: {self.channel_type}")
+        if not self.recipients:
+            raise ValueError("recipients must contain at least one value")
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class NotificationConfig:
+    smtp_host: str
+    smtp_port: int
+    from_address: str
+    channels: list[NotificationChannel]
+    min_severity: str = "warning"
+    smtp_username: str | None = None
+    smtp_password: str | None = None
+    smtp_use_tls: bool = True
+    subject_prefix: str = "Trading Platform"
+
+    def __post_init__(self) -> None:
+        if not self.smtp_host or not self.smtp_host.strip():
+            raise ValueError("smtp_host must be a non-empty string")
+        if self.smtp_port <= 0:
+            raise ValueError("smtp_port must be > 0")
+        if not self.from_address or not self.from_address.strip():
+            raise ValueError("from_address must be a non-empty string")
+        if not self.channels:
+            raise ValueError("channels must contain at least one notification channel")
+        if self.min_severity not in ALERT_SEVERITIES:
+            raise ValueError(f"Unsupported min_severity: {self.min_severity}")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "smtp_host": self.smtp_host,
+            "smtp_port": self.smtp_port,
+            "from_address": self.from_address,
+            "channels": [channel.to_dict() for channel in self.channels],
+            "min_severity": self.min_severity,
+            "smtp_username": self.smtp_username,
+            "smtp_password": self.smtp_password,
+            "smtp_use_tls": self.smtp_use_tls,
+            "subject_prefix": self.subject_prefix,
         }

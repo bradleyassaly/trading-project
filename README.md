@@ -81,6 +81,7 @@ preset_filters:
 registry_path: artifacts/strategy_registry.json
 governance_config_path: configs/governance.yaml
 monitoring_config_path: configs/monitoring.yaml
+notification_config_path: configs/notifications.yaml
 multi_strategy_output_path: artifacts/generated_registry_multi_strategy.yaml
 paper_state_path: artifacts/paper/multi_strategy_state.json
 output_root_dir: artifacts/orchestration
@@ -114,6 +115,7 @@ Key fields:
 - `continue_on_stage_error`: continue later enabled stages even after a failure
 - `registry_path` / `governance_config_path`: inputs for candidate evaluation and optional registry mutation
 - `monitoring_config_path`: thresholds for the final monitoring stage and standalone monitor commands
+- `notification_config_path`: optional SMTP/SMS notification settings used after monitoring completes
 - `multi_strategy_output_path`: generated config artifact that feeds the existing multi-strategy allocator
 - `paper_state_path`: persistent state file reused by the paper trading stage
 - `max_parallel_jobs`: reserved for future scheduler/parallelization support; currently kept explicit for config stability
@@ -451,6 +453,7 @@ trading-cli monitor strategy-health --registry artifacts/strategy_registry.json 
 trading-cli monitor portfolio-health --allocation-dir artifacts/portfolio/multi_strategy --config configs/monitoring.yaml --output-dir artifacts/monitoring/portfolio
 trading-cli monitor latest --pipeline-root artifacts/orchestration --config configs/monitoring.yaml --output-dir artifacts/monitoring/latest
 trading-cli monitor build-dashboard-data --pipeline-root artifacts/orchestration --output-dir artifacts/monitoring/dashboard
+trading-cli monitor notify --alerts artifacts/monitoring/latest/alerts.json --config configs/notifications.yaml
 ```
 
 Primary monitoring outputs:
@@ -459,6 +462,58 @@ Primary monitoring outputs:
 - `strategy_health.csv` / `strategy_health.json` / `strategy_alerts.md`: per-strategy metrics and alerts
 - `portfolio_health.csv` / `portfolio_health.json` / `portfolio_health.md`: combined-portfolio metrics and alerts
 - `run_history.csv`, `strategy_health_history.csv`, `portfolio_health_history.csv`: append-only trend histories for later dashboards
+
+### Notifications
+
+The notification layer is intentionally simple. It reads monitoring alerts, filters by `min_severity`, aggregates them into one message, and sends them synchronously.
+
+Supported channels:
+
+- `email`: SMTP via the Python standard library
+- `sms`: stub-only for now; intended as a pluggable future hook
+
+Example notification config:
+
+```yaml
+smtp_host: smtp.example.com
+smtp_port: 587
+from_address: alerts@example.com
+min_severity: warning
+smtp_username: alerts@example.com
+smtp_password: ${SMTP_PASSWORD}
+smtp_use_tls: true
+subject_prefix: Trading Platform
+channels:
+  - channel_type: email
+    recipients:
+      - ops@example.com
+  - channel_type: sms
+    recipients:
+      - "+15555550123"
+```
+
+Recommended thresholds:
+
+- start with `min_severity: critical` until the monitoring thresholds are stable
+- move to `warning` only after the warning stream is low-noise and actionable
+- keep SMS at `critical`-only operationally, even if email receives warnings
+
+Example aggregated message:
+
+```text
+Trading Platform: critical alerts (2)
+
+info=0 warning=1 critical=1
+
+[warning] portfolio_turnover portfolio:artifacts/portfolio/multi_strategy - turnover_estimate=0.30 exceeds maximum_turnover=0.25
+[critical] failed_stages run:daily_governance - failed_stage_count=1 exceeds maximum_failed_stages=0
+```
+
+Pipeline integration:
+
+- if `notification_config_path` is set on the pipeline config, the `monitoring` stage sends one aggregated notification after health evaluation
+- if no alerts meet the configured minimum severity, nothing is sent
+- notification results are written to `monitoring/notification_summary.json`
 
 Behavior:
 

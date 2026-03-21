@@ -4,6 +4,7 @@ import json
 
 from trading_platform.config.loader import (
     load_monitoring_config,
+    load_notification_config,
     load_pipeline_run_config,
     load_research_workflow_config,
 )
@@ -111,3 +112,26 @@ max_drift_between_sleeve_target_and_final_combined_weight: 0.1
     assert config.maximum_failed_stages == 0
     assert config.minimum_generated_position_count == 2
     assert config.maximum_symbol_concentration == 0.3
+
+
+def test_load_notification_config_from_yaml(tmp_path) -> None:
+    path = tmp_path / "notifications.yaml"
+    path.write_text(
+        """
+smtp_host: smtp.example.com
+smtp_port: 587
+from_address: alerts@example.com
+min_severity: warning
+channels:
+  - channel_type: email
+    recipients:
+      - ops@example.com
+""".strip(),
+        encoding="utf-8",
+    )
+
+    config = load_notification_config(path)
+
+    assert config.smtp_host == "smtp.example.com"
+    assert config.min_severity == "warning"
+    assert config.channels[0].channel_type == "email"

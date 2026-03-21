@@ -821,3 +821,20 @@ def test_grouped_monitor_latest_command_parses() -> None:
 
     assert args.monitor_command == "latest"
     assert args.pipeline_root == "artifacts/orchestration"
+
+
+def test_grouped_monitor_notify_command_parses() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "monitor",
+            "notify",
+            "--alerts",
+            "artifacts/monitoring/alerts.json",
+            "--config",
+            "configs/notifications.yaml",
+        ]
+    )
+
+    assert args.monitor_command == "notify"
+    assert args.alerts == "artifacts/monitoring/alerts.json"

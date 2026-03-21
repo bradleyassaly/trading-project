@@ -26,6 +26,7 @@ from trading_platform.cli.commands.multi_universe_alpha_research import (
 from trading_platform.cli.commands.multi_universe_report import cmd_multi_universe_report
 from trading_platform.cli.commands.monitor_build_dashboard_data import cmd_monitor_build_dashboard_data
 from trading_platform.cli.commands.monitor_latest import cmd_monitor_latest
+from trading_platform.cli.commands.monitor_notify import cmd_monitor_notify
 from trading_platform.cli.commands.monitor_portfolio_health import cmd_monitor_portfolio_health
 from trading_platform.cli.commands.monitor_run_health import cmd_monitor_run_health
 from trading_platform.cli.commands.monitor_strategy_health import cmd_monitor_strategy_health
@@ -785,5 +786,9 @@ def build_parser() -> argparse.ArgumentParser:
     monitor_dashboard.add_argument("--pipeline-root", type=str, required=True, help="Root directory containing timestamped pipeline runs.")
     monitor_dashboard.add_argument("--output-dir", type=str, required=True, help="Directory where dashboard-ready JSON/CSV artifacts will be written.")
     monitor_dashboard.set_defaults(func=cmd_monitor_build_dashboard_data)
+    monitor_notify = monitor_subparsers.add_parser("notify", help="Send aggregated notifications from an alerts JSON artifact")
+    monitor_notify.add_argument("--alerts", type=str, required=True, help="Path to alerts.json.")
+    monitor_notify.add_argument("--config", type=str, required=True, help="Path to the notification JSON/YAML config.")
+    monitor_notify.set_defaults(func=cmd_monitor_notify)
 
     return parser

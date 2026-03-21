@@ -9,7 +9,11 @@ from typing import Any, Callable
 
 import pandas as pd
 
-from trading_platform.config.loader import load_monitoring_config, load_multi_strategy_portfolio_config
+from trading_platform.config.loader import (
+    load_monitoring_config,
+    load_multi_strategy_portfolio_config,
+    load_notification_config,
+)
 from trading_platform.config.models import FeatureConfig, IngestConfig, ResearchWorkflowConfig
 from trading_platform.governance.models import RegistrySelectionOptions
 from trading_platform.governance.persistence import (
@@ -30,6 +34,7 @@ from trading_platform.live.preview import (
     run_live_dry_run_preview_for_targets,
     write_live_dry_run_artifacts,
 )
+from trading_platform.monitoring.notification_service import send_notifications
 from trading_platform.monitoring.service import evaluate_run_health_snapshot
 from trading_platform.orchestration.models import (
     PIPELINE_STAGE_NAMES,
@@ -187,6 +192,7 @@ def _render_run_summary_markdown(result: PipelineRunResult) -> str:
                 "## Monitoring",
                 f"- Health status: `{monitoring_health}`",
                 f"- Alert counts: `info={alert_counts.get('info', 0)} warning={alert_counts.get('warning', 0)} critical={alert_counts.get('critical', 0)}`",
+                f"- Notification sent: `{result.outputs.get('notification_sent', False)}`",
             ]
         )
         if critical_alerts:
@@ -566,12 +572,27 @@ def _run_monitoring_stage(config: PipelineRunConfig, run_dir: Path, context: dic
     context["monitoring_critical_alerts"] = [
         alert.message for alert in report.alerts if alert.severity == "critical"
     ]
-    return {
+    outputs = {
         **{name: str(path) for name, path in paths.items()},
         "monitoring_health_status": report.status,
         "monitoring_alert_counts": report.alert_counts,
         "monitoring_critical_alerts": context["monitoring_critical_alerts"],
     }
+    if config.notification_config_path:
+        notification_config = load_notification_config(config.notification_config_path)
+        notification_result = send_notifications(
+            alerts=report.alerts,
+            config=notification_config,
+        )
+        notification_summary_path = run_dir / "monitoring" / "notification_summary.json"
+        notification_summary_path.write_text(
+            json.dumps(notification_result, indent=2, default=str),
+            encoding="utf-8",
+        )
+        context["notification_sent"] = bool(notification_result.get("sent"))
+        outputs["notification_summary_path"] = str(notification_summary_path)
+        outputs["notification_sent"] = context["notification_sent"]
+    return outputs
 
 
 STAGE_HANDLERS: dict[str, Callable[[PipelineRunConfig, Path, dict[str, Any]], dict[str, Any]]] = {
@@ -635,6 +656,7 @@ def run_orchestration_pipeline(config: PipelineRunConfig) -> tuple[PipelineRunRe
                             "monitoring_health_status",
                             "monitoring_alert_counts",
                             "monitoring_critical_alerts",
+                            "notification_sent",
                         }
                     }
                 )
@@ -682,6 +704,7 @@ def run_orchestration_pipeline(config: PipelineRunConfig) -> tuple[PipelineRunRe
             "monitoring_health_status": context.get("monitoring_health_status"),
             "monitoring_alert_counts": context.get("monitoring_alert_counts", {}),
             "monitoring_critical_alerts": context.get("monitoring_critical_alerts", []),
+            "notification_sent": context.get("notification_sent", False),
         },
     )
     artifact_paths = _write_pipeline_artifacts(config=config, result=result, run_dir=run_dir)
