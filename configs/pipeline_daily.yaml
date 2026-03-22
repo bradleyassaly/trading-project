@@ -1,0 +1,24 @@
+run_name: daily_governance
+schedule_type: daily
+universes:
+  - nasdaq100
+registry_path: artifacts/strategy_registry.json
+governance_config_path: configs/governance.yaml
+monitoring_config_path: configs/monitoring.yaml
+notification_config_path: configs/notifications.yaml
+execution_config_path: configs/execution.yaml
+multi_strategy_output_path: artifacts/generated_registry_multi_strategy.json
+paper_state_path: artifacts/paper/multi_strategy_state.json
+output_root_dir: artifacts/orchestration
+fail_fast: false
+continue_on_stage_error: true
+max_parallel_jobs: 1
+stages:
+  promotion_evaluation: true
+  registry_mutation: false
+  multi_strategy_config_generation: true
+  portfolio_allocation: true
+  paper_trading: true
+  live_dry_run: true
+  reporting: true
+  monitoring: true

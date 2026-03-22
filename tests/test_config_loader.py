@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 from trading_platform.config.loader import (
     load_broker_config,
+    load_dashboard_config,
     load_execution_config,
     load_monitoring_config,
     load_notification_config,
@@ -224,3 +226,41 @@ allowed_monitoring_statuses: [healthy]
     assert config.max_orders_per_run == 10
     assert config.expected_account_id == "acct-1"
     assert config.allowed_monitoring_statuses == ["healthy"]
+
+
+def test_load_dashboard_config_from_yaml(tmp_path) -> None:
+    path = tmp_path / "dashboard.yaml"
+    path.write_text(
+        """
+artifacts_root: artifacts
+host: 127.0.0.1
+port: 8123
+""".strip(),
+        encoding="utf-8",
+    )
+
+    config = load_dashboard_config(path)
+
+    assert config.artifacts_root == "artifacts"
+    assert config.host == "127.0.0.1"
+    assert config.port == 8123
+
+
+def test_example_configs_load_from_repo() -> None:
+    root = Path(__file__).resolve().parents[1]
+
+    pipeline_config = load_pipeline_run_config(root / "configs" / "pipeline_daily.yaml")
+    monitoring_config = load_monitoring_config(root / "configs" / "monitoring.yaml")
+    notification_config = load_notification_config(root / "configs" / "notifications.yaml")
+    execution_config = load_execution_config(root / "configs" / "execution.yaml")
+    broker_config = load_broker_config(root / "configs" / "broker.yaml")
+    dashboard_config = load_dashboard_config(root / "configs" / "dashboard.yaml")
+    minimal_demo_config = load_pipeline_run_config(root / "configs" / "minimal_local_demo.yaml")
+
+    assert pipeline_config.schedule_type == "daily"
+    assert monitoring_config.maximum_failed_stages == 0
+    assert notification_config.channels[0].channel_type == "email"
+    assert execution_config.enabled is True
+    assert broker_config.broker_name == "mock"
+    assert dashboard_config.port == 8000
+    assert minimal_demo_config.schedule_type == "ad_hoc"

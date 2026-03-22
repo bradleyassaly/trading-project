@@ -9,6 +9,7 @@ from typing import Any, Callable
 
 import pandas as pd
 
+from trading_platform.artifacts.summary_utils import add_standard_summary_fields
 from trading_platform.config.loader import (
     load_execution_config,
     load_monitoring_config,
@@ -216,7 +217,23 @@ def _write_pipeline_artifacts(
     config_snapshot = run_dir / "pipeline_config_snapshot.json"
     errors_json = run_dir / "errors.json"
 
-    summary_json.write_text(json.dumps(result.to_dict(), indent=2, default=str), encoding="utf-8")
+    summary_payload = add_standard_summary_fields(
+        result.to_dict(),
+        summary_type="pipeline_run",
+        timestamp=result.ended_at,
+        status=result.status,
+        key_counts={
+            "stage_count": len(result.stage_records),
+            "failed_stage_count": sum(1 for record in result.stage_records if record.status == "failed"),
+            "error_count": len(result.errors),
+        },
+        key_metrics={
+            "duration_seconds": sum(record.duration_seconds or 0.0 for record in result.stage_records),
+        },
+        warnings=[],
+        errors=[str(item.get("error_message", "")) for item in result.errors if item.get("error_message")],
+    )
+    summary_json.write_text(json.dumps(summary_payload, indent=2, default=str), encoding="utf-8")
     summary_md.write_text(_render_run_summary_markdown(result), encoding="utf-8")
     pd.DataFrame([record.to_dict() for record in result.stage_records]).to_csv(stage_status_csv, index=False)
     config_snapshot.write_text(json.dumps(config.to_dict(), indent=2, default=str), encoding="utf-8")
@@ -231,6 +248,8 @@ def _write_pipeline_artifacts(
     }
     if result.errors:
         paths["errors_path"] = errors_json
+    summary_payload["artifact_paths"] = {name: str(path) for name, path in paths.items()}
+    summary_json.write_text(json.dumps(summary_payload, indent=2, default=str), encoding="utf-8")
     return paths
 
 

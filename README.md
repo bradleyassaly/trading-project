@@ -212,6 +212,118 @@ Notes:
 - it degrades gracefully when some artifact categories do not exist yet
 - it uses filesystem discovery only; there is no database and no background worker
 
+### Operator Quickstart
+
+For a minimal local setup, start with the repo example configs:
+
+- `configs/minimal_local_demo.yaml`
+- `configs/pipeline_daily.yaml`
+- `configs/monitoring.yaml`
+- `configs/notifications.yaml`
+- `configs/execution.yaml`
+- `configs/broker.yaml`
+- `configs/dashboard.yaml`
+
+Recommended first-pass local sequence:
+
+```bash
+trading-cli doctor --artifacts-root artifacts --monitoring-config configs/monitoring.yaml --execution-config configs/execution.yaml --broker-config configs/broker.yaml --dashboard-config configs/dashboard.yaml
+trading-cli pipeline run --config configs/minimal_local_demo.yaml
+trading-cli monitor latest --pipeline-root artifacts/orchestration --config configs/monitoring.yaml --output-dir artifacts/monitoring/latest
+trading-cli dashboard serve --artifacts-root artifacts --host 127.0.0.1 --port 8000
+```
+
+What this does:
+
+- validates that local config files and key directories are readable
+- runs a small registry-backed allocation path
+- evaluates the newest pipeline run for health and alerts
+- starts the local read-only dashboard on top of the artifact tree
+
+### Daily Operator Workflow
+
+Recommended daily operating loop:
+
+1. Run `trading-cli doctor` before changing configs or enabling any live-related workflow.
+2. Run `trading-cli pipeline run-daily --config configs/pipeline_daily.yaml`.
+3. Check `artifacts/orchestration/.../run_summary.md` and `artifacts/orchestration/.../monitoring/run_health.md`.
+4. Review `artifacts/paper/.../paper_run_summary_latest.md` and `artifacts/live_dry_run/.../live_dry_run_summary.md`.
+5. Open the dashboard and inspect the `Overview`, `Execution`, `Live`, and `Runs` pages.
+6. If live readiness is acceptable, use validate-only submit before any real submission workflow.
+
+### Weekly Governance Workflow
+
+Recommended weekly governance loop:
+
+1. Refresh research artifacts and walk-forward outputs for candidate strategies.
+2. Run `trading-cli registry evaluate-promotion` for new candidates.
+3. Run `trading-cli registry evaluate-degradation` for active paper and approved strategies.
+4. Promote or demote explicitly with `trading-cli registry promote` and `trading-cli registry demote`.
+5. Regenerate the registry-backed multi-strategy config.
+6. Re-run allocation, monitoring, and paper/live dry-run checks before changing the active lineup.
+
+### Validate-Only Live Workflow
+
+The safest live path is still validate-only:
+
+```bash
+trading-cli live dry-run-multi-strategy --config artifacts/generated_registry_multi_strategy.json --execution-config configs/execution.yaml --broker mock --output-dir artifacts/live_dry_run/multi_strategy
+trading-cli live submit-multi-strategy --config artifacts/generated_registry_multi_strategy.json --execution-config configs/execution.yaml --broker-config configs/broker.yaml --validate-only --output-dir artifacts/live_submit/multi_strategy
+```
+
+Interpretation:
+
+- `dry-run` shows the reconciled executable order package without any broker submission
+- `submit ... --validate-only` runs the same guarded pre-trade checks and broker payload transformation but does not send orders
+- use validate-only as the last operator check before enabling live submission
+
+### Alert Response Checklist
+
+When monitoring or notifications surface alerts:
+
+1. Read the latest `run_health.md`, `strategy_alerts.md`, or `portfolio_health.md`.
+2. Check whether the issue is a missing artifact, a stale artifact, a threshold breach, or a live safety failure.
+3. Confirm whether execution artifacts show rejected or clipped orders that materially changed the target portfolio.
+4. If live submission was blocked, inspect `live_risk_checks.json` and `live_submission_summary.json`.
+5. If the issue is operational rather than market-driven, fix config or data problems first and rerun the affected stage.
+
+Severity guidance:
+
+- `info`: audit-only, no immediate action required
+- `warning`: review before proceeding to live-facing workflows
+- `critical`: stop and resolve before paper promotion or live enablement
+
+### Kill Switch And Rollback Guidance
+
+Live safety controls are file-backed and intentionally conservative.
+
+Recommended controls:
+
+- keep `live_trading_enabled: false` in `configs/broker.yaml` until explicitly needed
+- require `manual_enable_flag_path` for any real live submission path
+- use `global_kill_switch_path` as an immediate stop mechanism
+- prefer `--validate-only` for routine checks
+
+Emergency steps:
+
+1. Create the configured kill-switch file.
+2. Run `trading-cli broker cancel-all --broker-config configs/broker.yaml`.
+3. Disable live trading in the broker config or remove the manual enable flag.
+4. Re-run `trading-cli doctor` and `trading-cli monitor latest` before considering re-enable.
+
+### Common Failure Modes
+
+Common operational failure patterns:
+
+- missing registry, monitoring, or broker config files
+- stale or incomplete allocation artifacts after a partial pipeline run
+- generated portfolios with zero or too few positions
+- rejected or clipped execution packages due to liquidity, lot size, or cash constraints
+- live submission blocked by kill switch, manual-enable flag absence, monitoring status, or notional caps
+- duplicate open-order protection skipping materially identical orders
+
+The intended response is explicit inspection of artifacts, not guessing. Every stage writes human-readable and machine-readable summaries so the operator can trace what was blocked, clipped, rejected, or skipped.
+
 ## Presets
 
 Two versioned presets are the main operational entrypoints:

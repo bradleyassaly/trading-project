@@ -6,6 +6,11 @@ from typing import Any
 
 import pandas as pd
 
+from trading_platform.artifacts.summary_utils import (
+    add_standard_summary_fields,
+    warnings_and_errors_from_checks,
+    workflow_status_from_checks,
+)
 from trading_platform.paper.models import PaperTradingConfig, PaperTradingRunResult
 
 
@@ -372,8 +377,34 @@ def persist_paper_run_outputs(
 
     latest_json_path = output_path / "paper_run_summary_latest.json"
     latest_md_path = output_path / "paper_run_summary_latest.md"
-    latest_json_path.write_text(json.dumps({"summary": summary_row, "health_checks": health_checks}, indent=2), encoding="utf-8")
+    summary_payload = {"summary": summary_row, "health_checks": health_checks}
+    warnings, errors = warnings_and_errors_from_checks(health_checks)
+    summary_payload = add_standard_summary_fields(
+        summary_payload,
+        summary_type="paper_run",
+        timestamp=str(summary_row["timestamp"]),
+        status=workflow_status_from_checks(health_checks),
+        key_counts={
+            "realized_holdings_count": summary_row["realized_holdings_count"],
+            "target_selected_count": summary_row["target_selected_count"],
+            "requested_order_count": summary_row["requested_order_count"],
+            "executable_order_count": summary_row["executable_order_count"],
+            "rejected_order_count": summary_row["rejected_order_count"],
+        },
+        key_metrics={
+            "current_equity": summary_row["current_equity"],
+            "cash": summary_row["cash"],
+            "gross_exposure": summary_row["gross_exposure"],
+            "turnover_estimate": summary_row["turnover_estimate"],
+            "estimated_execution_cost": summary_row["estimated_execution_cost"],
+        },
+        warnings=warnings,
+        errors=errors,
+    )
+    latest_json_path.write_text(json.dumps(summary_payload, indent=2), encoding="utf-8")
     latest_md_path.write_text(_summary_markdown(summary_row, health_checks), encoding="utf-8")
     paths["paper_run_summary_latest_json_path"] = latest_json_path
     paths["paper_run_summary_latest_md_path"] = latest_md_path
+    summary_payload["artifact_paths"] = {name: str(path) for name, path in paths.items()}
+    latest_json_path.write_text(json.dumps(summary_payload, indent=2), encoding="utf-8")
     return paths, health_checks, summary_row

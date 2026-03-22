@@ -315,6 +315,29 @@ def test_grouped_dashboard_build_static_data_command_parses() -> None:
     assert args.output_dir == "artifacts/dashboard_data"
 
 
+def test_grouped_doctor_command_parses() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "doctor",
+            "--artifacts-root",
+            "artifacts",
+            "--monitoring-config",
+            "configs/monitoring.yaml",
+            "--execution-config",
+            "configs/execution.yaml",
+            "--output-dir",
+            "artifacts/system_check",
+        ]
+    )
+
+    assert args.command_family == "doctor"
+    assert args.artifacts_root == "artifacts"
+    assert args.monitoring_config == "configs/monitoring.yaml"
+    assert args.execution_config == "configs/execution.yaml"
+    assert args.output_dir == "artifacts/system_check"
+
+
 def test_grouped_research_sweep_command_parses_xsec_grid() -> None:
     parser = build_parser()
     args = parser.parse_args(

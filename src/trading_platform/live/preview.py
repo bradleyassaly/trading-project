@@ -7,6 +7,11 @@ from typing import Any
 
 import pandas as pd
 
+from trading_platform.artifacts.summary_utils import (
+    add_standard_summary_fields,
+    warnings_and_errors_from_checks,
+    workflow_status_from_checks,
+)
 from trading_platform.broker.alpaca_broker import AlpacaBroker, AlpacaBrokerConfig
 from trading_platform.broker.live_models import (
     BrokerAccount,
@@ -673,6 +678,26 @@ def write_live_dry_run_artifacts(result: LivePreviewResult) -> dict[str, Path]:
     health_check_rows = [asdict(check) for check in result.health_checks]
     pd.DataFrame(health_check_rows).to_csv(health_checks_path, index=False)
     summary_payload["health_checks"] = health_check_rows
+    warnings, errors = warnings_and_errors_from_checks(health_check_rows)
+    summary_payload = add_standard_summary_fields(
+        summary_payload,
+        summary_type="live_dry_run",
+        timestamp=result.as_of,
+        status=workflow_status_from_checks(health_check_rows),
+        key_counts={
+            "adjusted_order_count": len(result.adjusted_orders),
+            "raw_order_count": len(result.reconciliation.orders),
+            "open_order_count": len(result.open_orders),
+        },
+        key_metrics={
+            "equity": float(result.account.equity),
+            "cash": float(result.account.cash),
+            "gross_exposure": float(target_diagnostics.get("average_gross_exposure") or 0.0),
+            "target_weight_sum": result.reconciliation.diagnostics.get("target_weight_sum"),
+        },
+        warnings=warnings,
+        errors=errors,
+    )
     summary_json_path.write_text(json.dumps(summary_payload, indent=2, default=str), encoding="utf-8")
     summary_md_path.write_text(_write_markdown_summary(summary_payload, health_check_rows), encoding="utf-8")
     preview_summary_json_path.write_text(json.dumps(summary_payload, indent=2, default=str), encoding="utf-8")
@@ -692,5 +717,8 @@ def write_live_dry_run_artifacts(result: LivePreviewResult) -> dict[str, Path]:
     if result.execution_result is not None:
         execution_paths = write_execution_artifacts(result.execution_result, output_dir)
         paths.update(execution_paths)
+    summary_payload["artifact_paths"] = {name: str(path) for name, path in paths.items()}
+    summary_json_path.write_text(json.dumps(summary_payload, indent=2, default=str), encoding="utf-8")
+    preview_summary_json_path.write_text(json.dumps(summary_payload, indent=2, default=str), encoding="utf-8")
     result.artifacts = paths
     return paths

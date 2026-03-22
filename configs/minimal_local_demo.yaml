@@ -1,0 +1,23 @@
+run_name: local_demo
+schedule_type: ad_hoc
+universes:
+  - nasdaq100
+registry_path: artifacts/strategy_registry.json
+governance_config_path: configs/governance.yaml
+monitoring_config_path: configs/monitoring.yaml
+execution_config_path: configs/execution.yaml
+multi_strategy_output_path: artifacts/generated_local_demo_multi_strategy.json
+paper_state_path: artifacts/paper/local_demo_state.json
+output_root_dir: artifacts/orchestration
+fail_fast: false
+continue_on_stage_error: true
+max_parallel_jobs: 1
+stages:
+  promotion_evaluation: false
+  registry_mutation: false
+  multi_strategy_config_generation: true
+  portfolio_allocation: true
+  paper_trading: false
+  live_dry_run: false
+  reporting: true
+  monitoring: false

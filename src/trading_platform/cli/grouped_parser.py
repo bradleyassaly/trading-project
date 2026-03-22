@@ -12,6 +12,7 @@ from trading_platform.cli.commands.daily_paper_job import cmd_daily_paper_job
 from trading_platform.cli.commands.dashboard_build_static_data import cmd_dashboard_build_static_data
 from trading_platform.cli.commands.dashboard_serve import cmd_dashboard_serve
 from trading_platform.cli.commands.decision_memo import cmd_decision_memo
+from trading_platform.cli.commands.doctor import cmd_doctor
 from trading_platform.cli.commands.execute_live import cmd_execute_live
 from trading_platform.cli.commands.execution_simulate import cmd_execution_simulate
 from trading_platform.cli.commands.experiments_dashboard import cmd_experiments_dashboard
@@ -854,5 +855,16 @@ def build_parser() -> argparse.ArgumentParser:
     dashboard_build.add_argument("--artifacts-root", type=str, default="artifacts", help="Root artifact directory to scan.")
     dashboard_build.add_argument("--output-dir", type=str, required=True, help="Directory where normalized dashboard JSON payloads will be written.")
     dashboard_build.set_defaults(func=cmd_dashboard_build_static_data)
+
+    doctor_parser = subparsers.add_parser("doctor", help="Run local environment, config, and artifact sanity checks")
+    doctor_parser.add_argument("--artifacts-root", type=str, default="artifacts", help="Artifact root to inspect.")
+    doctor_parser.add_argument("--pipeline-config", type=str, default=None, help="Optional pipeline config to validate.")
+    doctor_parser.add_argument("--monitoring-config", type=str, default=None, help="Optional monitoring config to validate.")
+    doctor_parser.add_argument("--notification-config", type=str, default=None, help="Optional notification config to validate.")
+    doctor_parser.add_argument("--execution-config", type=str, default=None, help="Optional execution config to validate.")
+    doctor_parser.add_argument("--broker-config", type=str, default=None, help="Optional broker config to validate.")
+    doctor_parser.add_argument("--dashboard-config", type=str, default=None, help="Optional dashboard config to validate.")
+    doctor_parser.add_argument("--output-dir", type=str, default="artifacts/system_check", help="Directory where doctor artifacts will be written.")
+    doctor_parser.set_defaults(func=cmd_doctor)
 
     return parser

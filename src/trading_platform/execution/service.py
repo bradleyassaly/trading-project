@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
 
+from trading_platform.artifacts.summary_utils import add_standard_summary_fields
 from trading_platform.execution.models import (
     ExecutableOrder,
     ExecutionConfig,
@@ -22,6 +24,10 @@ def _round_down_to_lot(shares: int, lot_size: int) -> int:
     if shares <= 0:
         return 0
     return (int(shares) // lot_size) * lot_size
+
+
+def _now_utc() -> str:
+    return datetime.now(UTC).isoformat()
 
 
 def _normalize_market_data(
@@ -640,7 +646,38 @@ def write_execution_artifacts(
     pd.DataFrame([row.to_dict() for row in result.liquidity_diagnostics]).to_csv(liquidity_constraints_path, index=False)
     pd.DataFrame(result.turnover_rows).to_csv(turnover_summary_path, index=False)
     pd.DataFrame(result.symbol_tradeability_rows).to_csv(symbol_tradeability_path, index=False)
-    execution_summary_json_path.write_text(json.dumps(result.summary.to_dict(), indent=2, default=str), encoding="utf-8")
+    paths = {
+        "requested_orders_path": requested_orders_path,
+        "executable_orders_path": executable_orders_path,
+        "rejected_orders_path": rejected_orders_path,
+        "execution_summary_json_path": execution_summary_json_path,
+        "execution_summary_md_path": execution_summary_md_path,
+        "liquidity_constraints_report_path": liquidity_constraints_path,
+        "turnover_summary_path": turnover_summary_path,
+        "symbol_tradeability_report_path": symbol_tradeability_path,
+    }
+    summary_payload = add_standard_summary_fields(
+        result.summary.to_dict(),
+        summary_type="execution",
+        timestamp=_now_utc(),
+        status="warning" if result.summary.rejected_order_count or result.summary.clipped_order_count else "succeeded",
+        key_counts={
+            "requested_order_count": result.summary.requested_order_count,
+            "executable_order_count": result.summary.executable_order_count,
+            "rejected_order_count": result.summary.rejected_order_count,
+            "clipped_order_count": result.summary.clipped_order_count,
+        },
+        key_metrics={
+            "requested_notional": result.summary.requested_notional,
+            "executed_notional": result.summary.executed_notional,
+            "expected_total_cost": result.summary.expected_total_cost,
+            "turnover_before_constraints": result.summary.turnover_before_constraints,
+            "turnover_after_constraints": result.summary.turnover_after_constraints,
+        },
+        warnings=["orders were clipped or rejected"] if result.summary.rejected_order_count or result.summary.clipped_order_count else [],
+        artifact_paths={name: str(path) for name, path in paths.items()},
+    )
+    execution_summary_json_path.write_text(json.dumps(summary_payload, indent=2, default=str), encoding="utf-8")
     execution_summary_md_path.write_text(
         "\n".join(
             [
@@ -664,13 +701,4 @@ def write_execution_artifacts(
         ),
         encoding="utf-8",
     )
-    return {
-        "requested_orders_path": requested_orders_path,
-        "executable_orders_path": executable_orders_path,
-        "rejected_orders_path": rejected_orders_path,
-        "execution_summary_json_path": execution_summary_json_path,
-        "execution_summary_md_path": execution_summary_md_path,
-        "liquidity_constraints_report_path": liquidity_constraints_path,
-        "turnover_summary_path": turnover_summary_path,
-        "symbol_tradeability_report_path": symbol_tradeability_path,
-    }
+    return paths

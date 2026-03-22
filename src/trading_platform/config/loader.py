@@ -13,6 +13,7 @@ from trading_platform.config.models import (
     ResearchWorkflowConfig,
     WalkForwardConfig,
 )
+from trading_platform.dashboard.models import DashboardConfig
 from trading_platform.execution.models import ExecutionConfig
 from trading_platform.monitoring.models import MonitoringConfig, NotificationChannel, NotificationConfig
 from trading_platform.orchestration.models import (
@@ -126,3 +127,8 @@ def load_execution_config(path: str | Path) -> ExecutionConfig:
 def load_broker_config(path: str | Path) -> BrokerConfig:
     data = _read_config_file(Path(path))
     return BrokerConfig(**data)
+
+
+def load_dashboard_config(path: str | Path) -> DashboardConfig:
+    data = _read_config_file(Path(path))
+    return DashboardConfig(**data)

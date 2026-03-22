@@ -9,6 +9,7 @@ from typing import Any
 
 import pandas as pd
 
+from trading_platform.artifacts.summary_utils import add_standard_summary_fields
 from trading_platform.broker.models import (
     BrokerConfig,
     BrokerExecutionSummary,
@@ -523,7 +524,36 @@ def write_live_submission_artifacts(result: LiveSubmissionResult, output_dir: st
     pd.DataFrame([request.to_dict() for request in result.broker_order_requests]).to_csv(requests_path, index=False)
     pd.DataFrame([order.to_dict() for order in result.broker_order_results]).to_csv(results_path, index=False)
 
-    summary_payload = result.summary.to_dict()
+    paths = {
+        "live_risk_checks_json_path": risk_json_path,
+        "live_risk_checks_md_path": risk_md_path,
+        "broker_order_requests_path": requests_path,
+        "broker_order_results_path": results_path,
+        "live_submission_summary_json_path": summary_json_path,
+        "live_submission_summary_md_path": summary_md_path,
+    }
+    summary_payload = add_standard_summary_fields(
+        result.summary.to_dict(),
+        summary_type="live_submission",
+        timestamp=result.summary.timestamp,
+        status="succeeded" if result.summary.risk_passed and (result.validate_only or result.summary.submitted or result.summary.requested_order_count == 0) else ("warning" if result.validate_only or result.summary.skipped_order_count else "failed"),
+        key_counts={
+            "requested_order_count": result.summary.requested_order_count,
+            "submitted_order_count": result.summary.submitted_order_count,
+            "skipped_order_count": result.summary.skipped_order_count,
+            "rejected_order_count": result.summary.rejected_order_count,
+            "duplicate_order_skip_count": result.summary.duplicate_order_skip_count,
+        },
+        key_metrics={
+            "total_requested_notional": result.summary.total_requested_notional,
+            "total_submitted_notional": result.summary.total_submitted_notional,
+            "projected_gross_exposure": result.summary.projected_gross_exposure,
+            "projected_net_exposure": result.summary.projected_net_exposure,
+        },
+        warnings=[row["message"] for row in risk_rows if not row["passed"] and not row["hard_block"]],
+        errors=[row["message"] for row in risk_rows if not row["passed"] and row["hard_block"]],
+        artifact_paths={name: str(path) for name, path in paths.items()},
+    )
     summary_payload["risk_checks"] = risk_rows
     summary_payload["validate_only"] = result.validate_only
     summary_json_path.write_text(json.dumps(summary_payload, indent=2, default=str), encoding="utf-8")
@@ -544,14 +574,7 @@ def write_live_submission_artifacts(result: LiveSubmissionResult, output_dir: st
         f"- Total submitted notional: `{result.summary.total_submitted_notional:.2f}`",
     ]
     summary_md_path.write_text("\n".join(summary_md_lines) + "\n", encoding="utf-8")
-    return {
-        "live_risk_checks_json_path": risk_json_path,
-        "live_risk_checks_md_path": risk_md_path,
-        "broker_order_requests_path": requests_path,
-        "broker_order_results_path": results_path,
-        "live_submission_summary_json_path": summary_json_path,
-        "live_submission_summary_md_path": summary_md_path,
-    }
+    return paths
 
 
 def submit_live_orders(

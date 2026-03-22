@@ -1,0 +1,10 @@
+smtp_host: smtp.example.com
+smtp_port: 587
+from_address: alerts@example.com
+min_severity: warning
+smtp_use_tls: true
+subject_prefix: Trading Platform
+channels:
+  - channel_type: email
+    recipients:
+      - ops@example.com

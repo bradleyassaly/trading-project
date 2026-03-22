@@ -381,6 +381,29 @@ def test_pipeline_artifacts_are_deterministic(monkeypatch, tmp_path: Path) -> No
     ).read_text(encoding="utf-8")
 
 
+def test_pipeline_summary_uses_standard_fields(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr("trading_platform.orchestration.service._now_utc", lambda: "2025-01-02T00:00:00Z")
+    monkeypatch.setattr("trading_platform.orchestration.service.perf_counter", lambda: 1.0)
+    config = _pipeline_config(
+        tmp_path,
+        stages=OrchestrationStageToggles(reporting=True),
+        stage_order=["reporting"],
+    )
+    monkeypatch.setattr("trading_platform.orchestration.service._union_symbols", lambda universes: ["AAPL"])
+
+    _result, paths = run_orchestration_pipeline(config)
+    payload = json.loads(Path(paths["run_summary_json_path"]).read_text(encoding="utf-8"))
+
+    assert payload["summary_type"] == "pipeline_run"
+    assert payload["timestamp"] == "2025-01-02T00:00:00Z"
+    assert "status" in payload
+    assert "key_counts" in payload
+    assert "key_metrics" in payload
+    assert "warnings" in payload
+    assert "errors" in payload
+    assert "artifact_paths" in payload
+
+
 def test_promotion_batch_and_multi_strategy_generation_integration(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr("trading_platform.orchestration.service._now_utc", lambda: "2025-01-02T00:00:00Z")
     monkeypatch.setattr("trading_platform.orchestration.service.perf_counter", lambda: 1.0)

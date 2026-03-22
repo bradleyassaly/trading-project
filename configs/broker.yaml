@@ -1,0 +1,26 @@
+broker_name: mock
+live_trading_enabled: false
+require_manual_enable_flag: true
+manual_enable_flag_path: flags/live.enable
+global_kill_switch_path: flags/live.kill
+expected_account_id: mock-account
+max_orders_per_run: 10
+max_total_notional_per_run: 50000
+max_symbol_notional_per_order: 10000
+max_gross_exposure: 1.0
+max_net_exposure: 1.0
+max_position_weight: 0.20
+max_position_change_notional: 15000
+allowed_order_types: [market]
+default_order_type: market
+allow_shorts_live: false
+cancel_existing_open_orders_before_submit: false
+skip_submission_if_existing_open_orders: true
+require_fresh_market_data: false
+max_market_data_age_seconds: 900
+require_clean_monitoring_status: false
+allowed_monitoring_statuses: [healthy, warning]
+monitoring_status_path: artifacts/orchestration/latest/monitoring/run_health.json
+mock_equity: 100000
+mock_cash: 100000
+tags: [demo, mock]
