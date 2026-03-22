@@ -6,6 +6,7 @@ from pathlib import Path
 import pandas as pd
 from trading_platform.research.alpha_lab.data_loading import load_symbol_feature_data
 
+from trading_platform.research.registry import write_research_run_manifest
 from trading_platform.research.alpha_lab.composite import (
     DEFAULT_COMPOSITE_CONFIG,
     build_composite_scores,
@@ -905,8 +906,7 @@ def run_alpha_research(
     }
     diagnostics_path.write_text(json.dumps(diagnostics, indent=2, default=str))
     approved_model_state_paths = write_approved_model_state(artifact_dir=output_dir)
-
-    return {
+    result_paths = {
         "leaderboard_path": str(leaderboard_path_csv),
         "fold_results_path": str(detailed_path_csv),
         "promoted_signals_path": str(promoted_signals_path_csv),
@@ -933,5 +933,26 @@ def run_alpha_research(
         "implementability_report_path": str(implementability_report_path_csv),
         "liquidity_filtered_portfolio_metrics_path": str(liquidity_filtered_metrics_path_csv),
         "capacity_scenarios_path": str(capacity_scenarios_path_csv),
+        "signal_diagnostics_path": str(diagnostics_path),
         **approved_model_state_paths,
     }
+    manifest_path = write_research_run_manifest(
+        output_dir=output_dir,
+        workflow_type="alpha_research",
+        command="service:run_alpha_research",
+        feature_dir=feature_dir,
+        signal_family=signal_family,
+        universe=universe,
+        symbols_requested=resolved_symbols,
+        lookbacks=lookbacks,
+        horizons=horizons,
+        min_rows=min_rows,
+        train_size=train_size,
+        test_size=test_size,
+        step_size=step_size,
+        min_train_size=min_train_size,
+        artifact_paths=result_paths,
+    )
+    result_paths["research_manifest_path"] = str(manifest_path)
+
+    return result_paths

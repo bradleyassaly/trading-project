@@ -61,4 +61,5 @@ def cmd_alpha_research(args) -> None:
     print(f"Detailed results: {result['fold_results_path']}")
     print(f"Composite portfolio returns: {result['portfolio_returns_path']}")
     print(f"Implementability report: {result['implementability_report_path']}")
+    print(f"Research manifest: {result['research_manifest_path']}")
     print(f"Experiment registry: {registry_paths['experiment_registry_path']}")

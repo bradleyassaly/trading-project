@@ -209,6 +209,7 @@ The dashboard is a local-first, read-only operator UI that sits on top of the ex
 Pages:
 
 - `Overview`: latest run status, monitoring health, alert counts, approved strategy count, generated position count, executable order count, broker health, and quick artifact links
+- `Research`: recent research manifests, top leaderboard rows, and promotion-ready candidates
 - `Strategies`: strategy registry table, family/status filters, and champion/challenger comparison when available
 - `Portfolio`: latest combined portfolio, sleeve weights, top positions, overlap diagnostics, and clipped symbols
 - `Execution`: requested vs executable orders, rejection reasons, expected cost, and liquidity diagnostics
@@ -220,6 +221,7 @@ Key API endpoints:
 - `/api/overview`
 - `/api/runs`
 - `/api/runs/latest`
+- `/api/research/latest`
 - `/api/strategies`
 - `/api/portfolio/latest`
 - `/api/execution/latest`
@@ -238,6 +240,34 @@ Notes:
 - the dashboard is read-only in v1
 - it degrades gracefully when some artifact categories do not exist yet
 - it uses filesystem discovery only; there is no database and no background worker
+
+### Research Workflow
+
+For a lightweight research-to-review loop:
+
+1. Run alpha research and inspect the per-run manifest:
+
+```bash
+trading-cli research alpha --symbols AAPL MSFT NVDA --lookbacks 20 63 --horizons 5 10 --output-dir artifacts/alpha_research/demo_run
+```
+
+2. Build the file-based research registry and leaderboard:
+
+```bash
+trading-cli research registry build --artifacts-root artifacts --output-dir artifacts/research_registry
+trading-cli research leaderboard --artifacts-root artifacts --output-dir artifacts/research_registry --metric portfolio_sharpe
+trading-cli research promotion-candidates --artifacts-root artifacts --output-dir artifacts/research_registry
+```
+
+3. Compare two runs when a challenger needs review:
+
+```bash
+trading-cli research compare-runs --artifacts-root artifacts --run-id-a demo_run --run-id-b challenger_run --output-dir artifacts/research_compare
+```
+
+4. Open the dashboard and use the `Research` page or `/api/research/latest` to inspect recent runs, top-ranked entries, and promotion-ready candidates.
+
+This is still artifact-driven and advisory. The research registry helps narrow candidates for governance review, strategy registry entry creation, and later paper/live portfolio inclusion.
 
 ### Operator Quickstart
 
@@ -849,6 +879,28 @@ The research pipeline can break performance out by period, regime, and fold; run
 ### Experiment Tracking
 
 Research and paper-trading runs can be registered into a shared experiment registry. The tracker stores configuration fingerprints, promotion state, composite and regime settings, portfolio metrics, robustness metrics, implementability metrics, and paper-trading summaries.
+
+### Research Run Manifests And Leaderboards
+
+Every alpha research run now also writes a standardized `research_run.json` manifest in its output directory. The manifest is additive and file-based: it records the run id, timestamp, workflow type, config and artifact paths, symbol scope, evaluation windows, top research metrics, and a lightweight promotion-readiness recommendation.
+
+Those manifests can be scanned into a cross-run registry and summarized into leaderboard and promotion-candidate artifacts without a database:
+
+```bash
+trading-cli research registry build --artifacts-root artifacts --output-dir artifacts/research_registry
+trading-cli research leaderboard --artifacts-root artifacts --output-dir artifacts/research_registry --metric portfolio_sharpe --group-by signal_family
+trading-cli research promotion-candidates --artifacts-root artifacts --output-dir artifacts/research_registry
+trading-cli research compare-runs --artifacts-root artifacts --run-id-a alpha_run_a --run-id-b alpha_run_b --output-dir artifacts/research_compare
+```
+
+Primary artifacts:
+
+- `research_run.json`: per-run normalized manifest
+- `research_registry.json` / `research_registry.csv`: scanned manifest index
+- `research_leaderboard.json` / `research_leaderboard.csv`: ranked cross-run summary
+- `promotion_candidates.json` / `promotion_candidates.csv`: transparent promotion-readiness recommendations
+
+This layer is intended to bridge research output review into governance and registry-backed promotion workflows. It does not auto-promote or auto-deploy anything.
 
 ### Paper Trading
 

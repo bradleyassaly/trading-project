@@ -26,6 +26,7 @@ def _page_shell(title: str, body: str) -> bytes:
     nav = """
 <nav>
   <a href="/">Overview</a>
+  <a href="/research">Research</a>
   <a href="/strategies">Strategies</a>
   <a href="/portfolio">Portfolio</a>
   <a href="/execution">Execution</a>
@@ -104,6 +105,7 @@ def _overview_page(service: DashboardDataService) -> bytes:
             ("Latest Pipeline Status", overview["latest_run"].get("status") or "n/a", overview["latest_run"].get("run_name") or "no pipeline runs found"),
             ("Monitoring Health", overview["monitoring"].get("status") or "n/a", "latest run health"),
             ("Approved Strategies", overview["registry"].get("approved_strategy_count") or 0, "from registry"),
+            ("Research Candidates", overview["research"].get("eligible_candidate_count") or 0, "promotion-ready runs"),
             ("Generated Positions", overview["portfolio"].get("generated_position_count") or 0, "latest portfolio"),
             ("Executable Orders", overview["execution"].get("executable_order_count") or 0, "latest execution package"),
             ("Broker Health", overview["broker_health"].get("status") or "n/a", overview["broker_health"].get("message") or "not available"),
@@ -138,6 +140,33 @@ def _strategies_page(service: DashboardDataService, query: dict[str, list[str]])
     body += "<h2>Registry</h2>" + _table(["strategy_id", "status", "family", "version", "preset_name", "universe", "current_deployment_stage", "promotion_passed", "degradation_status"], rows)
     body += "<h2>Champion / Challenger</h2>" + _table(list(payload["champion_challenger"][0].keys()) if payload["champion_challenger"] else ["family", "champion"], payload["champion_challenger"])
     return _page_shell("Strategies", body)
+
+
+def _research_page(service: DashboardDataService) -> bytes:
+    payload = service.research_latest_payload()
+    summary = payload.get("summary", {})
+    body = _cards(
+        [
+            ("Research Runs", summary.get("run_count", 0), "indexed manifests"),
+            ("Eligible Candidates", summary.get("eligible_candidate_count", 0), "promotion readiness"),
+            ("Signal Families", len(summary.get("signal_family_counts", {})), "observed across runs"),
+            ("Universes", len(summary.get("universe_counts", {})), "observed across runs"),
+        ]
+    )
+    body += "<h2>Signal Family Counts</h2>" + _bar_chart([(key, float(value)) for key, value in summary.get("signal_family_counts", {}).items()])
+    body += "<h2>Top Leaderboard Entries</h2>" + _table(
+        ["rank", "run_id", "signal_family", "universe", "metric_name", "metric_value", "promotion_recommendation"],
+        payload.get("leaderboard", []),
+    )
+    body += "<h2>Promotion Candidates</h2>" + _table(
+        ["run_id", "eligible", "promotion_recommendation", "mean_spearman_ic", "portfolio_sharpe", "reasons"],
+        payload.get("promotion_candidates", []),
+    )
+    body += "<h2>Recent Research Runs</h2>" + _table(
+        ["run_id", "timestamp", "workflow_type", "signal_family", "universe", "candidate_count", "promoted_signal_count"],
+        payload.get("recent_runs", []),
+    )
+    return _page_shell("Research", body)
 
 
 def _portfolio_page(service: DashboardDataService) -> bytes:
@@ -229,6 +258,8 @@ def create_dashboard_app(artifacts_root: str | Path) -> Callable:
             status, headers, body = _json_response(service.latest_run_detail_payload())
         elif path == "/api/strategies":
             status, headers, body = _json_response(service.strategies_payload())
+        elif path == "/api/research/latest":
+            status, headers, body = _json_response(service.research_latest_payload())
         elif path == "/api/portfolio/latest":
             status, headers, body = _json_response(service.portfolio_payload())
         elif path == "/api/execution/latest":
@@ -241,6 +272,8 @@ def create_dashboard_app(artifacts_root: str | Path) -> Callable:
             status, headers, body = "200 OK", [("Content-Type", "text/html; charset=utf-8")], _overview_page(service)
         elif path == "/strategies":
             status, headers, body = "200 OK", [("Content-Type", "text/html; charset=utf-8")], _strategies_page(service, query)
+        elif path == "/research":
+            status, headers, body = "200 OK", [("Content-Type", "text/html; charset=utf-8")], _research_page(service)
         elif path == "/portfolio":
             status, headers, body = "200 OK", [("Content-Type", "text/html; charset=utf-8")], _portfolio_page(service)
         elif path == "/execution":
@@ -273,6 +306,7 @@ def build_dashboard_static_data(*, artifacts_root: str | Path, output_dir: str |
         "runs.json": service.runs_payload(),
         "runs_latest.json": service.latest_run_detail_payload(),
         "strategies.json": service.strategies_payload(),
+        "research_latest.json": service.research_latest_payload(),
         "portfolio_latest.json": service.portfolio_payload(),
         "execution_latest.json": service.execution_payload(),
         "live_latest.json": service.live_payload(),

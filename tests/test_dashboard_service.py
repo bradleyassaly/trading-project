@@ -193,6 +193,72 @@ def _write_sample_artifacts(root: Path) -> None:
         root / "family_comparison.csv",
         index=False,
     )
+    (root / "research_registry.json").write_text(
+        json.dumps(
+            {
+                "summary": {"run_count": 2},
+                "runs": [
+                    {
+                        "run_id": "research-run-1",
+                        "timestamp": "2026-03-22T00:00:00+00:00",
+                        "workflow_type": "alpha_research",
+                        "signal_family": "momentum",
+                        "universe": "nasdaq100",
+                        "candidate_count": 12,
+                        "promoted_signal_count": 2,
+                    },
+                    {
+                        "run_id": "research-run-2",
+                        "timestamp": "2026-03-21T00:00:00+00:00",
+                        "workflow_type": "alpha_research",
+                        "signal_family": "value",
+                        "universe": "sp500",
+                        "candidate_count": 8,
+                        "promoted_signal_count": 0,
+                    },
+                ],
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    (root / "research_leaderboard.json").write_text(
+        json.dumps(
+            {
+                "rows": [
+                    {
+                        "rank": 1,
+                        "run_id": "research-run-1",
+                        "signal_family": "momentum",
+                        "universe": "nasdaq100",
+                        "metric_name": "portfolio_sharpe",
+                        "metric_value": 1.4,
+                        "promotion_recommendation": "promotion_candidate",
+                    }
+                ]
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    (root / "promotion_candidates.json").write_text(
+        json.dumps(
+            {
+                "rows": [
+                    {
+                        "run_id": "research-run-1",
+                        "eligible": True,
+                        "promotion_recommendation": "promotion_candidate",
+                        "mean_spearman_ic": 0.04,
+                        "portfolio_sharpe": 1.4,
+                        "reasons": "folds_tested >= 3",
+                    }
+                ]
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
 
 
 def _call_app(app, path: str) -> tuple[str, dict[str, str], dict]:
@@ -222,6 +288,7 @@ def test_dashboard_data_loading_with_sample_artifacts(tmp_path: Path) -> None:
 
     assert overview["latest_run"]["run_name"] == "daily_governance"
     assert overview["registry"]["approved_strategy_count"] == 1
+    assert overview["research"]["eligible_candidate_count"] == 1
     assert strategies["summary"]["status_counts"]["approved"] == 1
     assert execution["summary"]["executable_order_count"] == 1
 
@@ -273,6 +340,17 @@ def test_dashboard_execution_summary_normalization(tmp_path: Path) -> None:
     assert payload["rejected_orders"][0]["rejection_reason"] == "min_trade_notional"
 
 
+def test_dashboard_research_summary_normalization(tmp_path: Path) -> None:
+    _write_sample_artifacts(tmp_path)
+    service = DashboardDataService(tmp_path)
+
+    payload = service.research_latest_payload()
+
+    assert payload["summary"]["run_count"] == 2
+    assert payload["leaderboard"][0]["run_id"] == "research-run-1"
+    assert payload["promotion_candidates"][0]["eligible"] is True
+
+
 def test_dashboard_api_response_shapes(tmp_path: Path) -> None:
     _write_sample_artifacts(tmp_path)
     app = create_dashboard_app(tmp_path)
@@ -284,6 +362,9 @@ def test_dashboard_api_response_shapes(tmp_path: Path) -> None:
 
     _status, _headers, strategies = _call_app(app, "/api/strategies")
     assert {"generated_at", "summary", "filters", "strategies", "champion_challenger"} <= set(strategies)
+
+    _status, _headers, research = _call_app(app, "/api/research/latest")
+    assert {"generated_at", "summary", "recent_runs", "leaderboard", "promotion_candidates"} <= set(research)
 
     _status, _headers, live = _call_app(app, "/api/live/latest")
     assert {"generated_at", "dry_run_summary", "submission_summary", "risk_checks", "blocked_checks", "duplicate_events", "broker_health"} <= set(live)
@@ -299,3 +380,4 @@ def test_dashboard_static_data_build(tmp_path: Path) -> None:
 
     assert paths["overview_json"].exists()
     assert paths["runs_json"].exists()
+    assert paths["research_latest_json"].exists()

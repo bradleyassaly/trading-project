@@ -294,6 +294,32 @@ class DashboardDataService:
             "artifact_path": str(alert_path) if alert_path is not None else None,
         }
 
+    def research_payload(self) -> dict[str, Any]:
+        registry_path = _latest_matching_file(self.artifacts_root, ["research_registry.json"])
+        leaderboard_path = _latest_matching_file(self.artifacts_root, ["research_leaderboard.json"])
+        candidates_path = _latest_matching_file(self.artifacts_root, ["promotion_candidates.json"])
+        registry_payload = _safe_read_json(registry_path)
+        leaderboard_payload = _safe_read_json(leaderboard_path)
+        candidates_payload = _safe_read_json(candidates_path)
+        runs = registry_payload.get("runs", [])
+        leaderboard_rows = leaderboard_payload.get("rows", [])
+        candidate_rows = candidates_payload.get("rows", [])
+        return {
+            "generated_at": _now_utc(),
+            "registry_path": str(registry_path) if registry_path is not None else None,
+            "leaderboard_path": str(leaderboard_path) if leaderboard_path is not None else None,
+            "promotion_candidates_path": str(candidates_path) if candidates_path is not None else None,
+            "summary": {
+                "run_count": len(runs),
+                "signal_family_counts": _status_counts([str(row.get("signal_family")) for row in runs if row.get("signal_family")]),
+                "universe_counts": _status_counts([str(row.get("universe")) for row in runs if row.get("universe")]),
+                "eligible_candidate_count": len([row for row in candidate_rows if bool(row.get("eligible"))]),
+            },
+            "recent_runs": runs[:10],
+            "leaderboard": leaderboard_rows[:10],
+            "promotion_candidates": candidate_rows[:10],
+        }
+
     def overview_payload(self) -> dict[str, Any]:
         latest_run = self.latest_run_payload()
         registry = self.registry_payload()
@@ -301,6 +327,7 @@ class DashboardDataService:
         execution = self.latest_execution_payload()
         live = self.latest_live_payload()
         alerts = self.latest_alerts_payload()
+        research = self.research_payload()
         latest_run_summary = latest_run.get("summary", {})
         latest_run_health = latest_run.get("health", {})
         portfolio_summary = portfolio.get("summary", {})
@@ -330,6 +357,11 @@ class DashboardDataService:
             "registry": {
                 "approved_strategy_count": int(registry.get("status_counts", {}).get("approved", 0)),
                 "strategy_count": len(registry.get("strategies", [])),
+            },
+            "research": {
+                "run_count": research.get("summary", {}).get("run_count", 0),
+                "eligible_candidate_count": research.get("summary", {}).get("eligible_candidate_count", 0),
+                "top_leaderboard_entry": research.get("leaderboard", [{}])[0] if research.get("leaderboard") else {},
             },
             "portfolio": {
                 "generated_position_count": len(portfolio.get("combined_positions", [])),
@@ -387,3 +419,6 @@ class DashboardDataService:
         payload = self.latest_live_payload()
         payload["generated_at"] = _now_utc()
         return payload
+
+    def research_latest_payload(self) -> dict[str, Any]:
+        return self.research_payload()

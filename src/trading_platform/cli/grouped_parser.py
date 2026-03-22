@@ -53,8 +53,12 @@ from trading_platform.cli.commands.portfolio_apply_execution_constraints import 
 from trading_platform.cli.commands.portfolio_allocate_multi_strategy import cmd_portfolio_allocate_multi_strategy
 from trading_platform.cli.commands.portfolio_topn import cmd_portfolio_topn
 from trading_platform.cli.commands.research import cmd_research
+from trading_platform.cli.commands.research_compare_runs import cmd_research_compare_runs
+from trading_platform.cli.commands.research_leaderboard import cmd_research_leaderboard
 from trading_platform.cli.commands.research_monitor import cmd_research_monitor
+from trading_platform.cli.commands.research_promotion_candidates import cmd_research_promotion_candidates
 from trading_platform.cli.commands.research_refresh import cmd_research_refresh
+from trading_platform.cli.commands.research_registry_build import cmd_research_registry_build
 from trading_platform.cli.commands.registry_build_multi_strategy_config import cmd_registry_build_multi_strategy_config
 from trading_platform.cli.commands.registry_demote import cmd_registry_demote
 from trading_platform.cli.commands.registry_evaluate_degradation import cmd_registry_evaluate_degradation
@@ -126,6 +130,10 @@ _RESEARCH_GROUP_COMMANDS = {
     "multi-universe-report",
     "refresh",
     "monitor",
+    "registry",
+    "leaderboard",
+    "compare-runs",
+    "promotion-candidates",
     "pipeline",
     "strategies",
 }
@@ -600,6 +608,29 @@ def build_parser() -> argparse.ArgumentParser:
     research_monitor.add_argument("--concentration-spike-multiple", type=float, default=1.5, help="Multiple of expected top-position weight that triggers a concentration alert.")
     research_monitor.add_argument("--signal-churn-threshold", type=int, default=3, help="Number of approved-signal additions/removals that triggers a churn alert.")
     research_monitor.set_defaults(func=cmd_research_monitor)
+    research_registry = research_subparsers.add_parser("registry", help="Research manifest registry commands")
+    research_registry_subparsers = research_registry.add_subparsers(dest="research_registry_command", required=True)
+    research_registry_build = research_registry_subparsers.add_parser("build", help="Scan research run manifests and write normalized registry artifacts")
+    research_registry_build.add_argument("--artifacts-root", type=str, default="artifacts", help="Root artifact directory to scan for research manifests.")
+    research_registry_build.add_argument("--output-dir", type=str, required=True, help="Directory where registry artifacts will be written.")
+    research_registry_build.set_defaults(func=cmd_research_registry_build)
+    research_leaderboard = research_subparsers.add_parser("leaderboard", help="Build a cross-run research leaderboard from manifest summaries")
+    research_leaderboard.add_argument("--artifacts-root", type=str, default="artifacts", help="Root artifact directory to scan for research manifests.")
+    research_leaderboard.add_argument("--output-dir", type=str, required=True, help="Directory where leaderboard artifacts will be written.")
+    research_leaderboard.add_argument("--metric", type=str, default="portfolio_sharpe", help="Top-metric field used for ranking.")
+    research_leaderboard.add_argument("--group-by", type=str, default="none", choices=["none", "signal_family", "universe", "workflow_type"], help="Optional grouping applied before ranking.")
+    research_leaderboard.add_argument("--limit", type=int, default=20, help="Maximum number of leaderboard rows to write.")
+    research_leaderboard.set_defaults(func=cmd_research_leaderboard)
+    research_compare_runs = research_subparsers.add_parser("compare-runs", help="Compare two research runs by run_id")
+    research_compare_runs.add_argument("--artifacts-root", type=str, default="artifacts", help="Root artifact directory to scan for research manifests.")
+    research_compare_runs.add_argument("--run-id-a", type=str, required=True, help="Baseline run_id.")
+    research_compare_runs.add_argument("--run-id-b", type=str, required=True, help="Candidate run_id.")
+    research_compare_runs.add_argument("--output-dir", type=str, required=True, help="Directory where comparison artifacts will be written.")
+    research_compare_runs.set_defaults(func=cmd_research_compare_runs)
+    research_promotion_candidates = research_subparsers.add_parser("promotion-candidates", help="Evaluate research manifests for lightweight promotion readiness")
+    research_promotion_candidates.add_argument("--artifacts-root", type=str, default="artifacts", help="Root artifact directory to scan for research manifests.")
+    research_promotion_candidates.add_argument("--output-dir", type=str, required=True, help="Directory where promotion-candidate artifacts will be written.")
+    research_promotion_candidates.set_defaults(func=cmd_research_promotion_candidates)
     research_strategies = research_subparsers.add_parser("strategies", help="Show available legacy strategies")
     research_strategies.set_defaults(func=cmd_list_strategies)
 

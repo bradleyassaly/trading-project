@@ -23,6 +23,90 @@ def test_grouped_research_alpha_command_parses() -> None:
     assert args.lookbacks == [5]
 
 
+def test_grouped_research_registry_build_command_parses() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "research",
+            "registry",
+            "build",
+            "--artifacts-root",
+            "artifacts",
+            "--output-dir",
+            "artifacts/research_registry",
+        ]
+    )
+
+    assert args.command_family == "research"
+    assert args.research_command == "registry"
+    assert args.research_registry_command == "build"
+    assert args.output_dir == "artifacts/research_registry"
+
+
+def test_grouped_research_leaderboard_command_parses() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "research",
+            "leaderboard",
+            "--artifacts-root",
+            "artifacts",
+            "--output-dir",
+            "artifacts/research_registry",
+            "--metric",
+            "portfolio_sharpe",
+            "--group-by",
+            "signal_family",
+            "--limit",
+            "5",
+        ]
+    )
+
+    assert args.research_command == "leaderboard"
+    assert args.metric == "portfolio_sharpe"
+    assert args.group_by == "signal_family"
+    assert args.limit == 5
+
+
+def test_grouped_research_compare_runs_command_parses() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "research",
+            "compare-runs",
+            "--artifacts-root",
+            "artifacts",
+            "--run-id-a",
+            "run_a",
+            "--run-id-b",
+            "run_b",
+            "--output-dir",
+            "artifacts/research_compare",
+        ]
+    )
+
+    assert args.research_command == "compare-runs"
+    assert args.run_id_a == "run_a"
+    assert args.run_id_b == "run_b"
+
+
+def test_grouped_research_promotion_candidates_command_parses() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "research",
+            "promotion-candidates",
+            "--artifacts-root",
+            "artifacts",
+            "--output-dir",
+            "artifacts/research_candidates",
+        ]
+    )
+
+    assert args.research_command == "promotion-candidates"
+    assert args.output_dir == "artifacts/research_candidates"
+
+
 def test_grouped_data_features_command_parses_for_universe() -> None:
     parser = build_parser()
     args = parser.parse_args(["data", "features", "--universe", "nasdaq100"])
