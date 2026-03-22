@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from trading_platform.broker.models import BrokerConfig
 from trading_platform.config.models import (
     MultiStrategyGroupCap,
     MultiStrategyPortfolioConfig,
@@ -120,3 +121,8 @@ def load_execution_config(path: str | Path) -> ExecutionConfig:
     elif "flat_commission_per_order" in payload and "commission_model_type" not in payload:
         payload["commission_model_type"] = "flat"
     return ExecutionConfig(**payload)
+
+
+def load_broker_config(path: str | Path) -> BrokerConfig:
+    data = _read_config_file(Path(path))
+    return BrokerConfig(**data)

@@ -241,6 +241,18 @@ def _load_execution_summary(run_dir: Path) -> dict[str, Any]:
     return {}
 
 
+def _load_live_submission_summary(run_dir: Path) -> dict[str, Any]:
+    for candidate in [
+        run_dir / "live_submission" / "live_submission_summary.json",
+        run_dir / "live_submission_summary.json",
+        run_dir / "live_dry_run" / "live_submission_summary.json",
+    ]:
+        payload = _safe_read_json(candidate)
+        if payload:
+            return payload
+    return {}
+
+
 def _evaluate_run_health_payload(
     *,
     run_dir: Path,
@@ -333,6 +345,9 @@ def _evaluate_run_health_payload(
     execution_turnover_after_constraints = 0.0
     execution_total_cost = 0.0
     zero_executable_orders = 0
+    live_submission_failures = 0
+    live_duplicate_order_skips = 0
+    live_risk_check_failures = 0
 
     allocation_summary = _safe_read_json(run_dir / "portfolio_allocation" / "allocation_summary.json")
     combined_targets = _safe_read_csv(run_dir / "portfolio_allocation" / "combined_target_weights.csv")
@@ -503,6 +518,58 @@ def _evaluate_run_health_payload(
         execution_turnover_after_constraints = float(execution_summary.get("turnover_after_constraints", 0.0) or 0.0)
         execution_total_cost = float(execution_summary.get("expected_total_cost", 0.0) or 0.0)
         zero_executable_orders = int(bool(execution_summary.get("zero_executable_orders", False)))
+    live_submission_summary = _load_live_submission_summary(run_dir)
+    if live_submission_summary:
+        live_submission_failures = int(live_submission_summary.get("rejected_order_count", 0) or 0)
+        live_duplicate_order_skips = int(live_submission_summary.get("duplicate_order_skip_count", 0) or 0)
+        live_risk_check_failures = sum(
+            1
+            for row in live_submission_summary.get("risk_checks", [])
+            if not bool(row.get("passed", False))
+        )
+        if not bool(live_submission_summary.get("risk_passed", True)):
+            alerts.append(
+                Alert(
+                    code="live_risk_checks_failed",
+                    severity="critical",
+                    message="one or more live risk checks failed",
+                    timestamp=evaluated_at,
+                    entity_type="run",
+                    entity_id=run_payload.get("run_name", run_dir.name),
+                    metric_value=live_risk_check_failures,
+                    artifact_path=str(run_dir / "live_submission_summary.json"),
+                )
+            )
+        if any(
+            row.get("check_name") == "global_kill_switch" and not bool(row.get("passed", True))
+            for row in live_submission_summary.get("risk_checks", [])
+        ):
+            alerts.append(
+                Alert(
+                    code="live_kill_switch_block",
+                    severity="critical",
+                    message="live submission blocked by global kill switch",
+                    timestamp=evaluated_at,
+                    entity_type="run",
+                    entity_id=run_payload.get("run_name", run_dir.name),
+                    artifact_path=str(run_dir / "live_submission_summary.json"),
+                )
+            )
+        if any(
+            row.get("check_name") == "broker_health" and not bool(row.get("passed", True))
+            for row in live_submission_summary.get("risk_checks", [])
+        ):
+            alerts.append(
+                Alert(
+                    code="broker_health_failure",
+                    severity="critical",
+                    message="live submission broker health check failed",
+                    timestamp=evaluated_at,
+                    entity_type="run",
+                    entity_id=run_payload.get("run_name", run_dir.name),
+                    artifact_path=str(run_dir / "live_submission_summary.json"),
+                )
+            )
 
     if (
         config.maximum_rejected_order_count is not None
@@ -641,6 +708,57 @@ def _evaluate_run_health_payload(
                 artifact_path=str(run_dir / "paper_trading" / "execution_summary.json"),
             )
         )
+    if (
+        config.maximum_live_risk_check_failures is not None
+        and live_risk_check_failures > config.maximum_live_risk_check_failures
+    ):
+        alerts.append(
+            Alert(
+                code="live_risk_check_failures",
+                severity="critical",
+                message=f"live_risk_check_failures={live_risk_check_failures} exceeds maximum_live_risk_check_failures={config.maximum_live_risk_check_failures}",
+                timestamp=evaluated_at,
+                entity_type="run",
+                entity_id=run_payload.get("run_name", run_dir.name),
+                metric_value=live_risk_check_failures,
+                threshold_value=config.maximum_live_risk_check_failures,
+                artifact_path=str(run_dir / "live_submission_summary.json"),
+            )
+        )
+    if (
+        config.maximum_live_submission_failures is not None
+        and live_submission_failures > config.maximum_live_submission_failures
+    ):
+        alerts.append(
+            Alert(
+                code="live_submission_failures",
+                severity="critical",
+                message=f"live_submission_failures={live_submission_failures} exceeds maximum_live_submission_failures={config.maximum_live_submission_failures}",
+                timestamp=evaluated_at,
+                entity_type="run",
+                entity_id=run_payload.get("run_name", run_dir.name),
+                metric_value=live_submission_failures,
+                threshold_value=config.maximum_live_submission_failures,
+                artifact_path=str(run_dir / "live_submission_summary.json"),
+            )
+        )
+    if (
+        config.maximum_duplicate_order_skip_events is not None
+        and live_duplicate_order_skips > config.maximum_duplicate_order_skip_events
+    ):
+        alerts.append(
+            Alert(
+                code="duplicate_order_skips",
+                severity="warning",
+                message=f"duplicate_order_skip_count={live_duplicate_order_skips} exceeds maximum_duplicate_order_skip_events={config.maximum_duplicate_order_skip_events}",
+                timestamp=evaluated_at,
+                entity_type="run",
+                entity_id=run_payload.get("run_name", run_dir.name),
+                metric_value=live_duplicate_order_skips,
+                threshold_value=config.maximum_duplicate_order_skip_events,
+                artifact_path=str(run_dir / "live_submission_summary.json"),
+            )
+        )
 
     metrics = {
         "failed_stage_count": failed_stage_count,
@@ -663,6 +781,9 @@ def _evaluate_run_health_payload(
         "execution_turnover_after_constraints": execution_turnover_after_constraints,
         "execution_total_cost": execution_total_cost,
         "zero_executable_orders": zero_executable_orders,
+        "live_submission_failures": live_submission_failures,
+        "live_duplicate_order_skips": live_duplicate_order_skips,
+        "live_risk_check_failures": live_risk_check_failures,
     }
     report = RunHealthReport(
         run_dir=str(run_dir),
@@ -700,6 +821,8 @@ def _evaluate_run_health_payload(
                 "execution_rejected_order_count": execution_rejected_order_count,
                 "execution_liquidity_breach_count": execution_liquidity_breach_count,
                 "execution_total_cost": execution_total_cost,
+                "live_submission_failures": live_submission_failures,
+                "live_duplicate_order_skips": live_duplicate_order_skips,
             }
         ],
         [
@@ -716,6 +839,8 @@ def _evaluate_run_health_payload(
             "execution_rejected_order_count",
             "execution_liquidity_breach_count",
             "execution_total_cost",
+            "live_submission_failures",
+            "live_duplicate_order_skips",
         ],
     )
     return report, paths

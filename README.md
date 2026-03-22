@@ -12,6 +12,7 @@ This repository is an end-to-end research to deploy trading system. It covers:
 - strategy registry, promotion, and degradation governance
 - stateful paper trading with scheduled daily runs
 - broker-safe live dry-run previews with reconciliation and health checks
+- guarded live broker submission with explicit pre-trade checks, kill switches, and audit artifacts
 
 The codebase supports both a legacy strategy workflow and a newer `alpha_lab` workflow. The current validated operational path centers on the versioned Nasdaq-100 cross-sectional momentum presets:
 
@@ -166,6 +167,9 @@ maximum_clipped_order_ratio: 0.25
 maximum_turnover_after_execution: 0.30
 maximum_execution_cost: 250.0
 maximum_zero_executable_order_runs: 0
+maximum_live_risk_check_failures: 0
+maximum_live_submission_failures: 0
+maximum_duplicate_order_skip_events: 5
 ```
 
 Thresholds stay explicit in config so changes to operating policy are reviewable in git.
@@ -474,6 +478,9 @@ Execution-aware monitoring can also alert on:
 - rejected order count above threshold
 - liquidity breach count above threshold
 - short-availability failures
+- live risk-check failures
+- duplicate-order skip spikes
+- broker-health failures and kill-switch blocks during live submission
 
 ### Notifications
 
@@ -817,6 +824,10 @@ trading-cli paper daily --universe magnificent7 --signal-source composite --appr
 trading-cli paper report --account-dir artifacts/paper --output-dir artifacts/paper/report
 trading-cli live dry-run --universe magnificent7 --strategy sma_cross --top-n 5 --execution-config configs/execution.yaml --broker mock
 trading-cli live dry-run-multi-strategy --config configs/multi_strategy.yaml --execution-config configs/execution.yaml --broker mock --output-dir artifacts/live_dry_run/multi_strategy
+trading-cli live submit --universe magnificent7 --strategy sma_cross --execution-config configs/execution.yaml --broker-config configs/broker.yaml --validate-only --output-dir artifacts/live_submit
+trading-cli live submit-multi-strategy --config configs/multi_strategy.yaml --execution-config configs/execution.yaml --broker-config configs/broker.yaml --output-dir artifacts/live_submit/multi_strategy
+trading-cli broker health --broker-config configs/broker.yaml
+trading-cli broker cancel-all --broker-config configs/broker.yaml
 trading-cli live validate --universe magnificent7 --signal-source composite --approved-model-state artifacts/alpha_research/approved/approved_model_state.json --approval-artifact artifacts/research_refresh/approved_configuration_snapshots/latest_approved_configuration.json --output-dir artifacts/live_execution
 trading-cli live execute --universe magnificent7 --signal-source composite --approved-model-state artifacts/alpha_research/approved/approved_model_state.json --approved --output-dir artifacts/live_execution
 trading-cli experiments list --tracker-dir artifacts/experiment_tracking --limit 10
@@ -1066,6 +1077,98 @@ Current limitations:
 - liquidity checks use only available artifact fields and reject explicitly when required inputs are missing
 - `portfolio apply-execution-constraints` is intended as a diagnostic helper and uses simple quantity proxies from allocation artifacts
 - price-source assumptions are coarse (`close`, `next_open`, `vwap_proxy`) and do not imply intraday execution precision
+
+## Live Broker Submission
+
+Live submission is a separate guarded path above dry-run. The live submit commands reuse the same target generation, reconciliation, open-order adjustment, and optional execution-realism layer as dry-run, then add hard pre-trade checks before any order can be sent.
+
+Primary safeguards:
+
+- `live_trading_enabled` must be explicitly true in broker config
+- optional manual enable flag must exist if `require_manual_enable_flag` is enabled
+- global kill switch blocks submission immediately if the configured file exists
+- broker health must pass before submission
+- expected account id can be enforced
+- non-empty orders, max order count, total notional, and per-symbol notional are checked
+- projected gross, net, and max position weight are checked
+- shorts can be blocked at the live layer even if research or paper supports them
+- market data freshness can be enforced
+- monitoring status can be required to be `healthy` before submit
+- existing open-order policy is explicit: either block, or cancel-all first when configured
+
+Duplicate protection is conservative:
+
+- each outgoing order gets a deterministic `client_order_id`
+- if a materially identical open order already exists, the new order is skipped and recorded instead of blindly resubmitted
+- optional cancel-all happens only when `cancel_existing_open_orders_before_submit` is explicitly enabled
+
+Example broker config:
+
+```yaml
+broker_name: mock
+live_trading_enabled: false
+require_manual_enable_flag: true
+manual_enable_flag_path: flags/live.enable
+global_kill_switch_path: flags/live.kill
+expected_account_id: mock-account
+max_orders_per_run: 10
+max_total_notional_per_run: 50000
+max_symbol_notional_per_order: 10000
+max_gross_exposure: 1.0
+max_net_exposure: 1.0
+max_position_weight: 0.20
+max_position_change_notional: 15000
+allowed_order_types: [market]
+default_order_type: market
+allow_shorts_live: false
+cancel_existing_open_orders_before_submit: false
+skip_submission_if_existing_open_orders: true
+require_fresh_market_data: true
+max_market_data_age_seconds: 900
+require_clean_monitoring_status: true
+allowed_monitoring_statuses: [healthy]
+monitoring_status_path: artifacts/monitoring/latest/run_health.json
+mock_equity: 100000
+mock_cash: 100000
+tags: [staged_rollout]
+```
+
+Validate-only vs live submit:
+
+- `live submit --validate-only` builds the exact broker order package, runs all hard checks, writes artifacts, and does not submit
+- `live submit` only sends orders if every hard check passes
+- both modes write the same audit package, so the operator can diff validate-only vs actual submit runs
+
+Primary live submission artifacts:
+
+- `live_risk_checks.json` / `live_risk_checks.md`: per-check pass/fail results and hard-block reasons
+- `broker_order_requests.csv`: deterministic broker payloads that would be or were sent
+- `broker_order_results.csv`: submission, skip, reject, and cancel results
+- `live_submission_summary.json` / `live_submission_summary.md`: aggregate risk and submission summary
+
+Operational rollout guidance:
+
+1. Start with `broker_name: mock` and `live_trading_enabled: false`.
+2. Run `live submit --validate-only` repeatedly until the risk checks and payloads are stable.
+3. Enable the manual flag and leave the global kill switch path configured before any real submit.
+4. Keep `skip_submission_if_existing_open_orders: true` for the first live rollout.
+5. Only after repeated clean validate-only runs should `live_trading_enabled` be switched on.
+
+Kill switch behavior:
+
+- if the kill-switch file exists, submission is hard blocked
+- the block is written into `live_risk_checks.*` and `live_submission_summary.*`
+- `broker cancel-all` is the emergency command to clear outstanding mock or future real-broker orders
+
+Operational checklist before enabling live trading:
+
+- latest monitoring status is acceptable
+- broker health passes
+- expected account id matches
+- execution realism is configured if the strategy depends on liquidity filtering
+- validate-only output matches operator expectations
+- manual enable flag is present
+- kill switch is not active
 
 ## Governance Criteria
 

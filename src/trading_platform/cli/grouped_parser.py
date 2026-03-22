@@ -5,6 +5,8 @@ import argparse
 from trading_platform.cli.commands.alpha_research import cmd_alpha_research
 from trading_platform.cli.commands.alpha_research_loop import cmd_alpha_research_loop
 from trading_platform.cli.commands.approved_config_diff import cmd_approved_config_diff
+from trading_platform.cli.commands.broker_cancel_all import cmd_broker_cancel_all
+from trading_platform.cli.commands.broker_health import cmd_broker_health
 from trading_platform.cli.commands.compare_xsec_construction import cmd_compare_xsec_construction
 from trading_platform.cli.commands.daily_paper_job import cmd_daily_paper_job
 from trading_platform.cli.commands.decision_memo import cmd_decision_memo
@@ -21,6 +23,8 @@ from trading_platform.cli.commands.list_universes import cmd_list_universes
 from trading_platform.cli.commands.live_dry_run import cmd_live_dry_run
 from trading_platform.cli.commands.live_dry_run_multi_strategy import cmd_live_dry_run_multi_strategy
 from trading_platform.cli.commands.live_run_scheduled import cmd_live_run_scheduled
+from trading_platform.cli.commands.live_submit import cmd_live_submit
+from trading_platform.cli.commands.live_submit_multi_strategy import cmd_live_submit_multi_strategy
 from trading_platform.cli.commands.multi_universe_alpha_research import (
     cmd_multi_universe_alpha_research,
 )
@@ -436,6 +440,7 @@ def _add_live_base_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--mock-equity", type=float, default=100_000.0)
     parser.add_argument("--mock-cash", type=float, default=100_000.0)
     parser.add_argument("--mock-positions-path", default=None)
+    parser.add_argument("--broker-config", type=str, default=None, help="Optional broker JSON/YAML config for submit/health flows.")
 
 
 def _cmd_research_run(args) -> None:
@@ -687,6 +692,21 @@ def build_parser() -> argparse.ArgumentParser:
     add_xsec_live_arguments(live_run_scheduled)
     live_run_scheduled.add_argument("--output-dir", default="artifacts/live_dry_run", help="Directory for scheduled live dry-run artifacts.")
     live_run_scheduled.set_defaults(func=cmd_live_run_scheduled)
+    live_submit = live_subparsers.add_parser("submit", help="Run live preview plus strict pre-trade checks and optionally submit orders")
+    _add_live_base_arguments(live_submit)
+    add_preset_argument(live_submit, help_text="Optional versioned preset for validated live defaults. Explicit CLI flags still override preset values.")
+    add_xsec_live_arguments(live_submit)
+    live_submit.add_argument("--validate-only", action="store_true", help="Write the exact submission package without sending orders.")
+    live_submit.add_argument("--output-dir", default="artifacts/live_execution", help="Directory for live submit artifacts.")
+    live_submit.set_defaults(func=cmd_live_submit)
+    live_submit_multi = live_subparsers.add_parser("submit-multi-strategy", help="Run multi-strategy live preview plus strict pre-trade checks and optionally submit orders")
+    live_submit_multi.add_argument("--config", type=str, required=True, help="Path to the multi-strategy portfolio YAML/JSON config.")
+    live_submit_multi.add_argument("--execution-config", type=str, default=None, help="Optional execution realism JSON/YAML config.")
+    live_submit_multi.add_argument("--broker-config", type=str, required=True, help="Path to the broker-config JSON/YAML file.")
+    live_submit_multi.add_argument("--broker", type=str, default=None, choices=["mock", "alpaca"], help="Optional broker override.")
+    live_submit_multi.add_argument("--validate-only", action="store_true", help="Write the exact submission package without sending orders.")
+    live_submit_multi.add_argument("--output-dir", type=str, required=True, help="Directory for live submit and allocation artifacts.")
+    live_submit_multi.set_defaults(func=cmd_live_submit_multi_strategy)
     live_validate = live_subparsers.add_parser("validate", help="Run live execution control checks and write artifacts without submitting orders")
     _add_live_base_arguments(live_validate)
     add_live_control_arguments(live_validate)
@@ -809,5 +829,16 @@ def build_parser() -> argparse.ArgumentParser:
     monitor_notify.add_argument("--alerts", type=str, required=True, help="Path to alerts.json.")
     monitor_notify.add_argument("--config", type=str, required=True, help="Path to the notification JSON/YAML config.")
     monitor_notify.set_defaults(func=cmd_monitor_notify)
+
+    broker_parser = subparsers.add_parser("broker", help="Direct broker health and emergency commands")
+    broker_subparsers = broker_parser.add_subparsers(dest="broker_command", required=True)
+    broker_health = broker_subparsers.add_parser("health", help="Run broker connectivity and account health checks")
+    broker_health.add_argument("--broker", type=str, default=None, choices=["mock", "alpaca"], help="Optional broker override.")
+    broker_health.add_argument("--broker-config", type=str, required=True, help="Path to the broker-config JSON/YAML file.")
+    broker_health.set_defaults(func=cmd_broker_health)
+    broker_cancel = broker_subparsers.add_parser("cancel-all", help="Cancel all currently open broker orders")
+    broker_cancel.add_argument("--broker", type=str, default=None, choices=["mock", "alpaca"], help="Optional broker override.")
+    broker_cancel.add_argument("--broker-config", type=str, required=True, help="Path to the broker-config JSON/YAML file.")
+    broker_cancel.set_defaults(func=cmd_broker_cancel_all)
 
     return parser

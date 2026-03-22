@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 
 from trading_platform.config.loader import (
+    load_broker_config,
     load_execution_config,
     load_monitoring_config,
     load_notification_config,
@@ -112,6 +113,9 @@ maximum_clipped_order_ratio: 0.25
 maximum_turnover_after_execution: 0.3
 maximum_execution_cost: 100
 maximum_zero_executable_order_runs: 0
+maximum_live_risk_check_failures: 0
+maximum_live_submission_failures: 1
+maximum_duplicate_order_skip_events: 2
 """.strip(),
         encoding="utf-8",
     )
@@ -128,6 +132,7 @@ maximum_zero_executable_order_runs: 0
     assert config.maximum_clipped_order_ratio == 0.25
     assert config.maximum_turnover_after_execution == 0.3
     assert config.maximum_execution_cost == 100
+    assert config.maximum_live_submission_failures == 1
 
 
 def test_load_notification_config_from_yaml(tmp_path) -> None:
@@ -188,3 +193,34 @@ missing_liquidity_behavior: reject
     assert config.slippage_model_type == "liquidity_scaled"
     assert config.half_spread_bps == 2.0
     assert config.liquidity_slippage_bps == 5.0
+
+
+def test_load_broker_config_from_yaml(tmp_path) -> None:
+    path = tmp_path / "broker.yaml"
+    path.write_text(
+        """
+broker_name: mock
+live_trading_enabled: true
+require_manual_enable_flag: true
+manual_enable_flag_path: flags/live.enable
+global_kill_switch_path: flags/kill.switch
+expected_account_id: acct-1
+max_orders_per_run: 10
+max_total_notional_per_run: 50000
+max_symbol_notional_per_order: 10000
+allowed_order_types: [market]
+default_order_type: market
+allow_shorts_live: false
+require_clean_monitoring_status: true
+allowed_monitoring_statuses: [healthy]
+""".strip(),
+        encoding="utf-8",
+    )
+
+    config = load_broker_config(path)
+
+    assert config.broker_name == "mock"
+    assert config.live_trading_enabled is True
+    assert config.max_orders_per_run == 10
+    assert config.expected_account_id == "acct-1"
+    assert config.allowed_monitoring_statuses == ["healthy"]

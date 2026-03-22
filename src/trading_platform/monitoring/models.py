@@ -68,6 +68,9 @@ class MonitoringConfig:
     maximum_turnover_after_execution: float | None = None
     maximum_execution_cost: float | None = None
     maximum_zero_executable_order_runs: int | None = None
+    maximum_live_risk_check_failures: int | None = None
+    maximum_live_submission_failures: int | None = None
+    maximum_duplicate_order_skip_events: int | None = None
 
     def __post_init__(self) -> None:
         if self.maximum_failed_stages < 0:
@@ -97,6 +100,9 @@ class MonitoringConfig:
         _validate_nonnegative_optional(self.maximum_turnover_after_execution, "maximum_turnover_after_execution")
         _validate_nonnegative_optional(self.maximum_execution_cost, "maximum_execution_cost")
         _validate_nonnegative_optional(self.maximum_zero_executable_order_runs, "maximum_zero_executable_order_runs")
+        _validate_nonnegative_optional(self.maximum_live_risk_check_failures, "maximum_live_risk_check_failures")
+        _validate_nonnegative_optional(self.maximum_live_submission_failures, "maximum_live_submission_failures")
+        _validate_nonnegative_optional(self.maximum_duplicate_order_skip_events, "maximum_duplicate_order_skip_events")
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

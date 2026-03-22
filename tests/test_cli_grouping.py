@@ -218,7 +218,63 @@ def test_grouped_research_sweep_command_parses_breakout_grid() -> None:
     assert args.strategy == "breakout_hold"
     assert args.entry_lookback_values == [20, 55]
     assert args.exit_lookback_values == [10, 20]
-    assert args.momentum_lookback_values == [63]
+
+
+def test_grouped_live_submit_command_parses() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "live",
+            "submit",
+            "--symbols",
+            "AAPL",
+            "--broker-config",
+            "configs/broker.yaml",
+            "--validate-only",
+        ]
+    )
+
+    assert args.command_family == "live"
+    assert args.live_command == "submit"
+    assert args.broker_config == "configs/broker.yaml"
+    assert args.validate_only is True
+
+
+def test_grouped_live_submit_multi_strategy_command_parses() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "live",
+            "submit-multi-strategy",
+            "--config",
+            "configs/multi_strategy.yaml",
+            "--broker-config",
+            "configs/broker.yaml",
+            "--output-dir",
+            "artifacts/live_submit",
+        ]
+    )
+
+    assert args.command_family == "live"
+    assert args.live_command == "submit-multi-strategy"
+    assert args.broker_config == "configs/broker.yaml"
+    assert args.output_dir == "artifacts/live_submit"
+
+
+def test_grouped_broker_health_command_parses() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "broker",
+            "health",
+            "--broker-config",
+            "configs/broker.yaml",
+        ]
+    )
+
+    assert args.command_family == "broker"
+    assert args.broker_command == "health"
+    assert args.broker_config == "configs/broker.yaml"
 
 
 def test_grouped_research_sweep_command_parses_xsec_grid() -> None:

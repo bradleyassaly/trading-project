@@ -269,6 +269,40 @@ def test_run_health_execution_breach_case(tmp_path: Path) -> None:
     assert any(alert.code == "execution_cost" for alert in report.alerts)
 
 
+def test_run_health_live_submission_alerts(tmp_path: Path) -> None:
+    run_dir = _write_run_dir(tmp_path)
+    (run_dir / "live_submission_summary.json").write_text(
+        json.dumps(
+            {
+                "risk_passed": False,
+                "rejected_order_count": 2,
+                "duplicate_order_skip_count": 3,
+                "risk_checks": [
+                    {"check_name": "global_kill_switch", "passed": False},
+                    {"check_name": "broker_health", "passed": False},
+                ],
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    report, _paths = evaluate_run_health(
+        run_dir=run_dir,
+        config=MonitoringConfig(
+            maximum_live_risk_check_failures=0,
+            maximum_live_submission_failures=1,
+            maximum_duplicate_order_skip_events=1,
+        ),
+    )
+
+    assert any(alert.code == "live_risk_checks_failed" for alert in report.alerts)
+    assert any(alert.code == "live_kill_switch_block" for alert in report.alerts)
+    assert any(alert.code == "broker_health_failure" for alert in report.alerts)
+    assert any(alert.code == "live_submission_failures" for alert in report.alerts)
+    assert any(alert.code == "duplicate_order_skips" for alert in report.alerts)
+
+
 def test_portfolio_health_concentration_breach_case(tmp_path: Path) -> None:
     allocation_dir = _write_run_dir(tmp_path).parent / "2026-03-21T00-00-00+00-00" / "portfolio_allocation"
     report, _paths = evaluate_portfolio_health(

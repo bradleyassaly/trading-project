@@ -692,4 +692,5 @@ def write_live_dry_run_artifacts(result: LivePreviewResult) -> dict[str, Path]:
     if result.execution_result is not None:
         execution_paths = write_execution_artifacts(result.execution_result, output_dir)
         paths.update(execution_paths)
+    result.artifacts = paths
     return paths
