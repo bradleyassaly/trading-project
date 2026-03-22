@@ -277,6 +277,44 @@ def test_grouped_broker_health_command_parses() -> None:
     assert args.broker_config == "configs/broker.yaml"
 
 
+def test_grouped_dashboard_serve_command_parses() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "dashboard",
+            "serve",
+            "--artifacts-root",
+            "artifacts",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "8123",
+        ]
+    )
+
+    assert args.command_family == "dashboard"
+    assert args.dashboard_command == "serve"
+    assert args.port == 8123
+
+
+def test_grouped_dashboard_build_static_data_command_parses() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "dashboard",
+            "build-static-data",
+            "--artifacts-root",
+            "artifacts",
+            "--output-dir",
+            "artifacts/dashboard_data",
+        ]
+    )
+
+    assert args.command_family == "dashboard"
+    assert args.dashboard_command == "build-static-data"
+    assert args.output_dir == "artifacts/dashboard_data"
+
+
 def test_grouped_research_sweep_command_parses_xsec_grid() -> None:
     parser = build_parser()
     args = parser.parse_args(

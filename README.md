@@ -13,6 +13,7 @@ This repository is an end-to-end research to deploy trading system. It covers:
 - stateful paper trading with scheduled daily runs
 - broker-safe live dry-run previews with reconciliation and health checks
 - guarded live broker submission with explicit pre-trade checks, kill switches, and audit artifacts
+- a local read-only dashboard for inspecting artifact state across runs, strategies, portfolios, execution, and live readiness
 
 The codebase supports both a legacy strategy workflow and a newer `alpha_lab` workflow. The current validated operational path centers on the versioned Nasdaq-100 cross-sectional momentum presets:
 
@@ -173,6 +174,43 @@ maximum_duplicate_order_skip_events: 5
 ```
 
 Thresholds stay explicit in config so changes to operating policy are reviewable in git.
+
+### Dashboard
+
+The dashboard is a local-first, read-only operator UI that sits on top of the existing artifact tree. It does not compute portfolio logic and it does not place trades. It reads the same JSON and CSV artifacts already written by orchestration, governance, allocation, monitoring, execution, live dry-run, and live submit workflows.
+
+Pages:
+
+- `Overview`: latest run status, monitoring health, alert counts, approved strategy count, generated position count, executable order count, broker health, and quick artifact links
+- `Strategies`: strategy registry table, family/status filters, and champion/challenger comparison when available
+- `Portfolio`: latest combined portfolio, sleeve weights, top positions, overlap diagnostics, and clipped symbols
+- `Execution`: requested vs executable orders, rejection reasons, expected cost, and liquidity diagnostics
+- `Live`: latest dry-run summary, latest live submit summary, risk checks, blocked reasons, and duplicate-order skip events
+- `Runs`: recent orchestration runs, per-stage statuses, failures, and artifact directories
+
+Key API endpoints:
+
+- `/api/overview`
+- `/api/runs`
+- `/api/runs/latest`
+- `/api/strategies`
+- `/api/portfolio/latest`
+- `/api/execution/latest`
+- `/api/live/latest`
+- `/api/alerts/latest`
+
+Dashboard commands:
+
+```bash
+trading-cli dashboard serve --artifacts-root artifacts --host 127.0.0.1 --port 8000
+trading-cli dashboard build-static-data --artifacts-root artifacts --output-dir artifacts/dashboard_data
+```
+
+Notes:
+
+- the dashboard is read-only in v1
+- it degrades gracefully when some artifact categories do not exist yet
+- it uses filesystem discovery only; there is no database and no background worker
 
 ## Presets
 
@@ -828,6 +866,8 @@ trading-cli live submit --universe magnificent7 --strategy sma_cross --execution
 trading-cli live submit-multi-strategy --config configs/multi_strategy.yaml --execution-config configs/execution.yaml --broker-config configs/broker.yaml --output-dir artifacts/live_submit/multi_strategy
 trading-cli broker health --broker-config configs/broker.yaml
 trading-cli broker cancel-all --broker-config configs/broker.yaml
+trading-cli dashboard serve --artifacts-root artifacts --host 127.0.0.1 --port 8000
+trading-cli dashboard build-static-data --artifacts-root artifacts --output-dir artifacts/dashboard_data
 trading-cli live validate --universe magnificent7 --signal-source composite --approved-model-state artifacts/alpha_research/approved/approved_model_state.json --approval-artifact artifacts/research_refresh/approved_configuration_snapshots/latest_approved_configuration.json --output-dir artifacts/live_execution
 trading-cli live execute --universe magnificent7 --signal-source composite --approved-model-state artifacts/alpha_research/approved/approved_model_state.json --approved --output-dir artifacts/live_execution
 trading-cli experiments list --tracker-dir artifacts/experiment_tracking --limit 10

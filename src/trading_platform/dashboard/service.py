@@ -1,0 +1,389 @@
+from __future__ import annotations
+
+import json
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+
+import pandas as pd
+
+from trading_platform.governance.persistence import load_strategy_registry
+
+
+def _now_utc() -> str:
+    return datetime.now(UTC).isoformat()
+
+
+def _safe_read_json(path: str | Path | None) -> dict[str, Any]:
+    if path is None:
+        return {}
+    file_path = Path(path)
+    if not file_path.exists():
+        return {}
+    try:
+        return json.loads(file_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+
+
+def _safe_read_csv(path: str | Path | None) -> pd.DataFrame:
+    if path is None:
+        return pd.DataFrame()
+    file_path = Path(path)
+    if not file_path.exists():
+        return pd.DataFrame()
+    try:
+        return pd.read_csv(file_path)
+    except (pd.errors.EmptyDataError, pd.errors.ParserError):
+        return pd.DataFrame()
+
+
+def _newest_path(paths: list[Path]) -> Path | None:
+    existing = [path for path in paths if path.exists()]
+    if not existing:
+        return None
+    return max(existing, key=lambda path: path.stat().st_mtime)
+
+
+def _candidate_files(root: Path, names: list[str]) -> list[Path]:
+    found: list[Path] = []
+    for name in names:
+        direct = root / name
+        if direct.exists():
+            found.append(direct)
+        found.extend(root.rglob(name))
+    seen: set[str] = set()
+    unique: list[Path] = []
+    for path in found:
+        key = str(path.resolve())
+        if key not in seen:
+            seen.add(key)
+            unique.append(path)
+    return unique
+
+
+def _latest_matching_file(root: Path, names: list[str]) -> Path | None:
+    return _newest_path(_candidate_files(root, names))
+
+
+def _status_counts(values: list[str]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for value in values:
+        counts[value] = counts.get(value, 0) + 1
+    return dict(sorted(counts.items()))
+
+
+class DashboardDataService:
+    def __init__(self, artifacts_root: str | Path) -> None:
+        self.artifacts_root = Path(artifacts_root)
+
+    def find_latest_run_dir(self) -> Path | None:
+        summary = _latest_matching_file(self.artifacts_root, ["run_summary.json"])
+        return summary.parent if summary is not None else None
+
+    def recent_runs(self, limit: int = 20) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        for summary_path in sorted(self.artifacts_root.rglob("run_summary.json")):
+            payload = _safe_read_json(summary_path)
+            run_dir = summary_path.parent
+            run_health = _safe_read_json(run_dir / "monitoring" / "run_health.json")
+            stage_df = _safe_read_csv(run_dir / "stage_status.csv")
+            rows.append(
+                {
+                    "run_name": payload.get("run_name", run_dir.name),
+                    "run_dir": str(run_dir),
+                    "started_at": payload.get("started_at"),
+                    "ended_at": payload.get("ended_at"),
+                    "status": payload.get("status", "unknown"),
+                    "schedule_type": payload.get("schedule_type"),
+                    "health_status": run_health.get("status"),
+                    "critical_alert_count": int(run_health.get("alert_counts", {}).get("critical", 0) or 0),
+                    "warning_alert_count": int(run_health.get("alert_counts", {}).get("warning", 0) or 0),
+                    "stage_count": int(len(stage_df.index)),
+                    "failed_stage_count": int((stage_df.get("status", pd.Series(dtype=object)) == "failed").sum())
+                    if not stage_df.empty
+                    else 0,
+                    "artifact_dir": str(run_dir),
+                }
+            )
+        rows.sort(key=lambda row: str(row.get("started_at") or row["run_dir"]), reverse=True)
+        return rows[:limit]
+
+    def latest_run_payload(self) -> dict[str, Any]:
+        run_dir = self.find_latest_run_dir()
+        if run_dir is None:
+            return {"run_dir": None, "summary": {}, "health": {}, "stages": []}
+        return {
+            "run_dir": str(run_dir),
+            "summary": _safe_read_json(run_dir / "run_summary.json"),
+            "health": _safe_read_json(run_dir / "monitoring" / "run_health.json"),
+            "stages": _safe_read_csv(run_dir / "stage_status.csv").to_dict(orient="records"),
+        }
+
+    def registry_payload(self) -> dict[str, Any]:
+        registry_path = _latest_matching_file(
+            self.artifacts_root,
+            ["strategy_registry.json", "strategy_registry.yaml", "strategy_registry.yml"],
+        )
+        if registry_path is None:
+            return {
+                "registry_path": None,
+                "updated_at": None,
+                "strategies": [],
+                "status_counts": {},
+                "family_counts": {},
+                "champion_challenger": [],
+            }
+        registry = load_strategy_registry(registry_path)
+        comparison_path = _latest_matching_file(self.artifacts_root, ["family_comparison.csv"])
+        comparison_rows = _safe_read_csv(comparison_path).to_dict(orient="records") if comparison_path else []
+        strategies: list[dict[str, Any]] = []
+        for entry in registry.entries:
+            promotion = _safe_read_json(entry.latest_promotion_decision_path)
+            degradation = _safe_read_json(entry.latest_degradation_report_path)
+            strategies.append(
+                {
+                    "strategy_id": entry.strategy_id,
+                    "strategy_name": entry.strategy_name,
+                    "family": entry.family,
+                    "version": entry.version,
+                    "preset_name": entry.preset_name,
+                    "status": entry.status,
+                    "current_deployment_stage": entry.current_deployment_stage,
+                    "universe": entry.universe,
+                    "signal_type": entry.signal_type,
+                    "rebalance_frequency": entry.rebalance_frequency,
+                    "benchmark": entry.benchmark,
+                    "risk_profile": entry.risk_profile,
+                    "owner": entry.owner,
+                    "tags": entry.tags,
+                    "promotion_passed": promotion.get("passed") if promotion else None,
+                    "promotion_summary": promotion.get("summary_metrics", {}) if promotion else {},
+                    "degradation_status": degradation.get("status") if degradation else None,
+                    "degradation_summary": degradation.get("summary_metrics", degradation.get("metrics", {})) if degradation else {},
+                    "paper_artifact_path": entry.paper_artifact_path,
+                    "live_artifact_path": entry.live_artifact_path,
+                }
+            )
+        return {
+            "registry_path": str(registry_path),
+            "updated_at": registry.updated_at,
+            "strategies": strategies,
+            "status_counts": _status_counts([row["status"] for row in strategies]),
+            "family_counts": _status_counts([str(row["family"]) for row in strategies]),
+            "champion_challenger": comparison_rows,
+        }
+
+    def latest_portfolio_payload(self) -> dict[str, Any]:
+        run_dir = self.find_latest_run_dir()
+        candidates: list[Path] = []
+        if run_dir is not None:
+            candidates.append(run_dir / "portfolio_allocation" / "allocation_summary.json")
+        latest_summary_path = _newest_path(candidates + _candidate_files(self.artifacts_root, ["allocation_summary.json"]))
+        if latest_summary_path is None:
+            return {
+                "summary": {},
+                "combined_positions": [],
+                "sleeve_weights": [],
+                "top_positions": [],
+                "overlap": [],
+                "clipped_symbols": [],
+                "artifact_dir": None,
+            }
+        allocation_dir = latest_summary_path.parent
+        summary_payload = _safe_read_json(latest_summary_path)
+        summary = summary_payload.get("summary", summary_payload)
+        combined_df = _safe_read_csv(allocation_dir / "combined_target_weights.csv")
+        sleeve_df = _safe_read_csv(allocation_dir / "sleeve_target_weights.csv")
+        overlap_df = _safe_read_csv(allocation_dir / "symbol_overlap_report.csv")
+        sleeve_weights = []
+        if not sleeve_df.empty and "sleeve_name" in sleeve_df.columns:
+            weight_col = "scaled_target_weight" if "scaled_target_weight" in sleeve_df.columns else "target_weight"
+            aggregated = sleeve_df.groupby("sleeve_name", as_index=False)[weight_col].sum().sort_values(weight_col, ascending=False)
+            sleeve_weights = aggregated.to_dict(orient="records")
+        top_positions = []
+        if not combined_df.empty and "target_weight" in combined_df.columns:
+            sorted_df = combined_df.assign(abs_weight=combined_df["target_weight"].abs()).sort_values("abs_weight", ascending=False)
+            top_positions = sorted_df.drop(columns=["abs_weight"]).head(10).to_dict(orient="records")
+        return {
+            "summary": summary,
+            "combined_positions": combined_df.to_dict(orient="records"),
+            "sleeve_weights": sleeve_weights,
+            "top_positions": top_positions,
+            "overlap": overlap_df.to_dict(orient="records"),
+            "clipped_symbols": summary.get("symbols_removed_or_clipped", []),
+            "artifact_dir": str(allocation_dir),
+        }
+
+    def latest_execution_payload(self) -> dict[str, Any]:
+        run_dir = self.find_latest_run_dir()
+        preferred_dirs: list[Path] = []
+        if run_dir is not None:
+            preferred_dirs.extend([run_dir / "live_dry_run", run_dir / "paper_trading"])
+        summary_path = _newest_path(
+            [path / "execution_summary.json" for path in preferred_dirs if path.exists()]
+            + _candidate_files(self.artifacts_root, ["execution_summary.json"])
+        )
+        if summary_path is None:
+            return {
+                "summary": {},
+                "requested_orders": [],
+                "executable_orders": [],
+                "rejected_orders": [],
+                "liquidity_diagnostics": [],
+                "turnover_summary": [],
+                "artifact_dir": None,
+            }
+        execution_dir = summary_path.parent
+        return {
+            "summary": _safe_read_json(summary_path),
+            "requested_orders": _safe_read_csv(execution_dir / "requested_orders.csv").to_dict(orient="records"),
+            "executable_orders": _safe_read_csv(execution_dir / "executable_orders.csv").to_dict(orient="records"),
+            "rejected_orders": _safe_read_csv(execution_dir / "rejected_orders.csv").to_dict(orient="records"),
+            "liquidity_diagnostics": _safe_read_csv(execution_dir / "liquidity_constraints_report.csv").to_dict(orient="records"),
+            "turnover_summary": _safe_read_csv(execution_dir / "turnover_summary.csv").to_dict(orient="records"),
+            "artifact_dir": str(execution_dir),
+        }
+
+    def latest_live_payload(self) -> dict[str, Any]:
+        dry_run_path = _latest_matching_file(self.artifacts_root, ["live_dry_run_summary.json"])
+        submit_path = _latest_matching_file(self.artifacts_root, ["live_submission_summary.json"])
+        dry_run = _safe_read_json(dry_run_path)
+        submit = _safe_read_json(submit_path)
+        risk_checks = submit.get("risk_checks", [])
+        broker_health = None
+        for item in risk_checks:
+            if item.get("check_name") == "broker_health":
+                broker_health = item
+                break
+        if broker_health is None:
+            for item in dry_run.get("health_checks", []):
+                if item.get("check_name") == "broker_connectivity":
+                    broker_health = item
+                    break
+        duplicate_events = []
+        if submit_path is not None:
+            duplicate_events = [
+                row for row in _safe_read_csv(Path(submit_path).parent / "broker_order_results.csv").to_dict(orient="records")
+                if row.get("status") == "skipped"
+            ]
+        return {
+            "dry_run_summary": dry_run,
+            "submission_summary": submit,
+            "risk_checks": risk_checks,
+            "blocked_checks": [item for item in risk_checks if not bool(item.get("passed", False))],
+            "duplicate_events": duplicate_events,
+            "broker_health": broker_health or {},
+            "dry_run_artifact_dir": str(dry_run_path.parent) if dry_run_path is not None else None,
+            "submission_artifact_dir": str(submit_path.parent) if submit_path is not None else None,
+        }
+
+    def latest_alerts_payload(self) -> dict[str, Any]:
+        run_payload = self.latest_run_payload()
+        run_dir = Path(run_payload["run_dir"]) if run_payload.get("run_dir") else None
+        alert_path = run_dir / "monitoring" / "alerts.json" if run_dir is not None and (run_dir / "monitoring" / "alerts.json").exists() else _latest_matching_file(self.artifacts_root, ["alerts.json"])
+        alerts = []
+        if alert_path is not None and alert_path.exists():
+            try:
+                alerts = json.loads(alert_path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                alerts = []
+        return {
+            "alerts": alerts,
+            "severity_counts": _status_counts([str(item.get("severity", "info")) for item in alerts]),
+            "artifact_path": str(alert_path) if alert_path is not None else None,
+        }
+
+    def overview_payload(self) -> dict[str, Any]:
+        latest_run = self.latest_run_payload()
+        registry = self.registry_payload()
+        portfolio = self.latest_portfolio_payload()
+        execution = self.latest_execution_payload()
+        live = self.latest_live_payload()
+        alerts = self.latest_alerts_payload()
+        latest_run_summary = latest_run.get("summary", {})
+        latest_run_health = latest_run.get("health", {})
+        portfolio_summary = portfolio.get("summary", {})
+        execution_summary = execution.get("summary", {})
+        broker_health = live.get("broker_health", {})
+        quick_links = [
+            {"label": "latest_run_dir", "path": latest_run.get("run_dir")},
+            {"label": "registry", "path": registry.get("registry_path")},
+            {"label": "portfolio", "path": portfolio.get("artifact_dir")},
+            {"label": "execution", "path": execution.get("artifact_dir")},
+            {"label": "live_submit", "path": live.get("submission_artifact_dir")},
+        ]
+        return {
+            "generated_at": _now_utc(),
+            "latest_run": {
+                "run_name": latest_run_summary.get("run_name"),
+                "status": latest_run_summary.get("status"),
+                "schedule_type": latest_run_summary.get("schedule_type"),
+                "started_at": latest_run_summary.get("started_at"),
+                "health_status": latest_run_health.get("status"),
+                "run_dir": latest_run.get("run_dir"),
+            },
+            "monitoring": {
+                "status": latest_run_health.get("status"),
+                "alert_counts": latest_run_health.get("alert_counts", alerts.get("severity_counts", {})),
+            },
+            "registry": {
+                "approved_strategy_count": int(registry.get("status_counts", {}).get("approved", 0)),
+                "strategy_count": len(registry.get("strategies", [])),
+            },
+            "portfolio": {
+                "generated_position_count": len(portfolio.get("combined_positions", [])),
+                "gross_exposure": portfolio_summary.get("gross_exposure_after_constraints"),
+                "net_exposure": portfolio_summary.get("net_exposure_after_constraints"),
+            },
+            "execution": {
+                "executable_order_count": execution_summary.get("executable_order_count"),
+                "rejected_order_count": execution_summary.get("rejected_order_count"),
+                "expected_total_cost": execution_summary.get("expected_total_cost"),
+            },
+            "broker_health": {
+                "status": broker_health.get("status") or ("pass" if broker_health.get("passed") else None),
+                "message": broker_health.get("message"),
+            },
+            "quick_links": [item for item in quick_links if item.get("path")],
+        }
+
+    def strategies_payload(self) -> dict[str, Any]:
+        registry = self.registry_payload()
+        tags = sorted({tag for row in registry["strategies"] for tag in row.get("tags", [])})
+        return {
+            "generated_at": _now_utc(),
+            "registry_path": registry["registry_path"],
+            "summary": {"status_counts": registry["status_counts"], "family_counts": registry["family_counts"]},
+            "filters": {"statuses": sorted(registry["status_counts"]), "families": sorted(registry["family_counts"]), "tags": tags},
+            "strategies": registry["strategies"],
+            "champion_challenger": registry["champion_challenger"],
+        }
+
+    def runs_payload(self) -> dict[str, Any]:
+        return {"generated_at": _now_utc(), "runs": self.recent_runs()}
+
+    def latest_run_detail_payload(self) -> dict[str, Any]:
+        latest_run = self.latest_run_payload()
+        return {
+            "generated_at": _now_utc(),
+            "run_dir": latest_run.get("run_dir"),
+            "summary": latest_run.get("summary", {}),
+            "health": latest_run.get("health", {}),
+            "stages": latest_run.get("stages", []),
+        }
+
+    def portfolio_payload(self) -> dict[str, Any]:
+        payload = self.latest_portfolio_payload()
+        payload["generated_at"] = _now_utc()
+        return payload
+
+    def execution_payload(self) -> dict[str, Any]:
+        payload = self.latest_execution_payload()
+        payload["generated_at"] = _now_utc()
+        return payload
+
+    def live_payload(self) -> dict[str, Any]:
+        payload = self.latest_live_payload()
+        payload["generated_at"] = _now_utc()
+        return payload

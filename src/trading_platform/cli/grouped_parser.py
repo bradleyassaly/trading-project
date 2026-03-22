@@ -9,6 +9,8 @@ from trading_platform.cli.commands.broker_cancel_all import cmd_broker_cancel_al
 from trading_platform.cli.commands.broker_health import cmd_broker_health
 from trading_platform.cli.commands.compare_xsec_construction import cmd_compare_xsec_construction
 from trading_platform.cli.commands.daily_paper_job import cmd_daily_paper_job
+from trading_platform.cli.commands.dashboard_build_static_data import cmd_dashboard_build_static_data
+from trading_platform.cli.commands.dashboard_serve import cmd_dashboard_serve
 from trading_platform.cli.commands.decision_memo import cmd_decision_memo
 from trading_platform.cli.commands.execute_live import cmd_execute_live
 from trading_platform.cli.commands.execution_simulate import cmd_execution_simulate
@@ -840,5 +842,17 @@ def build_parser() -> argparse.ArgumentParser:
     broker_cancel.add_argument("--broker", type=str, default=None, choices=["mock", "alpaca"], help="Optional broker override.")
     broker_cancel.add_argument("--broker-config", type=str, required=True, help="Path to the broker-config JSON/YAML file.")
     broker_cancel.set_defaults(func=cmd_broker_cancel_all)
+
+    dashboard_parser = subparsers.add_parser("dashboard", help="Local read-only dashboard for artifact inspection")
+    dashboard_subparsers = dashboard_parser.add_subparsers(dest="dashboard_command", required=True)
+    dashboard_serve = dashboard_subparsers.add_parser("serve", help="Start the local dashboard server")
+    dashboard_serve.add_argument("--artifacts-root", type=str, default="artifacts", help="Root artifact directory to scan.")
+    dashboard_serve.add_argument("--host", type=str, default="127.0.0.1", help="Host to bind the local dashboard server.")
+    dashboard_serve.add_argument("--port", type=int, default=8000, help="Port to bind the local dashboard server.")
+    dashboard_serve.set_defaults(func=cmd_dashboard_serve)
+    dashboard_build = dashboard_subparsers.add_parser("build-static-data", help="Write normalized dashboard JSON payloads for external inspection")
+    dashboard_build.add_argument("--artifacts-root", type=str, default="artifacts", help="Root artifact directory to scan.")
+    dashboard_build.add_argument("--output-dir", type=str, required=True, help="Directory where normalized dashboard JSON payloads will be written.")
+    dashboard_build.set_defaults(func=cmd_dashboard_build_static_data)
 
     return parser
