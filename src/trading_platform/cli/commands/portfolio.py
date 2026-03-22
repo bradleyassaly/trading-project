@@ -52,6 +52,7 @@ def cmd_portfolio(args: argparse.Namespace) -> None:
 
     asset_returns = pd.concat(asset_return_frames, axis=1).sort_index().fillna(0.0)
     positions = pd.concat(position_frames, axis=1).sort_index().fillna(0.0)
+    execution_policy = ExecutionPolicy(rebalance_frequency=args.rebalance_frequency)
 
     simulation_result = simulate_equal_weight_portfolio(
         asset_returns=asset_returns,

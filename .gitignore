@@ -35,11 +35,19 @@ dist/
 
 # Testing / coverage
 .pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.nox/
+.tox/
 .coverage
+.coverage.*
 htmlcov/
 
 # Trading outputs
 artifacts/
+artifacts/dashboard_data/
+artifacts/system_check/
+artifacts/system_check_ci/
 reports/
 results/
 backtests/
@@ -58,3 +66,8 @@ data/processed/
 
 # Json experiment files
 artifacts/experiments/*.json
+
+# Misc local tooling
+.cache/
+.python-version
+.act/

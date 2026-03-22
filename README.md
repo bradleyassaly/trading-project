@@ -20,6 +20,33 @@ The codebase supports both a legacy strategy workflow and a newer `alpha_lab` wo
 - `xsec_nasdaq100_momentum_v1_research`
 - `xsec_nasdaq100_momentum_v1_deploy`
 
+## Fresh Machine Quickstart
+
+From a clean clone, the shortest install-to-dashboard path is:
+
+```bash
+python -m venv .venv
+. .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -e .[dev]
+trading-cli doctor --artifacts-root artifacts --monitoring-config configs/monitoring.yaml --execution-config configs/execution.yaml --broker-config configs/broker.yaml --dashboard-config configs/dashboard.yaml --output-dir artifacts/system_check
+python -m pytest tests/test_end_to_end_smoke.py
+trading-cli dashboard serve --artifacts-root artifacts --host 127.0.0.1 --port 8000
+```
+
+Windows PowerShell activation:
+
+```powershell
+.venv\Scripts\Activate.ps1
+```
+
+Notes:
+
+- `python -m pip install -e .[dev]` performs an editable install and exposes the `trading-cli` entry point
+- YAML config support is installed as a core dependency because the repo uses YAML heavily for operational configs
+- the smoke test is deterministic and CI-safe
+- the dashboard is local-only and read-only in v1
+
 ## Architecture Overview
 
 The system is organized as a simple pipeline:
@@ -1700,6 +1727,56 @@ Run a targeted file or subset when iterating:
 ```bash
 pytest tests/test_alpha_lab.py tests/test_alpha_research_loop.py
 ```
+
+### Developer Workflow
+
+The repo includes a minimal `Makefile` for standardized local commands:
+
+```bash
+make install
+make lint
+make test
+make smoke
+make doctor
+```
+
+Equivalent direct commands:
+
+```bash
+python -m pip install -e .[dev]
+python -m ruff check src tests --select E9,F63,F7,F82
+python -m pytest
+python -m pytest tests/test_end_to_end_smoke.py
+trading-cli doctor --artifacts-root artifacts --monitoring-config configs/monitoring.yaml --execution-config configs/execution.yaml --broker-config configs/broker.yaml --dashboard-config configs/dashboard.yaml --output-dir artifacts/system_check
+```
+
+The lint command is intentionally pragmatic for this pass:
+
+- it checks high-signal correctness failures such as syntax issues and undefined names
+- it does not force a broad repo-wide style cleanup during release hardening
+
+### Contributing
+
+Preferred contributor loop:
+
+1. Create or activate a virtual environment.
+2. Run `make install`.
+3. Make the smallest practical change.
+4. Run `make lint`, `make smoke`, and the relevant pytest subset locally.
+5. Run `make test` before opening or updating a PR.
+6. Keep changes additive and preserve existing CLI/config behavior unless a deliberate migration is required.
+
+### Release Checklist
+
+Before tagging or pushing a release candidate:
+
+1. Run `make install` in a fresh virtual environment.
+2. Run `make lint`.
+3. Run `make test`.
+4. Run `make smoke`.
+5. Run `make doctor`.
+6. Review example configs under `configs/` and any README command changes.
+7. Confirm GitHub Actions passes for both the main CI workflow and the smoke workflow.
 
 ### Adding New Research Modules
 
