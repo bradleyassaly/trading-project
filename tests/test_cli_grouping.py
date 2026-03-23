@@ -757,6 +757,26 @@ def test_grouped_experiment_compare_command_parses() -> None:
     assert args.variant_b == "adaptive_off"
 
 
+def test_grouped_experiment_summarize_campaign_command_parses() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "experiment",
+            "summarize-campaign",
+            "--runs",
+            "artifacts/experiments/campaign_regime_on_off/run_a",
+            "artifacts/experiments/campaign_adaptive_on_off/run_b",
+            "--output-dir",
+            "artifacts/experiments/campaign_summary",
+        ]
+    )
+
+    assert args.command_family == "experiment"
+    assert args.experiment_command == "summarize-campaign"
+    assert len(args.runs) == 2
+    assert args.output_dir == "artifacts/experiments/campaign_summary"
+
+
 def test_grouped_system_eval_build_command_parses() -> None:
     parser = build_parser()
     args = parser.parse_args(

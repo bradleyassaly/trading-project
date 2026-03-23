@@ -23,6 +23,7 @@ from trading_platform.cli.commands.execution_simulate import cmd_execution_simul
 from trading_platform.cli.commands.experiment_compare import cmd_experiment_compare
 from trading_platform.cli.commands.experiment_run import cmd_experiment_run
 from trading_platform.cli.commands.experiment_show import cmd_experiment_show
+from trading_platform.cli.commands.experiment_summarize_campaign import cmd_experiment_summarize_campaign
 from trading_platform.cli.commands.experiments_dashboard import cmd_experiments_dashboard
 from trading_platform.cli.commands.experiments_latest_model import cmd_experiments_latest_model
 from trading_platform.cli.commands.experiments_list import cmd_experiments_list
@@ -1088,5 +1089,9 @@ def build_parser() -> argparse.ArgumentParser:
     experiment_compare.add_argument("--variant-a", type=str, default=None, help="Optional variant name for group A.")
     experiment_compare.add_argument("--variant-b", type=str, default=None, help="Optional variant name for group B.")
     experiment_compare.set_defaults(func=cmd_experiment_compare)
+    experiment_summary = experiment_subparsers.add_parser("summarize-campaign", help="Summarize one or more experiment runs into a concise metric winner report")
+    experiment_summary.add_argument("--runs", nargs="+", required=True, help="One or more experiment run directories or experiment_run.json paths.")
+    experiment_summary.add_argument("--output-dir", type=str, required=True, help="Directory where campaign summary artifacts will be written.")
+    experiment_summary.set_defaults(func=cmd_experiment_summarize_campaign)
 
     return parser

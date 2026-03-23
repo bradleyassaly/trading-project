@@ -1,0 +1,22 @@
+experiment_name: campaign_governance_strict_vs_loose
+base_orchestration_config_path: configs/orchestration_experiment_base.yaml
+output_root_dir: artifacts/experiments
+run_label_metadata:
+  campaign: first_disciplined_campaign
+  question: governance
+notes: Compare strict versus loose lifecycle governance while keeping regime and adaptive allocation enabled.
+variants:
+  - name: governance_strict
+    feature_flags:
+      regime: true
+      adaptive: true
+      governance: true
+    config_overrides:
+      strategy_governance_policy_config_path: configs/strategy_governance_strict.yaml
+  - name: governance_loose
+    feature_flags:
+      regime: true
+      adaptive: true
+      governance: true
+    config_overrides:
+      strategy_governance_policy_config_path: configs/strategy_governance_loose.yaml

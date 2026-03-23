@@ -1329,6 +1329,55 @@ Notes:
 - the dashboard `Runs` view and `/api/experiments/latest` payload expose recent experiments and variant statuses
 - `--dry-run` materializes all variant configs without launching orchestration
 
+Recommended first campaign:
+
+Use three small pairwise experiments instead of one large matrix:
+
+1. `configs/experiment_campaign_regime.yaml`
+2. `configs/experiment_campaign_adaptive.yaml`
+3. `configs/experiment_campaign_governance.yaml`
+
+Supporting templates:
+
+- `configs/orchestration_experiment_base.yaml`
+- `configs/strategy_governance_strict.yaml`
+- `configs/strategy_governance_loose.yaml`
+
+This keeps interpretation simple:
+
+- regime on vs off
+- adaptive on vs off
+- strict governance vs loose governance
+
+Suggested commands:
+
+```bash
+trading-cli experiment run --config configs/experiment_campaign_regime.yaml
+trading-cli experiment run --config configs/experiment_campaign_adaptive.yaml
+trading-cli experiment run --config configs/experiment_campaign_governance.yaml
+trading-cli experiment summarize-campaign --runs artifacts/experiments/campaign_regime_on_off/<run_id> artifacts/experiments/campaign_adaptive_on_off/<run_id> artifacts/experiments/campaign_governance_strict_vs_loose/<run_id> --output-dir artifacts/experiments/first_campaign_summary
+```
+
+The campaign summary writes:
+
+- `experiment_campaign_summary.json`
+- `experiment_campaign_summary.csv`
+- `experiment_campaign_summary.md`
+
+It reports per-variant means for:
+
+- return
+- Sharpe proxy
+- drawdown
+- turnover
+- promotions
+- demotions
+- active strategies
+- warnings
+- kill-switch counts
+
+It also names the winning variant for each metric so you can decide whether a feature is worth keeping as the default.
+
 ### Paper Trading
 
 Paper trading supports both legacy strategy targets and approved composite alpha targets. The workflow builds target weights, generates rebalance orders, optionally applies simulated fills, and writes state, ledger, and diagnostics artifacts.

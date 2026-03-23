@@ -1,0 +1,10 @@
+schema_version: 1
+demote_after_deactivate_events: 4
+demote_after_degraded_cycles: 6
+under_review_on_weak_validation: true
+degrade_on_reduce_recommendation: false
+under_review_on_review_recommendation: true
+under_review_on_low_confidence: false
+low_confidence_values:
+  - low
+  - weak

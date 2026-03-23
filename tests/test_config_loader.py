@@ -554,6 +554,12 @@ def test_example_configs_load_from_repo() -> None:
     strategy_governance_config = load_strategy_governance_policy_config(root / "configs" / "strategy_governance.yaml")
     orchestration_config = load_automated_orchestration_config(root / "configs" / "orchestration.yaml")
     experiment_config = load_experiment_spec_config(root / "configs" / "experiments.yaml")
+    regime_campaign_config = load_experiment_spec_config(root / "configs" / "experiment_campaign_regime.yaml")
+    adaptive_campaign_config = load_experiment_spec_config(root / "configs" / "experiment_campaign_adaptive.yaml")
+    governance_campaign_config = load_experiment_spec_config(root / "configs" / "experiment_campaign_governance.yaml")
+    orchestration_experiment_base = load_automated_orchestration_config(root / "configs" / "orchestration_experiment_base.yaml")
+    governance_strict_config = load_strategy_governance_policy_config(root / "configs" / "strategy_governance_strict.yaml")
+    governance_loose_config = load_strategy_governance_policy_config(root / "configs" / "strategy_governance_loose.yaml")
     minimal_demo_config = load_pipeline_run_config(root / "configs" / "minimal_local_demo.yaml")
 
     assert pipeline_config.schedule_type == "daily"
@@ -574,4 +580,9 @@ def test_example_configs_load_from_repo() -> None:
     assert orchestration_config.feature_flags["regime"] is True
     assert experiment_config.experiment_name == "regime_vs_static_demo"
     assert len(experiment_config.variants) >= 2
+    assert regime_campaign_config.experiment_name == "campaign_regime_on_off"
+    assert adaptive_campaign_config.experiment_name == "campaign_adaptive_on_off"
+    assert governance_campaign_config.experiment_name == "campaign_governance_strict_vs_loose"
+    assert orchestration_experiment_base.feature_flags["adaptive"] is True
+    assert governance_strict_config.demote_after_deactivate_events < governance_loose_config.demote_after_deactivate_events
     assert minimal_demo_config.schedule_type == "ad_hoc"

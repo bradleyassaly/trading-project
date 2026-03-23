@@ -1,0 +1,24 @@
+experiment_name: campaign_regime_on_off
+base_orchestration_config_path: configs/orchestration_experiment_base.yaml
+output_root_dir: artifacts/experiments
+run_label_metadata:
+  campaign: first_disciplined_campaign
+  question: regime
+notes: Compare regime-aware allocation against the same pipeline with regime disabled.
+variants:
+  - name: regime_on
+    feature_flags:
+      regime: true
+      adaptive: true
+      governance: true
+    stage_overrides:
+      regime: true
+      adaptive_allocation: true
+  - name: regime_off
+    feature_flags:
+      regime: false
+      adaptive: true
+      governance: true
+    stage_overrides:
+      regime: false
+      adaptive_allocation: true

@@ -1,0 +1,40 @@
+run_name: experiment_baseline
+schedule_frequency: manual
+research_artifacts_root: artifacts
+experiment_name: null
+feature_flags:
+  regime: true
+  adaptive: true
+  governance: true
+output_root_dir: artifacts/orchestration_runs
+validation_output_dir: artifacts/orchestration_runs/validation
+promotion_policy_config_path: configs/promotion.yaml
+strategy_validation_policy_config_path: configs/strategy_validation.yaml
+strategy_portfolio_policy_config_path: configs/strategy_portfolio.yaml
+strategy_monitoring_policy_config_path: configs/strategy_monitoring.yaml
+market_regime_policy_config_path: configs/market_regime.yaml
+adaptive_allocation_policy_config_path: configs/adaptive_allocation.yaml
+strategy_governance_policy_config_path: configs/strategy_governance_strict.yaml
+strategy_lifecycle_path: artifacts/governance/strategy_lifecycle.json
+execution_config_path: configs/execution.yaml
+paper_state_path: artifacts/paper/experiment_baseline_state.json
+max_promotions_per_run: 3
+min_selected_strategies_warning: 1
+promotion_dry_run: false
+promotion_inactive: false
+adaptive_allocation_dry_run: false
+kill_switch_include_review: true
+loop_sleep_seconds: 3600
+stages:
+  research: true
+  registry: true
+  validation: true
+  promotion: true
+  portfolio: true
+  allocation: true
+  paper: true
+  monitoring: true
+  regime: true
+  adaptive_allocation: true
+  governance: true
+  kill_switch: true
