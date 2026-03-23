@@ -15,6 +15,7 @@ from trading_platform.config.models import (
 )
 from trading_platform.dashboard.models import DashboardConfig
 from trading_platform.execution.models import ExecutionConfig
+from trading_platform.experiments.runner import ExperimentSpecConfig, ExperimentVariantConfig
 from trading_platform.governance.strategy_lifecycle import StrategyGovernancePolicyConfig
 from trading_platform.monitoring.models import MonitoringConfig, NotificationChannel, NotificationConfig
 from trading_platform.orchestration.models import (
@@ -185,3 +186,10 @@ def load_automated_orchestration_config(path: str | Path) -> AutomatedOrchestrat
     payload = dict(data)
     payload["stages"] = AutomatedOrchestrationStageToggles(**payload.get("stages", {}))
     return AutomatedOrchestrationConfig(**payload)
+
+
+def load_experiment_spec_config(path: str | Path) -> ExperimentSpecConfig:
+    data = _read_config_file(Path(path))
+    payload = dict(data)
+    payload["variants"] = [ExperimentVariantConfig(**item) for item in payload.get("variants", [])]
+    return ExperimentSpecConfig(**payload)

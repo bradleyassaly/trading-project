@@ -1276,6 +1276,59 @@ Interpretation guidance:
 - compare warning counts and kill-switch counts alongside returns so higher performance is not coming from weaker controls
 - keep feature-flag A/B comparisons simple and transparent; this layer does not try to do heavy statistical inference
 
+### Running Controlled Experiments
+
+The repo now includes a lightweight experiment harness for running comparable orchestration variants without hand-editing multiple orchestration configs.
+
+Use it for cases such as:
+
+- `regime=true` vs `regime=false`
+- `adaptive=true` vs `adaptive=false`
+- strict vs loose governance policies
+- promotion threshold A vs threshold B
+
+The experiment spec in `configs/experiments.yaml` defines:
+
+- a shared base orchestration config
+- named variants with `feature_flags`
+- optional per-variant `config_overrides`
+- optional stage enable/disable overrides
+- optional repeat counts and run metadata
+
+Each experiment run writes a timestamped directory under `artifacts/experiments/<experiment_name>/...` with:
+
+- `experiment_run.json`
+- `experiment_run.csv`
+- `materialized_configs/...`
+- `variants/...` containing the real orchestration runs
+- `system_evaluation/system_evaluation_history.json`
+- `system_evaluation/system_evaluation_compare.json` when you run a compare step
+
+Recommended workflow:
+
+1. Define a base orchestration config in `configs/orchestration.yaml`.
+2. Define variants in `configs/experiments.yaml`.
+3. Run the full experiment cohort.
+4. Inspect the experiment summary and system evaluation history.
+5. Compare variants and decide whether the feature should be kept.
+
+Example commands:
+
+```bash
+trading-cli experiment run --config configs/experiments.yaml
+trading-cli experiment show --run artifacts/experiments/regime_vs_static_demo/2026-03-22T00-00-00+00-00
+trading-cli experiment compare --run artifacts/experiments/regime_vs_static_demo/2026-03-22T00-00-00+00-00 --output-dir artifacts/experiments/regime_vs_static_demo/compare --variant-a adaptive_regime_on --variant-b adaptive_regime_off
+trading-cli system-eval compare --history artifacts/experiments/regime_vs_static_demo/2026-03-22T00-00-00+00-00/system_evaluation --output-dir artifacts/experiments/regime_vs_static_demo/system_compare --group-by-field variant_name --value-a adaptive_regime_on --value-b adaptive_regime_off
+```
+
+Notes:
+
+- experiment runs are local, file-based, and reproducible
+- each variant gets a fully materialized orchestration config snapshot
+- orchestration runs written by the experiment harness include `experiment_name`, `variant_name`, and `experiment_run_id`
+- the dashboard `Runs` view and `/api/experiments/latest` payload expose recent experiments and variant statuses
+- `--dry-run` materializes all variant configs without launching orchestration
+
 ### Paper Trading
 
 Paper trading supports both legacy strategy targets and approved composite alpha targets. The workflow builds target weights, generates rebalance orders, optionally applies simulated fills, and writes state, ledger, and diagnostics artifacts.

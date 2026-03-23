@@ -1,0 +1,23 @@
+experiment_name: regime_vs_static_demo
+base_orchestration_config_path: configs/orchestration.yaml
+output_root_dir: artifacts/experiments
+repeat_count: 1
+run_label_metadata:
+  owner: local_operator
+  purpose: feature_comparison
+notes: Compare regime-aware and adaptive feature flags using the same base orchestration pipeline.
+variants:
+  - name: adaptive_regime_on
+    feature_flags:
+      adaptive: true
+      regime: true
+    stage_overrides:
+      regime: true
+      adaptive_allocation: true
+  - name: adaptive_regime_off
+    feature_flags:
+      adaptive: false
+      regime: false
+    stage_overrides:
+      regime: false
+      adaptive_allocation: false

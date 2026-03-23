@@ -111,6 +111,7 @@ def _overview_page(service: DashboardDataService) -> bytes:
             ("Current Regime", overview["market_regime"].get("regime_label") or "n/a", "latest regime snapshot"),
             ("Adaptive Weight Change", overview["adaptive_allocation"].get("absolute_weight_change") or 0, "latest adaptive snapshot"),
             ("Automation", overview["orchestration"].get("status") or "n/a", overview["orchestration"].get("run_id") or "no automated runs"),
+            ("Experiments", overview["experiments"].get("experiment_count") or 0, overview["experiments"].get("latest_experiment_name") or "no experiment runs"),
             ("System Return", overview["system_evaluation"].get("total_return") or 0, "latest evaluated orchestration run"),
             ("System Sharpe", overview["system_evaluation"].get("sharpe") or 0, "proxy from paper equity curve"),
             ("Strategy Warnings", overview["strategy_monitoring"].get("warning_strategy_count") or 0, "latest monitoring snapshot"),
@@ -314,6 +315,7 @@ def _runs_page(service: DashboardDataService) -> bytes:
     payload = service.runs_payload()
     runs = payload["runs"]
     orchestration_runs = payload.get("orchestration_runs", [])
+    experiments = payload.get("experiments", {})
     system_eval = payload.get("system_evaluation", {})
     body = _cards(
         [
@@ -327,11 +329,15 @@ def _runs_page(service: DashboardDataService) -> bytes:
     body += "<h2>Critical Alerts Trend</h2>" + _bar_chart([(str(index + 1), float(row.get("critical_alert_count", 0))) for index, row in enumerate(reversed(runs[:10]))])
     body += "<h2>Recent Runs</h2>" + _table(["run_name", "status", "health_status", "schedule_type", "started_at", "failed_stage_count", "artifact_dir"], runs)
     body += "<h2>Automated Orchestration Runs</h2>" + _table(
-        ["run_id", "run_name", "experiment_name", "status", "schedule_frequency", "selected_strategy_count", "total_return", "sharpe", "warning_strategy_count", "kill_switch_recommendation_count", "run_dir"],
+        ["run_id", "run_name", "experiment_name", "variant_name", "status", "schedule_frequency", "selected_strategy_count", "total_return", "sharpe", "warning_strategy_count", "kill_switch_recommendation_count", "run_dir"],
         orchestration_runs,
     )
+    body += "<h2>Recent Experiments</h2>" + _table(
+        ["experiment_name", "experiment_run_id", "status", "variant_count", "variant_run_count", "succeeded_count", "failed_count", "run_dir"],
+        experiments.get("rows", []),
+    )
     body += "<h2>System Evaluation History</h2>" + _table(
-        ["run_id", "experiment_name", "total_return", "sharpe", "max_drawdown", "warning_count", "kill_switch_count", "regime"],
+        ["run_id", "experiment_name", "variant_name", "total_return", "sharpe", "max_drawdown", "warning_count", "kill_switch_count", "regime"],
         system_eval.get("rows", []),
     )
     latest = service.latest_run_detail_payload()
@@ -357,6 +363,8 @@ def create_dashboard_app(artifacts_root: str | Path) -> Callable:
             status, headers, body = _json_response(service.system_evaluation_payload())
         elif path == "/api/system-eval/history":
             status, headers, body = _json_response(service.system_evaluation_history_payload())
+        elif path == "/api/experiments/latest":
+            status, headers, body = _json_response(service.experiments_payload())
         elif path == "/api/strategies":
             status, headers, body = _json_response(service.strategies_payload())
         elif path == "/api/research/latest":
@@ -417,6 +425,7 @@ def build_dashboard_static_data(*, artifacts_root: str | Path, output_dir: str |
         "runs.json": service.runs_payload(),
         "runs_latest.json": service.latest_run_detail_payload(),
         "orchestration_latest.json": service.latest_automated_orchestration_payload(),
+        "experiments_latest.json": service.experiments_payload(),
         "system_evaluation_latest.json": service.system_evaluation_payload(),
         "system_evaluation_history.json": service.system_evaluation_history_payload(),
         "strategies.json": service.strategies_payload(),

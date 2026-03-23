@@ -696,6 +696,67 @@ def test_grouped_orchestrate_loop_command_parses() -> None:
     assert args.max_iterations == 2
 
 
+def test_grouped_experiment_run_command_parses() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "experiment",
+            "run",
+            "--config",
+            "configs/experiments.yaml",
+            "--variants",
+            "adaptive_on",
+            "adaptive_off",
+            "--dry-run",
+        ]
+    )
+
+    assert args.command_family == "experiment"
+    assert args.experiment_command == "run"
+    assert args.config == "configs/experiments.yaml"
+    assert args.variants == ["adaptive_on", "adaptive_off"]
+    assert args.dry_run is True
+
+
+def test_grouped_experiment_show_command_parses() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "experiment",
+            "show",
+            "--run",
+            "artifacts/experiments/demo/2026-03-22T00-00-00+00-00",
+        ]
+    )
+
+    assert args.command_family == "experiment"
+    assert args.experiment_command == "show"
+    assert args.run == "artifacts/experiments/demo/2026-03-22T00-00-00+00-00"
+
+
+def test_grouped_experiment_compare_command_parses() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "experiment",
+            "compare",
+            "--run",
+            "artifacts/experiments/demo/2026-03-22T00-00-00+00-00",
+            "--output-dir",
+            "artifacts/experiments/demo/compare",
+            "--variant-a",
+            "adaptive_on",
+            "--variant-b",
+            "adaptive_off",
+        ]
+    )
+
+    assert args.command_family == "experiment"
+    assert args.experiment_command == "compare"
+    assert args.variant_a == "adaptive_on"
+    assert args.variant_b == "adaptive_off"
+
+
 def test_grouped_system_eval_build_command_parses() -> None:
     parser = build_parser()
     args = parser.parse_args(
@@ -746,6 +807,8 @@ def test_grouped_system_eval_compare_command_parses() -> None:
             "5",
             "--feature-flag",
             "regime",
+            "--group-by-field",
+            "variant_name",
             "--value-a",
             "true",
             "--value-b",
@@ -756,6 +819,7 @@ def test_grouped_system_eval_compare_command_parses() -> None:
     assert args.command_family == "system-eval"
     assert args.system_eval_command == "compare"
     assert args.feature_flag == "regime"
+    assert args.group_by_field == "variant_name"
     assert args.latest_count == 5
 
 

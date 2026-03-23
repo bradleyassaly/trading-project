@@ -17,7 +17,7 @@ from trading_platform.system_evaluation.service import (
 )
 
 
-def _write_run(root: Path, *, run_id: str, total_return_scale: float, adaptive: bool, regime: bool) -> Path:
+def _write_run(root: Path, *, run_id: str, total_return_scale: float, adaptive: bool, regime: bool, variant_name: str | None = None) -> Path:
     run_dir = root / "automation" / run_id
     (run_dir / "paper").mkdir(parents=True, exist_ok=True)
     (run_dir / "governance").mkdir(parents=True, exist_ok=True)
@@ -25,6 +25,8 @@ def _write_run(root: Path, *, run_id: str, total_return_scale: float, adaptive: 
     config_snapshot = {
         "run_name": "automation",
         "experiment_name": "ab_test",
+        "variant_name": variant_name or ("adaptive_on" if adaptive else "adaptive_off"),
+        "experiment_run_id": "experiment-1",
         "feature_flags": {"adaptive": adaptive, "regime": regime},
         "stages": {"adaptive_allocation": adaptive, "regime": regime},
     }
@@ -34,6 +36,8 @@ def _write_run(root: Path, *, run_id: str, total_return_scale: float, adaptive: 
         "run_name": "automation",
         "schedule_frequency": "daily",
         "experiment_name": "ab_test",
+        "variant_name": variant_name or ("adaptive_on" if adaptive else "adaptive_off"),
+        "experiment_run_id": "experiment-1",
         "feature_flags": {"adaptive": adaptive, "regime": regime},
         "started_at": f"{run_id.replace('T00-00-00+00-00', 'T00:00:00+00:00')}",
         "ended_at": f"{run_id.replace('T00-00-00+00-00', 'T00:05:00+00:00')}",
@@ -87,6 +91,7 @@ def test_system_evaluation_metric_computation(tmp_path: Path) -> None:
     assert payload["row"]["total_return"] is not None
     assert payload["row"]["regime"] == "trend"
     assert latest["row"]["experiment_name"] == "ab_test"
+    assert latest["row"]["variant_name"] == "adaptive_on"
 
 
 def test_system_evaluation_history_and_compare(tmp_path: Path) -> None:
@@ -104,13 +109,22 @@ def test_system_evaluation_history_and_compare(tmp_path: Path) -> None:
         value_a="true",
         value_b="false",
     )
+    variant_compare = compare_system_evaluations(
+        history_path_or_root=tmp_path / "history",
+        output_dir=tmp_path / "compare_variant",
+        group_by_field="variant_name",
+        value_a="adaptive_on",
+        value_b="adaptive_off",
+    )
 
     history_payload = json.loads((tmp_path / "history" / "system_evaluation_history.json").read_text(encoding="utf-8"))
     compare_payload = json.loads((tmp_path / "compare" / "system_evaluation_compare.json").read_text(encoding="utf-8"))
 
     assert history["run_count"] == 4
     assert history_payload["summary"]["best_run_id"] == "2026-03-22T00-00-00+00-00"
+    assert "adaptive_on" in history_payload["summary"]["variant_names"]
     assert compare["group_a_count"] == 2
+    assert variant_compare["group_a_count"] == 2
     assert compare_payload["comparison"]["feature_flag"] == "adaptive"
 
 

@@ -128,6 +128,8 @@ class DashboardDataService:
                     "status": payload.get("status", "unknown"),
                     "schedule_frequency": payload.get("schedule_frequency"),
                     "experiment_name": payload.get("experiment_name"),
+                    "variant_name": payload.get("variant_name"),
+                    "experiment_run_id": payload.get("experiment_run_id"),
                     "feature_flags": payload.get("feature_flags", {}),
                     "failed_stage_count": sum(1 for row in stage_records if row.get("status") == "failed"),
                     "selected_strategy_count": outputs.get("selected_strategy_count", 0),
@@ -490,6 +492,40 @@ class DashboardDataService:
             "rows": payload.get("rows", [])[:50],
         }
 
+    def experiments_payload(self) -> dict[str, Any]:
+        rows: list[dict[str, Any]] = []
+        for path in sorted(self.artifacts_root.rglob("experiment_run.json")):
+            payload = _safe_read_json(path)
+            summary = payload.get("summary", {})
+            rows.append(
+                {
+                    "experiment_name": payload.get("experiment_name"),
+                    "experiment_run_id": payload.get("experiment_run_id"),
+                    "status": payload.get("status"),
+                    "started_at": payload.get("started_at"),
+                    "ended_at": payload.get("ended_at"),
+                    "variant_count": summary.get("variant_count", 0),
+                    "variant_run_count": summary.get("variant_run_count", 0),
+                    "succeeded_count": summary.get("succeeded_count", 0),
+                    "failed_count": summary.get("failed_count", 0),
+                    "run_dir": str(path.parent),
+                    "variants": payload.get("variants", []),
+                    "system_evaluation": payload.get("system_evaluation", {}),
+                }
+            )
+        rows.sort(key=lambda row: str(row.get("started_at") or row.get("run_dir")), reverse=True)
+        latest = rows[0] if rows else {}
+        return {
+            "generated_at": _now_utc(),
+            "summary": {
+                "experiment_count": len(rows),
+                "latest_experiment_name": latest.get("experiment_name"),
+                "latest_variant_count": latest.get("variant_count", 0),
+            },
+            "latest": latest,
+            "rows": rows[:20],
+        }
+
     def overview_payload(self) -> dict[str, Any]:
         latest_run = self.latest_run_payload()
         registry = self.registry_payload()
@@ -504,6 +540,7 @@ class DashboardDataService:
         orchestration = self.latest_automated_orchestration_payload()
         system_eval = self.system_evaluation_payload()
         system_eval_history = self.system_evaluation_history_payload()
+        experiments = self.experiments_payload()
         validation = self.strategy_validation_payload()
         lifecycle = self.strategy_lifecycle_payload()
         latest_run_summary = latest_run.get("summary", {})
@@ -516,6 +553,7 @@ class DashboardDataService:
             {"label": "registry", "path": registry.get("registry_path")},
             {"label": "portfolio", "path": portfolio.get("artifact_dir")},
             {"label": "adaptive_allocation", "path": adaptive_allocation.get("adaptive_allocation_path")},
+            {"label": "experiment_run", "path": experiments.get("latest", {}).get("run_dir")},
             {"label": "system_evaluation", "path": system_eval.get("system_evaluation_path")},
             {"label": "execution", "path": execution.get("artifact_dir")},
             {"label": "live_submit", "path": live.get("submission_artifact_dir")},
@@ -571,6 +609,11 @@ class DashboardDataService:
                 "status": orchestration.get("summary", {}).get("status"),
                 "selected_strategy_count": orchestration.get("summary", {}).get("outputs", {}).get("selected_strategy_count", 0),
             },
+            "experiments": {
+                "experiment_count": experiments.get("summary", {}).get("experiment_count", 0),
+                "latest_experiment_name": experiments.get("summary", {}).get("latest_experiment_name"),
+                "latest_variant_count": experiments.get("summary", {}).get("latest_variant_count", 0),
+            },
             "system_evaluation": {
                 "total_return": system_eval.get("row", {}).get("total_return"),
                 "sharpe": system_eval.get("row", {}).get("sharpe"),
@@ -617,6 +660,7 @@ class DashboardDataService:
             "generated_at": _now_utc(),
             "runs": self.recent_runs(),
             "orchestration_runs": self.recent_orchestration_runs(),
+            "experiments": self.experiments_payload(),
             "system_evaluation": self.system_evaluation_history_payload(),
         }
 

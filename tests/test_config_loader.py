@@ -6,6 +6,7 @@ from pathlib import Path
 from trading_platform.config.loader import (
     load_broker_config,
     load_dashboard_config,
+    load_experiment_spec_config,
     load_execution_config,
     load_monitoring_config,
     load_notification_config,
@@ -502,6 +503,39 @@ stages:
     assert config.stages.kill_switch is True
 
 
+def test_load_experiment_spec_config_from_yaml(tmp_path) -> None:
+    path = tmp_path / "experiments.yaml"
+    path.write_text(
+        """
+experiment_name: ab_feature_test
+base_orchestration_config_path: configs/orchestration.yaml
+output_root_dir: artifacts/experiments
+repeat_count: 2
+run_label_metadata:
+  owner: qa
+variants:
+  - name: adaptive_on
+    feature_flags:
+      adaptive: true
+    stage_overrides:
+      adaptive_allocation: true
+  - name: adaptive_off
+    feature_flags:
+      adaptive: false
+    stage_overrides:
+      adaptive_allocation: false
+""".strip(),
+        encoding="utf-8",
+    )
+
+    config = load_experiment_spec_config(path)
+
+    assert config.experiment_name == "ab_feature_test"
+    assert config.repeat_count == 2
+    assert config.variants[0].feature_flags["adaptive"] is True
+    assert config.variants[1].stage_overrides["adaptive_allocation"] is False
+
+
 def test_example_configs_load_from_repo() -> None:
     root = Path(__file__).resolve().parents[1]
 
@@ -519,6 +553,7 @@ def test_example_configs_load_from_repo() -> None:
     adaptive_allocation_config = load_adaptive_allocation_policy_config(root / "configs" / "adaptive_allocation.yaml")
     strategy_governance_config = load_strategy_governance_policy_config(root / "configs" / "strategy_governance.yaml")
     orchestration_config = load_automated_orchestration_config(root / "configs" / "orchestration.yaml")
+    experiment_config = load_experiment_spec_config(root / "configs" / "experiments.yaml")
     minimal_demo_config = load_pipeline_run_config(root / "configs" / "minimal_local_demo.yaml")
 
     assert pipeline_config.schedule_type == "daily"
@@ -537,4 +572,6 @@ def test_example_configs_load_from_repo() -> None:
     assert orchestration_config.schedule_frequency == "manual"
     assert orchestration_config.experiment_name == "baseline_regime_adaptive"
     assert orchestration_config.feature_flags["regime"] is True
+    assert experiment_config.experiment_name == "regime_vs_static_demo"
+    assert len(experiment_config.variants) >= 2
     assert minimal_demo_config.schedule_type == "ad_hoc"

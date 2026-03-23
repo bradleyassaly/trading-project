@@ -20,6 +20,9 @@ from trading_platform.cli.commands.decision_memo import cmd_decision_memo
 from trading_platform.cli.commands.doctor import cmd_doctor
 from trading_platform.cli.commands.execute_live import cmd_execute_live
 from trading_platform.cli.commands.execution_simulate import cmd_execution_simulate
+from trading_platform.cli.commands.experiment_compare import cmd_experiment_compare
+from trading_platform.cli.commands.experiment_run import cmd_experiment_run
+from trading_platform.cli.commands.experiment_show import cmd_experiment_show
 from trading_platform.cli.commands.experiments_dashboard import cmd_experiments_dashboard
 from trading_platform.cli.commands.experiments_latest_model import cmd_experiments_latest_model
 from trading_platform.cli.commands.experiments_list import cmd_experiments_list
@@ -1064,8 +1067,26 @@ def build_parser() -> argparse.ArgumentParser:
     system_eval_compare.add_argument("--latest-count", type=int, default=10, help="Number of most recent runs to include in group A when feature-flag grouping is not used.")
     system_eval_compare.add_argument("--previous-count", type=int, default=None, help="Optional number of older runs to include in group B when feature-flag grouping is not used.")
     system_eval_compare.add_argument("--feature-flag", type=str, default=None, help="Optional feature flag name used to split runs into A/B groups.")
+    system_eval_compare.add_argument("--group-by-field", type=str, default=None, choices=["variant_name", "experiment_name", "experiment_run_id"], help="Optional non-feature field used to split runs into A/B groups.")
     system_eval_compare.add_argument("--value-a", type=str, default="true", help="Feature-flag value for group A when --feature-flag is used.")
     system_eval_compare.add_argument("--value-b", type=str, default="false", help="Feature-flag value for group B when --feature-flag is used.")
     system_eval_compare.set_defaults(func=cmd_system_eval_compare)
+
+    experiment_parser = subparsers.add_parser("experiment", help="Run and compare controlled orchestration experiment variants")
+    experiment_subparsers = experiment_parser.add_subparsers(dest="experiment_command", required=True)
+    experiment_run = experiment_subparsers.add_parser("run", help="Materialize orchestration variants and run a controlled experiment cohort")
+    experiment_run.add_argument("--config", type=str, required=True, help="Path to the experiment spec JSON/YAML file.")
+    experiment_run.add_argument("--variants", nargs="*", default=None, help="Optional subset of variant names to run.")
+    experiment_run.add_argument("--dry-run", action="store_true", help="Only materialize per-variant orchestration configs without running them.")
+    experiment_run.set_defaults(func=cmd_experiment_run)
+    experiment_show = experiment_subparsers.add_parser("show", help="Show a concise summary of an experiment run artifact")
+    experiment_show.add_argument("--run", type=str, required=True, help="Path to experiment_run.json or its parent directory.")
+    experiment_show.set_defaults(func=cmd_experiment_show)
+    experiment_compare = experiment_subparsers.add_parser("compare", help="Compare experiment variants using system evaluation history")
+    experiment_compare.add_argument("--run", type=str, required=True, help="Path to experiment_run.json or its parent directory.")
+    experiment_compare.add_argument("--output-dir", type=str, required=True, help="Directory where comparison artifacts will be written.")
+    experiment_compare.add_argument("--variant-a", type=str, default=None, help="Optional variant name for group A.")
+    experiment_compare.add_argument("--variant-b", type=str, default=None, help="Optional variant name for group B.")
+    experiment_compare.set_defaults(func=cmd_experiment_compare)
 
     return parser

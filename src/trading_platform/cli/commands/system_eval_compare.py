@@ -12,6 +12,7 @@ def cmd_system_eval_compare(args) -> None:
         latest_count=args.latest_count,
         previous_count=args.previous_count,
         feature_flag=getattr(args, "feature_flag", None),
+        group_by_field=getattr(args, "group_by_field", None),
         value_a=getattr(args, "value_a", True),
         value_b=getattr(args, "value_b", False),
     )

@@ -573,11 +573,13 @@ def _write_sample_artifacts(root: Path) -> None:
                     "run_count": 2,
                     "best_run_id": "2026-03-22T00-00-00+00-00",
                     "worst_run_id": "2026-03-21T00-00-00+00-00",
+                    "variant_names": ["adaptive_on", "adaptive_off"],
                 },
                 "rows": [
                     {
                         "run_id": "2026-03-22T00-00-00+00-00",
                         "experiment_name": "adaptive_vs_static",
+                        "variant_name": "adaptive_on",
                         "total_return": 0.03,
                         "sharpe": 1.1,
                         "max_drawdown": 0.01,
@@ -588,6 +590,7 @@ def _write_sample_artifacts(root: Path) -> None:
                     {
                         "run_id": "2026-03-21T00-00-00+00-00",
                         "experiment_name": "baseline",
+                        "variant_name": "adaptive_off",
                         "total_return": -0.01,
                         "sharpe": -0.2,
                         "max_drawdown": 0.03,
@@ -596,6 +599,44 @@ def _write_sample_artifacts(root: Path) -> None:
                         "regime": "low_vol",
                     },
                 ],
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    experiment_dir = root / "experiments" / "adaptive_vs_static" / "2026-03-22T00-00-00+00-00"
+    experiment_dir.mkdir(parents=True, exist_ok=True)
+    (experiment_dir / "experiment_run.json").write_text(
+        json.dumps(
+            {
+                "experiment_name": "adaptive_vs_static",
+                "experiment_run_id": "2026-03-22T00-00-00+00-00",
+                "started_at": "2026-03-22T00:00:00+00:00",
+                "ended_at": "2026-03-22T00:05:00+00:00",
+                "status": "succeeded",
+                "summary": {
+                    "variant_count": 2,
+                    "variant_run_count": 2,
+                    "succeeded_count": 2,
+                    "failed_count": 0,
+                },
+                "variants": [
+                    {
+                        "variant_name": "adaptive_on",
+                        "repeat_index": 1,
+                        "status": "succeeded",
+                        "run_dir": str(orchestration_dir),
+                    },
+                    {
+                        "variant_name": "adaptive_off",
+                        "repeat_index": 1,
+                        "status": "succeeded",
+                        "run_dir": str(orchestration_dir),
+                    },
+                ],
+                "system_evaluation": {
+                    "system_evaluation_history_json_path": str(root / "system_evaluation_history.json"),
+                },
             },
             indent=2,
         ),
@@ -638,6 +679,7 @@ def test_dashboard_data_loading_with_sample_artifacts(tmp_path: Path) -> None:
     assert overview["strategy_lifecycle"]["demoted_count"] == 1
     assert overview["adaptive_allocation"]["absolute_weight_change"] == 0.08
     assert overview["market_regime"]["regime_label"] == "trend"
+    assert overview["experiments"]["experiment_count"] == 1
     assert overview["system_evaluation"]["total_return"] == 0.03
     assert overview["orchestration"]["status"] == "succeeded"
     assert strategies["summary"]["status_counts"]["approved"] == 1
@@ -748,6 +790,8 @@ def test_dashboard_orchestration_normalization(tmp_path: Path) -> None:
     assert payload["summary"]["run_name"] == "automation"
     assert runs["orchestration_runs"][0]["status"] == "succeeded"
     assert runs["orchestration_runs"][0]["experiment_name"] == "adaptive_vs_static"
+    assert runs["orchestration_runs"][0]["variant_name"] is None
+    assert runs["experiments"]["rows"][0]["experiment_name"] == "adaptive_vs_static"
 
 
 def test_dashboard_system_evaluation_normalization(tmp_path: Path) -> None:
@@ -756,9 +800,12 @@ def test_dashboard_system_evaluation_normalization(tmp_path: Path) -> None:
 
     latest = service.system_evaluation_payload()
     history = service.system_evaluation_history_payload()
+    experiments = service.experiments_payload()
 
     assert latest["row"]["total_return"] == 0.03
     assert history["summary"]["best_run_id"] == "2026-03-22T00-00-00+00-00"
+    assert history["rows"][0]["variant_name"] == "adaptive_on"
+    assert experiments["summary"]["experiment_count"] == 1
 
 
 def test_dashboard_api_response_shapes(tmp_path: Path) -> None:
@@ -768,7 +815,7 @@ def test_dashboard_api_response_shapes(tmp_path: Path) -> None:
     status, headers, overview = _call_app(app, "/api/overview")
     assert status.startswith("200")
     assert headers["Content-Type"].startswith("application/json")
-    assert {"generated_at", "latest_run", "monitoring", "registry", "research", "strategy_monitoring", "strategy_lifecycle", "adaptive_allocation", "market_regime", "orchestration", "system_evaluation", "portfolio", "execution", "broker_health", "quick_links"} <= set(overview)
+    assert {"generated_at", "latest_run", "monitoring", "registry", "research", "strategy_monitoring", "strategy_lifecycle", "adaptive_allocation", "market_regime", "orchestration", "experiments", "system_evaluation", "portfolio", "execution", "broker_health", "quick_links"} <= set(overview)
 
     _status, _headers, strategies = _call_app(app, "/api/strategies")
     assert {"generated_at", "summary", "filters", "strategies", "champion_challenger"} <= set(strategies)
@@ -803,6 +850,9 @@ def test_dashboard_api_response_shapes(tmp_path: Path) -> None:
     _status, _headers, system_eval_history = _call_app(app, "/api/system-eval/history")
     assert {"generated_at", "summary", "rows"} <= set(system_eval_history)
 
+    _status, _headers, experiments = _call_app(app, "/api/experiments/latest")
+    assert {"generated_at", "summary", "latest", "rows"} <= set(experiments)
+
     _status, _headers, live = _call_app(app, "/api/live/latest")
     assert {"generated_at", "dry_run_summary", "submission_summary", "risk_checks", "blocked_checks", "duplicate_events", "broker_health"} <= set(live)
 
@@ -824,5 +874,6 @@ def test_dashboard_static_data_build(tmp_path: Path) -> None:
     assert paths["adaptive_allocation_latest_json"].exists()
     assert paths["regime_latest_json"].exists()
     assert paths["orchestration_latest_json"].exists()
+    assert paths["experiments_latest_json"].exists()
     assert paths["system_evaluation_latest_json"].exists()
     assert paths["system_evaluation_history_json"].exists()

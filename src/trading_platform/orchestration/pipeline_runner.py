@@ -103,7 +103,10 @@ class AutomatedOrchestrationConfig:
     schedule_frequency: str
     research_artifacts_root: str
     experiment_name: str | None = None
+    variant_name: str | None = None
+    experiment_run_id: str | None = None
     feature_flags: dict[str, Any] = field(default_factory=dict)
+    run_label_metadata: dict[str, Any] = field(default_factory=dict)
     output_root_dir: str = "artifacts/orchestration_runs"
     registry_output_dir: str | None = None
     validation_output_dir: str | None = None
@@ -224,7 +227,10 @@ class AutomatedOrchestrationResult:
     run_name: str
     schedule_frequency: str
     experiment_name: str | None
+    variant_name: str | None
+    experiment_run_id: str | None
     feature_flags: dict[str, Any]
+    run_label_metadata: dict[str, Any]
     started_at: str
     ended_at: str
     status: str
@@ -240,7 +246,10 @@ class AutomatedOrchestrationResult:
             "run_name": self.run_name,
             "schedule_frequency": self.schedule_frequency,
             "experiment_name": self.experiment_name,
+            "variant_name": self.variant_name,
+            "experiment_run_id": self.experiment_run_id,
             "feature_flags": self.feature_flags,
+            "run_label_metadata": self.run_label_metadata,
             "started_at": self.started_at,
             "ended_at": self.ended_at,
             "status": self.status,
@@ -320,6 +329,8 @@ def _render_markdown_summary(result: AutomatedOrchestrationResult) -> str:
         f"- Run id: `{result.run_id}`",
         f"- Schedule: `{result.schedule_frequency}`",
         f"- Experiment: `{result.experiment_name or 'n/a'}`",
+        f"- Variant: `{result.variant_name or 'n/a'}`",
+        f"- Experiment run id: `{result.experiment_run_id or 'n/a'}`",
         f"- Started: `{result.started_at}`",
         f"- Ended: `{result.ended_at}`",
         f"- Status: `{result.status}`",
@@ -839,7 +850,10 @@ def run_automated_orchestration(config: AutomatedOrchestrationConfig) -> tuple[A
         run_name=config.run_name,
         schedule_frequency=config.schedule_frequency,
         experiment_name=config.experiment_name,
+        variant_name=config.variant_name,
+        experiment_run_id=config.experiment_run_id,
         feature_flags=dict(sorted(config.feature_flags.items())),
+        run_label_metadata=dict(sorted(config.run_label_metadata.items())),
         started_at=started_at,
         ended_at=ended_at,
         status=status,

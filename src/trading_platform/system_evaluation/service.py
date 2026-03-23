@@ -197,6 +197,8 @@ class SystemEvaluationRow:
     run_name: str | None
     schedule_frequency: str | None
     experiment_name: str | None
+    variant_name: str | None
+    experiment_run_id: str | None
     config_hash: str | None
     strategy_count: int | None
     active_strategy_count: int | None
@@ -263,6 +265,8 @@ def evaluate_orchestration_run(*, run_dir: str | Path, output_dir: str | Path | 
         run_name=orchestration.get("run_name"),
         schedule_frequency=orchestration.get("schedule_frequency"),
         experiment_name=orchestration.get("experiment_name") or config_snapshot.get("experiment_name"),
+        variant_name=orchestration.get("variant_name") or config_snapshot.get("variant_name"),
+        experiment_run_id=orchestration.get("experiment_run_id") or config_snapshot.get("experiment_run_id"),
         config_hash=_config_hash(config_snapshot),
         strategy_count=int(outputs.get("selected_strategy_count", 0) or lifecycle_summary.get("strategy_count", 0) or 0),
         active_strategy_count=int(lifecycle_summary.get("active_count", 0) or governance_summary.get("active_count", 0) or 0),
@@ -325,6 +329,8 @@ def build_system_evaluation_history(*, runs_root: str | Path, output_dir: str | 
                 run_name=row_payload.get("run_name"),
                 schedule_frequency=row_payload.get("schedule_frequency"),
                 experiment_name=row_payload.get("experiment_name"),
+                variant_name=row_payload.get("variant_name"),
+                experiment_run_id=row_payload.get("experiment_run_id"),
                 config_hash=row_payload.get("config_hash"),
                 strategy_count=row_payload.get("strategy_count"),
                 active_strategy_count=row_payload.get("active_strategy_count"),
@@ -353,6 +359,7 @@ def build_system_evaluation_history(*, runs_root: str | Path, output_dir: str | 
             "best_run_id": next((row.run_id for row in sorted(rows, key=lambda item: item.total_return or float("-inf"), reverse=True)), None),
             "worst_run_id": next((row.run_id for row in sorted(rows, key=lambda item: item.total_return if item.total_return is not None else float("inf"))), None),
             "experiment_names": sorted({row.experiment_name for row in rows if row.experiment_name}),
+            "variant_names": sorted({row.variant_name for row in rows if row.variant_name}),
         },
         "rows": [asdict(row) for row in rows],
     }
@@ -418,6 +425,7 @@ def compare_system_evaluations(
     latest_count: int = 10,
     previous_count: int | None = None,
     feature_flag: str | None = None,
+    group_by_field: str | None = None,
     value_a: Any = True,
     value_b: Any = False,
 ) -> dict[str, Any]:
@@ -432,6 +440,11 @@ def compare_system_evaluations(
         group_b = [row for row in rows if _coerce_feature_flag((row.get("feature_flags") or {}).get(feature_flag)) == value_b]
         label_a = f"{feature_flag}={value_a}"
         label_b = f"{feature_flag}={value_b}"
+    elif group_by_field:
+        group_a = [row for row in rows if _coerce_feature_flag(row.get(group_by_field)) == value_a]
+        group_b = [row for row in rows if _coerce_feature_flag(row.get(group_by_field)) == value_b]
+        label_a = f"{group_by_field}={value_a}"
+        label_b = f"{group_by_field}={value_b}"
     else:
         sorted_rows = sorted(rows, key=lambda row: str(row.get("timestamp") or row.get("run_id")), reverse=True)
         group_a = sorted_rows[:latest_count]
@@ -456,6 +469,7 @@ def compare_system_evaluations(
             "group_a_count": len(group_a),
             "group_b_count": len(group_b),
             "feature_flag": feature_flag,
+            "group_by_field": group_by_field,
         },
         "rows": comparison_rows,
         "group_a_run_ids": [row.get("run_id") for row in group_a],
