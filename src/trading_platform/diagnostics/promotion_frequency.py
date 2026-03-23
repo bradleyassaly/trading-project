@@ -25,6 +25,7 @@ class ScenarioSpec:
     name: str
     symbols: tuple[str, ...]
     returns_by_symbol: dict[str, list[float]]
+    volume_by_symbol: dict[str, list[float]] | None = None
 
 
 def _default_scenarios() -> list[ScenarioSpec]:
@@ -97,6 +98,225 @@ def _default_scenarios() -> list[ScenarioSpec]:
     ]
 
 
+def _richer_ablation_scenarios() -> list[ScenarioSpec]:
+    periods = 79
+
+    def constant(value: float) -> list[float]:
+        return [value] * periods
+
+    def alternating(a: float, b: float) -> list[float]:
+        return [a if idx % 2 == 0 else b for idx in range(periods)]
+
+    def split(first: float, second: float) -> list[float]:
+        pivot = periods // 2
+        return [first] * pivot + [second] * (periods - pivot)
+
+    def cyclical(base: float, amplitude: float, cycle: int) -> list[float]:
+        values: list[float] = []
+        for idx in range(periods):
+            phase = (idx % cycle) / max(cycle - 1, 1)
+            values.append(base + amplitude * (2.0 * phase - 1.0))
+        return values
+
+    def trend(start: float, stop: float) -> list[float]:
+        if periods <= 1:
+            return [start]
+        step = (stop - start) / (periods - 1)
+        return [start + step * idx for idx in range(periods)]
+
+    def volume_constant(value: float) -> list[float]:
+        return [value] * periods
+
+    def volume_trend(start: float, stop: float) -> list[float]:
+        if periods <= 1:
+            return [start]
+        step = (stop - start) / (periods - 1)
+        return [start + step * idx for idx in range(periods)]
+
+    return [
+        ScenarioSpec(
+            name="steady_trend_with_vol_penalty",
+            symbols=("AAPL", "MSFT", "NVDA", "AMZN"),
+            returns_by_symbol={
+                "AAPL": constant(0.007),
+                "MSFT": alternating(0.018, -0.004),
+                "NVDA": constant(0.005),
+                "AMZN": constant(-0.002),
+            },
+            volume_by_symbol={
+                "AAPL": volume_constant(1_000_000),
+                "MSFT": volume_constant(900_000),
+                "NVDA": volume_constant(850_000),
+                "AMZN": volume_constant(800_000),
+            },
+        ),
+        ScenarioSpec(
+            name="volume_confirmation_rotation",
+            symbols=("AAPL", "MSFT", "NVDA", "AMZN"),
+            returns_by_symbol={
+                "AAPL": constant(0.004),
+                "MSFT": constant(0.0045),
+                "NVDA": constant(0.004),
+                "AMZN": constant(0.0035),
+            },
+            volume_by_symbol={
+                "AAPL": volume_trend(700_000, 1_600_000),
+                "MSFT": volume_trend(1_400_000, 650_000),
+                "NVDA": volume_constant(950_000),
+                "AMZN": volume_constant(900_000),
+            },
+        ),
+        ScenarioSpec(
+            name="breadth_collapse_defensive_leader",
+            symbols=("AAPL", "MSFT", "NVDA", "AMZN", "META"),
+            returns_by_symbol={
+                "AAPL": split(0.008, 0.002),
+                "MSFT": split(0.006, -0.008),
+                "NVDA": split(0.005, -0.012),
+                "AMZN": split(0.004, -0.010),
+                "META": split(0.003, -0.009),
+            },
+            volume_by_symbol={
+                "AAPL": volume_constant(1_200_000),
+                "MSFT": volume_constant(1_000_000),
+                "NVDA": volume_constant(980_000),
+                "AMZN": volume_constant(920_000),
+                "META": volume_constant(910_000),
+            },
+        ),
+        ScenarioSpec(
+            name="noisy_leader_vs_stable_runner",
+            symbols=("AAPL", "MSFT", "NVDA", "AMZN"),
+            returns_by_symbol={
+                "AAPL": constant(0.0055),
+                "MSFT": alternating(0.020, -0.006),
+                "NVDA": constant(0.0045),
+                "AMZN": constant(-0.0010),
+            },
+            volume_by_symbol={
+                "AAPL": volume_constant(1_050_000),
+                "MSFT": alternating(1_900_000, 500_000),
+                "NVDA": volume_constant(980_000),
+                "AMZN": volume_constant(850_000),
+            },
+        ),
+        ScenarioSpec(
+            name="broad_market_chop",
+            symbols=("AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOG"),
+            returns_by_symbol={
+                "AAPL": cyclical(0.002, 0.006, 6),
+                "MSFT": cyclical(0.0015, 0.005, 5),
+                "NVDA": alternating(0.012, -0.010),
+                "AMZN": alternating(0.009, -0.007),
+                "META": constant(0.0010),
+                "GOOG": constant(-0.0005),
+            },
+            volume_by_symbol={
+                "AAPL": volume_constant(1_100_000),
+                "MSFT": volume_constant(1_050_000),
+                "NVDA": alternating(1_800_000, 700_000),
+                "AMZN": alternating(1_600_000, 650_000),
+                "META": volume_constant(900_000),
+                "GOOG": volume_constant(880_000),
+            },
+        ),
+        ScenarioSpec(
+            name="late_volume_breakout",
+            symbols=("AAPL", "MSFT", "NVDA", "AMZN"),
+            returns_by_symbol={
+                "AAPL": split(0.001, 0.010),
+                "MSFT": split(0.006, 0.002),
+                "NVDA": split(0.004, 0.004),
+                "AMZN": split(-0.002, 0.001),
+            },
+            volume_by_symbol={
+                "AAPL": split(600_000, 1_700_000),
+                "MSFT": volume_constant(1_000_000),
+                "NVDA": volume_constant(950_000),
+                "AMZN": volume_constant(870_000),
+            },
+        ),
+        ScenarioSpec(
+            name="mean_reverting_volume_decay",
+            symbols=("AAPL", "MSFT", "NVDA", "AMZN"),
+            returns_by_symbol={
+                "AAPL": alternating(0.011, -0.007),
+                "MSFT": constant(0.004),
+                "NVDA": constant(0.0035),
+                "AMZN": constant(-0.001),
+            },
+            volume_by_symbol={
+                "AAPL": volume_trend(1_800_000, 550_000),
+                "MSFT": volume_constant(980_000),
+                "NVDA": volume_constant(920_000),
+                "AMZN": volume_constant(880_000),
+            },
+        ),
+        ScenarioSpec(
+            name="narrow_leadership_with_lagging_volume",
+            symbols=("AAPL", "MSFT", "NVDA", "AMZN", "META"),
+            returns_by_symbol={
+                "AAPL": constant(0.007),
+                "MSFT": constant(0.0065),
+                "NVDA": split(0.012, -0.004),
+                "AMZN": constant(0.001),
+                "META": constant(-0.0015),
+            },
+            volume_by_symbol={
+                "AAPL": volume_constant(1_100_000),
+                "MSFT": volume_constant(1_050_000),
+                "NVDA": volume_trend(1_700_000, 650_000),
+                "AMZN": volume_constant(870_000),
+                "META": volume_constant(860_000),
+            },
+        ),
+        ScenarioSpec(
+            name="broad_recovery_with_stable_turnover",
+            symbols=("AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOG"),
+            returns_by_symbol={
+                "AAPL": split(-0.006, 0.008),
+                "MSFT": split(-0.004, 0.007),
+                "NVDA": split(-0.008, 0.011),
+                "AMZN": split(-0.005, 0.006),
+                "META": split(-0.003, 0.005),
+                "GOOG": split(-0.002, 0.004),
+            },
+            volume_by_symbol={
+                "AAPL": volume_constant(1_050_000),
+                "MSFT": volume_constant(1_020_000),
+                "NVDA": volume_constant(1_150_000),
+                "AMZN": volume_constant(980_000),
+                "META": volume_constant(930_000),
+                "GOOG": volume_constant(910_000),
+            },
+        ),
+        ScenarioSpec(
+            name="flat_breadth_high_vol_spikes",
+            symbols=("AAPL", "MSFT", "NVDA", "AMZN"),
+            returns_by_symbol={
+                "AAPL": constant(0.003),
+                "MSFT": constant(0.003),
+                "NVDA": alternating(0.025, -0.019),
+                "AMZN": alternating(0.018, -0.014),
+            },
+            volume_by_symbol={
+                "AAPL": volume_constant(950_000),
+                "MSFT": volume_constant(940_000),
+                "NVDA": alternating(2_000_000, 700_000),
+                "AMZN": alternating(1_700_000, 680_000),
+            },
+        ),
+    ]
+
+
+def _resolve_scenarios(scenario_set_name: str) -> list[ScenarioSpec]:
+    if scenario_set_name == "default":
+        return _default_scenarios()
+    if scenario_set_name == "richer_ablation":
+        return _richer_ablation_scenarios()
+    raise ValueError(f"Unsupported scenario set: {scenario_set_name}")
+
+
 def _build_feature_fixture(output_dir: Path, scenario: ScenarioSpec) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
     timestamps = pd.date_range("2024-01-01", periods=80, freq="D")
@@ -104,13 +324,15 @@ def _build_feature_fixture(output_dir: Path, scenario: ScenarioSpec) -> Path:
         closes = [100.0]
         for daily_return in scenario.returns_by_symbol[symbol]:
             closes.append(closes[-1] * (1.0 + daily_return))
-        pd.DataFrame(
-            {
-                "timestamp": timestamps,
-                "symbol": [symbol] * len(timestamps),
-                "close": closes,
-            }
-        ).to_parquet(output_dir / f"{symbol}.parquet", index=False)
+        frame = pd.DataFrame(
+            {"timestamp": timestamps, "symbol": [symbol] * len(timestamps), "close": closes}
+        )
+        if scenario.volume_by_symbol and symbol in scenario.volume_by_symbol:
+            volume_values = list(scenario.volume_by_symbol[symbol])
+            if len(volume_values) == len(frame) - 1:
+                volume_values = [volume_values[0], *volume_values]
+            frame["volume"] = volume_values
+        frame.to_parquet(output_dir / f"{symbol}.parquet", index=False)
     return output_dir
 
 
@@ -369,15 +591,18 @@ def run_promotion_frequency_diagnostic(
     equity_context_enabled: bool = False,
     equity_context_include_volume: bool = False,
     artifact_stem: str = "signal_promotion_frequency",
+    scenario_set_name: str = "default",
+    scenarios: list[ScenarioSpec] | None = None,
 ) -> dict[str, Any]:
     output_root.mkdir(parents=True, exist_ok=True)
-    scenarios = _default_scenarios()
+    resolved_scenarios = scenarios or _resolve_scenarios(scenario_set_name)
     commands = [
         (
             f"python -m trading_platform.diagnostics.promotion_frequency --output-root {output_root} "
             f"--base-config {base_config_path} --signal-family {signal_family}"
             + (" --equity-context-enabled" if equity_context_enabled else "")
             + (" --equity-context-include-volume" if equity_context_include_volume else "")
+            + (f" --scenario-set {scenario_set_name}" if scenario_set_name != "default" else "")
         )
     ]
     rows = [
@@ -389,7 +614,7 @@ def run_promotion_frequency_diagnostic(
             equity_context_enabled=equity_context_enabled,
             equity_context_include_volume=equity_context_include_volume,
         )
-        for scenario in scenarios
+        for scenario in resolved_scenarios
     ]
     summary = _build_summary(rows)
 
@@ -402,7 +627,9 @@ def run_promotion_frequency_diagnostic(
         "signal_family": signal_family,
         "equity_context_enabled": equity_context_enabled,
         "equity_context_include_volume": equity_context_include_volume,
-        "scenario_count": len(scenarios),
+        "scenario_set_name": scenario_set_name,
+        "scenario_count": len(resolved_scenarios),
+        "scenario_names": [scenario.name for scenario in resolved_scenarios],
         "summary": summary,
         "rows": rows,
         "commands": commands,
@@ -465,6 +692,13 @@ def main() -> None:
         action="store_true",
         help="Include volume-ratio context when the feature inputs contain volume.",
     )
+    parser.add_argument(
+        "--scenario-set",
+        type=str,
+        default="default",
+        choices=["default", "richer_ablation"],
+        help="Built-in deterministic scenario set used to generate feature fixtures for the diagnostic.",
+    )
     args = parser.parse_args()
     result = run_promotion_frequency_diagnostic(
         output_root=args.output_root,
@@ -472,6 +706,7 @@ def main() -> None:
         signal_family=args.signal_family,
         equity_context_enabled=bool(args.equity_context_enabled),
         equity_context_include_volume=bool(args.equity_context_include_volume),
+        scenario_set_name=args.scenario_set,
     )
     print(f"Frequency diagnostic JSON: {result['json_path']}")
     print(f"Frequency diagnostic CSV: {result['csv_path']}")
