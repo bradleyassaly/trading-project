@@ -1,0 +1,18 @@
+experiment_name: campaign_adaptive_on_off_medium
+base_orchestration_config_path: configs/orchestration_experiment_medium.yaml
+output_root_dir: artifacts/experiments_medium
+run_label_metadata:
+  campaign: medium_local_debug
+  question: adaptive
+notes: Medium local-debug adaptive comparison. Produces real paper and monitoring outputs while staying smaller than the full campaign.
+variants:
+  - name: adaptive_on
+    feature_flags:
+      regime: true
+      adaptive: true
+      governance: true
+  - name: adaptive_off
+    feature_flags:
+      regime: true
+      adaptive: false
+      governance: true

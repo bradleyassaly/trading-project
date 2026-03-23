@@ -1,0 +1,28 @@
+schema_version: 1
+lookback_window_days: 21
+weighting_mode: performance_tilted
+max_upweight_per_cycle: 1.00
+max_downweight_per_cycle: 1.00
+max_weight_per_strategy: 1.00
+min_weight_per_strategy: 0.00
+neutral_weight_fallback: prior_weight
+review_penalty: 0.90
+reduce_penalty: 0.60
+deactivate_penalty: 0.10
+family_diversification_penalty: 0.95
+universe_diversification_penalty: 0.98
+rebalance_smoothing: 0.50
+require_min_observations: 3
+max_monitoring_age_days: 14
+freeze_on_stale_monitoring: true
+freeze_on_low_confidence: false
+regime_alignment_bonus: 1.10
+regime_misalignment_penalty: 0.90
+regime_unknown_multiplier: 1.00
+max_regime_age_days: 14
+freeze_on_stale_regime: true
+dry_run: false
+notes: Experiment-only adaptive allocation policy for medium local runs. Keeps adaptive weighting feasible for small portfolios while preserving the same rule-based logic.
+tags:
+  - experiment_only
+  - medium

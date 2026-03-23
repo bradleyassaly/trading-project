@@ -86,6 +86,7 @@ def _ensure_promoted_signal_columns(
     manifest = _read_artifact_json(artifact_dir, "research_run.json") if artifact_dir is not None else {}
     top_candidate = manifest.get("top_candidate", {}) if isinstance(manifest, dict) else {}
     evaluation_periods = manifest.get("evaluation_periods", {}) if isinstance(manifest, dict) else {}
+    top_metrics = manifest.get("top_metrics", {}) if isinstance(manifest, dict) else {}
     default_lookback = top_candidate.get("lookback")
     if default_lookback is None:
         lookbacks = evaluation_periods.get("lookbacks", []) if isinstance(evaluation_periods, dict) else []
@@ -98,6 +99,19 @@ def _ensure_promoted_signal_columns(
         normalized["lookback"] = int(default_lookback)
     if "horizon" not in normalized.columns:
         normalized["horizon"] = int(default_horizon)
+    if "mean_spearman_ic" not in normalized.columns:
+        normalized["mean_spearman_ic"] = float(top_metrics.get("mean_spearman_ic", 0.0) or 0.0)
+    if "mean_long_short_spread" not in normalized.columns:
+        normalized["mean_long_short_spread"] = 0.0
+    if "candidate_id" not in normalized.columns:
+        normalized["candidate_id"] = normalized.apply(
+            lambda row: candidate_id(
+                str(row["signal_family"]),
+                int(row["lookback"]),
+                int(row["horizon"]),
+            ),
+            axis=1,
+        )
     return normalized
 
 

@@ -1389,6 +1389,22 @@ trading-cli experiment run --config configs/experiment_campaign_adaptive.yaml
 trading-cli experiment run --config configs/experiment_campaign_governance.yaml
 ```
 
+### Fast vs Medium vs Full
+
+Use the three experiment modes for different feedback loops:
+
+- `fast`: quickest local check. Runs through research, validation, promotion, and portfolio selection only.
+- `medium`: local comparison mode. Runs the full experiment pipeline, including paper trading and monitoring, on the small fixture-backed research set so return / Sharpe proxy / drawdown metrics are available.
+- `full`: decision-quality campaign mode. Uses the broader default experiment inputs and full downstream stages.
+
+Medium local commands:
+
+```bash
+trading-cli experiment run --config configs/experiment_campaign_regime_medium.yaml
+trading-cli experiment run --config configs/experiment_campaign_adaptive_medium.yaml
+trading-cli experiment run --config configs/experiment_campaign_governance_medium.yaml
+```
+
 The campaign summary writes:
 
 - `experiment_campaign_summary.json`

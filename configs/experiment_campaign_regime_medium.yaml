@@ -1,0 +1,22 @@
+experiment_name: campaign_regime_on_off_medium
+base_orchestration_config_path: configs/orchestration_experiment_medium.yaml
+output_root_dir: artifacts/experiments_medium
+run_label_metadata:
+  campaign: medium_local_debug
+  question: regime
+notes: Medium local-debug regime comparison. Produces real paper and monitoring outputs while staying smaller than the full campaign.
+variants:
+  - name: regime_on
+    feature_flags:
+      regime: true
+      adaptive: true
+      governance: true
+    stage_overrides:
+      regime: true
+  - name: regime_off
+    feature_flags:
+      regime: false
+      adaptive: true
+      governance: true
+    stage_overrides:
+      regime: false
