@@ -556,6 +556,9 @@ def test_grouped_adaptive_allocation_build_command_parses() -> None:
             "artifacts/strategy_monitoring",
             "--lifecycle",
             "artifacts/governance",
+            "--regime",
+            "artifacts/regime",
+            "--use-regime",
             "--policy-config",
             "configs/adaptive_allocation.yaml",
             "--output-dir",
@@ -567,6 +570,8 @@ def test_grouped_adaptive_allocation_build_command_parses() -> None:
     assert args.command_family == "adaptive-allocation"
     assert args.adaptive_allocation_command == "build"
     assert args.lifecycle == "artifacts/governance"
+    assert args.regime == "artifacts/regime"
+    assert args.use_regime is True
     assert args.policy_config == "configs/adaptive_allocation.yaml"
     assert args.output_dir == "artifacts/adaptive_allocation"
     assert args.dry_run is True
@@ -604,6 +609,43 @@ def test_grouped_adaptive_allocation_export_run_config_command_parses() -> None:
     assert args.command_family == "adaptive-allocation"
     assert args.adaptive_allocation_command == "export-run-config"
     assert args.output_dir == "artifacts/adaptive_allocation_run"
+
+
+def test_grouped_regime_detect_command_parses() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "regime",
+            "detect",
+            "--input",
+            "artifacts/paper/paper_equity_curve.csv",
+            "--policy-config",
+            "configs/market_regime.yaml",
+            "--output-dir",
+            "artifacts/regime",
+        ]
+    )
+
+    assert args.command_family == "regime"
+    assert args.regime_command == "detect"
+    assert args.input == "artifacts/paper/paper_equity_curve.csv"
+    assert args.policy_config == "configs/market_regime.yaml"
+
+
+def test_grouped_regime_show_command_parses() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "regime",
+            "show",
+            "--regime",
+            "artifacts/regime",
+        ]
+    )
+
+    assert args.command_family == "regime"
+    assert args.regime_command == "show"
+    assert args.regime == "artifacts/regime"
 
 
 def test_grouped_orchestrate_run_command_parses() -> None:

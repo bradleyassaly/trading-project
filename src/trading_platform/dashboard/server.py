@@ -108,6 +108,7 @@ def _overview_page(service: DashboardDataService) -> bytes:
             ("Research Candidates", overview["research"].get("eligible_candidate_count") or 0, "promotion-ready runs"),
             ("Validated Strategies", overview["research"].get("validated_pass_count") or 0, "walk-forward validation pass"),
             ("Strategy Portfolio", overview["research"].get("strategy_portfolio_selected_count") or 0, "selected promoted strategies"),
+            ("Current Regime", overview["market_regime"].get("regime_label") or "n/a", "latest regime snapshot"),
             ("Adaptive Weight Change", overview["adaptive_allocation"].get("absolute_weight_change") or 0, "latest adaptive snapshot"),
             ("Automation", overview["orchestration"].get("status") or "n/a", overview["orchestration"].get("run_id") or "no automated runs"),
             ("Strategy Warnings", overview["strategy_monitoring"].get("warning_strategy_count") or 0, "latest monitoring snapshot"),
@@ -157,6 +158,7 @@ def _research_page(service: DashboardDataService) -> bytes:
     payload = service.research_latest_payload()
     monitoring = service.strategy_monitoring_payload()
     adaptive = payload.get("adaptive_allocation", {})
+    market_regime = payload.get("market_regime", {})
     validation = payload.get("strategy_validation", {})
     lifecycle = payload.get("strategy_lifecycle", {})
     summary = payload.get("summary", {})
@@ -168,6 +170,7 @@ def _research_page(service: DashboardDataService) -> bytes:
             ("Promoted Strategies", summary.get("promoted_strategy_count", 0), "generated paper presets"),
             ("Monitoring Warnings", monitoring.get("summary", {}).get("warning_strategy_count", 0), "selected strategy reviews"),
             ("Adaptive Changes", adaptive.get("summary", {}).get("absolute_weight_change", 0), "weight turnover for next cycle"),
+            ("Current Regime", market_regime.get("summary", {}).get("regime_label") or "n/a", "simple market context"),
             ("Demoted", summary.get("demoted_strategy_count", 0), "governance exclusions"),
             ("Signal Families", len(summary.get("signal_family_counts", {})), "observed across runs"),
             ("Universes", len(summary.get("universe_counts", {})), "observed across runs"),
@@ -223,8 +226,12 @@ def _research_page(service: DashboardDataService) -> bytes:
         monitoring.get("recommendations", []),
     )
     body += "<h2>Adaptive Allocation</h2>" + _table(
-        ["preset_name", "prior_weight", "adjusted_weight", "monitoring_recommendation", "reason_for_adjustment", "capped_by_policy"],
+        ["preset_name", "prior_weight", "adjusted_weight", "current_regime_label", "regime_compatibility", "monitoring_recommendation", "reason_for_adjustment", "capped_by_policy"],
         adaptive.get("strategies", []),
+    )
+    body += "<h2>Market Regime</h2>" + _table(
+        ["timestamp", "regime_label", "confidence_score", "realized_volatility", "long_return"],
+        market_regime.get("history", []),
     )
     body += "<h2>Recent Research Runs</h2>" + _table(
         ["run_id", "timestamp", "workflow_type", "signal_family", "universe", "candidate_count", "promoted_signal_count"],
@@ -237,17 +244,23 @@ def _portfolio_page(service: DashboardDataService) -> bytes:
     payload = service.portfolio_payload()
     summary = payload.get("summary", {})
     adaptive = payload.get("adaptive_allocation", {})
+    market_regime = payload.get("market_regime", {})
     body = _cards(
         [
             ("Gross Exposure", summary.get("gross_exposure_after_constraints", "n/a"), "after constraints"),
             ("Net Exposure", summary.get("net_exposure_after_constraints", "n/a"), "after constraints"),
             ("Position Count", len(payload.get("combined_positions", [])), "latest combined portfolio"),
             ("Clipped Symbols", len(payload.get("clipped_symbols", [])), "constraint actions"),
+            ("Current Regime", market_regime.get("summary", {}).get("regime_label") or "n/a", "allocation context"),
         ]
     )
     body += "<h2>Adaptive Weight Changes</h2>" + _table(
         ["preset_name", "prior_weight", "adjusted_weight", "delta_weight", "monitoring_recommendation"],
         adaptive.get("top_changes", []),
+    )
+    body += "<h2>Regime Snapshot</h2>" + _table(
+        ["timestamp", "regime_label", "confidence_score", "realized_volatility", "long_return"],
+        market_regime.get("history", []),
     )
     body += "<h2>Top Position Weights</h2>" + _bar_chart([(str(row.get("symbol")), float(abs(row.get("target_weight", 0.0)))) for row in payload.get("top_positions", [])[:8]])
     body += "<h2>Sleeve Weights</h2>" + _table(["sleeve_name", "scaled_target_weight"], payload.get("sleeve_weights", []))
@@ -344,6 +357,8 @@ def create_dashboard_app(artifacts_root: str | Path) -> Callable:
             status, headers, body = _json_response(service.strategy_monitoring_payload())
         elif path == "/api/adaptive-allocation/latest":
             status, headers, body = _json_response(service.adaptive_allocation_payload())
+        elif path == "/api/regime/latest":
+            status, headers, body = _json_response(service.market_regime_payload())
         elif path == "/api/portfolio/latest":
             status, headers, body = _json_response(service.portfolio_payload())
         elif path == "/api/execution/latest":
@@ -396,6 +411,7 @@ def build_dashboard_static_data(*, artifacts_root: str | Path, output_dir: str |
         "strategy_lifecycle_latest.json": service.strategy_lifecycle_payload(),
         "strategy_monitoring_latest.json": service.strategy_monitoring_payload(),
         "adaptive_allocation_latest.json": service.adaptive_allocation_payload(),
+        "regime_latest.json": service.market_regime_payload(),
         "portfolio_latest.json": service.portfolio_payload(),
         "execution_latest.json": service.execution_payload(),
         "live_latest.json": service.live_payload(),

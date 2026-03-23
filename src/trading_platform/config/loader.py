@@ -28,6 +28,7 @@ from trading_platform.orchestration.pipeline_runner import (
 from trading_platform.portfolio.strategy_monitoring import StrategyMonitoringPolicyConfig
 from trading_platform.portfolio.adaptive_allocation import AdaptiveAllocationPolicyConfig
 from trading_platform.portfolio.strategy_portfolio import StrategyPortfolioPolicyConfig
+from trading_platform.regime.service import MarketRegimePolicyConfig
 from trading_platform.research.promotion_pipeline import PromotionPolicyConfig
 from trading_platform.research.strategy_validation import StrategyValidationPolicyConfig
 
@@ -167,6 +168,11 @@ def load_strategy_monitoring_policy_config(path: str | Path) -> StrategyMonitori
 def load_adaptive_allocation_policy_config(path: str | Path) -> AdaptiveAllocationPolicyConfig:
     data = _read_config_file(Path(path))
     return AdaptiveAllocationPolicyConfig(**data)
+
+
+def load_market_regime_policy_config(path: str | Path) -> MarketRegimePolicyConfig:
+    data = _read_config_file(Path(path))
+    return MarketRegimePolicyConfig(**data)
 
 
 def load_strategy_governance_policy_config(path: str | Path) -> StrategyGovernancePolicyConfig:

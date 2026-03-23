@@ -16,6 +16,11 @@ require_min_observations: 5
 max_monitoring_age_days: 7
 freeze_on_stale_monitoring: true
 freeze_on_low_confidence: false
+regime_alignment_bonus: 1.10
+regime_misalignment_penalty: 0.90
+regime_unknown_multiplier: 1.00
+max_regime_age_days: 7
+freeze_on_stale_regime: true
 dry_run: false
 notes: Conservative adaptive weighting for next-cycle paper portfolios.
 tags:

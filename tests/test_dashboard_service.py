@@ -455,12 +455,15 @@ def _write_sample_artifacts(root: Path) -> None:
                     "total_selected_strategies": 1,
                     "absolute_weight_change": 0.08,
                     "warning_count": 1,
+                    "current_regime_label": "trend",
                 },
                 "strategies": [
                     {
                         "preset_name": "generated_momentum_nasdaq100_research_run_1_paper",
                         "prior_weight": 1.0,
                         "adjusted_weight": 0.92,
+                        "current_regime_label": "trend",
+                        "regime_compatibility": ["trend", "low_vol"],
                         "monitoring_recommendation": "deactivate",
                         "reason_for_adjustment": ["recommendation_penalty:deactivate"],
                         "capped_by_policy": True,
@@ -476,6 +479,31 @@ def _write_sample_artifacts(root: Path) -> None:
                     }
                 ],
                 "warnings": ["generated_momentum_nasdaq100_research_run_1_paper:stale_monitoring"],
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    (root / "market_regime.json").write_text(
+        json.dumps(
+            {
+                "generated_at": "2026-03-22T00:00:00+00:00",
+                "latest": {
+                    "timestamp": "2026-03-22T00:00:00+00:00",
+                    "regime_label": "trend",
+                    "confidence_score": 0.82,
+                    "realized_volatility": 0.18,
+                    "long_return": 0.07,
+                },
+                "history": [
+                    {
+                        "timestamp": "2026-03-22T00:00:00+00:00",
+                        "regime_label": "trend",
+                        "confidence_score": 0.82,
+                        "realized_volatility": 0.18,
+                        "long_return": 0.07,
+                    }
+                ],
             },
             indent=2,
         ),
@@ -542,6 +570,7 @@ def test_dashboard_data_loading_with_sample_artifacts(tmp_path: Path) -> None:
     assert overview["strategy_monitoring"]["warning_strategy_count"] == 1
     assert overview["strategy_lifecycle"]["demoted_count"] == 1
     assert overview["adaptive_allocation"]["absolute_weight_change"] == 0.08
+    assert overview["market_regime"]["regime_label"] == "trend"
     assert overview["orchestration"]["status"] == "succeeded"
     assert strategies["summary"]["status_counts"]["approved"] == 1
     assert execution["summary"]["executable_order_count"] == 1
@@ -631,6 +660,16 @@ def test_dashboard_adaptive_allocation_normalization(tmp_path: Path) -> None:
     assert payload["top_changes"][0]["delta_weight"] == -0.08
 
 
+def test_dashboard_market_regime_normalization(tmp_path: Path) -> None:
+    _write_sample_artifacts(tmp_path)
+    service = DashboardDataService(tmp_path)
+
+    payload = service.market_regime_payload()
+
+    assert payload["summary"]["regime_label"] == "trend"
+    assert payload["history"][0]["regime_label"] == "trend"
+
+
 def test_dashboard_orchestration_normalization(tmp_path: Path) -> None:
     _write_sample_artifacts(tmp_path)
     service = DashboardDataService(tmp_path)
@@ -649,7 +688,7 @@ def test_dashboard_api_response_shapes(tmp_path: Path) -> None:
     status, headers, overview = _call_app(app, "/api/overview")
     assert status.startswith("200")
     assert headers["Content-Type"].startswith("application/json")
-    assert {"generated_at", "latest_run", "monitoring", "registry", "research", "strategy_monitoring", "strategy_lifecycle", "adaptive_allocation", "orchestration", "portfolio", "execution", "broker_health", "quick_links"} <= set(overview)
+    assert {"generated_at", "latest_run", "monitoring", "registry", "research", "strategy_monitoring", "strategy_lifecycle", "adaptive_allocation", "market_regime", "orchestration", "portfolio", "execution", "broker_health", "quick_links"} <= set(overview)
 
     _status, _headers, strategies = _call_app(app, "/api/strategies")
     assert {"generated_at", "summary", "filters", "strategies", "champion_challenger"} <= set(strategies)
@@ -671,6 +710,9 @@ def test_dashboard_api_response_shapes(tmp_path: Path) -> None:
 
     _status, _headers, adaptive = _call_app(app, "/api/adaptive-allocation/latest")
     assert {"generated_at", "summary", "strategies", "top_changes", "warnings"} <= set(adaptive)
+
+    _status, _headers, regime = _call_app(app, "/api/regime/latest")
+    assert {"generated_at", "summary", "history", "policy"} <= set(regime)
 
     _status, _headers, orchestration = _call_app(app, "/api/orchestration/latest")
     assert {"run_dir", "summary", "stage_records"} <= set(orchestration)
@@ -694,4 +736,5 @@ def test_dashboard_static_data_build(tmp_path: Path) -> None:
     assert paths["strategy_lifecycle_latest_json"].exists()
     assert paths["strategy_monitoring_latest_json"].exists()
     assert paths["adaptive_allocation_latest_json"].exists()
+    assert paths["regime_latest_json"].exists()
     assert paths["orchestration_latest_json"].exists()

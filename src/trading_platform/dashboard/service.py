@@ -401,6 +401,33 @@ class DashboardDataService:
             "policy": adaptive_payload.get("policy", {}),
         }
 
+    def market_regime_payload(self) -> dict[str, Any]:
+        regime_path = _latest_matching_file(self.artifacts_root, ["market_regime.json"])
+        regime_payload = _safe_read_json(regime_path)
+        history_rows: list[dict[str, Any]] = []
+        for path in sorted(self.artifacts_root.rglob("market_regime.json")):
+            payload = _safe_read_json(path)
+            latest = payload.get("latest", {})
+            if latest:
+                history_rows.append(
+                    {
+                        "artifact_path": str(path),
+                        "timestamp": latest.get("timestamp") or payload.get("generated_at"),
+                        "regime_label": latest.get("regime_label"),
+                        "confidence_score": latest.get("confidence_score"),
+                        "realized_volatility": latest.get("realized_volatility"),
+                        "long_return": latest.get("long_return"),
+                    }
+                )
+        history_rows.sort(key=lambda row: str(row.get("timestamp") or ""), reverse=True)
+        return {
+            "generated_at": _now_utc(),
+            "market_regime_path": str(regime_path) if regime_path is not None else None,
+            "summary": regime_payload.get("latest", {}),
+            "history": history_rows[:20],
+            "policy": regime_payload.get("policy", {}),
+        }
+
     def strategy_validation_payload(self) -> dict[str, Any]:
         validation_path = _latest_matching_file(self.artifacts_root, ["strategy_validation.json"])
         validation_payload = _safe_read_json(validation_path)
@@ -447,6 +474,7 @@ class DashboardDataService:
         research = self.research_payload()
         strategy_monitoring = self.strategy_monitoring_payload()
         adaptive_allocation = self.adaptive_allocation_payload()
+        market_regime = self.market_regime_payload()
         orchestration = self.latest_automated_orchestration_payload()
         validation = self.strategy_validation_payload()
         lifecycle = self.strategy_lifecycle_payload()
@@ -503,6 +531,11 @@ class DashboardDataService:
                 "selected_strategy_count": adaptive_allocation.get("summary", {}).get("total_selected_strategies", 0),
                 "absolute_weight_change": adaptive_allocation.get("summary", {}).get("absolute_weight_change"),
                 "warning_count": adaptive_allocation.get("summary", {}).get("warning_count", 0),
+            },
+            "market_regime": {
+                "regime_label": market_regime.get("summary", {}).get("regime_label"),
+                "confidence_score": market_regime.get("summary", {}).get("confidence_score"),
+                "realized_volatility": market_regime.get("summary", {}).get("realized_volatility"),
             },
             "orchestration": {
                 "run_id": orchestration.get("summary", {}).get("run_id"),
@@ -564,6 +597,7 @@ class DashboardDataService:
     def portfolio_payload(self) -> dict[str, Any]:
         payload = self.latest_portfolio_payload()
         payload["adaptive_allocation"] = self.adaptive_allocation_payload()
+        payload["market_regime"] = self.market_regime_payload()
         payload["generated_at"] = _now_utc()
         return payload
 
@@ -580,6 +614,7 @@ class DashboardDataService:
     def research_latest_payload(self) -> dict[str, Any]:
         payload = self.research_payload()
         payload["adaptive_allocation"] = self.adaptive_allocation_payload()
+        payload["market_regime"] = self.market_regime_payload()
         payload["strategy_validation"] = self.strategy_validation_payload()
         payload["strategy_lifecycle"] = self.strategy_lifecycle_payload()
         return payload

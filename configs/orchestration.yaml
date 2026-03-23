@@ -7,6 +7,7 @@ promotion_policy_config_path: configs/promotion.yaml
 strategy_validation_policy_config_path: configs/strategy_validation.yaml
 strategy_portfolio_policy_config_path: configs/strategy_portfolio.yaml
 strategy_monitoring_policy_config_path: configs/strategy_monitoring.yaml
+market_regime_policy_config_path: configs/market_regime.yaml
 adaptive_allocation_policy_config_path: configs/adaptive_allocation.yaml
 strategy_governance_policy_config_path: configs/strategy_governance.yaml
 strategy_lifecycle_path: artifacts/governance/strategy_lifecycle.json
@@ -28,6 +29,7 @@ stages:
   allocation: true
   paper: true
   monitoring: true
+  regime: true
   adaptive_allocation: true
   governance: true
   kill_switch: true

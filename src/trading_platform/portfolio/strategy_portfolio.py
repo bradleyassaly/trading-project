@@ -274,6 +274,7 @@ def build_strategy_portfolio(
             continue
 
         selected_input.append(row)
+        row["lifecycle_state"] = lifecycle_state or None
         if source_run_id:
             seen_run_ids.add(source_run_id)
         if signal_family:
@@ -301,8 +302,9 @@ def build_strategy_portfolio(
                 "source_run_id": row.get("source_run_id"),
                 "signal_family": row.get("signal_family"),
                 "universe": row.get("universe"),
+                "regime_compatibility": row.get("regime_compatibility", []),
                 "promotion_status": row.get("status"),
-                "lifecycle_state": lifecycle_state or None,
+                "lifecycle_state": row.get("lifecycle_state"),
                 "allocation_weight": weights.get(preset_name, 0.0),
                 "target_capital_fraction": weights.get(preset_name, 0.0),
                 "selection_rank": rank,
@@ -383,7 +385,11 @@ def export_multi_strategy_run_config_bundle(
             notes=str(row.get("reason_selected", row.get("reason_for_adjustment", "")) or ""),
             tags=[
                 tag
-                for tag in [str(row.get("signal_family") or ""), str(row.get("universe") or "")]
+                for tag in [
+                    str(row.get("signal_family") or ""),
+                    str(row.get("universe") or ""),
+                    *(str(tag) for tag in row.get("regime_compatibility", [])),
+                ]
                 if tag
             ],
         )

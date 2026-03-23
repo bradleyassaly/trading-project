@@ -1,0 +1,32 @@
+schema_version: 1
+short_return_window: 20
+long_return_window: 63
+volatility_window: 20
+dispersion_window: 20
+high_volatility_threshold: 0.28
+low_volatility_threshold: 0.12
+trend_return_threshold: 0.04
+flat_return_threshold: 0.015
+confidence_floor: 0.2
+allow_paper_equity_curve_proxy: true
+strategy_family_regime_map:
+  momentum:
+    - trend
+    - low_vol
+  breakout:
+    - trend
+    - high_vol
+  reversal:
+    - mean_reversion
+    - low_vol
+  mean_reversion:
+    - mean_reversion
+    - low_vol
+  value:
+    - mean_reversion
+    - low_vol
+  volatility:
+    - high_vol
+  short_term:
+    - high_vol
+    - mean_reversion

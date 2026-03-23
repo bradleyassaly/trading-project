@@ -12,6 +12,7 @@ from trading_platform.portfolio.strategy_portfolio import (
     export_multi_strategy_run_config_bundle,
     load_strategy_portfolio,
 )
+from trading_platform.regime.service import infer_strategy_regime_compatibility, load_market_regime
 
 
 ADAPTIVE_ALLOCATION_SCHEMA_VERSION = 1
@@ -39,6 +40,11 @@ class AdaptiveAllocationPolicyConfig:
     max_monitoring_age_days: int | None = 7
     freeze_on_stale_monitoring: bool = True
     freeze_on_low_confidence: bool = False
+    regime_alignment_bonus: float = 1.10
+    regime_misalignment_penalty: float = 0.90
+    regime_unknown_multiplier: float = 1.0
+    max_regime_age_days: int | None = 7
+    freeze_on_stale_regime: bool = True
     candidate_state_multiplier: float = 0.0
     validated_state_multiplier: float = 1.0
     promoted_state_multiplier: float = 1.0
@@ -74,6 +80,9 @@ class AdaptiveAllocationPolicyConfig:
             "family_diversification_penalty": self.family_diversification_penalty,
             "universe_diversification_penalty": self.universe_diversification_penalty,
             "rebalance_smoothing": self.rebalance_smoothing,
+            "regime_alignment_bonus": self.regime_alignment_bonus,
+            "regime_misalignment_penalty": self.regime_misalignment_penalty,
+            "regime_unknown_multiplier": self.regime_unknown_multiplier,
             "candidate_state_multiplier": self.candidate_state_multiplier,
             "validated_state_multiplier": self.validated_state_multiplier,
             "promoted_state_multiplier": self.promoted_state_multiplier,
@@ -90,6 +99,8 @@ class AdaptiveAllocationPolicyConfig:
             raise ValueError("require_min_observations must be >= 0")
         if self.max_monitoring_age_days is not None and self.max_monitoring_age_days < 0:
             raise ValueError("max_monitoring_age_days must be >= 0 when provided")
+        if self.max_regime_age_days is not None and self.max_regime_age_days < 0:
+            raise ValueError("max_regime_age_days must be >= 0 when provided")
 
 
 def _now_utc() -> str:
@@ -175,6 +186,23 @@ def _lifecycle_multiplier(state: str, policy: AdaptiveAllocationPolicyConfig) ->
     }.get(normalized, 1.0)
 
 
+def _regime_multiplier(
+    *,
+    strategy_regimes: list[str],
+    current_regime: str | None,
+    policy: AdaptiveAllocationPolicyConfig,
+) -> tuple[float, str]:
+    normalized_regimes = [str(item).strip().lower() for item in strategy_regimes if str(item).strip()]
+    normalized_current = str(current_regime or "").strip().lower()
+    if not normalized_current:
+        return policy.regime_unknown_multiplier, "regime_unknown"
+    if not normalized_regimes:
+        return policy.regime_unknown_multiplier, "regime_missing_strategy_compatibility"
+    if normalized_current in normalized_regimes:
+        return policy.regime_alignment_bonus, f"regime_aligned:{normalized_current}"
+    return policy.regime_misalignment_penalty, f"regime_misaligned:{normalized_current}"
+
+
 def _performance_multiplier(
     *,
     weighting_mode: str,
@@ -252,6 +280,7 @@ def build_adaptive_allocation(
     strategy_portfolio_path: str | Path,
     strategy_monitoring_path: str | Path,
     strategy_lifecycle_path: str | Path | None = None,
+    market_regime_path: str | Path | None = None,
     output_dir: str | Path,
     policy: AdaptiveAllocationPolicyConfig,
 ) -> dict[str, Any]:
@@ -295,6 +324,16 @@ def build_adaptive_allocation(
     monitoring_age_days = (
         (datetime.now(UTC) - monitoring_generated_at).days if monitoring_generated_at is not None else None
     )
+    market_regime = load_market_regime(market_regime_path) if market_regime_path is not None and Path(market_regime_path).exists() else {}
+    market_regime_latest = market_regime.get("latest", {})
+    market_regime_generated_at = _parse_timestamp(market_regime.get("generated_at") or market_regime_latest.get("timestamp"))
+    market_regime_age_days = (
+        (datetime.now(UTC) - market_regime_generated_at).days if market_regime_generated_at is not None else None
+    )
+    current_regime_label = str(market_regime_latest.get("regime_label") or "").strip() or None
+    stale_regime = False
+    if policy.max_regime_age_days is not None and market_regime_age_days is not None:
+        stale_regime = market_regime_age_days > policy.max_regime_age_days
 
     raw_targets: dict[str, float] = {}
     lower_bounds: dict[str, float] = {}
@@ -319,6 +358,13 @@ def build_adaptive_allocation(
         observation_count = int(monitor_row.get("paper_observation_count", monitoring.get("summary", {}).get("observation_count", 0)) or 0)
         attribution_confidence = str(monitor_row.get("attribution_confidence") or "unknown")
         missing_data_days = _safe_float(monitor_row.get("missing_data_days"))
+        strategy_regime_compatibility = list(
+            row.get("regime_compatibility")
+            or infer_strategy_regime_compatibility(
+                signal_family=str(row.get("signal_family") or ""),
+                strategy_name=str(row.get("preset_name") or row.get("source_run_id") or ""),
+            )
+        )
 
         stale_monitoring = False
         if policy.max_monitoring_age_days is not None and monitoring_age_days is not None:
@@ -339,6 +385,10 @@ def build_adaptive_allocation(
         if not monitor_row:
             raw_target = fallback_weight
             reasons.append("fallback_missing_monitoring")
+        elif stale_regime and policy.freeze_on_stale_regime:
+            raw_target = prior_weight
+            reasons.append("frozen_stale_regime")
+            warnings.append(f"{preset_name}:stale_regime")
         elif stale_monitoring and policy.freeze_on_stale_monitoring:
             raw_target = prior_weight
             reasons.append("frozen_stale_monitoring")
@@ -369,7 +419,12 @@ def build_adaptive_allocation(
             recommendation_penalty = _recommendation_penalty(recommendation, policy)
             confidence_multiplier = _confidence_multiplier(attribution_confidence)
             lifecycle_multiplier = _lifecycle_multiplier(lifecycle_state, policy)
-            full_multiplier = performance_multiplier * recommendation_penalty * confidence_multiplier * family_penalty * universe_penalty * lifecycle_multiplier
+            regime_multiplier, regime_reason = _regime_multiplier(
+                strategy_regimes=strategy_regime_compatibility,
+                current_regime=current_regime_label,
+                policy=policy,
+            )
+            full_multiplier = performance_multiplier * recommendation_penalty * confidence_multiplier * family_penalty * universe_penalty * lifecycle_multiplier * regime_multiplier
             smoothed_multiplier = 1.0 + ((full_multiplier - 1.0) * policy.rebalance_smoothing)
             raw_target = prior_weight * max(smoothed_multiplier, 0.0)
             reasons.extend(
@@ -378,6 +433,7 @@ def build_adaptive_allocation(
                     f"recommendation_penalty:{recommendation}",
                     f"confidence:{attribution_confidence.lower() or 'unknown'}",
                     f"lifecycle_state:{lifecycle_state}",
+                    regime_reason,
                 ]
             )
             if family_penalty != 1.0:
@@ -387,7 +443,11 @@ def build_adaptive_allocation(
 
         lower_bound = max(policy.min_weight_per_strategy, prior_weight - policy.max_downweight_per_cycle)
         upper_bound = min(policy.max_weight_per_strategy, prior_weight + policy.max_upweight_per_cycle)
-        if stale_monitoring and policy.freeze_on_stale_monitoring:
+        if stale_regime and policy.freeze_on_stale_regime:
+            lower_bound = prior_weight
+            upper_bound = prior_weight
+            capped_by_policy = True
+        elif stale_monitoring and policy.freeze_on_stale_monitoring:
             lower_bound = prior_weight
             upper_bound = prior_weight
             capped_by_policy = True
@@ -420,6 +480,8 @@ def build_adaptive_allocation(
                 "realized_sharpe": realized_sharpe,
                 "monitoring_recommendation": recommendation,
                 "lifecycle_state": lifecycle_state,
+                "regime_compatibility": strategy_regime_compatibility,
+                "current_regime_label": current_regime_label,
                 "attribution_confidence": attribution_confidence,
                 "reason_for_adjustment": reasons,
                 "capped_by_policy": capped_by_policy,
@@ -463,6 +525,7 @@ def build_adaptive_allocation(
         "strategy_portfolio_path": str(Path(strategy_portfolio_path)),
         "strategy_monitoring_path": str(Path(strategy_monitoring_path)),
         "strategy_lifecycle_path": str(Path(strategy_lifecycle_path)) if strategy_lifecycle_path is not None else None,
+        "market_regime_path": str(Path(market_regime_path)) if market_regime_path is not None else None,
         "policy": asdict(policy),
         "summary": {
             "total_selected_strategies": len(row_payloads),
@@ -494,6 +557,8 @@ def build_adaptive_allocation(
             ),
             "warning_count": len(sorted(set(warnings))),
             "monitoring_age_days": monitoring_age_days,
+            "current_regime_label": current_regime_label,
+            "regime_age_days": market_regime_age_days,
             "status": "warning" if warnings else "healthy",
         },
         "strategies": row_payloads,
@@ -522,6 +587,7 @@ def build_adaptive_allocation(
         "selected_count": len(row_payloads),
         "warning_count": len(payload["warnings"]),
         "absolute_weight_change": absolute_weight_change,
+        "current_regime_label": current_regime_label,
     }
 
 

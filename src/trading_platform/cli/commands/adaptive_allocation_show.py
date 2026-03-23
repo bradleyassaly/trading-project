@@ -9,9 +9,12 @@ def cmd_adaptive_allocation_show(args) -> None:
     print(f"Selected strategies: {summary.get('total_selected_strategies', 0)}")
     print(f"Warnings: {summary.get('warning_count', 0)}")
     print(f"Absolute weight change: {summary.get('absolute_weight_change', 0.0)}")
+    if summary.get("current_regime_label"):
+        print(f"Current regime: {summary.get('current_regime_label')}")
     for row in payload.get("strategies", []):
         print(
             f"- {row['preset_name']}: prior={float(row['prior_weight']):.6f} "
             f"adjusted={float(row['adjusted_weight']):.6f} "
-            f"recommendation={row.get('monitoring_recommendation')}"
+            f"recommendation={row.get('monitoring_recommendation')} "
+            f"regime={row.get('current_regime_label')}"
         )

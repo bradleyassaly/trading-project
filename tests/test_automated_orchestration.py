@@ -24,10 +24,12 @@ def _config(tmp_path: Path, **overrides) -> AutomatedOrchestrationConfig:
         "strategy_validation_policy_config_path": str(tmp_path / "strategy_validation.yaml"),
         "strategy_portfolio_policy_config_path": str(tmp_path / "strategy_portfolio.yaml"),
         "strategy_monitoring_policy_config_path": str(tmp_path / "strategy_monitoring.yaml"),
+        "market_regime_policy_config_path": str(tmp_path / "market_regime.yaml"),
         "adaptive_allocation_policy_config_path": str(tmp_path / "adaptive_allocation.yaml"),
         "strategy_governance_policy_config_path": str(tmp_path / "strategy_governance.yaml"),
         "strategy_lifecycle_path": str(tmp_path / "strategy_lifecycle.json"),
         "paper_state_path": str(tmp_path / "paper_state.json"),
+        "market_regime_input_path": str(tmp_path / "prices.csv"),
     }
     base.update(overrides)
     return AutomatedOrchestrationConfig(**base)
@@ -38,6 +40,7 @@ def _write_policy_files(tmp_path: Path) -> None:
     (tmp_path / "strategy_validation.yaml").write_text("schema_version: 1\n", encoding="utf-8")
     (tmp_path / "strategy_portfolio.yaml").write_text("schema_version: 1\n", encoding="utf-8")
     (tmp_path / "strategy_monitoring.yaml").write_text("schema_version: 1\n", encoding="utf-8")
+    (tmp_path / "market_regime.yaml").write_text("schema_version: 1\n", encoding="utf-8")
     (tmp_path / "adaptive_allocation.yaml").write_text("schema_version: 1\n", encoding="utf-8")
     (tmp_path / "strategy_governance.yaml").write_text("schema_version: 1\n", encoding="utf-8")
 
@@ -54,6 +57,7 @@ promotion_policy_config_path: configs/promotion.yaml
 strategy_validation_policy_config_path: configs/strategy_validation.yaml
 strategy_portfolio_policy_config_path: configs/strategy_portfolio.yaml
 strategy_monitoring_policy_config_path: configs/strategy_monitoring.yaml
+market_regime_policy_config_path: configs/market_regime.yaml
 adaptive_allocation_policy_config_path: configs/adaptive_allocation.yaml
 strategy_governance_policy_config_path: configs/strategy_governance.yaml
 strategy_lifecycle_path: artifacts/governance/strategy_lifecycle.json
@@ -68,6 +72,7 @@ stages:
   allocation: true
   paper: true
   monitoring: true
+  regime: true
   adaptive_allocation: true
   governance: true
   kill_switch: true
@@ -81,6 +86,7 @@ stages:
     assert config.schedule_frequency == "daily"
     assert config.max_promotions_per_run == 2
     assert config.stages.validation is True
+    assert config.stages.regime is True
     assert config.stages.adaptive_allocation is True
     assert config.stages.governance is True
     assert config.stages.kill_switch is True
@@ -101,6 +107,7 @@ def test_automated_orchestration_stage_sequencing_and_artifact_passing(monkeypat
             allocation=True,
             paper=True,
             monitoring=True,
+            regime=True,
             adaptive_allocation=True,
             governance=True,
             kill_switch=True,
@@ -201,6 +208,16 @@ def test_automated_orchestration_stage_sequencing_and_artifact_passing(monkeypat
         lambda **kwargs: {"strategy_monitoring_json_path": str(Path(kwargs["output_dir"]) / "strategy_monitoring.json"), "warning_strategy_count": 1, "deactivation_candidate_count": 1, "kill_switch_recommendations_json_path": str(Path(kwargs["output_dir"]) / "kill_switch_recommendations.json")},
     )
     monkeypatch.setattr(
+        "trading_platform.orchestration.pipeline_runner.detect_market_regime",
+        lambda **kwargs: {
+            "market_regime_json_path": str(Path(kwargs["output_dir"]) / "market_regime.json"),
+            "market_regime_csv_path": str(Path(kwargs["output_dir"]) / "market_regime.csv"),
+            "regime_label": "trend",
+            "confidence_score": 0.7,
+            "latest": {"regime_label": "trend", "confidence_score": 0.7},
+        },
+    )
+    monkeypatch.setattr(
         "trading_platform.orchestration.pipeline_runner.build_adaptive_allocation",
         lambda **kwargs: (
             (Path(kwargs["output_dir"]) / "adaptive_allocation.json").write_text(
@@ -245,6 +262,7 @@ def test_automated_orchestration_stage_sequencing_and_artifact_passing(monkeypat
     assert result.status == "succeeded"
     assert result.outputs["validated_pass_count"] == 1
     assert result.outputs["selected_strategy_count"] == 1
+    assert result.outputs["current_regime_label"] == "trend"
     assert result.outputs["adaptive_selected_strategy_count"] == 1
     assert result.outputs["under_review_count"] == 1
     assert result.outputs["kill_switch_recommendation_count"] == 1
@@ -257,7 +275,7 @@ def test_automated_orchestration_fail_fast_on_empty_promotions(monkeypatch, tmp_
     monkeypatch.setattr("trading_platform.orchestration.pipeline_runner.perf_counter", lambda: 1.0)
     config = _config(
         tmp_path,
-        stages=AutomatedOrchestrationStageToggles(research=True, registry=True, validation=True, promotion=True, portfolio=True, allocation=False, paper=False, monitoring=False, governance=False, kill_switch=False),
+        stages=AutomatedOrchestrationStageToggles(research=True, registry=True, validation=True, promotion=True, portfolio=True, allocation=False, paper=False, monitoring=False, regime=False, governance=False, kill_switch=False),
         stage_order=["research", "registry", "validation", "promotion", "portfolio"],
     )
     monkeypatch.setattr("trading_platform.orchestration.pipeline_runner.load_research_manifests", lambda root: [{"run_id": "run-a"}])

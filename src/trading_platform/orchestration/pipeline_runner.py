@@ -40,6 +40,7 @@ from trading_platform.research.experiment_tracking import (
     build_paper_experiment_record,
     register_experiment,
 )
+from trading_platform.regime.service import detect_market_regime
 from trading_platform.research.promotion_pipeline import apply_research_promotions
 from trading_platform.research.registry import (
     build_promotion_candidates,
@@ -59,6 +60,7 @@ ORCHESTRATION_STAGE_NAMES = [
     "allocation",
     "paper",
     "monitoring",
+    "regime",
     "adaptive_allocation",
     "governance",
     "kill_switch",
@@ -72,7 +74,8 @@ ORCHESTRATION_STAGE_DEPENDENCIES: dict[str, list[str]] = {
     "allocation": ["portfolio"],
     "paper": ["portfolio"],
     "monitoring": ["paper"],
-    "adaptive_allocation": ["monitoring"],
+    "regime": ["monitoring"],
+    "adaptive_allocation": ["monitoring", "regime"],
     "governance": ["monitoring"],
     "kill_switch": ["monitoring"],
 }
@@ -88,6 +91,7 @@ class AutomatedOrchestrationStageToggles:
     allocation: bool = True
     paper: bool = True
     monitoring: bool = True
+    regime: bool = False
     adaptive_allocation: bool = False
     governance: bool = True
     kill_switch: bool = True
@@ -108,6 +112,7 @@ class AutomatedOrchestrationConfig:
     paper_output_dir: str | None = None
     paper_state_path: str | None = None
     monitoring_output_dir: str | None = None
+    regime_output_dir: str | None = None
     adaptive_allocation_output_dir: str | None = None
     adaptive_allocation_run_output_dir: str | None = None
     governance_output_dir: str | None = None
@@ -116,11 +121,13 @@ class AutomatedOrchestrationConfig:
     strategy_validation_policy_config_path: str | None = None
     strategy_portfolio_policy_config_path: str | None = None
     strategy_monitoring_policy_config_path: str | None = None
+    market_regime_policy_config_path: str | None = None
     adaptive_allocation_policy_config_path: str | None = None
     strategy_governance_policy_config_path: str | None = None
     strategy_lifecycle_path: str | None = None
     execution_config_path: str | None = None
     monitoring_notification_config_path: str | None = None
+    market_regime_input_path: str | None = None
     fail_fast: bool = True
     continue_on_stage_error: bool = False
     max_promotions_per_run: int | None = None
@@ -174,6 +181,8 @@ class AutomatedOrchestrationConfig:
             raise ValueError("paper_state_path is required when paper is enabled")
         if self.stages.monitoring and not self.strategy_monitoring_policy_config_path:
             raise ValueError("strategy_monitoring_policy_config_path is required when monitoring is enabled")
+        if self.stages.regime and not self.market_regime_policy_config_path:
+            raise ValueError("market_regime_policy_config_path is required when regime is enabled")
         if self.stages.adaptive_allocation and not self.adaptive_allocation_policy_config_path:
             raise ValueError("adaptive_allocation_policy_config_path is required when adaptive_allocation is enabled")
         if self.stages.governance and not self.strategy_governance_policy_config_path:
@@ -331,6 +340,7 @@ def _render_markdown_summary(result: AutomatedOrchestrationResult) -> str:
                 f"- Selected strategies: `{outputs.get('selected_strategy_count', 0)}`",
                 f"- Allocation positions: `{outputs.get('allocation_position_count', 0)}`",
                 f"- Monitoring warnings: `{outputs.get('warning_strategy_count', 0)}`",
+                f"- Current regime: `{outputs.get('current_regime_label', 'n/a')}`",
                 f"- Adaptive strategies: `{outputs.get('adaptive_selected_strategy_count', 0)}`",
                 f"- Under review: `{outputs.get('under_review_count', 0)}`",
                 f"- Demoted: `{outputs.get('demoted_count', 0)}`",
@@ -604,6 +614,33 @@ def _stage_monitoring(config: AutomatedOrchestrationConfig, run_dir: Path, conte
     return result
 
 
+def _stage_regime(config: AutomatedOrchestrationConfig, run_dir: Path, context: dict[str, Any]) -> dict[str, Any]:
+    from trading_platform.config.loader import load_market_regime_policy_config
+
+    output_dir = _ensure_stage_output_dir(run_dir, config.regime_output_dir, "regime")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    input_path = config.market_regime_input_path
+    if not input_path:
+        paper_dir = context.get("paper_dir")
+        if paper_dir and (Path(paper_dir) / "paper_equity_curve.csv").exists():
+            input_path = str(Path(paper_dir) / "paper_equity_curve.csv")
+    if not input_path:
+        raise OrchestrationStageError("regime stage requires market_regime_input_path or paper_equity_curve.csv")
+    policy = load_market_regime_policy_config(config.market_regime_policy_config_path)
+    result = detect_market_regime(
+        input_path=input_path,
+        output_dir=output_dir,
+        policy=policy,
+    )
+    latest = result.get("latest", {})
+    context["market_regime_dir"] = str(output_dir)
+    return {
+        **result,
+        "current_regime_label": latest.get("regime_label"),
+        "regime_confidence_score": latest.get("confidence_score"),
+    }
+
+
 def _stage_kill_switch(config: AutomatedOrchestrationConfig, run_dir: Path, context: dict[str, Any]) -> dict[str, Any]:
     monitoring_dir = context.get("strategy_monitoring_dir")
     if not monitoring_dir:
@@ -636,6 +673,7 @@ def _stage_adaptive_allocation(config: AutomatedOrchestrationConfig, run_dir: Pa
         strategy_portfolio_path=strategy_portfolio_dir,
         strategy_monitoring_path=monitoring_dir,
         strategy_lifecycle_path=config.strategy_lifecycle_path,
+        market_regime_path=context.get("market_regime_dir"),
         output_dir=output_dir,
         policy=policy,
     )
@@ -661,6 +699,7 @@ def _stage_adaptive_allocation(config: AutomatedOrchestrationConfig, run_dir: Pa
         **export_result,
         "adaptive_selected_strategy_count": selected_count,
         "adaptive_warning_count": int(payload.get("summary", {}).get("warning_count", 0)),
+        "current_regime_label": payload.get("summary", {}).get("current_regime_label"),
     }
 
 
@@ -697,6 +736,7 @@ RUNNER_STAGE_HANDLERS: dict[str, Callable[[AutomatedOrchestrationConfig, Path, d
     "allocation": _stage_allocation,
     "paper": _stage_paper,
     "monitoring": _stage_monitoring,
+    "regime": _stage_regime,
     "adaptive_allocation": _stage_adaptive_allocation,
     "governance": _stage_governance,
     "kill_switch": _stage_kill_switch,
@@ -748,6 +788,7 @@ def run_automated_orchestration(config: AutomatedOrchestrationConfig) -> tuple[A
                         "warning_strategy_count",
                         "deactivation_candidate_count",
                         "notification_sent",
+                        "current_regime_label",
                         "adaptive_selected_strategy_count",
                         "adaptive_warning_count",
                         "under_review_count",
@@ -755,6 +796,7 @@ def run_automated_orchestration(config: AutomatedOrchestrationConfig) -> tuple[A
                         "demoted_count",
                         "kill_switch_recommendation_count",
                     }
+                    and value is not None
                 }
             )
             if record.stage_name == "validation":

@@ -224,6 +224,7 @@ Key API endpoints:
 - `/api/runs/latest`
 - `/api/research/latest`
 - `/api/adaptive-allocation/latest`
+- `/api/regime/latest`
 - `/api/strategies`
 - `/api/portfolio/latest`
 - `/api/execution/latest`
@@ -242,6 +243,36 @@ Notes:
 - the dashboard is read-only in v1
 - it degrades gracefully when some artifact categories do not exist yet
 - it uses filesystem discovery only; there is no database and no background worker
+
+### Regime-Aware Allocation
+
+The platform can add a simple market-context layer before next-cycle adaptive allocation. It stays deliberately lightweight:
+
+- `trading-cli regime detect` reads an existing price or paper equity curve CSV and writes `market_regime.json` plus `market_regime.csv`
+- the detector uses transparent rolling-return and realized-volatility thresholds from `configs/market_regime.yaml`
+- promoted strategies carry `regime_compatibility` tags inferred from signal family, with config-driven overrides available in the policy file
+- adaptive allocation can opt into `--use-regime` so aligned strategies get a modest bonus and misaligned strategies get a capped penalty
+- stale or missing regime data can freeze weights instead of forcing a guess
+
+Primary artifacts:
+
+- `market_regime.json` / `market_regime.csv`
+- `adaptive_allocation.json` / `adaptive_allocation.csv` with `current_regime_label`, `regime_compatibility`, and explicit adjustment reasons
+
+Example:
+
+```bash
+trading-cli regime detect --input artifacts/paper/strategy_portfolio/paper_equity_curve.csv --policy-config configs/market_regime.yaml --output-dir artifacts/regime
+trading-cli regime show --regime artifacts/regime
+trading-cli adaptive-allocation build --portfolio artifacts/strategy_portfolio --monitoring artifacts/strategy_monitoring --lifecycle artifacts/governance/strategy_lifecycle.json --regime artifacts/regime --use-regime --policy-config configs/adaptive_allocation.yaml --output-dir artifacts/adaptive_allocation
+trading-cli adaptive-allocation export-run-config --allocation artifacts/adaptive_allocation --output-dir artifacts/adaptive_allocation_run
+```
+
+Tuning guidance:
+
+- raise `high_volatility_threshold` to make `high_vol` rarer
+- raise `trend_return_threshold` to require stronger directional evidence before labeling `trend`
+- keep `regime_alignment_bonus` and `regime_misalignment_penalty` modest so regime acts as context, not a replacement for monitoring and governance
 
 ### Research Workflow
 
@@ -1084,9 +1115,11 @@ After monitoring, the platform can build a conservative next-cycle weight plan i
 It:
 
 - reads `strategy_portfolio.json` plus `strategy_monitoring.json`
+- optionally reads `market_regime.json` when `--use-regime` is enabled
 - nudges weights up or down using explicit realized-performance and recommendation rules
+- applies a bounded regime alignment bonus or penalty using the current detected market regime
 - applies lifecycle state multipliers so `under_review`, `degraded`, and `demoted` strategies cannot silently receive full weight
-- freezes or falls back when monitoring data is stale, weak, or low-confidence
+- freezes or falls back when monitoring or regime data is stale, weak, or low-confidence
 - caps weight changes per cycle and re-exports a standard multi-strategy run bundle
 
 Primary artifacts:
@@ -1099,7 +1132,7 @@ Primary artifacts:
 Example:
 
 ```bash
-trading-cli adaptive-allocation build --portfolio artifacts/strategy_portfolio --monitoring artifacts/strategy_monitoring --lifecycle artifacts/governance/strategy_lifecycle.json --policy-config configs/adaptive_allocation.yaml --output-dir artifacts/adaptive_allocation
+trading-cli adaptive-allocation build --portfolio artifacts/strategy_portfolio --monitoring artifacts/strategy_monitoring --lifecycle artifacts/governance/strategy_lifecycle.json --regime artifacts/regime --use-regime --policy-config configs/adaptive_allocation.yaml --output-dir artifacts/adaptive_allocation
 trading-cli adaptive-allocation show --allocation artifacts/adaptive_allocation
 trading-cli adaptive-allocation export-run-config --allocation artifacts/adaptive_allocation --output-dir artifacts/adaptive_allocation_run
 trading-cli paper run-multi-strategy --config artifacts/adaptive_allocation_run/adaptive_allocation_multi_strategy.json --state-path artifacts/paper/adaptive_allocation_state.json --output-dir artifacts/paper/adaptive_allocation
@@ -1112,7 +1145,8 @@ trading-cli strategy-portfolio build --promoted-dir configs/generated_strategies
 trading-cli strategy-portfolio export-run-config --portfolio artifacts/strategy_portfolio --output-dir artifacts/strategy_portfolio_run
 trading-cli paper run-multi-strategy --config artifacts/strategy_portfolio_run/strategy_portfolio_multi_strategy.json --state-path artifacts/paper/strategy_portfolio_state.json --output-dir artifacts/paper/strategy_portfolio
 trading-cli strategy-monitor build --portfolio artifacts/strategy_portfolio --paper-dir artifacts/paper/strategy_portfolio --execution-dir artifacts/paper/strategy_portfolio --allocation-dir artifacts/portfolio/strategy_portfolio --policy-config configs/strategy_monitoring.yaml --output-dir artifacts/strategy_monitoring
-trading-cli adaptive-allocation build --portfolio artifacts/strategy_portfolio --monitoring artifacts/strategy_monitoring --policy-config configs/adaptive_allocation.yaml --output-dir artifacts/adaptive_allocation
+trading-cli regime detect --input artifacts/paper/strategy_portfolio/paper_equity_curve.csv --policy-config configs/market_regime.yaml --output-dir artifacts/regime
+trading-cli adaptive-allocation build --portfolio artifacts/strategy_portfolio --monitoring artifacts/strategy_monitoring --regime artifacts/regime --use-regime --policy-config configs/adaptive_allocation.yaml --output-dir artifacts/adaptive_allocation
 trading-cli adaptive-allocation export-run-config --allocation artifacts/adaptive_allocation --output-dir artifacts/adaptive_allocation_run
 ```
 
@@ -1120,6 +1154,7 @@ Notes:
 
 - the allocator is intentionally modest; it is not a black-box optimizer
 - recommendation penalties, observation minimums, stale-data freezes, and per-cycle weight caps all live in `configs/adaptive_allocation.yaml`
+- regime thresholds live in `configs/market_regime.yaml`, while regime bonuses and penalties live in `configs/adaptive_allocation.yaml`
 - exported configs reuse the same multi-strategy runtime path as static strategy portfolios
 
 ### Fully Automated Pipeline
@@ -1134,9 +1169,10 @@ The repo now includes a lightweight orchestration runner for the promoted-strate
 6. multi-strategy allocation
 7. paper execution
 8. strategy monitoring
-9. optional adaptive next-cycle capital allocation
-10. governance / lifecycle updates
-11. kill-switch recommendation generation
+9. optional market regime detection
+10. optional adaptive next-cycle capital allocation
+11. governance / lifecycle updates
+12. kill-switch recommendation generation
 
 Primary config:
 
@@ -1164,7 +1200,8 @@ trading-cli strategy-validation build --artifacts-root artifacts --policy-config
 trading-cli research promote --artifacts-root artifacts --registry-dir artifacts/research_registry --validation artifacts/strategy_validation --output-dir configs/generated_strategies --policy-config configs/promotion.yaml
 trading-cli strategy-portfolio build --promoted-dir configs/generated_strategies --lifecycle artifacts/governance/strategy_lifecycle.json --policy-config configs/strategy_portfolio.yaml --output-dir artifacts/strategy_portfolio
 trading-cli strategy-monitor build --portfolio artifacts/strategy_portfolio --paper-dir artifacts/paper/strategy_portfolio --execution-dir artifacts/paper/strategy_portfolio --allocation-dir artifacts/portfolio/strategy_portfolio --policy-config configs/strategy_monitoring.yaml --output-dir artifacts/strategy_monitoring
-trading-cli adaptive-allocation build --portfolio artifacts/strategy_portfolio --monitoring artifacts/strategy_monitoring --lifecycle artifacts/governance/strategy_lifecycle.json --policy-config configs/adaptive_allocation.yaml --output-dir artifacts/adaptive_allocation
+trading-cli regime detect --input artifacts/paper/strategy_portfolio/paper_equity_curve.csv --policy-config configs/market_regime.yaml --output-dir artifacts/regime
+trading-cli adaptive-allocation build --portfolio artifacts/strategy_portfolio --monitoring artifacts/strategy_monitoring --lifecycle artifacts/governance/strategy_lifecycle.json --regime artifacts/regime --use-regime --policy-config configs/adaptive_allocation.yaml --output-dir artifacts/adaptive_allocation
 trading-cli strategy-governance apply --promoted-dir configs/generated_strategies --validation artifacts/strategy_validation --monitoring artifacts/strategy_monitoring --adaptive-allocation artifacts/adaptive_allocation --lifecycle artifacts/governance/strategy_lifecycle.json --policy-config configs/strategy_governance.yaml --output-dir artifacts/strategy_governance
 ```
 
@@ -1178,6 +1215,7 @@ Scheduling guidance:
 
 - Linux/macOS: run `trading-cli orchestrate run --config configs/orchestration.yaml` from cron
 - Windows: run the same command from Task Scheduler
+- when enabled, the regime stage will use `market_regime_input_path` if set, otherwise it falls back to `paper_equity_curve.csv`
 - the adaptive stage is optional and writes a next-cycle bundle only; it does not change the already-completed paper cycle
 - keep `schedule_frequency` aligned with the external scheduler so artifact history stays readable
 

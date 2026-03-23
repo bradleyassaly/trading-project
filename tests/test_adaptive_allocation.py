@@ -36,6 +36,7 @@ def _write_strategy_portfolio(root: Path) -> Path:
                         "promotion_status": "active",
                         "allocation_weight": 0.6,
                         "target_capital_fraction": 0.6,
+                        "regime_compatibility": ["trend", "low_vol"],
                         "generated_preset_path": str(root / "generated_momentum_a.json"),
                     },
                     {
@@ -46,6 +47,7 @@ def _write_strategy_portfolio(root: Path) -> Path:
                         "promotion_status": "active",
                         "allocation_weight": 0.4,
                         "target_capital_fraction": 0.4,
+                        "regime_compatibility": ["mean_reversion", "low_vol"],
                         "generated_preset_path": str(root / "generated_value_b.json"),
                     },
                 ],
@@ -95,6 +97,23 @@ def _write_strategy_monitoring(root: Path, *, generated_at: str = "2026-03-22T00
         ),
         encoding="utf-8",
     )
+    return root
+
+
+def _write_market_regime(root: Path, *, regime_label: str = "trend", generated_at: str = "2026-03-22T00:00:00+00:00") -> Path:
+    root.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "generated_at": generated_at,
+        "latest": {
+            "timestamp": generated_at,
+            "regime_label": regime_label,
+            "confidence_score": 0.8,
+            "realized_volatility": 0.18,
+            "long_return": 0.09,
+        },
+        "history": [],
+    }
+    (root / "market_regime.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
     return root
 
 
@@ -202,15 +221,49 @@ def test_adaptive_allocation_respects_lifecycle_state_caps(tmp_path: Path) -> No
     assert rows["generated_value_b"]["adjusted_weight"] == 0.0
 
 
+def test_adaptive_allocation_uses_regime_alignment(tmp_path: Path) -> None:
+    portfolio_dir = _write_strategy_portfolio(tmp_path / "strategy_portfolio")
+    monitoring_dir = _write_strategy_monitoring(tmp_path / "monitoring")
+    regime_dir = _write_market_regime(tmp_path / "regime", regime_label="trend")
+
+    build_adaptive_allocation(
+        strategy_portfolio_path=portfolio_dir,
+        strategy_monitoring_path=monitoring_dir,
+        market_regime_path=regime_dir,
+        output_dir=tmp_path / "adaptive",
+        policy=AdaptiveAllocationPolicyConfig(
+            weighting_mode="equal_weight",
+            regime_alignment_bonus=1.2,
+            regime_misalignment_penalty=0.8,
+            max_upweight_per_cycle=0.30,
+            max_downweight_per_cycle=0.30,
+            max_weight_per_strategy=0.8,
+            rebalance_smoothing=1.0,
+            require_min_observations=5,
+        ),
+    )
+
+    payload = load_adaptive_allocation(tmp_path / "adaptive")
+    rows = {row["preset_name"]: row for row in payload["strategies"]}
+
+    assert payload["summary"]["current_regime_label"] == "trend"
+    assert rows["generated_momentum_a"]["adjusted_weight"] > rows["generated_value_b"]["adjusted_weight"]
+    assert "regime_aligned:trend" in rows["generated_momentum_a"]["reason_for_adjustment"]
+    assert "regime_misaligned:trend" in rows["generated_value_b"]["reason_for_adjustment"]
+
+
 def test_adaptive_allocation_cli_commands_write_outputs(tmp_path: Path, capsys) -> None:
     portfolio_dir = _write_strategy_portfolio(tmp_path / "strategy_portfolio")
     monitoring_dir = _write_strategy_monitoring(tmp_path / "monitoring")
+    _write_market_regime(tmp_path / "regime")
 
     cmd_adaptive_allocation_build(
         Namespace(
             portfolio=str(portfolio_dir),
             monitoring=str(monitoring_dir),
             lifecycle=None,
+            regime=str(tmp_path / "regime"),
+            use_regime=True,
             policy_config=None,
             output_dir=str(tmp_path / "adaptive"),
             dry_run=False,

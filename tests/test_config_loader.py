@@ -14,6 +14,7 @@ from trading_platform.config.loader import (
     load_research_workflow_config,
     load_automated_orchestration_config,
     load_adaptive_allocation_policy_config,
+    load_market_regime_policy_config,
     load_strategy_governance_policy_config,
     load_strategy_portfolio_policy_config,
     load_strategy_monitoring_policy_config,
@@ -395,6 +396,35 @@ freeze_on_low_confidence: false
     assert config.require_min_observations == 8
 
 
+def test_load_market_regime_policy_config_from_yaml(tmp_path) -> None:
+    path = tmp_path / "market_regime.yaml"
+    path.write_text(
+        """
+schema_version: 1
+short_return_window: 15
+long_return_window: 63
+volatility_window: 20
+dispersion_window: 10
+high_volatility_threshold: 0.3
+low_volatility_threshold: 0.1
+trend_return_threshold: 0.05
+flat_return_threshold: 0.01
+confidence_floor: 0.25
+allow_paper_equity_curve_proxy: true
+strategy_family_regime_map:
+  momentum: [trend]
+  value: [mean_reversion, low_vol]
+""".strip(),
+        encoding="utf-8",
+    )
+
+    config = load_market_regime_policy_config(path)
+
+    assert config.short_return_window == 15
+    assert config.high_volatility_threshold == 0.3
+    assert config.strategy_family_regime_map["momentum"] == ["trend"]
+
+
 def test_load_strategy_governance_policy_config_from_yaml(tmp_path) -> None:
     path = tmp_path / "strategy_governance.yaml"
     path.write_text(
@@ -432,6 +462,7 @@ promotion_policy_config_path: configs/promotion.yaml
 strategy_validation_policy_config_path: configs/strategy_validation.yaml
 strategy_portfolio_policy_config_path: configs/strategy_portfolio.yaml
 strategy_monitoring_policy_config_path: configs/strategy_monitoring.yaml
+market_regime_policy_config_path: configs/market_regime.yaml
 adaptive_allocation_policy_config_path: configs/adaptive_allocation.yaml
 strategy_governance_policy_config_path: configs/strategy_governance.yaml
 strategy_lifecycle_path: artifacts/governance/strategy_lifecycle.json
@@ -446,6 +477,7 @@ stages:
   allocation: true
   paper: true
   monitoring: true
+  regime: true
   adaptive_allocation: true
   governance: true
   kill_switch: true
@@ -458,6 +490,7 @@ stages:
     assert config.run_name == "auto"
     assert config.max_promotions_per_run == 2
     assert config.stages.validation is True
+    assert config.stages.regime is True
     assert config.stages.adaptive_allocation is True
     assert config.stages.governance is True
     assert config.stages.kill_switch is True
@@ -476,6 +509,7 @@ def test_example_configs_load_from_repo() -> None:
     strategy_validation_config = load_strategy_validation_policy_config(root / "configs" / "strategy_validation.yaml")
     strategy_portfolio_config = load_strategy_portfolio_policy_config(root / "configs" / "strategy_portfolio.yaml")
     strategy_monitoring_config = load_strategy_monitoring_policy_config(root / "configs" / "strategy_monitoring.yaml")
+    market_regime_config = load_market_regime_policy_config(root / "configs" / "market_regime.yaml")
     adaptive_allocation_config = load_adaptive_allocation_policy_config(root / "configs" / "adaptive_allocation.yaml")
     strategy_governance_config = load_strategy_governance_policy_config(root / "configs" / "strategy_governance.yaml")
     orchestration_config = load_automated_orchestration_config(root / "configs" / "orchestration.yaml")
@@ -491,6 +525,7 @@ def test_example_configs_load_from_repo() -> None:
     assert strategy_validation_config.min_folds >= 1
     assert strategy_portfolio_config.selection_metric == "ranking_value"
     assert strategy_monitoring_config.kill_switch_mode == "recommendation_only"
+    assert market_regime_config.short_return_window >= 1
     assert adaptive_allocation_config.weighting_mode in {"performance_tilted", "drawdown_penalized", "score_scaled", "equal_weight"}
     assert strategy_governance_config.demote_after_deactivate_events >= 1
     assert orchestration_config.schedule_frequency == "manual"

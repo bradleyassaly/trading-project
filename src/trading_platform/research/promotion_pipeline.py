@@ -14,6 +14,7 @@ from trading_platform.governance.models import (
 )
 from trading_platform.governance.persistence import save_strategy_registry
 from trading_platform.orchestration.models import OrchestrationStageToggles, PipelineRunConfig
+from trading_platform.regime.service import infer_strategy_regime_compatibility
 from trading_platform.research.registry import load_research_manifests
 
 try:
@@ -203,6 +204,10 @@ def _build_generated_preset_payload(
     artifact_paths = manifest.get("artifact_paths", {})
     approved_model_state = artifact_paths.get("approved_model_state_deployment_path") or artifact_paths.get("approved_model_state_path")
     composite_settings = manifest.get("diagnostics_snapshot", {}).get("composite_portfolio", {})
+    regime_compatibility = infer_strategy_regime_compatibility(
+        signal_family=str(manifest.get("signal_family") or ""),
+        strategy_name="composite_alpha",
+    )
     horizon = manifest.get("top_candidate", {}).get("horizon") or (
         (manifest.get("evaluation_periods", {}).get("horizons") or [1])[0]
     )
@@ -241,6 +246,7 @@ def _build_generated_preset_payload(
             "promotion_recommendation": candidate.get("promotion_recommendation"),
             "reasons": [part.strip() for part in str(candidate.get("reasons") or "").split(";") if part.strip()],
             "warnings": warnings,
+            "regime_compatibility": regime_compatibility,
             "artifact_dir": manifest.get("artifact_dir"),
             "approved_model_state_path": approved_model_state,
         },
@@ -448,6 +454,10 @@ def apply_research_promotions(
             "signal_family": manifest.get("signal_family"),
             "strategy_name": "composite_alpha",
             "universe": manifest.get("universe"),
+            "regime_compatibility": infer_strategy_regime_compatibility(
+                signal_family=str(manifest.get("signal_family") or ""),
+                strategy_name="composite_alpha",
+            ),
             "ranking_metric": policy.metric_name,
             "ranking_value": manifest.get("top_metrics", {}).get(policy.metric_name),
             "validation_status": validation_row.get("validation_status") if validation_row else None,

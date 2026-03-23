@@ -67,6 +67,8 @@ from trading_platform.cli.commands.research_promote import cmd_research_promote
 from trading_platform.cli.commands.research_promotion_candidates import cmd_research_promotion_candidates
 from trading_platform.cli.commands.research_refresh import cmd_research_refresh
 from trading_platform.cli.commands.research_registry_build import cmd_research_registry_build
+from trading_platform.cli.commands.regime_detect import cmd_regime_detect
+from trading_platform.cli.commands.regime_show import cmd_regime_show
 from trading_platform.cli.commands.registry_build_multi_strategy_config import cmd_registry_build_multi_strategy_config
 from trading_platform.cli.commands.registry_demote import cmd_registry_demote
 from trading_platform.cli.commands.registry_evaluate_degradation import cmd_registry_evaluate_degradation
@@ -961,10 +963,23 @@ def build_parser() -> argparse.ArgumentParser:
     adaptive_allocation_build.add_argument("--portfolio", type=str, required=True, help="Path to strategy_portfolio.json or its parent directory.")
     adaptive_allocation_build.add_argument("--monitoring", type=str, required=True, help="Path to strategy_monitoring.json or its parent directory.")
     adaptive_allocation_build.add_argument("--lifecycle", type=str, default=None, help="Optional strategy_lifecycle.json path or directory used to cap weights by governance state.")
+    adaptive_allocation_build.add_argument("--regime", type=str, default=None, help="Optional market_regime.json path or directory used for regime-aware adjustments.")
+    adaptive_allocation_build.add_argument("--use-regime", action="store_true", help="Apply regime-aware modifiers using --regime.")
     adaptive_allocation_build.add_argument("--policy-config", type=str, default=None, help="Optional adaptive allocation policy JSON/YAML file.")
     adaptive_allocation_build.add_argument("--output-dir", type=str, required=True, help="Directory where adaptive allocation artifacts will be written.")
     adaptive_allocation_build.add_argument("--dry-run", action="store_true", help="Mark the adaptive allocation snapshot as dry-run output.")
     adaptive_allocation_build.set_defaults(func=cmd_adaptive_allocation_build)
+
+    regime_parser = subparsers.add_parser("regime", help="Detect and inspect simple market regime artifacts")
+    regime_subparsers = regime_parser.add_subparsers(dest="regime_command", required=True)
+    regime_detect = regime_subparsers.add_parser("detect", help="Detect a simple market regime from price or equity history")
+    regime_detect.add_argument("--input", type=str, required=True, help="CSV file or directory containing price/equity history.")
+    regime_detect.add_argument("--policy-config", type=str, default=None, help="Optional market regime policy JSON/YAML file.")
+    regime_detect.add_argument("--output-dir", type=str, required=True, help="Directory where market regime artifacts will be written.")
+    regime_detect.set_defaults(func=cmd_regime_detect)
+    regime_show = regime_subparsers.add_parser("show", help="Print a concise summary of a market regime artifact")
+    regime_show.add_argument("--regime", type=str, required=True, help="Path to market_regime.json or its parent directory.")
+    regime_show.set_defaults(func=cmd_regime_show)
 
     strategy_validation_parser = subparsers.add_parser("strategy-validation", help="Build walk-forward validation snapshots from research manifests")
     strategy_validation_subparsers = strategy_validation_parser.add_subparsers(dest="strategy_validation_command", required=True)
