@@ -116,6 +116,8 @@ class DashboardDataService:
             run_dir = summary_path.parent
             stage_records = payload.get("stage_records", [])
             outputs = payload.get("outputs", {})
+            system_eval = _safe_read_json(run_dir / "system_evaluation.json")
+            system_row = system_eval.get("row", {})
             rows.append(
                 {
                     "run_id": payload.get("run_id"),
@@ -125,8 +127,12 @@ class DashboardDataService:
                     "ended_at": payload.get("ended_at"),
                     "status": payload.get("status", "unknown"),
                     "schedule_frequency": payload.get("schedule_frequency"),
+                    "experiment_name": payload.get("experiment_name"),
+                    "feature_flags": payload.get("feature_flags", {}),
                     "failed_stage_count": sum(1 for row in stage_records if row.get("status") == "failed"),
                     "selected_strategy_count": outputs.get("selected_strategy_count", 0),
+                    "total_return": system_row.get("total_return"),
+                    "sharpe": system_row.get("sharpe"),
                     "warning_strategy_count": outputs.get("warning_strategy_count", 0),
                     "kill_switch_recommendation_count": outputs.get("kill_switch_recommendation_count", 0),
                 }
@@ -464,6 +470,26 @@ class DashboardDataService:
             "stage_records": payload.get("stage_records", []),
         }
 
+    def system_evaluation_payload(self) -> dict[str, Any]:
+        latest = _latest_matching_file(self.artifacts_root, ["system_evaluation.json"])
+        payload = _safe_read_json(latest)
+        return {
+            "generated_at": _now_utc(),
+            "system_evaluation_path": str(latest) if latest is not None else None,
+            "row": payload.get("row", {}),
+            "metrics": payload.get("metrics", {}),
+        }
+
+    def system_evaluation_history_payload(self) -> dict[str, Any]:
+        latest = _latest_matching_file(self.artifacts_root, ["system_evaluation_history.json"])
+        payload = _safe_read_json(latest)
+        return {
+            "generated_at": _now_utc(),
+            "system_evaluation_history_path": str(latest) if latest is not None else None,
+            "summary": payload.get("summary", {}),
+            "rows": payload.get("rows", [])[:50],
+        }
+
     def overview_payload(self) -> dict[str, Any]:
         latest_run = self.latest_run_payload()
         registry = self.registry_payload()
@@ -476,6 +502,8 @@ class DashboardDataService:
         adaptive_allocation = self.adaptive_allocation_payload()
         market_regime = self.market_regime_payload()
         orchestration = self.latest_automated_orchestration_payload()
+        system_eval = self.system_evaluation_payload()
+        system_eval_history = self.system_evaluation_history_payload()
         validation = self.strategy_validation_payload()
         lifecycle = self.strategy_lifecycle_payload()
         latest_run_summary = latest_run.get("summary", {})
@@ -488,6 +516,7 @@ class DashboardDataService:
             {"label": "registry", "path": registry.get("registry_path")},
             {"label": "portfolio", "path": portfolio.get("artifact_dir")},
             {"label": "adaptive_allocation", "path": adaptive_allocation.get("adaptive_allocation_path")},
+            {"label": "system_evaluation", "path": system_eval.get("system_evaluation_path")},
             {"label": "execution", "path": execution.get("artifact_dir")},
             {"label": "live_submit", "path": live.get("submission_artifact_dir")},
         ]
@@ -542,6 +571,12 @@ class DashboardDataService:
                 "status": orchestration.get("summary", {}).get("status"),
                 "selected_strategy_count": orchestration.get("summary", {}).get("outputs", {}).get("selected_strategy_count", 0),
             },
+            "system_evaluation": {
+                "total_return": system_eval.get("row", {}).get("total_return"),
+                "sharpe": system_eval.get("row", {}).get("sharpe"),
+                "max_drawdown": system_eval.get("row", {}).get("max_drawdown"),
+                "best_run_id": system_eval_history.get("summary", {}).get("best_run_id"),
+            },
             "portfolio": {
                 "generated_position_count": len(portfolio.get("combined_positions", [])),
                 "gross_exposure": portfolio_summary.get("gross_exposure_after_constraints"),
@@ -582,6 +617,7 @@ class DashboardDataService:
             "generated_at": _now_utc(),
             "runs": self.recent_runs(),
             "orchestration_runs": self.recent_orchestration_runs(),
+            "system_evaluation": self.system_evaluation_history_payload(),
         }
 
     def latest_run_detail_payload(self) -> dict[str, Any]:

@@ -90,6 +90,9 @@ from trading_platform.cli.commands.strategy_monitor_show import cmd_strategy_mon
 from trading_platform.cli.commands.strategy_governance_apply import cmd_strategy_governance_apply
 from trading_platform.cli.commands.strategy_lifecycle_show import cmd_strategy_lifecycle_show
 from trading_platform.cli.commands.strategy_lifecycle_update import cmd_strategy_lifecycle_update
+from trading_platform.cli.commands.system_eval_build import cmd_system_eval_build
+from trading_platform.cli.commands.system_eval_compare import cmd_system_eval_compare
+from trading_platform.cli.commands.system_eval_show import cmd_system_eval_show
 from trading_platform.cli.commands.validate_signal import cmd_validate_signal
 from trading_platform.cli.commands.validate_live import cmd_validate_live
 from trading_platform.cli.commands.walkforward import cmd_walkforward
@@ -1045,5 +1048,24 @@ def build_parser() -> argparse.ArgumentParser:
     orchestrate_loop.add_argument("--config", type=str, required=True, help="Path to the automated orchestration JSON/YAML config.")
     orchestrate_loop.add_argument("--max-iterations", type=int, default=None, help="Optional maximum iterations before the loop exits.")
     orchestrate_loop.set_defaults(func=cmd_orchestrate_loop)
+
+    system_eval_parser = subparsers.add_parser("system-eval", help="Build and compare full-system evaluation artifacts across orchestration runs")
+    system_eval_subparsers = system_eval_parser.add_subparsers(dest="system_eval_command", required=True)
+    system_eval_build = system_eval_subparsers.add_parser("build", help="Scan orchestration runs and build system evaluation history artifacts")
+    system_eval_build.add_argument("--runs-root", type=str, required=True, help="Root directory containing timestamped orchestration runs.")
+    system_eval_build.add_argument("--output-dir", type=str, required=True, help="Directory where system evaluation history artifacts will be written.")
+    system_eval_build.set_defaults(func=cmd_system_eval_build)
+    system_eval_show = system_eval_subparsers.add_parser("show", help="Print a concise summary of a system evaluation artifact")
+    system_eval_show.add_argument("--evaluation", type=str, required=True, help="Path to system_evaluation.json or its parent directory.")
+    system_eval_show.set_defaults(func=cmd_system_eval_show)
+    system_eval_compare = system_eval_subparsers.add_parser("compare", help="Compare system evaluation groups across run history")
+    system_eval_compare.add_argument("--history", type=str, required=True, help="Path to system_evaluation_history.json, its parent directory, or an orchestration runs root.")
+    system_eval_compare.add_argument("--output-dir", type=str, required=True, help="Directory where comparison artifacts will be written.")
+    system_eval_compare.add_argument("--latest-count", type=int, default=10, help="Number of most recent runs to include in group A when feature-flag grouping is not used.")
+    system_eval_compare.add_argument("--previous-count", type=int, default=None, help="Optional number of older runs to include in group B when feature-flag grouping is not used.")
+    system_eval_compare.add_argument("--feature-flag", type=str, default=None, help="Optional feature flag name used to split runs into A/B groups.")
+    system_eval_compare.add_argument("--value-a", type=str, default="true", help="Feature-flag value for group A when --feature-flag is used.")
+    system_eval_compare.add_argument("--value-b", type=str, default="false", help="Feature-flag value for group B when --feature-flag is used.")
+    system_eval_compare.set_defaults(func=cmd_system_eval_compare)
 
     return parser

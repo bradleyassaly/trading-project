@@ -102,6 +102,8 @@ class AutomatedOrchestrationConfig:
     run_name: str
     schedule_frequency: str
     research_artifacts_root: str
+    experiment_name: str | None = None
+    feature_flags: dict[str, Any] = field(default_factory=dict)
     output_root_dir: str = "artifacts/orchestration_runs"
     registry_output_dir: str | None = None
     validation_output_dir: str | None = None
@@ -221,6 +223,8 @@ class AutomatedOrchestrationResult:
     run_id: str
     run_name: str
     schedule_frequency: str
+    experiment_name: str | None
+    feature_flags: dict[str, Any]
     started_at: str
     ended_at: str
     status: str
@@ -235,6 +239,8 @@ class AutomatedOrchestrationResult:
             "run_id": self.run_id,
             "run_name": self.run_name,
             "schedule_frequency": self.schedule_frequency,
+            "experiment_name": self.experiment_name,
+            "feature_flags": self.feature_flags,
             "started_at": self.started_at,
             "ended_at": self.ended_at,
             "status": self.status,
@@ -313,6 +319,7 @@ def _render_markdown_summary(result: AutomatedOrchestrationResult) -> str:
         "",
         f"- Run id: `{result.run_id}`",
         f"- Schedule: `{result.schedule_frequency}`",
+        f"- Experiment: `{result.experiment_name or 'n/a'}`",
         f"- Started: `{result.started_at}`",
         f"- Ended: `{result.ended_at}`",
         f"- Status: `{result.status}`",
@@ -347,6 +354,9 @@ def _render_markdown_summary(result: AutomatedOrchestrationResult) -> str:
                 f"- Kill-switch recommendations: `{outputs.get('kill_switch_recommendation_count', 0)}`",
             ]
         )
+    if result.feature_flags:
+        lines.extend(["", "## Feature Flags"])
+        lines.extend([f"- `{key}`: `{value}`" for key, value in sorted(result.feature_flags.items())])
     return "\n".join(lines) + "\n"
 
 
@@ -365,11 +375,16 @@ def _write_run_artifacts(config: AutomatedOrchestrationConfig, result: Automated
     config_path.write_text(json.dumps(config.to_dict(), indent=2, default=str), encoding="utf-8")
     if result.errors:
         errors_path.write_text(json.dumps(result.errors, indent=2, default=str), encoding="utf-8")
+    from trading_platform.system_evaluation.service import evaluate_orchestration_run
+
+    system_eval_payload = evaluate_orchestration_run(run_dir=run_dir, output_dir=run_dir)
     return {
         "orchestration_run_json_path": run_json_path,
         "orchestration_run_md_path": run_md_path,
         "stage_status_path": stage_csv_path,
         "orchestration_config_snapshot_path": config_path,
+        "system_evaluation_json_path": Path(system_eval_payload["system_evaluation_json_path"]),
+        "system_evaluation_csv_path": Path(system_eval_payload["system_evaluation_csv_path"]),
         **({"errors_path": errors_path} if result.errors else {}),
     }
 
@@ -823,6 +838,8 @@ def run_automated_orchestration(config: AutomatedOrchestrationConfig) -> tuple[A
         run_id=run_id,
         run_name=config.run_name,
         schedule_frequency=config.schedule_frequency,
+        experiment_name=config.experiment_name,
+        feature_flags=dict(sorted(config.feature_flags.items())),
         started_at=started_at,
         ended_at=ended_at,
         status=status,

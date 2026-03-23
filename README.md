@@ -225,6 +225,8 @@ Key API endpoints:
 - `/api/research/latest`
 - `/api/adaptive-allocation/latest`
 - `/api/regime/latest`
+- `/api/system-eval/latest`
+- `/api/system-eval/history`
 - `/api/strategies`
 - `/api/portfolio/latest`
 - `/api/execution/latest`
@@ -1225,6 +1227,54 @@ Debugging failed runs:
 - inspect `stage_status.csv` for per-stage status and timing
 - inspect the stage-specific artifact directory under the timestamped run folder
 - rerun a single step manually with the existing CLI commands if you need deeper debugging
+
+### Evaluating System Performance
+
+The platform now includes a lightweight system-level evaluation layer for full orchestration runs. It is intended to answer questions like:
+
+- did regime-aware allocation improve paper outcomes over the last month?
+- are adaptive runs outperforming static runs?
+- did a new promotion or governance policy help or just add churn?
+
+The evaluator is file-based and reads existing run artifacts such as:
+
+- `orchestration_run.json`
+- `orchestration_config_snapshot.json`
+- `paper_equity_curve.csv`
+- paper summary, governance, kill-switch, and regime artifacts when present
+
+Primary artifacts:
+
+- `system_evaluation.json`
+- `system_evaluation.csv`
+- `system_evaluation_history.json`
+- `system_evaluation_history.csv`
+- `system_evaluation_compare.json`
+- `system_evaluation_compare.md`
+
+Recommended workflow:
+
+1. Tag orchestration configs with `experiment_name` and `feature_flags`.
+2. Run the orchestrator normally.
+3. Build system evaluation history across completed runs.
+4. Compare recent cohorts or feature-flag groups.
+5. Use the dashboard `Runs` view and system-evaluation API payloads to inspect trends.
+
+Example commands:
+
+```bash
+trading-cli orchestrate run --config configs/orchestration.yaml
+trading-cli system-eval build --runs-root artifacts/orchestration_runs --output-dir artifacts/system_evaluation
+trading-cli system-eval show --evaluation artifacts/system_evaluation
+trading-cli system-eval compare --history artifacts/system_evaluation --output-dir artifacts/system_evaluation_compare --latest-count 10 --previous-count 10
+trading-cli system-eval compare --history artifacts/system_evaluation --output-dir artifacts/system_evaluation_compare_regime --feature-flag regime --value-a true --value-b false
+```
+
+Interpretation guidance:
+
+- prefer repeated improvements in total return, Sharpe proxy, and drawdown rather than single-run wins
+- compare warning counts and kill-switch counts alongside returns so higher performance is not coming from weaker controls
+- keep feature-flag A/B comparisons simple and transparent; this layer does not try to do heavy statistical inference
 
 ### Paper Trading
 

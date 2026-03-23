@@ -52,6 +52,10 @@ def test_load_automated_orchestration_config_from_yaml(tmp_path: Path) -> None:
 run_name: auto
 schedule_frequency: daily
 research_artifacts_root: artifacts
+experiment_name: ab_test
+feature_flags:
+  regime: true
+  adaptive: true
 output_root_dir: artifacts/orchestration_runs
 promotion_policy_config_path: configs/promotion.yaml
 strategy_validation_policy_config_path: configs/strategy_validation.yaml
@@ -83,6 +87,8 @@ stages:
     config = load_automated_orchestration_config(path)
 
     assert config.run_name == "auto"
+    assert config.experiment_name == "ab_test"
+    assert config.feature_flags["adaptive"] is True
     assert config.schedule_frequency == "daily"
     assert config.max_promotions_per_run == 2
     assert config.stages.validation is True
@@ -260,6 +266,7 @@ def test_automated_orchestration_stage_sequencing_and_artifact_passing(monkeypat
     result, paths = run_automated_orchestration(config)
 
     assert result.status == "succeeded"
+    assert result.experiment_name is None
     assert result.outputs["validated_pass_count"] == 1
     assert result.outputs["selected_strategy_count"] == 1
     assert result.outputs["current_regime_label"] == "trend"

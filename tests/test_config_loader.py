@@ -457,6 +457,10 @@ def test_load_automated_orchestration_config_from_yaml(tmp_path) -> None:
 run_name: auto
 schedule_frequency: manual
 research_artifacts_root: artifacts
+experiment_name: ab_test
+feature_flags:
+  regime: true
+  adaptive: false
 output_root_dir: artifacts/orchestration_runs
 promotion_policy_config_path: configs/promotion.yaml
 strategy_validation_policy_config_path: configs/strategy_validation.yaml
@@ -488,6 +492,8 @@ stages:
     config = load_automated_orchestration_config(path)
 
     assert config.run_name == "auto"
+    assert config.experiment_name == "ab_test"
+    assert config.feature_flags["regime"] is True
     assert config.max_promotions_per_run == 2
     assert config.stages.validation is True
     assert config.stages.regime is True
@@ -529,4 +535,6 @@ def test_example_configs_load_from_repo() -> None:
     assert adaptive_allocation_config.weighting_mode in {"performance_tilted", "drawdown_penalized", "score_scaled", "equal_weight"}
     assert strategy_governance_config.demote_after_deactivate_events >= 1
     assert orchestration_config.schedule_frequency == "manual"
+    assert orchestration_config.experiment_name == "baseline_regime_adaptive"
+    assert orchestration_config.feature_flags["regime"] is True
     assert minimal_demo_config.schedule_type == "ad_hoc"

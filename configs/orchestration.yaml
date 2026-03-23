@@ -1,6 +1,11 @@
 run_name: automated_promotion_loop
 schedule_frequency: manual
 research_artifacts_root: artifacts
+experiment_name: baseline_regime_adaptive
+feature_flags:
+  regime: true
+  adaptive: true
+  governance: true
 output_root_dir: artifacts/orchestration_runs
 validation_output_dir: artifacts/orchestration_runs/validation
 promotion_policy_config_path: configs/promotion.yaml

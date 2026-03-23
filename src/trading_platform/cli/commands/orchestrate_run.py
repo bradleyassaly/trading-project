@@ -11,6 +11,7 @@ def _print_orchestration_summary(result, artifact_paths) -> None:
     print(f"Run id: {result.run_id}")
     print(f"Run name: {result.run_name}")
     print(f"Schedule: {result.schedule_frequency}")
+    print(f"Experiment: {getattr(result, 'experiment_name', None) or 'n/a'}")
     print(f"Status: {result.status}")
     print("Stages:")
     for record in result.stage_records:

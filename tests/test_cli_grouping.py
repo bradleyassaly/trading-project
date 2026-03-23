@@ -696,6 +696,69 @@ def test_grouped_orchestrate_loop_command_parses() -> None:
     assert args.max_iterations == 2
 
 
+def test_grouped_system_eval_build_command_parses() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "system-eval",
+            "build",
+            "--runs-root",
+            "artifacts/orchestration_runs",
+            "--output-dir",
+            "artifacts/system_eval",
+        ]
+    )
+
+    assert args.command_family == "system-eval"
+    assert args.system_eval_command == "build"
+    assert args.runs_root == "artifacts/orchestration_runs"
+
+
+def test_grouped_system_eval_show_command_parses() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "system-eval",
+            "show",
+            "--evaluation",
+            "artifacts/system_eval",
+        ]
+    )
+
+    assert args.command_family == "system-eval"
+    assert args.system_eval_command == "show"
+    assert args.evaluation == "artifacts/system_eval"
+
+
+def test_grouped_system_eval_compare_command_parses() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "system-eval",
+            "compare",
+            "--history",
+            "artifacts/system_eval",
+            "--output-dir",
+            "artifacts/system_eval_compare",
+            "--latest-count",
+            "5",
+            "--previous-count",
+            "5",
+            "--feature-flag",
+            "regime",
+            "--value-a",
+            "true",
+            "--value-b",
+            "false",
+        ]
+    )
+
+    assert args.command_family == "system-eval"
+    assert args.system_eval_command == "compare"
+    assert args.feature_flag == "regime"
+    assert args.latest_count == 5
+
+
 def test_grouped_strategy_validation_build_command_parses() -> None:
     parser = build_parser()
     args = parser.parse_args(
