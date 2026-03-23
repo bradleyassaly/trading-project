@@ -131,6 +131,15 @@ def _clean_optional_text(value: Any) -> str | None:
     return text or None
 
 
+def _clean_optional_reason(value: Any) -> str | None:
+    text = _clean_optional_text(value)
+    if text is None:
+        return None
+    if text.casefold() in {"none", "null", "n/a", "na"}:
+        return None
+    return text
+
+
 def _safe_read_json(path: str | Path | None) -> dict[str, Any]:
     if path is None:
         return {}
@@ -185,6 +194,40 @@ def _first_row(frame: pd.DataFrame) -> dict[str, Any]:
     if frame.empty:
         return {}
     return frame.iloc[0].to_dict()
+
+
+def _metric_from_row(row: dict[str, Any], *names: str) -> float | None:
+    for name in names:
+        value = _safe_float(row.get(name))
+        if value is not None:
+            return value
+    return None
+
+
+def _repair_manifest_portfolio_metrics(manifest: dict[str, Any]) -> dict[str, Any]:
+    top_metrics = manifest.setdefault("top_metrics", {})
+    top_metrics["rejection_reason"] = _clean_optional_reason(top_metrics.get("rejection_reason"))
+    top_candidate = manifest.setdefault("top_candidate", {})
+    top_candidate["rejection_reason"] = _clean_optional_reason(top_candidate.get("rejection_reason"))
+    if _safe_float(top_metrics.get("portfolio_sharpe")) is not None:
+        manifest["promotion_recommendation"] = evaluate_manifest_promotion_readiness(manifest).to_dict()
+        return manifest
+    artifact_paths = manifest.get("artifact_paths", {})
+    portfolio_metrics_df = _safe_read_csv(artifact_paths.get("portfolio_metrics_path"))
+    top_portfolio = (
+        _top_row_by_metric(portfolio_metrics_df, "portfolio_sharpe")
+        or _top_row_by_metric(portfolio_metrics_df, "sharpe")
+    )
+    portfolio_sharpe = _metric_from_row(top_portfolio, "portfolio_sharpe", "sharpe")
+    if portfolio_sharpe is None:
+        return manifest
+    top_metrics["portfolio_sharpe"] = portfolio_sharpe
+    if _safe_float(top_metrics.get("portfolio_total_return")) is None:
+        top_metrics["portfolio_total_return"] = _metric_from_row(top_portfolio, "portfolio_total_return", "total_return")
+    if _safe_float(top_metrics.get("portfolio_max_drawdown")) is None:
+        top_metrics["portfolio_max_drawdown"] = _metric_from_row(top_portfolio, "portfolio_max_drawdown", "max_drawdown")
+    manifest["promotion_recommendation"] = evaluate_manifest_promotion_readiness(manifest).to_dict()
+    return manifest
 
 
 def _sorted_unique_strings(values: list[Any]) -> list[str]:
@@ -267,8 +310,7 @@ def evaluate_manifest_promotion_readiness(
             f"implementability_return_drag {return_drag} > {active_rules.max_implementability_return_drag}"
         )
 
-    rejection_reason = top_metrics.get("rejection_reason")
-    rejection_reason = _clean_optional_text(rejection_reason)
+    rejection_reason = _clean_optional_reason(top_metrics.get("rejection_reason"))
     if rejection_reason:
         reasons.append(f"top_candidate_rejection_reason: {rejection_reason}")
 
@@ -324,7 +366,10 @@ def build_research_run_manifest(
     diagnostics = _safe_read_json(normalized_artifacts.get("signal_diagnostics_path"))
 
     top_candidate = _top_row_by_metric(leaderboard_df, "mean_spearman_ic")
-    top_portfolio = _top_row_by_metric(portfolio_metrics_df, "sharpe")
+    top_portfolio = (
+        _top_row_by_metric(portfolio_metrics_df, "portfolio_sharpe")
+        or _top_row_by_metric(portfolio_metrics_df, "sharpe")
+    )
     top_implementability = _first_row(implementability_report_df)
 
     manifest_timestamp = timestamp or _now_utc()
@@ -361,19 +406,19 @@ def build_research_run_manifest(
             "mean_spearman_ic": _safe_float(top_candidate.get("mean_spearman_ic")),
             "mean_hit_rate": _safe_float(top_candidate.get("mean_hit_rate")),
             "mean_turnover": _safe_float(top_candidate.get("mean_turnover")),
-            "portfolio_sharpe": _safe_float(top_portfolio.get("sharpe")),
-            "portfolio_total_return": _safe_float(top_portfolio.get("total_return")),
-            "portfolio_max_drawdown": _safe_float(top_portfolio.get("max_drawdown")),
+            "portfolio_sharpe": _metric_from_row(top_portfolio, "portfolio_sharpe", "sharpe"),
+            "portfolio_total_return": _metric_from_row(top_portfolio, "portfolio_total_return", "total_return"),
+            "portfolio_max_drawdown": _metric_from_row(top_portfolio, "portfolio_max_drawdown", "max_drawdown"),
             "implementability_return_drag": _safe_float(top_implementability.get("return_drag")),
             "promotion_status": _clean_optional_text(top_candidate.get("promotion_status")),
-            "rejection_reason": _clean_optional_text(top_candidate.get("rejection_reason")),
+            "rejection_reason": _clean_optional_reason(top_candidate.get("rejection_reason")),
         },
         "top_candidate": {
             "signal_family": _clean_optional_text(top_candidate.get("signal_family")),
             "lookback": _safe_int(top_candidate.get("lookback")),
             "horizon": _safe_int(top_candidate.get("horizon")),
             "promotion_status": _clean_optional_text(top_candidate.get("promotion_status")),
-            "rejection_reason": _clean_optional_text(top_candidate.get("rejection_reason")),
+            "rejection_reason": _clean_optional_reason(top_candidate.get("rejection_reason")),
         },
         "diagnostics_snapshot": {
             "evaluation_mode": diagnostics.get("evaluation_mode"),
@@ -458,7 +503,7 @@ def load_research_manifests(artifacts_root: str | Path) -> list[dict[str, Any]]:
         if not payload:
             continue
         payload["manifest_path"] = str(path)
-        manifests.append(payload)
+        manifests.append(_repair_manifest_portfolio_metrics(payload))
     return manifests
 
 

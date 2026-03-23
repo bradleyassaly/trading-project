@@ -1,0 +1,42 @@
+run_name: signal_promotion_viability
+schedule_frequency: manual
+research_artifacts_root: artifacts/diagnostics/promotion_viability/research
+experiment_name: null
+feature_flags:
+  regime: true
+  adaptive: false
+  governance: false
+output_root_dir: artifacts/diagnostics/promotion_viability/orchestration_runs
+validation_output_dir: artifacts/diagnostics/promotion_viability/orchestration_runs/validation
+promotion_policy_config_path: configs/promotion_experiment.yaml
+strategy_validation_policy_config_path: configs/strategy_validation_experiment.yaml
+strategy_portfolio_policy_config_path: configs/strategy_portfolio.yaml
+strategy_monitoring_policy_config_path: configs/strategy_monitoring.yaml
+market_regime_policy_config_path: configs/market_regime.yaml
+strategy_lifecycle_path: artifacts/diagnostics/promotion_viability/governance/strategy_lifecycle.json
+execution_config_path: configs/execution.yaml
+paper_state_path: artifacts/diagnostics/promotion_viability/paper/signal_promotion_viability_state.json
+max_promotions_per_run: 1
+min_selected_strategies_warning: 1
+promotion_dry_run: false
+promotion_inactive: false
+kill_switch_include_review: true
+loop_sleep_seconds: 3600
+stages:
+  research: true
+  registry: true
+  validation: true
+  promotion: true
+  portfolio: true
+  allocation: true
+  paper: true
+  monitoring: true
+  regime: true
+  adaptive_allocation: false
+  governance: false
+  kill_switch: false
+tags:
+  - diagnostic
+  - promotion_viability
+  - local
+notes: Diagnostic-only end-to-end promotion viability profile. Uses a tiny local research root to answer whether research can produce promotable signals that reach portfolio and paper stages.

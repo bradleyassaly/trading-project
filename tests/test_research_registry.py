@@ -204,6 +204,88 @@ def test_promotion_candidate_logic_marks_ineligible_runs(tmp_path: Path) -> None
     assert "folds_tested" in payload["rows"][1]["reasons"]
 
 
+def test_manifest_and_promotion_candidates_support_portfolio_sharpe_column(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run_portfolio_sharpe"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    leaderboard_path = run_dir / "leaderboard.csv"
+    fold_results_path = run_dir / "fold_results.csv"
+    promoted_path = run_dir / "promoted_signals.csv"
+    portfolio_metrics_path = run_dir / "portfolio_metrics.csv"
+    implementability_path = run_dir / "implementability_report.csv"
+    diagnostics_path = run_dir / "signal_diagnostics.json"
+
+    pd.DataFrame(
+        [
+            {
+                "signal_family": "momentum",
+                "lookback": 20,
+                "horizon": 5,
+                "mean_spearman_ic": 0.04,
+                "mean_hit_rate": 0.55,
+                "mean_turnover": 0.12,
+                "promotion_status": "promote",
+                "rejection_reason": "none",
+            }
+        ]
+    ).to_csv(leaderboard_path, index=False)
+    pd.DataFrame(
+        [
+            {"fold_id": 1, "test_start": "2025-01-01", "test_end": "2025-01-28"},
+            {"fold_id": 2, "test_start": "2025-02-01", "test_end": "2025-02-28"},
+            {"fold_id": 3, "test_start": "2025-03-01", "test_end": "2025-03-28"},
+        ]
+    ).to_csv(fold_results_path, index=False)
+    pd.DataFrame([{"signal_family": "momentum"}]).to_csv(promoted_path, index=False)
+    pd.DataFrame(
+        [
+            {
+                "portfolio_sharpe": 1.25,
+                "portfolio_total_return": 0.18,
+                "portfolio_max_drawdown": -0.08,
+            }
+        ]
+    ).to_csv(portfolio_metrics_path, index=False)
+    pd.DataFrame([{"return_drag": 0.05}]).to_csv(implementability_path, index=False)
+    diagnostics_path.write_text(json.dumps({"evaluation_mode": "cross_sectional_long_short"}, indent=2), encoding="utf-8")
+
+    manifest_path = write_research_run_manifest(
+        output_dir=run_dir,
+        workflow_type="alpha_research",
+        command="test",
+        feature_dir=tmp_path / "features",
+        signal_family="momentum",
+        universe="nasdaq100",
+        symbols_requested=["AAPL", "MSFT", "NVDA"],
+        lookbacks=[20],
+        horizons=[5],
+        min_rows=250,
+        train_size=756,
+        test_size=63,
+        step_size=63,
+        min_train_size=252,
+        artifact_paths={
+            "leaderboard_path": leaderboard_path,
+            "fold_results_path": fold_results_path,
+            "promoted_signals_path": promoted_path,
+            "portfolio_metrics_path": portfolio_metrics_path,
+            "implementability_report_path": implementability_path,
+            "signal_diagnostics_path": diagnostics_path,
+        },
+    )
+
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["top_metrics"]["portfolio_sharpe"] == 1.25
+    assert manifest["top_metrics"]["rejection_reason"] is None
+    assert manifest["promotion_recommendation"]["eligible"] is True
+
+    result = build_promotion_candidates(artifacts_root=tmp_path, output_dir=tmp_path / "candidates")
+    payload = json.loads(Path(result["promotion_candidates_json_path"]).read_text(encoding="utf-8"))
+
+    assert result["eligible_count"] == 1
+    assert payload["rows"][0]["portfolio_sharpe"] == 1.25
+    assert "portfolio_sharpe missing" not in payload["rows"][0]["reasons"]
+
+
 def test_compare_runs_writes_deterministic_artifacts(tmp_path: Path) -> None:
     _write_research_run(
         tmp_path,
