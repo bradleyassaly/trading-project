@@ -546,7 +546,9 @@ def test_example_configs_load_from_repo() -> None:
     broker_config = load_broker_config(root / "configs" / "broker.yaml")
     dashboard_config = load_dashboard_config(root / "configs" / "dashboard.yaml")
     promotion_config = load_promotion_policy_config(root / "configs" / "promotion.yaml")
+    promotion_experiment_config = load_promotion_policy_config(root / "configs" / "promotion_experiment.yaml")
     strategy_validation_config = load_strategy_validation_policy_config(root / "configs" / "strategy_validation.yaml")
+    strategy_validation_experiment_config = load_strategy_validation_policy_config(root / "configs" / "strategy_validation_experiment.yaml")
     strategy_portfolio_config = load_strategy_portfolio_policy_config(root / "configs" / "strategy_portfolio.yaml")
     strategy_monitoring_config = load_strategy_monitoring_policy_config(root / "configs" / "strategy_monitoring.yaml")
     market_regime_config = load_market_regime_policy_config(root / "configs" / "market_regime.yaml")
@@ -557,7 +559,11 @@ def test_example_configs_load_from_repo() -> None:
     regime_campaign_config = load_experiment_spec_config(root / "configs" / "experiment_campaign_regime.yaml")
     adaptive_campaign_config = load_experiment_spec_config(root / "configs" / "experiment_campaign_adaptive.yaml")
     governance_campaign_config = load_experiment_spec_config(root / "configs" / "experiment_campaign_governance.yaml")
+    regime_campaign_fast_config = load_experiment_spec_config(root / "configs" / "experiment_campaign_regime_fast.yaml")
+    adaptive_campaign_fast_config = load_experiment_spec_config(root / "configs" / "experiment_campaign_adaptive_fast.yaml")
+    governance_campaign_fast_config = load_experiment_spec_config(root / "configs" / "experiment_campaign_governance_fast.yaml")
     orchestration_experiment_base = load_automated_orchestration_config(root / "configs" / "orchestration_experiment_base.yaml")
+    orchestration_experiment_fast = load_automated_orchestration_config(root / "configs" / "orchestration_experiment_fast.yaml")
     governance_strict_config = load_strategy_governance_policy_config(root / "configs" / "strategy_governance_strict.yaml")
     governance_loose_config = load_strategy_governance_policy_config(root / "configs" / "strategy_governance_loose.yaml")
     minimal_demo_config = load_pipeline_run_config(root / "configs" / "minimal_local_demo.yaml")
@@ -569,7 +575,9 @@ def test_example_configs_load_from_repo() -> None:
     assert broker_config.broker_name == "mock"
     assert dashboard_config.port == 8000
     assert promotion_config.metric_name == "portfolio_sharpe"
+    assert promotion_experiment_config.require_eligible_candidates is False
     assert strategy_validation_config.min_folds >= 1
+    assert strategy_validation_experiment_config.min_folds <= strategy_validation_config.min_folds
     assert strategy_portfolio_config.selection_metric == "ranking_value"
     assert strategy_monitoring_config.kill_switch_mode == "recommendation_only"
     assert market_regime_config.short_return_window >= 1
@@ -583,6 +591,13 @@ def test_example_configs_load_from_repo() -> None:
     assert regime_campaign_config.experiment_name == "campaign_regime_on_off"
     assert adaptive_campaign_config.experiment_name == "campaign_adaptive_on_off"
     assert governance_campaign_config.experiment_name == "campaign_governance_strict_vs_loose"
+    assert regime_campaign_fast_config.experiment_name == "campaign_regime_on_off_fast"
+    assert adaptive_campaign_fast_config.experiment_name == "campaign_adaptive_on_off_fast"
+    assert governance_campaign_fast_config.experiment_name == "campaign_governance_strict_vs_loose_fast"
     assert orchestration_experiment_base.feature_flags["adaptive"] is True
+    assert orchestration_experiment_fast.research_artifacts_root == "artifacts/promotion_fixture"
+    assert orchestration_experiment_fast.output_root_dir == "artifacts/orchestration_runs_fast"
+    assert orchestration_experiment_fast.promotion_policy_config_path == "configs/promotion_experiment.yaml"
+    assert orchestration_experiment_fast.strategy_validation_policy_config_path == "configs/strategy_validation_experiment.yaml"
     assert governance_strict_config.demote_after_deactivate_events < governance_loose_config.demote_after_deactivate_events
     assert minimal_demo_config.schedule_type == "ad_hoc"

@@ -1,0 +1,18 @@
+schema_version: 1
+metric_name: portfolio_sharpe
+min_metric_threshold: 0.0
+min_folds_tested: 2
+min_promoted_signals: 1
+require_validation_pass: false
+allow_weak_validation: true
+max_strategies_total: 2
+max_strategies_per_group: 1
+group_by: signal_family
+require_eligible_candidates: false
+default_status: inactive
+pipeline_monitoring_config_path: configs/monitoring.yaml
+pipeline_execution_config_path: configs/execution.yaml
+notes: Experiment-only promotion policy for fast local-debug campaigns. Intended to increase downstream experiment activity without changing operating defaults.
+tags:
+  - experiment_only
+  - fast_debug

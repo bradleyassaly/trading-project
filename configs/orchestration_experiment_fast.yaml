@@ -1,0 +1,44 @@
+run_name: experiment_fast_debug
+schedule_frequency: manual
+research_artifacts_root: artifacts/promotion_fixture
+experiment_name: null
+feature_flags:
+  regime: true
+  adaptive: true
+  governance: true
+output_root_dir: artifacts/orchestration_runs_fast
+validation_output_dir: artifacts/orchestration_runs_fast/validation
+promotion_policy_config_path: configs/promotion_experiment.yaml
+strategy_validation_policy_config_path: configs/strategy_validation_experiment.yaml
+strategy_portfolio_policy_config_path: configs/strategy_portfolio.yaml
+strategy_monitoring_policy_config_path: configs/strategy_monitoring.yaml
+market_regime_policy_config_path: configs/market_regime.yaml
+adaptive_allocation_policy_config_path: configs/adaptive_allocation.yaml
+strategy_governance_policy_config_path: configs/strategy_governance_strict.yaml
+strategy_lifecycle_path: artifacts/governance/strategy_lifecycle_fast_debug.json
+execution_config_path: configs/execution.yaml
+paper_state_path: artifacts/paper/experiment_fast_debug_state.json
+max_promotions_per_run: 2
+min_selected_strategies_warning: 1
+promotion_dry_run: false
+promotion_inactive: false
+adaptive_allocation_dry_run: false
+kill_switch_include_review: true
+loop_sleep_seconds: 3600
+stages:
+  research: true
+  registry: true
+  validation: true
+  promotion: true
+  portfolio: true
+  allocation: false
+  paper: false
+  monitoring: false
+  regime: false
+  adaptive_allocation: false
+  governance: false
+  kill_switch: false
+tags:
+  - fast_debug
+  - local
+notes: Fast local-debug orchestration base. Uses the small promotion_fixture research set for laptop-scale functionality checks through research, validation, promotion, and portfolio selection. It intentionally skips heavier downstream stages and is not decision-quality evidence.

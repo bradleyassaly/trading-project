@@ -1359,6 +1359,36 @@ trading-cli experiment run --config configs/experiment_campaign_governance.yaml
 trading-cli experiment summarize-campaign --runs artifacts/experiments/campaign_regime_on_off/<run_id> artifacts/experiments/campaign_adaptive_on_off/<run_id> artifacts/experiments/campaign_governance_strict_vs_loose/<run_id> --output-dir artifacts/experiments/first_campaign_summary
 ```
 
+### Fast Local Experiment Debugging
+
+Use the fast configs when you want to validate orchestration wiring, artifact generation, and experiment comparison behavior on a laptop without waiting for the full campaign footprint.
+
+Fast-debug templates:
+
+- `configs/orchestration_experiment_fast.yaml`
+- `configs/experiment_campaign_regime_fast.yaml`
+- `configs/experiment_campaign_adaptive_fast.yaml`
+- `configs/experiment_campaign_governance_fast.yaml`
+
+These configs point at the small `artifacts/promotion_fixture` research set, use separate fast output directories, and use `configs/strategy_validation_experiment.yaml` plus `configs/promotion_experiment.yaml` so a local run is more likely to reach promotion and portfolio selection quickly. They intentionally stop before the heavier downstream allocation/paper/monitoring stages, so they are for local functionality/debugging only, not for final decision-quality evidence.
+
+Fast local commands:
+
+```bash
+trading-cli experiment run --config configs/experiment_campaign_regime_fast.yaml
+trading-cli experiment run --config configs/experiment_campaign_adaptive_fast.yaml
+trading-cli experiment run --config configs/experiment_campaign_governance_fast.yaml
+trading-cli experiment summarize-campaign --runs artifacts/experiments_fast/campaign_regime_on_off_fast/<run_id> artifacts/experiments_fast/campaign_adaptive_on_off_fast/<run_id> artifacts/experiments_fast/campaign_governance_strict_vs_loose_fast/<run_id> --output-dir artifacts/experiments_fast/first_campaign_summary
+```
+
+Use the full campaign configs when you want higher-scope evidence:
+
+```bash
+trading-cli experiment run --config configs/experiment_campaign_regime.yaml
+trading-cli experiment run --config configs/experiment_campaign_adaptive.yaml
+trading-cli experiment run --config configs/experiment_campaign_governance.yaml
+```
+
 The campaign summary writes:
 
 - `experiment_campaign_summary.json`

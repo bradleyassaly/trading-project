@@ -1,0 +1,18 @@
+experiment_name: campaign_adaptive_on_off_fast
+base_orchestration_config_path: configs/orchestration_experiment_fast.yaml
+output_root_dir: artifacts/experiments_fast
+run_label_metadata:
+  campaign: fast_local_debug
+  question: adaptive
+notes: Fast local-debug adaptive comparison. Uses the small promotion_fixture input set and lightweight orchestration stages for functionality checks, not final evidence.
+variants:
+  - name: adaptive_on
+    feature_flags:
+      regime: true
+      adaptive: true
+      governance: true
+  - name: adaptive_off
+    feature_flags:
+      regime: true
+      adaptive: false
+      governance: true

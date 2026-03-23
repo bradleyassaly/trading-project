@@ -1,0 +1,14 @@
+schema_version: 1
+min_folds: 2
+min_out_of_sample_sharpe: 0.0
+weak_out_of_sample_sharpe: -0.1
+min_mean_spearman_ic: 0.0
+weak_mean_spearman_ic: -0.01
+min_positive_fold_ratio: 0.4
+weak_positive_fold_ratio: 0.3
+max_metric_std: 0.25
+min_proxy_confidence_score: 0.3
+notes: Experiment-only validation policy for fast local-debug campaigns. Looser than the operating default so the end-to-end experiment path is exercised more often.
+tags:
+  - experiment_only
+  - fast_debug

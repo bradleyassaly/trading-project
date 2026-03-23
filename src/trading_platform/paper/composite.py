@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -49,6 +50,16 @@ def _read_artifact_csv(artifact_dir: Path, filename: str) -> pd.DataFrame:
         return pd.DataFrame()
 
 
+def _read_artifact_json(artifact_dir: Path, filename: str) -> dict[str, Any]:
+    path = artifact_dir / filename
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+
+
 def _load_feature_history(symbol: str) -> pd.DataFrame:
     feature_df = load_feature_frame(symbol).copy()
     if "timestamp" in feature_df.columns:
@@ -59,6 +70,35 @@ def _load_feature_history(symbol: str) -> pd.DataFrame:
     if "symbol" not in feature_df.columns:
         feature_df["symbol"] = symbol
     return feature_df
+
+
+def _ensure_promoted_signal_columns(
+    promoted_signals_df: pd.DataFrame,
+    *,
+    artifact_dir: Path | None,
+    composite_horizon: int,
+) -> pd.DataFrame:
+    if promoted_signals_df.empty:
+        return promoted_signals_df
+    normalized = promoted_signals_df.copy()
+    if {"signal_family", "lookback", "horizon"}.issubset(normalized.columns):
+        return normalized
+    manifest = _read_artifact_json(artifact_dir, "research_run.json") if artifact_dir is not None else {}
+    top_candidate = manifest.get("top_candidate", {}) if isinstance(manifest, dict) else {}
+    evaluation_periods = manifest.get("evaluation_periods", {}) if isinstance(manifest, dict) else {}
+    default_lookback = top_candidate.get("lookback")
+    if default_lookback is None:
+        lookbacks = evaluation_periods.get("lookbacks", []) if isinstance(evaluation_periods, dict) else []
+        default_lookback = lookbacks[0] if lookbacks else 20
+    default_horizon = top_candidate.get("horizon")
+    if default_horizon is None:
+        horizons = evaluation_periods.get("horizons", []) if isinstance(evaluation_periods, dict) else []
+        default_horizon = horizons[0] if horizons else composite_horizon
+    if "lookback" not in normalized.columns:
+        normalized["lookback"] = int(default_lookback)
+    if "horizon" not in normalized.columns:
+        normalized["horizon"] = int(default_horizon)
+    return normalized
 
 
 def _build_component_panel(
@@ -180,6 +220,11 @@ def build_composite_paper_snapshot(
     promoted_signals_df = pd.DataFrame(approved_model_state.get("promoted_signals", []))
     if promoted_signals_df.empty and artifact_dir is not None:
         promoted_signals_df = _read_artifact_csv(artifact_dir, "promoted_signals.csv")
+    promoted_signals_df = _ensure_promoted_signal_columns(
+        promoted_signals_df,
+        artifact_dir=artifact_dir,
+        composite_horizon=int(config.composite_horizon),
+    )
 
     redundancy_df = pd.DataFrame(approved_model_state.get("redundancy_report", []))
     if redundancy_df.empty and artifact_dir is not None:
