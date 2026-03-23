@@ -1378,6 +1378,52 @@ It reports per-variant means for:
 
 It also names the winning variant for each metric so you can decide whether a feature is worth keeping as the default.
 
+### Choosing Defaults From Campaign Results
+
+After running the first disciplined campaign, convert the campaign summary into an explicit default recommendation instead of changing configs by hand.
+
+Recommended flow:
+
+1. run the regime, adaptive, and governance experiments
+2. build a combined `experiment_campaign_summary`
+3. run `experiment recommend-defaults`
+4. inspect `experiment_decision_summary.json/md`
+5. only materialize a recommended config snapshot when confidence is acceptable
+
+Decision outputs:
+
+- `experiment_decision_summary.json`
+- `experiment_decision_summary.csv`
+- `experiment_decision_summary.md`
+
+For each campaign, the decision layer records:
+
+- compared variants
+- winner by return
+- winner by Sharpe proxy
+- winner by drawdown
+- winner by warning / kill-switch burden
+- overall recommended default
+- confidence level: `low`, `medium`, or `high`
+- caveats and reasons
+
+The rules stay deliberately simple:
+
+- prefer higher Sharpe proxy when drawdown is not materially worse
+- reject candidates with materially higher warning or kill-switch burden
+- prefer the simpler baseline when differences are negligible
+- mark evidence as weak when run counts or metric separation are too small
+
+Example commands:
+
+```bash
+trading-cli experiment summarize-campaign --runs artifacts/experiments/campaign_regime_on_off/<run_id> artifacts/experiments/campaign_adaptive_on_off/<run_id> artifacts/experiments/campaign_governance_strict_vs_loose/<run_id> --output-dir artifacts/experiments/first_campaign_summary
+trading-cli experiment recommend-defaults --summary artifacts/experiments/first_campaign_summary --output-dir artifacts/experiments/default_recommendations
+trading-cli experiment recommend-defaults --summary artifacts/experiments/first_campaign_summary --output-dir artifacts/experiments/default_recommendations --write-config configs/orchestration_recommended_defaults.yaml --base-config configs/orchestration_experiment_base.yaml
+```
+
+The optional `--write-config` step writes a separate snapshot config. It does not mutate the main default orchestration config automatically.
+
 ### Paper Trading
 
 Paper trading supports both legacy strategy targets and approved composite alpha targets. The workflow builds target weights, generates rebalance orders, optionally applies simulated fills, and writes state, ledger, and diagnostics artifacts.

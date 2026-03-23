@@ -21,6 +21,7 @@ from trading_platform.cli.commands.doctor import cmd_doctor
 from trading_platform.cli.commands.execute_live import cmd_execute_live
 from trading_platform.cli.commands.execution_simulate import cmd_execution_simulate
 from trading_platform.cli.commands.experiment_compare import cmd_experiment_compare
+from trading_platform.cli.commands.experiment_recommend_defaults import cmd_experiment_recommend_defaults
 from trading_platform.cli.commands.experiment_run import cmd_experiment_run
 from trading_platform.cli.commands.experiment_show import cmd_experiment_show
 from trading_platform.cli.commands.experiment_summarize_campaign import cmd_experiment_summarize_campaign
@@ -1093,5 +1094,11 @@ def build_parser() -> argparse.ArgumentParser:
     experiment_summary.add_argument("--runs", nargs="+", required=True, help="One or more experiment run directories or experiment_run.json paths.")
     experiment_summary.add_argument("--output-dir", type=str, required=True, help="Directory where campaign summary artifacts will be written.")
     experiment_summary.set_defaults(func=cmd_experiment_summarize_campaign)
+    experiment_recommend = experiment_subparsers.add_parser("recommend-defaults", help="Turn campaign summary artifacts into recommended default settings")
+    experiment_recommend.add_argument("--summary", type=str, required=True, help="Path to experiment_campaign_summary.json or its parent directory.")
+    experiment_recommend.add_argument("--output-dir", type=str, required=True, help="Directory where decision summary artifacts will be written.")
+    experiment_recommend.add_argument("--write-config", type=str, default=None, help="Optional output path for a recommended orchestration config snapshot.")
+    experiment_recommend.add_argument("--base-config", type=str, default=None, help="Base orchestration config used when --write-config is provided.")
+    experiment_recommend.set_defaults(func=cmd_experiment_recommend_defaults)
 
     return parser

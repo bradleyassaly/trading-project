@@ -777,6 +777,29 @@ def test_grouped_experiment_summarize_campaign_command_parses() -> None:
     assert args.output_dir == "artifacts/experiments/campaign_summary"
 
 
+def test_grouped_experiment_recommend_defaults_command_parses() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "experiment",
+            "recommend-defaults",
+            "--summary",
+            "artifacts/experiments/first_campaign_summary",
+            "--output-dir",
+            "artifacts/experiments/default_recommendations",
+            "--write-config",
+            "configs/orchestration_recommended_defaults.yaml",
+            "--base-config",
+            "configs/orchestration_experiment_base.yaml",
+        ]
+    )
+
+    assert args.command_family == "experiment"
+    assert args.experiment_command == "recommend-defaults"
+    assert args.summary == "artifacts/experiments/first_campaign_summary"
+    assert args.write_config == "configs/orchestration_recommended_defaults.yaml"
+
+
 def test_grouped_system_eval_build_command_parses() -> None:
     parser = build_parser()
     args = parser.parse_args(
