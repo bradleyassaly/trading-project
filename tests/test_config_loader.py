@@ -4,14 +4,17 @@ import json
 from pathlib import Path
 
 from trading_platform.config.loader import (
+    load_live_dry_run_workflow_config,
     load_broker_config,
     load_dashboard_config,
     load_experiment_spec_config,
     load_execution_config,
     load_monitoring_config,
     load_notification_config,
+    load_paper_run_workflow_config,
     load_pipeline_run_config,
     load_promotion_policy_config,
+    load_research_run_workflow_config,
     load_research_workflow_config,
     load_automated_orchestration_config,
     load_adaptive_allocation_policy_config,
@@ -20,6 +23,7 @@ from trading_platform.config.loader import (
     load_strategy_portfolio_policy_config,
     load_strategy_monitoring_policy_config,
     load_strategy_validation_policy_config,
+    load_walkforward_workflow_config,
 )
 
 
@@ -67,6 +71,96 @@ commission: 0.001
     assert config.strategy == "sma_cross"
     assert config.fast == 20
     assert config.slow == 50
+
+
+def test_load_research_run_workflow_config_from_yaml(tmp_path) -> None:
+    path = tmp_path / "research_run.yaml"
+    path.write_text(
+        """
+preset: xsec_nasdaq100_momentum_v1_research
+strategy: xsec_momentum_topn
+engine: vectorized
+output_dir: artifacts/research/xsec
+lookback_bars: 84
+skip_bars: 21
+top_n: 2
+rebalance_bars: 21
+""".strip(),
+        encoding="utf-8",
+    )
+
+    config = load_research_run_workflow_config(path)
+
+    assert config.preset == "xsec_nasdaq100_momentum_v1_research"
+    assert config.output_dir == "artifacts/research/xsec"
+    assert config.top_n == 2
+
+
+def test_load_walkforward_workflow_config_from_yaml(tmp_path) -> None:
+    path = tmp_path / "walkforward.yaml"
+    path.write_text(
+        """
+preset: xsec_nasdaq100_momentum_v1_research
+strategy: xsec_momentum_topn
+output: artifacts/walkforward/nasdaq100.csv
+lookback_bars_values: [84]
+skip_bars_values: [21]
+top_n_values: [2]
+rebalance_bars_values: [21]
+train_bars: 756
+test_bars: 126
+step_bars: 126
+""".strip(),
+        encoding="utf-8",
+    )
+
+    config = load_walkforward_workflow_config(path)
+
+    assert config.output == "artifacts/walkforward/nasdaq100.csv"
+    assert config.lookback_bars_values == [84]
+    assert config.train_bars == 756
+
+
+def test_load_paper_run_workflow_config_from_yaml(tmp_path) -> None:
+    path = tmp_path / "paper.yaml"
+    path.write_text(
+        """
+preset: xsec_nasdaq100_momentum_v1_deploy
+output_dir: artifacts/paper/nasdaq100
+state_path: artifacts/paper/nasdaq100_state.json
+execution_config: configs/execution.yaml
+top_n: 2
+portfolio_construction_mode: transition
+""".strip(),
+        encoding="utf-8",
+    )
+
+    config = load_paper_run_workflow_config(path)
+
+    assert config.preset == "xsec_nasdaq100_momentum_v1_deploy"
+    assert config.state_path.endswith("nasdaq100_state.json")
+    assert config.portfolio_construction_mode == "transition"
+
+
+def test_load_live_dry_run_workflow_config_from_yaml(tmp_path) -> None:
+    path = tmp_path / "live.yaml"
+    path.write_text(
+        """
+preset: xsec_nasdaq100_momentum_v1_deploy
+output_dir: artifacts/live_dry_run/nasdaq100
+execution_config: configs/execution.yaml
+broker: mock
+portfolio_construction_mode: transition
+top_n: 2
+""".strip(),
+        encoding="utf-8",
+    )
+
+    config = load_live_dry_run_workflow_config(path)
+
+    assert config.preset == "xsec_nasdaq100_momentum_v1_deploy"
+    assert config.broker == "mock"
+    assert config.top_n == 2
 
 
 def test_load_pipeline_run_config_from_yaml(tmp_path) -> None:
@@ -603,6 +697,9 @@ def test_example_configs_load_from_repo() -> None:
     assert regime_campaign_medium_config.experiment_name == "campaign_regime_on_off_medium"
     assert adaptive_campaign_medium_config.experiment_name == "campaign_adaptive_on_off_medium"
     assert governance_campaign_medium_config.experiment_name == "campaign_governance_strict_vs_loose_medium"
+    assert regime_campaign_medium_config.repeat_count == 5
+    assert adaptive_campaign_medium_config.repeat_count == 5
+    assert governance_campaign_medium_config.repeat_count == 5
     assert orchestration_experiment_base.feature_flags["adaptive"] is True
     assert orchestration_experiment_fast.research_artifacts_root == "artifacts/promotion_fixture"
     assert orchestration_experiment_fast.output_root_dir == "artifacts/orchestration_runs_fast"

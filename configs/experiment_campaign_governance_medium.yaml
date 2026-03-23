@@ -1,10 +1,11 @@
 experiment_name: campaign_governance_strict_vs_loose_medium
 base_orchestration_config_path: configs/orchestration_experiment_medium.yaml
 output_root_dir: artifacts/experiments_medium
+repeat_count: 5
 run_label_metadata:
   campaign: medium_local_debug
   question: governance
-notes: Medium local-debug governance comparison. Produces real paper and monitoring outputs while staying smaller than the full campaign.
+notes: Medium repeated governance comparison. Fast configs are for debug, medium repeated configs are the preferred default-selection path, and full campaigns remain confirmation runs.
 variants:
   - name: governance_strict
     feature_flags:
