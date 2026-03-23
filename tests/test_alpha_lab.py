@@ -245,6 +245,25 @@ def test_build_signal_short_term_reversal_negates_momentum() -> None:
     pd.testing.assert_series_equal(reversal, -momentum)
 
 
+def test_build_signal_equity_context_momentum_uses_relative_vol_and_breadth_features() -> None:
+    df = pd.DataFrame(
+        {
+            "close": [100.0, 101.0, 102.0, 103.0],
+            "relative_return_1": [None, 0.02, 0.03, 0.04],
+            "breadth_impulse_1": [0.0, 0.10, -0.10, 0.20],
+            "realized_vol_20": [0.0, 0.02, 0.00, 0.04],
+            "volume_ratio_20": [1.0, 1.2, 2.0, 0.25],
+        }
+    )
+
+    signal = build_signal(df, signal_family="equity_context_momentum", lookback=1)
+
+    assert pd.isna(signal.iloc[0])
+    assert signal.iloc[1] == pytest.approx(1.32)
+    assert signal.iloc[2] == pytest.approx(0.0405)
+    assert signal.iloc[3] == pytest.approx(0.6)
+
+
 def test_evaluate_signal_returns_expected_ic_on_perfect_rank_order() -> None:
     signal = pd.Series([1.0, 2.0, 3.0, 4.0, 5.0])
     forward_return = pd.Series([10.0, 20.0, 30.0, 40.0, 50.0])

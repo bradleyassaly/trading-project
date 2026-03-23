@@ -156,7 +156,15 @@ def _first_failed_or_skipped_stage(result: Any) -> str | None:
     return None
 
 
-def _run_single_scenario(base_output_root: Path, scenario: ScenarioSpec, base_config_path: Path) -> dict[str, Any]:
+def _run_single_scenario(
+    base_output_root: Path,
+    scenario: ScenarioSpec,
+    base_config_path: Path,
+    *,
+    signal_family: str,
+    equity_context_enabled: bool,
+    equity_context_include_volume: bool,
+) -> dict[str, Any]:
     run_root = base_output_root / scenario.name
     if run_root.exists():
         shutil.rmtree(run_root)
@@ -176,7 +184,7 @@ def _run_single_scenario(base_output_root: Path, scenario: ScenarioSpec, base_co
             symbols=list(scenario.symbols),
             universe=None,
             feature_dir=features_dir,
-            signal_family="momentum",
+            signal_family=signal_family,
             lookbacks=[1, 2],
             horizons=[1],
             min_rows=20,
@@ -189,6 +197,8 @@ def _run_single_scenario(base_output_root: Path, scenario: ScenarioSpec, base_co
             min_train_size=None,
             regime_aware_enabled=True,
             regime_min_history=1,
+            equity_context_enabled=equity_context_enabled,
+            equity_context_include_volume=equity_context_include_volume,
         )
 
     build_research_registry(artifacts_root=research_root, output_dir=registry_dir)
@@ -218,6 +228,9 @@ def _run_single_scenario(base_output_root: Path, scenario: ScenarioSpec, base_co
 
     return {
         "scenario_name": scenario.name,
+        "signal_family": signal_family,
+        "equity_context_enabled": equity_context_enabled,
+        "equity_context_include_volume": equity_context_include_volume,
         "symbol_count": len(scenario.symbols),
         "candidate_count": int(manifest.get("candidate_count") or 0),
         "promoted_signal_count": int(manifest.get("promoted_signal_count") or 0),
@@ -282,6 +295,9 @@ def _render_markdown(
     summary: dict[str, Any],
     commands: list[str],
     base_config_path: Path,
+    signal_family: str,
+    equity_context_enabled: bool,
+    equity_context_include_volume: bool,
 ) -> str:
     lines = [
         "# Signal Promotion Frequency Diagnostic",
@@ -305,6 +321,9 @@ def _render_markdown(
         "",
         f"- base orchestration config reused: `{base_config_path}`",
         f"- output root: `{output_root}`",
+        f"- signal family: `{signal_family}`",
+        f"- equity context enabled: `{equity_context_enabled}`",
+        f"- equity context include volume: `{equity_context_include_volume}`",
         "- repeated run path: feature fixture -> research alpha -> registry -> validation -> promotion -> orchestration",
         "",
         "## Commands Run",
@@ -346,13 +365,32 @@ def run_promotion_frequency_diagnostic(
     *,
     output_root: Path,
     base_config_path: Path,
+    signal_family: str = "momentum",
+    equity_context_enabled: bool = False,
+    equity_context_include_volume: bool = False,
+    artifact_stem: str = "signal_promotion_frequency",
 ) -> dict[str, Any]:
     output_root.mkdir(parents=True, exist_ok=True)
     scenarios = _default_scenarios()
     commands = [
-        f"python -m trading_platform.diagnostics.promotion_frequency --output-root {output_root} --base-config {base_config_path}"
+        (
+            f"python -m trading_platform.diagnostics.promotion_frequency --output-root {output_root} "
+            f"--base-config {base_config_path} --signal-family {signal_family}"
+            + (" --equity-context-enabled" if equity_context_enabled else "")
+            + (" --equity-context-include-volume" if equity_context_include_volume else "")
+        )
     ]
-    rows = [_run_single_scenario(output_root, scenario, base_config_path) for scenario in scenarios]
+    rows = [
+        _run_single_scenario(
+            output_root,
+            scenario,
+            base_config_path,
+            signal_family=signal_family,
+            equity_context_enabled=equity_context_enabled,
+            equity_context_include_volume=equity_context_include_volume,
+        )
+        for scenario in scenarios
+    ]
     summary = _build_summary(rows)
 
     generated_at = datetime.now(UTC).isoformat()
@@ -361,14 +399,17 @@ def run_promotion_frequency_diagnostic(
         "generated_at": generated_at,
         "base_config_path": str(base_config_path),
         "output_root": str(output_root),
+        "signal_family": signal_family,
+        "equity_context_enabled": equity_context_enabled,
+        "equity_context_include_volume": equity_context_include_volume,
         "scenario_count": len(scenarios),
         "summary": summary,
         "rows": rows,
         "commands": commands,
     }
-    json_path = output_root / "signal_promotion_frequency.json"
-    csv_path = output_root / "signal_promotion_frequency.csv"
-    md_path = output_root / "signal_promotion_frequency.md"
+    json_path = output_root / f"{artifact_stem}.json"
+    csv_path = output_root / f"{artifact_stem}.csv"
+    md_path = output_root / f"{artifact_stem}.md"
     json_path.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
     pd.DataFrame(rows).to_csv(csv_path, index=False)
     md_path.write_text(
@@ -378,6 +419,9 @@ def run_promotion_frequency_diagnostic(
             summary=summary,
             commands=commands,
             base_config_path=base_config_path,
+            signal_family=signal_family,
+            equity_context_enabled=equity_context_enabled,
+            equity_context_include_volume=equity_context_include_volume,
         ),
         encoding="utf-8",
     )
@@ -404,8 +448,31 @@ def main() -> None:
         default=Path("configs/orchestration_signal_promotion_test.yaml"),
         help="Existing orchestration viability config to reuse per scenario.",
     )
+    parser.add_argument(
+        "--signal-family",
+        type=str,
+        default="momentum",
+        choices=["momentum", "short_term_reversal", "vol_adjusted_momentum", "equity_context_momentum"],
+        help="Signal family to evaluate across the repeated diagnostic scenarios.",
+    )
+    parser.add_argument(
+        "--equity-context-enabled",
+        action="store_true",
+        help="Enable the equity-only context feature expansion inside the alpha research runner.",
+    )
+    parser.add_argument(
+        "--equity-context-include-volume",
+        action="store_true",
+        help="Include volume-ratio context when the feature inputs contain volume.",
+    )
     args = parser.parse_args()
-    result = run_promotion_frequency_diagnostic(output_root=args.output_root, base_config_path=args.base_config)
+    result = run_promotion_frequency_diagnostic(
+        output_root=args.output_root,
+        base_config_path=args.base_config,
+        signal_family=args.signal_family,
+        equity_context_enabled=bool(args.equity_context_enabled),
+        equity_context_include_volume=bool(args.equity_context_include_volume),
+    )
     print(f"Frequency diagnostic JSON: {result['json_path']}")
     print(f"Frequency diagnostic CSV: {result['csv_path']}")
     print(f"Frequency diagnostic Markdown: {result['md_path']}")

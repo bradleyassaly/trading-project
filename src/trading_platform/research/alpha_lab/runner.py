@@ -107,6 +107,67 @@ def _build_shared_folds(
     )
 
 
+def _add_equity_context_features(
+    symbol_data: dict[str, pd.DataFrame],
+    *,
+    lookbacks: list[int],
+    include_volume: bool,
+    vol_window: int = 20,
+    volume_window: int = 20,
+) -> dict[str, pd.DataFrame]:
+    if not symbol_data:
+        return symbol_data
+
+    close_panel = pd.concat(
+        [
+            pd.Series(pd.to_numeric(df["close"], errors="coerce").to_numpy(), index=pd.to_datetime(df["timestamp"]), name=symbol)
+            for symbol, df in sorted(symbol_data.items())
+        ],
+        axis=1,
+    ).sort_index()
+    return_panel = close_panel.pct_change()
+    market_return_panels = {
+        lookback: close_panel.pct_change(lookback).mean(axis=1, skipna=True)
+        for lookback in sorted(set(lookbacks))
+    }
+    breadth_panels = {
+        lookback: close_panel.pct_change(lookback).gt(0.0).mean(axis=1, skipna=True)
+        for lookback in sorted(set(lookbacks))
+    }
+
+    volume_panel: pd.DataFrame | None = None
+    if include_volume and all("volume" in df.columns for df in symbol_data.values()):
+        volume_panel = pd.concat(
+            [
+                pd.Series(pd.to_numeric(df["volume"], errors="coerce").to_numpy(), index=pd.to_datetime(df["timestamp"]), name=symbol)
+                for symbol, df in sorted(symbol_data.items())
+            ],
+            axis=1,
+        ).sort_index()
+
+    enriched: dict[str, pd.DataFrame] = {}
+    for symbol, df in symbol_data.items():
+        working = df.sort_values("timestamp").copy()
+        timestamp_index = pd.to_datetime(working["timestamp"])
+        symbol_close = pd.Series(pd.to_numeric(working["close"], errors="coerce").to_numpy(), index=timestamp_index)
+        working[f"realized_vol_{vol_window}"] = return_panel[symbol].rolling(vol_window).std().reindex(timestamp_index).to_numpy()
+        for lookback in sorted(set(lookbacks)):
+            own_return = symbol_close.pct_change(lookback)
+            market_return = market_return_panels[lookback].reindex(timestamp_index)
+            breadth = breadth_panels[lookback].reindex(timestamp_index)
+            working[f"market_return_{lookback}"] = market_return.to_numpy()
+            working[f"relative_return_{lookback}"] = (own_return - market_return).to_numpy()
+            working[f"breadth_positive_{lookback}"] = breadth.to_numpy()
+            working[f"breadth_impulse_{lookback}"] = (breadth - 0.5).to_numpy()
+        if volume_panel is not None:
+            symbol_volume = volume_panel[symbol].reindex(timestamp_index)
+            working[f"volume_ratio_{volume_window}"] = (
+                symbol_volume / symbol_volume.rolling(volume_window).mean()
+            ).to_numpy()
+        enriched[symbol] = working
+    return enriched
+
+
 def _candidate_key(signal_family: str, lookback: int, horizon: int) -> tuple[str, int, int]:
     return signal_family, lookback, horizon
 
@@ -270,6 +331,8 @@ def run_alpha_research(
     regime_min_history: int = DEFAULT_REGIME_CONFIG.min_history,
     regime_underweight_mean_rank_ic: float = DEFAULT_REGIME_CONFIG.underweight_mean_rank_ic,
     regime_exclude_mean_rank_ic: float = DEFAULT_REGIME_CONFIG.exclude_mean_rank_ic,
+    equity_context_enabled: bool = False,
+    equity_context_include_volume: bool = False,
 ) -> dict[str, str]:
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -289,6 +352,13 @@ def run_alpha_research(
             raise ValueError(f"{symbol} feature data must include a 'timestamp' column.")
 
         symbol_data[symbol] = add_forward_return_labels(df, horizons=horizons)
+
+    if equity_context_enabled:
+        symbol_data = _add_equity_context_features(
+            symbol_data,
+            lookbacks=lookbacks,
+            include_volume=equity_context_include_volume,
+        )
 
     folds = _build_shared_folds(
         symbol_data,
@@ -903,6 +973,10 @@ def run_alpha_research(
         "signal_lifecycle": lifecycle_config.to_dict(),
         "regime": regime_config.to_dict(),
         "composite_portfolio": portfolio_config.to_dict(),
+        "equity_context": {
+            "enabled": equity_context_enabled,
+            "include_volume": equity_context_include_volume,
+        },
     }
     diagnostics_path.write_text(json.dumps(diagnostics, indent=2, default=str))
     approved_model_state_paths = write_approved_model_state(artifact_dir=output_dir)

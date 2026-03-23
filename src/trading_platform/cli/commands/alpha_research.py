@@ -48,6 +48,8 @@ def cmd_alpha_research(args) -> None:
         regime_min_history=args.regime_min_history,
         regime_underweight_mean_rank_ic=args.regime_underweight_mean_rank_ic,
         regime_exclude_mean_rank_ic=args.regime_exclude_mean_rank_ic,
+        equity_context_enabled=getattr(args, "equity_context_enabled", False),
+        equity_context_include_volume=getattr(args, "equity_context_include_volume", False),
     )
     tracker_dir_arg = getattr(args, "experiment_tracker_dir", None)
     tracker_dir = Path(tracker_dir_arg) if tracker_dir_arg else output_dir.parent / "experiment_tracking"
