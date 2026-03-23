@@ -12,6 +12,7 @@ from trading_platform.config.loader import (
     load_pipeline_run_config,
     load_promotion_policy_config,
     load_research_workflow_config,
+    load_automated_orchestration_config,
     load_strategy_portfolio_policy_config,
     load_strategy_monitoring_policy_config,
 )
@@ -332,6 +333,39 @@ kill_switch_mode: recommendation_only
     assert config.include_inactive_strategies is False
 
 
+def test_load_automated_orchestration_config_from_yaml(tmp_path) -> None:
+    path = tmp_path / "orchestration.yaml"
+    path.write_text(
+        """
+run_name: auto
+schedule_frequency: manual
+research_artifacts_root: artifacts
+output_root_dir: artifacts/orchestration_runs
+promotion_policy_config_path: configs/promotion.yaml
+strategy_portfolio_policy_config_path: configs/strategy_portfolio.yaml
+strategy_monitoring_policy_config_path: configs/strategy_monitoring.yaml
+paper_state_path: artifacts/paper/automation_state.json
+max_promotions_per_run: 2
+stages:
+  research: true
+  registry: true
+  promotion: true
+  portfolio: true
+  allocation: true
+  paper: true
+  monitoring: true
+  kill_switch: true
+""".strip(),
+        encoding="utf-8",
+    )
+
+    config = load_automated_orchestration_config(path)
+
+    assert config.run_name == "auto"
+    assert config.max_promotions_per_run == 2
+    assert config.stages.kill_switch is True
+
+
 def test_example_configs_load_from_repo() -> None:
     root = Path(__file__).resolve().parents[1]
 
@@ -344,6 +378,7 @@ def test_example_configs_load_from_repo() -> None:
     promotion_config = load_promotion_policy_config(root / "configs" / "promotion.yaml")
     strategy_portfolio_config = load_strategy_portfolio_policy_config(root / "configs" / "strategy_portfolio.yaml")
     strategy_monitoring_config = load_strategy_monitoring_policy_config(root / "configs" / "strategy_monitoring.yaml")
+    orchestration_config = load_automated_orchestration_config(root / "configs" / "orchestration.yaml")
     minimal_demo_config = load_pipeline_run_config(root / "configs" / "minimal_local_demo.yaml")
 
     assert pipeline_config.schedule_type == "daily"
@@ -355,4 +390,5 @@ def test_example_configs_load_from_repo() -> None:
     assert promotion_config.metric_name == "portfolio_sharpe"
     assert strategy_portfolio_config.selection_metric == "ranking_value"
     assert strategy_monitoring_config.kill_switch_mode == "recommendation_only"
+    assert orchestration_config.schedule_frequency == "manual"
     assert minimal_demo_config.schedule_type == "ad_hoc"

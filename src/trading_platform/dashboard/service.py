@@ -109,6 +109,31 @@ class DashboardDataService:
         rows.sort(key=lambda row: str(row.get("started_at") or row["run_dir"]), reverse=True)
         return rows[:limit]
 
+    def recent_orchestration_runs(self, limit: int = 20) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        for summary_path in sorted(self.artifacts_root.rglob("orchestration_run.json")):
+            payload = _safe_read_json(summary_path)
+            run_dir = summary_path.parent
+            stage_records = payload.get("stage_records", [])
+            outputs = payload.get("outputs", {})
+            rows.append(
+                {
+                    "run_id": payload.get("run_id"),
+                    "run_name": payload.get("run_name", run_dir.name),
+                    "run_dir": str(run_dir),
+                    "started_at": payload.get("started_at"),
+                    "ended_at": payload.get("ended_at"),
+                    "status": payload.get("status", "unknown"),
+                    "schedule_frequency": payload.get("schedule_frequency"),
+                    "failed_stage_count": sum(1 for row in stage_records if row.get("status") == "failed"),
+                    "selected_strategy_count": outputs.get("selected_strategy_count", 0),
+                    "warning_strategy_count": outputs.get("warning_strategy_count", 0),
+                    "kill_switch_recommendation_count": outputs.get("kill_switch_recommendation_count", 0),
+                }
+            )
+        rows.sort(key=lambda row: str(row.get("started_at") or row["run_dir"]), reverse=True)
+        return rows[:limit]
+
     def latest_run_payload(self) -> dict[str, Any]:
         run_dir = self.find_latest_run_dir()
         if run_dir is None:
@@ -349,6 +374,17 @@ class DashboardDataService:
             ),
         }
 
+    def latest_automated_orchestration_payload(self) -> dict[str, Any]:
+        latest = _latest_matching_file(self.artifacts_root, ["orchestration_run.json"])
+        if latest is None:
+            return {"run_dir": None, "summary": {}, "stage_records": []}
+        payload = _safe_read_json(latest)
+        return {
+            "run_dir": str(latest.parent),
+            "summary": payload,
+            "stage_records": payload.get("stage_records", []),
+        }
+
     def overview_payload(self) -> dict[str, Any]:
         latest_run = self.latest_run_payload()
         registry = self.registry_payload()
@@ -358,6 +394,7 @@ class DashboardDataService:
         alerts = self.latest_alerts_payload()
         research = self.research_payload()
         strategy_monitoring = self.strategy_monitoring_payload()
+        orchestration = self.latest_automated_orchestration_payload()
         latest_run_summary = latest_run.get("summary", {})
         latest_run_health = latest_run.get("health", {})
         portfolio_summary = portfolio.get("summary", {})
@@ -400,6 +437,11 @@ class DashboardDataService:
                 "deactivation_candidate_count": strategy_monitoring.get("summary", {}).get("deactivation_candidate_count", 0),
                 "aggregate_return": strategy_monitoring.get("summary", {}).get("aggregate_return"),
             },
+            "orchestration": {
+                "run_id": orchestration.get("summary", {}).get("run_id"),
+                "status": orchestration.get("summary", {}).get("status"),
+                "selected_strategy_count": orchestration.get("summary", {}).get("outputs", {}).get("selected_strategy_count", 0),
+            },
             "portfolio": {
                 "generated_position_count": len(portfolio.get("combined_positions", [])),
                 "gross_exposure": portfolio_summary.get("gross_exposure_after_constraints"),
@@ -430,7 +472,11 @@ class DashboardDataService:
         }
 
     def runs_payload(self) -> dict[str, Any]:
-        return {"generated_at": _now_utc(), "runs": self.recent_runs()}
+        return {
+            "generated_at": _now_utc(),
+            "runs": self.recent_runs(),
+            "orchestration_runs": self.recent_orchestration_runs(),
+        }
 
     def latest_run_detail_payload(self) -> dict[str, Any]:
         latest_run = self.latest_run_payload()

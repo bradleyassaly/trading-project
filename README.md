@@ -1027,6 +1027,56 @@ Notes:
 - kill-switch outputs are recommendation-first and read-only by default
 - `configs/strategy_monitoring.yaml` keeps thresholds explicit and easy to review
 
+### Fully Automated Pipeline
+
+The repo now includes a lightweight orchestration runner for the promoted-strategy workflow. It automates:
+
+1. research manifest discovery
+2. registry / leaderboard / promotion-candidate refresh
+3. promotion into generated paper presets
+4. strategy portfolio selection and export
+5. multi-strategy allocation
+6. paper execution
+7. strategy monitoring
+8. kill-switch recommendation generation
+
+Primary config:
+
+- `configs/orchestration.yaml`
+
+Primary run artifacts:
+
+- `orchestration_run.json`
+- `orchestration_run.md`
+- `stage_status.csv`
+- `orchestration_config_snapshot.json`
+
+Example:
+
+```bash
+trading-cli orchestrate run --config configs/orchestration.yaml
+trading-cli orchestrate show-run --run artifacts/orchestration_runs/automated_promotion_loop/2026-03-22T00-00-00+00-00
+```
+
+Optional local loop:
+
+```bash
+trading-cli orchestrate loop --config configs/orchestration.yaml --max-iterations 1
+```
+
+Scheduling guidance:
+
+- Linux/macOS: run `trading-cli orchestrate run --config configs/orchestration.yaml` from cron
+- Windows: run the same command from Task Scheduler
+- keep `schedule_frequency` aligned with the external scheduler so artifact history stays readable
+
+Debugging failed runs:
+
+- inspect `orchestration_run.md` for the high-level stage summary
+- inspect `stage_status.csv` for per-stage status and timing
+- inspect the stage-specific artifact directory under the timestamped run folder
+- rerun a single step manually with the existing CLI commands if you need deeper debugging
+
 ### Paper Trading
 
 Paper trading supports both legacy strategy targets and approved composite alpha targets. The workflow builds target weights, generates rebalance orders, optionally applies simulated fills, and writes state, ledger, and diagnostics artifacts.

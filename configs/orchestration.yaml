@@ -1,0 +1,24 @@
+run_name: automated_promotion_loop
+schedule_frequency: manual
+research_artifacts_root: artifacts
+output_root_dir: artifacts/orchestration_runs
+promotion_policy_config_path: configs/promotion.yaml
+strategy_portfolio_policy_config_path: configs/strategy_portfolio.yaml
+strategy_monitoring_policy_config_path: configs/strategy_monitoring.yaml
+execution_config_path: configs/execution.yaml
+paper_state_path: artifacts/paper/automated_orchestration_state.json
+max_promotions_per_run: 3
+min_selected_strategies_warning: 1
+promotion_dry_run: false
+promotion_inactive: false
+kill_switch_include_review: true
+loop_sleep_seconds: 3600
+stages:
+  research: true
+  registry: true
+  promotion: true
+  portfolio: true
+  allocation: true
+  paper: true
+  monitoring: true
+  kill_switch: true

@@ -38,6 +38,8 @@ from trading_platform.cli.commands.monitor_notify import cmd_monitor_notify
 from trading_platform.cli.commands.monitor_portfolio_health import cmd_monitor_portfolio_health
 from trading_platform.cli.commands.monitor_run_health import cmd_monitor_run_health
 from trading_platform.cli.commands.monitor_strategy_health import cmd_monitor_strategy_health
+from trading_platform.cli.commands.orchestrate_run import cmd_orchestrate_loop, cmd_orchestrate_run
+from trading_platform.cli.commands.orchestrate_show_run import cmd_orchestrate_show_run
 from trading_platform.cli.commands.paper_report import cmd_paper_report
 from trading_platform.cli.commands.paper_run import cmd_paper_run
 from trading_platform.cli.commands.paper_run_multi_strategy import cmd_paper_run_multi_strategy
@@ -951,5 +953,18 @@ def build_parser() -> argparse.ArgumentParser:
     doctor_parser.add_argument("--dashboard-config", type=str, default=None, help="Optional dashboard config to validate.")
     doctor_parser.add_argument("--output-dir", type=str, default="artifacts/system_check", help="Directory where doctor artifacts will be written.")
     doctor_parser.set_defaults(func=cmd_doctor)
+
+    orchestrate_parser = subparsers.add_parser("orchestrate", help="Automate the full research-to-monitoring pipeline")
+    orchestrate_subparsers = orchestrate_parser.add_subparsers(dest="orchestrate_command", required=True)
+    orchestrate_run = orchestrate_subparsers.add_parser("run", help="Run the automated promotion, portfolio, paper, and monitoring pipeline")
+    orchestrate_run.add_argument("--config", type=str, required=True, help="Path to the automated orchestration JSON/YAML config.")
+    orchestrate_run.set_defaults(func=cmd_orchestrate_run)
+    orchestrate_show = orchestrate_subparsers.add_parser("show-run", help="Show a concise summary of an orchestration run artifact")
+    orchestrate_show.add_argument("--run", type=str, required=True, help="Path to orchestration_run.json or its parent directory.")
+    orchestrate_show.set_defaults(func=cmd_orchestrate_show_run)
+    orchestrate_loop = orchestrate_subparsers.add_parser("loop", help="Run the automated orchestration pipeline repeatedly with sleep intervals")
+    orchestrate_loop.add_argument("--config", type=str, required=True, help="Path to the automated orchestration JSON/YAML config.")
+    orchestrate_loop.add_argument("--max-iterations", type=int, default=None, help="Optional maximum iterations before the loop exits.")
+    orchestrate_loop.set_defaults(func=cmd_orchestrate_loop)
 
     return parser

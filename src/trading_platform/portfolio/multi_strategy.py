@@ -7,7 +7,7 @@ from typing import Any
 
 import pandas as pd
 
-from trading_platform.cli.presets import resolve_cli_preset
+from trading_platform.cli.presets import CliPreset, resolve_cli_preset
 from trading_platform.config.models import MultiStrategyPortfolioConfig, MultiStrategySleeveConfig
 from trading_platform.metadata.groups import build_group_series
 from trading_platform.paper.models import PaperTradingConfig
@@ -56,11 +56,26 @@ class MultiStrategyAllocationResult:
     summary: dict[str, Any]
 
 
-def _paper_config_from_preset(preset_name: str) -> PaperTradingConfig:
+def _load_cli_preset(preset_name: str, preset_path: str | None = None) -> CliPreset:
+    if preset_path:
+        path = Path(preset_path)
+        if not path.exists():
+            raise ValueError(f"Preset path does not exist: {preset_path}")
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        return CliPreset(
+            name=str(payload.get("name") or preset_name),
+            description=str(payload.get("description") or f"Generated preset from {path.name}"),
+            params=dict(payload.get("params", {})),
+            decision_context=dict(payload.get("decision_context", {})),
+        )
     try:
-        preset = resolve_cli_preset(preset_name)
+        return resolve_cli_preset(preset_name)
     except SystemExit as exc:
         raise ValueError(f"Unknown preset: {preset_name}") from exc
+
+
+def _paper_config_from_preset(preset_name: str, preset_path: str | None = None) -> PaperTradingConfig:
+    preset = _load_cli_preset(preset_name, preset_path)
 
     params = dict(preset.params)
     symbols = params.pop("symbols", None)
@@ -126,7 +141,10 @@ def load_strategy_sleeves(
     for sleeve in portfolio_config.sleeves:
         if not sleeve.enabled:
             continue
-        paper_config = _paper_config_from_preset(sleeve.preset_name)
+        if sleeve.preset_path:
+            paper_config = _paper_config_from_preset(sleeve.preset_name, sleeve.preset_path)
+        else:
+            paper_config = _paper_config_from_preset(sleeve.preset_name)
         target_result = build_target_construction_result(config=paper_config)
         bundles.append(
             SleeveTargetBundle(
@@ -306,6 +324,7 @@ def allocate_multi_strategy_portfolio(
                     "target_weight": float(target_weight),
                     "scaled_target_weight": scaled_weight,
                     "side": "long" if scaled_weight >= 0 else "short",
+                    "preset_path": bundle.sleeve.preset_path or "",
                     "capital_weight_raw": raw_weights[sleeve_name],
                     "capital_weight_normalized": capital_weight,
                     "rebalance_priority": bundle.sleeve.rebalance_priority,
@@ -592,6 +611,7 @@ def write_multi_strategy_artifacts(
             "target_weight",
             "scaled_target_weight",
             "side",
+            "preset_path",
             "capital_weight_raw",
             "capital_weight_normalized",
             "rebalance_priority",

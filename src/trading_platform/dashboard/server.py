@@ -107,6 +107,7 @@ def _overview_page(service: DashboardDataService) -> bytes:
             ("Approved Strategies", overview["registry"].get("approved_strategy_count") or 0, "from registry"),
             ("Research Candidates", overview["research"].get("eligible_candidate_count") or 0, "promotion-ready runs"),
             ("Strategy Portfolio", overview["research"].get("strategy_portfolio_selected_count") or 0, "selected promoted strategies"),
+            ("Automation", overview["orchestration"].get("status") or "n/a", overview["orchestration"].get("run_id") or "no automated runs"),
             ("Strategy Warnings", overview["strategy_monitoring"].get("warning_strategy_count") or 0, "latest monitoring snapshot"),
             ("Generated Positions", overview["portfolio"].get("generated_position_count") or 0, "latest portfolio"),
             ("Executable Orders", overview["execution"].get("executable_order_count") or 0, "latest execution package"),
@@ -254,6 +255,7 @@ def _live_page(service: DashboardDataService) -> bytes:
 def _runs_page(service: DashboardDataService) -> bytes:
     payload = service.runs_payload()
     runs = payload["runs"]
+    orchestration_runs = payload.get("orchestration_runs", [])
     body = _cards(
         [
             ("Run Count", len(runs), "recent discovered runs"),
@@ -264,6 +266,10 @@ def _runs_page(service: DashboardDataService) -> bytes:
     )
     body += "<h2>Critical Alerts Trend</h2>" + _bar_chart([(str(index + 1), float(row.get("critical_alert_count", 0))) for index, row in enumerate(reversed(runs[:10]))])
     body += "<h2>Recent Runs</h2>" + _table(["run_name", "status", "health_status", "schedule_type", "started_at", "failed_stage_count", "artifact_dir"], runs)
+    body += "<h2>Automated Orchestration Runs</h2>" + _table(
+        ["run_id", "run_name", "status", "schedule_frequency", "selected_strategy_count", "warning_strategy_count", "kill_switch_recommendation_count", "run_dir"],
+        orchestration_runs,
+    )
     latest = service.latest_run_detail_payload()
     body += "<h2>Latest Stage Status</h2>" + _table(["stage_name", "status", "started_at", "ended_at", "duration_seconds", "error_message"], latest.get("stages", []))
     return _page_shell("Runs", body)
@@ -281,6 +287,8 @@ def create_dashboard_app(artifacts_root: str | Path) -> Callable:
             status, headers, body = _json_response(service.runs_payload())
         elif path == "/api/runs/latest":
             status, headers, body = _json_response(service.latest_run_detail_payload())
+        elif path == "/api/orchestration/latest":
+            status, headers, body = _json_response(service.latest_automated_orchestration_payload())
         elif path == "/api/strategies":
             status, headers, body = _json_response(service.strategies_payload())
         elif path == "/api/research/latest":
@@ -332,6 +340,7 @@ def build_dashboard_static_data(*, artifacts_root: str | Path, output_dir: str |
         "overview.json": service.overview_payload(),
         "runs.json": service.runs_payload(),
         "runs_latest.json": service.latest_run_detail_payload(),
+        "orchestration_latest.json": service.latest_automated_orchestration_payload(),
         "strategies.json": service.strategies_payload(),
         "research_latest.json": service.research_latest_payload(),
         "strategy_monitoring_latest.json": service.strategy_monitoring_payload(),

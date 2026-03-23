@@ -370,6 +370,7 @@ class MultiStrategySleeveConfig:
     sleeve_name: str
     preset_name: str
     target_capital_weight: float
+    preset_path: str | None = None
     enabled: bool = True
     min_capital_weight: float | None = None
     max_capital_weight: float | None = None
@@ -382,6 +383,8 @@ class MultiStrategySleeveConfig:
             raise ValueError("sleeve_name must be a non-empty string")
         if not self.preset_name or not self.preset_name.strip():
             raise ValueError("preset_name must be a non-empty string")
+        if self.preset_path is not None and not self.preset_path.strip():
+            raise ValueError("preset_path must be a non-empty string when provided")
         if self.target_capital_weight < 0:
             raise ValueError("target_capital_weight must be >= 0")
         if self.min_capital_weight is not None and self.min_capital_weight < 0:

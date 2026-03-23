@@ -357,6 +357,31 @@ def _write_sample_artifacts(root: Path) -> None:
         ),
         encoding="utf-8",
     )
+    orchestration_dir = root / "orchestration_runs" / "automation" / "2026-03-22T00-00-00+00-00"
+    orchestration_dir.mkdir(parents=True, exist_ok=True)
+    (orchestration_dir / "orchestration_run.json").write_text(
+        json.dumps(
+            {
+                "run_id": "2026-03-22T00-00-00+00-00",
+                "run_name": "automation",
+                "schedule_frequency": "daily",
+                "started_at": "2026-03-22T00:00:00+00:00",
+                "ended_at": "2026-03-22T00:05:00+00:00",
+                "status": "succeeded",
+                "stage_records": [
+                    {"stage_name": "research", "status": "succeeded"},
+                    {"stage_name": "promotion", "status": "succeeded"},
+                ],
+                "outputs": {
+                    "selected_strategy_count": 1,
+                    "warning_strategy_count": 1,
+                    "kill_switch_recommendation_count": 1,
+                },
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
 
 
 def _call_app(app, path: str) -> tuple[str, dict[str, str], dict]:
@@ -390,6 +415,7 @@ def test_dashboard_data_loading_with_sample_artifacts(tmp_path: Path) -> None:
     assert overview["research"]["promoted_strategy_count"] == 1
     assert overview["research"]["strategy_portfolio_selected_count"] == 1
     assert overview["strategy_monitoring"]["warning_strategy_count"] == 1
+    assert overview["orchestration"]["status"] == "succeeded"
     assert strategies["summary"]["status_counts"]["approved"] == 1
     assert execution["summary"]["executable_order_count"] == 1
 
@@ -465,6 +491,17 @@ def test_dashboard_strategy_monitoring_normalization(tmp_path: Path) -> None:
     assert payload["recommendations"][0]["recommendation"] == "deactivate"
 
 
+def test_dashboard_orchestration_normalization(tmp_path: Path) -> None:
+    _write_sample_artifacts(tmp_path)
+    service = DashboardDataService(tmp_path)
+
+    payload = service.latest_automated_orchestration_payload()
+    runs = service.runs_payload()
+
+    assert payload["summary"]["run_name"] == "automation"
+    assert runs["orchestration_runs"][0]["status"] == "succeeded"
+
+
 def test_dashboard_api_response_shapes(tmp_path: Path) -> None:
     _write_sample_artifacts(tmp_path)
     app = create_dashboard_app(tmp_path)
@@ -472,7 +509,7 @@ def test_dashboard_api_response_shapes(tmp_path: Path) -> None:
     status, headers, overview = _call_app(app, "/api/overview")
     assert status.startswith("200")
     assert headers["Content-Type"].startswith("application/json")
-    assert {"generated_at", "latest_run", "monitoring", "registry", "strategy_monitoring", "portfolio", "execution", "broker_health", "quick_links"} <= set(overview)
+    assert {"generated_at", "latest_run", "monitoring", "registry", "strategy_monitoring", "orchestration", "portfolio", "execution", "broker_health", "quick_links"} <= set(overview)
 
     _status, _headers, strategies = _call_app(app, "/api/strategies")
     assert {"generated_at", "summary", "filters", "strategies", "champion_challenger"} <= set(strategies)
@@ -483,6 +520,9 @@ def test_dashboard_api_response_shapes(tmp_path: Path) -> None:
 
     _status, _headers, strategy_monitor = _call_app(app, "/api/strategy-monitor/latest")
     assert {"generated_at", "summary", "strategies", "recommendations", "attribution_summary"} <= set(strategy_monitor)
+
+    _status, _headers, orchestration = _call_app(app, "/api/orchestration/latest")
+    assert {"run_dir", "summary", "stage_records"} <= set(orchestration)
 
     _status, _headers, live = _call_app(app, "/api/live/latest")
     assert {"generated_at", "dry_run_summary", "submission_summary", "risk_checks", "blocked_checks", "duplicate_events", "broker_health"} <= set(live)
@@ -500,3 +540,4 @@ def test_dashboard_static_data_build(tmp_path: Path) -> None:
     assert paths["runs_json"].exists()
     assert paths["research_latest_json"].exists()
     assert paths["strategy_monitoring_latest_json"].exists()
+    assert paths["orchestration_latest_json"].exists()

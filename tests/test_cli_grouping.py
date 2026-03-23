@@ -536,6 +536,54 @@ def test_grouped_strategy_monitor_recommend_command_parses() -> None:
     assert args.include_review is True
 
 
+def test_grouped_orchestrate_run_command_parses() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "orchestrate",
+            "run",
+            "--config",
+            "configs/orchestration.yaml",
+        ]
+    )
+
+    assert args.command_family == "orchestrate"
+    assert args.orchestrate_command == "run"
+    assert args.config == "configs/orchestration.yaml"
+
+
+def test_grouped_orchestrate_show_run_command_parses() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "orchestrate",
+            "show-run",
+            "--run",
+            "artifacts/orchestration_runs/latest",
+        ]
+    )
+
+    assert args.orchestrate_command == "show-run"
+    assert args.run == "artifacts/orchestration_runs/latest"
+
+
+def test_grouped_orchestrate_loop_command_parses() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "orchestrate",
+            "loop",
+            "--config",
+            "configs/orchestration.yaml",
+            "--max-iterations",
+            "2",
+        ]
+    )
+
+    assert args.orchestrate_command == "loop"
+    assert args.max_iterations == 2
+
+
 def test_grouped_doctor_command_parses() -> None:
     parser = build_parser()
     args = parser.parse_args(

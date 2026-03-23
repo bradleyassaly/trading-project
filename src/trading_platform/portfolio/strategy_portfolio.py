@@ -354,6 +354,7 @@ def export_strategy_portfolio_run_config(
             sleeve_name=str(row["preset_name"]),
             preset_name=str(row["preset_name"]),
             target_capital_weight=float(row["target_capital_fraction"]),
+            preset_path=str(row.get("generated_preset_path") or "") or None,
             enabled=True,
             notes=str(row.get("reason_selected") or ""),
             tags=[tag for tag in [str(row.get("signal_family") or ""), str(row.get("universe") or "")] if tag],
