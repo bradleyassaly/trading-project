@@ -1,0 +1,13 @@
+schema_version: 1
+min_observations: 5
+warning_drawdown: 0.08
+deactivate_drawdown: 0.15
+warning_realized_sharpe: 0.5
+deactivate_realized_sharpe: 0.0
+max_drift_from_expected: 1.0
+max_underperformance_streak: 5
+max_missing_data_days: 3
+include_inactive_strategies: true
+kill_switch_mode: recommendation_only
+tags:
+  - strategy_monitoring

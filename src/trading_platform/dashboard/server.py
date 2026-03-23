@@ -107,6 +107,7 @@ def _overview_page(service: DashboardDataService) -> bytes:
             ("Approved Strategies", overview["registry"].get("approved_strategy_count") or 0, "from registry"),
             ("Research Candidates", overview["research"].get("eligible_candidate_count") or 0, "promotion-ready runs"),
             ("Strategy Portfolio", overview["research"].get("strategy_portfolio_selected_count") or 0, "selected promoted strategies"),
+            ("Strategy Warnings", overview["strategy_monitoring"].get("warning_strategy_count") or 0, "latest monitoring snapshot"),
             ("Generated Positions", overview["portfolio"].get("generated_position_count") or 0, "latest portfolio"),
             ("Executable Orders", overview["execution"].get("executable_order_count") or 0, "latest execution package"),
             ("Broker Health", overview["broker_health"].get("status") or "n/a", overview["broker_health"].get("message") or "not available"),
@@ -145,12 +146,14 @@ def _strategies_page(service: DashboardDataService, query: dict[str, list[str]])
 
 def _research_page(service: DashboardDataService) -> bytes:
     payload = service.research_latest_payload()
+    monitoring = service.strategy_monitoring_payload()
     summary = payload.get("summary", {})
     body = _cards(
         [
             ("Research Runs", summary.get("run_count", 0), "indexed manifests"),
             ("Eligible Candidates", summary.get("eligible_candidate_count", 0), "promotion readiness"),
             ("Promoted Strategies", summary.get("promoted_strategy_count", 0), "generated paper presets"),
+            ("Monitoring Warnings", monitoring.get("summary", {}).get("warning_strategy_count", 0), "selected strategy reviews"),
             ("Signal Families", len(summary.get("signal_family_counts", {})), "observed across runs"),
             ("Universes", len(summary.get("universe_counts", {})), "observed across runs"),
         ]
@@ -175,6 +178,14 @@ def _research_page(service: DashboardDataService) -> bytes:
     body += "<h2>Strategy Portfolio Exclusions</h2>" + _table(
         ["preset_name", "reason"],
         payload.get("strategy_portfolio", {}).get("excluded_candidates", []),
+    )
+    body += "<h2>Strategy Monitoring</h2>" + _table(
+        ["preset_name", "current_status", "portfolio_weight", "realized_sharpe", "drawdown", "recommendation", "warning_flags"],
+        monitoring.get("strategies", []),
+    )
+    body += "<h2>Kill-Switch Recommendations</h2>" + _table(
+        ["preset_name", "recommendation", "reasons", "portfolio_weight", "paper_observation_count"],
+        monitoring.get("recommendations", []),
     )
     body += "<h2>Recent Research Runs</h2>" + _table(
         ["run_id", "timestamp", "workflow_type", "signal_family", "universe", "candidate_count", "promoted_signal_count"],
@@ -274,6 +285,8 @@ def create_dashboard_app(artifacts_root: str | Path) -> Callable:
             status, headers, body = _json_response(service.strategies_payload())
         elif path == "/api/research/latest":
             status, headers, body = _json_response(service.research_latest_payload())
+        elif path == "/api/strategy-monitor/latest":
+            status, headers, body = _json_response(service.strategy_monitoring_payload())
         elif path == "/api/portfolio/latest":
             status, headers, body = _json_response(service.portfolio_payload())
         elif path == "/api/execution/latest":
@@ -321,6 +334,7 @@ def build_dashboard_static_data(*, artifacts_root: str | Path, output_dir: str |
         "runs_latest.json": service.latest_run_detail_payload(),
         "strategies.json": service.strategies_payload(),
         "research_latest.json": service.research_latest_payload(),
+        "strategy_monitoring_latest.json": service.strategy_monitoring_payload(),
         "portfolio_latest.json": service.portfolio_payload(),
         "execution_latest.json": service.execution_payload(),
         "live_latest.json": service.live_payload(),

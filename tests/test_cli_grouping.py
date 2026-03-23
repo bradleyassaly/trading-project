@@ -479,6 +479,63 @@ def test_grouped_strategy_portfolio_export_run_config_command_parses() -> None:
     assert args.output_dir == "artifacts/strategy_portfolio_run"
 
 
+def test_grouped_strategy_monitor_build_command_parses() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "strategy-monitor",
+            "build",
+            "--portfolio",
+            "artifacts/strategy_portfolio",
+            "--paper-dir",
+            "artifacts/paper/strategy_portfolio",
+            "--policy-config",
+            "configs/strategy_monitoring.yaml",
+            "--output-dir",
+            "artifacts/strategy_monitoring",
+        ]
+    )
+
+    assert args.command_family == "strategy-monitor"
+    assert args.strategy_monitor_command == "build"
+    assert args.paper_dir == "artifacts/paper/strategy_portfolio"
+
+
+def test_grouped_strategy_monitor_show_command_parses() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "strategy-monitor",
+            "show",
+            "--monitoring",
+            "artifacts/strategy_monitoring",
+        ]
+    )
+
+    assert args.command_family == "strategy-monitor"
+    assert args.strategy_monitor_command == "show"
+    assert args.monitoring == "artifacts/strategy_monitoring"
+
+
+def test_grouped_strategy_monitor_recommend_command_parses() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "strategy-monitor",
+            "recommend-kill-switch",
+            "--monitoring",
+            "artifacts/strategy_monitoring",
+            "--output-dir",
+            "artifacts/strategy_monitoring_recommendations",
+            "--include-review",
+        ]
+    )
+
+    assert args.command_family == "strategy-monitor"
+    assert args.strategy_monitor_command == "recommend-kill-switch"
+    assert args.include_review is True
+
+
 def test_grouped_doctor_command_parses() -> None:
     parser = build_parser()
     args = parser.parse_args(

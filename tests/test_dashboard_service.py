@@ -303,6 +303,60 @@ def _write_sample_artifacts(root: Path) -> None:
         ),
         encoding="utf-8",
     )
+    (root / "strategy_monitoring.json").write_text(
+        json.dumps(
+            {
+                "summary": {
+                    "selected_strategy_count": 1,
+                    "warning_strategy_count": 1,
+                    "deactivation_candidate_count": 1,
+                    "aggregate_return": -0.08,
+                },
+                "strategies": [
+                    {
+                        "preset_name": "generated_momentum_nasdaq100_research_run_1_paper",
+                        "current_status": "active",
+                        "portfolio_weight": 1.0,
+                        "realized_sharpe": -0.6,
+                        "drawdown": 0.12,
+                        "recommendation": "deactivate",
+                        "warning_flags": ["drawdown_breach"],
+                    }
+                ],
+                "kill_switch_recommendations": [
+                    {
+                        "preset_name": "generated_momentum_nasdaq100_research_run_1_paper",
+                        "recommendation": "deactivate",
+                        "reasons": ["drawdown_breach"],
+                        "portfolio_weight": 1.0,
+                        "paper_observation_count": 10,
+                    }
+                ],
+                "attribution_summary": {
+                    "method": "proxy_weight_scaled",
+                    "confidence": "low",
+                },
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    (root / "kill_switch_recommendations.json").write_text(
+        json.dumps(
+            {
+                "summary": {"recommendation_count": 1},
+                "recommendations": [
+                    {
+                        "preset_name": "generated_momentum_nasdaq100_research_run_1_paper",
+                        "recommendation": "deactivate",
+                        "reasons": ["drawdown_breach"],
+                    }
+                ],
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
 
 
 def _call_app(app, path: str) -> tuple[str, dict[str, str], dict]:
@@ -335,6 +389,7 @@ def test_dashboard_data_loading_with_sample_artifacts(tmp_path: Path) -> None:
     assert overview["research"]["eligible_candidate_count"] == 1
     assert overview["research"]["promoted_strategy_count"] == 1
     assert overview["research"]["strategy_portfolio_selected_count"] == 1
+    assert overview["strategy_monitoring"]["warning_strategy_count"] == 1
     assert strategies["summary"]["status_counts"]["approved"] == 1
     assert execution["summary"]["executable_order_count"] == 1
 
@@ -399,6 +454,17 @@ def test_dashboard_research_summary_normalization(tmp_path: Path) -> None:
     assert payload["strategy_portfolio"]["selected_strategies"][0]["preset_name"].startswith("generated_")
 
 
+def test_dashboard_strategy_monitoring_normalization(tmp_path: Path) -> None:
+    _write_sample_artifacts(tmp_path)
+    service = DashboardDataService(tmp_path)
+
+    payload = service.strategy_monitoring_payload()
+
+    assert payload["summary"]["warning_strategy_count"] == 1
+    assert payload["strategies"][0]["recommendation"] == "deactivate"
+    assert payload["recommendations"][0]["recommendation"] == "deactivate"
+
+
 def test_dashboard_api_response_shapes(tmp_path: Path) -> None:
     _write_sample_artifacts(tmp_path)
     app = create_dashboard_app(tmp_path)
@@ -406,7 +472,7 @@ def test_dashboard_api_response_shapes(tmp_path: Path) -> None:
     status, headers, overview = _call_app(app, "/api/overview")
     assert status.startswith("200")
     assert headers["Content-Type"].startswith("application/json")
-    assert {"generated_at", "latest_run", "monitoring", "registry", "portfolio", "execution", "broker_health", "quick_links"} <= set(overview)
+    assert {"generated_at", "latest_run", "monitoring", "registry", "strategy_monitoring", "portfolio", "execution", "broker_health", "quick_links"} <= set(overview)
 
     _status, _headers, strategies = _call_app(app, "/api/strategies")
     assert {"generated_at", "summary", "filters", "strategies", "champion_challenger"} <= set(strategies)
@@ -414,6 +480,9 @@ def test_dashboard_api_response_shapes(tmp_path: Path) -> None:
     _status, _headers, research = _call_app(app, "/api/research/latest")
     assert {"generated_at", "summary", "recent_runs", "leaderboard", "promotion_candidates", "promoted_strategies"} <= set(research)
     assert "strategy_portfolio" in research
+
+    _status, _headers, strategy_monitor = _call_app(app, "/api/strategy-monitor/latest")
+    assert {"generated_at", "summary", "strategies", "recommendations", "attribution_summary"} <= set(strategy_monitor)
 
     _status, _headers, live = _call_app(app, "/api/live/latest")
     assert {"generated_at", "dry_run_summary", "submission_summary", "risk_checks", "blocked_checks", "duplicate_events", "broker_health"} <= set(live)
@@ -430,3 +499,4 @@ def test_dashboard_static_data_build(tmp_path: Path) -> None:
     assert paths["overview_json"].exists()
     assert paths["runs_json"].exists()
     assert paths["research_latest_json"].exists()
+    assert paths["strategy_monitoring_latest_json"].exists()

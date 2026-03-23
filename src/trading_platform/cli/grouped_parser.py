@@ -73,6 +73,11 @@ from trading_platform.cli.commands.sweep import cmd_sweep
 from trading_platform.cli.commands.strategy_portfolio_build import cmd_strategy_portfolio_build
 from trading_platform.cli.commands.strategy_portfolio_export_run_config import cmd_strategy_portfolio_export_run_config
 from trading_platform.cli.commands.strategy_portfolio_show import cmd_strategy_portfolio_show
+from trading_platform.cli.commands.strategy_monitor_build import cmd_strategy_monitor_build
+from trading_platform.cli.commands.strategy_monitor_recommend_kill_switch import (
+    cmd_strategy_monitor_recommend_kill_switch,
+)
+from trading_platform.cli.commands.strategy_monitor_show import cmd_strategy_monitor_show
 from trading_platform.cli.commands.validate_signal import cmd_validate_signal
 from trading_platform.cli.commands.validate_live import cmd_validate_live
 from trading_platform.cli.commands.walkforward import cmd_walkforward
@@ -916,6 +921,25 @@ def build_parser() -> argparse.ArgumentParser:
     strategy_portfolio_export.add_argument("--portfolio", type=str, required=True, help="Path to strategy_portfolio.json or its parent directory.")
     strategy_portfolio_export.add_argument("--output-dir", type=str, required=True, help="Directory where runnable config artifacts will be written.")
     strategy_portfolio_export.set_defaults(func=cmd_strategy_portfolio_export_run_config)
+
+    strategy_monitor_parser = subparsers.add_parser("strategy-monitor", help="Build monitoring snapshots and kill-switch recommendations for strategy portfolios")
+    strategy_monitor_subparsers = strategy_monitor_parser.add_subparsers(dest="strategy_monitor_command", required=True)
+    strategy_monitor_build = strategy_monitor_subparsers.add_parser("build", help="Build a strategy monitoring snapshot from a strategy portfolio and paper artifacts")
+    strategy_monitor_build.add_argument("--portfolio", type=str, required=True, help="Path to strategy_portfolio.json or its parent directory.")
+    strategy_monitor_build.add_argument("--paper-dir", type=str, required=True, help="Directory containing paper_run_summary and paper_equity_curve artifacts.")
+    strategy_monitor_build.add_argument("--execution-dir", type=str, default=None, help="Optional execution artifact directory for cost and rejection diagnostics.")
+    strategy_monitor_build.add_argument("--allocation-dir", type=str, default=None, help="Optional multi-strategy allocation directory for sleeve attribution diagnostics.")
+    strategy_monitor_build.add_argument("--policy-config", type=str, default=None, help="Optional strategy monitoring policy JSON/YAML file.")
+    strategy_monitor_build.add_argument("--output-dir", type=str, required=True, help="Directory where strategy monitoring artifacts will be written.")
+    strategy_monitor_build.set_defaults(func=cmd_strategy_monitor_build)
+    strategy_monitor_show = strategy_monitor_subparsers.add_parser("show", help="Print a concise summary of a strategy monitoring artifact")
+    strategy_monitor_show.add_argument("--monitoring", type=str, required=True, help="Path to strategy_monitoring.json or its parent directory.")
+    strategy_monitor_show.set_defaults(func=cmd_strategy_monitor_show)
+    strategy_monitor_recommend = strategy_monitor_subparsers.add_parser("recommend-kill-switch", help="Filter and rewrite kill-switch recommendations from a monitoring snapshot")
+    strategy_monitor_recommend.add_argument("--monitoring", type=str, required=True, help="Path to strategy_monitoring.json or its parent directory.")
+    strategy_monitor_recommend.add_argument("--output-dir", type=str, default=None, help="Optional directory where recommendation artifacts should be written.")
+    strategy_monitor_recommend.add_argument("--include-review", action="store_true", help="Include review-only recommendations alongside reduce/deactivate recommendations.")
+    strategy_monitor_recommend.set_defaults(func=cmd_strategy_monitor_recommend_kill_switch)
 
     doctor_parser = subparsers.add_parser("doctor", help="Run local environment, config, and artifact sanity checks")
     doctor_parser.add_argument("--artifacts-root", type=str, default="artifacts", help="Artifact root to inspect.")

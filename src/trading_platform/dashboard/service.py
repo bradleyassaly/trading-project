@@ -331,6 +331,24 @@ class DashboardDataService:
             "strategy_portfolio": strategy_portfolio_payload,
         }
 
+    def strategy_monitoring_payload(self) -> dict[str, Any]:
+        monitoring_path = _latest_matching_file(self.artifacts_root, ["strategy_monitoring.json"])
+        recommendations_path = _latest_matching_file(self.artifacts_root, ["kill_switch_recommendations.json"])
+        monitoring_payload = _safe_read_json(monitoring_path)
+        recommendations_payload = _safe_read_json(recommendations_path)
+        return {
+            "generated_at": _now_utc(),
+            "strategy_monitoring_path": str(monitoring_path) if monitoring_path is not None else None,
+            "kill_switch_recommendations_path": str(recommendations_path) if recommendations_path is not None else None,
+            "summary": monitoring_payload.get("summary", {}),
+            "strategies": monitoring_payload.get("strategies", []),
+            "attribution_summary": monitoring_payload.get("attribution_summary", {}),
+            "recommendations": recommendations_payload.get(
+                "recommendations",
+                monitoring_payload.get("kill_switch_recommendations", []),
+            ),
+        }
+
     def overview_payload(self) -> dict[str, Any]:
         latest_run = self.latest_run_payload()
         registry = self.registry_payload()
@@ -339,6 +357,7 @@ class DashboardDataService:
         live = self.latest_live_payload()
         alerts = self.latest_alerts_payload()
         research = self.research_payload()
+        strategy_monitoring = self.strategy_monitoring_payload()
         latest_run_summary = latest_run.get("summary", {})
         latest_run_health = latest_run.get("health", {})
         portfolio_summary = portfolio.get("summary", {})
@@ -375,6 +394,11 @@ class DashboardDataService:
                 "promoted_strategy_count": research.get("summary", {}).get("promoted_strategy_count", 0),
                 "strategy_portfolio_selected_count": research.get("summary", {}).get("strategy_portfolio_selected_count", 0),
                 "top_leaderboard_entry": research.get("leaderboard", [{}])[0] if research.get("leaderboard") else {},
+            },
+            "strategy_monitoring": {
+                "warning_strategy_count": strategy_monitoring.get("summary", {}).get("warning_strategy_count", 0),
+                "deactivation_candidate_count": strategy_monitoring.get("summary", {}).get("deactivation_candidate_count", 0),
+                "aggregate_return": strategy_monitoring.get("summary", {}).get("aggregate_return"),
             },
             "portfolio": {
                 "generated_position_count": len(portfolio.get("combined_positions", [])),

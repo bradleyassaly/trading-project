@@ -985,6 +985,48 @@ trading-cli strategy-portfolio export-run-config --portfolio artifacts/strategy_
 trading-cli paper run-multi-strategy --config artifacts/strategy_portfolio_run/strategy_portfolio_multi_strategy.json --state-path artifacts/paper/strategy_portfolio_state.json --output-dir artifacts/paper/strategy_portfolio
 ```
 
+### Strategy Monitoring And Kill-Switch Recommendations
+
+Once a promoted strategy portfolio is running in paper trading, the next layer is ongoing review. The strategy monitoring workflow reads the selected strategy portfolio plus paper, execution, and optional allocation artifacts, then writes a deterministic monitoring snapshot and recommendation package.
+
+It:
+
+- summarizes aggregate paper performance for the selected promoted lineup
+- maps that aggregate outcome back to selected strategies using explicit attribution confidence labels
+- flags deterioration such as drawdown breaches, weak realized Sharpe, missing data, or expected-metric drift
+- writes recommendation-first kill-switch outputs without changing live execution state
+
+Primary artifacts:
+
+- `strategy_monitoring.json` / `strategy_monitoring.csv`
+- `strategy_attribution.csv`
+- `kill_switch_recommendations.json` / `kill_switch_recommendations.csv`
+
+Example:
+
+```bash
+trading-cli strategy-monitor build --portfolio artifacts/strategy_portfolio --paper-dir artifacts/paper/strategy_portfolio --execution-dir artifacts/paper/strategy_portfolio --allocation-dir artifacts/portfolio/strategy_portfolio --policy-config configs/strategy_monitoring.yaml --output-dir artifacts/strategy_monitoring
+trading-cli strategy-monitor show --monitoring artifacts/strategy_monitoring
+trading-cli strategy-monitor recommend-kill-switch --monitoring artifacts/strategy_monitoring --output-dir artifacts/strategy_monitoring_recommendations --include-review
+```
+
+Research to production to monitoring flow:
+
+```bash
+trading-cli research promote --artifacts-root artifacts --registry-dir artifacts/research_registry --output-dir configs/generated_strategies --policy-config configs/promotion.yaml
+trading-cli strategy-portfolio build --promoted-dir configs/generated_strategies --policy-config configs/strategy_portfolio.yaml --output-dir artifacts/strategy_portfolio
+trading-cli strategy-portfolio export-run-config --portfolio artifacts/strategy_portfolio --output-dir artifacts/strategy_portfolio_run
+trading-cli paper run-multi-strategy --config artifacts/strategy_portfolio_run/strategy_portfolio_multi_strategy.json --state-path artifacts/paper/strategy_portfolio_state.json --output-dir artifacts/paper/strategy_portfolio
+trading-cli portfolio allocate-multi-strategy --config artifacts/strategy_portfolio_run/strategy_portfolio_multi_strategy.json --output-dir artifacts/portfolio/strategy_portfolio
+trading-cli strategy-monitor build --portfolio artifacts/strategy_portfolio --paper-dir artifacts/paper/strategy_portfolio --execution-dir artifacts/paper/strategy_portfolio --allocation-dir artifacts/portfolio/strategy_portfolio --policy-config configs/strategy_monitoring.yaml --output-dir artifacts/strategy_monitoring
+```
+
+Notes:
+
+- attribution is marked as exact only when strategy-level paper outcomes exist; otherwise the snapshot writes a proxy method and confidence level
+- kill-switch outputs are recommendation-first and read-only by default
+- `configs/strategy_monitoring.yaml` keeps thresholds explicit and easy to review
+
 ### Paper Trading
 
 Paper trading supports both legacy strategy targets and approved composite alpha targets. The workflow builds target weights, generates rebalance orders, optionally applies simulated fills, and writes state, ledger, and diagnostics artifacts.

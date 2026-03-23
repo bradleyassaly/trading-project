@@ -13,6 +13,7 @@ from trading_platform.config.loader import (
     load_promotion_policy_config,
     load_research_workflow_config,
     load_strategy_portfolio_policy_config,
+    load_strategy_monitoring_policy_config,
 )
 
 
@@ -305,6 +306,32 @@ warn_on_same_family_overlap: true
     assert config.max_weight_per_strategy == 0.4
 
 
+def test_load_strategy_monitoring_policy_config_from_yaml(tmp_path) -> None:
+    path = tmp_path / "strategy_monitoring.yaml"
+    path.write_text(
+        """
+schema_version: 1
+min_observations: 7
+warning_drawdown: 0.05
+deactivate_drawdown: 0.12
+warning_realized_sharpe: 0.4
+deactivate_realized_sharpe: -0.1
+max_drift_from_expected: 0.8
+max_underperformance_streak: 3
+max_missing_data_days: 2
+include_inactive_strategies: false
+kill_switch_mode: recommendation_only
+""".strip(),
+        encoding="utf-8",
+    )
+
+    config = load_strategy_monitoring_policy_config(path)
+
+    assert config.min_observations == 7
+    assert config.warning_drawdown == 0.05
+    assert config.include_inactive_strategies is False
+
+
 def test_example_configs_load_from_repo() -> None:
     root = Path(__file__).resolve().parents[1]
 
@@ -316,6 +343,7 @@ def test_example_configs_load_from_repo() -> None:
     dashboard_config = load_dashboard_config(root / "configs" / "dashboard.yaml")
     promotion_config = load_promotion_policy_config(root / "configs" / "promotion.yaml")
     strategy_portfolio_config = load_strategy_portfolio_policy_config(root / "configs" / "strategy_portfolio.yaml")
+    strategy_monitoring_config = load_strategy_monitoring_policy_config(root / "configs" / "strategy_monitoring.yaml")
     minimal_demo_config = load_pipeline_run_config(root / "configs" / "minimal_local_demo.yaml")
 
     assert pipeline_config.schedule_type == "daily"
@@ -326,4 +354,5 @@ def test_example_configs_load_from_repo() -> None:
     assert dashboard_config.port == 8000
     assert promotion_config.metric_name == "portfolio_sharpe"
     assert strategy_portfolio_config.selection_metric == "ranking_value"
+    assert strategy_monitoring_config.kill_switch_mode == "recommendation_only"
     assert minimal_demo_config.schedule_type == "ad_hoc"
