@@ -89,6 +89,9 @@ def test_system_evaluation_metric_computation(tmp_path: Path) -> None:
 
     assert payload["row"]["run_id"] == "2026-03-22T00-00-00+00-00"
     assert payload["row"]["total_return"] is not None
+    assert payload["row"]["equity_observation_count"] == 3
+    assert payload["row"]["return_observation_count"] == 2
+    assert payload["diagnostic"]["metric_warnings"] == []
     assert payload["row"]["regime"] == "trend"
     assert latest["row"]["experiment_name"] == "ab_test"
     assert latest["row"]["variant_name"] == "adaptive_on"
@@ -133,6 +136,24 @@ def test_system_evaluation_handles_no_op_orchestration_run(tmp_path: Path) -> No
     assert payload["row"]["insufficient_output_reason"] == "no strategies were promoted"
 
 
+def test_system_evaluation_marks_single_observation_metrics_as_insufficient(tmp_path: Path) -> None:
+    run_dir = _write_run(tmp_path / "runs", run_id="2026-03-22T00-00-00+00-00", total_return_scale=0.0, adaptive=False, regime=False)
+    pd.DataFrame([{"timestamp": "2026-03-22T00:00:00+00:00", "equity": 100000.0}]).to_csv(
+        run_dir / "paper" / "paper_equity_curve.csv",
+        index=False,
+    )
+
+    payload = evaluate_orchestration_run(run_dir=run_dir, output_dir=tmp_path / "eval")
+
+    assert payload["row"]["total_return"] is None
+    assert payload["row"]["volatility"] is None
+    assert payload["row"]["sharpe"] is None
+    assert payload["row"]["max_drawdown"] is None
+    assert "insufficient_history_for_total_return" in payload["row"]["metric_warnings"]
+    assert "insufficient_history_for_sharpe" in payload["row"]["metric_warnings"]
+    assert payload["diagnostic"]["observation_count"] == 1
+
+
 def test_system_evaluation_history_and_compare(tmp_path: Path) -> None:
     runs_root = tmp_path / "runs"
     _write_run(runs_root, run_id="2026-03-22T00-00-00+00-00", total_return_scale=0.04, adaptive=True, regime=True)
@@ -161,10 +182,34 @@ def test_system_evaluation_history_and_compare(tmp_path: Path) -> None:
 
     assert history["run_count"] == 4
     assert history_payload["summary"]["best_run_id"] == "2026-03-22T00-00-00+00-00"
+    assert history_payload["summary"]["history_metrics"]["total_return"] is not None
     assert "adaptive_on" in history_payload["summary"]["variant_names"]
     assert compare["group_a_count"] == 2
     assert variant_compare["group_a_count"] == 2
     assert compare_payload["comparison"]["feature_flag"] == "adaptive"
+
+
+def test_system_evaluation_history_builds_metrics_from_recurring_single_point_runs(tmp_path: Path) -> None:
+    runs_root = tmp_path / "runs"
+    run_a = _write_run(runs_root, run_id="2026-03-20T00-00-00+00-00", total_return_scale=0.0, adaptive=True, regime=False)
+    run_b = _write_run(runs_root, run_id="2026-03-21T00-00-00+00-00", total_return_scale=0.0, adaptive=True, regime=False)
+    run_c = _write_run(runs_root, run_id="2026-03-22T00-00-00+00-00", total_return_scale=0.0, adaptive=True, regime=False)
+    pd.DataFrame([{"timestamp": "2026-03-20T00:00:00+00:00", "equity": 100000.0}]).to_csv(run_a / "paper" / "paper_equity_curve.csv", index=False)
+    pd.DataFrame([{"timestamp": "2026-03-21T00:00:00+00:00", "equity": 101000.0}]).to_csv(run_b / "paper" / "paper_equity_curve.csv", index=False)
+    pd.DataFrame([{"timestamp": "2026-03-22T00:00:00+00:00", "equity": 102000.0}]).to_csv(run_c / "paper" / "paper_equity_curve.csv", index=False)
+    for run_dir, equity in ((run_a, 100000.0), (run_b, 101000.0), (run_c, 102000.0)):
+        (run_dir / "paper" / "paper_run_summary_latest.json").write_text(
+            json.dumps({"summary": {"timestamp": run_dir.name.replace("T00-00-00+00-00", "T00:00:00+00:00"), "current_equity": equity}}),
+            encoding="utf-8",
+        )
+
+    history = build_system_evaluation_history(runs_root=runs_root, output_dir=tmp_path / "history")
+    latest = load_system_evaluation(tmp_path / "history")
+
+    assert history["run_count"] == 3
+    assert latest["history_metrics"]["total_return"] == 0.02
+    assert latest["history_metrics"]["max_drawdown"] == 0.0
+    assert latest["history_metrics"]["observation_count"] == 3
 
 
 def test_system_eval_cli_commands(tmp_path: Path, capsys) -> None:
@@ -173,8 +218,8 @@ def test_system_eval_cli_commands(tmp_path: Path, capsys) -> None:
     _write_run(runs_root, run_id="2026-03-21T00-00-00+00-00", total_return_scale=-0.01, adaptive=False, regime=False)
 
     evaluate_orchestration_run(run_dir=run_dir, output_dir=tmp_path / "eval")
-    cmd_system_eval_show(Namespace(evaluation=str(tmp_path / "eval")))
     cmd_system_eval_build(Namespace(runs_root=str(runs_root), output_dir=str(tmp_path / "history")))
+    cmd_system_eval_show(Namespace(evaluation=str(tmp_path / "history")))
     cmd_system_eval_compare(
         Namespace(
             history=str(runs_root),
@@ -191,3 +236,4 @@ def test_system_eval_cli_commands(tmp_path: Path, capsys) -> None:
     assert "Run id:" in captured
     assert "History JSON:" in captured
     assert "Comparison JSON:" in captured
+    assert "History total return:" in captured

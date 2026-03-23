@@ -108,6 +108,14 @@ def _paper_equity_curve_path(run_dir: Path) -> Path | None:
     return _newest_path(_candidate_files(run_dir, ["paper_equity_curve.csv"]))
 
 
+def _paper_positions_history_path(run_dir: Path) -> Path | None:
+    return _newest_path(_candidate_files(run_dir, ["paper_positions_history.csv"]))
+
+
+def _paper_orders_history_path(run_dir: Path) -> Path | None:
+    return _newest_path(_candidate_files(run_dir, ["paper_orders_history.csv"]))
+
+
 def _paper_summary_payload(run_dir: Path) -> dict[str, Any]:
     latest = _newest_path(_candidate_files(run_dir, ["paper_run_summary_latest.json"]))
     payload = _safe_read_json(latest)
@@ -139,7 +147,15 @@ def _kill_switch_payload(run_dir: Path) -> dict[str, Any]:
     return _safe_read_json(latest)
 
 
-def _equity_curve_metrics(equity_curve: pd.DataFrame) -> dict[str, float | None]:
+def _paper_summary_equity_observation(paper_summary: dict[str, Any]) -> pd.DataFrame:
+    timestamp = paper_summary.get("timestamp") or paper_summary.get("rebalance_timestamp")
+    current_equity = _safe_float(paper_summary.get("current_equity") or paper_summary.get("equity"))
+    if timestamp is None or current_equity is None:
+        return pd.DataFrame(columns=["timestamp", "equity"])
+    return pd.DataFrame([{"timestamp": timestamp, "equity": current_equity}])
+
+
+def _equity_curve_metrics(equity_curve: pd.DataFrame) -> dict[str, Any]:
     if equity_curve.empty:
         return {
             "total_return": None,
@@ -147,6 +163,9 @@ def _equity_curve_metrics(equity_curve: pd.DataFrame) -> dict[str, float | None]
             "sharpe": None,
             "max_drawdown": None,
             "observation_count": 0,
+            "return_observation_count": 0,
+            "warnings": ["missing_equity_curve"],
+            "source": "none",
         }
     frame = equity_curve.copy()
     timestamp_col = "timestamp" if "timestamp" in frame.columns else "date" if "date" in frame.columns else None
@@ -158,6 +177,9 @@ def _equity_curve_metrics(equity_curve: pd.DataFrame) -> dict[str, float | None]
             "sharpe": None,
             "max_drawdown": None,
             "observation_count": int(len(frame.index)),
+            "return_observation_count": 0,
+            "warnings": ["missing_equity_column"],
+            "source": "equity_curve",
         }
     if timestamp_col is not None:
         frame[timestamp_col] = pd.to_datetime(frame[timestamp_col], utc=True, errors="coerce")
@@ -171,21 +193,74 @@ def _equity_curve_metrics(equity_curve: pd.DataFrame) -> dict[str, float | None]
             "sharpe": None,
             "max_drawdown": None,
             "observation_count": 0,
+            "return_observation_count": 0,
+            "warnings": ["empty_equity_curve_after_normalization"],
+            "source": "equity_curve",
         }
     series = frame[equity_col].astype(float)
     returns = series.pct_change().dropna()
-    total_return = ((series.iloc[-1] / series.iloc[0]) - 1.0) if len(series) > 1 and series.iloc[0] != 0 else 0.0
-    volatility = returns.std(ddof=0) * (252 ** 0.5) if not returns.empty else 0.0
-    sharpe = ((returns.mean() / returns.std(ddof=0)) * (252 ** 0.5)) if not returns.empty and returns.std(ddof=0) > 0 else 0.0
-    drawdowns = (series / series.cummax()) - 1.0
-    max_drawdown = abs(float(drawdowns.min())) if not drawdowns.empty else 0.0
+    warnings: list[str] = []
+    observation_count = int(len(series.index))
+    return_observation_count = int(len(returns.index))
+    total_return: float | None = None
+    volatility: float | None = None
+    sharpe: float | None = None
+    max_drawdown: float | None = None
+
+    if observation_count < 2 or series.iloc[0] == 0:
+        warnings.append("insufficient_history_for_total_return")
+        warnings.append("insufficient_history_for_max_drawdown")
+    else:
+        total_return = round(float((series.iloc[-1] / series.iloc[0]) - 1.0), 10)
+        drawdowns = (series / series.cummax()) - 1.0
+        max_drawdown = round(abs(float(drawdowns.min())), 10) if not drawdowns.empty else 0.0
+
+    if return_observation_count < 2:
+        warnings.append("insufficient_history_for_volatility")
+        warnings.append("insufficient_history_for_sharpe")
+    else:
+        volatility_value = returns.std(ddof=0) * (252 ** 0.5)
+        volatility = round(float(volatility_value), 10)
+        if returns.std(ddof=0) > 0:
+            sharpe = round(float((returns.mean() / returns.std(ddof=0)) * (252 ** 0.5)), 10)
+        else:
+            warnings.append("degenerate_zero_return_variance_for_sharpe")
+
+    if return_observation_count >= 1 and returns.abs().sum() == 0:
+        warnings.append("flat_equity_curve")
     return {
-        "total_return": round(float(total_return), 10),
-        "volatility": round(float(volatility), 10),
-        "sharpe": round(float(sharpe), 10),
-        "max_drawdown": round(float(max_drawdown), 10),
-        "observation_count": int(len(series.index)),
+        "total_return": total_return,
+        "volatility": volatility,
+        "sharpe": sharpe,
+        "max_drawdown": max_drawdown,
+        "observation_count": observation_count,
+        "return_observation_count": return_observation_count,
+        "warnings": sorted(set(warnings)),
+        "source": "equity_curve",
     }
+
+
+def _history_equity_metrics(rows: list["SystemEvaluationRow"]) -> dict[str, Any]:
+    history_rows = [
+        {"timestamp": row.timestamp, "equity": row.current_equity}
+        for row in rows
+        if row.timestamp is not None and row.current_equity is not None
+    ]
+    if not history_rows:
+        return {
+            "total_return": None,
+            "volatility": None,
+            "sharpe": None,
+            "max_drawdown": None,
+            "observation_count": 0,
+            "return_observation_count": 0,
+            "warnings": ["missing_history_equity_observations"],
+            "source": "history_rows",
+        }
+    history_frame = pd.DataFrame(history_rows)
+    history_frame["timestamp"] = pd.to_datetime(history_frame["timestamp"], utc=True, errors="coerce")
+    history_frame = history_frame.dropna(subset=["timestamp"]).sort_values("timestamp").drop_duplicates(subset=["timestamp"], keep="last")
+    return {**_equity_curve_metrics(history_frame), "source": "history_rows"}
 
 
 @dataclass(frozen=True)
@@ -206,11 +281,14 @@ class SystemEvaluationRow:
     demoted_count: int | None
     warning_count: int | None
     kill_switch_count: int | None
+    current_equity: float | None
     total_return: float | None
     volatility: float | None
     sharpe: float | None
     max_drawdown: float | None
     turnover: float | None
+    equity_observation_count: int | None
+    return_observation_count: int | None
     regime: str | None
     adaptive_enabled: bool | None
     regime_enabled: bool | None
@@ -218,11 +296,13 @@ class SystemEvaluationRow:
     insufficient_output_reason: str | None
     feature_flags: dict[str, Any]
     warnings: list[str]
+    metric_warnings: list[str]
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
         payload["feature_flags"] = json.dumps(payload["feature_flags"], sort_keys=True)
         payload["warnings"] = "|".join(payload["warnings"])
+        payload["metric_warnings"] = "|".join(payload["metric_warnings"])
         return payload
 
 
@@ -233,13 +313,22 @@ def evaluate_orchestration_run(*, run_dir: str | Path, output_dir: str | Path | 
         raise FileNotFoundError(f"orchestration_run.json not found under {run_path}")
     config_snapshot = _safe_read_json(run_path / "orchestration_config_snapshot.json")
     paper_summary = _paper_summary_payload(run_path)
-    equity_curve = _safe_read_csv(_paper_equity_curve_path(run_path))
+    paper_equity_curve_path = _paper_equity_curve_path(run_path)
+    paper_positions_history_path = _paper_positions_history_path(run_path)
+    paper_orders_history_path = _paper_orders_history_path(run_path)
+    equity_curve = _safe_read_csv(paper_equity_curve_path)
     execution_summary = _execution_summary_payload(run_path)
     governance = _governance_payload(run_path)
     lifecycle = _lifecycle_payload(run_path)
     kill_switch = _kill_switch_payload(run_path)
     regime = _regime_payload(run_path)
     metrics = _equity_curve_metrics(equity_curve)
+    if metrics["observation_count"] <= 0:
+        fallback_equity_curve = _paper_summary_equity_observation(paper_summary)
+        fallback_metrics = _equity_curve_metrics(fallback_equity_curve)
+        fallback_metrics["source"] = "paper_summary"
+        metrics = fallback_metrics
+    current_equity = _safe_float(paper_summary.get("current_equity") or paper_summary.get("equity"))
 
     outputs = orchestration.get("outputs", {})
     lifecycle_summary = lifecycle.get("summary", {})
@@ -276,11 +365,14 @@ def evaluate_orchestration_run(*, run_dir: str | Path, output_dir: str | Path | 
         demoted_count=int(outputs.get("demoted_count", 0) or governance_summary.get("demoted_count", 0) or lifecycle_summary.get("demoted_count", 0) or 0),
         warning_count=warning_count,
         kill_switch_count=int(outputs.get("kill_switch_recommendation_count", 0) or kill_switch.get("summary", {}).get("recommendation_count", 0) or 0),
+        current_equity=current_equity,
         total_return=metrics["total_return"],
         volatility=metrics["volatility"],
         sharpe=metrics["sharpe"],
         max_drawdown=metrics["max_drawdown"],
         turnover=turnover,
+        equity_observation_count=metrics["observation_count"],
+        return_observation_count=metrics["return_observation_count"],
         regime=outputs.get("current_regime_label") or regime.get("latest", {}).get("regime_label"),
         adaptive_enabled=bool(adaptive_enabled) if adaptive_enabled is not None else None,
         regime_enabled=bool(regime_enabled) if regime_enabled is not None else None,
@@ -288,13 +380,27 @@ def evaluate_orchestration_run(*, run_dir: str | Path, output_dir: str | Path | 
         insufficient_output_reason=outputs.get("no_op_reason") or outputs.get("skip_reason"),
         feature_flags=feature_flags,
         warnings=sorted(set(str(item) for item in orchestration.get("warnings", []))),
+        metric_warnings=metrics["warnings"],
     )
     payload = {
         "schema_version": SYSTEM_EVALUATION_SCHEMA_VERSION,
         "generated_at": _now_utc(),
         "row": asdict(row),
         "metrics": metrics,
-        "paper_equity_curve_path": str(_paper_equity_curve_path(run_path)) if _paper_equity_curve_path(run_path) is not None else None,
+        "diagnostic": {
+            "metric_source": metrics.get("source"),
+            "paper_equity_curve_path": str(paper_equity_curve_path) if paper_equity_curve_path is not None else None,
+            "paper_positions_history_path": str(paper_positions_history_path) if paper_positions_history_path is not None else None,
+            "paper_orders_history_path": str(paper_orders_history_path) if paper_orders_history_path is not None else None,
+            "paper_positions_history_count": int(len(_safe_read_csv(paper_positions_history_path).index)),
+            "paper_orders_history_count": int(len(_safe_read_csv(paper_orders_history_path).index)),
+            "paper_summary_timestamp": paper_summary.get("timestamp"),
+            "paper_summary_current_equity": current_equity,
+            "metric_warnings": metrics["warnings"],
+            "observation_count": metrics["observation_count"],
+            "return_observation_count": metrics["return_observation_count"],
+        },
+        "paper_equity_curve_path": str(paper_equity_curve_path) if paper_equity_curve_path is not None else None,
         "orchestration_run_path": str(run_path / "orchestration_run.json"),
     }
     if output_dir is not None:
@@ -342,11 +448,14 @@ def build_system_evaluation_history(*, runs_root: str | Path, output_dir: str | 
                 demoted_count=row_payload.get("demoted_count"),
                 warning_count=row_payload.get("warning_count"),
                 kill_switch_count=row_payload.get("kill_switch_count"),
+                current_equity=row_payload.get("current_equity"),
                 total_return=row_payload.get("total_return"),
                 volatility=row_payload.get("volatility"),
                 sharpe=row_payload.get("sharpe"),
                 max_drawdown=row_payload.get("max_drawdown"),
                 turnover=row_payload.get("turnover"),
+                equity_observation_count=row_payload.get("equity_observation_count"),
+                return_observation_count=row_payload.get("return_observation_count"),
                 regime=row_payload.get("regime"),
                 adaptive_enabled=row_payload.get("adaptive_enabled"),
                 regime_enabled=row_payload.get("regime_enabled"),
@@ -354,9 +463,11 @@ def build_system_evaluation_history(*, runs_root: str | Path, output_dir: str | 
                 insufficient_output_reason=row_payload.get("insufficient_output_reason"),
                 feature_flags=row_payload.get("feature_flags", {}),
                 warnings=row_payload.get("warnings", []),
+                metric_warnings=row_payload.get("metric_warnings", []),
             )
         )
     rows.sort(key=lambda row: str(row.timestamp or row.run_id), reverse=True)
+    history_metrics = _history_equity_metrics(rows)
     payload = {
         "schema_version": SYSTEM_EVALUATION_SCHEMA_VERSION,
         "generated_at": _now_utc(),
@@ -366,6 +477,7 @@ def build_system_evaluation_history(*, runs_root: str | Path, output_dir: str | 
             "worst_run_id": next((row.run_id for row in sorted(rows, key=lambda item: item.total_return if item.total_return is not None else float("inf"))), None),
             "experiment_names": sorted({row.experiment_name for row in rows if row.experiment_name}),
             "variant_names": sorted({row.variant_name for row in rows if row.variant_name}),
+            "history_metrics": history_metrics,
         },
         "rows": [asdict(row) for row in rows],
     }
@@ -387,7 +499,14 @@ def build_system_evaluation_history(*, runs_root: str | Path, output_dir: str | 
                 "volatility": rows[0].volatility,
                 "sharpe": rows[0].sharpe,
                 "max_drawdown": rows[0].max_drawdown,
-                "observation_count": None,
+                "observation_count": rows[0].equity_observation_count,
+                "return_observation_count": rows[0].return_observation_count,
+            },
+            "history_metrics": history_metrics,
+            "diagnostic": {
+                "metric_source": "history_build_latest_row",
+                "metric_warnings": rows[0].metric_warnings,
+                "history_metric_warnings": history_metrics.get("warnings", []),
             },
         }
         latest_json_path.write_text(json.dumps(latest_payload, indent=2, default=str), encoding="utf-8")
