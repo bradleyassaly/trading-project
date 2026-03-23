@@ -4,6 +4,11 @@ import argparse
 
 from trading_platform.cli.commands.alpha_research import cmd_alpha_research
 from trading_platform.cli.commands.alpha_research_loop import cmd_alpha_research_loop
+from trading_platform.cli.commands.adaptive_allocation_build import cmd_adaptive_allocation_build
+from trading_platform.cli.commands.adaptive_allocation_export_run_config import (
+    cmd_adaptive_allocation_export_run_config,
+)
+from trading_platform.cli.commands.adaptive_allocation_show import cmd_adaptive_allocation_show
 from trading_platform.cli.commands.approved_config_diff import cmd_approved_config_diff
 from trading_platform.cli.commands.broker_cancel_all import cmd_broker_cancel_all
 from trading_platform.cli.commands.broker_health import cmd_broker_health
@@ -942,6 +947,23 @@ def build_parser() -> argparse.ArgumentParser:
     strategy_monitor_recommend.add_argument("--output-dir", type=str, default=None, help="Optional directory where recommendation artifacts should be written.")
     strategy_monitor_recommend.add_argument("--include-review", action="store_true", help="Include review-only recommendations alongside reduce/deactivate recommendations.")
     strategy_monitor_recommend.set_defaults(func=cmd_strategy_monitor_recommend_kill_switch)
+
+    adaptive_allocation_parser = subparsers.add_parser("adaptive-allocation", help="Adapt multi-strategy capital weights using strategy monitoring outcomes")
+    adaptive_allocation_subparsers = adaptive_allocation_parser.add_subparsers(dest="adaptive_allocation_command", required=True)
+    adaptive_allocation_build = adaptive_allocation_subparsers.add_parser("build", help="Build an adaptive allocation snapshot from a strategy portfolio and strategy monitoring artifacts")
+    adaptive_allocation_build.add_argument("--portfolio", type=str, required=True, help="Path to strategy_portfolio.json or its parent directory.")
+    adaptive_allocation_build.add_argument("--monitoring", type=str, required=True, help="Path to strategy_monitoring.json or its parent directory.")
+    adaptive_allocation_build.add_argument("--policy-config", type=str, default=None, help="Optional adaptive allocation policy JSON/YAML file.")
+    adaptive_allocation_build.add_argument("--output-dir", type=str, required=True, help="Directory where adaptive allocation artifacts will be written.")
+    adaptive_allocation_build.add_argument("--dry-run", action="store_true", help="Mark the adaptive allocation snapshot as dry-run output.")
+    adaptive_allocation_build.set_defaults(func=cmd_adaptive_allocation_build)
+    adaptive_allocation_show = adaptive_allocation_subparsers.add_parser("show", help="Print a concise summary of an adaptive allocation artifact")
+    adaptive_allocation_show.add_argument("--allocation", type=str, required=True, help="Path to adaptive_allocation.json or its parent directory.")
+    adaptive_allocation_show.set_defaults(func=cmd_adaptive_allocation_show)
+    adaptive_allocation_export = adaptive_allocation_subparsers.add_parser("export-run-config", help="Export a runnable multi-strategy and pipeline config bundle from an adaptive allocation snapshot")
+    adaptive_allocation_export.add_argument("--allocation", type=str, required=True, help="Path to adaptive_allocation.json or its parent directory.")
+    adaptive_allocation_export.add_argument("--output-dir", type=str, required=True, help="Directory where runnable config artifacts will be written.")
+    adaptive_allocation_export.set_defaults(func=cmd_adaptive_allocation_export_run_config)
 
     doctor_parser = subparsers.add_parser("doctor", help="Run local environment, config, and artifact sanity checks")
     doctor_parser.add_argument("--artifacts-root", type=str, default="artifacts", help="Artifact root to inspect.")

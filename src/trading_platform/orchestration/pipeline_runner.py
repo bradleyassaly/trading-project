@@ -22,6 +22,10 @@ from trading_platform.portfolio.multi_strategy import (
     allocate_multi_strategy_portfolio,
     write_multi_strategy_artifacts,
 )
+from trading_platform.portfolio.adaptive_allocation import (
+    build_adaptive_allocation,
+    export_adaptive_allocation_run_config,
+)
 from trading_platform.portfolio.strategy_monitoring import (
     build_strategy_monitoring_snapshot,
     recommend_kill_switch_actions,
@@ -52,6 +56,7 @@ ORCHESTRATION_STAGE_NAMES = [
     "allocation",
     "paper",
     "monitoring",
+    "adaptive_allocation",
     "kill_switch",
 ]
 ORCHESTRATION_STAGE_STATUSES = {"pending", "skipped", "running", "succeeded", "failed"}
@@ -62,6 +67,7 @@ ORCHESTRATION_STAGE_DEPENDENCIES: dict[str, list[str]] = {
     "allocation": ["portfolio"],
     "paper": ["portfolio"],
     "monitoring": ["paper"],
+    "adaptive_allocation": ["monitoring"],
     "kill_switch": ["monitoring"],
 }
 
@@ -75,6 +81,7 @@ class AutomatedOrchestrationStageToggles:
     allocation: bool = True
     paper: bool = True
     monitoring: bool = True
+    adaptive_allocation: bool = False
     kill_switch: bool = True
 
 
@@ -92,10 +99,13 @@ class AutomatedOrchestrationConfig:
     paper_output_dir: str | None = None
     paper_state_path: str | None = None
     monitoring_output_dir: str | None = None
+    adaptive_allocation_output_dir: str | None = None
+    adaptive_allocation_run_output_dir: str | None = None
     kill_switch_output_dir: str | None = None
     promotion_policy_config_path: str | None = None
     strategy_portfolio_policy_config_path: str | None = None
     strategy_monitoring_policy_config_path: str | None = None
+    adaptive_allocation_policy_config_path: str | None = None
     execution_config_path: str | None = None
     monitoring_notification_config_path: str | None = None
     fail_fast: bool = True
@@ -104,6 +114,7 @@ class AutomatedOrchestrationConfig:
     min_selected_strategies_warning: int = 1
     promotion_dry_run: bool = False
     promotion_inactive: bool = False
+    adaptive_allocation_dry_run: bool = False
     kill_switch_include_review: bool = False
     loop_sleep_seconds: int | None = None
     stage_order: list[str] = field(default_factory=lambda: list(ORCHESTRATION_STAGE_NAMES))
@@ -148,6 +159,8 @@ class AutomatedOrchestrationConfig:
             raise ValueError("paper_state_path is required when paper is enabled")
         if self.stages.monitoring and not self.strategy_monitoring_policy_config_path:
             raise ValueError("strategy_monitoring_policy_config_path is required when monitoring is enabled")
+        if self.stages.adaptive_allocation and not self.adaptive_allocation_policy_config_path:
+            raise ValueError("adaptive_allocation_policy_config_path is required when adaptive_allocation is enabled")
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
@@ -300,6 +313,7 @@ def _render_markdown_summary(result: AutomatedOrchestrationResult) -> str:
                 f"- Selected strategies: `{outputs.get('selected_strategy_count', 0)}`",
                 f"- Allocation positions: `{outputs.get('allocation_position_count', 0)}`",
                 f"- Monitoring warnings: `{outputs.get('warning_strategy_count', 0)}`",
+                f"- Adaptive strategies: `{outputs.get('adaptive_selected_strategy_count', 0)}`",
                 f"- Kill-switch recommendations: `{outputs.get('kill_switch_recommendation_count', 0)}`",
             ]
         )
@@ -561,6 +575,49 @@ def _stage_kill_switch(config: AutomatedOrchestrationConfig, run_dir: Path, cont
     return {**result, "kill_switch_recommendation_count": result["recommendation_count"]}
 
 
+def _stage_adaptive_allocation(config: AutomatedOrchestrationConfig, run_dir: Path, context: dict[str, Any]) -> dict[str, Any]:
+    strategy_portfolio_dir = context.get("strategy_portfolio_dir")
+    monitoring_dir = context.get("strategy_monitoring_dir")
+    if not strategy_portfolio_dir or not monitoring_dir:
+        raise OrchestrationStageError("adaptive_allocation stage requires strategy portfolio and monitoring outputs")
+    from trading_platform.config.loader import load_adaptive_allocation_policy_config
+
+    policy = load_adaptive_allocation_policy_config(config.adaptive_allocation_policy_config_path)
+    if config.adaptive_allocation_dry_run:
+        policy = type(policy)(**{**policy.__dict__, "dry_run": True})
+    output_dir = _ensure_stage_output_dir(run_dir, config.adaptive_allocation_output_dir, "adaptive_allocation")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    build_result = build_adaptive_allocation(
+        strategy_portfolio_path=strategy_portfolio_dir,
+        strategy_monitoring_path=monitoring_dir,
+        output_dir=output_dir,
+        policy=policy,
+    )
+    payload = json.loads((output_dir / "adaptive_allocation.json").read_text(encoding="utf-8"))
+    selected_count = int(payload.get("summary", {}).get("total_selected_strategies", 0))
+    if selected_count <= 0:
+        raise OrchestrationStageError("adaptive allocation is empty")
+    export_dir = _ensure_stage_output_dir(
+        run_dir,
+        config.adaptive_allocation_run_output_dir,
+        "adaptive_allocation_run",
+    )
+    export_dir.mkdir(parents=True, exist_ok=True)
+    export_result = export_adaptive_allocation_run_config(
+        adaptive_allocation_path=output_dir,
+        output_dir=export_dir,
+    )
+    context["adaptive_allocation_dir"] = str(output_dir)
+    context["adaptive_allocation_run_dir"] = str(export_dir)
+    context["next_cycle_multi_strategy_config_path"] = export_result["multi_strategy_config_path"]
+    return {
+        **build_result,
+        **export_result,
+        "adaptive_selected_strategy_count": selected_count,
+        "adaptive_warning_count": int(payload.get("summary", {}).get("warning_count", 0)),
+    }
+
+
 RUNNER_STAGE_HANDLERS: dict[str, Callable[[AutomatedOrchestrationConfig, Path, dict[str, Any]], dict[str, Any]]] = {
     "research": _stage_research,
     "registry": _stage_registry,
@@ -569,6 +626,7 @@ RUNNER_STAGE_HANDLERS: dict[str, Callable[[AutomatedOrchestrationConfig, Path, d
     "allocation": _stage_allocation,
     "paper": _stage_paper,
     "monitoring": _stage_monitoring,
+    "adaptive_allocation": _stage_adaptive_allocation,
     "kill_switch": _stage_kill_switch,
 }
 
@@ -615,6 +673,8 @@ def run_automated_orchestration(config: AutomatedOrchestrationConfig) -> tuple[A
                         "warning_strategy_count",
                         "deactivation_candidate_count",
                         "notification_sent",
+                        "adaptive_selected_strategy_count",
+                        "adaptive_warning_count",
                         "kill_switch_recommendation_count",
                     }
                 }

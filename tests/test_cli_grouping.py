@@ -536,6 +536,65 @@ def test_grouped_strategy_monitor_recommend_command_parses() -> None:
     assert args.include_review is True
 
 
+def test_grouped_adaptive_allocation_build_command_parses() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "adaptive-allocation",
+            "build",
+            "--portfolio",
+            "artifacts/strategy_portfolio",
+            "--monitoring",
+            "artifacts/strategy_monitoring",
+            "--policy-config",
+            "configs/adaptive_allocation.yaml",
+            "--output-dir",
+            "artifacts/adaptive_allocation",
+            "--dry-run",
+        ]
+    )
+
+    assert args.command_family == "adaptive-allocation"
+    assert args.adaptive_allocation_command == "build"
+    assert args.policy_config == "configs/adaptive_allocation.yaml"
+    assert args.output_dir == "artifacts/adaptive_allocation"
+    assert args.dry_run is True
+
+
+def test_grouped_adaptive_allocation_show_command_parses() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "adaptive-allocation",
+            "show",
+            "--allocation",
+            "artifacts/adaptive_allocation",
+        ]
+    )
+
+    assert args.command_family == "adaptive-allocation"
+    assert args.adaptive_allocation_command == "show"
+    assert args.allocation == "artifacts/adaptive_allocation"
+
+
+def test_grouped_adaptive_allocation_export_run_config_command_parses() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "adaptive-allocation",
+            "export-run-config",
+            "--allocation",
+            "artifacts/adaptive_allocation",
+            "--output-dir",
+            "artifacts/adaptive_allocation_run",
+        ]
+    )
+
+    assert args.command_family == "adaptive-allocation"
+    assert args.adaptive_allocation_command == "export-run-config"
+    assert args.output_dir == "artifacts/adaptive_allocation_run"
+
+
 def test_grouped_orchestrate_run_command_parses() -> None:
     parser = build_parser()
     args = parser.parse_args(

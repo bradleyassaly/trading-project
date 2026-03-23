@@ -210,8 +210,9 @@ Pages:
 
 - `Overview`: latest run status, monitoring health, alert counts, approved strategy count, generated position count, executable order count, broker health, and quick artifact links
 - `Research`: recent research manifests, top leaderboard rows, promotion-ready candidates, promoted generated strategies, and the current strategy portfolio selection
+- `Research`: recent research manifests, top leaderboard rows, promotion-ready candidates, promoted generated strategies, the current strategy portfolio selection, and the latest adaptive reweighting snapshot
 - `Strategies`: strategy registry table, family/status filters, and champion/challenger comparison when available
-- `Portfolio`: latest combined portfolio, sleeve weights, top positions, overlap diagnostics, and clipped symbols
+- `Portfolio`: latest combined portfolio, sleeve weights, top positions, overlap diagnostics, clipped symbols, and the latest prior-vs-adjusted adaptive weights
 - `Execution`: requested vs executable orders, rejection reasons, expected cost, and liquidity diagnostics
 - `Live`: latest dry-run summary, latest live submit summary, risk checks, blocked reasons, and duplicate-order skip events
 - `Runs`: recent orchestration runs, per-stage statuses, failures, and artifact directories
@@ -222,6 +223,7 @@ Key API endpoints:
 - `/api/runs`
 - `/api/runs/latest`
 - `/api/research/latest`
+- `/api/adaptive-allocation/latest`
 - `/api/strategies`
 - `/api/portfolio/latest`
 - `/api/execution/latest`
@@ -1027,6 +1029,50 @@ Notes:
 - kill-switch outputs are recommendation-first and read-only by default
 - `configs/strategy_monitoring.yaml` keeps thresholds explicit and easy to review
 
+### Adaptive Capital Allocation
+
+After monitoring, the platform can build a conservative next-cycle weight plan instead of blindly reusing static strategy weights. The adaptive allocator stays file-based and deterministic.
+
+It:
+
+- reads `strategy_portfolio.json` plus `strategy_monitoring.json`
+- nudges weights up or down using explicit realized-performance and recommendation rules
+- freezes or falls back when monitoring data is stale, weak, or low-confidence
+- caps weight changes per cycle and re-exports a standard multi-strategy run bundle
+
+Primary artifacts:
+
+- `adaptive_allocation.json` / `adaptive_allocation.csv`
+- `adaptive_allocation_multi_strategy.json`
+- `adaptive_allocation_pipeline.yaml`
+- `adaptive_allocation_run_bundle.json`
+
+Example:
+
+```bash
+trading-cli adaptive-allocation build --portfolio artifacts/strategy_portfolio --monitoring artifacts/strategy_monitoring --policy-config configs/adaptive_allocation.yaml --output-dir artifacts/adaptive_allocation
+trading-cli adaptive-allocation show --allocation artifacts/adaptive_allocation
+trading-cli adaptive-allocation export-run-config --allocation artifacts/adaptive_allocation --output-dir artifacts/adaptive_allocation_run
+trading-cli paper run-multi-strategy --config artifacts/adaptive_allocation_run/adaptive_allocation_multi_strategy.json --state-path artifacts/paper/adaptive_allocation_state.json --output-dir artifacts/paper/adaptive_allocation
+```
+
+Typical flow:
+
+```bash
+trading-cli strategy-portfolio build --promoted-dir configs/generated_strategies --policy-config configs/strategy_portfolio.yaml --output-dir artifacts/strategy_portfolio
+trading-cli strategy-portfolio export-run-config --portfolio artifacts/strategy_portfolio --output-dir artifacts/strategy_portfolio_run
+trading-cli paper run-multi-strategy --config artifacts/strategy_portfolio_run/strategy_portfolio_multi_strategy.json --state-path artifacts/paper/strategy_portfolio_state.json --output-dir artifacts/paper/strategy_portfolio
+trading-cli strategy-monitor build --portfolio artifacts/strategy_portfolio --paper-dir artifacts/paper/strategy_portfolio --execution-dir artifacts/paper/strategy_portfolio --allocation-dir artifacts/portfolio/strategy_portfolio --policy-config configs/strategy_monitoring.yaml --output-dir artifacts/strategy_monitoring
+trading-cli adaptive-allocation build --portfolio artifacts/strategy_portfolio --monitoring artifacts/strategy_monitoring --policy-config configs/adaptive_allocation.yaml --output-dir artifacts/adaptive_allocation
+trading-cli adaptive-allocation export-run-config --allocation artifacts/adaptive_allocation --output-dir artifacts/adaptive_allocation_run
+```
+
+Notes:
+
+- the allocator is intentionally modest; it is not a black-box optimizer
+- recommendation penalties, observation minimums, stale-data freezes, and per-cycle weight caps all live in `configs/adaptive_allocation.yaml`
+- exported configs reuse the same multi-strategy runtime path as static strategy portfolios
+
 ### Fully Automated Pipeline
 
 The repo now includes a lightweight orchestration runner for the promoted-strategy workflow. It automates:
@@ -1038,7 +1084,8 @@ The repo now includes a lightweight orchestration runner for the promoted-strate
 5. multi-strategy allocation
 6. paper execution
 7. strategy monitoring
-8. kill-switch recommendation generation
+8. optional adaptive next-cycle capital allocation
+9. kill-switch recommendation generation
 
 Primary config:
 
@@ -1068,6 +1115,7 @@ Scheduling guidance:
 
 - Linux/macOS: run `trading-cli orchestrate run --config configs/orchestration.yaml` from cron
 - Windows: run the same command from Task Scheduler
+- the adaptive stage is optional and writes a next-cycle bundle only; it does not change the already-completed paper cycle
 - keep `schedule_frequency` aligned with the external scheduler so artifact history stays readable
 
 Debugging failed runs:

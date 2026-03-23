@@ -13,6 +13,7 @@ from trading_platform.config.loader import (
     load_promotion_policy_config,
     load_research_workflow_config,
     load_automated_orchestration_config,
+    load_adaptive_allocation_policy_config,
     load_strategy_portfolio_policy_config,
     load_strategy_monitoring_policy_config,
 )
@@ -333,6 +334,40 @@ kill_switch_mode: recommendation_only
     assert config.include_inactive_strategies is False
 
 
+def test_load_adaptive_allocation_policy_config_from_yaml(tmp_path) -> None:
+    path = tmp_path / "adaptive_allocation.yaml"
+    path.write_text(
+        """
+schema_version: 1
+lookback_window_days: 21
+weighting_mode: drawdown_penalized
+max_upweight_per_cycle: 0.07
+max_downweight_per_cycle: 0.09
+max_weight_per_strategy: 0.45
+min_weight_per_strategy: 0.05
+neutral_weight_fallback: prior_weight
+review_penalty: 0.85
+reduce_penalty: 0.55
+deactivate_penalty: 0.1
+family_diversification_penalty: 0.95
+universe_diversification_penalty: 0.98
+rebalance_smoothing: 0.6
+require_min_observations: 8
+max_monitoring_age_days: 5
+freeze_on_stale_monitoring: true
+freeze_on_low_confidence: false
+""".strip(),
+        encoding="utf-8",
+    )
+
+    config = load_adaptive_allocation_policy_config(path)
+
+    assert config.lookback_window_days == 21
+    assert config.weighting_mode == "drawdown_penalized"
+    assert config.max_upweight_per_cycle == 0.07
+    assert config.require_min_observations == 8
+
+
 def test_load_automated_orchestration_config_from_yaml(tmp_path) -> None:
     path = tmp_path / "orchestration.yaml"
     path.write_text(
@@ -344,6 +379,7 @@ output_root_dir: artifacts/orchestration_runs
 promotion_policy_config_path: configs/promotion.yaml
 strategy_portfolio_policy_config_path: configs/strategy_portfolio.yaml
 strategy_monitoring_policy_config_path: configs/strategy_monitoring.yaml
+adaptive_allocation_policy_config_path: configs/adaptive_allocation.yaml
 paper_state_path: artifacts/paper/automation_state.json
 max_promotions_per_run: 2
 stages:
@@ -354,6 +390,7 @@ stages:
   allocation: true
   paper: true
   monitoring: true
+  adaptive_allocation: true
   kill_switch: true
 """.strip(),
         encoding="utf-8",
@@ -363,6 +400,7 @@ stages:
 
     assert config.run_name == "auto"
     assert config.max_promotions_per_run == 2
+    assert config.stages.adaptive_allocation is True
     assert config.stages.kill_switch is True
 
 
@@ -378,6 +416,7 @@ def test_example_configs_load_from_repo() -> None:
     promotion_config = load_promotion_policy_config(root / "configs" / "promotion.yaml")
     strategy_portfolio_config = load_strategy_portfolio_policy_config(root / "configs" / "strategy_portfolio.yaml")
     strategy_monitoring_config = load_strategy_monitoring_policy_config(root / "configs" / "strategy_monitoring.yaml")
+    adaptive_allocation_config = load_adaptive_allocation_policy_config(root / "configs" / "adaptive_allocation.yaml")
     orchestration_config = load_automated_orchestration_config(root / "configs" / "orchestration.yaml")
     minimal_demo_config = load_pipeline_run_config(root / "configs" / "minimal_local_demo.yaml")
 
@@ -390,5 +429,6 @@ def test_example_configs_load_from_repo() -> None:
     assert promotion_config.metric_name == "portfolio_sharpe"
     assert strategy_portfolio_config.selection_metric == "ranking_value"
     assert strategy_monitoring_config.kill_switch_mode == "recommendation_only"
+    assert adaptive_allocation_config.weighting_mode in {"performance_tilted", "drawdown_penalized", "score_scaled", "equal_weight"}
     assert orchestration_config.schedule_frequency == "manual"
     assert minimal_demo_config.schedule_type == "ad_hoc"

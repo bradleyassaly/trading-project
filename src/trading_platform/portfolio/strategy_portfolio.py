@@ -337,34 +337,44 @@ def load_strategy_portfolio(path_or_dir: str | Path) -> dict[str, Any]:
     return payload
 
 
-def export_strategy_portfolio_run_config(
+def export_multi_strategy_run_config_bundle(
     *,
-    strategy_portfolio_path: str | Path,
+    selected_rows: list[dict[str, Any]],
     output_dir: str | Path,
+    bundle_name: str,
+    source_artifact_path: str | Path,
+    notes: str,
 ) -> dict[str, Any]:
-    portfolio_payload = load_strategy_portfolio(strategy_portfolio_path)
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
-    selected = list(portfolio_payload.get("selected_strategies", []))
-    if not selected:
-        raise ValueError("Strategy portfolio contains no selected strategies")
+    if not selected_rows:
+        raise ValueError("Selected strategy rows are required to export a multi-strategy run config bundle")
 
     sleeves = [
         MultiStrategySleeveConfig(
             sleeve_name=str(row["preset_name"]),
             preset_name=str(row["preset_name"]),
-            target_capital_weight=float(row["target_capital_fraction"]),
-            preset_path=str(row.get("generated_preset_path") or "") or None,
-            enabled=True,
-            notes=str(row.get("reason_selected") or ""),
-            tags=[tag for tag in [str(row.get("signal_family") or ""), str(row.get("universe") or "")] if tag],
+            target_capital_weight=float(
+                row.get("target_capital_fraction", row.get("allocation_weight", row.get("adjusted_weight", 0.0))) or 0.0
+            ),
+            preset_path=str(
+                row.get("generated_preset_path", row.get("preset_path", ""))
+            )
+            or None,
+            enabled=bool(row.get("enabled", True)),
+            notes=str(row.get("reason_selected", row.get("reason_for_adjustment", "")) or ""),
+            tags=[
+                tag
+                for tag in [str(row.get("signal_family") or ""), str(row.get("universe") or "")]
+                if tag
+            ],
         )
-        for row in selected
+        for row in selected_rows
     ]
     multi_strategy_config = MultiStrategyPortfolioConfig(
         sleeves=sleeves,
-        notes="Generated from strategy_portfolio.json",
-        tags=["strategy_portfolio"],
+        notes=notes,
+        tags=[bundle_name],
     )
     multi_strategy_payload = {
         "gross_leverage_cap": multi_strategy_config.gross_leverage_cap,
@@ -380,15 +390,15 @@ def export_strategy_portfolio_run_config(
         "tags": multi_strategy_config.tags,
         "sleeves": [asdict(item) for item in multi_strategy_config.sleeves],
     }
-    multi_strategy_path = _write_payload(output_path / "strategy_portfolio_multi_strategy.json", multi_strategy_payload)
+    multi_strategy_path = _write_payload(output_path / f"{bundle_name}_multi_strategy.json", multi_strategy_payload)
 
-    primary_universe = str(selected[0].get("universe") or "nasdaq100")
+    primary_universe = str(selected_rows[0].get("universe") or "nasdaq100")
     pipeline_config = PipelineRunConfig(
-        run_name="strategy_portfolio_paper",
+        run_name=f"{bundle_name}_paper",
         schedule_type="ad_hoc",
         universes=[primary_universe],
         multi_strategy_input_path=str(multi_strategy_path),
-        paper_state_path="artifacts/paper/strategy_portfolio_state.json",
+        paper_state_path=f"artifacts/paper/{bundle_name}_state.json",
         output_root_dir="artifacts/orchestration",
         continue_on_stage_error=True,
         stages=OrchestrationStageToggles(
@@ -398,17 +408,35 @@ def export_strategy_portfolio_run_config(
             monitoring=False,
         ),
     )
-    pipeline_path = _write_payload(output_path / "strategy_portfolio_pipeline.yaml", pipeline_config.to_dict())
+    pipeline_path = _write_payload(output_path / f"{bundle_name}_pipeline.yaml", pipeline_config.to_dict())
     bundle_payload = {
         "generated_at": _now_utc(),
-        "strategy_portfolio_path": str(Path(strategy_portfolio_path)),
+        "source_artifact_path": str(Path(source_artifact_path)),
         "multi_strategy_config_path": str(multi_strategy_path),
         "pipeline_config_path": str(pipeline_path),
-        "selected_preset_names": [row["preset_name"] for row in selected],
+        "selected_preset_names": [row["preset_name"] for row in selected_rows],
     }
-    bundle_path = _write_payload(output_path / "strategy_portfolio_run_bundle.json", bundle_payload)
+    bundle_path = _write_payload(output_path / f"{bundle_name}_run_bundle.json", bundle_payload)
     return {
         "multi_strategy_config_path": str(multi_strategy_path),
         "pipeline_config_path": str(pipeline_path),
         "run_bundle_path": str(bundle_path),
     }
+
+
+def export_strategy_portfolio_run_config(
+    *,
+    strategy_portfolio_path: str | Path,
+    output_dir: str | Path,
+) -> dict[str, Any]:
+    portfolio_payload = load_strategy_portfolio(strategy_portfolio_path)
+    selected = list(portfolio_payload.get("selected_strategies", []))
+    if not selected:
+        raise ValueError("Strategy portfolio contains no selected strategies")
+    return export_multi_strategy_run_config_bundle(
+        selected_rows=selected,
+        output_dir=output_dir,
+        bundle_name="strategy_portfolio",
+        source_artifact_path=strategy_portfolio_path,
+        notes="Generated from strategy_portfolio.json",
+    )

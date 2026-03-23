@@ -374,6 +374,19 @@ class DashboardDataService:
             ),
         }
 
+    def adaptive_allocation_payload(self) -> dict[str, Any]:
+        adaptive_path = _latest_matching_file(self.artifacts_root, ["adaptive_allocation.json"])
+        adaptive_payload = _safe_read_json(adaptive_path)
+        return {
+            "generated_at": _now_utc(),
+            "adaptive_allocation_path": str(adaptive_path) if adaptive_path is not None else None,
+            "summary": adaptive_payload.get("summary", {}),
+            "strategies": adaptive_payload.get("strategies", []),
+            "top_changes": adaptive_payload.get("top_changes", []),
+            "warnings": adaptive_payload.get("warnings", []),
+            "policy": adaptive_payload.get("policy", {}),
+        }
+
     def latest_automated_orchestration_payload(self) -> dict[str, Any]:
         latest = _latest_matching_file(self.artifacts_root, ["orchestration_run.json"])
         if latest is None:
@@ -394,6 +407,7 @@ class DashboardDataService:
         alerts = self.latest_alerts_payload()
         research = self.research_payload()
         strategy_monitoring = self.strategy_monitoring_payload()
+        adaptive_allocation = self.adaptive_allocation_payload()
         orchestration = self.latest_automated_orchestration_payload()
         latest_run_summary = latest_run.get("summary", {})
         latest_run_health = latest_run.get("health", {})
@@ -404,6 +418,7 @@ class DashboardDataService:
             {"label": "latest_run_dir", "path": latest_run.get("run_dir")},
             {"label": "registry", "path": registry.get("registry_path")},
             {"label": "portfolio", "path": portfolio.get("artifact_dir")},
+            {"label": "adaptive_allocation", "path": adaptive_allocation.get("adaptive_allocation_path")},
             {"label": "execution", "path": execution.get("artifact_dir")},
             {"label": "live_submit", "path": live.get("submission_artifact_dir")},
         ]
@@ -436,6 +451,11 @@ class DashboardDataService:
                 "warning_strategy_count": strategy_monitoring.get("summary", {}).get("warning_strategy_count", 0),
                 "deactivation_candidate_count": strategy_monitoring.get("summary", {}).get("deactivation_candidate_count", 0),
                 "aggregate_return": strategy_monitoring.get("summary", {}).get("aggregate_return"),
+            },
+            "adaptive_allocation": {
+                "selected_strategy_count": adaptive_allocation.get("summary", {}).get("total_selected_strategies", 0),
+                "absolute_weight_change": adaptive_allocation.get("summary", {}).get("absolute_weight_change"),
+                "warning_count": adaptive_allocation.get("summary", {}).get("warning_count", 0),
             },
             "orchestration": {
                 "run_id": orchestration.get("summary", {}).get("run_id"),
@@ -490,6 +510,7 @@ class DashboardDataService:
 
     def portfolio_payload(self) -> dict[str, Any]:
         payload = self.latest_portfolio_payload()
+        payload["adaptive_allocation"] = self.adaptive_allocation_payload()
         payload["generated_at"] = _now_utc()
         return payload
 
@@ -504,4 +525,6 @@ class DashboardDataService:
         return payload
 
     def research_latest_payload(self) -> dict[str, Any]:
-        return self.research_payload()
+        payload = self.research_payload()
+        payload["adaptive_allocation"] = self.adaptive_allocation_payload()
+        return payload

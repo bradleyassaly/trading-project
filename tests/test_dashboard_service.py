@@ -357,6 +357,39 @@ def _write_sample_artifacts(root: Path) -> None:
         ),
         encoding="utf-8",
     )
+    (root / "adaptive_allocation.json").write_text(
+        json.dumps(
+            {
+                "summary": {
+                    "total_selected_strategies": 1,
+                    "absolute_weight_change": 0.08,
+                    "warning_count": 1,
+                },
+                "strategies": [
+                    {
+                        "preset_name": "generated_momentum_nasdaq100_research_run_1_paper",
+                        "prior_weight": 1.0,
+                        "adjusted_weight": 0.92,
+                        "monitoring_recommendation": "deactivate",
+                        "reason_for_adjustment": ["recommendation_penalty:deactivate"],
+                        "capped_by_policy": True,
+                    }
+                ],
+                "top_changes": [
+                    {
+                        "preset_name": "generated_momentum_nasdaq100_research_run_1_paper",
+                        "prior_weight": 1.0,
+                        "adjusted_weight": 0.92,
+                        "delta_weight": -0.08,
+                        "monitoring_recommendation": "deactivate",
+                    }
+                ],
+                "warnings": ["generated_momentum_nasdaq100_research_run_1_paper:stale_monitoring"],
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
     orchestration_dir = root / "orchestration_runs" / "automation" / "2026-03-22T00-00-00+00-00"
     orchestration_dir.mkdir(parents=True, exist_ok=True)
     (orchestration_dir / "orchestration_run.json").write_text(
@@ -415,6 +448,7 @@ def test_dashboard_data_loading_with_sample_artifacts(tmp_path: Path) -> None:
     assert overview["research"]["promoted_strategy_count"] == 1
     assert overview["research"]["strategy_portfolio_selected_count"] == 1
     assert overview["strategy_monitoring"]["warning_strategy_count"] == 1
+    assert overview["adaptive_allocation"]["absolute_weight_change"] == 0.08
     assert overview["orchestration"]["status"] == "succeeded"
     assert strategies["summary"]["status_counts"]["approved"] == 1
     assert execution["summary"]["executable_order_count"] == 1
@@ -491,6 +525,17 @@ def test_dashboard_strategy_monitoring_normalization(tmp_path: Path) -> None:
     assert payload["recommendations"][0]["recommendation"] == "deactivate"
 
 
+def test_dashboard_adaptive_allocation_normalization(tmp_path: Path) -> None:
+    _write_sample_artifacts(tmp_path)
+    service = DashboardDataService(tmp_path)
+
+    payload = service.adaptive_allocation_payload()
+
+    assert payload["summary"]["absolute_weight_change"] == 0.08
+    assert payload["strategies"][0]["adjusted_weight"] == 0.92
+    assert payload["top_changes"][0]["delta_weight"] == -0.08
+
+
 def test_dashboard_orchestration_normalization(tmp_path: Path) -> None:
     _write_sample_artifacts(tmp_path)
     service = DashboardDataService(tmp_path)
@@ -509,7 +554,7 @@ def test_dashboard_api_response_shapes(tmp_path: Path) -> None:
     status, headers, overview = _call_app(app, "/api/overview")
     assert status.startswith("200")
     assert headers["Content-Type"].startswith("application/json")
-    assert {"generated_at", "latest_run", "monitoring", "registry", "strategy_monitoring", "orchestration", "portfolio", "execution", "broker_health", "quick_links"} <= set(overview)
+    assert {"generated_at", "latest_run", "monitoring", "registry", "strategy_monitoring", "adaptive_allocation", "orchestration", "portfolio", "execution", "broker_health", "quick_links"} <= set(overview)
 
     _status, _headers, strategies = _call_app(app, "/api/strategies")
     assert {"generated_at", "summary", "filters", "strategies", "champion_challenger"} <= set(strategies)
@@ -520,6 +565,9 @@ def test_dashboard_api_response_shapes(tmp_path: Path) -> None:
 
     _status, _headers, strategy_monitor = _call_app(app, "/api/strategy-monitor/latest")
     assert {"generated_at", "summary", "strategies", "recommendations", "attribution_summary"} <= set(strategy_monitor)
+
+    _status, _headers, adaptive = _call_app(app, "/api/adaptive-allocation/latest")
+    assert {"generated_at", "summary", "strategies", "top_changes", "warnings"} <= set(adaptive)
 
     _status, _headers, orchestration = _call_app(app, "/api/orchestration/latest")
     assert {"run_dir", "summary", "stage_records"} <= set(orchestration)
@@ -540,4 +588,5 @@ def test_dashboard_static_data_build(tmp_path: Path) -> None:
     assert paths["runs_json"].exists()
     assert paths["research_latest_json"].exists()
     assert paths["strategy_monitoring_latest_json"].exists()
+    assert paths["adaptive_allocation_latest_json"].exists()
     assert paths["orchestration_latest_json"].exists()

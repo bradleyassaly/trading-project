@@ -25,6 +25,7 @@ from trading_platform.orchestration.pipeline_runner import (
     AutomatedOrchestrationStageToggles,
 )
 from trading_platform.portfolio.strategy_monitoring import StrategyMonitoringPolicyConfig
+from trading_platform.portfolio.adaptive_allocation import AdaptiveAllocationPolicyConfig
 from trading_platform.portfolio.strategy_portfolio import StrategyPortfolioPolicyConfig
 from trading_platform.research.promotion_pipeline import PromotionPolicyConfig
 
@@ -154,6 +155,11 @@ def load_strategy_portfolio_policy_config(path: str | Path) -> StrategyPortfolio
 def load_strategy_monitoring_policy_config(path: str | Path) -> StrategyMonitoringPolicyConfig:
     data = _read_config_file(Path(path))
     return StrategyMonitoringPolicyConfig(**data)
+
+
+def load_adaptive_allocation_policy_config(path: str | Path) -> AdaptiveAllocationPolicyConfig:
+    data = _read_config_file(Path(path))
+    return AdaptiveAllocationPolicyConfig(**data)
 
 
 def load_automated_orchestration_config(path: str | Path) -> AutomatedOrchestrationConfig:

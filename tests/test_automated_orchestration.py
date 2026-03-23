@@ -23,6 +23,7 @@ def _config(tmp_path: Path, **overrides) -> AutomatedOrchestrationConfig:
         "promotion_policy_config_path": str(tmp_path / "promotion.yaml"),
         "strategy_portfolio_policy_config_path": str(tmp_path / "strategy_portfolio.yaml"),
         "strategy_monitoring_policy_config_path": str(tmp_path / "strategy_monitoring.yaml"),
+        "adaptive_allocation_policy_config_path": str(tmp_path / "adaptive_allocation.yaml"),
         "paper_state_path": str(tmp_path / "paper_state.json"),
     }
     base.update(overrides)
@@ -33,6 +34,7 @@ def _write_policy_files(tmp_path: Path) -> None:
     (tmp_path / "promotion.yaml").write_text("schema_version: 1\n", encoding="utf-8")
     (tmp_path / "strategy_portfolio.yaml").write_text("schema_version: 1\n", encoding="utf-8")
     (tmp_path / "strategy_monitoring.yaml").write_text("schema_version: 1\n", encoding="utf-8")
+    (tmp_path / "adaptive_allocation.yaml").write_text("schema_version: 1\n", encoding="utf-8")
 
 
 def test_load_automated_orchestration_config_from_yaml(tmp_path: Path) -> None:
@@ -46,6 +48,7 @@ output_root_dir: artifacts/orchestration_runs
 promotion_policy_config_path: configs/promotion.yaml
 strategy_portfolio_policy_config_path: configs/strategy_portfolio.yaml
 strategy_monitoring_policy_config_path: configs/strategy_monitoring.yaml
+adaptive_allocation_policy_config_path: configs/adaptive_allocation.yaml
 paper_state_path: artifacts/paper_state.json
 max_promotions_per_run: 2
 stages:
@@ -56,6 +59,7 @@ stages:
   allocation: true
   paper: true
   monitoring: true
+  adaptive_allocation: true
   kill_switch: true
 """.strip(),
         encoding="utf-8",
@@ -66,6 +70,7 @@ stages:
     assert config.run_name == "auto"
     assert config.schedule_frequency == "daily"
     assert config.max_promotions_per_run == 2
+    assert config.stages.adaptive_allocation is True
     assert config.stages.kill_switch is True
 
 
@@ -73,7 +78,20 @@ def test_automated_orchestration_stage_sequencing_and_artifact_passing(monkeypat
     _write_policy_files(tmp_path)
     monkeypatch.setattr("trading_platform.orchestration.pipeline_runner._now_utc", lambda: "2026-03-22T00:00:00+00:00")
     monkeypatch.setattr("trading_platform.orchestration.pipeline_runner.perf_counter", lambda: 1.0)
-    config = _config(tmp_path)
+    config = _config(
+        tmp_path,
+        stages=AutomatedOrchestrationStageToggles(
+            research=True,
+            registry=True,
+            promotion=True,
+            portfolio=True,
+            allocation=True,
+            paper=True,
+            monitoring=True,
+            adaptive_allocation=True,
+            kill_switch=True,
+        ),
+    )
 
     monkeypatch.setattr(
         "trading_platform.orchestration.pipeline_runner.load_research_manifests",
@@ -165,6 +183,30 @@ def test_automated_orchestration_stage_sequencing_and_artifact_passing(monkeypat
         lambda **kwargs: {"strategy_monitoring_json_path": str(Path(kwargs["output_dir"]) / "strategy_monitoring.json"), "warning_strategy_count": 1, "deactivation_candidate_count": 1, "kill_switch_recommendations_json_path": str(Path(kwargs["output_dir"]) / "kill_switch_recommendations.json")},
     )
     monkeypatch.setattr(
+        "trading_platform.orchestration.pipeline_runner.build_adaptive_allocation",
+        lambda **kwargs: (
+            (Path(kwargs["output_dir"]) / "adaptive_allocation.json").write_text(
+                json.dumps({"summary": {"total_selected_strategies": 1, "warning_count": 0}}),
+                encoding="utf-8",
+            ),
+            {
+                "adaptive_allocation_json_path": str(Path(kwargs["output_dir"]) / "adaptive_allocation.json"),
+                "adaptive_allocation_csv_path": str(Path(kwargs["output_dir"]) / "adaptive_allocation.csv"),
+                "selected_count": 1,
+                "warning_count": 0,
+                "absolute_weight_change": 0.05,
+            },
+        )[1],
+    )
+    monkeypatch.setattr(
+        "trading_platform.orchestration.pipeline_runner.export_adaptive_allocation_run_config",
+        lambda **kwargs: {
+            "multi_strategy_config_path": str(Path(kwargs["output_dir"]) / "adaptive_multi_strategy.json"),
+            "pipeline_config_path": str(Path(kwargs["output_dir"]) / "adaptive_pipeline.yaml"),
+            "run_bundle_path": str(Path(kwargs["output_dir"]) / "adaptive_bundle.json"),
+        },
+    )
+    monkeypatch.setattr(
         "trading_platform.orchestration.pipeline_runner.recommend_kill_switch_actions",
         lambda **kwargs: {"kill_switch_recommendations_json_path": str(Path(kwargs["output_dir"]) / "kill_switch_recommendations.json"), "kill_switch_recommendations_csv_path": str(Path(kwargs["output_dir"]) / "kill_switch_recommendations.csv"), "recommendation_count": 1},
     )
@@ -173,6 +215,7 @@ def test_automated_orchestration_stage_sequencing_and_artifact_passing(monkeypat
 
     assert result.status == "succeeded"
     assert result.outputs["selected_strategy_count"] == 1
+    assert result.outputs["adaptive_selected_strategy_count"] == 1
     assert result.outputs["kill_switch_recommendation_count"] == 1
     assert paths["orchestration_run_json_path"].exists()
 
