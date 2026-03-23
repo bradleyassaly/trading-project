@@ -1,0 +1,461 @@
+from __future__ import annotations
+
+import json
+import re
+from dataclasses import asdict, dataclass, field
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+
+from trading_platform.governance.models import (
+    StrategyRegistry,
+    StrategyRegistryAuditEvent,
+    StrategyRegistryEntry,
+)
+from trading_platform.governance.persistence import save_strategy_registry
+from trading_platform.orchestration.models import OrchestrationStageToggles, PipelineRunConfig
+from trading_platform.research.registry import load_research_manifests
+
+try:
+    import yaml
+except ImportError:  # pragma: no cover
+    yaml = None
+
+
+PROMOTION_POLICY_SCHEMA_VERSION = 1
+PROMOTED_STRATEGIES_INDEX_NAME = "promoted_strategies.json"
+
+
+@dataclass(frozen=True)
+class PromotionPolicyConfig:
+    schema_version: int = PROMOTION_POLICY_SCHEMA_VERSION
+    metric_name: str = "portfolio_sharpe"
+    min_metric_threshold: float = 0.5
+    min_folds_tested: int = 3
+    min_promoted_signals: int = 1
+    max_strategies_total: int | None = 5
+    max_strategies_per_group: int | None = 1
+    group_by: str = "signal_family"
+    require_eligible_candidates: bool = True
+    default_status: str = "inactive"
+    pipeline_monitoring_config_path: str | None = "configs/monitoring.yaml"
+    pipeline_execution_config_path: str | None = "configs/execution.yaml"
+    notes: str | None = None
+    tags: list[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        if self.schema_version != PROMOTION_POLICY_SCHEMA_VERSION:
+            raise ValueError(f"Unsupported promotion policy schema_version: {self.schema_version}")
+        if self.min_folds_tested < 0:
+            raise ValueError("min_folds_tested must be >= 0")
+        if self.min_promoted_signals < 0:
+            raise ValueError("min_promoted_signals must be >= 0")
+        if self.max_strategies_total is not None and self.max_strategies_total <= 0:
+            raise ValueError("max_strategies_total must be > 0 when provided")
+        if self.max_strategies_per_group is not None and self.max_strategies_per_group <= 0:
+            raise ValueError("max_strategies_per_group must be > 0 when provided")
+        if self.group_by not in {"signal_family", "universe", "workflow_type"}:
+            raise ValueError("group_by must be one of: signal_family, universe, workflow_type")
+        if self.default_status not in {"active", "inactive"}:
+            raise ValueError("default_status must be one of: active, inactive")
+
+
+def _now_utc() -> str:
+    return datetime.now(UTC).isoformat()
+
+
+def _safe_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _safe_int(value: Any) -> int | None:
+    number = _safe_float(value)
+    return int(number) if number is not None else None
+
+
+def _safe_read_json(path: str | Path | None) -> dict[str, Any]:
+    if path is None:
+        return {}
+    file_path = Path(path)
+    if not file_path.exists():
+        return {}
+    try:
+        return json.loads(file_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+
+
+def _write_payload(path: Path, payload: dict[str, Any]) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    suffix = path.suffix.lower()
+    if suffix == ".json":
+        path.write_text(json.dumps(payload, indent=2, sort_keys=False), encoding="utf-8")
+        return path
+    if suffix in {".yaml", ".yml"}:
+        if yaml is None:
+            raise ImportError("PyYAML is required for YAML files. Install with `pip install pyyaml`.")
+        path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+        return path
+    raise ValueError(f"Unsupported file type: {suffix}")
+
+
+def load_promotion_policy_config(path: str | Path) -> PromotionPolicyConfig:
+    file_path = Path(path)
+    suffix = file_path.suffix.lower()
+    if suffix == ".json":
+        payload = json.loads(file_path.read_text(encoding="utf-8"))
+    elif suffix in {".yaml", ".yml"}:
+        if yaml is None:
+            raise ImportError("PyYAML is required for YAML files. Install with `pip install pyyaml`.")
+        payload = yaml.safe_load(file_path.read_text(encoding="utf-8")) or {}
+    else:
+        raise ValueError(f"Unsupported file type: {suffix}")
+    return PromotionPolicyConfig(**payload)
+
+
+def _sanitize_name(text: str) -> str:
+    return re.sub(r"[^a-z0-9_]+", "_", text.lower()).strip("_")
+
+
+def _build_generated_preset_name(manifest: dict[str, Any]) -> str:
+    signal_family = _sanitize_name(str(manifest.get("signal_family") or "signal"))
+    universe = _sanitize_name(str(manifest.get("universe") or "custom"))
+    run_id = _sanitize_name(str(manifest.get("run_id") or "run"))
+    return f"generated_{signal_family}_{universe}_{run_id}_paper"
+
+
+def _load_promoted_index(output_dir: Path) -> dict[str, Any]:
+    path = output_dir / PROMOTED_STRATEGIES_INDEX_NAME
+    payload = _safe_read_json(path)
+    if not payload:
+        return {"schema_version": 1, "generated_at": None, "strategies": []}
+    payload.setdefault("schema_version", 1)
+    payload.setdefault("strategies", [])
+    return payload
+
+
+def _build_warning_list(manifest: dict[str, Any], policy: PromotionPolicyConfig) -> list[str]:
+    warnings: list[str] = []
+    folds = _safe_int(manifest.get("folds_tested"))
+    if folds is None or folds <= policy.min_folds_tested:
+        warnings.append("low_sample_size_or_missing_folds")
+    metric_value = _safe_float(manifest.get("top_metrics", {}).get(policy.metric_name))
+    if metric_value is None:
+        warnings.append(f"missing_metric_{policy.metric_name}")
+    turnover = _safe_float(manifest.get("top_metrics", {}).get("mean_turnover"))
+    if turnover is not None and turnover > 0.5:
+        warnings.append("high_turnover_proxy")
+    if manifest.get("top_metrics", {}).get("rejection_reason"):
+        warnings.append("candidate_has_rejection_reason")
+    return warnings
+
+
+def _candidate_passes_policy(candidate: dict[str, Any], manifest: dict[str, Any], policy: PromotionPolicyConfig) -> tuple[bool, list[str]]:
+    reasons: list[str] = []
+    metric_value = _safe_float(manifest.get("top_metrics", {}).get(policy.metric_name))
+    if policy.require_eligible_candidates and not bool(candidate.get("eligible")):
+        reasons.append("candidate_not_marked_eligible")
+    if metric_value is None or metric_value < policy.min_metric_threshold:
+        reasons.append(
+            f"{policy.metric_name} {metric_value if metric_value is not None else 'missing'} < {policy.min_metric_threshold}"
+        )
+    folds = _safe_int(manifest.get("folds_tested"))
+    if folds is None or folds < policy.min_folds_tested:
+        reasons.append(f"folds_tested {folds if folds is not None else 'missing'} < {policy.min_folds_tested}")
+    promoted_signals = _safe_int(manifest.get("promoted_signal_count"))
+    if promoted_signals is None or promoted_signals < policy.min_promoted_signals:
+        reasons.append(
+            f"promoted_signal_count {promoted_signals if promoted_signals is not None else 'missing'} < {policy.min_promoted_signals}"
+        )
+    return (not reasons), reasons
+
+
+def _build_generated_preset_payload(
+    *,
+    preset_name: str,
+    manifest: dict[str, Any],
+    candidate: dict[str, Any],
+    status: str,
+    warnings: list[str],
+    metric_name: str,
+) -> dict[str, Any]:
+    artifact_paths = manifest.get("artifact_paths", {})
+    approved_model_state = artifact_paths.get("approved_model_state_deployment_path") or artifact_paths.get("approved_model_state_path")
+    composite_settings = manifest.get("diagnostics_snapshot", {}).get("composite_portfolio", {})
+    horizon = manifest.get("top_candidate", {}).get("horizon") or (
+        (manifest.get("evaluation_periods", {}).get("horizons") or [1])[0]
+    )
+    params = {
+        "preset_name": preset_name,
+        "signal_source": "composite",
+        "strategy": "sma_cross",
+        "symbols": manifest.get("symbols_requested"),
+        "approved_model_state": approved_model_state,
+        "composite_artifact_dir": manifest.get("artifact_dir"),
+        "composite_horizon": int(horizon) if horizon is not None else 1,
+        "composite_weighting_scheme": "equal",
+        "composite_portfolio_mode": "long_only_top_n",
+        "rebalance_frequency": "daily",
+        "min_price": composite_settings.get("min_price"),
+        "min_volume": composite_settings.get("min_volume"),
+        "min_avg_dollar_volume": composite_settings.get("min_avg_dollar_volume"),
+        "max_adv_participation": composite_settings.get("max_adv_participation", 0.05),
+        "max_position_pct_of_adv": composite_settings.get("max_position_pct_of_adv", 0.1),
+        "max_notional_per_name": composite_settings.get("max_notional_per_name"),
+    }
+    params = {key: value for key, value in params.items() if value is not None}
+    return {
+        "schema_version": 1,
+        "preset_type": "generated_strategy_preset",
+        "name": preset_name,
+        "description": f"Generated composite paper preset promoted from research run {manifest.get('run_id')}.",
+        "params": params,
+        "decision_context": {
+            "source_run_id": manifest.get("run_id"),
+            "signal_family": manifest.get("signal_family"),
+            "universe": manifest.get("universe"),
+            "status": status,
+            "ranking_metric": metric_name,
+            "ranking_value": manifest.get("top_metrics", {}).get(metric_name),
+            "promotion_recommendation": candidate.get("promotion_recommendation"),
+            "reasons": [part.strip() for part in str(candidate.get("reasons") or "").split(";") if part.strip()],
+            "warnings": warnings,
+            "artifact_dir": manifest.get("artifact_dir"),
+            "approved_model_state_path": approved_model_state,
+        },
+    }
+
+
+def _build_registry_entry(
+    *,
+    preset_name: str,
+    manifest: dict[str, Any],
+    status: str,
+    promoted_strategy_path: Path,
+) -> StrategyRegistryEntry:
+    pipeline_stage = "paper" if status == "active" else "candidate"
+    return StrategyRegistryEntry(
+        strategy_id=preset_name,
+        strategy_name=preset_name,
+        family=str(manifest.get("signal_family") or "generated"),
+        version=str(manifest.get("timestamp") or _now_utc())[:10].replace("-", ""),
+        preset_name=preset_name,
+        research_artifact_paths=[str(manifest.get("artifact_dir"))],
+        created_at=_now_utc(),
+        status="paper",
+        owner="research_promotion",
+        source="research_promote_cli",
+        current_deployment_stage=pipeline_stage,
+        notes=f"Promoted from research run {manifest.get('run_id')}",
+        tags=["generated", "research_promotion"],
+        universe=manifest.get("universe"),
+        signal_type="composite_alpha",
+        rebalance_frequency="daily",
+        benchmark="equal_weight",
+        risk_profile="paper_candidate",
+        metadata={
+            "source_run_id": manifest.get("run_id"),
+            "generated_strategy_path": str(promoted_strategy_path),
+        },
+    )
+
+
+def _build_pipeline_config(
+    *,
+    preset_name: str,
+    manifest: dict[str, Any],
+    output_dir: Path,
+    registry_path: Path,
+    policy: PromotionPolicyConfig,
+) -> PipelineRunConfig:
+    universe = manifest.get("universe") or "nasdaq100"
+    return PipelineRunConfig(
+        run_name=f"paper_promotion_{preset_name}",
+        schedule_type="ad_hoc",
+        universes=[str(universe)],
+        preset_filters=[preset_name],
+        registry_path=str(registry_path),
+        monitoring_config_path=policy.pipeline_monitoring_config_path,
+        execution_config_path=policy.pipeline_execution_config_path,
+        multi_strategy_output_path=str(output_dir / f"{preset_name}_multi_strategy.json"),
+        paper_state_path=str(Path("artifacts/paper/promoted") / f"{preset_name}_state.json"),
+        output_root_dir="artifacts/orchestration",
+        continue_on_stage_error=True,
+        registry_include_paper_strategies=True,
+        registry_selection_weighting_scheme="equal",
+        registry_max_strategies=1,
+        stages=OrchestrationStageToggles(
+            multi_strategy_config_generation=True,
+            portfolio_allocation=True,
+            paper_trading=True,
+            reporting=True,
+            monitoring=bool(policy.pipeline_monitoring_config_path),
+        ),
+    )
+
+
+def _serialize_pipeline_config(config: PipelineRunConfig) -> dict[str, Any]:
+    return config.to_dict()
+
+
+def _load_candidate_rows(registry_dir: Path) -> list[dict[str, Any]]:
+    payload = _safe_read_json(registry_dir / "promotion_candidates.json")
+    return list(payload.get("rows", []))
+
+
+def apply_research_promotions(
+    *,
+    artifacts_root: str | Path,
+    registry_dir: str | Path,
+    output_dir: str | Path,
+    policy: PromotionPolicyConfig,
+    top_n: int | None = None,
+    allow_overwrite: bool = False,
+    dry_run: bool = False,
+    inactive: bool = False,
+) -> dict[str, Any]:
+    artifacts_root_path = Path(artifacts_root)
+    registry_dir_path = Path(registry_dir)
+    output_dir_path = Path(output_dir)
+    output_dir_path.mkdir(parents=True, exist_ok=True)
+
+    manifests = {manifest.get("run_id"): manifest for manifest in load_research_manifests(artifacts_root_path)}
+    candidates = _load_candidate_rows(registry_dir_path)
+    existing_index = _load_promoted_index(output_dir_path)
+    existing_run_ids = {row.get("source_run_id") for row in existing_index.get("strategies", [])}
+    existing_preset_names = {row.get("preset_name") for row in existing_index.get("strategies", [])}
+    selected: list[tuple[dict[str, Any], dict[str, Any], list[str]]] = []
+    group_counts: dict[str, int] = {}
+
+    sorted_candidates = sorted(
+        candidates,
+        key=lambda row: (
+            _safe_float(row.get(policy.metric_name) if policy.metric_name in row else None)
+            if policy.metric_name in row
+            else _safe_float(manifests.get(row.get("run_id"), {}).get("top_metrics", {}).get(policy.metric_name))
+            or float("-inf"),
+            str(row.get("timestamp") or ""),
+            str(row.get("run_id") or ""),
+        ),
+        reverse=True,
+    )
+    for candidate in sorted_candidates:
+        run_id = str(candidate.get("run_id") or "")
+        manifest = manifests.get(run_id)
+        if not manifest:
+            continue
+        passes, reasons = _candidate_passes_policy(candidate, manifest, policy)
+        if not passes:
+            continue
+        group_value = str(manifest.get(policy.group_by) or "ungrouped")
+        if policy.max_strategies_per_group is not None and group_counts.get(group_value, 0) >= policy.max_strategies_per_group:
+            continue
+        if run_id in existing_run_ids and not allow_overwrite:
+            continue
+        selected.append((candidate, manifest, reasons))
+        group_counts[group_value] = group_counts.get(group_value, 0) + 1
+        total_limit = top_n if top_n is not None else policy.max_strategies_total
+        if total_limit is not None and len(selected) >= total_limit:
+            break
+
+    promoted_rows: list[dict[str, Any]] = []
+    generated_paths: dict[str, str] = {}
+    existing_rows = [row for row in existing_index.get("strategies", [])]
+
+    for candidate, manifest, _reasons in selected:
+        preset_name = _build_generated_preset_name(manifest)
+        status = "inactive" if inactive else policy.default_status
+        warnings = _build_warning_list(manifest, policy)
+        preset_payload = _build_generated_preset_payload(
+            preset_name=preset_name,
+            manifest=manifest,
+            candidate=candidate,
+            status=status,
+            warnings=warnings,
+            metric_name=policy.metric_name,
+        )
+        promoted_strategy_path = output_dir_path / f"{preset_name}.json"
+        registry_path = output_dir_path / f"{preset_name}_registry.json"
+        pipeline_config_path = output_dir_path / f"{preset_name}_pipeline.yaml"
+        if (promoted_strategy_path.exists() or registry_path.exists() or pipeline_config_path.exists()) and not allow_overwrite:
+            if preset_name in existing_preset_names:
+                continue
+            raise FileExistsError(
+                f"Generated strategy artifacts already exist for preset {preset_name}. Use --allow-overwrite to replace them."
+            )
+
+        registry = StrategyRegistry(
+            updated_at=_now_utc(),
+            entries=[_build_registry_entry(
+                preset_name=preset_name,
+                manifest=manifest,
+                status=status,
+                promoted_strategy_path=promoted_strategy_path,
+            )],
+            audit_log=[
+                StrategyRegistryAuditEvent(
+                    timestamp=_now_utc(),
+                    strategy_id=preset_name,
+                    action="generated_promotion",
+                    to_status="paper",
+                    note=f"Promoted from research run {manifest.get('run_id')}",
+                )
+            ],
+        )
+        pipeline_config = _build_pipeline_config(
+            preset_name=preset_name,
+            manifest=manifest,
+            output_dir=output_dir_path,
+            registry_path=registry_path,
+            policy=policy,
+        )
+        promoted_row = {
+            "preset_name": preset_name,
+            "source_run_id": manifest.get("run_id"),
+            "signal_family": manifest.get("signal_family"),
+            "strategy_name": "composite_alpha",
+            "universe": manifest.get("universe"),
+            "ranking_metric": policy.metric_name,
+            "ranking_value": manifest.get("top_metrics", {}).get(policy.metric_name),
+            "promotion_timestamp": _now_utc(),
+            "status": status,
+            "rationale": candidate.get("reasons"),
+            "warnings": warnings,
+            "generated_preset_path": str(promoted_strategy_path),
+            "generated_registry_path": str(registry_path),
+            "generated_pipeline_config_path": str(pipeline_config_path),
+        }
+        promoted_rows.append(promoted_row)
+        if dry_run:
+            continue
+        _write_payload(promoted_strategy_path, preset_payload)
+        save_strategy_registry(registry, registry_path)
+        _write_payload(pipeline_config_path, _serialize_pipeline_config(pipeline_config))
+        generated_paths[preset_name] = str(promoted_strategy_path)
+
+    if not dry_run:
+        retained = [
+            row
+            for row in existing_rows
+            if row.get("source_run_id") not in {item["source_run_id"] for item in promoted_rows}
+        ]
+        index_payload = {
+            "schema_version": 1,
+            "generated_at": _now_utc(),
+            "policy": asdict(policy),
+            "strategies": sorted(retained + promoted_rows, key=lambda row: str(row.get("preset_name"))),
+        }
+        _write_payload(output_dir_path / PROMOTED_STRATEGIES_INDEX_NAME, index_payload)
+
+    return {
+        "selected_count": len(promoted_rows),
+        "dry_run": dry_run,
+        "promoted_rows": promoted_rows,
+        "generated_paths": generated_paths,
+        "promoted_index_path": str(output_dir_path / PROMOTED_STRATEGIES_INDEX_NAME),
+    }

@@ -20,6 +20,7 @@ from trading_platform.orchestration.models import (
     OrchestrationStageToggles,
     PipelineRunConfig,
 )
+from trading_platform.research.promotion_pipeline import PromotionPolicyConfig
 
 try:
     import yaml
@@ -132,3 +133,8 @@ def load_broker_config(path: str | Path) -> BrokerConfig:
 def load_dashboard_config(path: str | Path) -> DashboardConfig:
     data = _read_config_file(Path(path))
     return DashboardConfig(**data)
+
+
+def load_promotion_policy_config(path: str | Path) -> PromotionPolicyConfig:
+    data = _read_config_file(Path(path))
+    return PromotionPolicyConfig(**data)

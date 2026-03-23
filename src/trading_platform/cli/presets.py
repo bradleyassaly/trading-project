@@ -1,8 +1,15 @@
 from __future__ import annotations
 
+import json
 from copy import deepcopy
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
+
+try:
+    import yaml
+except ImportError:  # pragma: no cover
+    yaml = None
 
 
 @dataclass(frozen=True)
@@ -86,6 +93,8 @@ CLI_PRESETS: dict[str, CliPreset] = {
     ),
 }
 
+GENERATED_PRESET_DIRECTORIES = [Path("configs/generated_strategies")]
+
 
 PRESET_OVERRIDE_OPTION_ALIASES: dict[str, list[str]] = {
     "symbols": ["--symbols"],
@@ -114,12 +123,15 @@ PRESET_OVERRIDE_OPTION_ALIASES: dict[str, list[str]] = {
 
 
 def get_preset_choices() -> list[str]:
-    return sorted(CLI_PRESETS.keys())
+    return sorted({*CLI_PRESETS.keys(), *_load_generated_presets().keys()})
 
 
 def resolve_cli_preset(name: str) -> CliPreset:
-    try:
+    if name in CLI_PRESETS:
         return CLI_PRESETS[name]
+    generated = _load_generated_presets()
+    try:
+        return generated[name]
     except KeyError as exc:
         raise SystemExit(f"Unknown preset: {name}") from exc
 
@@ -203,3 +215,41 @@ def build_decision_memo_payload(
             "Extend validation to additional liquid universes before promoting a new preset version.",
         ],
     }
+
+
+def _read_preset_payload(path: Path) -> dict[str, Any]:
+    suffix = path.suffix.lower()
+    if suffix == ".json":
+        return json.loads(path.read_text(encoding="utf-8"))
+    if suffix in {".yaml", ".yml"}:
+        if yaml is None:
+            raise ImportError("PyYAML is required for YAML preset files. Install with `pip install pyyaml`.")
+        payload = yaml.safe_load(path.read_text(encoding="utf-8"))
+        return payload or {}
+    raise ValueError(f"Unsupported preset file type: {suffix}")
+
+
+def _load_generated_presets() -> dict[str, CliPreset]:
+    presets: dict[str, CliPreset] = {}
+    for directory in GENERATED_PRESET_DIRECTORIES:
+        if not directory.exists():
+            continue
+        for path in sorted(directory.glob("*.*")):
+            if path.suffix.lower() not in {".json", ".yaml", ".yml"}:
+                continue
+            try:
+                payload = _read_preset_payload(path)
+            except (json.JSONDecodeError, ValueError):
+                continue
+            if payload.get("preset_type") != "generated_strategy_preset":
+                continue
+            name = str(payload.get("name") or "").strip()
+            if not name:
+                continue
+            presets[name] = CliPreset(
+                name=name,
+                description=str(payload.get("description") or f"Generated preset from {path.name}"),
+                params=dict(payload.get("params", {})),
+                decision_context=dict(payload.get("decision_context", {})),
+            )
+    return presets

@@ -209,7 +209,7 @@ The dashboard is a local-first, read-only operator UI that sits on top of the ex
 Pages:
 
 - `Overview`: latest run status, monitoring health, alert counts, approved strategy count, generated position count, executable order count, broker health, and quick artifact links
-- `Research`: recent research manifests, top leaderboard rows, and promotion-ready candidates
+- `Research`: recent research manifests, top leaderboard rows, promotion-ready candidates, and promoted generated strategies
 - `Strategies`: strategy registry table, family/status filters, and champion/challenger comparison when available
 - `Portfolio`: latest combined portfolio, sleeve weights, top positions, overlap diagnostics, and clipped symbols
 - `Execution`: requested vs executable orders, rejection reasons, expected cost, and liquidity diagnostics
@@ -268,6 +268,29 @@ trading-cli research compare-runs --artifacts-root artifacts --run-id-a demo_run
 4. Open the dashboard and use the `Research` page or `/api/research/latest` to inspect recent runs, top-ranked entries, and promotion-ready candidates.
 
 This is still artifact-driven and advisory. The research registry helps narrow candidates for governance review, strategy registry entry creation, and later paper/live portfolio inclusion.
+
+### Research To Production Workflow
+
+The conservative handoff from research to paper now looks like this:
+
+1. Run research and inspect `research_run.json`.
+2. Build the research registry and leaderboard.
+3. Generate promotion candidates.
+4. Apply promotion into generated paper presets.
+5. Run the generated preset through paper trading.
+6. Optionally run the generated single-strategy paper pipeline.
+
+Example end-to-end commands:
+
+```bash
+trading-cli research alpha --symbols AAPL MSFT NVDA --lookbacks 20 63 --horizons 5 10 --output-dir artifacts/alpha_research/demo_run
+trading-cli research registry build --artifacts-root artifacts --output-dir artifacts/research_registry
+trading-cli research leaderboard --artifacts-root artifacts --output-dir artifacts/research_registry --metric portfolio_sharpe
+trading-cli research promotion-candidates --artifacts-root artifacts --output-dir artifacts/research_registry
+trading-cli research promote --artifacts-root artifacts --registry-dir artifacts/research_registry --output-dir configs/generated_strategies --policy-config configs/promotion.yaml
+trading-cli paper run-preset-scheduled --preset generated_momentum_nasdaq100_demo_run_paper
+trading-cli pipeline run --config configs/generated_strategies/generated_momentum_nasdaq100_demo_run_paper_pipeline.yaml
+```
 
 ### Operator Quickstart
 
@@ -901,6 +924,36 @@ Primary artifacts:
 - `promotion_candidates.json` / `promotion_candidates.csv`: transparent promotion-readiness recommendations
 
 This layer is intended to bridge research output review into governance and registry-backed promotion workflows. It does not auto-promote or auto-deploy anything.
+
+### Research Promotion Pipeline
+
+The promotion pipeline closes the loop from research candidate to runnable paper-trading artifact. It stays file-based and conservative:
+
+- it reads `promotion_candidates.json` plus the underlying `research_run.json` manifests
+- it applies a simple rule-based policy from `configs/promotion.yaml`
+- it generates an auditable bundle under `configs/generated_strategies`
+
+Each generated bundle includes:
+
+- a generated preset JSON file that the existing `--preset` CLI path can resolve
+- a single-entry strategy registry JSON file
+- a minimal runnable pipeline YAML file for single-strategy paper-stage orchestration
+- an append-only `promoted_strategies.json` index
+
+Example:
+
+```bash
+trading-cli research promote --artifacts-root artifacts --registry-dir artifacts/research_registry --output-dir configs/generated_strategies --policy-config configs/promotion.yaml
+trading-cli paper run-preset-scheduled --preset generated_momentum_nasdaq100_demo_run_paper
+trading-cli pipeline run --config configs/generated_strategies/generated_momentum_nasdaq100_demo_run_paper_pipeline.yaml
+```
+
+Promotion safeguards:
+
+- duplicate run ids are skipped unless `--allow-overwrite` is set
+- `--dry-run` shows what would be promoted without writing files
+- `--inactive` forces promoted strategies to start inactive
+- warnings are recorded for low sample size, missing metrics, and other incomplete inputs
 
 ### Paper Trading
 

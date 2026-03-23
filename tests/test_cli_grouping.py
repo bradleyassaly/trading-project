@@ -107,6 +107,34 @@ def test_grouped_research_promotion_candidates_command_parses() -> None:
     assert args.output_dir == "artifacts/research_candidates"
 
 
+def test_grouped_research_promote_command_parses() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "research",
+            "promote",
+            "--artifacts-root",
+            "artifacts",
+            "--registry-dir",
+            "artifacts/research_registry",
+            "--output-dir",
+            "configs/generated_strategies",
+            "--policy-config",
+            "configs/promotion.yaml",
+            "--top-n",
+            "2",
+            "--dry-run",
+        ]
+    )
+
+    assert args.research_command == "promote"
+    assert args.registry_dir == "artifacts/research_registry"
+    assert args.output_dir == "configs/generated_strategies"
+    assert args.policy_config == "configs/promotion.yaml"
+    assert args.top_n == 2
+    assert args.dry_run is True
+
+
 def test_grouped_data_features_command_parses_for_universe() -> None:
     parser = build_parser()
     args = parser.parse_args(["data", "features", "--universe", "nasdaq100"])

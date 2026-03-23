@@ -149,6 +149,7 @@ def _research_page(service: DashboardDataService) -> bytes:
         [
             ("Research Runs", summary.get("run_count", 0), "indexed manifests"),
             ("Eligible Candidates", summary.get("eligible_candidate_count", 0), "promotion readiness"),
+            ("Promoted Strategies", summary.get("promoted_strategy_count", 0), "generated paper presets"),
             ("Signal Families", len(summary.get("signal_family_counts", {})), "observed across runs"),
             ("Universes", len(summary.get("universe_counts", {})), "observed across runs"),
         ]
@@ -161,6 +162,10 @@ def _research_page(service: DashboardDataService) -> bytes:
     body += "<h2>Promotion Candidates</h2>" + _table(
         ["run_id", "eligible", "promotion_recommendation", "mean_spearman_ic", "portfolio_sharpe", "reasons"],
         payload.get("promotion_candidates", []),
+    )
+    body += "<h2>Promoted Strategies</h2>" + _table(
+        ["preset_name", "source_run_id", "status", "ranking_metric", "ranking_value", "generated_preset_path"],
+        payload.get("promoted_strategies", []),
     )
     body += "<h2>Recent Research Runs</h2>" + _table(
         ["run_id", "timestamp", "workflow_type", "signal_family", "universe", "candidate_count", "promoted_signal_count"],

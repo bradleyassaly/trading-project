@@ -10,6 +10,7 @@ from trading_platform.config.loader import (
     load_monitoring_config,
     load_notification_config,
     load_pipeline_run_config,
+    load_promotion_policy_config,
     load_research_workflow_config,
 )
 
@@ -246,6 +247,34 @@ port: 8123
     assert config.port == 8123
 
 
+def test_load_promotion_policy_config_from_yaml(tmp_path) -> None:
+    path = tmp_path / "promotion.yaml"
+    path.write_text(
+        """
+schema_version: 1
+metric_name: portfolio_sharpe
+min_metric_threshold: 0.75
+min_folds_tested: 4
+min_promoted_signals: 2
+max_strategies_total: 3
+max_strategies_per_group: 1
+group_by: signal_family
+require_eligible_candidates: true
+default_status: inactive
+pipeline_monitoring_config_path: configs/monitoring.yaml
+pipeline_execution_config_path: configs/execution.yaml
+""".strip(),
+        encoding="utf-8",
+    )
+
+    config = load_promotion_policy_config(path)
+
+    assert config.metric_name == "portfolio_sharpe"
+    assert config.min_metric_threshold == 0.75
+    assert config.max_strategies_total == 3
+    assert config.default_status == "inactive"
+
+
 def test_example_configs_load_from_repo() -> None:
     root = Path(__file__).resolve().parents[1]
 
@@ -255,6 +284,7 @@ def test_example_configs_load_from_repo() -> None:
     execution_config = load_execution_config(root / "configs" / "execution.yaml")
     broker_config = load_broker_config(root / "configs" / "broker.yaml")
     dashboard_config = load_dashboard_config(root / "configs" / "dashboard.yaml")
+    promotion_config = load_promotion_policy_config(root / "configs" / "promotion.yaml")
     minimal_demo_config = load_pipeline_run_config(root / "configs" / "minimal_local_demo.yaml")
 
     assert pipeline_config.schedule_type == "daily"
@@ -263,4 +293,5 @@ def test_example_configs_load_from_repo() -> None:
     assert execution_config.enabled is True
     assert broker_config.broker_name == "mock"
     assert dashboard_config.port == 8000
+    assert promotion_config.metric_name == "portfolio_sharpe"
     assert minimal_demo_config.schedule_type == "ad_hoc"

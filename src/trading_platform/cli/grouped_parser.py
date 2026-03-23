@@ -56,6 +56,7 @@ from trading_platform.cli.commands.research import cmd_research
 from trading_platform.cli.commands.research_compare_runs import cmd_research_compare_runs
 from trading_platform.cli.commands.research_leaderboard import cmd_research_leaderboard
 from trading_platform.cli.commands.research_monitor import cmd_research_monitor
+from trading_platform.cli.commands.research_promote import cmd_research_promote
 from trading_platform.cli.commands.research_promotion_candidates import cmd_research_promotion_candidates
 from trading_platform.cli.commands.research_refresh import cmd_research_refresh
 from trading_platform.cli.commands.research_registry_build import cmd_research_registry_build
@@ -134,6 +135,7 @@ _RESEARCH_GROUP_COMMANDS = {
     "leaderboard",
     "compare-runs",
     "promotion-candidates",
+    "promote",
     "pipeline",
     "strategies",
 }
@@ -631,6 +633,16 @@ def build_parser() -> argparse.ArgumentParser:
     research_promotion_candidates.add_argument("--artifacts-root", type=str, default="artifacts", help="Root artifact directory to scan for research manifests.")
     research_promotion_candidates.add_argument("--output-dir", type=str, required=True, help="Directory where promotion-candidate artifacts will be written.")
     research_promotion_candidates.set_defaults(func=cmd_research_promotion_candidates)
+    research_promote = research_subparsers.add_parser("promote", help="Convert promotion-ready research runs into generated paper-trading presets and configs")
+    research_promote.add_argument("--artifacts-root", type=str, default="artifacts", help="Root artifact directory to scan for research manifests.")
+    research_promote.add_argument("--registry-dir", type=str, required=True, help="Directory containing promotion_candidates.json and related research registry artifacts.")
+    research_promote.add_argument("--output-dir", type=str, required=True, help="Directory where generated strategy presets and config bundles will be written.")
+    research_promote.add_argument("--policy-config", type=str, default=None, help="Optional promotion policy JSON/YAML file.")
+    research_promote.add_argument("--top-n", type=int, default=None, help="Optional maximum number of strategies to promote this run.")
+    research_promote.add_argument("--allow-overwrite", action="store_true", help="Allow replacing existing generated preset/config artifacts.")
+    research_promote.add_argument("--dry-run", action="store_true", help="Evaluate and print promotions without writing artifacts.")
+    research_promote.add_argument("--inactive", action="store_true", help="Write promoted strategies with inactive status regardless of policy default.")
+    research_promote.set_defaults(func=cmd_research_promote)
     research_strategies = research_subparsers.add_parser("strategies", help="Show available legacy strategies")
     research_strategies.set_defaults(func=cmd_list_strategies)
 

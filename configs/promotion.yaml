@@ -1,0 +1,16 @@
+schema_version: 1
+metric_name: portfolio_sharpe
+min_metric_threshold: 0.5
+min_folds_tested: 3
+min_promoted_signals: 1
+max_strategies_total: 3
+max_strategies_per_group: 1
+group_by: signal_family
+require_eligible_candidates: true
+default_status: inactive
+pipeline_monitoring_config_path: configs/monitoring.yaml
+pipeline_execution_config_path: configs/execution.yaml
+notes: Promote only high-confidence research candidates into paper-trading-ready generated presets.
+tags:
+  - promotion
+  - paper_ready
