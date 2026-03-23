@@ -64,6 +64,7 @@ class PipelineRunConfig:
     notification_config_path: str | None = None
     execution_config_path: str | None = None
     multi_strategy_output_path: str | None = None
+    multi_strategy_input_path: str | None = None
     paper_state_path: str | None = None
     live_broker: str = "mock"
     output_root_dir: str = "artifacts/orchestration"
@@ -139,6 +140,14 @@ class PipelineRunConfig:
         ):
             raise ValueError(
                 "multi_strategy_output_path is required when multi_strategy_config_generation is enabled"
+            )
+        if (
+            (self.stages.portfolio_allocation or self.stages.paper_trading or self.stages.live_dry_run)
+            and not self.stages.multi_strategy_config_generation
+            and not self.multi_strategy_input_path
+        ):
+            raise ValueError(
+                "multi_strategy_input_path is required when portfolio/paper/live stages are enabled without multi_strategy_config_generation"
             )
         if self.stages.paper_trading and not self.paper_state_path:
             raise ValueError("paper_state_path is required when paper_trading is enabled")

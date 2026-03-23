@@ -106,6 +106,7 @@ def _overview_page(service: DashboardDataService) -> bytes:
             ("Monitoring Health", overview["monitoring"].get("status") or "n/a", "latest run health"),
             ("Approved Strategies", overview["registry"].get("approved_strategy_count") or 0, "from registry"),
             ("Research Candidates", overview["research"].get("eligible_candidate_count") or 0, "promotion-ready runs"),
+            ("Strategy Portfolio", overview["research"].get("strategy_portfolio_selected_count") or 0, "selected promoted strategies"),
             ("Generated Positions", overview["portfolio"].get("generated_position_count") or 0, "latest portfolio"),
             ("Executable Orders", overview["execution"].get("executable_order_count") or 0, "latest execution package"),
             ("Broker Health", overview["broker_health"].get("status") or "n/a", overview["broker_health"].get("message") or "not available"),
@@ -166,6 +167,14 @@ def _research_page(service: DashboardDataService) -> bytes:
     body += "<h2>Promoted Strategies</h2>" + _table(
         ["preset_name", "source_run_id", "status", "ranking_metric", "ranking_value", "generated_preset_path"],
         payload.get("promoted_strategies", []),
+    )
+    body += "<h2>Strategy Portfolio</h2>" + _table(
+        ["preset_name", "allocation_weight", "signal_family", "universe", "selection_rank"],
+        payload.get("strategy_portfolio", {}).get("selected_strategies", []),
+    )
+    body += "<h2>Strategy Portfolio Exclusions</h2>" + _table(
+        ["preset_name", "reason"],
+        payload.get("strategy_portfolio", {}).get("excluded_candidates", []),
     )
     body += "<h2>Recent Research Runs</h2>" + _table(
         ["run_id", "timestamp", "workflow_type", "signal_family", "universe", "candidate_count", "promoted_signal_count"],

@@ -307,23 +307,28 @@ class DashboardDataService:
         leaderboard_rows = leaderboard_payload.get("rows", [])
         candidate_rows = candidates_payload.get("rows", [])
         promoted_rows = promoted_payload.get("strategies", [])
+        strategy_portfolio_path = _latest_matching_file(self.artifacts_root, ["strategy_portfolio.json"])
+        strategy_portfolio_payload = _safe_read_json(strategy_portfolio_path)
         return {
             "generated_at": _now_utc(),
             "registry_path": str(registry_path) if registry_path is not None else None,
             "leaderboard_path": str(leaderboard_path) if leaderboard_path is not None else None,
             "promotion_candidates_path": str(candidates_path) if candidates_path is not None else None,
             "promoted_strategies_path": str(promoted_path) if promoted_path is not None else None,
+            "strategy_portfolio_path": str(strategy_portfolio_path) if strategy_portfolio_path is not None else None,
             "summary": {
                 "run_count": len(runs),
                 "signal_family_counts": _status_counts([str(row.get("signal_family")) for row in runs if row.get("signal_family")]),
                 "universe_counts": _status_counts([str(row.get("universe")) for row in runs if row.get("universe")]),
                 "eligible_candidate_count": len([row for row in candidate_rows if bool(row.get("eligible"))]),
                 "promoted_strategy_count": len(promoted_rows),
+                "strategy_portfolio_selected_count": len(strategy_portfolio_payload.get("selected_strategies", [])),
             },
             "recent_runs": runs[:10],
             "leaderboard": leaderboard_rows[:10],
             "promotion_candidates": candidate_rows[:10],
             "promoted_strategies": promoted_rows[:10],
+            "strategy_portfolio": strategy_portfolio_payload,
         }
 
     def overview_payload(self) -> dict[str, Any]:
@@ -368,6 +373,7 @@ class DashboardDataService:
                 "run_count": research.get("summary", {}).get("run_count", 0),
                 "eligible_candidate_count": research.get("summary", {}).get("eligible_candidate_count", 0),
                 "promoted_strategy_count": research.get("summary", {}).get("promoted_strategy_count", 0),
+                "strategy_portfolio_selected_count": research.get("summary", {}).get("strategy_portfolio_selected_count", 0),
                 "top_leaderboard_entry": research.get("leaderboard", [{}])[0] if research.get("leaderboard") else {},
             },
             "portfolio": {

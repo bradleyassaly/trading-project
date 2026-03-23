@@ -12,6 +12,7 @@ from trading_platform.config.loader import (
     load_pipeline_run_config,
     load_promotion_policy_config,
     load_research_workflow_config,
+    load_strategy_portfolio_policy_config,
 )
 
 
@@ -275,6 +276,35 @@ pipeline_execution_config_path: configs/execution.yaml
     assert config.default_status == "inactive"
 
 
+def test_load_strategy_portfolio_policy_config_from_yaml(tmp_path) -> None:
+    path = tmp_path / "strategy_portfolio.yaml"
+    path.write_text(
+        """
+schema_version: 1
+max_strategies: 4
+max_strategies_per_signal_family: 1
+max_strategies_per_universe: 2
+max_weight_per_strategy: 0.4
+min_weight_per_strategy: 0.1
+selection_metric: ranking_value
+weighting_mode: equal
+require_active_only: false
+require_promotion_eligible_only: true
+deduplicate_source_runs: true
+diversification_dimension: signal_family
+fallback_equal_weight_mode: true
+warn_on_same_family_overlap: true
+""".strip(),
+        encoding="utf-8",
+    )
+
+    config = load_strategy_portfolio_policy_config(path)
+
+    assert config.max_strategies == 4
+    assert config.max_strategies_per_signal_family == 1
+    assert config.max_weight_per_strategy == 0.4
+
+
 def test_example_configs_load_from_repo() -> None:
     root = Path(__file__).resolve().parents[1]
 
@@ -285,6 +315,7 @@ def test_example_configs_load_from_repo() -> None:
     broker_config = load_broker_config(root / "configs" / "broker.yaml")
     dashboard_config = load_dashboard_config(root / "configs" / "dashboard.yaml")
     promotion_config = load_promotion_policy_config(root / "configs" / "promotion.yaml")
+    strategy_portfolio_config = load_strategy_portfolio_policy_config(root / "configs" / "strategy_portfolio.yaml")
     minimal_demo_config = load_pipeline_run_config(root / "configs" / "minimal_local_demo.yaml")
 
     assert pipeline_config.schedule_type == "daily"
@@ -294,4 +325,5 @@ def test_example_configs_load_from_repo() -> None:
     assert broker_config.broker_name == "mock"
     assert dashboard_config.port == 8000
     assert promotion_config.metric_name == "portfolio_sharpe"
+    assert strategy_portfolio_config.selection_metric == "ranking_value"
     assert minimal_demo_config.schedule_type == "ad_hoc"

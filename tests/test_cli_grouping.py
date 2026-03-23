@@ -427,6 +427,58 @@ def test_grouped_dashboard_build_static_data_command_parses() -> None:
     assert args.output_dir == "artifacts/dashboard_data"
 
 
+def test_grouped_strategy_portfolio_build_command_parses() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "strategy-portfolio",
+            "build",
+            "--promoted-dir",
+            "configs/generated_strategies",
+            "--policy-config",
+            "configs/strategy_portfolio.yaml",
+            "--output-dir",
+            "artifacts/strategy_portfolio",
+        ]
+    )
+
+    assert args.command_family == "strategy-portfolio"
+    assert args.strategy_portfolio_command == "build"
+    assert args.promoted_dir == "configs/generated_strategies"
+
+
+def test_grouped_strategy_portfolio_show_command_parses() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "strategy-portfolio",
+            "show",
+            "--portfolio",
+            "artifacts/strategy_portfolio",
+        ]
+    )
+
+    assert args.strategy_portfolio_command == "show"
+    assert args.portfolio == "artifacts/strategy_portfolio"
+
+
+def test_grouped_strategy_portfolio_export_run_config_command_parses() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "strategy-portfolio",
+            "export-run-config",
+            "--portfolio",
+            "artifacts/strategy_portfolio",
+            "--output-dir",
+            "artifacts/strategy_portfolio_run",
+        ]
+    )
+
+    assert args.strategy_portfolio_command == "export-run-config"
+    assert args.output_dir == "artifacts/strategy_portfolio_run"
+
+
 def test_grouped_doctor_command_parses() -> None:
     parser = build_parser()
     args = parser.parse_args(

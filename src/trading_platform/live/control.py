@@ -385,8 +385,9 @@ def _data_staleness_violation(
         return None
     latest = pd.Timestamp(latest_timestamp)
     if latest.tzinfo is None:
-        latest = latest.tz_localize("UTC")
-    age_days = (pd.Timestamp(datetime.now(UTC)) - latest).days
+        age_days = (datetime.now().date() - latest.date()).days
+    else:
+        age_days = (datetime.now(latest.tzinfo).date() - latest.date()).days
     if age_days > int(max_data_staleness_days):
         return "stale_data"
     return None

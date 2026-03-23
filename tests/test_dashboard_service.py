@@ -277,6 +277,32 @@ def _write_sample_artifacts(root: Path) -> None:
         ),
         encoding="utf-8",
     )
+    (root / "strategy_portfolio.json").write_text(
+        json.dumps(
+            {
+                "summary": {
+                    "total_selected_strategies": 1,
+                    "total_active_weight": 1.0,
+                    "warning_count": 1,
+                },
+                "selected_strategies": [
+                    {
+                        "preset_name": "generated_momentum_nasdaq100_research_run_1_paper",
+                        "allocation_weight": 1.0,
+                        "signal_family": "momentum",
+                        "universe": "nasdaq100",
+                        "selection_rank": 1,
+                    }
+                ],
+                "excluded_candidates": [
+                    {"preset_name": "generated_value_sp500_research_run_2_paper", "reason": "signal_family_cap"}
+                ],
+                "warnings": ["underfilled_allocation_due_to_caps"],
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
 
 
 def _call_app(app, path: str) -> tuple[str, dict[str, str], dict]:
@@ -308,6 +334,7 @@ def test_dashboard_data_loading_with_sample_artifacts(tmp_path: Path) -> None:
     assert overview["registry"]["approved_strategy_count"] == 1
     assert overview["research"]["eligible_candidate_count"] == 1
     assert overview["research"]["promoted_strategy_count"] == 1
+    assert overview["research"]["strategy_portfolio_selected_count"] == 1
     assert strategies["summary"]["status_counts"]["approved"] == 1
     assert execution["summary"]["executable_order_count"] == 1
 
@@ -369,6 +396,7 @@ def test_dashboard_research_summary_normalization(tmp_path: Path) -> None:
     assert payload["leaderboard"][0]["run_id"] == "research-run-1"
     assert payload["promotion_candidates"][0]["eligible"] is True
     assert payload["promoted_strategies"][0]["preset_name"].startswith("generated_")
+    assert payload["strategy_portfolio"]["selected_strategies"][0]["preset_name"].startswith("generated_")
 
 
 def test_dashboard_api_response_shapes(tmp_path: Path) -> None:
@@ -385,6 +413,7 @@ def test_dashboard_api_response_shapes(tmp_path: Path) -> None:
 
     _status, _headers, research = _call_app(app, "/api/research/latest")
     assert {"generated_at", "summary", "recent_runs", "leaderboard", "promotion_candidates", "promoted_strategies"} <= set(research)
+    assert "strategy_portfolio" in research
 
     _status, _headers, live = _call_app(app, "/api/live/latest")
     assert {"generated_at", "dry_run_summary", "submission_summary", "risk_checks", "blocked_checks", "duplicate_events", "broker_health"} <= set(live)

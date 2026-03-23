@@ -1,0 +1,18 @@
+schema_version: 1
+max_strategies: 4
+max_strategies_per_signal_family: 1
+max_strategies_per_universe: 2
+max_weight_per_strategy: 0.5
+min_weight_per_strategy: 0.1
+selection_metric: ranking_value
+weighting_mode: equal
+require_active_only: false
+require_promotion_eligible_only: true
+deduplicate_source_runs: true
+diversification_dimension: signal_family
+fallback_equal_weight_mode: true
+warn_on_same_family_overlap: true
+notes: Build a conservative paper-stage portfolio from promoted strategies.
+tags:
+  - strategy_portfolio
+  - paper

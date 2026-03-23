@@ -70,6 +70,9 @@ from trading_platform.cli.commands.run_job import cmd_run_job
 from trading_platform.cli.commands.run_sweep import cmd_run_sweep
 from trading_platform.cli.commands.run_walk_forward import cmd_run_walk_forward
 from trading_platform.cli.commands.sweep import cmd_sweep
+from trading_platform.cli.commands.strategy_portfolio_build import cmd_strategy_portfolio_build
+from trading_platform.cli.commands.strategy_portfolio_export_run_config import cmd_strategy_portfolio_export_run_config
+from trading_platform.cli.commands.strategy_portfolio_show import cmd_strategy_portfolio_show
 from trading_platform.cli.commands.validate_signal import cmd_validate_signal
 from trading_platform.cli.commands.validate_live import cmd_validate_live
 from trading_platform.cli.commands.walkforward import cmd_walkforward
@@ -898,6 +901,21 @@ def build_parser() -> argparse.ArgumentParser:
     dashboard_build.add_argument("--artifacts-root", type=str, default="artifacts", help="Root artifact directory to scan.")
     dashboard_build.add_argument("--output-dir", type=str, required=True, help="Directory where normalized dashboard JSON payloads will be written.")
     dashboard_build.set_defaults(func=cmd_dashboard_build_static_data)
+
+    strategy_portfolio_parser = subparsers.add_parser("strategy-portfolio", help="Select and weight promoted strategies into a portfolio bundle")
+    strategy_portfolio_subparsers = strategy_portfolio_parser.add_subparsers(dest="strategy_portfolio_command", required=True)
+    strategy_portfolio_build = strategy_portfolio_subparsers.add_parser("build", help="Build a strategy portfolio from promoted strategies and a selection policy")
+    strategy_portfolio_build.add_argument("--promoted-dir", type=str, required=True, help="Directory containing promoted_strategies.json.")
+    strategy_portfolio_build.add_argument("--policy-config", type=str, default=None, help="Optional strategy portfolio policy JSON/YAML file.")
+    strategy_portfolio_build.add_argument("--output-dir", type=str, required=True, help="Directory where strategy portfolio artifacts will be written.")
+    strategy_portfolio_build.set_defaults(func=cmd_strategy_portfolio_build)
+    strategy_portfolio_show = strategy_portfolio_subparsers.add_parser("show", help="Print a concise summary of a strategy portfolio artifact")
+    strategy_portfolio_show.add_argument("--portfolio", type=str, required=True, help="Path to strategy_portfolio.json or its parent directory.")
+    strategy_portfolio_show.set_defaults(func=cmd_strategy_portfolio_show)
+    strategy_portfolio_export = strategy_portfolio_subparsers.add_parser("export-run-config", help="Export a runnable multi-strategy and pipeline config bundle from a strategy portfolio")
+    strategy_portfolio_export.add_argument("--portfolio", type=str, required=True, help="Path to strategy_portfolio.json or its parent directory.")
+    strategy_portfolio_export.add_argument("--output-dir", type=str, required=True, help="Directory where runnable config artifacts will be written.")
+    strategy_portfolio_export.set_defaults(func=cmd_strategy_portfolio_export_run_config)
 
     doctor_parser = subparsers.add_parser("doctor", help="Run local environment, config, and artifact sanity checks")
     doctor_parser.add_argument("--artifacts-root", type=str, default="artifacts", help="Artifact root to inspect.")

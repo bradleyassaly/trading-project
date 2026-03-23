@@ -209,7 +209,7 @@ The dashboard is a local-first, read-only operator UI that sits on top of the ex
 Pages:
 
 - `Overview`: latest run status, monitoring health, alert counts, approved strategy count, generated position count, executable order count, broker health, and quick artifact links
-- `Research`: recent research manifests, top leaderboard rows, promotion-ready candidates, and promoted generated strategies
+- `Research`: recent research manifests, top leaderboard rows, promotion-ready candidates, promoted generated strategies, and the current strategy portfolio selection
 - `Strategies`: strategy registry table, family/status filters, and champion/challenger comparison when available
 - `Portfolio`: latest combined portfolio, sleeve weights, top positions, overlap diagnostics, and clipped symbols
 - `Execution`: requested vs executable orders, rejection reasons, expected cost, and liquidity diagnostics
@@ -277,8 +277,9 @@ The conservative handoff from research to paper now looks like this:
 2. Build the research registry and leaderboard.
 3. Generate promotion candidates.
 4. Apply promotion into generated paper presets.
-5. Run the generated preset through paper trading.
-6. Optionally run the generated single-strategy paper pipeline.
+5. Build a strategy portfolio from promoted presets.
+6. Export a runnable multi-strategy config bundle.
+7. Run the paper trading workflow.
 
 Example end-to-end commands:
 
@@ -288,8 +289,10 @@ trading-cli research registry build --artifacts-root artifacts --output-dir arti
 trading-cli research leaderboard --artifacts-root artifacts --output-dir artifacts/research_registry --metric portfolio_sharpe
 trading-cli research promotion-candidates --artifacts-root artifacts --output-dir artifacts/research_registry
 trading-cli research promote --artifacts-root artifacts --registry-dir artifacts/research_registry --output-dir configs/generated_strategies --policy-config configs/promotion.yaml
-trading-cli paper run-preset-scheduled --preset generated_momentum_nasdaq100_demo_run_paper
-trading-cli pipeline run --config configs/generated_strategies/generated_momentum_nasdaq100_demo_run_paper_pipeline.yaml
+trading-cli strategy-portfolio build --promoted-dir configs/generated_strategies --policy-config configs/strategy_portfolio.yaml --output-dir artifacts/strategy_portfolio
+trading-cli strategy-portfolio export-run-config --portfolio artifacts/strategy_portfolio --output-dir artifacts/strategy_portfolio_run
+trading-cli paper run-multi-strategy --config artifacts/strategy_portfolio_run/strategy_portfolio_multi_strategy.json --state-path artifacts/paper/strategy_portfolio_state.json --output-dir artifacts/paper/strategy_portfolio
+trading-cli pipeline run --config artifacts/strategy_portfolio_run/strategy_portfolio_pipeline.yaml
 ```
 
 ### Operator Quickstart
@@ -954,6 +957,33 @@ Promotion safeguards:
 - `--dry-run` shows what would be promoted without writing files
 - `--inactive` forces promoted strategies to start inactive
 - warnings are recorded for low sample size, missing metrics, and other incomplete inputs
+
+### Strategy Portfolio Layer
+
+Promoted strategies still need a portfolio-selection step before they should run together. The strategy portfolio layer sits on top of `promoted_strategies.json` and stays explicit and file-based.
+
+It:
+
+- selects a capped set of promoted strategies
+- assigns deterministic capital fractions
+- records exclusions and warnings
+- exports a runnable multi-strategy config bundle for the existing allocator and paper runtime
+
+Primary artifacts:
+
+- `strategy_portfolio.json` / `strategy_portfolio.csv`
+- `strategy_portfolio_multi_strategy.json`
+- `strategy_portfolio_pipeline.yaml`
+- `strategy_portfolio_run_bundle.json`
+
+Example:
+
+```bash
+trading-cli strategy-portfolio build --promoted-dir configs/generated_strategies --policy-config configs/strategy_portfolio.yaml --output-dir artifacts/strategy_portfolio
+trading-cli strategy-portfolio show --portfolio artifacts/strategy_portfolio
+trading-cli strategy-portfolio export-run-config --portfolio artifacts/strategy_portfolio --output-dir artifacts/strategy_portfolio_run
+trading-cli paper run-multi-strategy --config artifacts/strategy_portfolio_run/strategy_portfolio_multi_strategy.json --state-path artifacts/paper/strategy_portfolio_state.json --output-dir artifacts/paper/strategy_portfolio
+```
 
 ### Paper Trading
 

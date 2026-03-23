@@ -20,6 +20,7 @@ from trading_platform.orchestration.models import (
     OrchestrationStageToggles,
     PipelineRunConfig,
 )
+from trading_platform.portfolio.strategy_portfolio import StrategyPortfolioPolicyConfig
 from trading_platform.research.promotion_pipeline import PromotionPolicyConfig
 
 try:
@@ -138,3 +139,8 @@ def load_dashboard_config(path: str | Path) -> DashboardConfig:
 def load_promotion_policy_config(path: str | Path) -> PromotionPolicyConfig:
     data = _read_config_file(Path(path))
     return PromotionPolicyConfig(**data)
+
+
+def load_strategy_portfolio_policy_config(path: str | Path) -> StrategyPortfolioPolicyConfig:
+    data = _read_config_file(Path(path))
+    return StrategyPortfolioPolicyConfig(**data)

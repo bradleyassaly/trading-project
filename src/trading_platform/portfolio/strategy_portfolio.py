@@ -1,0 +1,413 @@
+from __future__ import annotations
+
+import json
+from dataclasses import asdict, dataclass, field
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+
+import pandas as pd
+
+from trading_platform.config.models import MultiStrategyPortfolioConfig, MultiStrategySleeveConfig
+from trading_platform.orchestration.models import OrchestrationStageToggles, PipelineRunConfig
+
+try:
+    import yaml
+except ImportError:  # pragma: no cover
+    yaml = None
+
+
+STRATEGY_PORTFOLIO_SCHEMA_VERSION = 1
+
+
+@dataclass(frozen=True)
+class StrategyPortfolioPolicyConfig:
+    schema_version: int = STRATEGY_PORTFOLIO_SCHEMA_VERSION
+    max_strategies: int | None = 5
+    max_strategies_per_signal_family: int | None = 1
+    max_strategies_per_universe: int | None = None
+    max_weight_per_strategy: float = 0.5
+    min_weight_per_strategy: float = 0.0
+    selection_metric: str = "ranking_value"
+    weighting_mode: str = "equal"
+    require_active_only: bool = False
+    require_promotion_eligible_only: bool = True
+    deduplicate_source_runs: bool = True
+    diversification_dimension: str = "signal_family"
+    fallback_equal_weight_mode: bool = True
+    warn_on_same_family_overlap: bool = True
+    output_inactive_status: str = "inactive"
+    notes: str | None = None
+    tags: list[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        if self.schema_version != STRATEGY_PORTFOLIO_SCHEMA_VERSION:
+            raise ValueError(f"Unsupported strategy portfolio schema_version: {self.schema_version}")
+        if self.max_strategies is not None and self.max_strategies <= 0:
+            raise ValueError("max_strategies must be > 0 when provided")
+        if self.max_strategies_per_signal_family is not None and self.max_strategies_per_signal_family <= 0:
+            raise ValueError("max_strategies_per_signal_family must be > 0 when provided")
+        if self.max_strategies_per_universe is not None and self.max_strategies_per_universe <= 0:
+            raise ValueError("max_strategies_per_universe must be > 0 when provided")
+        if self.max_weight_per_strategy <= 0:
+            raise ValueError("max_weight_per_strategy must be > 0")
+        if self.min_weight_per_strategy < 0:
+            raise ValueError("min_weight_per_strategy must be >= 0")
+        if self.min_weight_per_strategy > self.max_weight_per_strategy:
+            raise ValueError("min_weight_per_strategy must be <= max_weight_per_strategy")
+        if self.weighting_mode not in {"equal", "metric_proportional"}:
+            raise ValueError("weighting_mode must be one of: equal, metric_proportional")
+        if self.diversification_dimension not in {"none", "signal_family", "universe"}:
+            raise ValueError("diversification_dimension must be one of: none, signal_family, universe")
+
+
+def _now_utc() -> str:
+    return datetime.now(UTC).isoformat()
+
+
+def _safe_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    if pd.isna(numeric):
+        return None
+    return numeric
+
+
+def _safe_read_json(path: str | Path | None) -> dict[str, Any]:
+    if path is None:
+        return {}
+    file_path = Path(path)
+    if not file_path.exists():
+        return {}
+    try:
+        return json.loads(file_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+
+
+def _write_payload(path: Path, payload: dict[str, Any]) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    suffix = path.suffix.lower()
+    if suffix == ".json":
+        path.write_text(json.dumps(payload, indent=2, sort_keys=False), encoding="utf-8")
+        return path
+    if suffix in {".yaml", ".yml"}:
+        if yaml is None:
+            raise ImportError("PyYAML is required for YAML output. Install with `pip install pyyaml`.")
+        path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+        return path
+    raise ValueError(f"Unsupported output file type: {suffix}")
+
+
+def _load_promoted_strategies(promoted_dir: str | Path) -> list[dict[str, Any]]:
+    payload = _safe_read_json(Path(promoted_dir) / "promoted_strategies.json")
+    return list(payload.get("strategies", []))
+
+
+def _row_metric_value(row: dict[str, Any], metric_name: str) -> float | None:
+    if metric_name in row:
+        return _safe_float(row.get(metric_name))
+    if row.get("ranking_metric") == metric_name:
+        return _safe_float(row.get("ranking_value"))
+    if metric_name == "ranking_value":
+        return _safe_float(row.get("ranking_value"))
+    return None
+
+
+def _rank_candidates(rows: list[dict[str, Any]], metric_name: str) -> list[dict[str, Any]]:
+    return sorted(
+        rows,
+        key=lambda row: (
+            _row_metric_value(row, metric_name) or float("-inf"),
+            str(row.get("promotion_timestamp") or ""),
+            str(row.get("preset_name") or ""),
+        ),
+        reverse=True,
+    )
+
+
+def _passes_filters(row: dict[str, Any], policy: StrategyPortfolioPolicyConfig) -> tuple[bool, str | None]:
+    if policy.require_active_only and row.get("status") != "active":
+        return False, "status_not_active"
+    if policy.require_promotion_eligible_only and not row.get("source_run_id"):
+        return False, "missing_source_run_id"
+    return True, None
+
+
+def _build_base_weights(rows: list[dict[str, Any]], policy: StrategyPortfolioPolicyConfig) -> dict[str, float]:
+    if not rows:
+        return {}
+    if policy.weighting_mode == "equal":
+        return {str(row["preset_name"]): 1.0 for row in rows}
+    raw = {
+        str(row["preset_name"]): max(_row_metric_value(row, policy.selection_metric) or 0.0, 0.0)
+        for row in rows
+    }
+    total = sum(raw.values())
+    if total <= 0 and policy.fallback_equal_weight_mode:
+        return {str(row["preset_name"]): 1.0 for row in rows}
+    return raw
+
+
+def _normalize_with_caps(
+    rows: list[dict[str, Any]],
+    policy: StrategyPortfolioPolicyConfig,
+) -> tuple[dict[str, float], list[str]]:
+    warnings: list[str] = []
+    if not rows:
+        return {}, warnings
+    if len(rows) * policy.min_weight_per_strategy > 1.0 + 1e-12:
+        raise ValueError("min_weight_per_strategy is too large for the number of selected strategies")
+
+    raw = _build_base_weights(rows, policy)
+    total = sum(raw.values())
+    if total <= 0:
+        raw = {str(row["preset_name"]): 1.0 for row in rows}
+        total = float(len(rows))
+        warnings.append("fallback_equal_weight_applied")
+    weights = {name: value / total for name, value in raw.items()}
+    selected_names = [str(row["preset_name"]) for row in rows]
+    fixed: dict[str, float] = {}
+    remaining = set(selected_names)
+
+    while remaining:
+        remaining_weight = max(1.0 - sum(fixed.values()), 0.0)
+        raw_total = sum(raw[name] for name in remaining)
+        if raw_total <= 0:
+            provisional = {name: remaining_weight / len(remaining) for name in remaining}
+        else:
+            provisional = {name: remaining_weight * (raw[name] / raw_total) for name in remaining}
+
+        changed = False
+        for name, value in list(provisional.items()):
+            if value < policy.min_weight_per_strategy - 1e-12:
+                fixed[name] = policy.min_weight_per_strategy
+                remaining.remove(name)
+                changed = True
+            elif value > policy.max_weight_per_strategy + 1e-12:
+                fixed[name] = policy.max_weight_per_strategy
+                remaining.remove(name)
+                changed = True
+        if not changed:
+            fixed.update(provisional)
+            break
+
+        if sum(fixed.values()) > 1.0 + 1e-12:
+            raise ValueError("Strategy portfolio weight constraints are infeasible")
+
+    assigned_total = sum(fixed.values())
+    if assigned_total < 0.999999:
+        warnings.append("underfilled_allocation_due_to_caps")
+    return fixed, warnings
+
+
+def build_strategy_portfolio(
+    *,
+    promoted_dir: str | Path,
+    output_dir: str | Path,
+    policy: StrategyPortfolioPolicyConfig,
+) -> dict[str, Any]:
+    promoted_rows = _load_promoted_strategies(promoted_dir)
+    if not promoted_rows:
+        raise FileNotFoundError(
+            f"No promoted strategies found under {Path(promoted_dir) / 'promoted_strategies.json'}"
+        )
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+
+    selected_input: list[dict[str, Any]] = []
+    excluded_rows: list[dict[str, Any]] = []
+    seen_run_ids: set[str] = set()
+    family_counts: dict[str, int] = {}
+    universe_counts: dict[str, int] = {}
+
+    for row in _rank_candidates(promoted_rows, policy.selection_metric):
+        preset_name = str(row.get("preset_name") or "")
+        if not preset_name:
+            continue
+        passes, reason = _passes_filters(row, policy)
+        if not passes:
+            excluded_rows.append({"preset_name": preset_name, "reason": reason})
+            continue
+        source_run_id = str(row.get("source_run_id") or "")
+        if policy.deduplicate_source_runs and source_run_id and source_run_id in seen_run_ids:
+            excluded_rows.append({"preset_name": preset_name, "reason": "duplicate_source_run"})
+            continue
+        signal_family = str(row.get("signal_family") or "")
+        if (
+            policy.max_strategies_per_signal_family is not None
+            and signal_family
+            and family_counts.get(signal_family, 0) >= policy.max_strategies_per_signal_family
+        ):
+            excluded_rows.append({"preset_name": preset_name, "reason": "signal_family_cap"})
+            continue
+        universe = str(row.get("universe") or "")
+        if (
+            policy.max_strategies_per_universe is not None
+            and universe
+            and universe_counts.get(universe, 0) >= policy.max_strategies_per_universe
+        ):
+            excluded_rows.append({"preset_name": preset_name, "reason": "universe_cap"})
+            continue
+        if policy.max_strategies is not None and len(selected_input) >= policy.max_strategies:
+            excluded_rows.append({"preset_name": preset_name, "reason": "max_strategies_reached"})
+            continue
+
+        selected_input.append(row)
+        if source_run_id:
+            seen_run_ids.add(source_run_id)
+        if signal_family:
+            family_counts[signal_family] = family_counts.get(signal_family, 0) + 1
+        if universe:
+            universe_counts[universe] = universe_counts.get(universe, 0) + 1
+
+    weights, allocation_warnings = _normalize_with_caps(selected_input, policy)
+    warnings = list(allocation_warnings)
+    if policy.warn_on_same_family_overlap:
+        combos: dict[tuple[str, str], int] = {}
+        for row in selected_input:
+            key = (str(row.get("signal_family") or ""), str(row.get("universe") or ""))
+            combos[key] = combos.get(key, 0) + 1
+        for (family, universe), count in sorted(combos.items()):
+            if count > 1 and family:
+                warnings.append(f"similar_strategy_proxy_overlap:{family}:{universe or 'unknown'}:{count}")
+
+    selected_rows: list[dict[str, Any]] = []
+    for rank, row in enumerate(selected_input, start=1):
+        preset_name = str(row["preset_name"])
+        selected_rows.append(
+            {
+                "preset_name": preset_name,
+                "source_run_id": row.get("source_run_id"),
+                "signal_family": row.get("signal_family"),
+                "universe": row.get("universe"),
+                "promotion_status": row.get("status"),
+                "allocation_weight": weights.get(preset_name, 0.0),
+                "target_capital_fraction": weights.get(preset_name, 0.0),
+                "selection_rank": rank,
+                "selection_metric": policy.selection_metric,
+                "selection_metric_value": _row_metric_value(row, policy.selection_metric),
+                "reason_selected": "selected_by_policy",
+                "warnings": "|".join(row.get("warnings", [])),
+                "generated_preset_path": row.get("generated_preset_path"),
+                "generated_registry_path": row.get("generated_registry_path"),
+                "generated_pipeline_config_path": row.get("generated_pipeline_config_path"),
+            }
+        )
+
+    total_active_weight = float(sum(row["allocation_weight"] for row in selected_rows))
+    payload = {
+        "schema_version": STRATEGY_PORTFOLIO_SCHEMA_VERSION,
+        "generated_at": _now_utc(),
+        "policy": asdict(policy),
+        "summary": {
+            "total_selected_strategies": len(selected_rows),
+            "total_active_weight": total_active_weight,
+            "signal_family_counts": family_counts,
+            "universe_counts": universe_counts,
+            "warning_count": len(warnings),
+        },
+        "selected_strategies": selected_rows,
+        "excluded_candidates": excluded_rows,
+        "warnings": warnings,
+    }
+
+    json_path = _write_payload(output_path / "strategy_portfolio.json", payload)
+    csv_path = output_path / "strategy_portfolio.csv"
+    pd.DataFrame(selected_rows).to_csv(csv_path, index=False)
+    return {
+        "strategy_portfolio_json_path": str(json_path),
+        "strategy_portfolio_csv_path": str(csv_path),
+        "selected_count": len(selected_rows),
+        "warning_count": len(warnings),
+    }
+
+
+def load_strategy_portfolio(path_or_dir: str | Path) -> dict[str, Any]:
+    path = Path(path_or_dir)
+    if path.is_dir():
+        path = path / "strategy_portfolio.json"
+    payload = _safe_read_json(path)
+    if not payload:
+        raise FileNotFoundError(f"Strategy portfolio artifact not found or invalid: {path}")
+    return payload
+
+
+def export_strategy_portfolio_run_config(
+    *,
+    strategy_portfolio_path: str | Path,
+    output_dir: str | Path,
+) -> dict[str, Any]:
+    portfolio_payload = load_strategy_portfolio(strategy_portfolio_path)
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+    selected = list(portfolio_payload.get("selected_strategies", []))
+    if not selected:
+        raise ValueError("Strategy portfolio contains no selected strategies")
+
+    sleeves = [
+        MultiStrategySleeveConfig(
+            sleeve_name=str(row["preset_name"]),
+            preset_name=str(row["preset_name"]),
+            target_capital_weight=float(row["target_capital_fraction"]),
+            enabled=True,
+            notes=str(row.get("reason_selected") or ""),
+            tags=[tag for tag in [str(row.get("signal_family") or ""), str(row.get("universe") or "")] if tag],
+        )
+        for row in selected
+    ]
+    multi_strategy_config = MultiStrategyPortfolioConfig(
+        sleeves=sleeves,
+        notes="Generated from strategy_portfolio.json",
+        tags=["strategy_portfolio"],
+    )
+    multi_strategy_payload = {
+        "gross_leverage_cap": multi_strategy_config.gross_leverage_cap,
+        "net_exposure_cap": multi_strategy_config.net_exposure_cap,
+        "max_position_weight": multi_strategy_config.max_position_weight,
+        "max_symbol_concentration": multi_strategy_config.max_symbol_concentration,
+        "sector_caps": [],
+        "turnover_cap": multi_strategy_config.turnover_cap,
+        "cash_reserve_pct": multi_strategy_config.cash_reserve_pct,
+        "group_map_path": multi_strategy_config.group_map_path,
+        "rebalance_timestamp": multi_strategy_config.rebalance_timestamp,
+        "notes": multi_strategy_config.notes,
+        "tags": multi_strategy_config.tags,
+        "sleeves": [asdict(item) for item in multi_strategy_config.sleeves],
+    }
+    multi_strategy_path = _write_payload(output_path / "strategy_portfolio_multi_strategy.json", multi_strategy_payload)
+
+    primary_universe = str(selected[0].get("universe") or "nasdaq100")
+    pipeline_config = PipelineRunConfig(
+        run_name="strategy_portfolio_paper",
+        schedule_type="ad_hoc",
+        universes=[primary_universe],
+        multi_strategy_input_path=str(multi_strategy_path),
+        paper_state_path="artifacts/paper/strategy_portfolio_state.json",
+        output_root_dir="artifacts/orchestration",
+        continue_on_stage_error=True,
+        stages=OrchestrationStageToggles(
+            portfolio_allocation=True,
+            paper_trading=True,
+            reporting=True,
+            monitoring=False,
+        ),
+    )
+    pipeline_path = _write_payload(output_path / "strategy_portfolio_pipeline.yaml", pipeline_config.to_dict())
+    bundle_payload = {
+        "generated_at": _now_utc(),
+        "strategy_portfolio_path": str(Path(strategy_portfolio_path)),
+        "multi_strategy_config_path": str(multi_strategy_path),
+        "pipeline_config_path": str(pipeline_path),
+        "selected_preset_names": [row["preset_name"] for row in selected],
+    }
+    bundle_path = _write_payload(output_path / "strategy_portfolio_run_bundle.json", bundle_payload)
+    return {
+        "multi_strategy_config_path": str(multi_strategy_path),
+        "pipeline_config_path": str(pipeline_path),
+        "run_bundle_path": str(bundle_path),
+    }

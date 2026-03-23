@@ -642,6 +642,8 @@ def run_orchestration_pipeline(config: PipelineRunConfig) -> tuple[PipelineRunRe
         "symbols": _union_symbols(config.universes),
         "run_started_at": started_at,
     }
+    if config.multi_strategy_input_path:
+        context["multi_strategy_config_path"] = str(config.multi_strategy_input_path)
     stage_records = [PipelineStageRecord(stage_name=stage_name) for stage_name in config.stage_order]
     errors: list[dict[str, Any]] = []
     outputs: dict[str, Any] = {}
