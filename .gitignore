@@ -45,6 +45,8 @@ htmlcov/
 
 # Trading outputs
 artifacts/
+artifacts_fast/
+artifacts_medium/
 artifacts/dashboard_data/
 artifacts/system_check/
 artifacts/system_check_ci/

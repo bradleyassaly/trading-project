@@ -1330,6 +1330,67 @@ Notes:
 - `--dry-run` materializes all variant configs without launching orchestration
 - empty promotion results are valid experimental outcomes; the promotion stage is reported as skipped/no-op with `promoted_strategy_count = 0`, and downstream portfolio/paper stages are skipped with explicit reasons instead of treated as runtime failures
 
+### Experiment Modes
+
+Use the three experiment profiles for different iteration loops:
+
+- Fast mode:
+  - purpose: quick local debugging of orchestration, promotion, and portfolio wiring
+  - configs: `configs/experiment_campaign_*_fast.yaml`
+  - example:
+
+```bash
+trading-cli experiment run --config configs/experiment_campaign_regime_fast.yaml
+```
+
+- Medium mode:
+  - purpose: reasonably fast local experiments with real paper, monitoring, and system-evaluation outputs
+  - includes paper + monitoring + system evaluation
+  - configs: `configs/experiment_campaign_*_medium.yaml`
+  - example:
+
+```bash
+trading-cli experiment run --config configs/experiment_campaign_regime_medium.yaml
+trading-cli experiment run --config configs/experiment_campaign_adaptive_medium.yaml
+trading-cli experiment run --config configs/experiment_campaign_governance_medium.yaml
+```
+
+- Full mode:
+  - purpose: highest-confidence experiment evidence, with the broadest scope and slowest runtime
+  - configs: `configs/experiment_campaign_regime.yaml`, `configs/experiment_campaign_adaptive.yaml`, `configs/experiment_campaign_governance.yaml`
+  - example:
+
+```bash
+trading-cli experiment run --config configs/experiment_campaign_regime.yaml
+```
+
+Fast and medium profiles are for iterative local use. Full profiles are the path to final feature-retention decisions.
+
+### Experiment Workflow
+
+Recommended loop:
+
+1. run one or more experiment campaigns
+2. summarize campaign results across variants
+3. recommend default settings from the campaign summary
+
+Example medium-profile commands:
+
+```bash
+trading-cli experiment run --config configs/experiment_campaign_regime_medium.yaml
+trading-cli experiment run --config configs/experiment_campaign_adaptive_medium.yaml
+trading-cli experiment run --config configs/experiment_campaign_governance_medium.yaml
+trading-cli experiment summarize-campaign --runs artifacts/experiments_medium/campaign_regime_on_off_medium/<run_id> artifacts/experiments_medium/campaign_adaptive_on_off_medium/<run_id> artifacts/experiments_medium/campaign_governance_strict_vs_loose_medium/<run_id> --output-dir artifacts/experiments_medium/campaign_summary
+trading-cli experiment recommend-defaults --summary artifacts/experiments_medium/campaign_summary --output-dir artifacts/experiments_medium/default_recommendations
+```
+
+### Typical Usage Flow
+
+1. run the medium experiments first
+2. summarize the three campaign outputs
+3. review the recommended defaults and caveats
+4. if the result looks promising, validate it with the full experiment configs before changing primary defaults
+
 Recommended first campaign:
 
 Use three small pairwise experiments instead of one large matrix:
