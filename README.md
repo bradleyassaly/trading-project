@@ -1328,6 +1328,7 @@ Notes:
 - orchestration runs written by the experiment harness include `experiment_name`, `variant_name`, and `experiment_run_id`
 - the dashboard `Runs` view and `/api/experiments/latest` payload expose recent experiments and variant statuses
 - `--dry-run` materializes all variant configs without launching orchestration
+- empty promotion results are valid experimental outcomes; the promotion stage is reported as skipped/no-op with `promoted_strategy_count = 0`, and downstream portfolio/paper stages are skipped with explicit reasons instead of treated as runtime failures
 
 Recommended first campaign:
 

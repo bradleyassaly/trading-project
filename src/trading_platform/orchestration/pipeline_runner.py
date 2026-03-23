@@ -265,6 +265,19 @@ class OrchestrationStageError(RuntimeError):
     pass
 
 
+class OrchestrationStageSkipped(RuntimeError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        outputs: dict[str, Any] | None = None,
+        warnings: list[str] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.outputs = outputs or {}
+        self.warnings = warnings or []
+
+
 def _now_utc() -> str:
     return datetime.now(UTC).isoformat()
 
@@ -280,6 +293,36 @@ def _ensure_stage_output_dir(run_dir: Path, configured_path: str | None, stage_n
             return path
         return path
     return run_dir / stage_name
+
+
+def _no_promotions_skip_payload(*, stage_name: str) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "skip_reason": "no strategies were promoted",
+        "no_op": True,
+        "no_op_reason": "no strategies were promoted",
+    }
+    if stage_name == "promotion":
+        payload["promoted_strategy_count"] = 0
+        payload["promoted_preset_names"] = []
+    elif stage_name == "portfolio":
+        payload["selected_strategy_count"] = 0
+    elif stage_name == "allocation":
+        payload["allocation_position_count"] = 0
+    elif stage_name == "paper":
+        payload["paper_order_count"] = 0
+    elif stage_name == "monitoring":
+        payload["warning_strategy_count"] = 0
+        payload["deactivation_candidate_count"] = 0
+    elif stage_name == "adaptive_allocation":
+        payload["adaptive_selected_strategy_count"] = 0
+        payload["adaptive_warning_count"] = 0
+    elif stage_name == "governance":
+        payload["under_review_count"] = 0
+        payload["degraded_count"] = 0
+        payload["demoted_count"] = 0
+    elif stage_name == "kill_switch":
+        payload["kill_switch_recommendation_count"] = 0
+    return payload
 
 
 def _build_multi_strategy_paper_config(result, reserve_cash_pct: float) -> PaperTradingConfig:
@@ -338,8 +381,10 @@ def _render_markdown_summary(result: AutomatedOrchestrationResult) -> str:
         "## Stages",
     ]
     for record in result.stage_records:
+        skip_reason = record.outputs.get("skip_reason", "")
         lines.append(
-            f"- `{record.stage_name}`: status=`{record.status}` warnings=`{len(record.warnings)}` error=`{record.error_message or ''}`"
+            f"- `{record.stage_name}`: status=`{record.status}` warnings=`{len(record.warnings)}` "
+            f"skip_reason=`{skip_reason}` error=`{record.error_message or ''}`"
         )
     if result.warnings:
         lines.extend(["", "## Run Warnings"])
@@ -355,6 +400,7 @@ def _render_markdown_summary(result: AutomatedOrchestrationResult) -> str:
                 "## Key Outputs",
                 f"- Validated strategies: `{outputs.get('validated_pass_count', 0)}`",
                 f"- Promoted strategies: `{outputs.get('promoted_strategy_count', 0)}`",
+                f"- No-op reason: `{outputs.get('no_op_reason', 'n/a')}`",
                 f"- Selected strategies: `{outputs.get('selected_strategy_count', 0)}`",
                 f"- Allocation positions: `{outputs.get('allocation_position_count', 0)}`",
                 f"- Monitoring warnings: `{outputs.get('warning_strategy_count', 0)}`",
@@ -458,7 +504,19 @@ def _stage_promotion(config: AutomatedOrchestrationConfig, run_dir: Path, contex
         raise OrchestrationStageError("promotion stage requires registry outputs")
     candidate_payload = json.loads((Path(registry_dir) / "promotion_candidates.json").read_text(encoding="utf-8"))
     if not candidate_payload.get("rows"):
-        raise OrchestrationStageError("promotion stage requires promotion candidates")
+        context["no_promoted_strategies"] = True
+        raise OrchestrationStageSkipped(
+            "no strategies were promoted",
+            outputs={
+                "promoted_strategy_count": 0,
+                "promoted_preset_names": [],
+                "skip_reason": "no strategies were promoted",
+                "no_op": True,
+                "no_op_reason": "no strategies were promoted",
+                "promotion_candidate_count": 0,
+            },
+            warnings=["no_promotion_candidates"],
+        )
     from trading_platform.config.loader import load_promotion_policy_config
 
     policy = load_promotion_policy_config(config.promotion_policy_config_path)
@@ -475,7 +533,20 @@ def _stage_promotion(config: AutomatedOrchestrationConfig, run_dir: Path, contex
         validation_path=context.get("strategy_validation_dir"),
     )
     if result["selected_count"] <= 0:
-        raise OrchestrationStageError("no strategies were promoted")
+        context["no_promoted_strategies"] = True
+        raise OrchestrationStageSkipped(
+            "no strategies were promoted",
+            outputs={
+                "promoted_strategy_count": 0,
+                "promoted_index_path": result["promoted_index_path"],
+                "promotion_dry_run": result["dry_run"],
+                "promoted_preset_names": [],
+                "skip_reason": "no strategies were promoted",
+                "no_op": True,
+                "no_op_reason": "no strategies were promoted",
+            },
+            warnings=["no_strategies_promoted"],
+        )
     context["promoted_dir"] = str(output_dir)
     context["promoted_rows"] = result["promoted_rows"]
     return {
@@ -487,6 +558,11 @@ def _stage_promotion(config: AutomatedOrchestrationConfig, run_dir: Path, contex
 
 
 def _stage_portfolio(config: AutomatedOrchestrationConfig, run_dir: Path, context: dict[str, Any]) -> dict[str, Any]:
+    if context.get("no_promoted_strategies"):
+        raise OrchestrationStageSkipped(
+            "portfolio stage skipped because no strategies were promoted",
+            outputs=_no_promotions_skip_payload(stage_name="portfolio"),
+        )
     promoted_dir = context.get("promoted_dir")
     if not promoted_dir:
         raise OrchestrationStageError("portfolio stage requires promoted strategies")
@@ -525,6 +601,11 @@ def _stage_portfolio(config: AutomatedOrchestrationConfig, run_dir: Path, contex
 
 
 def _stage_allocation(config: AutomatedOrchestrationConfig, run_dir: Path, context: dict[str, Any]) -> dict[str, Any]:
+    if context.get("no_promoted_strategies"):
+        raise OrchestrationStageSkipped(
+            "allocation stage skipped because no strategies were promoted",
+            outputs=_no_promotions_skip_payload(stage_name="allocation"),
+        )
     config_path = context.get("multi_strategy_config_path")
     if not config_path:
         raise OrchestrationStageError("allocation stage requires exported multi-strategy config")
@@ -547,6 +628,11 @@ def _stage_allocation(config: AutomatedOrchestrationConfig, run_dir: Path, conte
 
 
 def _stage_paper(config: AutomatedOrchestrationConfig, run_dir: Path, context: dict[str, Any]) -> dict[str, Any]:
+    if context.get("no_promoted_strategies"):
+        raise OrchestrationStageSkipped(
+            "paper stage skipped because no strategies were promoted",
+            outputs=_no_promotions_skip_payload(stage_name="paper"),
+        )
     allocation_result = context.get("allocation_result")
     if allocation_result is None:
         raise OrchestrationStageError("paper stage requires allocation results")
@@ -598,6 +684,11 @@ def _stage_paper(config: AutomatedOrchestrationConfig, run_dir: Path, context: d
 
 
 def _stage_monitoring(config: AutomatedOrchestrationConfig, run_dir: Path, context: dict[str, Any]) -> dict[str, Any]:
+    if context.get("no_promoted_strategies"):
+        raise OrchestrationStageSkipped(
+            "monitoring stage skipped because no strategies were promoted",
+            outputs=_no_promotions_skip_payload(stage_name="monitoring"),
+        )
     strategy_portfolio_dir = context.get("strategy_portfolio_dir")
     paper_dir = context.get("paper_dir")
     if not strategy_portfolio_dir or not paper_dir:
@@ -641,6 +732,11 @@ def _stage_monitoring(config: AutomatedOrchestrationConfig, run_dir: Path, conte
 
 
 def _stage_regime(config: AutomatedOrchestrationConfig, run_dir: Path, context: dict[str, Any]) -> dict[str, Any]:
+    if context.get("no_promoted_strategies"):
+        raise OrchestrationStageSkipped(
+            "regime stage skipped because no strategies were promoted",
+            outputs=_no_promotions_skip_payload(stage_name="regime"),
+        )
     from trading_platform.config.loader import load_market_regime_policy_config
 
     output_dir = _ensure_stage_output_dir(run_dir, config.regime_output_dir, "regime")
@@ -668,6 +764,11 @@ def _stage_regime(config: AutomatedOrchestrationConfig, run_dir: Path, context: 
 
 
 def _stage_kill_switch(config: AutomatedOrchestrationConfig, run_dir: Path, context: dict[str, Any]) -> dict[str, Any]:
+    if context.get("no_promoted_strategies"):
+        raise OrchestrationStageSkipped(
+            "kill_switch stage skipped because no strategies were promoted",
+            outputs=_no_promotions_skip_payload(stage_name="kill_switch"),
+        )
     monitoring_dir = context.get("strategy_monitoring_dir")
     if not monitoring_dir:
         raise OrchestrationStageError("kill_switch stage requires monitoring outputs")
@@ -684,6 +785,11 @@ def _stage_kill_switch(config: AutomatedOrchestrationConfig, run_dir: Path, cont
 
 
 def _stage_adaptive_allocation(config: AutomatedOrchestrationConfig, run_dir: Path, context: dict[str, Any]) -> dict[str, Any]:
+    if context.get("no_promoted_strategies"):
+        raise OrchestrationStageSkipped(
+            "adaptive_allocation stage skipped because no strategies were promoted",
+            outputs=_no_promotions_skip_payload(stage_name="adaptive_allocation"),
+        )
     strategy_portfolio_dir = context.get("strategy_portfolio_dir")
     monitoring_dir = context.get("strategy_monitoring_dir")
     if not strategy_portfolio_dir or not monitoring_dir:
@@ -730,6 +836,11 @@ def _stage_adaptive_allocation(config: AutomatedOrchestrationConfig, run_dir: Pa
 
 
 def _stage_governance(config: AutomatedOrchestrationConfig, run_dir: Path, context: dict[str, Any]) -> dict[str, Any]:
+    if context.get("no_promoted_strategies"):
+        raise OrchestrationStageSkipped(
+            "governance stage skipped because no strategies were promoted",
+            outputs=_no_promotions_skip_payload(stage_name="governance"),
+        )
     promoted_dir = context.get("promoted_dir")
     monitoring_dir = context.get("strategy_monitoring_dir")
     if not promoted_dir or not monitoring_dir:
@@ -827,6 +938,38 @@ def run_automated_orchestration(config: AutomatedOrchestrationConfig) -> tuple[A
             )
             if record.stage_name == "validation":
                 outputs["validated_pass_count"] = record.outputs.get("pass_count", 0)
+        except OrchestrationStageSkipped as exc:
+            record.status = "skipped"
+            record.outputs = dict(exc.outputs)
+            record.warnings.extend(exc.warnings)
+            warnings.extend(f"{record.stage_name}:{warning}" for warning in exc.warnings)
+            outputs[record.stage_name] = record.outputs
+            outputs.update(
+                {
+                    key: value
+                    for key, value in record.outputs.items()
+                    if key in {
+                        "promoted_strategy_count",
+                        "promoted_preset_names",
+                        "selected_strategy_count",
+                        "allocation_position_count",
+                        "paper_equity",
+                        "warning_strategy_count",
+                        "deactivation_candidate_count",
+                        "current_regime_label",
+                        "adaptive_selected_strategy_count",
+                        "adaptive_warning_count",
+                        "under_review_count",
+                        "degraded_count",
+                        "demoted_count",
+                        "kill_switch_recommendation_count",
+                        "skip_reason",
+                        "no_op",
+                        "no_op_reason",
+                    }
+                    and value is not None
+                }
+            )
         except Exception as exc:
             record.status = "failed"
             record.error_message = f"{type(exc).__name__}: {exc}"

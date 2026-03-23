@@ -276,7 +276,7 @@ def test_automated_orchestration_stage_sequencing_and_artifact_passing(monkeypat
     assert paths["orchestration_run_json_path"].exists()
 
 
-def test_automated_orchestration_fail_fast_on_empty_promotions(monkeypatch, tmp_path: Path) -> None:
+def test_automated_orchestration_skips_on_empty_promotions(monkeypatch, tmp_path: Path) -> None:
     _write_policy_files(tmp_path)
     monkeypatch.setattr("trading_platform.orchestration.pipeline_runner._now_utc", lambda: "2026-03-22T00:00:00+00:00")
     monkeypatch.setattr("trading_platform.orchestration.pipeline_runner.perf_counter", lambda: 1.0)
@@ -303,9 +303,44 @@ def test_automated_orchestration_fail_fast_on_empty_promotions(monkeypatch, tmp_
 
     result, _ = run_automated_orchestration(config)
 
-    assert result.status == "failed"
-    assert result.stage_records[3].status == "failed"
-    assert result.stage_records[4].status == "pending"
+    assert result.status == "succeeded"
+    assert result.stage_records[3].status == "skipped"
+    assert result.stage_records[3].outputs["promoted_strategy_count"] == 0
+    assert result.stage_records[3].outputs["skip_reason"] == "no strategies were promoted"
+    assert result.stage_records[4].status == "skipped"
+    assert result.stage_records[4].outputs["skip_reason"] == "no strategies were promoted"
+    assert result.outputs["promoted_strategy_count"] == 0
+    assert result.outputs["no_op"] is True
+    assert result.outputs["no_op_reason"] == "no strategies were promoted"
+
+
+def test_automated_orchestration_skips_on_empty_promotion_candidates(monkeypatch, tmp_path: Path) -> None:
+    _write_policy_files(tmp_path)
+    monkeypatch.setattr("trading_platform.orchestration.pipeline_runner._now_utc", lambda: "2026-03-22T00:00:00+00:00")
+    monkeypatch.setattr("trading_platform.orchestration.pipeline_runner.perf_counter", lambda: 1.0)
+    config = _config(
+        tmp_path,
+        stages=AutomatedOrchestrationStageToggles(research=True, registry=True, validation=True, promotion=True, portfolio=True, allocation=False, paper=False, monitoring=False, regime=False, governance=False, kill_switch=False),
+        stage_order=["research", "registry", "validation", "promotion", "portfolio"],
+    )
+    monkeypatch.setattr("trading_platform.orchestration.pipeline_runner.load_research_manifests", lambda root: [{"run_id": "run-a"}])
+    monkeypatch.setattr("trading_platform.orchestration.pipeline_runner.build_research_registry", lambda **kwargs: {"registry_json_path": "x", "run_count": 1})
+    monkeypatch.setattr("trading_platform.orchestration.pipeline_runner.build_research_leaderboard", lambda **kwargs: {"leaderboard_json_path": "x", "row_count": 1})
+    monkeypatch.setattr("trading_platform.orchestration.pipeline_runner.build_strategy_validation", lambda **kwargs: {"strategy_validation_json_path": "x", "strategy_validation_csv_path": "x", "pass_count": 1, "weak_count": 0, "fail_count": 0})
+    monkeypatch.setattr(
+        "trading_platform.orchestration.pipeline_runner.build_promotion_candidates",
+        lambda **kwargs: (
+            (Path(kwargs["output_dir"]) / "promotion_candidates.json").write_text(json.dumps({"rows": []}), encoding="utf-8"),
+            {"promotion_candidates_json_path": str(Path(kwargs["output_dir"]) / "promotion_candidates.json"), "eligible_count": 0},
+        )[1],
+    )
+
+    result, _ = run_automated_orchestration(config)
+
+    assert result.status == "succeeded"
+    assert result.stage_records[3].status == "skipped"
+    assert result.stage_records[3].outputs["promotion_candidate_count"] == 0
+    assert result.stage_records[4].status == "skipped"
 
 
 def test_orchestrate_cli_commands(tmp_path: Path, monkeypatch, capsys) -> None:

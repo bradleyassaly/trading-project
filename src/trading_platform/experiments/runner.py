@@ -121,6 +121,9 @@ class ExperimentVariantRunRecord:
     run_dir: str | None = None
     orchestration_run_path: str | None = None
     system_evaluation_path: str | None = None
+    promoted_strategy_count: int = 0
+    no_op: bool = False
+    insufficient_output_reason: str | None = None
     warning_count: int = 0
     error_message: str | None = None
 
@@ -221,6 +224,7 @@ def _write_experiment_artifacts(
         "variant_run_count": len(variant_records),
         "succeeded_count": sum(1 for record in variant_records if record.status == "succeeded"),
         "failed_count": sum(1 for record in variant_records if record.status == "failed"),
+        "no_op_count": sum(1 for record in variant_records if record.no_op),
         "dry_run_count": sum(1 for record in variant_records if record.status == "dry_run"),
         "warning_count": len(warnings),
     }
@@ -303,6 +307,9 @@ def run_experiment(
                     run_dir=result.run_dir,
                     orchestration_run_path=str(artifact_paths["orchestration_run_json_path"]),
                     system_evaluation_path=str(artifact_paths.get("system_evaluation_json_path")) if artifact_paths.get("system_evaluation_json_path") else None,
+                    promoted_strategy_count=int(result.outputs.get("promoted_strategy_count", 0) or 0),
+                    no_op=bool(result.outputs.get("no_op", False)),
+                    insufficient_output_reason=result.outputs.get("no_op_reason") or result.outputs.get("skip_reason"),
                     warning_count=len(result.warnings),
                     error_message="; ".join(item["error_message"] for item in result.errors) if result.errors else None,
                 )

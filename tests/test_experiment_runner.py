@@ -236,3 +236,85 @@ def test_experiment_cli_commands(monkeypatch, tmp_path: Path, capsys) -> None:
     assert "Experiment:" in captured
     assert "Run id:" in captured
     assert "Comparison JSON:" in captured
+
+
+def test_experiment_runner_records_no_op_variant(monkeypatch, tmp_path: Path) -> None:
+    orchestration_path = _base_orchestration_config(tmp_path)
+    spec_path = _experiment_spec(tmp_path, orchestration_path)
+    spec = load_experiment_spec_config(spec_path)
+
+    def _fake_noop_run(config):
+        run_dir = Path(config.output_root_dir) / config.run_name / "2026-03-22T00-00-00+00-00"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        (run_dir / "orchestration_run.json").write_text(
+            json.dumps(
+                {
+                    "run_id": "2026-03-22T00-00-00+00-00",
+                    "run_name": config.run_name,
+                    "schedule_frequency": config.schedule_frequency,
+                    "experiment_name": config.experiment_name,
+                    "variant_name": config.variant_name,
+                    "experiment_run_id": config.experiment_run_id,
+                    "feature_flags": config.feature_flags,
+                    "started_at": "2026-03-22T00:00:00+00:00",
+                    "ended_at": "2026-03-22T00:05:00+00:00",
+                    "status": "succeeded",
+                    "warnings": ["promotion:no_strategies_promoted"],
+                    "stage_records": [
+                        {"stage_name": "promotion", "status": "skipped", "outputs": {"promoted_strategy_count": 0, "skip_reason": "no strategies were promoted"}}
+                    ],
+                    "outputs": {
+                        "promoted_strategy_count": 0,
+                        "no_op": True,
+                        "no_op_reason": "no strategies were promoted",
+                    },
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        (run_dir / "orchestration_config_snapshot.json").write_text(
+            json.dumps(config.to_dict(), indent=2, default=str),
+            encoding="utf-8",
+        )
+        result = type(
+            "Result",
+            (),
+            {
+                "run_id": "2026-03-22T00-00-00+00-00",
+                "run_name": config.run_name,
+                "schedule_frequency": config.schedule_frequency,
+                "experiment_name": config.experiment_name,
+                "variant_name": config.variant_name,
+                "experiment_run_id": config.experiment_run_id,
+                "feature_flags": config.feature_flags,
+                "run_label_metadata": config.run_label_metadata,
+                "started_at": "2026-03-22T00:00:00+00:00",
+                "ended_at": "2026-03-22T00:05:00+00:00",
+                "status": "succeeded",
+                "run_dir": str(run_dir),
+                "stage_records": [],
+                "warnings": ["promotion:no_strategies_promoted"],
+                "errors": [],
+                "outputs": {
+                    "promoted_strategy_count": 0,
+                    "no_op": True,
+                    "no_op_reason": "no strategies were promoted",
+                },
+            },
+        )()
+        return result, {
+            "orchestration_run_json_path": run_dir / "orchestration_run.json",
+            "system_evaluation_json_path": run_dir / "system_evaluation.json",
+        }
+
+    monkeypatch.setattr("trading_platform.experiments.runner._now_utc", lambda: "2026-03-22T00:00:00+00:00")
+    monkeypatch.setattr("trading_platform.experiments.runner.run_automated_orchestration", _fake_noop_run)
+
+    result = run_experiment(spec=spec, selected_variants=["regime_on"])
+    payload = load_experiment_run(result["run_dir"])
+
+    assert result["status"] == "succeeded"
+    assert payload["summary"]["no_op_count"] == 1
+    assert payload["variants"][0]["no_op"] is True
+    assert payload["variants"][0]["insufficient_output_reason"] == "no strategies were promoted"

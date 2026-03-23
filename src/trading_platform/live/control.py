@@ -385,9 +385,16 @@ def _data_staleness_violation(
         return None
     latest = pd.Timestamp(latest_timestamp)
     if latest.tzinfo is None:
-        age_days = (datetime.now().date() - latest.date()).days
+        current_date = datetime.now().date()
     else:
-        age_days = (datetime.now(latest.tzinfo).date() - latest.date()).days
+        current_date = datetime.now(latest.tzinfo).date()
+    latest_date = latest.date()
+    if current_date <= latest_date:
+        return None
+    # Daily trading inputs are typically evaluated on market business days rather
+    # than raw calendar-day gaps, so weekend spacing alone should not trigger a
+    # stale-data abort.
+    age_days = max(0, len(pd.bdate_range(latest_date, current_date)) - 1)
     if age_days > int(max_data_staleness_days):
         return "stale_data"
     return None

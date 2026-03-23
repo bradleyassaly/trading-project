@@ -94,6 +94,45 @@ def test_system_evaluation_metric_computation(tmp_path: Path) -> None:
     assert latest["row"]["variant_name"] == "adaptive_on"
 
 
+def test_system_evaluation_handles_no_op_orchestration_run(tmp_path: Path) -> None:
+    run_dir = tmp_path / "runs" / "automation" / "2026-03-22T00-00-00+00-00"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "orchestration_run.json").write_text(
+        json.dumps(
+            {
+                "run_id": "2026-03-22T00-00-00+00-00",
+                "run_name": "automation",
+                "schedule_frequency": "daily",
+                "experiment_name": "ab_test",
+                "variant_name": "adaptive_off",
+                "experiment_run_id": "experiment-1",
+                "started_at": "2026-03-22T00:00:00+00:00",
+                "ended_at": "2026-03-22T00:05:00+00:00",
+                "status": "succeeded",
+                "warnings": ["promotion:no_strategies_promoted"],
+                "stage_records": [],
+                "outputs": {
+                    "promoted_strategy_count": 0,
+                    "no_op": True,
+                    "no_op_reason": "no strategies were promoted",
+                },
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    (run_dir / "orchestration_config_snapshot.json").write_text(
+        json.dumps({"stages": {"adaptive_allocation": False, "regime": False}}, indent=2),
+        encoding="utf-8",
+    )
+
+    payload = evaluate_orchestration_run(run_dir=run_dir, output_dir=tmp_path / "eval")
+
+    assert payload["row"]["promoted_strategy_count"] == 0
+    assert payload["row"]["no_op"] is True
+    assert payload["row"]["insufficient_output_reason"] == "no strategies were promoted"
+
+
 def test_system_evaluation_history_and_compare(tmp_path: Path) -> None:
     runs_root = tmp_path / "runs"
     _write_run(runs_root, run_id="2026-03-22T00-00-00+00-00", total_return_scale=0.04, adaptive=True, regime=True)

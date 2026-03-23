@@ -214,6 +214,8 @@ class SystemEvaluationRow:
     regime: str | None
     adaptive_enabled: bool | None
     regime_enabled: bool | None
+    no_op: bool
+    insufficient_output_reason: str | None
     feature_flags: dict[str, Any]
     warnings: list[str]
 
@@ -282,6 +284,8 @@ def evaluate_orchestration_run(*, run_dir: str | Path, output_dir: str | Path | 
         regime=outputs.get("current_regime_label") or regime.get("latest", {}).get("regime_label"),
         adaptive_enabled=bool(adaptive_enabled) if adaptive_enabled is not None else None,
         regime_enabled=bool(regime_enabled) if regime_enabled is not None else None,
+        no_op=bool(outputs.get("no_op", False)),
+        insufficient_output_reason=outputs.get("no_op_reason") or outputs.get("skip_reason"),
         feature_flags=feature_flags,
         warnings=sorted(set(str(item) for item in orchestration.get("warnings", []))),
     )
@@ -346,6 +350,8 @@ def build_system_evaluation_history(*, runs_root: str | Path, output_dir: str | 
                 regime=row_payload.get("regime"),
                 adaptive_enabled=row_payload.get("adaptive_enabled"),
                 regime_enabled=row_payload.get("regime_enabled"),
+                no_op=bool(row_payload.get("no_op", False)),
+                insufficient_output_reason=row_payload.get("insufficient_output_reason"),
                 feature_flags=row_payload.get("feature_flags", {}),
                 warnings=row_payload.get("warnings", []),
             )
