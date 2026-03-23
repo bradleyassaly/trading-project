@@ -935,6 +935,7 @@ This layer is intended to bridge research output review into governance and regi
 The promotion pipeline closes the loop from research candidate to runnable paper-trading artifact. It stays file-based and conservative:
 
 - it reads `promotion_candidates.json` plus the underlying `research_run.json` manifests
+- it can require `strategy_validation.json` walk-forward evidence before promotion
 - it applies a simple rule-based policy from `configs/promotion.yaml`
 - it generates an auditable bundle under `configs/generated_strategies`
 
@@ -948,6 +949,7 @@ Each generated bundle includes:
 Example:
 
 ```bash
+trading-cli strategy-validation build --artifacts-root artifacts --policy-config configs/strategy_validation.yaml --output-dir artifacts/strategy_validation
 trading-cli research promote --artifacts-root artifacts --registry-dir artifacts/research_registry --output-dir configs/generated_strategies --policy-config configs/promotion.yaml
 trading-cli paper run-preset-scheduled --preset generated_momentum_nasdaq100_demo_run_paper
 trading-cli pipeline run --config configs/generated_strategies/generated_momentum_nasdaq100_demo_run_paper_pipeline.yaml
@@ -955,10 +957,55 @@ trading-cli pipeline run --config configs/generated_strategies/generated_momentu
 
 Promotion safeguards:
 
+- validation can gate promotion unless `--override-validation` is set
 - duplicate run ids are skipped unless `--allow-overwrite` is set
 - `--dry-run` shows what would be promoted without writing files
 - `--inactive` forces promoted strategies to start inactive
 - warnings are recorded for low sample size, missing metrics, and other incomplete inputs
+
+### Strategy Lifecycle And Governance
+
+The platform now keeps explicit lifecycle state separate from research artifacts. This layer is deterministic, file-based, and auditable.
+
+Lifecycle states:
+
+- `candidate`
+- `validated`
+- `promoted`
+- `active`
+- `under_review`
+- `degraded`
+- `demoted`
+
+Primary artifacts:
+
+- `strategy_validation.json` / `strategy_validation.csv`
+- `strategy_lifecycle.json` / `strategy_lifecycle.csv`
+- `strategy_governance_summary.json`
+
+Validation uses simple interpretable checks from `configs/strategy_validation.yaml`:
+
+- minimum walk-forward folds
+- minimum out-of-sample Sharpe proxy
+- minimum mean IC
+- positive fold ratio
+- stability / dispersion checks
+- proxy confidence score
+
+Governance uses `configs/strategy_governance.yaml` and post-promotion monitoring signals to update lifecycle state:
+
+- weak validation can move a strategy to `under_review`
+- repeated `reduce` / `deactivate` recommendations can move a strategy to `degraded` or `demoted`
+- lifecycle state then feeds portfolio selection and adaptive allocation
+
+Example:
+
+```bash
+trading-cli strategy-validation build --artifacts-root artifacts --policy-config configs/strategy_validation.yaml --output-dir artifacts/strategy_validation
+trading-cli research promote --artifacts-root artifacts --registry-dir artifacts/research_registry --validation artifacts/strategy_validation --output-dir configs/generated_strategies --policy-config configs/promotion.yaml
+trading-cli strategy-governance apply --promoted-dir configs/generated_strategies --validation artifacts/strategy_validation --monitoring artifacts/strategy_monitoring --adaptive-allocation artifacts/adaptive_allocation --lifecycle artifacts/governance/strategy_lifecycle.json --policy-config configs/strategy_governance.yaml --output-dir artifacts/strategy_governance
+trading-cli strategy-lifecycle show --lifecycle artifacts/governance
+```
 
 ### Strategy Portfolio Layer
 
@@ -968,6 +1015,7 @@ It:
 
 - selects a capped set of promoted strategies
 - assigns deterministic capital fractions
+- excludes `demoted` lifecycle entries when a lifecycle artifact is supplied
 - records exclusions and warnings
 - exports a runnable multi-strategy config bundle for the existing allocator and paper runtime
 
@@ -981,7 +1029,7 @@ Primary artifacts:
 Example:
 
 ```bash
-trading-cli strategy-portfolio build --promoted-dir configs/generated_strategies --policy-config configs/strategy_portfolio.yaml --output-dir artifacts/strategy_portfolio
+trading-cli strategy-portfolio build --promoted-dir configs/generated_strategies --lifecycle artifacts/governance/strategy_lifecycle.json --policy-config configs/strategy_portfolio.yaml --output-dir artifacts/strategy_portfolio
 trading-cli strategy-portfolio show --portfolio artifacts/strategy_portfolio
 trading-cli strategy-portfolio export-run-config --portfolio artifacts/strategy_portfolio --output-dir artifacts/strategy_portfolio_run
 trading-cli paper run-multi-strategy --config artifacts/strategy_portfolio_run/strategy_portfolio_multi_strategy.json --state-path artifacts/paper/strategy_portfolio_state.json --output-dir artifacts/paper/strategy_portfolio
@@ -1037,6 +1085,7 @@ It:
 
 - reads `strategy_portfolio.json` plus `strategy_monitoring.json`
 - nudges weights up or down using explicit realized-performance and recommendation rules
+- applies lifecycle state multipliers so `under_review`, `degraded`, and `demoted` strategies cannot silently receive full weight
 - freezes or falls back when monitoring data is stale, weak, or low-confidence
 - caps weight changes per cycle and re-exports a standard multi-strategy run bundle
 
@@ -1050,7 +1099,7 @@ Primary artifacts:
 Example:
 
 ```bash
-trading-cli adaptive-allocation build --portfolio artifacts/strategy_portfolio --monitoring artifacts/strategy_monitoring --policy-config configs/adaptive_allocation.yaml --output-dir artifacts/adaptive_allocation
+trading-cli adaptive-allocation build --portfolio artifacts/strategy_portfolio --monitoring artifacts/strategy_monitoring --lifecycle artifacts/governance/strategy_lifecycle.json --policy-config configs/adaptive_allocation.yaml --output-dir artifacts/adaptive_allocation
 trading-cli adaptive-allocation show --allocation artifacts/adaptive_allocation
 trading-cli adaptive-allocation export-run-config --allocation artifacts/adaptive_allocation --output-dir artifacts/adaptive_allocation_run
 trading-cli paper run-multi-strategy --config artifacts/adaptive_allocation_run/adaptive_allocation_multi_strategy.json --state-path artifacts/paper/adaptive_allocation_state.json --output-dir artifacts/paper/adaptive_allocation
@@ -1079,13 +1128,15 @@ The repo now includes a lightweight orchestration runner for the promoted-strate
 
 1. research manifest discovery
 2. registry / leaderboard / promotion-candidate refresh
-3. promotion into generated paper presets
-4. strategy portfolio selection and export
-5. multi-strategy allocation
-6. paper execution
-7. strategy monitoring
-8. optional adaptive next-cycle capital allocation
-9. kill-switch recommendation generation
+3. walk-forward validation snapshot generation
+4. promotion into generated paper presets
+5. strategy portfolio selection and export
+6. multi-strategy allocation
+7. paper execution
+8. strategy monitoring
+9. optional adaptive next-cycle capital allocation
+10. governance / lifecycle updates
+11. kill-switch recommendation generation
 
 Primary config:
 
@@ -1103,6 +1154,18 @@ Example:
 ```bash
 trading-cli orchestrate run --config configs/orchestration.yaml
 trading-cli orchestrate show-run --run artifacts/orchestration_runs/automated_promotion_loop/2026-03-22T00-00-00+00-00
+```
+
+Representative end-to-end governance flow:
+
+```bash
+trading-cli research registry build --artifacts-root artifacts --output-dir artifacts/research_registry
+trading-cli strategy-validation build --artifacts-root artifacts --policy-config configs/strategy_validation.yaml --output-dir artifacts/strategy_validation
+trading-cli research promote --artifacts-root artifacts --registry-dir artifacts/research_registry --validation artifacts/strategy_validation --output-dir configs/generated_strategies --policy-config configs/promotion.yaml
+trading-cli strategy-portfolio build --promoted-dir configs/generated_strategies --lifecycle artifacts/governance/strategy_lifecycle.json --policy-config configs/strategy_portfolio.yaml --output-dir artifacts/strategy_portfolio
+trading-cli strategy-monitor build --portfolio artifacts/strategy_portfolio --paper-dir artifacts/paper/strategy_portfolio --execution-dir artifacts/paper/strategy_portfolio --allocation-dir artifacts/portfolio/strategy_portfolio --policy-config configs/strategy_monitoring.yaml --output-dir artifacts/strategy_monitoring
+trading-cli adaptive-allocation build --portfolio artifacts/strategy_portfolio --monitoring artifacts/strategy_monitoring --lifecycle artifacts/governance/strategy_lifecycle.json --policy-config configs/adaptive_allocation.yaml --output-dir artifacts/adaptive_allocation
+trading-cli strategy-governance apply --promoted-dir configs/generated_strategies --validation artifacts/strategy_validation --monitoring artifacts/strategy_monitoring --adaptive-allocation artifacts/adaptive_allocation --lifecycle artifacts/governance/strategy_lifecycle.json --policy-config configs/strategy_governance.yaml --output-dir artifacts/strategy_governance
 ```
 
 Optional local loop:

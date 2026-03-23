@@ -33,6 +33,8 @@ class PromotionPolicyConfig:
     min_metric_threshold: float = 0.5
     min_folds_tested: int = 3
     min_promoted_signals: int = 1
+    require_validation_pass: bool = True
+    allow_weak_validation: bool = False
     max_strategies_total: int | None = 5
     max_strategies_per_group: int | None = 1
     group_by: str = "signal_family"
@@ -82,7 +84,7 @@ def _safe_read_json(path: str | Path | None) -> dict[str, Any]:
     if path is None:
         return {}
     file_path = Path(path)
-    if not file_path.exists():
+    if not file_path.exists() or file_path.is_dir():
         return {}
     try:
         return json.loads(file_path.read_text(encoding="utf-8"))
@@ -173,6 +175,20 @@ def _candidate_passes_policy(candidate: dict[str, Any], manifest: dict[str, Any]
             f"promoted_signal_count {promoted_signals if promoted_signals is not None else 'missing'} < {policy.min_promoted_signals}"
         )
     return (not reasons), reasons
+
+
+def _load_validation_rows(path: str | Path | None) -> dict[str, dict[str, Any]]:
+    if path is None:
+        return {}
+    file_path = Path(path)
+    if file_path.is_dir():
+        file_path = file_path / "strategy_validation.json"
+    payload = _safe_read_json(file_path)
+    return {
+        str(row.get("run_id")): row
+        for row in payload.get("rows", [])
+        if row.get("run_id")
+    }
 
 
 def _build_generated_preset_payload(
@@ -314,10 +330,12 @@ def apply_research_promotions(
     registry_dir: str | Path,
     output_dir: str | Path,
     policy: PromotionPolicyConfig,
+    validation_path: str | Path | None = None,
     top_n: int | None = None,
     allow_overwrite: bool = False,
     dry_run: bool = False,
     inactive: bool = False,
+    override_validation: bool = False,
 ) -> dict[str, Any]:
     artifacts_root_path = Path(artifacts_root)
     registry_dir_path = Path(registry_dir)
@@ -326,6 +344,8 @@ def apply_research_promotions(
 
     manifests = {manifest.get("run_id"): manifest for manifest in load_research_manifests(artifacts_root_path)}
     candidates = _load_candidate_rows(registry_dir_path)
+    explicit_validation_requested = validation_path is not None
+    validation_lookup = _load_validation_rows(validation_path or (registry_dir_path / "strategy_validation.json"))
     existing_index = _load_promoted_index(output_dir_path)
     existing_run_ids = {row.get("source_run_id") for row in existing_index.get("strategies", [])}
     existing_preset_names = {row.get("preset_name") for row in existing_index.get("strategies", [])}
@@ -352,6 +372,13 @@ def apply_research_promotions(
         passes, reasons = _candidate_passes_policy(candidate, manifest, policy)
         if not passes:
             continue
+        validation_row = validation_lookup.get(run_id)
+        validation_status = str(validation_row.get("validation_status") or "") if validation_row else ""
+        if policy.require_validation_pass and not override_validation and (validation_lookup or explicit_validation_requested):
+            if not validation_row:
+                continue
+            if validation_status != "pass" and not (policy.allow_weak_validation and validation_status == "weak"):
+                continue
         group_value = str(manifest.get(policy.group_by) or "ungrouped")
         if policy.max_strategies_per_group is not None and group_counts.get(group_value, 0) >= policy.max_strategies_per_group:
             continue
@@ -371,6 +398,7 @@ def apply_research_promotions(
         preset_name = _build_generated_preset_name(manifest)
         status = "inactive" if inactive else policy.default_status
         warnings = _build_warning_list(manifest, policy)
+        validation_row = validation_lookup.get(str(manifest.get("run_id") or ""))
         preset_payload = _build_generated_preset_payload(
             preset_name=preset_name,
             manifest=manifest,
@@ -422,6 +450,8 @@ def apply_research_promotions(
             "universe": manifest.get("universe"),
             "ranking_metric": policy.metric_name,
             "ranking_value": manifest.get("top_metrics", {}).get(policy.metric_name),
+            "validation_status": validation_row.get("validation_status") if validation_row else None,
+            "validation_reason": validation_row.get("validation_reason") if validation_row else None,
             "promotion_timestamp": _now_utc(),
             "status": status,
             "rationale": candidate.get("reasons"),

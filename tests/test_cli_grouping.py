@@ -121,9 +121,12 @@ def test_grouped_research_promote_command_parses() -> None:
             "configs/generated_strategies",
             "--policy-config",
             "configs/promotion.yaml",
+            "--validation",
+            "artifacts/research_registry",
             "--top-n",
             "2",
             "--dry-run",
+            "--override-validation",
         ]
     )
 
@@ -131,8 +134,10 @@ def test_grouped_research_promote_command_parses() -> None:
     assert args.registry_dir == "artifacts/research_registry"
     assert args.output_dir == "configs/generated_strategies"
     assert args.policy_config == "configs/promotion.yaml"
+    assert args.validation == "artifacts/research_registry"
     assert args.top_n == 2
     assert args.dry_run is True
+    assert args.override_validation is True
 
 
 def test_grouped_data_features_command_parses_for_universe() -> None:
@@ -437,6 +442,8 @@ def test_grouped_strategy_portfolio_build_command_parses() -> None:
             "configs/generated_strategies",
             "--policy-config",
             "configs/strategy_portfolio.yaml",
+            "--lifecycle",
+            "artifacts/governance",
             "--output-dir",
             "artifacts/strategy_portfolio",
         ]
@@ -445,6 +452,7 @@ def test_grouped_strategy_portfolio_build_command_parses() -> None:
     assert args.command_family == "strategy-portfolio"
     assert args.strategy_portfolio_command == "build"
     assert args.promoted_dir == "configs/generated_strategies"
+    assert args.lifecycle == "artifacts/governance"
 
 
 def test_grouped_strategy_portfolio_show_command_parses() -> None:
@@ -546,6 +554,8 @@ def test_grouped_adaptive_allocation_build_command_parses() -> None:
             "artifacts/strategy_portfolio",
             "--monitoring",
             "artifacts/strategy_monitoring",
+            "--lifecycle",
+            "artifacts/governance",
             "--policy-config",
             "configs/adaptive_allocation.yaml",
             "--output-dir",
@@ -556,6 +566,7 @@ def test_grouped_adaptive_allocation_build_command_parses() -> None:
 
     assert args.command_family == "adaptive-allocation"
     assert args.adaptive_allocation_command == "build"
+    assert args.lifecycle == "artifacts/governance"
     assert args.policy_config == "configs/adaptive_allocation.yaml"
     assert args.output_dir == "artifacts/adaptive_allocation"
     assert args.dry_run is True
@@ -641,6 +652,87 @@ def test_grouped_orchestrate_loop_command_parses() -> None:
 
     assert args.orchestrate_command == "loop"
     assert args.max_iterations == 2
+
+
+def test_grouped_strategy_validation_build_command_parses() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "strategy-validation",
+            "build",
+            "--artifacts-root",
+            "artifacts",
+            "--policy-config",
+            "configs/strategy_validation.yaml",
+            "--output-dir",
+            "artifacts/strategy_validation",
+        ]
+    )
+
+    assert args.command_family == "strategy-validation"
+    assert args.strategy_validation_command == "build"
+    assert args.policy_config == "configs/strategy_validation.yaml"
+
+
+def test_grouped_strategy_lifecycle_commands_parse() -> None:
+    parser = build_parser()
+    show_args = parser.parse_args(
+        [
+            "strategy-lifecycle",
+            "show",
+            "--lifecycle",
+            "artifacts/governance",
+        ]
+    )
+    update_args = parser.parse_args(
+        [
+            "strategy-lifecycle",
+            "update",
+            "--lifecycle",
+            "artifacts/governance",
+            "--strategy-id",
+            "generated_demo",
+            "--state",
+            "under_review",
+            "--reason",
+            "manual_review",
+        ]
+    )
+
+    assert show_args.command_family == "strategy-lifecycle"
+    assert show_args.strategy_lifecycle_command == "show"
+    assert update_args.strategy_lifecycle_command == "update"
+    assert update_args.state == "under_review"
+
+
+def test_grouped_strategy_governance_apply_command_parses() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "strategy-governance",
+            "apply",
+            "--promoted-dir",
+            "configs/generated_strategies",
+            "--validation",
+            "artifacts/strategy_validation",
+            "--monitoring",
+            "artifacts/strategy_monitoring",
+            "--adaptive-allocation",
+            "artifacts/adaptive_allocation",
+            "--lifecycle",
+            "artifacts/governance/strategy_lifecycle.json",
+            "--policy-config",
+            "configs/strategy_governance.yaml",
+            "--output-dir",
+            "artifacts/strategy_governance",
+            "--dry-run",
+        ]
+    )
+
+    assert args.command_family == "strategy-governance"
+    assert args.strategy_governance_command == "apply"
+    assert args.adaptive_allocation == "artifacts/adaptive_allocation"
+    assert args.dry_run is True
 
 
 def test_grouped_doctor_command_parses() -> None:

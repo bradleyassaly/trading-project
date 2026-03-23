@@ -106,10 +106,12 @@ def _overview_page(service: DashboardDataService) -> bytes:
             ("Monitoring Health", overview["monitoring"].get("status") or "n/a", "latest run health"),
             ("Approved Strategies", overview["registry"].get("approved_strategy_count") or 0, "from registry"),
             ("Research Candidates", overview["research"].get("eligible_candidate_count") or 0, "promotion-ready runs"),
+            ("Validated Strategies", overview["research"].get("validated_pass_count") or 0, "walk-forward validation pass"),
             ("Strategy Portfolio", overview["research"].get("strategy_portfolio_selected_count") or 0, "selected promoted strategies"),
             ("Adaptive Weight Change", overview["adaptive_allocation"].get("absolute_weight_change") or 0, "latest adaptive snapshot"),
             ("Automation", overview["orchestration"].get("status") or "n/a", overview["orchestration"].get("run_id") or "no automated runs"),
             ("Strategy Warnings", overview["strategy_monitoring"].get("warning_strategy_count") or 0, "latest monitoring snapshot"),
+            ("Demoted Strategies", overview["strategy_lifecycle"].get("demoted_count") or 0, "lifecycle governance"),
             ("Generated Positions", overview["portfolio"].get("generated_position_count") or 0, "latest portfolio"),
             ("Executable Orders", overview["execution"].get("executable_order_count") or 0, "latest execution package"),
             ("Broker Health", overview["broker_health"].get("status") or "n/a", overview["broker_health"].get("message") or "not available"),
@@ -122,6 +124,7 @@ def _overview_page(service: DashboardDataService) -> bytes:
 
 def _strategies_page(service: DashboardDataService, query: dict[str, list[str]]) -> bytes:
     payload = service.strategies_payload()
+    lifecycle = payload.get("strategy_lifecycle", [])
     rows = payload["strategies"]
     status_filter = (query.get("status") or [None])[0]
     family_filter = (query.get("family") or [None])[0]
@@ -142,6 +145,10 @@ def _strategies_page(service: DashboardDataService, query: dict[str, list[str]])
     )
     body += "<h2>Status Counts</h2>" + _bar_chart([(key, float(value)) for key, value in payload["summary"]["status_counts"].items()])
     body += "<h2>Registry</h2>" + _table(["strategy_id", "status", "family", "version", "preset_name", "universe", "current_deployment_stage", "promotion_passed", "degradation_status"], rows)
+    body += "<h2>Lifecycle States</h2>" + _table(
+        ["strategy_id", "preset_name", "current_state", "validation_status", "monitoring_recommendation", "adaptive_adjusted_weight", "latest_reasons"],
+        lifecycle,
+    )
     body += "<h2>Champion / Challenger</h2>" + _table(list(payload["champion_challenger"][0].keys()) if payload["champion_challenger"] else ["family", "champion"], payload["champion_challenger"])
     return _page_shell("Strategies", body)
 
@@ -150,14 +157,18 @@ def _research_page(service: DashboardDataService) -> bytes:
     payload = service.research_latest_payload()
     monitoring = service.strategy_monitoring_payload()
     adaptive = payload.get("adaptive_allocation", {})
+    validation = payload.get("strategy_validation", {})
+    lifecycle = payload.get("strategy_lifecycle", {})
     summary = payload.get("summary", {})
     body = _cards(
         [
             ("Research Runs", summary.get("run_count", 0), "indexed manifests"),
+            ("Validated Pass", summary.get("validated_pass_count", 0), "walk-forward evidence"),
             ("Eligible Candidates", summary.get("eligible_candidate_count", 0), "promotion readiness"),
             ("Promoted Strategies", summary.get("promoted_strategy_count", 0), "generated paper presets"),
             ("Monitoring Warnings", monitoring.get("summary", {}).get("warning_strategy_count", 0), "selected strategy reviews"),
             ("Adaptive Changes", adaptive.get("summary", {}).get("absolute_weight_change", 0), "weight turnover for next cycle"),
+            ("Demoted", summary.get("demoted_strategy_count", 0), "governance exclusions"),
             ("Signal Families", len(summary.get("signal_family_counts", {})), "observed across runs"),
             ("Universes", len(summary.get("universe_counts", {})), "observed across runs"),
         ]
@@ -171,9 +182,29 @@ def _research_page(service: DashboardDataService) -> bytes:
         ["run_id", "eligible", "promotion_recommendation", "mean_spearman_ic", "portfolio_sharpe", "reasons"],
         payload.get("promotion_candidates", []),
     )
+    body += "<h2>Strategy Validation</h2>" + _table(
+        ["run_id", "signal_family", "universe", "number_of_folds", "out_of_sample_sharpe", "proxy_confidence_score", "validation_status", "validation_reason"],
+        [
+            {
+                "run_id": row.get("run_id"),
+                "signal_family": row.get("signal_family"),
+                "universe": row.get("universe"),
+                "number_of_folds": row.get("number_of_folds"),
+                "out_of_sample_sharpe": row.get("out_of_sample_metrics", {}).get("out_of_sample_sharpe"),
+                "proxy_confidence_score": row.get("proxy_confidence_score"),
+                "validation_status": row.get("validation_status"),
+                "validation_reason": row.get("validation_reason"),
+            }
+            for row in validation.get("rows", [])
+        ],
+    )
     body += "<h2>Promoted Strategies</h2>" + _table(
-        ["preset_name", "source_run_id", "status", "ranking_metric", "ranking_value", "generated_preset_path"],
+        ["preset_name", "source_run_id", "status", "validation_status", "ranking_metric", "ranking_value", "generated_preset_path"],
         payload.get("promoted_strategies", []),
+    )
+    body += "<h2>Lifecycle State</h2>" + _table(
+        ["strategy_id", "preset_name", "current_state", "validation_status", "monitoring_recommendation", "adaptive_adjusted_weight", "latest_reasons"],
+        lifecycle.get("strategies", []),
     )
     body += "<h2>Strategy Portfolio</h2>" + _table(
         ["preset_name", "allocation_weight", "signal_family", "universe", "selection_rank"],
@@ -305,6 +336,10 @@ def create_dashboard_app(artifacts_root: str | Path) -> Callable:
             status, headers, body = _json_response(service.strategies_payload())
         elif path == "/api/research/latest":
             status, headers, body = _json_response(service.research_latest_payload())
+        elif path == "/api/strategy-validation/latest":
+            status, headers, body = _json_response(service.strategy_validation_payload())
+        elif path == "/api/strategy-lifecycle/latest":
+            status, headers, body = _json_response(service.strategy_lifecycle_payload())
         elif path == "/api/strategy-monitor/latest":
             status, headers, body = _json_response(service.strategy_monitoring_payload())
         elif path == "/api/adaptive-allocation/latest":
@@ -357,6 +392,8 @@ def build_dashboard_static_data(*, artifacts_root: str | Path, output_dir: str |
         "orchestration_latest.json": service.latest_automated_orchestration_payload(),
         "strategies.json": service.strategies_payload(),
         "research_latest.json": service.research_latest_payload(),
+        "strategy_validation_latest.json": service.strategy_validation_payload(),
+        "strategy_lifecycle_latest.json": service.strategy_lifecycle_payload(),
         "strategy_monitoring_latest.json": service.strategy_monitoring_payload(),
         "adaptive_allocation_latest.json": service.adaptive_allocation_payload(),
         "portfolio_latest.json": service.portfolio_payload(),

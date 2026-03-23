@@ -160,6 +160,48 @@ def test_adaptive_allocation_freezes_stale_monitoring(tmp_path: Path) -> None:
     assert any("stale_monitoring" in warning for warning in payload["warnings"])
 
 
+def test_adaptive_allocation_respects_lifecycle_state_caps(tmp_path: Path) -> None:
+    portfolio_dir = _write_strategy_portfolio(tmp_path / "strategy_portfolio")
+    monitoring_dir = _write_strategy_monitoring(tmp_path / "monitoring")
+    lifecycle_dir = tmp_path / "lifecycle"
+    lifecycle_dir.mkdir(parents=True, exist_ok=True)
+    (lifecycle_dir / "strategy_lifecycle.json").write_text(
+        json.dumps(
+            {
+                "strategies": [
+                    {
+                        "strategy_id": "generated_value_b",
+                        "preset_name": "generated_value_b",
+                        "current_state": "demoted",
+                    }
+                ]
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    build_adaptive_allocation(
+        strategy_portfolio_path=portfolio_dir,
+        strategy_monitoring_path=monitoring_dir,
+        strategy_lifecycle_path=lifecycle_dir,
+        output_dir=tmp_path / "adaptive",
+        policy=AdaptiveAllocationPolicyConfig(
+            weighting_mode="performance_tilted",
+            max_upweight_per_cycle=0.7,
+            max_weight_per_strategy=1.0,
+            rebalance_smoothing=1.0,
+            require_min_observations=5,
+        ),
+    )
+
+    payload = load_adaptive_allocation(tmp_path / "adaptive")
+    rows = {row["preset_name"]: row for row in payload["strategies"]}
+
+    assert rows["generated_value_b"]["lifecycle_state"] == "demoted"
+    assert rows["generated_value_b"]["adjusted_weight"] == 0.0
+
+
 def test_adaptive_allocation_cli_commands_write_outputs(tmp_path: Path, capsys) -> None:
     portfolio_dir = _write_strategy_portfolio(tmp_path / "strategy_portfolio")
     monitoring_dir = _write_strategy_monitoring(tmp_path / "monitoring")
@@ -168,6 +210,7 @@ def test_adaptive_allocation_cli_commands_write_outputs(tmp_path: Path, capsys) 
         Namespace(
             portfolio=str(portfolio_dir),
             monitoring=str(monitoring_dir),
+            lifecycle=None,
             policy_config=None,
             output_dir=str(tmp_path / "adaptive"),
             dry_run=False,

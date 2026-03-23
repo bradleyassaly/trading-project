@@ -19,6 +19,7 @@ def cmd_strategy_portfolio_build(args) -> None:
         promoted_dir=Path(args.promoted_dir),
         output_dir=Path(args.output_dir),
         policy=policy,
+        lifecycle_path=Path(args.lifecycle) if getattr(args, "lifecycle", None) else None,
     )
     print(f"Selected strategies: {result['selected_count']}")
     print(f"Warnings: {result['warning_count']}")

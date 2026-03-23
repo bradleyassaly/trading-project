@@ -85,9 +85,13 @@ from trading_platform.cli.commands.strategy_monitor_recommend_kill_switch import
     cmd_strategy_monitor_recommend_kill_switch,
 )
 from trading_platform.cli.commands.strategy_monitor_show import cmd_strategy_monitor_show
+from trading_platform.cli.commands.strategy_governance_apply import cmd_strategy_governance_apply
+from trading_platform.cli.commands.strategy_lifecycle_show import cmd_strategy_lifecycle_show
+from trading_platform.cli.commands.strategy_lifecycle_update import cmd_strategy_lifecycle_update
 from trading_platform.cli.commands.validate_signal import cmd_validate_signal
 from trading_platform.cli.commands.validate_live import cmd_validate_live
 from trading_platform.cli.commands.walkforward import cmd_walkforward
+from trading_platform.cli.commands.strategy_validation_build import cmd_strategy_validation_build
 from trading_platform.cli.common import (
     add_date_range_arguments,
     add_feature_arguments,
@@ -653,10 +657,12 @@ def build_parser() -> argparse.ArgumentParser:
     research_promote.add_argument("--registry-dir", type=str, required=True, help="Directory containing promotion_candidates.json and related research registry artifacts.")
     research_promote.add_argument("--output-dir", type=str, required=True, help="Directory where generated strategy presets and config bundles will be written.")
     research_promote.add_argument("--policy-config", type=str, default=None, help="Optional promotion policy JSON/YAML file.")
+    research_promote.add_argument("--validation", type=str, default=None, help="Optional strategy_validation.json path or directory used to gate promotion.")
     research_promote.add_argument("--top-n", type=int, default=None, help="Optional maximum number of strategies to promote this run.")
     research_promote.add_argument("--allow-overwrite", action="store_true", help="Allow replacing existing generated preset/config artifacts.")
     research_promote.add_argument("--dry-run", action="store_true", help="Evaluate and print promotions without writing artifacts.")
     research_promote.add_argument("--inactive", action="store_true", help="Write promoted strategies with inactive status regardless of policy default.")
+    research_promote.add_argument("--override-validation", action="store_true", help="Allow promotion even when validation does not pass.")
     research_promote.set_defaults(func=cmd_research_promote)
     research_strategies = research_subparsers.add_parser("strategies", help="Show available legacy strategies")
     research_strategies.set_defaults(func=cmd_list_strategies)
@@ -919,6 +925,7 @@ def build_parser() -> argparse.ArgumentParser:
     strategy_portfolio_build = strategy_portfolio_subparsers.add_parser("build", help="Build a strategy portfolio from promoted strategies and a selection policy")
     strategy_portfolio_build.add_argument("--promoted-dir", type=str, required=True, help="Directory containing promoted_strategies.json.")
     strategy_portfolio_build.add_argument("--policy-config", type=str, default=None, help="Optional strategy portfolio policy JSON/YAML file.")
+    strategy_portfolio_build.add_argument("--lifecycle", type=str, default=None, help="Optional strategy_lifecycle.json path or directory used to exclude demoted strategies.")
     strategy_portfolio_build.add_argument("--output-dir", type=str, required=True, help="Directory where strategy portfolio artifacts will be written.")
     strategy_portfolio_build.set_defaults(func=cmd_strategy_portfolio_build)
     strategy_portfolio_show = strategy_portfolio_subparsers.add_parser("show", help="Print a concise summary of a strategy portfolio artifact")
@@ -953,10 +960,45 @@ def build_parser() -> argparse.ArgumentParser:
     adaptive_allocation_build = adaptive_allocation_subparsers.add_parser("build", help="Build an adaptive allocation snapshot from a strategy portfolio and strategy monitoring artifacts")
     adaptive_allocation_build.add_argument("--portfolio", type=str, required=True, help="Path to strategy_portfolio.json or its parent directory.")
     adaptive_allocation_build.add_argument("--monitoring", type=str, required=True, help="Path to strategy_monitoring.json or its parent directory.")
+    adaptive_allocation_build.add_argument("--lifecycle", type=str, default=None, help="Optional strategy_lifecycle.json path or directory used to cap weights by governance state.")
     adaptive_allocation_build.add_argument("--policy-config", type=str, default=None, help="Optional adaptive allocation policy JSON/YAML file.")
     adaptive_allocation_build.add_argument("--output-dir", type=str, required=True, help="Directory where adaptive allocation artifacts will be written.")
     adaptive_allocation_build.add_argument("--dry-run", action="store_true", help="Mark the adaptive allocation snapshot as dry-run output.")
     adaptive_allocation_build.set_defaults(func=cmd_adaptive_allocation_build)
+
+    strategy_validation_parser = subparsers.add_parser("strategy-validation", help="Build walk-forward validation snapshots from research manifests")
+    strategy_validation_subparsers = strategy_validation_parser.add_subparsers(dest="strategy_validation_command", required=True)
+    strategy_validation_build = strategy_validation_subparsers.add_parser("build", help="Build strategy validation artifacts from research manifests")
+    strategy_validation_build.add_argument("--artifacts-root", type=str, default="artifacts", help="Root artifact directory to scan for research manifests.")
+    strategy_validation_build.add_argument("--policy-config", type=str, default=None, help="Optional strategy validation policy JSON/YAML file.")
+    strategy_validation_build.add_argument("--output-dir", type=str, required=True, help="Directory where strategy validation artifacts will be written.")
+    strategy_validation_build.set_defaults(func=cmd_strategy_validation_build)
+
+    strategy_lifecycle_parser = subparsers.add_parser("strategy-lifecycle", help="Inspect and update file-based strategy lifecycle state")
+    strategy_lifecycle_subparsers = strategy_lifecycle_parser.add_subparsers(dest="strategy_lifecycle_command", required=True)
+    strategy_lifecycle_show = strategy_lifecycle_subparsers.add_parser("show", help="Show a concise summary of a strategy lifecycle artifact")
+    strategy_lifecycle_show.add_argument("--lifecycle", type=str, required=True, help="Path to strategy_lifecycle.json or its parent directory.")
+    strategy_lifecycle_show.set_defaults(func=cmd_strategy_lifecycle_show)
+    strategy_lifecycle_update = strategy_lifecycle_subparsers.add_parser("update", help="Append or apply an explicit lifecycle state transition")
+    strategy_lifecycle_update.add_argument("--lifecycle", type=str, required=True, help="Path to strategy_lifecycle.json or its parent directory.")
+    strategy_lifecycle_update.add_argument("--strategy-id", type=str, required=True, help="Strategy identifier or preset name to update.")
+    strategy_lifecycle_update.add_argument("--state", type=str, required=True, choices=["candidate", "validated", "promoted", "active", "under_review", "degraded", "demoted"], help="New lifecycle state.")
+    strategy_lifecycle_update.add_argument("--reason", type=str, required=True, help="Human-readable reason for the transition.")
+    strategy_lifecycle_update.add_argument("--output-path", type=str, default=None, help="Optional alternate output path for the updated lifecycle artifact.")
+    strategy_lifecycle_update.set_defaults(func=cmd_strategy_lifecycle_update)
+
+    strategy_governance_parser = subparsers.add_parser("strategy-governance", help="Apply validation, monitoring, and allocation governance to promoted strategies")
+    strategy_governance_subparsers = strategy_governance_parser.add_subparsers(dest="strategy_governance_command", required=True)
+    strategy_governance_apply = strategy_governance_subparsers.add_parser("apply", help="Build strategy lifecycle and governance summary artifacts")
+    strategy_governance_apply.add_argument("--promoted-dir", type=str, required=True, help="Directory containing promoted_strategies.json.")
+    strategy_governance_apply.add_argument("--validation", type=str, default=None, help="Optional strategy_validation.json path or directory.")
+    strategy_governance_apply.add_argument("--monitoring", type=str, default=None, help="Optional strategy_monitoring.json path or directory.")
+    strategy_governance_apply.add_argument("--adaptive-allocation", type=str, default=None, help="Optional adaptive_allocation.json path or directory.")
+    strategy_governance_apply.add_argument("--lifecycle", type=str, default=None, help="Optional persistent strategy_lifecycle.json path or directory.")
+    strategy_governance_apply.add_argument("--policy-config", type=str, default=None, help="Optional strategy governance policy JSON/YAML file.")
+    strategy_governance_apply.add_argument("--output-dir", type=str, required=True, help="Directory where governance artifacts will be written.")
+    strategy_governance_apply.add_argument("--dry-run", action="store_true", help="Evaluate governance without updating the persistent lifecycle artifact.")
+    strategy_governance_apply.set_defaults(func=cmd_strategy_governance_apply)
     adaptive_allocation_show = adaptive_allocation_subparsers.add_parser("show", help="Print a concise summary of an adaptive allocation artifact")
     adaptive_allocation_show.add_argument("--allocation", type=str, required=True, help="Path to adaptive_allocation.json or its parent directory.")
     adaptive_allocation_show.set_defaults(func=cmd_adaptive_allocation_show)

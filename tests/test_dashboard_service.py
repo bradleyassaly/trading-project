@@ -259,6 +259,37 @@ def _write_sample_artifacts(root: Path) -> None:
         ),
         encoding="utf-8",
     )
+    (root / "strategy_validation.json").write_text(
+        json.dumps(
+            {
+                "summary": {"run_count": 2, "pass_count": 1, "weak_count": 1, "fail_count": 0},
+                "rows": [
+                    {
+                        "run_id": "research-run-1",
+                        "signal_family": "momentum",
+                        "universe": "nasdaq100",
+                        "number_of_folds": 4,
+                        "proxy_confidence_score": 0.81,
+                        "validation_status": "pass",
+                        "validation_reason": "validation_pass",
+                        "out_of_sample_metrics": {"out_of_sample_sharpe": 1.1},
+                    },
+                    {
+                        "run_id": "research-run-2",
+                        "signal_family": "value",
+                        "universe": "sp500",
+                        "number_of_folds": 3,
+                        "proxy_confidence_score": 0.52,
+                        "validation_status": "weak",
+                        "validation_reason": "out_of_sample_sharpe 0.2 < 0.5",
+                        "out_of_sample_metrics": {"out_of_sample_sharpe": 0.2},
+                    },
+                ],
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
     (root / "promoted_strategies.json").write_text(
         json.dumps(
             {
@@ -267,11 +298,71 @@ def _write_sample_artifacts(root: Path) -> None:
                         "preset_name": "generated_momentum_nasdaq100_research_run_1_paper",
                         "source_run_id": "research-run-1",
                         "status": "inactive",
+                        "validation_status": "pass",
                         "ranking_metric": "portfolio_sharpe",
                         "ranking_value": 1.4,
                         "generated_preset_path": "configs/generated_strategies/generated_momentum_nasdaq100_research_run_1_paper.json",
                     }
                 ]
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    (root / "strategy_lifecycle.json").write_text(
+        json.dumps(
+            {
+                "summary": {
+                    "strategy_count": 2,
+                    "active_count": 0,
+                    "under_review_count": 1,
+                    "degraded_count": 0,
+                    "demoted_count": 1,
+                    "state_counts": {
+                        "candidate": 0,
+                        "validated": 0,
+                        "promoted": 0,
+                        "active": 0,
+                        "under_review": 1,
+                        "degraded": 0,
+                        "demoted": 1,
+                    },
+                },
+                "strategies": [
+                    {
+                        "strategy_id": "generated_momentum_nasdaq100_research_run_1_paper",
+                        "preset_name": "generated_momentum_nasdaq100_research_run_1_paper",
+                        "current_state": "demoted",
+                        "validation_status": "pass",
+                        "monitoring_recommendation": "deactivate",
+                        "adaptive_adjusted_weight": 0.0,
+                        "latest_reasons": ["repeated_deactivate_recommendation"],
+                    },
+                    {
+                        "strategy_id": "research-run-2",
+                        "preset_name": None,
+                        "current_state": "under_review",
+                        "validation_status": "weak",
+                        "monitoring_recommendation": None,
+                        "adaptive_adjusted_weight": None,
+                        "latest_reasons": ["weak_validation"],
+                    },
+                ],
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    (root / "strategy_governance_summary.json").write_text(
+        json.dumps(
+            {
+                "summary": {
+                    "strategy_count": 2,
+                    "demoted_count": 1,
+                    "degraded_count": 0,
+                    "under_review_count": 1,
+                    "active_count": 0,
+                }
             },
             indent=2,
         ),
@@ -446,8 +537,10 @@ def test_dashboard_data_loading_with_sample_artifacts(tmp_path: Path) -> None:
     assert overview["registry"]["approved_strategy_count"] == 1
     assert overview["research"]["eligible_candidate_count"] == 1
     assert overview["research"]["promoted_strategy_count"] == 1
+    assert overview["research"]["validated_pass_count"] == 1
     assert overview["research"]["strategy_portfolio_selected_count"] == 1
     assert overview["strategy_monitoring"]["warning_strategy_count"] == 1
+    assert overview["strategy_lifecycle"]["demoted_count"] == 1
     assert overview["adaptive_allocation"]["absolute_weight_change"] == 0.08
     assert overview["orchestration"]["status"] == "succeeded"
     assert strategies["summary"]["status_counts"]["approved"] == 1
@@ -511,6 +604,8 @@ def test_dashboard_research_summary_normalization(tmp_path: Path) -> None:
     assert payload["leaderboard"][0]["run_id"] == "research-run-1"
     assert payload["promotion_candidates"][0]["eligible"] is True
     assert payload["promoted_strategies"][0]["preset_name"].startswith("generated_")
+    assert payload["strategy_validation"]["summary"]["pass_count"] == 1
+    assert payload["strategy_lifecycle"]["summary"]["demoted_count"] == 1
     assert payload["strategy_portfolio"]["selected_strategies"][0]["preset_name"].startswith("generated_")
 
 
@@ -554,7 +649,7 @@ def test_dashboard_api_response_shapes(tmp_path: Path) -> None:
     status, headers, overview = _call_app(app, "/api/overview")
     assert status.startswith("200")
     assert headers["Content-Type"].startswith("application/json")
-    assert {"generated_at", "latest_run", "monitoring", "registry", "strategy_monitoring", "adaptive_allocation", "orchestration", "portfolio", "execution", "broker_health", "quick_links"} <= set(overview)
+    assert {"generated_at", "latest_run", "monitoring", "registry", "research", "strategy_monitoring", "strategy_lifecycle", "adaptive_allocation", "orchestration", "portfolio", "execution", "broker_health", "quick_links"} <= set(overview)
 
     _status, _headers, strategies = _call_app(app, "/api/strategies")
     assert {"generated_at", "summary", "filters", "strategies", "champion_challenger"} <= set(strategies)
@@ -562,6 +657,14 @@ def test_dashboard_api_response_shapes(tmp_path: Path) -> None:
     _status, _headers, research = _call_app(app, "/api/research/latest")
     assert {"generated_at", "summary", "recent_runs", "leaderboard", "promotion_candidates", "promoted_strategies"} <= set(research)
     assert "strategy_portfolio" in research
+    assert "strategy_validation" in research
+    assert "strategy_lifecycle" in research
+
+    _status, _headers, validation = _call_app(app, "/api/strategy-validation/latest")
+    assert {"generated_at", "summary", "rows", "policy"} <= set(validation)
+
+    _status, _headers, lifecycle = _call_app(app, "/api/strategy-lifecycle/latest")
+    assert {"generated_at", "summary", "strategies", "governance_summary"} <= set(lifecycle)
 
     _status, _headers, strategy_monitor = _call_app(app, "/api/strategy-monitor/latest")
     assert {"generated_at", "summary", "strategies", "recommendations", "attribution_summary"} <= set(strategy_monitor)
@@ -587,6 +690,8 @@ def test_dashboard_static_data_build(tmp_path: Path) -> None:
     assert paths["overview_json"].exists()
     assert paths["runs_json"].exists()
     assert paths["research_latest_json"].exists()
+    assert paths["strategy_validation_latest_json"].exists()
+    assert paths["strategy_lifecycle_latest_json"].exists()
     assert paths["strategy_monitoring_latest_json"].exists()
     assert paths["adaptive_allocation_latest_json"].exists()
     assert paths["orchestration_latest_json"].exists()

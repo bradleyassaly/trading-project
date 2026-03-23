@@ -14,8 +14,10 @@ from trading_platform.config.loader import (
     load_research_workflow_config,
     load_automated_orchestration_config,
     load_adaptive_allocation_policy_config,
+    load_strategy_governance_policy_config,
     load_strategy_portfolio_policy_config,
     load_strategy_monitoring_policy_config,
+    load_strategy_validation_policy_config,
 )
 
 
@@ -308,6 +310,31 @@ warn_on_same_family_overlap: true
     assert config.max_weight_per_strategy == 0.4
 
 
+def test_load_strategy_validation_policy_config_from_yaml(tmp_path) -> None:
+    path = tmp_path / "strategy_validation.yaml"
+    path.write_text(
+        """
+schema_version: 1
+min_folds: 4
+min_out_of_sample_sharpe: 0.6
+weak_out_of_sample_sharpe: 0.2
+min_mean_spearman_ic: 0.02
+weak_mean_spearman_ic: 0.01
+min_positive_fold_ratio: 0.55
+weak_positive_fold_ratio: 0.45
+max_metric_std: 0.12
+min_proxy_confidence_score: 0.65
+""".strip(),
+        encoding="utf-8",
+    )
+
+    config = load_strategy_validation_policy_config(path)
+
+    assert config.min_folds == 4
+    assert config.min_out_of_sample_sharpe == 0.6
+    assert config.min_proxy_confidence_score == 0.65
+
+
 def test_load_strategy_monitoring_policy_config_from_yaml(tmp_path) -> None:
     path = tmp_path / "strategy_monitoring.yaml"
     path.write_text(
@@ -368,6 +395,31 @@ freeze_on_low_confidence: false
     assert config.require_min_observations == 8
 
 
+def test_load_strategy_governance_policy_config_from_yaml(tmp_path) -> None:
+    path = tmp_path / "strategy_governance.yaml"
+    path.write_text(
+        """
+schema_version: 1
+demote_after_deactivate_events: 3
+demote_after_degraded_cycles: 4
+under_review_on_weak_validation: true
+degrade_on_reduce_recommendation: false
+under_review_on_review_recommendation: true
+under_review_on_low_confidence: true
+low_confidence_values:
+  - low
+  - weak
+""".strip(),
+        encoding="utf-8",
+    )
+
+    config = load_strategy_governance_policy_config(path)
+
+    assert config.demote_after_deactivate_events == 3
+    assert config.degrade_on_reduce_recommendation is False
+    assert config.low_confidence_values == ["low", "weak"]
+
+
 def test_load_automated_orchestration_config_from_yaml(tmp_path) -> None:
     path = tmp_path / "orchestration.yaml"
     path.write_text(
@@ -377,20 +429,25 @@ schedule_frequency: manual
 research_artifacts_root: artifacts
 output_root_dir: artifacts/orchestration_runs
 promotion_policy_config_path: configs/promotion.yaml
+strategy_validation_policy_config_path: configs/strategy_validation.yaml
 strategy_portfolio_policy_config_path: configs/strategy_portfolio.yaml
 strategy_monitoring_policy_config_path: configs/strategy_monitoring.yaml
 adaptive_allocation_policy_config_path: configs/adaptive_allocation.yaml
+strategy_governance_policy_config_path: configs/strategy_governance.yaml
+strategy_lifecycle_path: artifacts/governance/strategy_lifecycle.json
 paper_state_path: artifacts/paper/automation_state.json
 max_promotions_per_run: 2
 stages:
   research: true
   registry: true
+  validation: true
   promotion: true
   portfolio: true
   allocation: true
   paper: true
   monitoring: true
   adaptive_allocation: true
+  governance: true
   kill_switch: true
 """.strip(),
         encoding="utf-8",
@@ -400,7 +457,9 @@ stages:
 
     assert config.run_name == "auto"
     assert config.max_promotions_per_run == 2
+    assert config.stages.validation is True
     assert config.stages.adaptive_allocation is True
+    assert config.stages.governance is True
     assert config.stages.kill_switch is True
 
 
@@ -414,9 +473,11 @@ def test_example_configs_load_from_repo() -> None:
     broker_config = load_broker_config(root / "configs" / "broker.yaml")
     dashboard_config = load_dashboard_config(root / "configs" / "dashboard.yaml")
     promotion_config = load_promotion_policy_config(root / "configs" / "promotion.yaml")
+    strategy_validation_config = load_strategy_validation_policy_config(root / "configs" / "strategy_validation.yaml")
     strategy_portfolio_config = load_strategy_portfolio_policy_config(root / "configs" / "strategy_portfolio.yaml")
     strategy_monitoring_config = load_strategy_monitoring_policy_config(root / "configs" / "strategy_monitoring.yaml")
     adaptive_allocation_config = load_adaptive_allocation_policy_config(root / "configs" / "adaptive_allocation.yaml")
+    strategy_governance_config = load_strategy_governance_policy_config(root / "configs" / "strategy_governance.yaml")
     orchestration_config = load_automated_orchestration_config(root / "configs" / "orchestration.yaml")
     minimal_demo_config = load_pipeline_run_config(root / "configs" / "minimal_local_demo.yaml")
 
@@ -427,8 +488,10 @@ def test_example_configs_load_from_repo() -> None:
     assert broker_config.broker_name == "mock"
     assert dashboard_config.port == 8000
     assert promotion_config.metric_name == "portfolio_sharpe"
+    assert strategy_validation_config.min_folds >= 1
     assert strategy_portfolio_config.selection_metric == "ranking_value"
     assert strategy_monitoring_config.kill_switch_mode == "recommendation_only"
     assert adaptive_allocation_config.weighting_mode in {"performance_tilted", "drawdown_penalized", "score_scaled", "equal_weight"}
+    assert strategy_governance_config.demote_after_deactivate_events >= 1
     assert orchestration_config.schedule_frequency == "manual"
     assert minimal_demo_config.schedule_type == "ad_hoc"

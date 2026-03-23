@@ -20,6 +20,7 @@ def cmd_adaptive_allocation_build(args) -> None:
     result = build_adaptive_allocation(
         strategy_portfolio_path=Path(args.portfolio),
         strategy_monitoring_path=Path(args.monitoring),
+        strategy_lifecycle_path=Path(args.lifecycle) if getattr(args, "lifecycle", None) else None,
         output_dir=Path(args.output_dir),
         policy=policy,
     )

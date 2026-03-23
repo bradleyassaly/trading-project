@@ -17,6 +17,10 @@ from trading_platform.research.promotion_pipeline import (
     apply_research_promotions,
 )
 from trading_platform.research.registry import build_promotion_candidates, build_research_registry
+from trading_platform.research.strategy_validation import (
+    StrategyValidationPolicyConfig,
+    build_strategy_validation,
+)
 
 
 def _write_research_run(
@@ -192,6 +196,43 @@ def test_promotion_dry_run_and_duplicate_protection(tmp_path: Path) -> None:
     assert len(source_run_ids) == len(set(source_run_ids))
 
 
+def test_promotion_requires_validation_pass_unless_overridden(tmp_path: Path) -> None:
+    registry_dir = _seed_registry(tmp_path)
+    validation_dir = tmp_path / "validation"
+    build_strategy_validation(
+        artifacts_root=tmp_path,
+        output_dir=validation_dir,
+        policy=StrategyValidationPolicyConfig(
+            min_folds=5,
+            min_out_of_sample_sharpe=1.5,
+            min_mean_spearman_ic=0.05,
+            min_positive_fold_ratio=0.8,
+            min_proxy_confidence_score=0.9,
+        ),
+    )
+    output_dir = tmp_path / "generated_strategies"
+
+    blocked = apply_research_promotions(
+        artifacts_root=tmp_path,
+        registry_dir=registry_dir,
+        validation_path=validation_dir,
+        output_dir=output_dir,
+        policy=PromotionPolicyConfig(max_strategies_total=2, require_validation_pass=True),
+    )
+    allowed = apply_research_promotions(
+        artifacts_root=tmp_path,
+        registry_dir=registry_dir,
+        validation_path=validation_dir,
+        output_dir=output_dir,
+        policy=PromotionPolicyConfig(max_strategies_total=1, require_validation_pass=True),
+        override_validation=True,
+    )
+
+    assert blocked["selected_count"] == 0
+    assert allowed["selected_count"] == 1
+    assert allowed["promoted_rows"][0]["validation_status"] in {"weak", "fail"}
+
+
 def test_generated_configs_are_valid_for_pipeline_and_paper(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     registry_dir = _seed_registry(tmp_path)
     output_dir = tmp_path / "generated_strategies"
@@ -244,10 +285,12 @@ def test_research_promote_cli_writes_outputs(tmp_path: Path, capsys) -> None:
             registry_dir=str(registry_dir),
             output_dir=str(output_dir),
             policy_config=None,
+            validation=None,
             top_n=1,
             allow_overwrite=False,
             dry_run=False,
             inactive=True,
+            override_validation=False,
         )
     )
 

@@ -2,10 +2,14 @@ run_name: automated_promotion_loop
 schedule_frequency: manual
 research_artifacts_root: artifacts
 output_root_dir: artifacts/orchestration_runs
+validation_output_dir: artifacts/orchestration_runs/validation
 promotion_policy_config_path: configs/promotion.yaml
+strategy_validation_policy_config_path: configs/strategy_validation.yaml
 strategy_portfolio_policy_config_path: configs/strategy_portfolio.yaml
 strategy_monitoring_policy_config_path: configs/strategy_monitoring.yaml
 adaptive_allocation_policy_config_path: configs/adaptive_allocation.yaml
+strategy_governance_policy_config_path: configs/strategy_governance.yaml
+strategy_lifecycle_path: artifacts/governance/strategy_lifecycle.json
 execution_config_path: configs/execution.yaml
 paper_state_path: artifacts/paper/automated_orchestration_state.json
 max_promotions_per_run: 3
@@ -18,10 +22,12 @@ loop_sleep_seconds: 3600
 stages:
   research: true
   registry: true
+  validation: true
   promotion: true
   portfolio: true
   allocation: true
   paper: true
   monitoring: true
   adaptive_allocation: true
+  governance: true
   kill_switch: true

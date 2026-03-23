@@ -130,6 +130,38 @@ def test_strategy_portfolio_weighting_and_export_run_config(tmp_path: Path) -> N
     assert pipeline.stages.paper_trading is True
 
 
+def test_strategy_portfolio_excludes_demoted_lifecycle_entries(tmp_path: Path) -> None:
+    promoted_dir = _write_promoted_strategies(tmp_path / "promoted")
+    lifecycle_dir = tmp_path / "lifecycle"
+    lifecycle_dir.mkdir()
+    (lifecycle_dir / "strategy_lifecycle.json").write_text(
+        json.dumps(
+            {
+                "strategies": [
+                    {
+                        "strategy_id": "generated_momentum_a",
+                        "preset_name": "generated_momentum_a",
+                        "current_state": "demoted",
+                    }
+                ]
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    build_strategy_portfolio(
+        promoted_dir=promoted_dir,
+        lifecycle_path=lifecycle_dir,
+        output_dir=tmp_path / "strategy_portfolio",
+        policy=StrategyPortfolioPolicyConfig(max_strategies=3),
+    )
+    payload = load_strategy_portfolio(tmp_path / "strategy_portfolio")
+
+    assert all(row["preset_name"] != "generated_momentum_a" for row in payload["selected_strategies"])
+    assert any(row["reason"] == "lifecycle_demoted" for row in payload["excluded_candidates"])
+
+
 def test_strategy_portfolio_cli_commands_write_outputs(tmp_path: Path, capsys) -> None:
     promoted_dir = _write_promoted_strategies(tmp_path / "promoted")
     output_dir = tmp_path / "strategy_portfolio"
@@ -138,6 +170,7 @@ def test_strategy_portfolio_cli_commands_write_outputs(tmp_path: Path, capsys) -
         Namespace(
             promoted_dir=str(promoted_dir),
             policy_config=None,
+            lifecycle=None,
             output_dir=str(output_dir),
         )
     )

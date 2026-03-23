@@ -21,6 +21,8 @@ def cmd_research_promote(args) -> None:
         allow_overwrite=bool(getattr(args, "allow_overwrite", False)),
         dry_run=bool(getattr(args, "dry_run", False)),
         inactive=bool(getattr(args, "inactive", False)),
+        validation_path=Path(args.validation) if getattr(args, "validation", None) else None,
+        override_validation=bool(getattr(args, "override_validation", False)),
     )
     print(f"Selected promotions: {result['selected_count']}")
     print(f"Dry run: {result['dry_run']}")

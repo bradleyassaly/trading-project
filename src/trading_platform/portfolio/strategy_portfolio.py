@@ -210,6 +210,7 @@ def build_strategy_portfolio(
     promoted_dir: str | Path,
     output_dir: str | Path,
     policy: StrategyPortfolioPolicyConfig,
+    lifecycle_path: str | Path | None = None,
 ) -> dict[str, Any]:
     promoted_rows = _load_promoted_strategies(promoted_dir)
     if not promoted_rows:
@@ -218,6 +219,16 @@ def build_strategy_portfolio(
         )
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
+    lifecycle_lookup: dict[str, dict[str, Any]] = {}
+    if lifecycle_path is not None and Path(lifecycle_path).exists():
+        from trading_platform.governance.strategy_lifecycle import load_strategy_lifecycle
+
+        lifecycle_payload = load_strategy_lifecycle(lifecycle_path)
+        lifecycle_lookup = {
+            str(row.get("preset_name") or row.get("source_run_id") or row.get("strategy_id")): row
+            for row in lifecycle_payload.get("strategies", [])
+            if row.get("preset_name") or row.get("source_run_id") or row.get("strategy_id")
+        }
 
     selected_input: list[dict[str, Any]] = []
     excluded_rows: list[dict[str, Any]] = []
@@ -234,6 +245,11 @@ def build_strategy_portfolio(
             excluded_rows.append({"preset_name": preset_name, "reason": reason})
             continue
         source_run_id = str(row.get("source_run_id") or "")
+        lifecycle_row = lifecycle_lookup.get(preset_name) or lifecycle_lookup.get(source_run_id)
+        lifecycle_state = str(lifecycle_row.get("current_state") or "") if lifecycle_row else ""
+        if lifecycle_state == "demoted":
+            excluded_rows.append({"preset_name": preset_name, "reason": "lifecycle_demoted"})
+            continue
         if policy.deduplicate_source_runs and source_run_id and source_run_id in seen_run_ids:
             excluded_rows.append({"preset_name": preset_name, "reason": "duplicate_source_run"})
             continue
@@ -286,6 +302,7 @@ def build_strategy_portfolio(
                 "signal_family": row.get("signal_family"),
                 "universe": row.get("universe"),
                 "promotion_status": row.get("status"),
+                "lifecycle_state": lifecycle_state or None,
                 "allocation_weight": weights.get(preset_name, 0.0),
                 "target_capital_fraction": weights.get(preset_name, 0.0),
                 "selection_rank": rank,
@@ -303,6 +320,7 @@ def build_strategy_portfolio(
     payload = {
         "schema_version": STRATEGY_PORTFOLIO_SCHEMA_VERSION,
         "generated_at": _now_utc(),
+        "strategy_lifecycle_path": str(Path(lifecycle_path)) if lifecycle_path is not None else None,
         "policy": asdict(policy),
         "summary": {
             "total_selected_strategies": len(selected_rows),

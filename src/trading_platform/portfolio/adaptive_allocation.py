@@ -7,7 +7,6 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
-
 from trading_platform.portfolio.strategy_monitoring import load_strategy_monitoring
 from trading_platform.portfolio.strategy_portfolio import (
     export_multi_strategy_run_config_bundle,
@@ -40,6 +39,13 @@ class AdaptiveAllocationPolicyConfig:
     max_monitoring_age_days: int | None = 7
     freeze_on_stale_monitoring: bool = True
     freeze_on_low_confidence: bool = False
+    candidate_state_multiplier: float = 0.0
+    validated_state_multiplier: float = 1.0
+    promoted_state_multiplier: float = 1.0
+    active_state_multiplier: float = 1.0
+    under_review_state_multiplier: float = 0.5
+    degraded_state_multiplier: float = 0.1
+    demoted_state_multiplier: float = 0.0
     dry_run: bool = False
     notes: str | None = None
     tags: list[str] = field(default_factory=list)
@@ -68,6 +74,13 @@ class AdaptiveAllocationPolicyConfig:
             "family_diversification_penalty": self.family_diversification_penalty,
             "universe_diversification_penalty": self.universe_diversification_penalty,
             "rebalance_smoothing": self.rebalance_smoothing,
+            "candidate_state_multiplier": self.candidate_state_multiplier,
+            "validated_state_multiplier": self.validated_state_multiplier,
+            "promoted_state_multiplier": self.promoted_state_multiplier,
+            "active_state_multiplier": self.active_state_multiplier,
+            "under_review_state_multiplier": self.under_review_state_multiplier,
+            "degraded_state_multiplier": self.degraded_state_multiplier,
+            "demoted_state_multiplier": self.demoted_state_multiplier,
         }.items():
             if value < 0:
                 raise ValueError(f"{name} must be >= 0")
@@ -149,6 +162,19 @@ def _confidence_multiplier(confidence: str) -> float:
     return 1.0
 
 
+def _lifecycle_multiplier(state: str, policy: AdaptiveAllocationPolicyConfig) -> float:
+    normalized = str(state or "").lower()
+    return {
+        "candidate": policy.candidate_state_multiplier,
+        "validated": policy.validated_state_multiplier,
+        "promoted": policy.promoted_state_multiplier,
+        "active": policy.active_state_multiplier,
+        "under_review": policy.under_review_state_multiplier,
+        "degraded": policy.degraded_state_multiplier,
+        "demoted": policy.demoted_state_multiplier,
+    }.get(normalized, 1.0)
+
+
 def _performance_multiplier(
     *,
     weighting_mode: str,
@@ -225,11 +251,17 @@ def build_adaptive_allocation(
     *,
     strategy_portfolio_path: str | Path,
     strategy_monitoring_path: str | Path,
+    strategy_lifecycle_path: str | Path | None = None,
     output_dir: str | Path,
     policy: AdaptiveAllocationPolicyConfig,
 ) -> dict[str, Any]:
     portfolio = load_strategy_portfolio(strategy_portfolio_path)
     monitoring = load_strategy_monitoring(strategy_monitoring_path)
+    lifecycle = {"strategies": []}
+    if strategy_lifecycle_path is not None and Path(strategy_lifecycle_path).exists():
+        from trading_platform.governance.strategy_lifecycle import load_strategy_lifecycle
+
+        lifecycle = load_strategy_lifecycle(strategy_lifecycle_path)
     selected_rows = list(portfolio.get("selected_strategies", []))
     if not selected_rows:
         raise ValueError("Strategy portfolio contains no selected strategies")
@@ -238,6 +270,11 @@ def build_adaptive_allocation(
         str(row.get("preset_name")): row
         for row in monitoring.get("strategies", [])
         if row.get("preset_name")
+    }
+    lifecycle_lookup = {
+        str(row.get("preset_name") or row.get("source_run_id") or row.get("strategy_id")): row
+        for row in lifecycle.get("strategies", [])
+        if row.get("preset_name") or row.get("source_run_id") or row.get("strategy_id")
     }
     strategy_count = len(selected_rows)
     family_counts = {
@@ -269,6 +306,12 @@ def build_adaptive_allocation(
         preset_name = str(row.get("preset_name") or "")
         prior_weight = float(row.get("target_capital_fraction", row.get("allocation_weight", 0.0)) or 0.0)
         monitor_row = monitor_lookup.get(preset_name, {})
+        lifecycle_row = lifecycle_lookup.get(preset_name) or lifecycle_lookup.get(str(row.get("source_run_id") or ""))
+        lifecycle_state = str(
+            row.get("lifecycle_state")
+            or (lifecycle_row or {}).get("current_state")
+            or ("active" if str(row.get("promotion_status")) == "active" else "promoted")
+        )
         recommendation = str(monitor_row.get("recommendation") or "keep")
         realized_return = _safe_float(monitor_row.get("realized_return", monitor_row.get("proxy_return_contribution")))
         realized_drawdown = _safe_float(monitor_row.get("drawdown", monitor_row.get("proxy_drawdown_contribution")))
@@ -325,7 +368,8 @@ def build_adaptive_allocation(
             )
             recommendation_penalty = _recommendation_penalty(recommendation, policy)
             confidence_multiplier = _confidence_multiplier(attribution_confidence)
-            full_multiplier = performance_multiplier * recommendation_penalty * confidence_multiplier * family_penalty * universe_penalty
+            lifecycle_multiplier = _lifecycle_multiplier(lifecycle_state, policy)
+            full_multiplier = performance_multiplier * recommendation_penalty * confidence_multiplier * family_penalty * universe_penalty * lifecycle_multiplier
             smoothed_multiplier = 1.0 + ((full_multiplier - 1.0) * policy.rebalance_smoothing)
             raw_target = prior_weight * max(smoothed_multiplier, 0.0)
             reasons.extend(
@@ -333,6 +377,7 @@ def build_adaptive_allocation(
                     performance_reason,
                     f"recommendation_penalty:{recommendation}",
                     f"confidence:{attribution_confidence.lower() or 'unknown'}",
+                    f"lifecycle_state:{lifecycle_state}",
                 ]
             )
             if family_penalty != 1.0:
@@ -345,6 +390,14 @@ def build_adaptive_allocation(
         if stale_monitoring and policy.freeze_on_stale_monitoring:
             lower_bound = prior_weight
             upper_bound = prior_weight
+            capped_by_policy = True
+        lifecycle_multiplier = _lifecycle_multiplier(lifecycle_state, policy)
+        if lifecycle_multiplier <= 0:
+            lower_bound = 0.0
+            upper_bound = 0.0
+            capped_by_policy = True
+        elif lifecycle_multiplier < 1.0:
+            upper_bound = min(upper_bound, prior_weight * lifecycle_multiplier)
             capped_by_policy = True
         if insufficient_data and policy.neutral_weight_fallback == "prior_weight":
             lower_bound = max(lower_bound, prior_weight - min(policy.max_downweight_per_cycle, 1e-6))
@@ -366,6 +419,7 @@ def build_adaptive_allocation(
                 "realized_drawdown": realized_drawdown,
                 "realized_sharpe": realized_sharpe,
                 "monitoring_recommendation": recommendation,
+                "lifecycle_state": lifecycle_state,
                 "attribution_confidence": attribution_confidence,
                 "reason_for_adjustment": reasons,
                 "capped_by_policy": capped_by_policy,
@@ -408,6 +462,7 @@ def build_adaptive_allocation(
         "dry_run": policy.dry_run,
         "strategy_portfolio_path": str(Path(strategy_portfolio_path)),
         "strategy_monitoring_path": str(Path(strategy_monitoring_path)),
+        "strategy_lifecycle_path": str(Path(strategy_lifecycle_path)) if strategy_lifecycle_path is not None else None,
         "policy": asdict(policy),
         "summary": {
             "total_selected_strategies": len(row_payloads),

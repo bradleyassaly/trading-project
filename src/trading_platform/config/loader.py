@@ -15,6 +15,7 @@ from trading_platform.config.models import (
 )
 from trading_platform.dashboard.models import DashboardConfig
 from trading_platform.execution.models import ExecutionConfig
+from trading_platform.governance.strategy_lifecycle import StrategyGovernancePolicyConfig
 from trading_platform.monitoring.models import MonitoringConfig, NotificationChannel, NotificationConfig
 from trading_platform.orchestration.models import (
     OrchestrationStageToggles,
@@ -28,6 +29,7 @@ from trading_platform.portfolio.strategy_monitoring import StrategyMonitoringPol
 from trading_platform.portfolio.adaptive_allocation import AdaptiveAllocationPolicyConfig
 from trading_platform.portfolio.strategy_portfolio import StrategyPortfolioPolicyConfig
 from trading_platform.research.promotion_pipeline import PromotionPolicyConfig
+from trading_platform.research.strategy_validation import StrategyValidationPolicyConfig
 
 try:
     import yaml
@@ -147,6 +149,11 @@ def load_promotion_policy_config(path: str | Path) -> PromotionPolicyConfig:
     return PromotionPolicyConfig(**data)
 
 
+def load_strategy_validation_policy_config(path: str | Path) -> StrategyValidationPolicyConfig:
+    data = _read_config_file(Path(path))
+    return StrategyValidationPolicyConfig(**data)
+
+
 def load_strategy_portfolio_policy_config(path: str | Path) -> StrategyPortfolioPolicyConfig:
     data = _read_config_file(Path(path))
     return StrategyPortfolioPolicyConfig(**data)
@@ -160,6 +167,11 @@ def load_strategy_monitoring_policy_config(path: str | Path) -> StrategyMonitori
 def load_adaptive_allocation_policy_config(path: str | Path) -> AdaptiveAllocationPolicyConfig:
     data = _read_config_file(Path(path))
     return AdaptiveAllocationPolicyConfig(**data)
+
+
+def load_strategy_governance_policy_config(path: str | Path) -> StrategyGovernancePolicyConfig:
+    data = _read_config_file(Path(path))
+    return StrategyGovernancePolicyConfig(**data)
 
 
 def load_automated_orchestration_config(path: str | Path) -> AutomatedOrchestrationConfig:

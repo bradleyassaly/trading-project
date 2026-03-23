@@ -21,9 +21,12 @@ def _config(tmp_path: Path, **overrides) -> AutomatedOrchestrationConfig:
         "research_artifacts_root": str(tmp_path / "research"),
         "output_root_dir": str(tmp_path / "runs"),
         "promotion_policy_config_path": str(tmp_path / "promotion.yaml"),
+        "strategy_validation_policy_config_path": str(tmp_path / "strategy_validation.yaml"),
         "strategy_portfolio_policy_config_path": str(tmp_path / "strategy_portfolio.yaml"),
         "strategy_monitoring_policy_config_path": str(tmp_path / "strategy_monitoring.yaml"),
         "adaptive_allocation_policy_config_path": str(tmp_path / "adaptive_allocation.yaml"),
+        "strategy_governance_policy_config_path": str(tmp_path / "strategy_governance.yaml"),
+        "strategy_lifecycle_path": str(tmp_path / "strategy_lifecycle.json"),
         "paper_state_path": str(tmp_path / "paper_state.json"),
     }
     base.update(overrides)
@@ -32,9 +35,11 @@ def _config(tmp_path: Path, **overrides) -> AutomatedOrchestrationConfig:
 
 def _write_policy_files(tmp_path: Path) -> None:
     (tmp_path / "promotion.yaml").write_text("schema_version: 1\n", encoding="utf-8")
+    (tmp_path / "strategy_validation.yaml").write_text("schema_version: 1\n", encoding="utf-8")
     (tmp_path / "strategy_portfolio.yaml").write_text("schema_version: 1\n", encoding="utf-8")
     (tmp_path / "strategy_monitoring.yaml").write_text("schema_version: 1\n", encoding="utf-8")
     (tmp_path / "adaptive_allocation.yaml").write_text("schema_version: 1\n", encoding="utf-8")
+    (tmp_path / "strategy_governance.yaml").write_text("schema_version: 1\n", encoding="utf-8")
 
 
 def test_load_automated_orchestration_config_from_yaml(tmp_path: Path) -> None:
@@ -46,20 +51,25 @@ schedule_frequency: daily
 research_artifacts_root: artifacts
 output_root_dir: artifacts/orchestration_runs
 promotion_policy_config_path: configs/promotion.yaml
+strategy_validation_policy_config_path: configs/strategy_validation.yaml
 strategy_portfolio_policy_config_path: configs/strategy_portfolio.yaml
 strategy_monitoring_policy_config_path: configs/strategy_monitoring.yaml
 adaptive_allocation_policy_config_path: configs/adaptive_allocation.yaml
+strategy_governance_policy_config_path: configs/strategy_governance.yaml
+strategy_lifecycle_path: artifacts/governance/strategy_lifecycle.json
 paper_state_path: artifacts/paper_state.json
 max_promotions_per_run: 2
 stages:
   research: true
   registry: true
+  validation: true
   promotion: true
   portfolio: true
   allocation: true
   paper: true
   monitoring: true
   adaptive_allocation: true
+  governance: true
   kill_switch: true
 """.strip(),
         encoding="utf-8",
@@ -70,7 +80,9 @@ stages:
     assert config.run_name == "auto"
     assert config.schedule_frequency == "daily"
     assert config.max_promotions_per_run == 2
+    assert config.stages.validation is True
     assert config.stages.adaptive_allocation is True
+    assert config.stages.governance is True
     assert config.stages.kill_switch is True
 
 
@@ -83,12 +95,14 @@ def test_automated_orchestration_stage_sequencing_and_artifact_passing(monkeypat
         stages=AutomatedOrchestrationStageToggles(
             research=True,
             registry=True,
+            validation=True,
             promotion=True,
             portfolio=True,
             allocation=True,
             paper=True,
             monitoring=True,
             adaptive_allocation=True,
+            governance=True,
             kill_switch=True,
         ),
     )
@@ -104,6 +118,10 @@ def test_automated_orchestration_stage_sequencing_and_artifact_passing(monkeypat
     monkeypatch.setattr(
         "trading_platform.orchestration.pipeline_runner.build_research_leaderboard",
         lambda **kwargs: {"leaderboard_json_path": str(Path(kwargs["output_dir"]) / "research_leaderboard.json"), "row_count": 1},
+    )
+    monkeypatch.setattr(
+        "trading_platform.orchestration.pipeline_runner.build_strategy_validation",
+        lambda **kwargs: {"strategy_validation_json_path": str(Path(kwargs["output_dir"]) / "strategy_validation.json"), "strategy_validation_csv_path": str(Path(kwargs["output_dir"]) / "strategy_validation.csv"), "pass_count": 1, "weak_count": 0, "fail_count": 0},
     )
     monkeypatch.setattr(
         "trading_platform.orchestration.pipeline_runner.build_promotion_candidates",
@@ -207,6 +225,17 @@ def test_automated_orchestration_stage_sequencing_and_artifact_passing(monkeypat
         },
     )
     monkeypatch.setattr(
+        "trading_platform.orchestration.pipeline_runner.apply_strategy_governance",
+        lambda **kwargs: {
+            "strategy_lifecycle_json_path": str(Path(kwargs["output_dir"]) / "strategy_lifecycle.json"),
+            "strategy_lifecycle_csv_path": str(Path(kwargs["output_dir"]) / "strategy_lifecycle.csv"),
+            "strategy_governance_summary_json_path": str(Path(kwargs["output_dir"]) / "strategy_governance_summary.json"),
+            "under_review_count": 1,
+            "degraded_count": 0,
+            "demoted_count": 0,
+        },
+    )
+    monkeypatch.setattr(
         "trading_platform.orchestration.pipeline_runner.recommend_kill_switch_actions",
         lambda **kwargs: {"kill_switch_recommendations_json_path": str(Path(kwargs["output_dir"]) / "kill_switch_recommendations.json"), "kill_switch_recommendations_csv_path": str(Path(kwargs["output_dir"]) / "kill_switch_recommendations.csv"), "recommendation_count": 1},
     )
@@ -214,8 +243,10 @@ def test_automated_orchestration_stage_sequencing_and_artifact_passing(monkeypat
     result, paths = run_automated_orchestration(config)
 
     assert result.status == "succeeded"
+    assert result.outputs["validated_pass_count"] == 1
     assert result.outputs["selected_strategy_count"] == 1
     assert result.outputs["adaptive_selected_strategy_count"] == 1
+    assert result.outputs["under_review_count"] == 1
     assert result.outputs["kill_switch_recommendation_count"] == 1
     assert paths["orchestration_run_json_path"].exists()
 
@@ -226,12 +257,13 @@ def test_automated_orchestration_fail_fast_on_empty_promotions(monkeypatch, tmp_
     monkeypatch.setattr("trading_platform.orchestration.pipeline_runner.perf_counter", lambda: 1.0)
     config = _config(
         tmp_path,
-        stages=AutomatedOrchestrationStageToggles(research=True, registry=True, promotion=True, portfolio=True, allocation=False, paper=False, monitoring=False, kill_switch=False),
-        stage_order=["research", "registry", "promotion", "portfolio"],
+        stages=AutomatedOrchestrationStageToggles(research=True, registry=True, validation=True, promotion=True, portfolio=True, allocation=False, paper=False, monitoring=False, governance=False, kill_switch=False),
+        stage_order=["research", "registry", "validation", "promotion", "portfolio"],
     )
     monkeypatch.setattr("trading_platform.orchestration.pipeline_runner.load_research_manifests", lambda root: [{"run_id": "run-a"}])
     monkeypatch.setattr("trading_platform.orchestration.pipeline_runner.build_research_registry", lambda **kwargs: {"registry_json_path": "x", "run_count": 1})
     monkeypatch.setattr("trading_platform.orchestration.pipeline_runner.build_research_leaderboard", lambda **kwargs: {"leaderboard_json_path": "x", "row_count": 1})
+    monkeypatch.setattr("trading_platform.orchestration.pipeline_runner.build_strategy_validation", lambda **kwargs: {"strategy_validation_json_path": "x", "strategy_validation_csv_path": "x", "pass_count": 1, "weak_count": 0, "fail_count": 0})
     monkeypatch.setattr(
         "trading_platform.orchestration.pipeline_runner.build_promotion_candidates",
         lambda **kwargs: (
@@ -247,8 +279,8 @@ def test_automated_orchestration_fail_fast_on_empty_promotions(monkeypatch, tmp_
     result, _ = run_automated_orchestration(config)
 
     assert result.status == "failed"
-    assert result.stage_records[2].status == "failed"
-    assert result.stage_records[3].status == "pending"
+    assert result.stage_records[3].status == "failed"
+    assert result.stage_records[4].status == "pending"
 
 
 def test_orchestrate_cli_commands(tmp_path: Path, monkeypatch, capsys) -> None:

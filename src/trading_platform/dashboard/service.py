@@ -324,14 +324,20 @@ class DashboardDataService:
         leaderboard_path = _latest_matching_file(self.artifacts_root, ["research_leaderboard.json"])
         candidates_path = _latest_matching_file(self.artifacts_root, ["promotion_candidates.json"])
         promoted_path = _latest_matching_file(self.artifacts_root, ["promoted_strategies.json"])
+        validation_path = _latest_matching_file(self.artifacts_root, ["strategy_validation.json"])
+        lifecycle_path = _latest_matching_file(self.artifacts_root, ["strategy_lifecycle.json"])
         registry_payload = _safe_read_json(registry_path)
         leaderboard_payload = _safe_read_json(leaderboard_path)
         candidates_payload = _safe_read_json(candidates_path)
         promoted_payload = _safe_read_json(promoted_path)
+        validation_payload = _safe_read_json(validation_path)
+        lifecycle_payload = _safe_read_json(lifecycle_path)
         runs = registry_payload.get("runs", [])
         leaderboard_rows = leaderboard_payload.get("rows", [])
         candidate_rows = candidates_payload.get("rows", [])
         promoted_rows = promoted_payload.get("strategies", [])
+        validation_rows = validation_payload.get("rows", [])
+        lifecycle_rows = lifecycle_payload.get("strategies", [])
         strategy_portfolio_path = _latest_matching_file(self.artifacts_root, ["strategy_portfolio.json"])
         strategy_portfolio_payload = _safe_read_json(strategy_portfolio_path)
         return {
@@ -340,6 +346,8 @@ class DashboardDataService:
             "leaderboard_path": str(leaderboard_path) if leaderboard_path is not None else None,
             "promotion_candidates_path": str(candidates_path) if candidates_path is not None else None,
             "promoted_strategies_path": str(promoted_path) if promoted_path is not None else None,
+            "strategy_validation_path": str(validation_path) if validation_path is not None else None,
+            "strategy_lifecycle_path": str(lifecycle_path) if lifecycle_path is not None else None,
             "strategy_portfolio_path": str(strategy_portfolio_path) if strategy_portfolio_path is not None else None,
             "summary": {
                 "run_count": len(runs),
@@ -347,12 +355,18 @@ class DashboardDataService:
                 "universe_counts": _status_counts([str(row.get("universe")) for row in runs if row.get("universe")]),
                 "eligible_candidate_count": len([row for row in candidate_rows if bool(row.get("eligible"))]),
                 "promoted_strategy_count": len(promoted_rows),
+                "validated_pass_count": len([row for row in validation_rows if row.get("validation_status") == "pass"]),
+                "validated_weak_count": len([row for row in validation_rows if row.get("validation_status") == "weak"]),
+                "degraded_strategy_count": len([row for row in lifecycle_rows if row.get("current_state") == "degraded"]),
+                "demoted_strategy_count": len([row for row in lifecycle_rows if row.get("current_state") == "demoted"]),
                 "strategy_portfolio_selected_count": len(strategy_portfolio_payload.get("selected_strategies", [])),
             },
             "recent_runs": runs[:10],
             "leaderboard": leaderboard_rows[:10],
             "promotion_candidates": candidate_rows[:10],
             "promoted_strategies": promoted_rows[:10],
+            "strategy_validation": validation_rows[:10],
+            "strategy_lifecycle": lifecycle_rows[:10],
             "strategy_portfolio": strategy_portfolio_payload,
         }
 
@@ -387,6 +401,31 @@ class DashboardDataService:
             "policy": adaptive_payload.get("policy", {}),
         }
 
+    def strategy_validation_payload(self) -> dict[str, Any]:
+        validation_path = _latest_matching_file(self.artifacts_root, ["strategy_validation.json"])
+        validation_payload = _safe_read_json(validation_path)
+        return {
+            "generated_at": _now_utc(),
+            "strategy_validation_path": str(validation_path) if validation_path is not None else None,
+            "summary": validation_payload.get("summary", {}),
+            "rows": validation_payload.get("rows", []),
+            "policy": validation_payload.get("policy", {}),
+        }
+
+    def strategy_lifecycle_payload(self) -> dict[str, Any]:
+        lifecycle_path = _latest_matching_file(self.artifacts_root, ["strategy_lifecycle.json"])
+        lifecycle_payload = _safe_read_json(lifecycle_path)
+        governance_path = _latest_matching_file(self.artifacts_root, ["strategy_governance_summary.json"])
+        governance_payload = _safe_read_json(governance_path)
+        return {
+            "generated_at": _now_utc(),
+            "strategy_lifecycle_path": str(lifecycle_path) if lifecycle_path is not None else None,
+            "strategy_governance_summary_path": str(governance_path) if governance_path is not None else None,
+            "summary": lifecycle_payload.get("summary", {}),
+            "strategies": lifecycle_payload.get("strategies", []),
+            "governance_summary": governance_payload,
+        }
+
     def latest_automated_orchestration_payload(self) -> dict[str, Any]:
         latest = _latest_matching_file(self.artifacts_root, ["orchestration_run.json"])
         if latest is None:
@@ -409,6 +448,8 @@ class DashboardDataService:
         strategy_monitoring = self.strategy_monitoring_payload()
         adaptive_allocation = self.adaptive_allocation_payload()
         orchestration = self.latest_automated_orchestration_payload()
+        validation = self.strategy_validation_payload()
+        lifecycle = self.strategy_lifecycle_payload()
         latest_run_summary = latest_run.get("summary", {})
         latest_run_health = latest_run.get("health", {})
         portfolio_summary = portfolio.get("summary", {})
@@ -444,6 +485,7 @@ class DashboardDataService:
                 "run_count": research.get("summary", {}).get("run_count", 0),
                 "eligible_candidate_count": research.get("summary", {}).get("eligible_candidate_count", 0),
                 "promoted_strategy_count": research.get("summary", {}).get("promoted_strategy_count", 0),
+                "validated_pass_count": validation.get("summary", {}).get("pass_count", 0),
                 "strategy_portfolio_selected_count": research.get("summary", {}).get("strategy_portfolio_selected_count", 0),
                 "top_leaderboard_entry": research.get("leaderboard", [{}])[0] if research.get("leaderboard") else {},
             },
@@ -451,6 +493,11 @@ class DashboardDataService:
                 "warning_strategy_count": strategy_monitoring.get("summary", {}).get("warning_strategy_count", 0),
                 "deactivation_candidate_count": strategy_monitoring.get("summary", {}).get("deactivation_candidate_count", 0),
                 "aggregate_return": strategy_monitoring.get("summary", {}).get("aggregate_return"),
+            },
+            "strategy_lifecycle": {
+                "under_review_count": lifecycle.get("summary", {}).get("under_review_count", 0),
+                "degraded_count": lifecycle.get("summary", {}).get("degraded_count", 0),
+                "demoted_count": lifecycle.get("summary", {}).get("demoted_count", 0),
             },
             "adaptive_allocation": {
                 "selected_strategy_count": adaptive_allocation.get("summary", {}).get("total_selected_strategies", 0),
@@ -481,14 +528,20 @@ class DashboardDataService:
 
     def strategies_payload(self) -> dict[str, Any]:
         registry = self.registry_payload()
+        lifecycle = self.strategy_lifecycle_payload()
         tags = sorted({tag for row in registry["strategies"] for tag in row.get("tags", [])})
         return {
             "generated_at": _now_utc(),
             "registry_path": registry["registry_path"],
-            "summary": {"status_counts": registry["status_counts"], "family_counts": registry["family_counts"]},
+            "summary": {
+                "status_counts": registry["status_counts"],
+                "family_counts": registry["family_counts"],
+                "lifecycle_counts": lifecycle.get("summary", {}).get("state_counts", {}),
+            },
             "filters": {"statuses": sorted(registry["status_counts"]), "families": sorted(registry["family_counts"]), "tags": tags},
             "strategies": registry["strategies"],
             "champion_challenger": registry["champion_challenger"],
+            "strategy_lifecycle": lifecycle.get("strategies", []),
         }
 
     def runs_payload(self) -> dict[str, Any]:
@@ -527,4 +580,6 @@ class DashboardDataService:
     def research_latest_payload(self) -> dict[str, Any]:
         payload = self.research_payload()
         payload["adaptive_allocation"] = self.adaptive_allocation_payload()
+        payload["strategy_validation"] = self.strategy_validation_payload()
+        payload["strategy_lifecycle"] = self.strategy_lifecycle_payload()
         return payload

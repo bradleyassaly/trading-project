@@ -35,6 +35,7 @@ from trading_platform.portfolio.strategy_portfolio import (
     export_strategy_portfolio_run_config,
     load_strategy_portfolio,
 )
+from trading_platform.governance.strategy_lifecycle import apply_strategy_governance
 from trading_platform.research.experiment_tracking import (
     build_paper_experiment_record,
     register_experiment,
@@ -46,28 +47,33 @@ from trading_platform.research.registry import (
     build_research_registry,
     load_research_manifests,
 )
+from trading_platform.research.strategy_validation import build_strategy_validation
 
 
 ORCHESTRATION_STAGE_NAMES = [
     "research",
     "registry",
+    "validation",
     "promotion",
     "portfolio",
     "allocation",
     "paper",
     "monitoring",
     "adaptive_allocation",
+    "governance",
     "kill_switch",
 ]
 ORCHESTRATION_STAGE_STATUSES = {"pending", "skipped", "running", "succeeded", "failed"}
 ORCHESTRATION_STAGE_DEPENDENCIES: dict[str, list[str]] = {
     "registry": ["research"],
-    "promotion": ["registry"],
+    "validation": ["research"],
+    "promotion": ["registry", "validation"],
     "portfolio": ["promotion"],
     "allocation": ["portfolio"],
     "paper": ["portfolio"],
     "monitoring": ["paper"],
     "adaptive_allocation": ["monitoring"],
+    "governance": ["monitoring"],
     "kill_switch": ["monitoring"],
 }
 
@@ -76,12 +82,14 @@ ORCHESTRATION_STAGE_DEPENDENCIES: dict[str, list[str]] = {
 class AutomatedOrchestrationStageToggles:
     research: bool = True
     registry: bool = True
+    validation: bool = True
     promotion: bool = True
     portfolio: bool = True
     allocation: bool = True
     paper: bool = True
     monitoring: bool = True
     adaptive_allocation: bool = False
+    governance: bool = True
     kill_switch: bool = True
 
 
@@ -92,6 +100,7 @@ class AutomatedOrchestrationConfig:
     research_artifacts_root: str
     output_root_dir: str = "artifacts/orchestration_runs"
     registry_output_dir: str | None = None
+    validation_output_dir: str | None = None
     promotion_output_dir: str | None = None
     strategy_portfolio_output_dir: str | None = None
     strategy_portfolio_run_output_dir: str | None = None
@@ -101,11 +110,15 @@ class AutomatedOrchestrationConfig:
     monitoring_output_dir: str | None = None
     adaptive_allocation_output_dir: str | None = None
     adaptive_allocation_run_output_dir: str | None = None
+    governance_output_dir: str | None = None
     kill_switch_output_dir: str | None = None
     promotion_policy_config_path: str | None = None
+    strategy_validation_policy_config_path: str | None = None
     strategy_portfolio_policy_config_path: str | None = None
     strategy_monitoring_policy_config_path: str | None = None
     adaptive_allocation_policy_config_path: str | None = None
+    strategy_governance_policy_config_path: str | None = None
+    strategy_lifecycle_path: str | None = None
     execution_config_path: str | None = None
     monitoring_notification_config_path: str | None = None
     fail_fast: bool = True
@@ -153,6 +166,8 @@ class AutomatedOrchestrationConfig:
     def _validate_stage_requirements(self) -> None:
         if self.stages.promotion and not self.promotion_policy_config_path:
             raise ValueError("promotion_policy_config_path is required when promotion is enabled")
+        if self.stages.validation and not self.strategy_validation_policy_config_path:
+            raise ValueError("strategy_validation_policy_config_path is required when validation is enabled")
         if self.stages.portfolio and not self.strategy_portfolio_policy_config_path:
             raise ValueError("strategy_portfolio_policy_config_path is required when portfolio is enabled")
         if self.stages.paper and not self.paper_state_path:
@@ -161,6 +176,8 @@ class AutomatedOrchestrationConfig:
             raise ValueError("strategy_monitoring_policy_config_path is required when monitoring is enabled")
         if self.stages.adaptive_allocation and not self.adaptive_allocation_policy_config_path:
             raise ValueError("adaptive_allocation_policy_config_path is required when adaptive_allocation is enabled")
+        if self.stages.governance and not self.strategy_governance_policy_config_path:
+            raise ValueError("strategy_governance_policy_config_path is required when governance is enabled")
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
@@ -309,11 +326,14 @@ def _render_markdown_summary(result: AutomatedOrchestrationResult) -> str:
             [
                 "",
                 "## Key Outputs",
+                f"- Validated strategies: `{outputs.get('validated_pass_count', 0)}`",
                 f"- Promoted strategies: `{outputs.get('promoted_strategy_count', 0)}`",
                 f"- Selected strategies: `{outputs.get('selected_strategy_count', 0)}`",
                 f"- Allocation positions: `{outputs.get('allocation_position_count', 0)}`",
                 f"- Monitoring warnings: `{outputs.get('warning_strategy_count', 0)}`",
                 f"- Adaptive strategies: `{outputs.get('adaptive_selected_strategy_count', 0)}`",
+                f"- Under review: `{outputs.get('under_review_count', 0)}`",
+                f"- Demoted: `{outputs.get('demoted_count', 0)}`",
                 f"- Kill-switch recommendations: `{outputs.get('kill_switch_recommendation_count', 0)}`",
             ]
         )
@@ -377,6 +397,25 @@ def _stage_registry(config: AutomatedOrchestrationConfig, run_dir: Path, context
     return {**registry_result, **leaderboard_result, **candidates_result}
 
 
+def _stage_validation(config: AutomatedOrchestrationConfig, run_dir: Path, context: dict[str, Any]) -> dict[str, Any]:
+    if int(context.get("research_manifest_count", 0)) <= 0:
+        raise OrchestrationStageError("validation stage requires research manifests")
+    from trading_platform.config.loader import load_strategy_validation_policy_config
+
+    policy = load_strategy_validation_policy_config(config.strategy_validation_policy_config_path)
+    output_dir = _ensure_stage_output_dir(run_dir, config.validation_output_dir, "validation")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    result = build_strategy_validation(
+        artifacts_root=config.research_artifacts_root,
+        output_dir=output_dir,
+        policy=policy,
+    )
+    if (result["pass_count"] + result["weak_count"] + result["fail_count"]) <= 0:
+        raise OrchestrationStageError("validation stage produced no rows")
+    context["strategy_validation_dir"] = str(output_dir)
+    return result
+
+
 def _stage_promotion(config: AutomatedOrchestrationConfig, run_dir: Path, context: dict[str, Any]) -> dict[str, Any]:
     registry_dir = context.get("registry_dir")
     if not registry_dir:
@@ -397,6 +436,7 @@ def _stage_promotion(config: AutomatedOrchestrationConfig, run_dir: Path, contex
         top_n=config.max_promotions_per_run,
         dry_run=config.promotion_dry_run,
         inactive=config.promotion_inactive,
+        validation_path=context.get("strategy_validation_dir"),
     )
     if result["selected_count"] <= 0:
         raise OrchestrationStageError("no strategies were promoted")
@@ -419,7 +459,12 @@ def _stage_portfolio(config: AutomatedOrchestrationConfig, run_dir: Path, contex
     policy = load_strategy_portfolio_policy_config(config.strategy_portfolio_policy_config_path)
     portfolio_dir = _ensure_stage_output_dir(run_dir, config.strategy_portfolio_output_dir, "strategy_portfolio")
     portfolio_dir.mkdir(parents=True, exist_ok=True)
-    build_result = build_strategy_portfolio(promoted_dir=promoted_dir, output_dir=portfolio_dir, policy=policy)
+    build_result = build_strategy_portfolio(
+        promoted_dir=promoted_dir,
+        lifecycle_path=config.strategy_lifecycle_path,
+        output_dir=portfolio_dir,
+        policy=policy,
+    )
     payload = load_strategy_portfolio(portfolio_dir)
     selected_count = int(payload.get("summary", {}).get("total_selected_strategies", 0))
     if selected_count <= 0:
@@ -590,6 +635,7 @@ def _stage_adaptive_allocation(config: AutomatedOrchestrationConfig, run_dir: Pa
     build_result = build_adaptive_allocation(
         strategy_portfolio_path=strategy_portfolio_dir,
         strategy_monitoring_path=monitoring_dir,
+        strategy_lifecycle_path=config.strategy_lifecycle_path,
         output_dir=output_dir,
         policy=policy,
     )
@@ -618,15 +664,41 @@ def _stage_adaptive_allocation(config: AutomatedOrchestrationConfig, run_dir: Pa
     }
 
 
+def _stage_governance(config: AutomatedOrchestrationConfig, run_dir: Path, context: dict[str, Any]) -> dict[str, Any]:
+    promoted_dir = context.get("promoted_dir")
+    monitoring_dir = context.get("strategy_monitoring_dir")
+    if not promoted_dir or not monitoring_dir:
+        raise OrchestrationStageError("governance stage requires promoted strategies and monitoring outputs")
+    from trading_platform.config.loader import load_strategy_governance_policy_config
+
+    policy = load_strategy_governance_policy_config(config.strategy_governance_policy_config_path)
+    output_dir = _ensure_stage_output_dir(run_dir, config.governance_output_dir, "governance")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    result = apply_strategy_governance(
+        promoted_dir=promoted_dir,
+        strategy_validation_path=context.get("strategy_validation_dir"),
+        strategy_monitoring_path=monitoring_dir,
+        adaptive_allocation_path=context.get("adaptive_allocation_dir"),
+        lifecycle_path=config.strategy_lifecycle_path,
+        output_dir=output_dir,
+        policy=policy,
+        dry_run=False,
+    )
+    context["strategy_governance_dir"] = str(output_dir)
+    return result
+
+
 RUNNER_STAGE_HANDLERS: dict[str, Callable[[AutomatedOrchestrationConfig, Path, dict[str, Any]], dict[str, Any]]] = {
     "research": _stage_research,
     "registry": _stage_registry,
+    "validation": _stage_validation,
     "promotion": _stage_promotion,
     "portfolio": _stage_portfolio,
     "allocation": _stage_allocation,
     "paper": _stage_paper,
     "monitoring": _stage_monitoring,
     "adaptive_allocation": _stage_adaptive_allocation,
+    "governance": _stage_governance,
     "kill_switch": _stage_kill_switch,
 }
 
@@ -667,6 +739,9 @@ def run_automated_orchestration(config: AutomatedOrchestrationConfig) -> tuple[A
                     if key in {
                         "promoted_strategy_count",
                         "promoted_preset_names",
+                        "pass_count",
+                        "weak_count",
+                        "fail_count",
                         "selected_strategy_count",
                         "allocation_position_count",
                         "paper_equity",
@@ -675,10 +750,15 @@ def run_automated_orchestration(config: AutomatedOrchestrationConfig) -> tuple[A
                         "notification_sent",
                         "adaptive_selected_strategy_count",
                         "adaptive_warning_count",
+                        "under_review_count",
+                        "degraded_count",
+                        "demoted_count",
                         "kill_switch_recommendation_count",
                     }
                 }
             )
+            if record.stage_name == "validation":
+                outputs["validated_pass_count"] = record.outputs.get("pass_count", 0)
         except Exception as exc:
             record.status = "failed"
             record.error_message = f"{type(exc).__name__}: {exc}"
