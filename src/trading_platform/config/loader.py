@@ -144,8 +144,14 @@ def load_paper_run_workflow_config(path: str | Path) -> PaperRunWorkflowConfig:
         payload["sub_universe_id"] = screening_section["sub_universe_id"]
     if "universe_filters" not in payload and isinstance(screening_section.get("filters"), list):
         payload["universe_filters"] = screening_section["filters"]
+    if "reference_data_root" not in payload and "reference_data_root" in screening_section:
+        payload["reference_data_root"] = screening_section["reference_data_root"]
     if "universe_membership_path" not in payload and "membership_history_path" in screening_section:
         payload["universe_membership_path"] = screening_section["membership_history_path"]
+    if "taxonomy_snapshot_path" not in payload and "taxonomy_snapshot_path" in screening_section:
+        payload["taxonomy_snapshot_path"] = screening_section["taxonomy_snapshot_path"]
+    if "benchmark_mapping_path" not in payload and "benchmark_mapping_path" in screening_section:
+        payload["benchmark_mapping_path"] = screening_section["benchmark_mapping_path"]
     if "market_regime_path" not in payload and "market_regime_path" in screening_section:
         payload["market_regime_path"] = screening_section["market_regime_path"]
     return PaperRunWorkflowConfig(**payload)
@@ -159,8 +165,14 @@ def load_live_dry_run_workflow_config(path: str | Path) -> LiveDryRunWorkflowCon
         payload["sub_universe_id"] = screening_section["sub_universe_id"]
     if "universe_filters" not in payload and isinstance(screening_section.get("filters"), list):
         payload["universe_filters"] = screening_section["filters"]
+    if "reference_data_root" not in payload and "reference_data_root" in screening_section:
+        payload["reference_data_root"] = screening_section["reference_data_root"]
     if "universe_membership_path" not in payload and "membership_history_path" in screening_section:
         payload["universe_membership_path"] = screening_section["membership_history_path"]
+    if "taxonomy_snapshot_path" not in payload and "taxonomy_snapshot_path" in screening_section:
+        payload["taxonomy_snapshot_path"] = screening_section["taxonomy_snapshot_path"]
+    if "benchmark_mapping_path" not in payload and "benchmark_mapping_path" in screening_section:
+        payload["benchmark_mapping_path"] = screening_section["benchmark_mapping_path"]
     if "market_regime_path" not in payload and "market_regime_path" in screening_section:
         payload["market_regime_path"] = screening_section["market_regime_path"]
     return LiveDryRunWorkflowConfig(**payload)

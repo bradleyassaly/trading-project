@@ -3,6 +3,11 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
+from trading_platform.reference_data.models import (
+    ReferenceDataCoverageSummary,
+    ReferenceDataVersionManifest,
+)
+
 
 def _csv_scalar(value: Any) -> Any:
     if value is None:
@@ -288,6 +293,8 @@ class UniverseBuildBundle:
     membership_records: list[UniverseMembershipRecord] = field(default_factory=list)
     summary: UniverseBuildSummary | None = None
     enrichment_summary: UniverseEnrichmentSummary | None = None
+    reference_data_coverage_summary: ReferenceDataCoverageSummary | None = None
+    reference_data_manifest: ReferenceDataVersionManifest | None = None
 
     @property
     def eligible_symbols(self) -> list[str]:
@@ -310,4 +317,10 @@ class UniverseBuildBundle:
             "membership_records": [row.to_dict() for row in self.membership_records],
             "summary": self.summary.to_dict() if self.summary is not None else None,
             "enrichment_summary": self.enrichment_summary.to_dict() if self.enrichment_summary is not None else None,
+            "reference_data_coverage_summary": self.reference_data_coverage_summary.to_dict()
+            if self.reference_data_coverage_summary is not None
+            else None,
+            "reference_data_manifest": self.reference_data_manifest.to_dict()
+            if self.reference_data_manifest is not None
+            else None,
         }

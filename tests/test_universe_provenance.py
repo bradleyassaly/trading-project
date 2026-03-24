@@ -57,6 +57,8 @@ def test_write_universe_provenance_artifacts_writes_expected_files(tmp_path: Pat
     assert paths["universe_membership_csv"].exists()
     assert paths["universe_filter_results_csv"].exists()
     assert paths["universe_build_summary_json"].exists()
+    assert paths["reference_data_coverage_summary_json"].exists()
+    assert paths["membership_resolution_audit_csv"].exists()
     membership_df = pd.read_csv(paths["universe_membership_csv"])
     assert membership_df.iloc[0]["symbol"] == "AAPL"
 

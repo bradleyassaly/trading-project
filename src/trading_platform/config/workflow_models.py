@@ -170,7 +170,10 @@ class PaperRunWorkflowConfig:
     ensemble_minimum_member_metric: float | None = None
     sub_universe_id: str | None = None
     universe_filters: list[dict[str, Any]] = field(default_factory=list)
+    reference_data_root: str | None = None
     universe_membership_path: str | None = None
+    taxonomy_snapshot_path: str | None = None
+    benchmark_mapping_path: str | None = None
     market_regime_path: str | None = None
     data_sources: dict[str, Any] = field(default_factory=dict)
 
@@ -218,7 +221,10 @@ class LiveDryRunWorkflowConfig:
     benchmark: str | None = None
     sub_universe_id: str | None = None
     universe_filters: list[dict[str, Any]] = field(default_factory=list)
+    reference_data_root: str | None = None
     universe_membership_path: str | None = None
+    taxonomy_snapshot_path: str | None = None
+    benchmark_mapping_path: str | None = None
     market_regime_path: str | None = None
 
     def __post_init__(self) -> None:

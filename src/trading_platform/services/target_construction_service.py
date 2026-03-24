@@ -180,8 +180,11 @@ def _build_universe_bundle(config: PaperTradingConfig) -> UniverseBuildBundle:
         sub_universe_id=config.sub_universe_id,
         filter_definitions=config.universe_filters,
         feature_loader=load_feature_frame,
+        reference_data_root=config.reference_data_root,
         group_map_path=config.group_map_path,
         membership_history_path=config.universe_membership_path,
+        taxonomy_snapshot_path=config.taxonomy_snapshot_path,
+        benchmark_mapping_path=config.benchmark_mapping_path,
         benchmark_id=config.benchmark,
         market_regime_path=config.market_regime_path,
     )

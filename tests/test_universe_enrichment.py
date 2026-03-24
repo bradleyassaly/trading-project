@@ -83,6 +83,75 @@ def test_write_universe_enrichment_artifacts(tmp_path: Path) -> None:
     assert paths["universe_enrichment_csv"].exists()
     assert paths["point_in_time_membership_csv"].exists()
     assert paths["universe_enrichment_summary_json"].exists()
+    assert paths["reference_data_coverage_summary_json"].exists()
+    assert paths["membership_resolution_audit_csv"].exists()
+    assert paths["taxonomy_resolution_audit_csv"].exists()
+    assert paths["benchmark_mapping_resolution_audit_csv"].exists()
+
+
+def test_universe_enrichment_prefers_versioned_reference_data(tmp_path: Path) -> None:
+    reference_root = tmp_path / "reference_data"
+    reference_root.mkdir()
+    (reference_root / "reference_data_manifest.json").write_text(
+        json.dumps(
+            {
+                "version": "2026.03.24",
+                "datasets": {
+                    "membership_history": {"version": "m1"},
+                    "taxonomy_snapshots": {"version": "t1"},
+                    "benchmark_mapping_snapshots": {"version": "b1"},
+                },
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    (reference_root / "universe_membership_history.csv").write_text(
+        "universe_id,symbol,effective_start_date,effective_end_date,membership_status,source,source_version,resolution_status,coverage_status\n"
+        "demo,AAPL,2025-01-01,,member,reference_membership,m1,confirmed,confirmed\n"
+        "demo,MSFT,2024-01-01,2024-12-31,member,reference_membership,m1,confirmed,confirmed\n",
+        encoding="utf-8",
+    )
+    (reference_root / "taxonomy_snapshots.csv").write_text(
+        "symbol,effective_start_date,effective_end_date,sector,industry,group,source,source_version,resolution_status,coverage_status\n"
+        "AAPL,2025-01-01,,Technology,Consumer Electronics,TECH,reference_taxonomy,t1,confirmed,confirmed\n"
+        "MSFT,2025-01-01,,Technology,Software,TECH,reference_taxonomy,t1,confirmed,confirmed\n",
+        encoding="utf-8",
+    )
+    (reference_root / "benchmark_mapping_snapshots.csv").write_text(
+        "symbol,effective_start_date,effective_end_date,benchmark_id,benchmark_symbol,source,source_version,resolution_status,coverage_status\n"
+        "AAPL,2025-01-01,,spy_proxy,SPY,reference_benchmark,b1,confirmed,confirmed\n",
+        encoding="utf-8",
+    )
+    frames = {
+        "AAPL": pd.DataFrame({"timestamp": pd.date_range("2025-01-01", periods=25), "close": range(100, 125), "volume": [1_000_000] * 25}),
+        "MSFT": pd.DataFrame({"timestamp": pd.date_range("2025-01-01", periods=25), "close": range(200, 225), "volume": [2_000_000] * 25}),
+        "SPY": pd.DataFrame({"timestamp": pd.date_range("2025-01-01", periods=25), "close": range(300, 325), "volume": [5_000_000] * 25}),
+    }
+
+    bundle = build_universe_provenance_bundle(
+        symbols=["AAPL", "MSFT"],
+        base_universe_id="demo",
+        sub_universe_id="demo_screened",
+        feature_loader=lambda symbol: frames[symbol],
+        reference_data_root=str(reference_root),
+        benchmark_id="equal_weight",
+    )
+
+    enrichment = {row.symbol: row for row in bundle.enrichment_records}
+    membership = {row.symbol: row for row in bundle.point_in_time_membership}
+
+    assert membership["AAPL"].membership_source == "reference_membership"
+    assert membership["AAPL"].membership_resolution_status == "confirmed"
+    assert membership["MSFT"].membership_status == "not_member"
+    assert enrichment["AAPL"].taxonomy.taxonomy_source == "reference_taxonomy"
+    assert enrichment["AAPL"].benchmark_context.benchmark_id == "spy_proxy"
+    assert enrichment["AAPL"].benchmark_context.benchmark_symbol == "SPY"
+    assert enrichment["AAPL"].benchmark_context.benchmark_source == "reference_benchmark"
+    assert bundle.reference_data_manifest is not None
+    assert bundle.reference_data_manifest.version == "2026.03.24"
+    assert bundle.reference_data_coverage_summary is not None
+    assert bundle.reference_data_coverage_summary.confirmed_membership_count == 2
 
 
 def test_target_construction_includes_enrichment_in_candidate_metadata(monkeypatch, tmp_path: Path) -> None:

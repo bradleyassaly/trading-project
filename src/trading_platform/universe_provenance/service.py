@@ -6,6 +6,16 @@ from typing import Any, Callable
 
 import pandas as pd
 
+from trading_platform.reference_data.models import ReferenceDataCoverageSummary
+from trading_platform.reference_data.service import (
+    load_benchmark_mapping_snapshots,
+    load_membership_history,
+    load_reference_data_manifest,
+    load_taxonomy_snapshots,
+    resolve_benchmark_mapping_snapshot,
+    resolve_membership_snapshot,
+    resolve_taxonomy_snapshot,
+)
 from trading_platform.regime.service import load_market_regime
 from trading_platform.signals.loaders import load_feature_frame
 from trading_platform.universe_provenance.models import (
@@ -79,27 +89,6 @@ def _load_taxonomy_map(path: str | None, symbols: list[str]) -> dict[str, dict[s
     return taxonomy_map
 
 
-def _load_membership_history(
-    membership_history_path: str | None,
-    base_universe_id: str | None,
-) -> pd.DataFrame:
-    if not membership_history_path:
-        return pd.DataFrame()
-    path = Path(membership_history_path)
-    if not path.exists():
-        return pd.DataFrame()
-    frame = pd.read_csv(path)
-    if "symbol" not in frame.columns:
-        return pd.DataFrame()
-    frame["symbol"] = frame["symbol"].astype(str).str.upper()
-    if "base_universe_id" in frame.columns and base_universe_id:
-        frame = frame[frame["base_universe_id"].astype(str) == str(base_universe_id)]
-    for column in ("effective_start", "effective_end"):
-        if column in frame.columns:
-            frame[column] = pd.to_datetime(frame[column], errors="coerce")
-    return frame
-
-
 def _resolve_point_in_time_membership(
     *,
     symbol: str,
@@ -107,38 +96,31 @@ def _resolve_point_in_time_membership(
     base_universe_id: str | None,
     membership_history: pd.DataFrame,
 ) -> PointInTimeUniverseMembership:
-    as_of_ts = pd.Timestamp(as_of)
-    if not membership_history.empty:
-        symbol_rows = membership_history[membership_history["symbol"] == symbol]
-        if not symbol_rows.empty and "effective_start" in symbol_rows.columns:
-            matches = symbol_rows[
-                (symbol_rows["effective_start"].isna() | (symbol_rows["effective_start"] <= as_of_ts))
-                & (symbol_rows["effective_end"].isna() | (symbol_rows["effective_end"] >= as_of_ts))
-            ]
-            if not matches.empty:
-                row = matches.iloc[0]
-                return PointInTimeUniverseMembership(
-                    symbol=symbol,
-                    as_of=as_of,
-                    base_universe_id=base_universe_id,
-                    membership_status="member",
-                    membership_source="point_in_time_membership_file",
-                    membership_resolution_status="confirmed",
-                    membership_confidence=1.0,
-                    effective_start=str(row.get("effective_start").date()) if pd.notna(row.get("effective_start")) else None,
-                    effective_end=str(row.get("effective_end").date()) if pd.notna(row.get("effective_end")) else None,
-                )
-            if not symbol_rows.empty:
-                return PointInTimeUniverseMembership(
-                    symbol=symbol,
-                    as_of=as_of,
-                    base_universe_id=base_universe_id,
-                    membership_status="not_member",
-                    membership_source="point_in_time_membership_file",
-                    membership_resolution_status="confirmed",
-                    membership_confidence=1.0,
-                    unavailable_reason="outside_effective_membership_window",
-                )
+    snapshot = resolve_membership_snapshot(
+        symbol=symbol,
+        as_of_date=as_of,
+        universe_id=base_universe_id,
+        membership_history=membership_history,
+    )
+    if snapshot is not None:
+        metadata = dict(snapshot.metadata)
+        return PointInTimeUniverseMembership(
+            symbol=symbol,
+            as_of=as_of,
+            base_universe_id=base_universe_id,
+            membership_status=snapshot.membership_status,
+            membership_source=str(snapshot.source or "reference_data"),
+            membership_resolution_status=snapshot.resolution_status,
+            membership_confidence=1.0 if snapshot.resolution_status == "confirmed" else 0.75,
+            effective_start=metadata.get("effective_start_date"),
+            effective_end=metadata.get("effective_end_date"),
+            unavailable_reason=None if snapshot.membership_status == "member" else "outside_effective_membership_window",
+            metadata={
+                "coverage_status": snapshot.coverage_status,
+                "source_version": snapshot.source_version,
+                "notes": snapshot.notes,
+            },
+        )
     return PointInTimeUniverseMembership(
         symbol=symbol,
         as_of=as_of,
@@ -179,6 +161,35 @@ def _build_regime_context(as_of: str, market_regime_path: str | None) -> tuple[s
     if regime_label is None:
         return None, "market_regime_json", "unavailable"
     return regime_label, "market_regime_json", "confirmed"
+
+
+def _load_legacy_taxonomy_map(path: str | None, symbols: list[str]) -> dict[str, dict[str, str | None]]:
+    return _load_taxonomy_map(path, symbols)
+
+
+def _resolve_taxonomy_payload(
+    *,
+    symbol: str,
+    as_of: str,
+    taxonomy_snapshots: pd.DataFrame,
+    legacy_taxonomy_map: dict[str, dict[str, str | None]],
+) -> dict[str, str | None]:
+    snapshot = resolve_taxonomy_snapshot(symbol=symbol, as_of_date=as_of, taxonomy_snapshots=taxonomy_snapshots)
+    if snapshot is not None:
+        return {
+            "sector": snapshot.sector,
+            "industry": snapshot.industry,
+            "group": snapshot.group,
+            "source": snapshot.source or "reference_data",
+            "resolution_status": snapshot.resolution_status,
+            "coverage_status": snapshot.coverage_status,
+            "source_version": snapshot.source_version,
+            "notes": snapshot.notes,
+        }
+    return legacy_taxonomy_map.get(
+        symbol,
+        {"sector": None, "industry": None, "group": None, "source": "taxonomy_unavailable", "resolution_status": "unavailable"},
+    )
 
 
 def parse_universe_filter_definitions(
@@ -449,8 +460,11 @@ def build_universe_provenance_bundle(
     sub_universe_id: str | None = None,
     filter_definitions: list[dict[str, Any] | UniverseFilterDefinition] | None = None,
     feature_loader: Callable[[str], pd.DataFrame] = load_feature_frame,
+    reference_data_root: str | None = None,
     group_map_path: str | None = None,
     membership_history_path: str | None = None,
+    taxonomy_snapshot_path: str | None = None,
+    benchmark_mapping_path: str | None = None,
     benchmark_id: str | None = None,
     market_regime_path: str | None = None,
 ) -> UniverseBuildBundle:
@@ -468,9 +482,31 @@ def build_universe_provenance_bundle(
     resolved_base_universe_id = base_universe_id or "custom_symbols"
     resolved_sub_universe_id = sub_universe_id or (f"{resolved_base_universe_id}_eligible" if parsed_filters else resolved_base_universe_id)
     universe_id = resolved_sub_universe_id or resolved_base_universe_id
-    taxonomy_map = _load_taxonomy_map(group_map_path, base_symbols)
+    legacy_taxonomy_map = _load_legacy_taxonomy_map(group_map_path, base_symbols)
+    taxonomy_snapshots = load_taxonomy_snapshots(
+        reference_data_root=reference_data_root,
+        taxonomy_snapshot_path=taxonomy_snapshot_path,
+    )
+    taxonomy_map = {
+        symbol: _resolve_taxonomy_payload(
+            symbol=symbol,
+            as_of=as_of,
+            taxonomy_snapshots=taxonomy_snapshots,
+            legacy_taxonomy_map=legacy_taxonomy_map,
+        )
+        for symbol in base_symbols
+    }
     group_map = {symbol: str(payload.get("group")) for symbol, payload in taxonomy_map.items() if payload.get("group")}
-    membership_history = _load_membership_history(membership_history_path, resolved_base_universe_id)
+    membership_history = load_membership_history(
+        reference_data_root=reference_data_root,
+        membership_history_path=membership_history_path,
+        universe_id=resolved_base_universe_id,
+    )
+    benchmark_mappings = load_benchmark_mapping_snapshots(
+        reference_data_root=reference_data_root,
+        benchmark_mapping_path=benchmark_mapping_path,
+    )
+    reference_data_manifest = load_reference_data_manifest(reference_data_root)
     regime_label, regime_source, regime_resolution_status = _build_regime_context(as_of, market_regime_path)
 
     active = {symbol: True for symbol in base_symbols}
@@ -557,25 +593,61 @@ def build_universe_provenance_bundle(
                 failures_by_symbol[symbol].append(result.exclusion_reason or result.filter_name)
 
     membership_records: list[UniverseMembershipRecord] = []
-    benchmark_return = None
-    benchmark_source = None
-    benchmark_resolution_status = "unavailable"
-    benchmark_symbol = None
+    benchmark_return_by_symbol: dict[str, float | None] = {}
+    benchmark_source_by_symbol: dict[str, str | None] = {}
+    benchmark_resolution_by_symbol: dict[str, str] = {}
+    benchmark_id_by_symbol: dict[str, str | None] = {}
+    benchmark_symbol_by_symbol: dict[str, str | None] = {}
+
+    equal_weight_return = None
     if benchmark_id == "equal_weight":
         series = [value for value in asset_return_map_20.values() if value is not None]
         if series:
-            benchmark_return = float(sum(series) / len(series))
-            benchmark_source = "equal_weight_universe_proxy"
-            benchmark_resolution_status = "confirmed_synthetic"
-    elif benchmark_id:
-        benchmark_symbol = benchmark_id
-        benchmark_frame, benchmark_error = _feature_metrics(str(benchmark_id).upper(), feature_cache, feature_loader)
-        benchmark_return = _window_return(benchmark_frame, window=20)
-        if benchmark_return is not None:
-            benchmark_source = "benchmark_feature_frame"
-            benchmark_resolution_status = "confirmed"
-        else:
-            benchmark_source = benchmark_error or "benchmark_unavailable"
+            equal_weight_return = float(sum(series) / len(series))
+
+    for symbol in base_symbols:
+        resolved_benchmark_id = benchmark_id
+        resolved_benchmark_symbol = None
+        benchmark_return = None
+        benchmark_source = None
+        benchmark_resolution_status = "unavailable"
+        benchmark_snapshot = resolve_benchmark_mapping_snapshot(
+            symbol=symbol,
+            as_of_date=as_of,
+            benchmark_mappings=benchmark_mappings,
+        )
+        if benchmark_snapshot is not None and (benchmark_snapshot.benchmark_id or benchmark_snapshot.benchmark_symbol):
+            resolved_benchmark_id = benchmark_snapshot.benchmark_id or benchmark_id
+            resolved_benchmark_symbol = benchmark_snapshot.benchmark_symbol
+            if resolved_benchmark_symbol:
+                benchmark_frame, benchmark_error = _feature_metrics(str(resolved_benchmark_symbol).upper(), feature_cache, feature_loader)
+                benchmark_return = _window_return(benchmark_frame, window=20)
+                benchmark_source = str(benchmark_snapshot.source or "reference_data")
+                benchmark_resolution_status = benchmark_snapshot.resolution_status
+                if benchmark_return is None:
+                    benchmark_source = benchmark_error or benchmark_source
+            else:
+                benchmark_source = str(benchmark_snapshot.source or "reference_data")
+                benchmark_resolution_status = benchmark_snapshot.resolution_status
+        elif benchmark_id == "equal_weight":
+            benchmark_return = equal_weight_return
+            if benchmark_return is not None:
+                benchmark_source = "equal_weight_universe_proxy"
+                benchmark_resolution_status = "confirmed_synthetic"
+        elif benchmark_id:
+            resolved_benchmark_symbol = benchmark_id
+            benchmark_frame, benchmark_error = _feature_metrics(str(benchmark_id).upper(), feature_cache, feature_loader)
+            benchmark_return = _window_return(benchmark_frame, window=20)
+            if benchmark_return is not None:
+                benchmark_source = "benchmark_feature_frame"
+                benchmark_resolution_status = "confirmed"
+            else:
+                benchmark_source = benchmark_error or "benchmark_unavailable"
+        benchmark_return_by_symbol[symbol] = benchmark_return
+        benchmark_source_by_symbol[symbol] = benchmark_source
+        benchmark_resolution_by_symbol[symbol] = benchmark_resolution_status
+        benchmark_id_by_symbol[symbol] = resolved_benchmark_id
+        benchmark_symbol_by_symbol[symbol] = resolved_benchmark_symbol
 
     for symbol in base_symbols:
         included = active[symbol]
@@ -598,14 +670,14 @@ def build_universe_provenance_bundle(
         benchmark_context = BenchmarkContextSnapshot(
             symbol=symbol,
             as_of=as_of,
-            benchmark_id=benchmark_id,
-            benchmark_symbol=benchmark_symbol,
-            relative_strength_20=(asset_return_map_20[symbol] - benchmark_return) if asset_return_map_20[symbol] is not None and benchmark_return is not None else None,
-            benchmark_return_20=benchmark_return,
+            benchmark_id=benchmark_id_by_symbol[symbol],
+            benchmark_symbol=benchmark_symbol_by_symbol[symbol],
+            relative_strength_20=(asset_return_map_20[symbol] - benchmark_return_by_symbol[symbol]) if asset_return_map_20[symbol] is not None and benchmark_return_by_symbol[symbol] is not None else None,
+            benchmark_return_20=benchmark_return_by_symbol[symbol],
             asset_return_20=asset_return_map_20[symbol],
-            benchmark_source=benchmark_source,
-            benchmark_resolution_status=benchmark_resolution_status,
-            unavailable_reason=None if benchmark_return is not None else "benchmark_context_unavailable",
+            benchmark_source=benchmark_source_by_symbol[symbol],
+            benchmark_resolution_status=benchmark_resolution_by_symbol[symbol],
+            unavailable_reason=None if benchmark_return_by_symbol[symbol] is not None else "benchmark_context_unavailable",
         )
         missing_fields = [
             field_name
@@ -667,8 +739,8 @@ def build_universe_provenance_bundle(
                 group_label=taxonomy_snapshot.group,
                 sector=taxonomy_snapshot.sector,
                 industry=taxonomy_snapshot.industry,
-                benchmark_id=benchmark_id,
-                benchmark_symbol=benchmark_symbol,
+                benchmark_id=benchmark_id_by_symbol[symbol],
+                benchmark_symbol=benchmark_symbol_by_symbol[symbol],
                 regime_label=regime_label,
                 metadata=metadata_by_symbol[symbol],
             )
@@ -719,7 +791,32 @@ def build_universe_provenance_bundle(
         metadata={
             "membership_history_path": membership_history_path,
             "benchmark_id": benchmark_id,
+            "reference_data_root": reference_data_root,
+            "taxonomy_snapshot_path": taxonomy_snapshot_path,
+            "benchmark_mapping_path": benchmark_mapping_path,
             "market_regime_path": market_regime_path,
+        },
+    )
+    reference_data_coverage_summary = ReferenceDataCoverageSummary(
+        as_of_date=as_of,
+        universe_id=resolved_base_universe_id,
+        confirmed_membership_count=sum(1 for row in point_in_time_membership if row.membership_resolution_status == "confirmed"),
+        fallback_membership_count=sum(1 for row in point_in_time_membership if row.membership_resolution_status in {"static_fallback", "fallback"}),
+        unavailable_membership_count=sum(1 for row in point_in_time_membership if row.membership_resolution_status == "unavailable"),
+        confirmed_taxonomy_count=sum(1 for row in enrichment_records if row.taxonomy.taxonomy_resolution_status == "confirmed"),
+        fallback_taxonomy_count=sum(1 for row in enrichment_records if row.taxonomy.taxonomy_resolution_status not in {None, "confirmed", "unavailable"}),
+        unavailable_taxonomy_count=sum(1 for row in enrichment_records if row.taxonomy.taxonomy_resolution_status in {None, "unavailable"}),
+        confirmed_benchmark_mapping_count=sum(1 for row in enrichment_records if row.benchmark_context.benchmark_resolution_status in {"confirmed", "confirmed_synthetic"}),
+        fallback_benchmark_mapping_count=sum(1 for row in enrichment_records if row.benchmark_context.benchmark_resolution_status not in {None, "confirmed", "confirmed_synthetic", "unavailable"}),
+        unavailable_benchmark_mapping_count=sum(1 for row in enrichment_records if row.benchmark_context.benchmark_resolution_status in {None, "unavailable"}),
+        source_versions={
+            key: str(value.get("version"))
+            for key, value in ((reference_data_manifest.datasets if reference_data_manifest is not None else {}) or {}).items()
+            if isinstance(value, dict) and value.get("version") is not None
+        },
+        metadata={
+            "manifest_version": reference_data_manifest.version if reference_data_manifest is not None else None,
+            "reference_data_root": reference_data_root,
         },
     )
     return UniverseBuildBundle(
@@ -741,6 +838,8 @@ def build_universe_provenance_bundle(
         membership_records=membership_records,
         summary=summary,
         enrichment_summary=enrichment_summary,
+        reference_data_coverage_summary=reference_data_coverage_summary,
+        reference_data_manifest=reference_data_manifest,
     )
 
 
@@ -886,6 +985,64 @@ def write_universe_provenance_artifacts(
     _write_csv("universe_enrichment.csv", [row.flat_dict() for row in bundle.enrichment_records])
     _write_csv("point_in_time_membership.csv", [row.flat_dict() for row in bundle.point_in_time_membership])
     _write_json("universe_enrichment_summary.json", bundle.enrichment_summary.to_dict() if bundle.enrichment_summary is not None else None)
+    _write_json(
+        "reference_data_coverage_summary.json",
+        bundle.reference_data_coverage_summary.to_dict() if bundle.reference_data_coverage_summary is not None else None,
+    )
+    _write_csv(
+        "membership_resolution_audit.csv",
+        [
+            {
+                "symbol": row.symbol,
+                "as_of": row.as_of,
+                "base_universe_id": row.base_universe_id,
+                "membership_status": row.membership_status,
+                "membership_source": row.membership_source,
+                "membership_resolution_status": row.membership_resolution_status,
+                "membership_confidence": row.membership_confidence,
+                "effective_start": row.effective_start,
+                "effective_end": row.effective_end,
+                "coverage_status": row.metadata.get("coverage_status") if isinstance(row.metadata, dict) else None,
+                "source_version": row.metadata.get("source_version") if isinstance(row.metadata, dict) else None,
+                "notes": row.metadata.get("notes") if isinstance(row.metadata, dict) else None,
+                "unavailable_reason": row.unavailable_reason,
+            }
+            for row in bundle.point_in_time_membership
+        ],
+    )
+    _write_csv(
+        "taxonomy_resolution_audit.csv",
+        [
+            {
+                "symbol": row.symbol,
+                "as_of": row.as_of,
+                "sector": row.taxonomy.sector,
+                "industry": row.taxonomy.industry,
+                "group": row.taxonomy.group,
+                "taxonomy_source": row.taxonomy.taxonomy_source,
+                "taxonomy_resolution_status": row.taxonomy.taxonomy_resolution_status,
+                "unavailable_reason": row.taxonomy.unavailable_reason,
+            }
+            for row in bundle.enrichment_records
+        ],
+    )
+    _write_csv(
+        "benchmark_mapping_resolution_audit.csv",
+        [
+            {
+                "symbol": row.symbol,
+                "as_of": row.as_of,
+                "benchmark_id": row.benchmark_context.benchmark_id,
+                "benchmark_symbol": row.benchmark_context.benchmark_symbol,
+                "benchmark_source": row.benchmark_context.benchmark_source,
+                "benchmark_resolution_status": row.benchmark_context.benchmark_resolution_status,
+                "benchmark_return_20": row.benchmark_context.benchmark_return_20,
+                "relative_strength_20": row.benchmark_context.relative_strength_20,
+                "unavailable_reason": row.benchmark_context.unavailable_reason,
+            }
+            for row in bundle.enrichment_records
+        ],
+    )
     _write_csv(
         "sub_universe_snapshot.csv",
         [
@@ -902,4 +1059,6 @@ def write_universe_provenance_artifacts(
             if row.inclusion_status == "included"
         ],
     )
+    if bundle.reference_data_manifest is not None:
+        _write_json("reference_data_manifest.json", bundle.reference_data_manifest.to_dict())
     return paths

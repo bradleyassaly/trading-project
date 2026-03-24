@@ -89,7 +89,10 @@ class LivePreviewConfig:
     mock_positions_path: str | None = None
     sub_universe_id: str | None = None
     universe_filters: list[dict[str, Any]] = field(default_factory=list)
+    reference_data_root: str | None = None
     universe_membership_path: str | None = None
+    taxonomy_snapshot_path: str | None = None
+    benchmark_mapping_path: str | None = None
     market_regime_path: str | None = None
     output_dir: Path = Path("artifacts/live_dry_run")
 
@@ -221,7 +224,10 @@ def _build_paper_config(config: LivePreviewConfig) -> PaperTradingConfig:
         reserve_cash_pct=config.reserve_cash_pct,
         sub_universe_id=config.sub_universe_id,
         universe_filters=list(config.universe_filters),
+        reference_data_root=config.reference_data_root,
         universe_membership_path=config.universe_membership_path,
+        taxonomy_snapshot_path=config.taxonomy_snapshot_path,
+        benchmark_mapping_path=config.benchmark_mapping_path,
         market_regime_path=config.market_regime_path,
     )
 
@@ -232,7 +238,10 @@ def _build_target_preview(
     if (
         not config.universe_filters
         and not config.sub_universe_id
+        and not config.reference_data_root
         and not config.universe_membership_path
+        and not config.taxonomy_snapshot_path
+        and not config.benchmark_mapping_path
         and not config.market_regime_path
     ):
         paper_config = _build_paper_config(config)
@@ -241,6 +250,12 @@ def _build_target_preview(
             base_universe_id=config.universe_name,
             sub_universe_id=config.sub_universe_id,
             filter_definitions=[],
+            reference_data_root=config.reference_data_root,
+            membership_history_path=config.universe_membership_path,
+            taxonomy_snapshot_path=config.taxonomy_snapshot_path,
+            benchmark_mapping_path=config.benchmark_mapping_path,
+            benchmark_id=config.benchmark,
+            market_regime_path=config.market_regime_path,
         )
         if config.strategy == "xsec_momentum_topn":
             xsec_result = _compute_latest_xsec_target_weights(config=paper_config)

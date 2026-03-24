@@ -357,6 +357,11 @@ The dashboard and downstream tooling should prefer the summary and history files
 - `universe_enrichment.csv`
 - `point_in_time_membership.csv`
 - `universe_enrichment_summary.json`
+- `reference_data_coverage_summary.json`
+- `membership_resolution_audit.csv`
+- `taxonomy_resolution_audit.csv`
+- `benchmark_mapping_resolution_audit.csv`
+- `reference_data_manifest.json` when a maintained manifest is present
 - `candidate_snapshot.json`
 - `candidate_snapshot.csv`
 - `trade_decisions.json`
@@ -384,6 +389,11 @@ The dashboard and downstream tooling should prefer the summary and history files
 - `universe_enrichment.csv`
 - `point_in_time_membership.csv`
 - `universe_enrichment_summary.json`
+- `reference_data_coverage_summary.json`
+- `membership_resolution_audit.csv`
+- `taxonomy_resolution_audit.csv`
+- `benchmark_mapping_resolution_audit.csv`
+- `reference_data_manifest.json` when a maintained manifest is present
 - `candidate_snapshot.json`
 - `trade_decisions.json`
 - `execution_decisions.json`
@@ -642,13 +652,17 @@ Current point-in-time behavior:
 - if no point-in-time history is available, the system falls back to the configured base universe and labels it `static_fallback`
 - custom symbol lists remain explicit base-universe membership inputs
 - symbols outside a confirmed point-in-time membership window are excluded before later filters and ranking
+- if maintained local reference data is available, the enrichment layer prefers that history before any legacy fallback files
 
 Suggested screening config shape:
 
 ```yaml
 screening:
   sub_universe_id: liquid_trend_candidates
+  reference_data_root: artifacts/reference_data/v1
   membership_history_path: artifacts/universe_membership/nasdaq100_membership.csv
+  taxonomy_snapshot_path: artifacts/reference_data/v1/taxonomy_snapshots.csv
+  benchmark_mapping_path: artifacts/reference_data/v1/benchmark_mapping_snapshots.csv
   market_regime_path: artifacts/regime
   filters:
     - filter_name: min_price
@@ -694,6 +708,81 @@ Current limits:
 - exact historical index membership still depends on user-provided membership-history files
 - benchmark context is currently lightweight and uses either a configured benchmark symbol or a synthetic equal-weight universe proxy
 - regime enrichment is optional and depends on an existing `market_regime.json` artifact
+
+## Versioned Local Reference Data
+
+The universe enrichment layer now supports maintained local reference datasets so historical context is reproducible instead of depending only on runtime fallback logic.
+
+Reference-data conventions:
+
+- set `screening.reference_data_root` to a versioned directory such as `artifacts/reference_data/v1`
+- the loader looks for:
+  - `universe_membership_history.csv`
+  - `taxonomy_snapshots.csv`
+  - `benchmark_mapping_snapshots.csv`
+  - `reference_data_manifest.json`
+- explicit file paths still override the default filenames if you need a non-standard layout
+- if maintained files are missing, the system falls back to the older behavior and labels that fallback explicitly in the stored artifacts
+
+Resolution statuses remain explicit:
+
+- `confirmed`: resolved from maintained point-in-time reference data or a directly supported benchmark frame
+- `inferred`: reserved for future heuristic point-in-time resolution paths
+- `fallback`: resolved from weaker local assumptions or compatibility paths
+- `static_fallback`: the symbol remained in the configured base universe because no point-in-time membership history existed
+- `unavailable`: the field could not be resolved from maintained data or fallback logic
+
+Recommended local layout:
+
+```text
+artifacts/
+  reference_data/
+    v1/
+      reference_data_manifest.json
+      universe_membership_history.csv
+      taxonomy_snapshots.csv
+      benchmark_mapping_snapshots.csv
+```
+
+The manifest is intentionally simple. A minimal example:
+
+```json
+{
+  "version": "2026.03.24",
+  "datasets": {
+    "membership_history": {"version": "m1"},
+    "taxonomy_snapshots": {"version": "t1"},
+    "benchmark_mapping_snapshots": {"version": "b1"}
+  }
+}
+```
+
+New audit and coverage artifacts:
+
+- `reference_data_coverage_summary.json`
+- `membership_resolution_audit.csv`
+- `taxonomy_resolution_audit.csv`
+- `benchmark_mapping_resolution_audit.csv`
+- `reference_data_manifest.json` is copied into the run output when present
+
+These make it easy to inspect:
+
+- how many symbols were resolved from maintained reference data versus fallback logic
+- which membership decisions were confirmed point-in-time and which remained fallback-heavy
+- which taxonomy and benchmark fields came from maintained dated snapshots
+- which symbols still need better local reference coverage
+
+How this improves explainability:
+
+- trade and candidate explanations can now reference maintained membership, taxonomy, and benchmark sources instead of only best-effort runtime derivations
+- historical universe eligibility becomes more auditable because effective-date snapshots are preserved locally
+- benchmark-relative and taxonomy-aware screens have cleaner upstream provenance and lower `unavailable` rates
+
+Current limitations and maintenance notes:
+
+- the system only uses local maintained files; it does not fetch vendor data automatically
+- richer inferred-resolution logic is intentionally deferred until there is a reliable local source for that inference
+- refreshing coverage is a file maintenance task today: add or replace the versioned snapshot files and bump the manifest version when needed
 
 ## Paper Slippage Modeling
 
