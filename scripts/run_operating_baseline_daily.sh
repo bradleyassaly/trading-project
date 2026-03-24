@@ -20,8 +20,17 @@ else
   PYTHON_BIN="python"
 fi
 
+if [[ -f "${REPO_ROOT}/.venv/bin/activate" ]]; then
+  # shellcheck disable=SC1091
+  source "${REPO_ROOT}/.venv/bin/activate"
+elif [[ -f "${REPO_ROOT}/.venv/Scripts/activate" ]]; then
+  # shellcheck disable=SC1091
+  source "${REPO_ROOT}/.venv/Scripts/activate"
+fi
+
 "${PYTHON_BIN}" -m trading_platform.system.operating_baseline_daily \
   --config configs/orchestration_operating_baseline.yaml \
   --summary-dir artifacts/operating_baseline_daily \
+  --alerts-config configs/alerts.yaml \
   --log-path "${LOG_PATH}" \
-  "$@" 2>&1 | tee "${LOG_PATH}"
+  "$@" 2>&1 | tee -a "${LOG_PATH}"
