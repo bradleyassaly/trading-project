@@ -264,6 +264,63 @@ def test_build_signal_equity_context_momentum_uses_relative_vol_and_breadth_feat
     assert signal.iloc[3] == pytest.approx(0.6)
 
 
+def test_build_signal_volatility_adjusted_momentum_alias_matches_existing_family() -> None:
+    df = pd.DataFrame({"close": [100.0, 102.0, 104.0, 108.0, 110.0]})
+
+    legacy = build_signal(df, signal_family="vol_adjusted_momentum", lookback=2)
+    aliased = build_signal(df, signal_family="volatility_adjusted_momentum", lookback=2)
+
+    pd.testing.assert_series_equal(legacy, aliased)
+
+
+def test_build_signal_short_horizon_mean_reversion_negates_return_zscore() -> None:
+    df = pd.DataFrame({"close": [100.0, 104.0, 103.0, 101.0, 99.0, 100.0]})
+
+    signal = build_signal(df, signal_family="short_horizon_mean_reversion", lookback=3)
+
+    assert signal.notna().sum() > 0
+    assert signal.iloc[4] > 0.0
+
+
+def test_build_signal_momentum_acceleration_compares_fast_and_slow_returns() -> None:
+    df = pd.DataFrame({"close": [100.0, 100.0, 100.0, 90.0, 95.0, 110.0]})
+
+    signal = build_signal(df, signal_family="momentum_acceleration", lookback=4)
+
+    assert pd.isna(signal.iloc[0])
+    assert signal.iloc[5] > 0.0
+
+
+def test_build_signal_cross_sectional_relative_strength_prefers_relative_return_feature() -> None:
+    df = pd.DataFrame(
+        {
+            "close": [100.0, 101.0, 102.0, 103.0],
+            "relative_return_1": [None, 0.02, 0.01, 0.03],
+        }
+    )
+
+    signal = build_signal(df, signal_family="cross_sectional_relative_strength", lookback=1)
+
+    assert pd.isna(signal.iloc[0])
+    assert signal.iloc[1] == pytest.approx(0.02)
+    assert signal.iloc[3] == pytest.approx(0.03)
+
+
+def test_build_signal_volume_shock_momentum_scales_momentum_by_volume_ratio() -> None:
+    df = pd.DataFrame(
+        {
+            "close": [100.0, 101.0, 102.0, 104.0],
+            "volume_ratio_20": [1.0, 0.5, 2.0, 1.5],
+        }
+    )
+
+    signal = build_signal(df, signal_family="volume_shock_momentum", lookback=1)
+
+    assert pd.isna(signal.iloc[0])
+    assert signal.iloc[1] == pytest.approx(0.005)
+    assert signal.iloc[2] == pytest.approx((102.0 / 101.0 - 1.0) * 2.0)
+
+
 def test_evaluate_signal_returns_expected_ic_on_perfect_rank_order() -> None:
     signal = pd.Series([1.0, 2.0, 3.0, 4.0, 5.0])
     forward_return = pd.Series([10.0, 20.0, 30.0, 40.0, 50.0])

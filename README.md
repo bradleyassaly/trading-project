@@ -555,6 +555,47 @@ Current limitations:
 - member selection currently relies on existing promoted-candidate metrics
 - ensemble paper trading is wired through the promoted-signal artifact path, not live trading
 
+## Experimental Equity-Only Signal Families
+
+The alpha research path now includes a small set of additional equity-only signal families built from the same local price and volume inputs:
+
+- `volatility_adjusted_momentum`
+- `short_horizon_mean_reversion`
+- `momentum_acceleration`
+- `cross_sectional_relative_strength`
+- `volume_shock_momentum`
+
+These stay additive and experimental:
+
+- no macro
+- no derivatives
+- no FX
+- no crypto
+- no ML meta-model
+
+Run a lightweight family comparison with:
+
+```bash
+python -m trading_platform.diagnostics.signal_family_comparison --output-root artifacts/diagnostics/signal_family_comparison --base-config configs/orchestration_signal_promotion_test.yaml
+```
+
+That diagnostic writes:
+
+- `signal_family_comparison.json`
+- `signal_family_comparison.md`
+- per-family repeated promotion-frequency artifacts under `artifacts/diagnostics/signal_family_comparison/<signal_family>/`
+
+Use it to compare which families actually produce:
+
+- promoted strategies
+- portfolio and paper-stage reach
+- better `portfolio_sharpe` distributions
+
+Current guidance:
+
+- keep `momentum` as the default baseline unless a family comparison run shows a clear win
+- treat the new families as equity-only experimental paths for controlled follow-up testing
+
 ### Live dry-run
 
 - `live_dry_run_summary.json`

@@ -101,6 +101,7 @@ from trading_platform.cli.commands.system_eval_show import cmd_system_eval_show
 from trading_platform.cli.commands.validate_signal import cmd_validate_signal
 from trading_platform.cli.commands.validate_live import cmd_validate_live
 from trading_platform.cli.commands.walkforward import cmd_walkforward
+from trading_platform.research.alpha_lab.signals import SUPPORTED_SIGNAL_FAMILIES
 from trading_platform.cli.commands.strategy_validation_build import cmd_strategy_validation_build
 from trading_platform.cli.common import (
     add_date_range_arguments,
@@ -215,8 +216,8 @@ def add_composite_paper_arguments(parser: argparse.ArgumentParser) -> None:
         "--signal-source",
         type=str,
         default="legacy",
-        choices=["legacy", "composite"],
-        help="Choose legacy strategy scores or the approved composite alpha signal.",
+        choices=["legacy", "composite", "ensemble"],
+        help="Choose legacy strategy scores, the approved composite alpha signal, or the promoted-signal ensemble.",
     )
     parser.add_argument(
         "--approved-model-state",
@@ -241,6 +242,14 @@ def add_composite_paper_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--max-adv-participation", type=float, default=0.05, help="Maximum ADV participation used in composite implementability constraints.")
     parser.add_argument("--max-position-pct-of-adv", type=float, default=0.1, help="Maximum single-name position size as a fraction of ADV.")
     parser.add_argument("--max-notional-per-name", type=float, default=None, help="Optional max notional per name used in composite implementability constraints.")
+    parser.add_argument("--enable-ensemble", action="store_true", help="Enable the promoted-signal ensemble overlay for paper target construction.")
+    parser.add_argument("--ensemble-mode", type=str, default="disabled", choices=["disabled", "candidate_weighted", "family_weighted"], help="How to combine eligible ensemble members.")
+    parser.add_argument("--ensemble-weight-method", type=str, default="equal", choices=["equal", "performance_weighted", "rank_weighted"], help="How to weight eligible ensemble members.")
+    parser.add_argument("--ensemble-normalize-scores", type=str, default="rank_pct", choices=["raw", "zscore", "rank_pct"], help="How to normalize member scores before ensemble aggregation.")
+    parser.add_argument("--ensemble-max-members", type=int, default=5, help="Maximum number of candidates included in the ensemble.")
+    parser.add_argument("--ensemble-max-members-per-family", type=int, default=None, help="Optional cap on included candidates from the same family.")
+    parser.add_argument("--ensemble-minimum-member-observations", type=int, default=0, help="Minimum observations required for an ensemble member.")
+    parser.add_argument("--ensemble-minimum-member-metric", type=float, default=None, help="Optional minimum metric required for ensemble inclusion.")
 
 
 def add_experiment_tracker_argument(parser: argparse.ArgumentParser) -> None:
@@ -298,6 +307,11 @@ def _add_paper_run_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--lot-size", type=int, default=1, help="Round target quantities down to this lot size")
     parser.add_argument("--reserve-cash-pct", type=float, default=0.0, help="Fraction of equity to hold back as cash")
     parser.add_argument("--execution-config", type=str, default=None, help="Optional execution realism JSON/YAML config.")
+    parser.add_argument("--use-alpaca-latest-data", action="store_true", help="Use Alpaca for the latest execution-time OHLCV bars and fall back to historical data on failure.")
+    parser.add_argument("--latest-data-max-age-seconds", type=int, default=86_400, help="Mark latest execution-time market data as stale when the latest bar exceeds this age.")
+    parser.add_argument("--slippage-model", type=str, default="none", choices=["none", "fixed_bps"], help="Optional paper-only slippage model used for expected fill pricing.")
+    parser.add_argument("--slippage-buy-bps", type=float, default=0.0, help="Paper-only buy-side slippage in basis points when --slippage-model fixed_bps is enabled.")
+    parser.add_argument("--slippage-sell-bps", type=float, default=0.0, help="Paper-only sell-side slippage in basis points when --slippage-model fixed_bps is enabled.")
     parser.add_argument("--state-path", type=str, default="artifacts/paper/paper_state.json", help="JSON file used to persist paper portfolio state")
     parser.add_argument("--output-dir", type=str, default="artifacts/paper", help="Base directory for paper-run output artifacts")
     parser.add_argument("--auto-apply-fills", action="store_true", help="Immediately apply simulated fills and update positions/cash")
@@ -371,12 +385,20 @@ def _add_alpha_research_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--symbols", nargs="+", default=None, help="Symbols to include in the alpha research run.")
     parser.add_argument("--universe", type=str, default=None, help="Named universe to evaluate instead of passing --symbols.")
     parser.add_argument("--feature-dir", type=str, default="data/features", help="Directory containing per-symbol feature parquet files.")
-    parser.add_argument("--signal-family", type=str, default="momentum", choices=["momentum", "short_term_reversal", "vol_adjusted_momentum", "equity_context_momentum"], help="Signal family to evaluate.")
+    parser.add_argument("--signal-family", type=str, default="momentum", choices=list(SUPPORTED_SIGNAL_FAMILIES), help="Signal family to evaluate.")
     parser.add_argument("--lookbacks", type=int, nargs="+", default=[5, 10, 20, 60], help="Lookback windows to test.")
     parser.add_argument("--horizons", type=int, nargs="+", default=[1, 5, 20], help="Forward return horizons to test.")
     parser.add_argument("--min-rows", type=int, default=126, help="Minimum number of usable rows required per symbol.")
     parser.add_argument("--equity-context-enabled", action="store_true", help="Enable a small equity-only context feature expansion derived from the current universe price history.")
     parser.add_argument("--equity-context-include-volume", action="store_true", help="Include a simple volume-ratio context when the feature inputs contain volume.")
+    parser.add_argument("--enable-ensemble", action="store_true", help="Build an optional ensemble score from eligible promoted members.")
+    parser.add_argument("--ensemble-mode", type=str, default="disabled", choices=["disabled", "candidate_weighted", "family_weighted"], help="How to combine ensemble members.")
+    parser.add_argument("--ensemble-weight-method", type=str, default="equal", choices=["equal", "performance_weighted", "rank_weighted"], help="How to weight eligible ensemble members.")
+    parser.add_argument("--ensemble-normalize-scores", type=str, default="rank_pct", choices=["raw", "zscore", "rank_pct"], help="How to normalize per-member scores before combination.")
+    parser.add_argument("--ensemble-max-members", type=int, default=5, help="Maximum number of members included in the ensemble.")
+    parser.add_argument("--ensemble-max-members-per-family", type=int, default=None, help="Optional family cap applied during ensemble member selection.")
+    parser.add_argument("--ensemble-minimum-member-observations", type=int, default=0, help="Minimum observations required for an ensemble member.")
+    parser.add_argument("--ensemble-minimum-member-metric", type=float, default=None, help="Optional minimum metric threshold for ensemble inclusion.")
     parser.add_argument("--top-quantile", type=float, default=0.2, help="Top quantile threshold used for spread metrics.")
     parser.add_argument("--bottom-quantile", type=float, default=0.2, help="Bottom quantile threshold used for spread metrics.")
     parser.add_argument("--output-dir", type=str, default="artifacts/alpha_research", help="Directory where alpha research artifacts will be written.")
@@ -439,7 +461,7 @@ def _add_multi_universe_arguments(parser: argparse.ArgumentParser) -> None:
     add_experiment_tracker_argument(parser)
     parser.add_argument("--universes", nargs="+", required=True, help="Named universes to evaluate in one job.")
     parser.add_argument("--feature-dir", type=str, default="data/features", help="Directory containing per-symbol feature parquet files.")
-    parser.add_argument("--signal-family", type=str, default="momentum", choices=["momentum", "short_term_reversal", "vol_adjusted_momentum", "equity_context_momentum"], help="Signal family to evaluate in each universe.")
+    parser.add_argument("--signal-family", type=str, default="momentum", choices=list(SUPPORTED_SIGNAL_FAMILIES), help="Signal family to evaluate in each universe.")
     parser.add_argument("--lookbacks", type=int, nargs="+", default=[5, 10, 20, 60], help="Lookback windows to test.")
     parser.add_argument("--horizons", type=int, nargs="+", default=[1, 5, 20], help="Forward return horizons to test.")
     parser.add_argument("--min-rows", type=int, default=126, help="Minimum number of usable rows required per symbol.")

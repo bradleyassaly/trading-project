@@ -23,6 +23,33 @@ def test_grouped_research_alpha_command_parses() -> None:
     assert args.lookbacks == [5]
 
 
+def test_grouped_research_alpha_command_parses_ensemble_args() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "research",
+            "alpha",
+            "--symbols",
+            "AAPL",
+            "--enable-ensemble",
+            "--ensemble-mode",
+            "family_weighted",
+            "--ensemble-weight-method",
+            "rank_weighted",
+            "--ensemble-normalize-scores",
+            "zscore",
+            "--ensemble-max-members",
+            "4",
+        ]
+    )
+
+    assert args.enable_ensemble is True
+    assert args.ensemble_mode == "family_weighted"
+    assert args.ensemble_weight_method == "rank_weighted"
+    assert args.ensemble_normalize_scores == "zscore"
+    assert args.ensemble_max_members == 4
+
+
 def test_grouped_research_registry_build_command_parses() -> None:
     parser = build_parser()
     args = parser.parse_args(
@@ -1072,6 +1099,65 @@ def test_grouped_paper_run_command_parses_execution_config() -> None:
     assert args.execution_config == "configs/execution.yaml"
 
 
+def test_grouped_paper_run_command_parses_alpaca_latest_flag() -> None:
+    parser = build_parser()
+    args = parser.parse_args(["paper", "run", "--symbols", "AAPL", "--use-alpaca-latest-data"])
+
+    assert args.use_alpaca_latest_data is True
+
+
+def test_grouped_paper_run_command_parses_slippage_and_freshness_flags() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "paper",
+            "run",
+            "--symbols",
+            "AAPL",
+            "--slippage-model",
+            "fixed_bps",
+            "--slippage-buy-bps",
+            "5",
+            "--slippage-sell-bps",
+            "7",
+            "--latest-data-max-age-seconds",
+            "900",
+        ]
+    )
+
+    assert args.slippage_model == "fixed_bps"
+    assert args.slippage_buy_bps == 5.0
+    assert args.slippage_sell_bps == 7.0
+    assert args.latest_data_max_age_seconds == 900
+
+
+def test_grouped_paper_run_command_parses_ensemble_flags() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "paper",
+            "run",
+            "--symbols",
+            "AAPL",
+            "--signal-source",
+            "ensemble",
+            "--enable-ensemble",
+            "--ensemble-mode",
+            "candidate_weighted",
+            "--ensemble-weight-method",
+            "performance_weighted",
+            "--ensemble-max-members",
+            "3",
+        ]
+    )
+
+    assert args.signal_source == "ensemble"
+    assert args.enable_ensemble is True
+    assert args.ensemble_mode == "candidate_weighted"
+    assert args.ensemble_weight_method == "performance_weighted"
+    assert args.ensemble_max_members == 3
+
+
 def test_grouped_paper_run_command_parses_preset() -> None:
     parser = build_parser()
     args = parser.parse_args(["paper", "run", "--preset", "xsec_nasdaq100_momentum_v1_deploy"])
@@ -1085,6 +1171,14 @@ def test_grouped_paper_run_preset_scheduled_command_parses() -> None:
     args = parser.parse_args(["paper", "run-preset-scheduled", "--preset", "xsec_nasdaq100_momentum_v1_deploy"])
 
     assert args.paper_command == "run-preset-scheduled"
+    assert args.preset == "xsec_nasdaq100_momentum_v1_deploy"
+
+
+def test_grouped_paper_schedule_command_parses() -> None:
+    parser = build_parser()
+    args = parser.parse_args(["paper", "schedule", "--preset", "xsec_nasdaq100_momentum_v1_deploy"])
+
+    assert args.paper_command == "schedule"
     assert args.preset == "xsec_nasdaq100_momentum_v1_deploy"
 
 
@@ -1184,6 +1278,23 @@ def test_grouped_live_run_preset_scheduled_command_parses() -> None:
     assert args.output_dir == "artifacts/live_dry_run"
 
 
+def test_grouped_live_schedule_command_parses() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "live",
+            "schedule",
+            "--preset",
+            "xsec_nasdaq100_momentum_v1_deploy",
+            "--broker",
+            "mock",
+        ]
+    )
+
+    assert args.live_command == "schedule"
+    assert args.preset == "xsec_nasdaq100_momentum_v1_deploy"
+
+
 def test_grouped_live_dry_run_multi_strategy_command_parses() -> None:
     parser = build_parser()
     args = parser.parse_args(
@@ -1236,6 +1347,22 @@ def test_legacy_flat_research_command_rewrites_to_grouped_run() -> None:
 
     assert argv == ["research", "run", "--symbols", "AAPL"]
     assert "research run" in str(note)
+
+
+def test_grouped_research_alpha_accepts_new_signal_family() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "research",
+            "alpha",
+            "--symbols",
+            "AAPL",
+            "--signal-family",
+            "momentum_acceleration",
+        ]
+    )
+
+    assert args.signal_family == "momentum_acceleration"
 
 
 def test_grouped_research_walkforward_command_parses_with_optional_dates() -> None:
@@ -1430,6 +1557,23 @@ def test_grouped_research_decision_memo_command_parses() -> None:
     assert args.research_command == "decision-memo"
     assert args.preset == "xsec_nasdaq100_momentum_v1_research"
     assert args.deploy_preset == "xsec_nasdaq100_momentum_v1_deploy"
+
+
+def test_grouped_research_memo_command_parses() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "research",
+            "memo",
+            "--preset",
+            "xsec_nasdaq100_momentum_v1_research",
+            "--deploy-preset",
+            "xsec_nasdaq100_momentum_v1_deploy",
+        ]
+    )
+
+    assert args.research_command == "memo"
+    assert args.preset == "xsec_nasdaq100_momentum_v1_research"
 
 
 def test_grouped_research_walkforward_command_parses_compatibility_day_aliases() -> None:
@@ -1690,3 +1834,47 @@ def test_grouped_execution_simulate_command_parses() -> None:
     assert args.command_family == "execution"
     assert args.execution_command == "simulate"
     assert args.targets == "artifacts/targets.csv"
+
+
+def test_grouped_ops_pipeline_command_parses() -> None:
+    parser = build_parser()
+    args = parser.parse_args(["ops", "pipeline", "run", "--config", "configs/pipeline.yaml"])
+
+    assert args.command_family == "ops"
+    assert args.ops_command == "pipeline"
+    assert args.ops_pipeline_command == "run"
+    assert args.config == "configs/pipeline.yaml"
+
+
+def test_grouped_ops_registry_build_deploy_config_command_parses() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "ops",
+            "registry",
+            "build-deploy-config",
+            "--registry",
+            "artifacts/registry.json",
+            "--output-path",
+            "artifacts/multi_strategy.json",
+        ]
+    )
+
+    assert args.command_family == "ops"
+    assert args.ops_command == "registry"
+    assert args.ops_registry_command == "build-deploy-config"
+    assert args.output_path == "artifacts/multi_strategy.json"
+
+
+def test_legacy_pipeline_group_rewrites_to_ops() -> None:
+    argv, note = rewrite_legacy_cli_args(["pipeline", "run", "--config", "configs/pipeline.yaml"])
+
+    assert argv == ["ops", "pipeline", "run", "--config", "configs/pipeline.yaml"]
+    assert "ops pipeline" in str(note)
+
+
+def test_legacy_registry_group_rewrites_to_ops() -> None:
+    argv, note = rewrite_legacy_cli_args(["registry", "list", "--registry", "artifacts/registry.json"])
+
+    assert argv == ["ops", "registry", "list", "--registry", "artifacts/registry.json"]
+    assert "ops registry" in str(note)

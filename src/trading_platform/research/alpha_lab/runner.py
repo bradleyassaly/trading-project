@@ -10,6 +10,7 @@ from trading_platform.research.registry import write_research_run_manifest
 from trading_platform.research.alpha_lab.composite import (
     DEFAULT_COMPOSITE_CONFIG,
     build_composite_scores,
+    candidate_id,
     evaluate_composite_scores,
     select_low_redundancy_signals,
 )
@@ -40,6 +41,12 @@ from trading_platform.research.alpha_lab.labels import add_forward_return_labels
 from trading_platform.research.alpha_lab.metrics import (
     compute_cross_sectional_daily_metrics,
     evaluate_cross_sectional_signal,
+)
+from trading_platform.research.ensemble import (
+    EnsembleConfig,
+    assign_member_weights,
+    build_ensemble_scores,
+    select_ensemble_members,
 )
 from trading_platform.research.alpha_lab.promotion import (
     DEFAULT_PROMOTION_THRESHOLDS,
@@ -170,6 +177,10 @@ def _add_equity_context_features(
 
 def _candidate_key(signal_family: str, lookback: int, horizon: int) -> tuple[str, int, int]:
     return signal_family, lookback, horizon
+
+
+def _signal_family_requires_equity_context(signal_family: str) -> bool:
+    return signal_family in {"cross_sectional_relative_strength"}
 
 
 def _safe_series_corr(left: pd.Series, right: pd.Series) -> float:
@@ -333,6 +344,15 @@ def run_alpha_research(
     regime_exclude_mean_rank_ic: float = DEFAULT_REGIME_CONFIG.exclude_mean_rank_ic,
     equity_context_enabled: bool = False,
     equity_context_include_volume: bool = False,
+    ensemble_enabled: bool = False,
+    ensemble_mode: str = "disabled",
+    ensemble_weight_method: str = "equal",
+    ensemble_normalize_scores: str = "rank_pct",
+    ensemble_max_members: int = 5,
+    ensemble_require_promoted_only: bool = True,
+    ensemble_max_members_per_family: int | None = None,
+    ensemble_minimum_member_observations: int = 0,
+    ensemble_minimum_member_metric: float | None = None,
 ) -> dict[str, str]:
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -353,7 +373,7 @@ def run_alpha_research(
 
         symbol_data[symbol] = add_forward_return_labels(df, horizons=horizons)
 
-    if equity_context_enabled:
+    if equity_context_enabled or _signal_family_requires_equity_context(signal_family):
         symbol_data = _add_equity_context_features(
             symbol_data,
             lookbacks=lookbacks,
@@ -550,6 +570,104 @@ def run_alpha_research(
     promoted_signals_df = leaderboard_df.loc[
         leaderboard_df["promotion_status"] == "promote"
     ].reset_index(drop=True)
+    ensemble_config = EnsembleConfig(
+        enabled=ensemble_enabled,
+        mode=ensemble_mode if ensemble_enabled else "disabled",
+        weight_method=ensemble_weight_method,
+        normalize_scores=ensemble_normalize_scores,
+        max_members=ensemble_max_members,
+        require_promoted_only=ensemble_require_promoted_only,
+        max_members_per_family=ensemble_max_members_per_family,
+        minimum_member_observations=ensemble_minimum_member_observations,
+        minimum_member_metric=ensemble_minimum_member_metric,
+    )
+    ensemble_member_summary_df = pd.DataFrame(
+        columns=[
+            "member_id",
+            "member_type",
+            "family",
+            "selection_rank",
+            "raw_metric",
+            "normalized_weight",
+            "included_in_ensemble",
+            "exclusion_reason",
+            "signal_family",
+            "lookback",
+            "horizon",
+            "promotion_status",
+            "total_obs",
+        ]
+    )
+    ensemble_signal_snapshot_df = pd.DataFrame(
+        columns=[
+            "timestamp",
+            "symbol",
+            "ensemble_score",
+            "member_count",
+            "contributing_families",
+            "contributing_candidates",
+            "top_contributing_member",
+            "top_contributing_family",
+            "horizon",
+            "ensemble_mode",
+            "weight_method",
+            "normalize_scores",
+        ]
+    )
+    ensemble_research_summary: dict[str, object] = {
+        "enabled": ensemble_config.enabled,
+        "mode": ensemble_config.mode,
+        "weight_method": ensemble_config.weight_method,
+        "normalize_scores": ensemble_config.normalize_scores,
+        "eligible_member_count": 0,
+        "included_member_count": 0,
+        "ensemble_horizon_count": 0,
+    }
+    if ensemble_config.enabled and not leaderboard_df.empty:
+        ensemble_members = leaderboard_df.copy()
+        ensemble_members["candidate_id"] = ensemble_members.apply(
+            lambda row: candidate_id(
+                str(row["signal_family"]),
+                int(row["lookback"]),
+                int(row["horizon"]),
+            ),
+            axis=1,
+        )
+        ensemble_member_summary_df = select_ensemble_members(ensemble_members, ensemble_config)
+        ensemble_member_summary_df = assign_member_weights(ensemble_member_summary_df, ensemble_config)
+        ensemble_frames: list[pd.DataFrame] = []
+        for horizon in sorted(ensemble_member_summary_df["horizon"].dropna().unique().tolist()):
+            horizon_members = ensemble_member_summary_df.loc[
+                ensemble_member_summary_df["horizon"] == horizon
+            ].copy()
+            signal_frames = {
+                str(row["member_id"]): combined_score_panels.get(
+                    _candidate_key(
+                        str(row["signal_family"]),
+                        int(row["lookback"]),
+                        int(row["horizon"]),
+                    ),
+                    pd.DataFrame(columns=["timestamp", "symbol", "signal"]),
+                )
+                for _, row in horizon_members.iterrows()
+            }
+            ensemble_frame = build_ensemble_scores(signal_frames, ensemble_config, horizon_members)
+            if ensemble_frame.empty:
+                continue
+            ensemble_frame["horizon"] = int(horizon)
+            ensemble_frame["ensemble_mode"] = ensemble_config.mode
+            ensemble_frame["weight_method"] = ensemble_config.weight_method
+            ensemble_frame["normalize_scores"] = ensemble_config.normalize_scores
+            ensemble_frames.append(ensemble_frame)
+        if ensemble_frames:
+            ensemble_signal_snapshot_df = pd.concat(ensemble_frames, ignore_index=True)
+        ensemble_research_summary.update(
+            {
+                "eligible_member_count": int(len(ensemble_member_summary_df)),
+                "included_member_count": int(ensemble_member_summary_df["included_in_ensemble"].sum()),
+                "ensemble_horizon_count": int(ensemble_signal_snapshot_df["horizon"].nunique()) if not ensemble_signal_snapshot_df.empty else 0,
+            }
+        )
     lifecycle_config = SignalLifecycleConfig(
         recent_quality_window=dynamic_recent_quality_window,
         min_history=dynamic_min_history,
@@ -784,6 +902,38 @@ def run_alpha_research(
         top_quantile=top_quantile,
         bottom_quantile=bottom_quantile,
     )
+    ensemble_leaderboard_df = pd.DataFrame()
+    if not ensemble_signal_snapshot_df.empty:
+        ensemble_eval_input = ensemble_signal_snapshot_df.rename(
+            columns={
+                "ensemble_score": "composite_score",
+                "member_count": "component_count",
+            }
+        ).copy()
+        ensemble_eval_input["weighting_scheme"] = (
+            "ensemble_" + ensemble_config.mode + "_" + ensemble_config.weight_method
+        )
+        ensemble_eval_input["selected_signal_count"] = ensemble_eval_input["component_count"]
+        ensemble_leaderboard_df = evaluate_composite_scores(
+            ensemble_eval_input[
+                [
+                    "timestamp",
+                    "symbol",
+                    "horizon",
+                    "weighting_scheme",
+                    "composite_score",
+                    "component_count",
+                    "selected_signal_count",
+                ]
+            ],
+            label_panel_by_horizon=combined_label_panels,
+            folds=folds,
+            top_quantile=top_quantile,
+            bottom_quantile=bottom_quantile,
+        )
+        if not ensemble_leaderboard_df.empty:
+            top_row = ensemble_leaderboard_df.iloc[0].to_dict()
+            ensemble_research_summary["top_ensemble_metric"] = top_row
     portfolio_config = CompositePortfolioConfig(
         top_n=portfolio_top_n,
         long_quantile=portfolio_long_quantile,
@@ -854,6 +1004,11 @@ def run_alpha_research(
     composite_scores_path_parquet = output_dir / "composite_scores.parquet"
     composite_leaderboard_path_csv = output_dir / "composite_leaderboard.csv"
     composite_leaderboard_path_parquet = output_dir / "composite_leaderboard.parquet"
+    ensemble_member_summary_path_csv = output_dir / "ensemble_member_summary.csv"
+    ensemble_member_summary_path_parquet = output_dir / "ensemble_member_summary.parquet"
+    ensemble_signal_snapshot_path_csv = output_dir / "ensemble_signal_snapshot.csv"
+    ensemble_signal_snapshot_path_parquet = output_dir / "ensemble_signal_snapshot.parquet"
+    ensemble_research_summary_path = output_dir / "ensemble_research_summary.json"
     dynamic_signal_weights_path_csv = output_dir / "dynamic_signal_weights.csv"
     dynamic_signal_weights_path_parquet = output_dir / "dynamic_signal_weights.parquet"
     active_signals_by_date_path_csv = output_dir / "active_signals_by_date.csv"
@@ -899,6 +1054,8 @@ def run_alpha_research(
     redundancy_df.to_csv(redundancy_path_csv, index=False)
     composite_scores_df.to_csv(composite_scores_path_csv, index=False)
     composite_leaderboard_df.to_csv(composite_leaderboard_path_csv, index=False)
+    ensemble_member_summary_df.to_csv(ensemble_member_summary_path_csv, index=False)
+    ensemble_signal_snapshot_df.to_csv(ensemble_signal_snapshot_path_csv, index=False)
     dynamic_signal_weights_df.to_csv(dynamic_signal_weights_path_csv, index=False)
     active_signals_by_date_df.to_csv(active_signals_by_date_path_csv, index=False)
     deactivated_signals_df.to_csv(deactivated_signals_path_csv, index=False)
@@ -923,6 +1080,8 @@ def run_alpha_research(
     redundancy_df.to_parquet(redundancy_path_parquet, index=False)
     composite_scores_df.to_parquet(composite_scores_path_parquet, index=False)
     composite_leaderboard_df.to_parquet(composite_leaderboard_path_parquet, index=False)
+    ensemble_member_summary_df.to_parquet(ensemble_member_summary_path_parquet, index=False)
+    ensemble_signal_snapshot_df.to_parquet(ensemble_signal_snapshot_path_parquet, index=False)
     dynamic_signal_weights_df.to_parquet(dynamic_signal_weights_path_parquet, index=False)
     active_signals_by_date_df.to_parquet(active_signals_by_date_path_parquet, index=False)
     deactivated_signals_df.to_parquet(deactivated_signals_path_parquet, index=False)
@@ -941,6 +1100,10 @@ def run_alpha_research(
     liquidity_filtered_portfolio_metrics_df.to_parquet(liquidity_filtered_metrics_path_parquet, index=False)
     capacity_scenarios_df.to_parquet(capacity_scenarios_path_parquet, index=False)
     composite_diagnostics_path.write_text(json.dumps(composite_diagnostics, indent=2, default=str))
+    ensemble_research_summary_path.write_text(
+        json.dumps(ensemble_research_summary, indent=2, default=str),
+        encoding="utf-8",
+    )
     portfolio_diagnostics_payload: dict[str, object] = {}
     for key, value in composite_portfolio_diagnostics.items():
         if key == "asset_returns_matrix":
@@ -960,6 +1123,7 @@ def run_alpha_research(
     diagnostics = {
         "symbols_requested": resolved_symbols,
         "signal_family": signal_family,
+        "signal_family_requires_equity_context": _signal_family_requires_equity_context(signal_family),
         "lookbacks": lookbacks,
         "horizons": horizons,
         "min_rows": min_rows,
@@ -977,6 +1141,14 @@ def run_alpha_research(
             "enabled": equity_context_enabled,
             "include_volume": equity_context_include_volume,
         },
+        "ensemble": {
+            "enabled": ensemble_config.enabled,
+            "mode": ensemble_config.mode,
+            "weight_method": ensemble_config.weight_method,
+            "normalize_scores": ensemble_config.normalize_scores,
+            "max_members": ensemble_config.max_members,
+            "require_promoted_only": ensemble_config.require_promoted_only,
+        },
     }
     diagnostics_path.write_text(json.dumps(diagnostics, indent=2, default=str))
     approved_model_state_paths = write_approved_model_state(artifact_dir=output_dir)
@@ -988,6 +1160,9 @@ def run_alpha_research(
         "redundancy_path": str(redundancy_path_csv),
         "composite_scores_path": str(composite_scores_path_csv),
         "composite_leaderboard_path": str(composite_leaderboard_path_csv),
+        "ensemble_member_summary_path": str(ensemble_member_summary_path_csv),
+        "ensemble_signal_snapshot_path": str(ensemble_signal_snapshot_path_csv),
+        "ensemble_research_summary_path": str(ensemble_research_summary_path),
         "dynamic_signal_weights_path": str(dynamic_signal_weights_path_csv),
         "active_signals_by_date_path": str(active_signals_by_date_path_csv),
         "deactivated_signals_path": str(deactivated_signals_path_csv),

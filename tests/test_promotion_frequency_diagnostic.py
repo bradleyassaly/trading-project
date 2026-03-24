@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from trading_platform.diagnostics.feature_ablation import _build_comparison_payload, AblationMode
 from trading_platform.diagnostics.equity_feature_expansion import _build_comparison_summary
 from trading_platform.diagnostics.promotion_frequency import _build_summary, _resolve_scenarios
+from trading_platform.diagnostics.signal_family_comparison import _build_comparison_payload as _build_family_payload
+from trading_platform.diagnostics.signal_family_comparison import _build_family_summary
 
 
 def test_build_summary_counts_drop_stages_and_rates() -> None:
@@ -147,3 +151,78 @@ def test_feature_ablation_payload_prefers_best_funnel_then_sharpe() -> None:
 
     assert payload["best_mode_by_funnel_then_sharpe"] == "equity_context_momentum"
     assert payload["decision"] == "promote equity-context features into broader testing because they show measurable benefit"
+
+
+def test_build_family_summary_aggregates_counts_and_sharpe() -> None:
+    result = {
+        "summary": {
+            "runs_with_candidates": 2,
+            "runs_passing_validation": 1,
+            "runs_with_promotion_candidates": 1,
+            "runs_with_promoted_strategies": 1,
+            "runs_reaching_portfolio_stage": 1,
+            "runs_reaching_paper_stage": 1,
+        },
+        "rows": [
+            {
+                "candidate_count": 2,
+                "validation_pass_count": 1,
+                "promotion_candidate_count": 1,
+                "promoted_strategy_count": 1,
+                "portfolio_selected_strategy_count": 1,
+                "paper_stage_reached": True,
+                "portfolio_sharpe": 1.2,
+            },
+            {
+                "candidate_count": 1,
+                "validation_pass_count": 0,
+                "promotion_candidate_count": 0,
+                "promoted_strategy_count": 0,
+                "portfolio_selected_strategy_count": 0,
+                "paper_stage_reached": False,
+                "portfolio_sharpe": None,
+            },
+        ],
+        "json_path": "family.json",
+        "csv_path": "family.csv",
+        "md_path": "family.md",
+    }
+
+    summary = _build_family_summary("momentum", result)
+
+    assert summary["total_candidate_count"] == 3
+    assert summary["promoted_strategy_count"] == 1
+    assert summary["paper_stage_count"] == 1
+    assert summary["portfolio_sharpe_summary"]["mean"] == 1.2
+
+
+def test_signal_family_payload_prefers_better_funnel_then_sharpe() -> None:
+    payload = _build_family_payload(
+        family_summaries=[
+            {
+                "signal_family": "momentum",
+                "summary": {
+                    "runs_with_promoted_strategies": 3,
+                    "runs_reaching_paper_stage": 3,
+                    "runs_passing_validation": 3,
+                },
+                "portfolio_sharpe_summary": {"mean": 1.0},
+            },
+            {
+                "signal_family": "momentum_acceleration",
+                "summary": {
+                    "runs_with_promoted_strategies": 4,
+                    "runs_reaching_paper_stage": 4,
+                    "runs_passing_validation": 4,
+                },
+                "portfolio_sharpe_summary": {"mean": 1.1},
+            },
+        ],
+        commands=["python -m trading_platform.diagnostics.signal_family_comparison"],
+        base_config_path=Path("configs/orchestration_signal_promotion_test.yaml"),
+        output_root=Path("artifacts/diagnostics/signal_family_comparison"),
+        scenario_set_name="default",
+    )
+
+    assert payload["best_family_by_funnel_then_sharpe"] == "momentum_acceleration"
+    assert payload["decision"] == "promote winning new family into broader testing"

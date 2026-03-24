@@ -15,6 +15,7 @@ from trading_platform.config.loader import load_automated_orchestration_config
 from trading_platform.config.loader import load_promotion_policy_config, load_strategy_validation_policy_config
 from trading_platform.orchestration.pipeline_runner import run_automated_orchestration
 from trading_platform.research.alpha_lab.runner import run_alpha_research
+from trading_platform.research.alpha_lab.signals import SUPPORTED_SIGNAL_FAMILIES
 from trading_platform.research.promotion_pipeline import apply_research_promotions
 from trading_platform.research.registry import build_promotion_candidates, build_research_registry
 from trading_platform.research.strategy_validation import build_strategy_validation
@@ -679,7 +680,7 @@ def main() -> None:
         "--signal-family",
         type=str,
         default="momentum",
-        choices=["momentum", "short_term_reversal", "vol_adjusted_momentum", "equity_context_momentum"],
+        choices=list(SUPPORTED_SIGNAL_FAMILIES),
         help="Signal family to evaluate across the repeated diagnostic scenarios.",
     )
     parser.add_argument(
