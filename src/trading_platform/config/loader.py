@@ -13,11 +13,18 @@ from trading_platform.config.models import (
     ResearchWorkflowConfig,
     WalkForwardConfig,
 )
+from trading_platform.config.workflow_models import (
+    LiveDryRunWorkflowConfig,
+    PaperRunWorkflowConfig,
+    ResearchRunWorkflowConfig,
+    WalkForwardWorkflowConfig,
+)
 from trading_platform.dashboard.models import DashboardConfig
 from trading_platform.execution.models import ExecutionConfig
 from trading_platform.experiments.runner import ExperimentSpecConfig, ExperimentVariantConfig
 from trading_platform.governance.strategy_lifecycle import StrategyGovernancePolicyConfig
 from trading_platform.monitoring.models import MonitoringConfig, NotificationChannel, NotificationConfig
+from trading_platform.monitoring.models import DailyAlertsConfig
 from trading_platform.orchestration.models import (
     OrchestrationStageToggles,
     PipelineRunConfig,
@@ -74,6 +81,26 @@ def load_walk_forward_config(path: str | Path) -> WalkForwardConfig:
     return WalkForwardConfig(**data)
 
 
+def load_research_run_workflow_config(path: str | Path) -> ResearchRunWorkflowConfig:
+    data = _read_config_file(Path(path))
+    return ResearchRunWorkflowConfig(**data)
+
+
+def load_walkforward_workflow_config(path: str | Path) -> WalkForwardWorkflowConfig:
+    data = _read_config_file(Path(path))
+    return WalkForwardWorkflowConfig(**data)
+
+
+def load_paper_run_workflow_config(path: str | Path) -> PaperRunWorkflowConfig:
+    data = _read_config_file(Path(path))
+    return PaperRunWorkflowConfig(**data)
+
+
+def load_live_dry_run_workflow_config(path: str | Path) -> LiveDryRunWorkflowConfig:
+    data = _read_config_file(Path(path))
+    return LiveDryRunWorkflowConfig(**data)
+
+
 def load_multi_strategy_portfolio_config(path: str | Path) -> MultiStrategyPortfolioConfig:
     data = _read_config_file(Path(path))
     sleeves = [
@@ -107,6 +134,14 @@ def load_notification_config(path: str | Path) -> NotificationConfig:
     payload = dict(data)
     payload["channels"] = [NotificationChannel(**item) for item in payload.get("channels", [])]
     return NotificationConfig(**payload)
+
+
+def load_daily_alerts_config(path: str | Path) -> DailyAlertsConfig:
+    data = _read_config_file(Path(path))
+    payload = dict(data)
+    payload["email_to"] = list(payload.get("email_to", []) or [])
+    payload["sms_target"] = list(payload.get("sms_target", []) or [])
+    return DailyAlertsConfig(**payload)
 
 
 def load_execution_config(path: str | Path) -> ExecutionConfig:

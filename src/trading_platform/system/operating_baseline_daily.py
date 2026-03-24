@@ -7,8 +7,15 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from trading_platform.config.loader import load_automated_orchestration_config
+from trading_platform.config.loader import (
+    load_automated_orchestration_config,
+    load_daily_alerts_config,
+)
 from trading_platform.dashboard.server import build_dashboard_static_data
+from trading_platform.monitoring.daily_alerts import (
+    persist_daily_alert_result,
+    send_daily_alerts,
+)
 from trading_platform.orchestration.pipeline_runner import run_automated_orchestration
 from trading_platform.system_evaluation.service import (
     build_system_evaluation_history,
@@ -133,6 +140,7 @@ def _build_summary(
         "monitoring_warning_count": _safe_int(
             monitoring_outputs.get("warning_strategy_count") or getattr(result, "outputs", {}).get("warning_strategy_count")
         ),
+        "kill_switch_recommendation_count": _safe_int(getattr(result, "outputs", {}).get("kill_switch_recommendation_count")),
         "warning_count": len(getattr(result, "warnings", []) or []),
         "stage_outcomes": [
             {
@@ -196,12 +204,15 @@ def run_operating_baseline_daily(
     dashboard_artifacts_root: str | Path = "artifacts",
     dashboard_output_dir: str | Path = DEFAULT_DASHBOARD_OUTPUT_DIR,
     log_path: str | Path | None = None,
+    alerts_config_path: str | Path | None = None,
 ) -> dict[str, Any]:
     config_file = Path(config_path)
     summary_root = Path(summary_dir)
     log_file = Path(log_path) if log_path is not None else None
     dashboard_paths: dict[str, Path] | None = None
+    alerts_config = None
     try:
+        alerts_config = load_daily_alerts_config(alerts_config_path) if alerts_config_path else None
         config = load_automated_orchestration_config(config_file)
         result, artifact_paths = run_automated_orchestration(config)
         runs_root = Path(config.output_root_dir) / config.run_name
@@ -229,6 +240,11 @@ def run_operating_baseline_daily(
         )
         summary_paths = _write_summary(summary_root, summary)
         summary["paths"].update({key: str(value) for key, value in summary_paths.items()})
+        if alerts_config is not None:
+            alert_result = send_daily_alerts(summary=summary, config=alerts_config)
+            alert_paths = persist_daily_alert_result(summary_dir=summary_root, payload=alert_result)
+            summary["alerts"] = alert_result
+            summary["paths"].update(alert_paths)
         _write_summary(summary_root, summary)
         return summary
     except Exception as exc:
@@ -241,6 +257,11 @@ def run_operating_baseline_daily(
             "error": f"{type(exc).__name__}: {exc}",
             "traceback": traceback.format_exc(),
         }
+        if alerts_config is not None:
+            alert_result = send_daily_alerts(summary=failure_summary, config=alerts_config)
+            alert_paths = persist_daily_alert_result(summary_dir=summary_root, payload=alert_result)
+            failure_summary["alerts"] = alert_result
+            failure_summary["paths"] = alert_paths
         _write_summary(summary_root, failure_summary)
         raise
 
@@ -257,6 +278,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--dashboard-artifacts-root", default="artifacts", help="Artifacts root to scan for dashboard static data.")
     parser.add_argument("--dashboard-output-dir", default=str(DEFAULT_DASHBOARD_OUTPUT_DIR), help="Output directory for dashboard static data.")
+    parser.add_argument("--alerts-config", default=None, help="Optional path to the daily alerts YAML/JSON config.")
     return parser
 
 
@@ -270,6 +292,7 @@ def main(argv: list[str] | None = None) -> int:
         dashboard_artifacts_root=args.dashboard_artifacts_root,
         dashboard_output_dir=args.dashboard_output_dir,
         log_path=args.log_path,
+        alerts_config_path=args.alerts_config,
     )
     print(f"Run id: {summary.get('run_id')}")
     print(f"Run status: {summary.get('run_status')}")
@@ -277,6 +300,8 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Selected strategies: {summary.get('selected_strategy_count')}")
     print(f"Paper orders: {summary.get('paper_order_count')}")
     print(f"Monitoring warnings: {summary.get('monitoring_warning_count')}")
+    if summary.get("alerts"):
+        print(f"Alert count: {summary.get('alerts', {}).get('alert_count')}")
     print(f"Daily summary JSON: {summary.get('paths', {}).get('daily_baseline_summary_json_path')}")
     if summary.get("run_status") == "failed":
         return 1

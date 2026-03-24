@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
+from os import getenv
 from typing import Any
 
 
 ALERT_SEVERITIES = {"info", "warning", "critical"}
 HEALTH_STATUSES = {"healthy", "warning", "critical"}
 NOTIFICATION_CHANNELS = {"email", "sms"}
+SMS_PROVIDERS = {"stub", "email_gateway"}
 
 
 def _validate_nonnegative_optional(value: float | int | None, field_name: str) -> None:
@@ -230,4 +232,109 @@ class NotificationConfig:
             "smtp_password": self.smtp_password,
             "smtp_use_tls": self.smtp_use_tls,
             "subject_prefix": self.subject_prefix,
+        }
+
+
+@dataclass(frozen=True)
+class DailyAlertsConfig:
+    email_enabled: bool
+    sms_enabled: bool = False
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_username: str | None = None
+    smtp_password_env_var: str | None = None
+    email_from: str = ""
+    email_to: list[str] = field(default_factory=list)
+    smtp_use_tls: bool = True
+    subject_prefix: str = "Trading Platform"
+    email_min_severity: str = "warning"
+    sms_provider: str = "stub"
+    sms_target: list[str] = field(default_factory=list)
+    sms_min_severity: str = "critical"
+    send_daily_success_summary: bool = True
+    send_on_failure: bool = True
+    send_on_zero_promotions: bool = True
+    send_on_monitoring_warnings: bool = True
+    send_on_kill_switch_recommendations: bool = True
+    monitoring_warning_threshold: int = 1
+
+    def __post_init__(self) -> None:
+        if self.email_min_severity not in ALERT_SEVERITIES:
+            raise ValueError(f"Unsupported email_min_severity: {self.email_min_severity}")
+        if self.sms_min_severity not in ALERT_SEVERITIES:
+            raise ValueError(f"Unsupported sms_min_severity: {self.sms_min_severity}")
+        if self.sms_provider not in SMS_PROVIDERS:
+            raise ValueError(f"Unsupported sms_provider: {self.sms_provider}")
+        if self.monitoring_warning_threshold < 0:
+            raise ValueError("monitoring_warning_threshold must be >= 0")
+        if self.email_enabled:
+            if not self.smtp_host or not self.smtp_host.strip():
+                raise ValueError("smtp_host must be a non-empty string when email is enabled")
+            if self.smtp_port <= 0:
+                raise ValueError("smtp_port must be > 0 when email is enabled")
+            if not self.email_from or not self.email_from.strip():
+                raise ValueError("email_from must be a non-empty string when email is enabled")
+            if not self.email_to:
+                raise ValueError("email_to must contain at least one recipient when email is enabled")
+        if self.sms_enabled and not self.sms_target:
+            raise ValueError("sms_target must contain at least one recipient when sms is enabled")
+
+    @property
+    def smtp_password(self) -> str | None:
+        if not self.smtp_password_env_var:
+            return None
+        return getenv(self.smtp_password_env_var)
+
+    def to_email_notification_config(self) -> NotificationConfig | None:
+        if not self.email_enabled:
+            return None
+        return NotificationConfig(
+            smtp_host=self.smtp_host,
+            smtp_port=self.smtp_port,
+            from_address=self.email_from,
+            channels=[NotificationChannel(channel_type="email", recipients=self.email_to)],
+            min_severity=self.email_min_severity,
+            smtp_username=self.smtp_username,
+            smtp_password=self.smtp_password,
+            smtp_use_tls=self.smtp_use_tls,
+            subject_prefix=self.subject_prefix,
+        )
+
+    def to_sms_notification_config(self) -> NotificationConfig | None:
+        if not self.sms_enabled:
+            return None
+        return NotificationConfig(
+            smtp_host=self.smtp_host,
+            smtp_port=self.smtp_port,
+            from_address=self.email_from,
+            channels=[NotificationChannel(channel_type="sms", recipients=self.sms_target)],
+            min_severity=self.sms_min_severity,
+            smtp_username=self.smtp_username,
+            smtp_password=self.smtp_password,
+            smtp_use_tls=self.smtp_use_tls,
+            subject_prefix=self.subject_prefix,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "email_enabled": self.email_enabled,
+            "sms_enabled": self.sms_enabled,
+            "smtp_host": self.smtp_host,
+            "smtp_port": self.smtp_port,
+            "smtp_username": self.smtp_username,
+            "smtp_password_env_var": self.smtp_password_env_var,
+            "email_from": self.email_from,
+            "email_to": self.email_to,
+            "smtp_use_tls": self.smtp_use_tls,
+            "subject_prefix": self.subject_prefix,
+            "email_min_severity": self.email_min_severity,
+            "sms_provider": self.sms_provider,
+            "sms_target": self.sms_target,
+            "sms_min_severity": self.sms_min_severity,
+            "send_daily_success_summary": self.send_daily_success_summary,
+            "send_on_failure": self.send_on_failure,
+            "send_on_zero_promotions": self.send_on_zero_promotions,
+            "send_on_monitoring_warnings": self.send_on_monitoring_warnings,
+            "send_on_kill_switch_recommendations": self.send_on_kill_switch_recommendations,
+            "monitoring_warning_threshold": self.monitoring_warning_threshold,
         }

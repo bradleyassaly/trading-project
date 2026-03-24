@@ -639,6 +639,12 @@ Local module entrypoint if you want to wire your own scheduler:
 python -m trading_platform.system.operating_baseline_daily --config configs/orchestration_operating_baseline.yaml --summary-dir artifacts/operating_baseline_daily
 ```
 
+Enable alerts explicitly by passing the alert policy config:
+
+```bash
+python -m trading_platform.system.operating_baseline_daily --config configs/orchestration_operating_baseline.yaml --summary-dir artifacts/operating_baseline_daily --alerts-config configs/alerts.yaml
+```
+
 Predictable outputs:
 
 - daily log: `artifacts/operating_baseline_daily/logs/YYYY-MM-DD.log`
@@ -664,6 +670,48 @@ Optional dashboard refresh:
 ```bash
 python -m trading_platform.system.operating_baseline_daily --config configs/orchestration_operating_baseline.yaml --summary-dir artifacts/operating_baseline_daily --refresh-dashboard-static-data --dashboard-output-dir artifacts/dashboard_data
 ```
+
+### Alerts
+
+The daily baseline runner supports a small alerting layer through:
+
+- `configs/alerts.yaml`
+- SMTP email first
+- optional SMS only for high-severity events
+
+Required secret environment variables:
+
+- `TRADING_PLATFORM_SMTP_PASSWORD` for the example config
+
+Alert config fields include:
+
+- `email_enabled`
+- `sms_enabled`
+- `smtp_host`
+- `smtp_port`
+- `smtp_username`
+- `smtp_password_env_var`
+- `email_from`
+- `email_to`
+- `sms_provider`
+- `sms_target`
+- `email_min_severity`
+- `sms_min_severity`
+- `send_daily_success_summary`
+- `send_on_failure`
+- `send_on_zero_promotions`
+- `send_on_monitoring_warnings`
+- `send_on_kill_switch_recommendations`
+
+Recommended policy:
+
+- email: enable `info` or `warning` severity so the operator gets one daily summary plus actionable warnings
+- SMS: keep disabled by default, or use `critical` only for failures or kill-switch-style events
+
+Current minimal SMS support stays intentionally conservative:
+
+- `sms_provider: stub` for local testing
+- `sms_provider: email_gateway` if you want to route critical alerts to carrier/email-to-SMS gateway targets without adding a vendor SDK
 
 If you want to inspect the dashboard on the same instance:
 

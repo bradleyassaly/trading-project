@@ -1,0 +1,21 @@
+email_enabled: true
+sms_enabled: false
+smtp_host: smtp.example.com
+smtp_port: 587
+smtp_username: alerts@example.com
+smtp_password_env_var: TRADING_PLATFORM_SMTP_PASSWORD
+smtp_use_tls: true
+email_from: alerts@example.com
+email_to:
+  - ops@example.com
+subject_prefix: Trading Platform
+email_min_severity: info
+sms_provider: stub
+sms_target: []
+sms_min_severity: critical
+send_daily_success_summary: true
+send_on_failure: true
+send_on_zero_promotions: true
+send_on_monitoring_warnings: true
+send_on_kill_switch_recommendations: true
+monitoring_warning_threshold: 1
