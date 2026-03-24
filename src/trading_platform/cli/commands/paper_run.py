@@ -6,8 +6,15 @@ from trading_platform.cli.config_support import apply_workflow_config, option_is
 from trading_platform.cli.common import normalize_paper_weighting_scheme, resolve_symbols
 from trading_platform.cli.presets import apply_cli_preset
 from trading_platform.config.loader import load_execution_config, load_paper_run_workflow_config
+from trading_platform.db.services import (
+    DatabaseLineageService,
+    log_paper_orders_and_fills,
+    log_portfolio_decision_bundle,
+    log_position_snapshots,
+    register_artifact_bundle,
+)
 from trading_platform.paper.models import PaperTradingConfig
-from trading_platform.paper.persistence import persist_paper_run_outputs
+from trading_platform.paper.persistence import _run_key, persist_paper_run_outputs
 from trading_platform.paper.service import (
     JsonPaperStateStore,
     run_paper_trading_cycle,
@@ -109,34 +116,78 @@ def cmd_paper_run(args) -> None:
     )
     if config.preset_name:
         print(f"Preset: {config.preset_name}")
+    db_service = DatabaseLineageService.from_config(
+        enable_database_metadata=getattr(loaded_config, "enable_database_metadata", None) if loaded_config is not None else None,
+        database_url=getattr(loaded_config, "database_url", None) if loaded_config is not None else None,
+        database_schema=getattr(loaded_config, "database_schema", None) if loaded_config is not None else None,
+    )
+    portfolio_run_id = db_service.create_portfolio_run(
+        run_key="|".join(["paper", str(config.preset_name or "manual"), str(config.strategy), str(config.universe_name or len(config.symbols)), str(Path(args.output_dir))]),
+        mode="paper",
+        config_payload=loaded_config or config,
+        notes=f"strategy={config.strategy}",
+    )
 
-    execution_config = load_execution_config(args.execution_config) if getattr(args, "execution_config", None) else None
-    state_path = Path(args.state_path)
-    state_file_preexisting = state_path.exists()
-    state_store = JsonPaperStateStore(state_path)
-    result = run_paper_trading_cycle(
-        config=config,
-        state_store=state_store,
-        execution_config=execution_config,
-        auto_apply_fills=args.auto_apply_fills,
-    )
-    artifact_paths = write_paper_trading_artifacts(
-        result=result,
-        output_dir=Path(args.output_dir),
-    )
-    persistence_paths, health_checks, latest_summary = persist_paper_run_outputs(
-        result=result,
-        config=config,
-        output_dir=Path(args.output_dir),
-        state_file_preexisting=state_file_preexisting,
-    )
-    output_dir = Path(args.output_dir)
-    tracker_dir_arg = getattr(args, "experiment_tracker_dir", None)
-    tracker_dir = Path(tracker_dir_arg) if tracker_dir_arg else output_dir.parent / "experiment_tracking"
-    registry_paths = register_experiment(
-        build_paper_experiment_record(output_dir),
-        tracker_dir=tracker_dir,
-    )
+    try:
+        execution_config = load_execution_config(args.execution_config) if getattr(args, "execution_config", None) else None
+        state_path = Path(args.state_path)
+        state_file_preexisting = state_path.exists()
+        state_store = JsonPaperStateStore(state_path)
+        result = run_paper_trading_cycle(
+            config=config,
+            state_store=state_store,
+            execution_config=execution_config,
+            auto_apply_fills=args.auto_apply_fills,
+        )
+        artifact_paths = write_paper_trading_artifacts(
+            result=result,
+            output_dir=Path(args.output_dir),
+        )
+        persistence_paths, health_checks, latest_summary = persist_paper_run_outputs(
+            result=result,
+            config=config,
+            output_dir=Path(args.output_dir),
+            state_file_preexisting=state_file_preexisting,
+        )
+        output_dir = Path(args.output_dir)
+        tracker_dir_arg = getattr(args, "experiment_tracker_dir", None)
+        tracker_dir = Path(tracker_dir_arg) if tracker_dir_arg else output_dir.parent / "experiment_tracking"
+        registry_paths = register_experiment(
+            build_paper_experiment_record(output_dir),
+            tracker_dir=tracker_dir,
+        )
+        log_portfolio_decision_bundle(
+            db_service=db_service,
+            portfolio_run_id=portfolio_run_id,
+            decision_bundle=result.decision_bundle,
+            universe_bundle=result.universe_bundle,
+        )
+        log_paper_orders_and_fills(
+            db_service=db_service,
+            orders=result.orders,
+            fills=result.fills,
+            as_of=result.as_of,
+            broker="paper",
+        )
+        log_position_snapshots(
+            db_service=db_service,
+            positions=result.state.positions,
+            as_of=result.as_of,
+            account="paper",
+            source="paper_state",
+        )
+        combined_paths = dict(artifact_paths)
+        combined_paths.update(persistence_paths)
+        register_artifact_bundle(
+            db_service=db_service,
+            artifact_paths=combined_paths,
+            artifact_type_prefix="paper",
+            portfolio_run_id=portfolio_run_id,
+        )
+        db_service.complete_portfolio_run(portfolio_run_id, notes=f"run_key={_run_key(config, result)} | as_of={result.as_of}")
+    except Exception as exc:
+        db_service.fail_portfolio_run(portfolio_run_id, notes=repr(exc))
+        raise
 
     print(f"As of: {result.as_of}")
     print(f"Orders: {len(result.orders)}")
@@ -180,8 +231,6 @@ def cmd_paper_run(args) -> None:
         if item["status"] != "pass":
             print(f"  {item['status']}: {item['check_name']} -> {item['message']}")
     print("Artifacts:")
-    combined_paths = dict(artifact_paths)
-    combined_paths.update(persistence_paths)
     for name, path in sorted(combined_paths.items()):
         print(f"  {name}: {path}")
     print(f"  experiment_registry_path: {registry_paths['experiment_registry_path']}")

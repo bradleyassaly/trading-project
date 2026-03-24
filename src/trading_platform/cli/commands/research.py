@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+from typing import Any
 
 from trading_platform.artifact_schemas import WorkflowArtifactSummary
 from trading_platform.backtests.engine import run_backtest_on_df
@@ -24,6 +25,7 @@ from trading_platform.research.service import (
     to_legacy_stats,
 )
 from trading_platform.research.xsec_momentum import run_xsec_momentum_topn
+from trading_platform.db.services import DatabaseLineageService, register_artifact_bundle
 
 
 def _save_run_artifacts(
@@ -39,7 +41,7 @@ def _save_run_artifacts(
     stats: dict[str, object],
     experiment_id: str,
     result=None,
-) -> None:
+) -> dict[str, Path]:
     output_dir.mkdir(parents=True, exist_ok=True)
     metadata_path = output_dir / f"{symbol}_{strategy}_{engine}_run_summary.json"
     summary = WorkflowArtifactSummary(
@@ -72,9 +74,10 @@ def _save_run_artifacts(
     }
     metadata_path.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
     print(f"  saved summary: {metadata_path}")
+    paths: dict[str, Path] = {"summary_json": metadata_path}
 
     if result is None:
-        return
+        return paths
 
     timeseries_path = output_dir / f"{symbol}_{strategy}_timeseries.csv"
     signal_path = output_dir / f"{symbol}_{strategy}_signals.csv"
@@ -82,6 +85,9 @@ def _save_run_artifacts(
     result.signal_frame.to_csv(signal_path, index=True)
     print(f"  saved timeseries: {timeseries_path}")
     print(f"  saved signals: {signal_path}")
+    paths["timeseries_csv"] = timeseries_path
+    paths["signals_csv"] = signal_path
+    return paths
 
 
 def _save_xsec_run_artifacts(
@@ -96,7 +102,7 @@ def _save_xsec_run_artifacts(
     stats: dict[str, object],
     experiment_id: str,
     result,
-) -> None:
+) -> dict[str, Path]:
     output_dir.mkdir(parents=True, exist_ok=True)
     metadata_path = output_dir / f"{strategy}_{engine}_universe_run_summary.json"
     summary = WorkflowArtifactSummary(
@@ -127,12 +133,39 @@ def _save_xsec_run_artifacts(
         "engine": engine,
     }
     metadata_path.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
-    result.timeseries.to_csv(output_dir / f"{strategy}_portfolio_timeseries.csv", index=True)
-    result.target_weights.to_csv(output_dir / f"{strategy}_portfolio_weights.csv", index=True)
-    result.positions.to_csv(output_dir / f"{strategy}_portfolio_positions.csv", index=True)
-    result.scores.to_csv(output_dir / f"{strategy}_scores.csv", index=True)
-    result.rebalance_diagnostics.to_csv(output_dir / f"{strategy}_rebalance_diagnostics.csv", index=True)
+    timeseries_path = output_dir / f"{strategy}_portfolio_timeseries.csv"
+    weights_path = output_dir / f"{strategy}_portfolio_weights.csv"
+    positions_path = output_dir / f"{strategy}_portfolio_positions.csv"
+    scores_path = output_dir / f"{strategy}_scores.csv"
+    rebalance_path = output_dir / f"{strategy}_rebalance_diagnostics.csv"
+    result.timeseries.to_csv(timeseries_path, index=True)
+    result.target_weights.to_csv(weights_path, index=True)
+    result.positions.to_csv(positions_path, index=True)
+    result.scores.to_csv(scores_path, index=True)
+    result.rebalance_diagnostics.to_csv(rebalance_path, index=True)
     print(f"  saved summary: {metadata_path}")
+    return {
+        "summary_json": metadata_path,
+        "timeseries_csv": timeseries_path,
+        "weights_csv": weights_path,
+        "positions_csv": positions_path,
+        "scores_csv": scores_path,
+        "rebalance_csv": rebalance_path,
+    }
+
+
+def _research_run_key(args: argparse.Namespace, symbols: list[str]) -> str:
+    selection = getattr(args, "universe", None) or getattr(args, "preset", None) or ",".join(sorted(symbols))
+    return "|".join(
+        [
+            "research",
+            str(selection),
+            str(getattr(args, "strategy", "")),
+            str(getattr(args, "engine", "")),
+            str(getattr(args, "start", None) or "full"),
+            str(getattr(args, "end", None) or "full"),
+        ]
+    )
 
 
 def _run_xsec_research(args: argparse.Namespace, symbols: list[str]) -> None:
@@ -167,7 +200,7 @@ def _run_xsec_research(args: argparse.Namespace, symbols: list[str]) -> None:
     rows_used = int(len(result.timeseries))
 
     if args.output_dir:
-        _save_xsec_run_artifacts(
+        return _save_xsec_run_artifacts(
             output_dir=Path(args.output_dir),
             strategy=args.strategy,
             engine=args.engine,
@@ -220,11 +253,14 @@ def _run_xsec_research(args: argparse.Namespace, symbols: list[str]) -> None:
         f"cost_bps={getattr(args, 'cost_bps', None) if getattr(args, 'cost_bps', None) is not None else resolve_turnover_cost(args) * 10000.0}, "
         f"activity={activity_note(stats)}, Experiment={exp_id}"
     )
+    return {}
 
 
 def cmd_research(args: argparse.Namespace) -> None:
+    loaded_config = None
     if getattr(args, "config", None):
         loaded = load_research_run_workflow_config(args.config)
+        loaded_config = loaded
         if getattr(loaded, "preset", None) and not option_is_explicit(args, "preset"):
             args.preset = loaded.preset
     apply_cli_preset(args)
@@ -239,78 +275,113 @@ def cmd_research(args: argparse.Namespace) -> None:
         f"Running research run for {len(symbols)} symbol(s): "
         f"{print_symbol_list(symbols)} | engine={args.engine} | {requested_range}"
     )
+    db_service = DatabaseLineageService.from_config(
+        enable_database_metadata=getattr(loaded_config, "enable_database_metadata", None) if loaded_config is not None else None,
+        database_url=getattr(loaded_config, "database_url", None) if loaded_config is not None else None,
+        database_schema=getattr(loaded_config, "database_schema", None) if loaded_config is not None else None,
+    )
+    research_run_id = db_service.create_research_run(
+        run_key=_research_run_key(args, symbols),
+        run_type="research",
+        config_payload=loaded_config or vars(args),
+        notes=f"strategy={args.strategy}",
+    )
+    strategy_definition_id = db_service.upsert_strategy_definition(
+        name=str(args.strategy),
+        version=str(args.engine),
+        config_payload=loaded_config or vars(args),
+        code_hash=None,
+        is_active=True,
+    )
 
-    if args.strategy == "xsec_momentum_topn":
-        _run_xsec_research(args, symbols)
-        return
+    try:
+        if args.strategy == "xsec_momentum_topn":
+            artifact_paths = _run_xsec_research(args, symbols)
+            register_artifact_bundle(
+                db_service=db_service,
+                artifact_paths=artifact_paths,
+                artifact_type_prefix="research",
+                research_run_id=research_run_id,
+            )
+            db_service.complete_research_run(research_run_id, notes=f"strategy_definition_id={strategy_definition_id}")
+            return
 
-    for symbol in symbols:
-        prepared = prepare_research_frame(symbol, start=args.start, end=args.end)
-        df = prepared["df"]
-        result = None
-        strategy_params = build_strategy_params(args)
+        for symbol in symbols:
+            prepared = prepare_research_frame(symbol, start=args.start, end=args.end)
+            df = prepared["df"]
+            result = None
+            strategy_params = build_strategy_params(args)
 
-        if args.engine == "legacy":
-            stats = run_backtest_on_df(
-                df=df,
-                symbol=symbol,
-                strategy=args.strategy,
-                **strategy_params,
-                cash=args.cash,
-                commission=args.commission,
-            )
-        elif args.engine == "vectorized":
-            execution_policy = ExecutionPolicy(
-                rebalance_frequency=args.rebalance_frequency,
-            )
-            result = run_vectorized_research_on_df(
-                df=df,
-                symbol=symbol,
-                strategy=args.strategy,
-                **strategy_params,
-                cost_per_turnover=args.commission,
-                initial_equity=args.cash,
-                execution_policy=execution_policy,
-            )
-            stats = to_legacy_stats(
-                result,
-                symbol=symbol,
-                strategy=args.strategy,
-                **strategy_params,
-                cash=args.cash,
-                commission=args.commission,
-            )
-        else:
-            raise SystemExit(f"Unsupported engine: {args.engine}")
+            if args.engine == "legacy":
+                stats = run_backtest_on_df(
+                    df=df,
+                    symbol=symbol,
+                    strategy=args.strategy,
+                    **strategy_params,
+                    cash=args.cash,
+                    commission=args.commission,
+                )
+            elif args.engine == "vectorized":
+                execution_policy = ExecutionPolicy(rebalance_frequency=args.rebalance_frequency)
+                result = run_vectorized_research_on_df(
+                    df=df,
+                    symbol=symbol,
+                    strategy=args.strategy,
+                    **strategy_params,
+                    cost_per_turnover=args.commission,
+                    initial_equity=args.cash,
+                    execution_policy=execution_policy,
+                )
+                stats = to_legacy_stats(
+                    result,
+                    symbol=symbol,
+                    strategy=args.strategy,
+                    **strategy_params,
+                    cash=args.cash,
+                    commission=args.commission,
+                )
+            else:
+                raise SystemExit(f"Unsupported engine: {args.engine}")
 
-        exp_id = log_experiment(stats)
-        if args.output_dir:
-            _save_run_artifacts(
-                output_dir=Path(args.output_dir),
-                symbol=symbol,
-                strategy=args.strategy,
-                engine=args.engine,
-                feature_path=prepared["path"],
-                effective_start=prepared["effective_start"],
-                effective_end=prepared["effective_end"],
-                rows_used=prepared["rows"],
-                stats=stats,
-                experiment_id=exp_id,
-                result=result,
-            )
+            exp_id = log_experiment(stats)
+            artifact_paths: dict[str, Path] = {}
+            if args.output_dir:
+                artifact_paths = _save_run_artifacts(
+                    output_dir=Path(args.output_dir),
+                    symbol=symbol,
+                    strategy=args.strategy,
+                    engine=args.engine,
+                    feature_path=prepared["path"],
+                    effective_start=prepared["effective_start"],
+                    effective_end=prepared["effective_end"],
+                    rows_used=prepared["rows"],
+                    stats=stats,
+                    experiment_id=exp_id,
+                    result=result,
+                )
+                register_artifact_bundle(
+                    db_service=db_service,
+                    artifact_paths=artifact_paths,
+                    artifact_type_prefix=f"research:{symbol}",
+                    research_run_id=research_run_id,
+                )
 
-        print(
-            f"[OK] {symbol}: engine={args.engine}, strategy={args.strategy}, "
-            f"range={prepared['effective_start']}->{prepared['effective_end']}, "
-            f"rows={prepared['rows']}, feature_path={prepared['path']}, "
-            f"fast={strategy_params['fast']}, slow={strategy_params['slow']}, lookback={strategy_params['lookback']}, "
-            f"entry_lookback={strategy_params['entry_lookback']}, exit_lookback={strategy_params['exit_lookback']}, "
-            f"momentum_lookback={strategy_params['momentum_lookback']}, "
-            f"Return[%]={stats.get('Return [%]', 'n/a')}, "
-            f"Sharpe={stats.get('Sharpe Ratio', 'n/a')}, "
-            f"MaxDD[%]={stats.get('Max. Drawdown [%]', 'n/a')}, "
-            f"trade_count={stats.get('trade_count', 'n/a')}, "
-            f"time_in_market[%]={stats.get('percent_time_in_market', 'n/a')}, "
-            f"activity={activity_note(stats)}, "
-            f"Experiment={exp_id}"
-        )
+            print(
+                f"[OK] {symbol}: engine={args.engine}, strategy={args.strategy}, "
+                f"range={prepared['effective_start']}->{prepared['effective_end']}, "
+                f"rows={prepared['rows']}, feature_path={prepared['path']}, "
+                f"fast={strategy_params['fast']}, slow={strategy_params['slow']}, lookback={strategy_params['lookback']}, "
+                f"entry_lookback={strategy_params['entry_lookback']}, exit_lookback={strategy_params['exit_lookback']}, "
+                f"momentum_lookback={strategy_params['momentum_lookback']}, "
+                f"Return[%]={stats.get('Return [%]', 'n/a')}, "
+                f"Sharpe={stats.get('Sharpe Ratio', 'n/a')}, "
+                f"MaxDD[%]={stats.get('Max. Drawdown [%]', 'n/a')}, "
+                f"trade_count={stats.get('trade_count', 'n/a')}, "
+                f"time_in_market[%]={stats.get('percent_time_in_market', 'n/a')}, "
+                f"activity={activity_note(stats)}, "
+                f"Experiment={exp_id}"
+            )
+        db_service.complete_research_run(research_run_id, notes=f"strategy_definition_id={strategy_definition_id}")
+    except Exception as exc:
+        db_service.fail_research_run(research_run_id, notes=repr(exc))
+        raise

@@ -48,6 +48,9 @@ class ResearchRunWorkflowConfig:
     vol_lookback_bars: int = 20
     benchmark: str = "equal_weight"
     cost_bps: float | None = None
+    enable_database_metadata: bool = False
+    database_url: str | None = None
+    database_schema: str | None = None
 
     def __post_init__(self) -> None:
         _validate_symbol_selection(
@@ -175,6 +178,9 @@ class PaperRunWorkflowConfig:
     taxonomy_snapshot_path: str | None = None
     benchmark_mapping_path: str | None = None
     market_regime_path: str | None = None
+    enable_database_metadata: bool = False
+    database_url: str | None = None
+    database_schema: str | None = None
     data_sources: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -226,6 +232,9 @@ class LiveDryRunWorkflowConfig:
     taxonomy_snapshot_path: str | None = None
     benchmark_mapping_path: str | None = None
     market_regime_path: str | None = None
+    enable_database_metadata: bool = False
+    database_url: str | None = None
+    database_schema: str | None = None
 
     def __post_init__(self) -> None:
         _validate_symbol_selection(

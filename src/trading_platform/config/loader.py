@@ -66,6 +66,17 @@ def _read_config_file(path: Path) -> dict[str, Any]:
     raise ValueError(f"Unsupported config file type: {suffix}")
 
 
+def _apply_database_section(payload: dict[str, Any]) -> dict[str, Any]:
+    database_section = payload.pop("database", {}) if isinstance(payload.get("database"), dict) else {}
+    if "enable_database_metadata" not in payload and "enable" in database_section:
+        payload["enable_database_metadata"] = database_section["enable"]
+    if "database_url" not in payload and "database_url" in database_section:
+        payload["database_url"] = database_section["database_url"]
+    if "database_schema" not in payload and "database_schema" in database_section:
+        payload["database_schema"] = database_section["database_schema"]
+    return payload
+
+
 def load_research_workflow_config(path: str | Path) -> ResearchWorkflowConfig:
     data = _read_config_file(Path(path))
     return ResearchWorkflowConfig(**data)
@@ -83,7 +94,7 @@ def load_walk_forward_config(path: str | Path) -> WalkForwardConfig:
 
 def load_research_run_workflow_config(path: str | Path) -> ResearchRunWorkflowConfig:
     data = _read_config_file(Path(path))
-    return ResearchRunWorkflowConfig(**data)
+    return ResearchRunWorkflowConfig(**_apply_database_section(dict(data)))
 
 
 def load_walkforward_workflow_config(path: str | Path) -> WalkForwardWorkflowConfig:
@@ -93,7 +104,7 @@ def load_walkforward_workflow_config(path: str | Path) -> WalkForwardWorkflowCon
 
 def load_paper_run_workflow_config(path: str | Path) -> PaperRunWorkflowConfig:
     data = _read_config_file(Path(path))
-    payload = dict(data)
+    payload = _apply_database_section(dict(data))
     screening_section = payload.pop("screening", {}) if isinstance(payload.get("screening"), dict) else {}
     paper_section = payload.pop("paper", {}) if isinstance(payload.get("paper"), dict) else {}
     execution_section = (
@@ -159,7 +170,7 @@ def load_paper_run_workflow_config(path: str | Path) -> PaperRunWorkflowConfig:
 
 def load_live_dry_run_workflow_config(path: str | Path) -> LiveDryRunWorkflowConfig:
     data = _read_config_file(Path(path))
-    payload = dict(data)
+    payload = _apply_database_section(dict(data))
     screening_section = payload.pop("screening", {}) if isinstance(payload.get("screening"), dict) else {}
     if "sub_universe_id" not in payload and "sub_universe_id" in screening_section:
         payload["sub_universe_id"] = screening_section["sub_universe_id"]

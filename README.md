@@ -61,6 +61,106 @@ Windows PowerShell:
 .venv\Scripts\Activate.ps1
 ```
 
+## Hybrid Storage Architecture
+
+The platform now supports a pragmatic hybrid storage model:
+
+- files remain the primary data plane for heavy artifacts
+- PostgreSQL is an optional control plane for normalized metadata, lineage, and cross-run queryability
+
+Artifact-first is still the rule.
+
+Keep these in files:
+
+- large feature matrices
+- signal snapshots
+- walk-forward result grids
+- charts, HTML reports, and images
+- large diagnostics and leaderboard exports
+
+Store these in PostgreSQL when DB metadata is enabled:
+
+- research runs and portfolio runs
+- artifact registry metadata and lineage links
+- strategy definitions and promotion decisions
+- candidate evaluations, portfolio decisions, and signal contributions
+- order, order-event, fill, and position metadata
+- universe membership and filter-level provenance summaries
+
+When DB metadata is disabled, workflows continue to run in the existing artifact-first mode.
+When DB metadata is enabled, the same workflows still write artifacts first and additionally write normalized metadata rows.
+
+## Database Setup
+
+Phase 1 targets PostgreSQL through SQLAlchemy 2.x and Alembic.
+
+Optional environment variables:
+
+```bash
+TRADING_PLATFORM_ENABLE_DATABASE_METADATA=1
+TRADING_PLATFORM_DATABASE_URL=postgresql+psycopg://postgres:postgres@localhost:5432/trading_platform
+TRADING_PLATFORM_DATABASE_SCHEMA=public
+```
+
+You can also put the same settings in workflow configs:
+
+```yaml
+database:
+  enable: true
+  database_url: postgresql+psycopg://postgres:postgres@localhost:5432/trading_platform
+  database_schema: public
+```
+
+Local PostgreSQL example:
+
+```bash
+createdb trading_platform
+```
+
+Run migrations:
+
+```bash
+alembic upgrade head
+```
+
+Create a new revision later:
+
+```bash
+alembic revision -m "describe change"
+```
+
+The initial migration adds the phase-1 control-plane tables for:
+
+- symbols, universes, and universe memberships
+- research runs and portfolio runs
+- strategy definitions, promotion decisions, and promoted strategies
+- artifact registry and run-artifact links
+- portfolio decisions, signal contributions, and position snapshots
+- orders, order events, and fills
+- candidate evaluations and universe filter results
+
+## DB Lineage
+
+When enabled, the intended lineage chain is:
+
+`research run -> strategy definition -> promotion decision -> promoted strategy -> portfolio run -> candidate evaluation -> portfolio decision -> order / fill -> artifact registry`
+
+This phase intentionally stores metadata and references, not heavyweight research payloads.
+
+Current phase-1 workflow coverage:
+
+- `research run`: creates a `ResearchRun`, records the strategy definition, and registers emitted research artifacts
+- `research promote`: records promotion decisions and promoted-strategy state when promotions are selected
+- `paper run`: creates a `PortfolioRun`, records candidate/trade decision metadata, order/fill metadata, position snapshots, and emitted paper artifacts
+- `live dry-run`: creates a `PortfolioRun`, records decision metadata, preview order lifecycle metadata, broker position snapshots, and emitted live-preview artifacts
+
+Current deferred items:
+
+- full migration of walk-forward grids, leaderboard history, and large research diagnostics into relational form
+- a dedicated execution-run table beyond the current portfolio-run linkage
+- deep normalization of every universe-enrichment field into first-class relational tables
+- automatic Postgres provisioning or vendor-specific ingestion pipelines
+
 ## Canonical Workflow
 
 ### 1. Data ingest

@@ -81,6 +81,10 @@ preset: xsec_nasdaq100_momentum_v1_research
 strategy: xsec_momentum_topn
 engine: vectorized
 output_dir: artifacts/research/xsec
+database:
+  enable: true
+  database_url: postgresql+psycopg://localhost/trading
+  database_schema: control_plane
 lookback_bars: 84
 skip_bars: 21
 top_n: 2
@@ -94,6 +98,9 @@ rebalance_bars: 21
     assert config.preset == "xsec_nasdaq100_momentum_v1_research"
     assert config.output_dir == "artifacts/research/xsec"
     assert config.top_n == 2
+    assert config.enable_database_metadata is True
+    assert config.database_url == "postgresql+psycopg://localhost/trading"
+    assert config.database_schema == "control_plane"
 
 
 def test_load_walkforward_workflow_config_from_yaml(tmp_path) -> None:
@@ -201,6 +208,10 @@ def test_load_paper_run_workflow_config_with_screening_section(tmp_path) -> None
 preset: xsec_nasdaq100_momentum_v1_deploy
 state_path: artifacts/paper/nasdaq100_state.json
 output_dir: artifacts/paper/nasdaq100
+database:
+  enable: true
+  database_url: postgresql+psycopg://localhost/trading
+  database_schema: control_plane
 screening:
   sub_universe_id: liquid_trend_candidates
   reference_data_root: artifacts/reference_data/v1
@@ -222,6 +233,9 @@ screening:
     config = load_paper_run_workflow_config(path)
 
     assert config.sub_universe_id == "liquid_trend_candidates"
+    assert config.enable_database_metadata is True
+    assert config.database_url == "postgresql+psycopg://localhost/trading"
+    assert config.database_schema == "control_plane"
     assert config.reference_data_root == "artifacts/reference_data/v1"
     assert config.universe_membership_path == "artifacts/universe_membership/demo.csv"
     assert config.taxonomy_snapshot_path == "artifacts/reference_data/v1/taxonomy.csv"
@@ -237,6 +251,10 @@ def test_load_live_dry_run_workflow_config_with_screening_section(tmp_path) -> N
         """
 preset: xsec_nasdaq100_momentum_v1_deploy
 output_dir: artifacts/live_dry_run/nasdaq100
+database:
+  enable: true
+  database_url: postgresql+psycopg://localhost/trading
+  database_schema: control_plane
 screening:
   sub_universe_id: liquid_trend_candidates
   reference_data_root: artifacts/reference_data/v1
@@ -255,6 +273,9 @@ screening:
     config = load_live_dry_run_workflow_config(path)
 
     assert config.sub_universe_id == "liquid_trend_candidates"
+    assert config.enable_database_metadata is True
+    assert config.database_url == "postgresql+psycopg://localhost/trading"
+    assert config.database_schema == "control_plane"
     assert config.reference_data_root == "artifacts/reference_data/v1"
     assert config.universe_membership_path == "artifacts/universe_membership/demo.csv"
     assert config.taxonomy_snapshot_path == "artifacts/reference_data/v1/taxonomy.csv"

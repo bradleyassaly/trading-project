@@ -6,6 +6,13 @@ from trading_platform.cli.config_support import apply_workflow_config, option_is
 from trading_platform.cli.common import resolve_symbols
 from trading_platform.cli.presets import apply_cli_preset
 from trading_platform.config.loader import load_execution_config, load_live_dry_run_workflow_config
+from trading_platform.db.services import (
+    DatabaseLineageService,
+    log_live_preview_orders,
+    log_portfolio_decision_bundle,
+    log_position_snapshots,
+    register_artifact_bundle,
+)
 from trading_platform.live.preview import (
     LivePreviewConfig,
     run_live_dry_run_preview,
@@ -80,10 +87,52 @@ def cmd_live_dry_run(args) -> None:
         setattr(args, "market_regime_path", getattr(loaded_config, "market_regime_path", None))
     config = _build_config(args)
     print(f"Running live dry-run for {len(config.symbols)} symbol(s): {', '.join(config.symbols)}")
+    db_service = DatabaseLineageService.from_config(
+        enable_database_metadata=getattr(loaded_config, "enable_database_metadata", None) if loaded_config is not None else None,
+        database_url=getattr(loaded_config, "database_url", None) if loaded_config is not None else None,
+        database_schema=getattr(loaded_config, "database_schema", None) if loaded_config is not None else None,
+    )
+    portfolio_run_id = db_service.create_portfolio_run(
+        run_key="|".join(["live_dry_run", str(config.preset_name or "manual"), str(config.strategy), str(config.universe_name or len(config.symbols)), str(config.output_dir)]),
+        mode="live_dry_run",
+        config_payload=loaded_config or config,
+        notes=f"broker={config.broker}",
+    )
 
-    execution_config = load_execution_config(args.execution_config) if getattr(args, "execution_config", None) else None
-    result = run_live_dry_run_preview(config, execution_config=execution_config) if execution_config is not None else run_live_dry_run_preview(config)
-    artifact_paths = write_live_dry_run_artifacts(result)
+    try:
+        execution_config = load_execution_config(args.execution_config) if getattr(args, "execution_config", None) else None
+        result = run_live_dry_run_preview(config, execution_config=execution_config) if execution_config is not None else run_live_dry_run_preview(config)
+        artifact_paths = write_live_dry_run_artifacts(result)
+        log_portfolio_decision_bundle(
+            db_service=db_service,
+            portfolio_run_id=portfolio_run_id,
+            decision_bundle=getattr(result, "decision_bundle", None),
+            universe_bundle=getattr(result, "universe_bundle", None),
+        )
+        log_live_preview_orders(
+            db_service=db_service,
+            adjusted_orders=result.adjusted_orders,
+            execution_result=result.execution_result,
+            as_of=result.as_of,
+            broker=config.broker,
+        )
+        log_position_snapshots(
+            db_service=db_service,
+            positions=result.positions,
+            as_of=result.as_of,
+            account=result.account.account_id,
+            source="live_preview",
+        )
+        register_artifact_bundle(
+            db_service=db_service,
+            artifact_paths=artifact_paths,
+            artifact_type_prefix="live_dry_run",
+            portfolio_run_id=portfolio_run_id,
+        )
+        db_service.complete_portfolio_run(portfolio_run_id, notes=f"run_id={getattr(result, 'run_id', '')} | as_of={result.as_of}")
+    except Exception as exc:
+        db_service.fail_portfolio_run(portfolio_run_id, notes=repr(exc))
+        raise
 
     print(f"As of: {result.as_of}")
     print(f"Broker: {config.broker}")
