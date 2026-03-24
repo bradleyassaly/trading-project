@@ -6,6 +6,13 @@ max_weight_per_strategy: 0.5
 min_weight_per_strategy: 0.1
 selection_metric: ranking_value
 weighting_mode: equal
+# Supported weighting modes:
+# - equal / equal_weight
+# - metric_proportional / metric_weighted
+# - capped_metric_weighted
+# - inverse_count_by_signal_family
+# - score_then_cap
+metric_weight_cap_multiple: 1.5
 require_active_only: false
 require_promotion_eligible_only: true
 deduplicate_source_runs: true

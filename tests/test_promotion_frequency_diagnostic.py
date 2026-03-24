@@ -7,6 +7,7 @@ from trading_platform.diagnostics.equity_feature_expansion import _build_compari
 from trading_platform.diagnostics.promotion_frequency import _build_summary, _resolve_scenarios
 from trading_platform.diagnostics.signal_family_comparison import _build_comparison_payload as _build_family_payload
 from trading_platform.diagnostics.signal_family_comparison import _build_family_summary
+from trading_platform.diagnostics.strategy_weighting_comparison import _recommend_mode
 
 
 def test_build_summary_counts_drop_stages_and_rates() -> None:
@@ -226,3 +227,30 @@ def test_signal_family_payload_prefers_better_funnel_then_sharpe() -> None:
 
     assert payload["best_family_by_funnel_then_sharpe"] == "momentum_acceleration"
     assert payload["decision"] == "promote winning new family into broader testing"
+
+
+def test_strategy_weighting_recommendation_prefers_balanced_exportable_mode() -> None:
+    recommendation = _recommend_mode(
+        [
+            {
+                "weighting_mode": "metric_weighted",
+                "run_bundle_exported": True,
+                "effective_strategy_count": 2.0,
+                "effective_family_count": 2.0,
+                "weighted_metric_average": 1.2,
+                "max_family_weight": 0.7,
+                "max_strategy_weight": 0.7,
+            },
+            {
+                "weighting_mode": "capped_metric_weighted",
+                "run_bundle_exported": True,
+                "effective_strategy_count": 2.6,
+                "effective_family_count": 2.0,
+                "weighted_metric_average": 1.1,
+                "max_family_weight": 0.5,
+                "max_strategy_weight": 0.45,
+            },
+        ]
+    )
+
+    assert recommendation == "capped_metric_weighted"

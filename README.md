@@ -596,6 +596,48 @@ Current guidance:
 - keep `momentum` as the default baseline unless a family comparison run shows a clear win
 - treat the new families as equity-only experimental paths for controlled follow-up testing
 
+## Strategy Portfolio Weighting Modes
+
+Promoted strategies can now be combined with a few transparent rule-based weighting modes in the strategy-portfolio policy:
+
+- `equal_weight`
+- `metric_weighted`
+- `capped_metric_weighted`
+- `inverse_count_by_signal_family`
+- `score_then_cap`
+
+Backward-compatible aliases still load:
+
+- `equal`
+- `metric_proportional`
+
+When to use them:
+
+- `equal_weight`: safest baseline for sparse promoted sets
+- `metric_weighted`: simple score tilt when you want stronger preference for the top-ranked strategies
+- `capped_metric_weighted`: preferred experimental mode when you want score sensitivity with less concentration
+- `inverse_count_by_signal_family`: better family balance when the promoted set clusters in one family
+- `score_then_cap`: rank-aware weighting that is less sensitive to raw metric magnitude
+
+Run a lightweight weighting comparison with:
+
+```bash
+python -m trading_platform.diagnostics.strategy_weighting_comparison --output-root artifacts/diagnostics/strategy_weighting_comparison
+```
+
+That writes:
+
+- `strategy_weighting_comparison.json`
+- `strategy_weighting_comparison.md`
+
+Use it to compare:
+
+- selected strategy count
+- assigned weights
+- effective strategy concentration
+- family concentration
+- run-config export readiness
+
 ### Live dry-run
 
 - `live_dry_run_summary.json`

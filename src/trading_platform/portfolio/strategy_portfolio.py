@@ -18,6 +18,17 @@ except ImportError:  # pragma: no cover
 
 
 STRATEGY_PORTFOLIO_SCHEMA_VERSION = 1
+_WEIGHTING_MODE_ALIASES = {
+    "equal": "equal_weight",
+    "metric_proportional": "metric_weighted",
+}
+_VALID_WEIGHTING_MODES = {
+    "equal_weight",
+    "metric_weighted",
+    "capped_metric_weighted",
+    "inverse_count_by_signal_family",
+    "score_then_cap",
+}
 
 
 @dataclass(frozen=True)
@@ -30,6 +41,7 @@ class StrategyPortfolioPolicyConfig:
     min_weight_per_strategy: float = 0.0
     selection_metric: str = "ranking_value"
     weighting_mode: str = "equal"
+    metric_weight_cap_multiple: float = 1.5
     require_active_only: bool = False
     require_promotion_eligible_only: bool = True
     deduplicate_source_runs: bool = True
@@ -55,8 +67,15 @@ class StrategyPortfolioPolicyConfig:
             raise ValueError("min_weight_per_strategy must be >= 0")
         if self.min_weight_per_strategy > self.max_weight_per_strategy:
             raise ValueError("min_weight_per_strategy must be <= max_weight_per_strategy")
-        if self.weighting_mode not in {"equal", "metric_proportional"}:
-            raise ValueError("weighting_mode must be one of: equal, metric_proportional")
+        resolved_weighting_mode = _resolve_weighting_mode(self.weighting_mode)
+        if resolved_weighting_mode not in _VALID_WEIGHTING_MODES:
+            raise ValueError(
+                "weighting_mode must be one of: equal, metric_proportional, "
+                "equal_weight, metric_weighted, capped_metric_weighted, "
+                "inverse_count_by_signal_family, score_then_cap"
+            )
+        if self.metric_weight_cap_multiple <= 0:
+            raise ValueError("metric_weight_cap_multiple must be > 0")
         if self.diversification_dimension not in {"none", "signal_family", "universe"}:
             raise ValueError("diversification_dimension must be one of: none, signal_family, universe")
 
@@ -103,6 +122,11 @@ def _write_payload(path: Path, payload: dict[str, Any]) -> Path:
     raise ValueError(f"Unsupported output file type: {suffix}")
 
 
+def _resolve_weighting_mode(weighting_mode: str) -> str:
+    normalized = str(weighting_mode or "").strip()
+    return _WEIGHTING_MODE_ALIASES.get(normalized, normalized)
+
+
 def _load_promoted_strategies(promoted_dir: str | Path) -> list[dict[str, Any]]:
     payload = _safe_read_json(Path(promoted_dir) / "promoted_strategies.json")
     return list(payload.get("strategies", []))
@@ -141,16 +165,59 @@ def _passes_filters(row: dict[str, Any], policy: StrategyPortfolioPolicyConfig) 
 def _build_base_weights(rows: list[dict[str, Any]], policy: StrategyPortfolioPolicyConfig) -> dict[str, float]:
     if not rows:
         return {}
-    if policy.weighting_mode == "equal":
+    weighting_mode = _resolve_weighting_mode(policy.weighting_mode)
+    if weighting_mode == "equal_weight":
         return {str(row["preset_name"]): 1.0 for row in rows}
+    if weighting_mode == "inverse_count_by_signal_family":
+        family_counts: dict[str, int] = {}
+        for row in rows:
+            family = str(row.get("signal_family") or "unknown")
+            family_counts[family] = family_counts.get(family, 0) + 1
+        return {
+            str(row["preset_name"]): 1.0 / max(family_counts.get(str(row.get("signal_family") or "unknown"), 1), 1)
+            for row in rows
+        }
+    if weighting_mode == "score_then_cap":
+        ranked = _rank_candidates(rows, policy.selection_metric)
+        count = len(ranked)
+        return {
+            str(row["preset_name"]): float(count - index)
+            for index, row in enumerate(ranked)
+        }
     raw = {
         str(row["preset_name"]): max(_row_metric_value(row, policy.selection_metric) or 0.0, 0.0)
         for row in rows
     }
+    if weighting_mode == "capped_metric_weighted":
+        positive_metrics = sorted(value for value in raw.values() if value > 0)
+        if positive_metrics:
+            median_metric = float(pd.Series(positive_metrics).median())
+            metric_cap = median_metric * policy.metric_weight_cap_multiple
+            raw = {
+                name: min(value, metric_cap) if value > 0 else value
+                for name, value in raw.items()
+            }
     total = sum(raw.values())
     if total <= 0 and policy.fallback_equal_weight_mode:
         return {str(row["preset_name"]): 1.0 for row in rows}
     return raw
+
+
+def _summarize_family_weights(selected_rows: list[dict[str, Any]]) -> dict[str, float]:
+    family_weights: dict[str, float] = {}
+    for row in selected_rows:
+        family = str(row.get("signal_family") or "unknown")
+        family_weights[family] = family_weights.get(family, 0.0) + float(row.get("allocation_weight") or 0.0)
+    return dict(sorted(family_weights.items()))
+
+
+def _effective_count(weights: list[float]) -> float:
+    positive = [float(weight) for weight in weights if float(weight) > 0]
+    if not positive:
+        return 0.0
+    total = sum(positive)
+    normalized = [weight / total for weight in positive]
+    return float(1.0 / sum(weight * weight for weight in normalized))
 
 
 def _normalize_with_caps(
@@ -319,6 +386,15 @@ def build_strategy_portfolio(
         )
 
     total_active_weight = float(sum(row["allocation_weight"] for row in selected_rows))
+    family_weight_summary = _summarize_family_weights(selected_rows)
+    family_effective_count = _effective_count(list(family_weight_summary.values()))
+    effective_strategy_count = _effective_count([row["allocation_weight"] for row in selected_rows])
+    preset_path_ready_count = sum(
+        1 for row in selected_rows if row.get("generated_preset_path") and Path(str(row["generated_preset_path"])).suffix
+    )
+    pipeline_path_ready_count = sum(
+        1 for row in selected_rows if row.get("generated_pipeline_config_path") and Path(str(row["generated_pipeline_config_path"])).suffix
+    )
     payload = {
         "schema_version": STRATEGY_PORTFOLIO_SCHEMA_VERSION,
         "generated_at": _now_utc(),
@@ -327,8 +403,16 @@ def build_strategy_portfolio(
         "summary": {
             "total_selected_strategies": len(selected_rows),
             "total_active_weight": total_active_weight,
+            "weighting_mode_resolved": _resolve_weighting_mode(policy.weighting_mode),
             "signal_family_counts": family_counts,
             "universe_counts": universe_counts,
+            "signal_family_weights": family_weight_summary,
+            "max_strategy_weight": max((row["allocation_weight"] for row in selected_rows), default=0.0),
+            "max_family_weight": max(family_weight_summary.values(), default=0.0),
+            "effective_strategy_count": effective_strategy_count,
+            "effective_family_count": family_effective_count,
+            "preset_path_ready_count": preset_path_ready_count,
+            "pipeline_path_ready_count": pipeline_path_ready_count,
             "warning_count": len(warnings),
         },
         "selected_strategies": selected_rows,

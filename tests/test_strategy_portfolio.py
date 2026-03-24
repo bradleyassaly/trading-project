@@ -130,6 +130,79 @@ def test_strategy_portfolio_weighting_and_export_run_config(tmp_path: Path) -> N
     assert pipeline.stages.paper_trading is True
 
 
+def test_strategy_portfolio_metric_weighted_concentrates_more_than_capped_metric_weighted(tmp_path: Path) -> None:
+    promoted_dir = _write_promoted_strategies(tmp_path / "promoted")
+
+    build_strategy_portfolio(
+        promoted_dir=promoted_dir,
+        output_dir=tmp_path / "metric_portfolio",
+        policy=StrategyPortfolioPolicyConfig(
+            max_strategies=3,
+            max_strategies_per_signal_family=2,
+            max_weight_per_strategy=0.8,
+            weighting_mode="metric_weighted",
+        ),
+    )
+    metric_payload = load_strategy_portfolio(tmp_path / "metric_portfolio")
+
+    build_strategy_portfolio(
+        promoted_dir=promoted_dir,
+        output_dir=tmp_path / "capped_metric_portfolio",
+        policy=StrategyPortfolioPolicyConfig(
+            max_strategies=3,
+            max_strategies_per_signal_family=2,
+            max_weight_per_strategy=0.8,
+            weighting_mode="capped_metric_weighted",
+            metric_weight_cap_multiple=1.0,
+        ),
+    )
+    capped_payload = load_strategy_portfolio(tmp_path / "capped_metric_portfolio")
+
+    assert metric_payload["summary"]["max_strategy_weight"] > capped_payload["summary"]["max_strategy_weight"]
+
+
+def test_strategy_portfolio_inverse_count_by_signal_family_balances_family_weights(tmp_path: Path) -> None:
+    promoted_dir = _write_promoted_strategies(tmp_path / "promoted")
+
+    build_strategy_portfolio(
+        promoted_dir=promoted_dir,
+        output_dir=tmp_path / "family_balanced_portfolio",
+        policy=StrategyPortfolioPolicyConfig(
+            max_strategies=3,
+            max_strategies_per_signal_family=2,
+            max_weight_per_strategy=0.8,
+            weighting_mode="inverse_count_by_signal_family",
+            deduplicate_source_runs=False,
+        ),
+    )
+    payload = load_strategy_portfolio(tmp_path / "family_balanced_portfolio")
+
+    family_weights = payload["summary"]["signal_family_weights"]
+    assert family_weights["momentum"] == family_weights["value"]
+    assert payload["summary"]["effective_family_count"] >= 2.0
+
+
+def test_strategy_portfolio_score_then_cap_prefers_higher_ranked_strategies(tmp_path: Path) -> None:
+    promoted_dir = _write_promoted_strategies(tmp_path / "promoted")
+
+    build_strategy_portfolio(
+        promoted_dir=promoted_dir,
+        output_dir=tmp_path / "score_then_cap_portfolio",
+        policy=StrategyPortfolioPolicyConfig(
+            max_strategies=3,
+            max_strategies_per_signal_family=2,
+            max_weight_per_strategy=0.6,
+            weighting_mode="score_then_cap",
+            deduplicate_source_runs=False,
+        ),
+    )
+    payload = load_strategy_portfolio(tmp_path / "score_then_cap_portfolio")
+    rows = {row["preset_name"]: row for row in payload["selected_strategies"]}
+
+    assert rows["generated_momentum_a"]["allocation_weight"] > rows["generated_value_a"]["allocation_weight"]
+    assert payload["summary"]["weighting_mode_resolved"] == "score_then_cap"
+
+
 def test_strategy_portfolio_excludes_demoted_lifecycle_entries(tmp_path: Path) -> None:
     promoted_dir = _write_promoted_strategies(tmp_path / "promoted")
     lifecycle_dir = tmp_path / "lifecycle"

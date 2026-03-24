@@ -131,6 +131,26 @@ state_path: artifacts/paper/nasdaq100_state.json
 execution_config: configs/execution.yaml
 top_n: 2
 portfolio_construction_mode: transition
+use_alpaca_latest_data: true
+data_sources:
+  prices:
+    historical: yfinance
+    latest: alpaca
+paper:
+  execution:
+    latest_data_max_age_seconds: 3600
+    slippage:
+      enabled: true
+      model: fixed_bps
+      buy_bps: 5
+      sell_bps: 7
+  ensemble:
+    enabled: true
+    mode: family_weighted
+    weight_method: rank_weighted
+    normalize_scores: zscore
+    max_members: 4
+    require_promoted_only: true
 """.strip(),
         encoding="utf-8",
     )
@@ -140,6 +160,17 @@ portfolio_construction_mode: transition
     assert config.preset == "xsec_nasdaq100_momentum_v1_deploy"
     assert config.state_path.endswith("nasdaq100_state.json")
     assert config.portfolio_construction_mode == "transition"
+    assert config.use_alpaca_latest_data is True
+    assert config.data_sources["prices"]["latest"] == "alpaca"
+    assert config.latest_data_max_age_seconds == 3600
+    assert config.slippage_model == "fixed_bps"
+    assert config.slippage_buy_bps == 5
+    assert config.slippage_sell_bps == 7
+    assert config.ensemble_enabled is True
+    assert config.ensemble_mode == "family_weighted"
+    assert config.ensemble_weight_method == "rank_weighted"
+    assert config.ensemble_normalize_scores == "zscore"
+    assert config.ensemble_max_members == 4
 
 
 def test_load_live_dry_run_workflow_config_from_yaml(tmp_path) -> None:
@@ -404,6 +435,23 @@ warn_on_same_family_overlap: true
     assert config.max_strategies == 4
     assert config.max_strategies_per_signal_family == 1
     assert config.max_weight_per_strategy == 0.4
+
+
+def test_load_strategy_portfolio_policy_config_accepts_new_weighting_modes(tmp_path) -> None:
+    path = tmp_path / "strategy_portfolio.yaml"
+    path.write_text(
+        """
+schema_version: 1
+weighting_mode: capped_metric_weighted
+metric_weight_cap_multiple: 1.25
+""".strip(),
+        encoding="utf-8",
+    )
+
+    config = load_strategy_portfolio_policy_config(path)
+
+    assert config.weighting_mode == "capped_metric_weighted"
+    assert config.metric_weight_cap_multiple == 1.25
 
 
 def test_load_strategy_validation_policy_config_from_yaml(tmp_path) -> None:
