@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict, dataclass, field
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +31,7 @@ from trading_platform.metadata.groups import build_group_series
 from trading_platform.paper.models import (
     OrderGenerationResult,
     PaperOrder,
+    PaperExecutionPriceSnapshot,
     PaperPortfolioState,
     PaperPosition,
     PaperSignalSnapshot,
@@ -37,6 +39,7 @@ from trading_platform.paper.models import (
     PaperTradingRunResult,
 )
 from trading_platform.paper.ledger import append_equity_snapshot, append_fills
+from trading_platform.paper.slippage import apply_order_slippage, validate_slippage_config
 from trading_platform.risk.pre_trade_checks import validate_orders
 from trading_platform.research.xsec_momentum import run_xsec_momentum_topn
 from trading_platform.signals.common import normalize_price_frame
@@ -98,7 +101,7 @@ def _load_xsec_prepared_frames(
 def _compute_latest_xsec_target_weights(
     *,
     config: PaperTradingConfig,
-) -> tuple[str, dict[str, float], dict[str, float], dict[str, float], dict[str, float], dict[str, Any], list[str]]:
+) -> tuple[str, dict[str, float], dict[str, float], dict[str, float], dict[str, float], dict[str, Any], list[str], list[PaperExecutionPriceSnapshot]]:
     target_construction_service.load_feature_frame = load_feature_frame
     target_construction_service.resolve_feature_frame_path = resolve_feature_frame_path
     target_construction_service.run_xsec_momentum_topn = run_xsec_momentum_topn
@@ -120,6 +123,7 @@ def load_signal_snapshot(
     fast: int | None = None,
     slow: int | None = None,
     lookback: int | None = None,
+    config: PaperTradingConfig | None = None,
 ) -> PaperSignalSnapshot:
     target_construction_service.load_feature_frame = load_feature_frame
     target_construction_service.SIGNAL_REGISTRY = SIGNAL_REGISTRY
@@ -129,6 +133,7 @@ def load_signal_snapshot(
         fast=fast,
         slow=slow,
         lookback=lookback,
+        config=config,
     )
 
 
@@ -361,6 +366,23 @@ def _apply_execution_orders_to_state(
     return state, fills
 
 
+def _apply_paper_slippage(
+    *,
+    orders: list[PaperOrder],
+    config: PaperTradingConfig,
+) -> tuple[list[PaperOrder], dict[str, Any]]:
+    validate_slippage_config(config)
+    adjusted = [apply_order_slippage(order, config) for order in orders]
+    model = str(config.slippage_model or "none").lower()
+    return adjusted, {
+        "slippage_enabled": model != "none",
+        "slippage_model": model,
+        "slippage_buy_bps": float(config.slippage_buy_bps),
+        "slippage_sell_bps": float(config.slippage_sell_bps),
+        "slippage_order_count": len(adjusted),
+    }
+
+
 def run_paper_trading_cycle_for_targets(
     *,
     config: PaperTradingConfig,
@@ -373,6 +395,7 @@ def run_paper_trading_cycle_for_targets(
     target_diagnostics: dict[str, Any],
     skipped_symbols: list[str],
     extra_diagnostics: dict[str, Any] | None = None,
+    price_snapshots: list[PaperExecutionPriceSnapshot] | None = None,
     execution_config: ExecutionConfig | None = None,
     auto_apply_fills: bool = False,
 ) -> PaperTradingRunResult:
@@ -401,6 +424,10 @@ def run_paper_trading_cycle_for_targets(
             current_cash=state.cash,
             current_equity=state.equity,
         )
+    executable_orders, slippage_diagnostics = _apply_paper_slippage(
+        orders=executable_orders,
+        config=config,
+    )
 
     broker_orders = [
         BrokerOrder(
@@ -425,20 +452,10 @@ def run_paper_trading_cycle_for_targets(
 
     fills = []
     if auto_apply_fills and executable_orders:
-        if execution_config is not None:
-            state, fills = _apply_execution_orders_to_state(
-                state=state,
-                orders=executable_orders,
-            )
-        else:
-            broker = PaperBroker(
-                state=state,
-                config=PaperBrokerConfig(
-                    commission_per_order=0.0,
-                    slippage_bps=0.0,
-                ),
-            )
-            fills = broker.submit_orders(broker_orders)
+        state, fills = _apply_execution_orders_to_state(
+            state=state,
+            orders=executable_orders,
+        )
         state = sync_state_prices(state, latest_prices)
 
     state.as_of = as_of
@@ -456,6 +473,20 @@ def run_paper_trading_cycle_for_targets(
         },
         "fill_count": len(fills),
         "execution": execution_diagnostics,
+        "paper_execution": {
+            "slippage_enabled": slippage_diagnostics["slippage_enabled"],
+            "slippage_model": slippage_diagnostics["slippage_model"],
+            "slippage_buy_bps": slippage_diagnostics["slippage_buy_bps"],
+            "slippage_sell_bps": slippage_diagnostics["slippage_sell_bps"],
+            "ensemble_enabled": bool(config.ensemble_enabled and config.signal_source == "ensemble"),
+            "ensemble_mode": config.ensemble_mode,
+            "ensemble_weight_method": config.ensemble_weight_method,
+            "latest_data_source": target_diagnostics.get("latest_data_source", target_diagnostics.get("latest_price_source")),
+            "latest_data_fallback_used": bool(target_diagnostics.get("latest_data_fallback_used", target_diagnostics.get("latest_price_fallback_used", False))),
+            "latest_bar_timestamp": target_diagnostics.get("latest_bar_timestamp"),
+            "latest_bar_age_seconds": target_diagnostics.get("latest_bar_age_seconds"),
+            "latest_data_stale": target_diagnostics.get("latest_data_stale"),
+        },
     }
     diagnostics.update(extra_diagnostics or {})
 
@@ -470,6 +501,7 @@ def run_paper_trading_cycle_for_targets(
         fills=fills,
         skipped_symbols=skipped_symbols,
         diagnostics=diagnostics,
+        price_snapshots=list(price_snapshots or []),
     )
 
 
@@ -480,7 +512,7 @@ def run_paper_trading_cycle(
     execution_config: ExecutionConfig | None = None,
     auto_apply_fills: bool = False,
 ) -> PaperTradingRunResult:
-    if config.signal_source == "composite":
+    if config.signal_source in {"composite", "ensemble"}:
         target_result = build_target_construction_result(config=config)
         return run_paper_trading_cycle_for_targets(
             config=config,
@@ -493,6 +525,7 @@ def run_paper_trading_cycle(
             target_diagnostics=target_result.target_diagnostics,
             skipped_symbols=target_result.skipped_symbols,
             extra_diagnostics=target_result.extra_diagnostics,
+            price_snapshots=target_result.price_snapshots,
             execution_config=execution_config,
             auto_apply_fills=auto_apply_fills,
         )
@@ -506,6 +539,7 @@ def run_paper_trading_cycle(
             latest_scores,
             target_diagnostics,
             skipped_symbols,
+            price_snapshots,
         ) = _compute_latest_xsec_target_weights(config=config)
         return run_paper_trading_cycle_for_targets(
             config=config,
@@ -518,6 +552,7 @@ def run_paper_trading_cycle(
             target_diagnostics=target_diagnostics,
             skipped_symbols=skipped_symbols,
             extra_diagnostics={},
+            price_snapshots=price_snapshots,
             execution_config=execution_config,
             auto_apply_fills=auto_apply_fills,
         )
@@ -528,6 +563,7 @@ def run_paper_trading_cycle(
         fast=config.fast,
         slow=config.slow,
         lookback=config.lookback,
+        config=config,
     )
     latest_prices = {
         symbol: float(price)
@@ -544,6 +580,13 @@ def run_paper_trading_cycle(
             snapshot=snapshot,
         )
     )
+    target_diagnostics = {
+        **target_diagnostics,
+        "historical_price_source": snapshot.metadata.get("historical_source", "yfinance"),
+        "latest_price_source": snapshot.metadata.get("latest_source", "yfinance"),
+        "latest_price_fallback_used": snapshot.metadata.get("latest_fallback_used", False),
+        **dict(snapshot.metadata.get("freshness_summary", {})),
+    }
     return run_paper_trading_cycle_for_targets(
         config=config,
         state_store=state_store,
@@ -555,6 +598,7 @@ def run_paper_trading_cycle(
         target_diagnostics=target_diagnostics,
         skipped_symbols=snapshot.skipped_symbols,
         extra_diagnostics={},
+        price_snapshots=list(snapshot.metadata.get("price_snapshots", [])),
         execution_config=execution_config,
         auto_apply_fills=auto_apply_fills,
     )
@@ -573,6 +617,7 @@ def write_paper_trading_artifacts(
     equity_snapshot_path = output_path / "paper_equity_snapshot.csv"
     positions_path = output_path / "paper_positions.csv"
     targets_path = output_path / "paper_target_weights.csv"
+    execution_price_snapshot_path = output_path / "execution_price_snapshot.csv"
     summary_path = output_path / "paper_summary.json"
 
     pd.DataFrame([asdict(order) for order in result.orders]).to_csv(orders_path, index=False)
@@ -592,6 +637,10 @@ def write_paper_trading_artifacts(
             for symbol, weight in sorted(result.latest_target_weights.items())
         ]
     ).to_csv(targets_path, index=False)
+    pd.DataFrame([asdict(snapshot) for snapshot in result.price_snapshots]).to_csv(
+        execution_price_snapshot_path,
+        index=False,
+    )
 
     extra_paths: dict[str, Path] = {}
     if result.diagnostics.get("signal_source") == "composite":
@@ -626,6 +675,12 @@ def write_paper_trading_artifacts(
             "approved_target_weights_path": approved_targets_path,
             "composite_diagnostics_path": composite_diagnostics_path,
         }
+    elif result.diagnostics.get("signal_source") == "ensemble":
+        ensemble_snapshot_path = output_path / "paper_ensemble_decision_snapshot.csv"
+        pd.DataFrame(result.diagnostics.get("ensemble_snapshot", [])).to_csv(ensemble_snapshot_path, index=False)
+        extra_paths = {
+            "paper_ensemble_decision_snapshot_path": ensemble_snapshot_path,
+        }
 
     pd.DataFrame(
         [
@@ -658,6 +713,7 @@ def write_paper_trading_artifacts(
         "fills": [asdict(fill) for fill in result.fills],
         "skipped_symbols": result.skipped_symbols,
         "diagnostics": result.diagnostics,
+        "price_snapshots": [asdict(snapshot) for snapshot in result.price_snapshots],
     }
     summary_path.write_text(json.dumps(summary_payload, indent=2), encoding="utf-8")
 
@@ -667,6 +723,7 @@ def write_paper_trading_artifacts(
         "equity_snapshot_path": equity_snapshot_path,
         "positions_path": positions_path,
         "targets_path": targets_path,
+        "execution_price_snapshot_path": execution_price_snapshot_path,
         "summary_path": summary_path,
     }
     execution_payload = result.diagnostics.get("execution", {})

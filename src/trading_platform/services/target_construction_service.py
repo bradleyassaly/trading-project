@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -15,11 +16,23 @@ from trading_platform.paper.composite import (
     build_composite_paper_snapshot,
     compute_latest_composite_target_weights,
 )
-from trading_platform.paper.models import PaperSignalSnapshot, PaperTradingConfig
+from trading_platform.paper.ensemble import build_ensemble_paper_snapshot
+from trading_platform.paper.models import PaperExecutionPriceSnapshot, PaperSignalSnapshot, PaperTradingConfig
+from trading_platform.paper.price_diagnostics import (
+    build_execution_price_snapshots,
+    summarize_execution_price_snapshots,
+)
 from trading_platform.research.xsec_momentum import run_xsec_momentum_topn
 from trading_platform.signals.common import normalize_price_frame
 from trading_platform.signals.loaders import load_feature_frame, resolve_feature_frame_path
 from trading_platform.signals.registry import SIGNAL_REGISTRY
+from trading_platform.ingestion.alpaca_data import (
+    fetch_alpaca_bars,
+    merge_historical_with_latest,
+)
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -33,6 +46,7 @@ class TargetConstructionResult:
     skipped_symbols: list[str] = field(default_factory=list)
     signal_snapshot: PaperSignalSnapshot | None = None
     extra_diagnostics: dict[str, Any] = field(default_factory=dict)
+    price_snapshots: list[PaperExecutionPriceSnapshot] = field(default_factory=list)
 
 
 def _load_xsec_prepared_frames(
@@ -60,6 +74,87 @@ def _load_xsec_prepared_frames(
     return prepared_frames, skipped_symbols, skip_reasons
 
 
+def _historical_price_source(config: PaperTradingConfig) -> str:
+    prices = (config.data_sources or {}).get("prices", {})
+    historical = str(prices.get("historical", "yfinance")).lower()
+    return historical or "yfinance"
+
+
+def _latest_price_source(config: PaperTradingConfig) -> str:
+    if config.use_alpaca_latest_data:
+        return "alpaca"
+    prices = (config.data_sources or {}).get("prices", {})
+    latest = str(prices.get("latest", "yfinance")).lower()
+    return latest or "yfinance"
+
+
+def _latest_fetch_window(frames: dict[str, pd.DataFrame]) -> tuple[str, str] | None:
+    timestamps: list[pd.Timestamp] = []
+    for frame in frames.values():
+        normalized = pd.to_datetime(frame.get("timestamp"), errors="coerce") if "timestamp" in frame.columns else pd.Series(dtype="datetime64[ns]")
+        normalized = normalized.dropna()
+        if not normalized.empty:
+            timestamps.append(pd.Timestamp(normalized.max()))
+    if not timestamps:
+        return None
+    latest_timestamp = max(timestamps)
+    start = (latest_timestamp - pd.Timedelta(days=7)).date().isoformat()
+    end = (pd.Timestamp.now(tz="UTC") + pd.Timedelta(days=1)).date().isoformat()
+    return start, end
+
+
+def _merge_latest_bar_into_frame(historical_frame: pd.DataFrame, latest_bars: pd.DataFrame, symbol: str) -> pd.DataFrame:
+    if latest_bars.empty:
+        return historical_frame
+    if "symbol" not in historical_frame.columns:
+        historical_frame = historical_frame.copy()
+        historical_frame["symbol"] = symbol
+    latest_symbol = latest_bars[latest_bars["symbol"].astype(str).str.upper() == symbol.upper()].copy()
+    if latest_symbol.empty:
+        return historical_frame
+    latest_symbol = latest_symbol.rename(columns={"date": "timestamp"})
+    merged = merge_historical_with_latest(historical_frame, latest_symbol)
+    if "date" in merged.columns and "timestamp" not in merged.columns:
+        merged = merged.rename(columns={"date": "timestamp"})
+    return merged
+
+
+def _apply_latest_market_data(
+    *,
+    config: PaperTradingConfig,
+    historical_frames: dict[str, pd.DataFrame],
+) -> tuple[dict[str, pd.DataFrame], str, bool]:
+    latest_source = _latest_price_source(config)
+    historical_source = _historical_price_source(config)
+    logger.info(
+        "paper market data sources: historical=%s latest=%s symbols=%s",
+        historical_source,
+        latest_source,
+        len(historical_frames),
+    )
+    if latest_source != "alpaca":
+        return historical_frames, latest_source, False
+
+    window = _latest_fetch_window(historical_frames)
+    if window is None:
+        logger.warning("Alpaca latest-data override requested but no historical timestamps were available; using historical data only")
+        return historical_frames, "yfinance", True
+    start, end = window
+    try:
+        latest_bars = fetch_alpaca_bars(sorted(historical_frames), start=start, end=end, timeframe="1Day")
+    except Exception as exc:
+        logger.warning("Alpaca latest-data fetch failed for %s symbol(s); falling back to historical data: %s", len(historical_frames), exc)
+        return historical_frames, "yfinance", True
+    if latest_bars.empty:
+        logger.warning("Alpaca latest-data fetch returned no rows for %s symbol(s); falling back to historical data", len(historical_frames))
+        return historical_frames, "yfinance", True
+    merged_frames: dict[str, pd.DataFrame] = {}
+    for symbol, frame in historical_frames.items():
+        merged_frames[symbol] = _merge_latest_bar_into_frame(frame, latest_bars, symbol)
+    logger.info("using Alpaca latest data for %s symbol(s)", len(merged_frames))
+    return merged_frames, "alpaca", False
+
+
 def load_signal_snapshot(
     *,
     symbols: list[str],
@@ -67,7 +162,10 @@ def load_signal_snapshot(
     fast: int | None = None,
     slow: int | None = None,
     lookback: int | None = None,
+    config: PaperTradingConfig | None = None,
 ) -> PaperSignalSnapshot:
+    feature_frames: dict[str, pd.DataFrame] = {}
+    historical_frames: dict[str, pd.DataFrame] = {}
     signal_fn = SIGNAL_REGISTRY[strategy]
     asset_return_frames: list[pd.Series] = []
     score_frames: list[pd.Series] = []
@@ -77,7 +175,29 @@ def load_signal_snapshot(
 
     for symbol in symbols:
         try:
-            feature_df = load_feature_frame(symbol)
+            loaded_frame = load_feature_frame(symbol)
+            feature_frames[symbol] = loaded_frame
+            historical_frames[symbol] = loaded_frame.copy()
+        except Exception as exc:
+            skipped_symbols.append(symbol)
+            skip_reasons[symbol] = repr(exc)
+
+    latest_source_effective = _latest_price_source(config) if config is not None else "yfinance"
+    latest_fallback_used = False
+    if config is not None and feature_frames:
+        historical_source = _historical_price_source(config)
+        latest_source = _latest_price_source(config)
+        logger.info("loading signal snapshot with historical=%s latest=%s symbols=%s", historical_source, latest_source, len(feature_frames))
+        feature_frames, latest_source_effective, latest_fallback_used = _apply_latest_market_data(
+            config=config,
+            historical_frames=feature_frames,
+        )
+        if latest_fallback_used:
+            logger.warning("signal snapshot fell back to yfinance-derived history for latest bars")
+
+    for symbol in symbols:
+        try:
+            feature_df = feature_frames[symbol]
             signal_kwargs = {}
             if fast is not None:
                 signal_kwargs["fast"] = fast
@@ -124,12 +244,33 @@ def load_signal_snapshot(
     asset_returns = pd.concat(asset_return_frames, axis=1).sort_index().fillna(0.0)
     scores = pd.concat(score_frames, axis=1).sort_index()
     closes = pd.concat(close_frames, axis=1).sort_index().ffill()
+    historical_source = _historical_price_source(config) if config is not None else "yfinance"
+    price_snapshots = build_execution_price_snapshots(
+        historical_frames=historical_frames,
+        final_frames=feature_frames,
+        historical_source=historical_source,
+        latest_data_source=latest_source_effective,
+        fallback_used=latest_fallback_used,
+        latest_data_max_age_seconds=int(getattr(config, "latest_data_max_age_seconds", 86_400) or 86_400),
+    )
+    freshness_summary = summarize_execution_price_snapshots(
+        price_snapshots,
+        latest_data_source=latest_source_effective,
+        fallback_used=latest_fallback_used,
+    )
 
     return PaperSignalSnapshot(
         asset_returns=asset_returns,
         scores=scores,
         closes=closes,
         skipped_symbols=skipped_symbols,
+        metadata={
+            "historical_source": historical_source,
+            "latest_source": latest_source_effective,
+            "latest_fallback_used": latest_fallback_used,
+            "price_snapshots": price_snapshots,
+            "freshness_summary": freshness_summary,
+        },
     )
 
 
@@ -191,8 +332,25 @@ def compute_latest_target_weights(
 def _compute_latest_xsec_target_weights(
     *,
     config: PaperTradingConfig,
-) -> tuple[str, dict[str, float], dict[str, float], dict[str, float], dict[str, float], dict[str, Any], list[str]]:
+) -> tuple[str, dict[str, float], dict[str, float], dict[str, float], dict[str, float], dict[str, Any], list[str], list[PaperExecutionPriceSnapshot]]:
     prepared_frames, skipped_symbols, skip_reasons = _load_xsec_prepared_frames(config.symbols)
+    historical_frames = {
+        symbol: prepared["df"]
+        for symbol, prepared in prepared_frames.items()
+    }
+    merged_frames, effective_latest_source, fallback_used = _apply_latest_market_data(
+        config=config,
+        historical_frames=historical_frames,
+    )
+    if fallback_used:
+        logger.warning("xsec target construction fell back to yfinance-derived history for latest bars")
+    prepared_frames = {
+        symbol: {
+            **prepared_frames[symbol],
+            "df": merged_frames[symbol],
+        }
+        for symbol in prepared_frames
+    }
     result = run_xsec_momentum_topn(
         prepared_frames=prepared_frames,
         lookback_bars=int(config.lookback_bars or 84),
@@ -230,6 +388,19 @@ def _compute_latest_xsec_target_weights(
         latest_price = pd.to_numeric(normalized["close"], errors="coerce").dropna()
         if not latest_price.empty:
             latest_prices[symbol] = float(latest_price.iloc[-1])
+    price_snapshots = build_execution_price_snapshots(
+        historical_frames=historical_frames,
+        final_frames=merged_frames,
+        historical_source=_historical_price_source(config),
+        latest_data_source=effective_latest_source,
+        fallback_used=fallback_used,
+        latest_data_max_age_seconds=int(config.latest_data_max_age_seconds),
+    )
+    freshness_summary = summarize_execution_price_snapshots(
+        price_snapshots,
+        latest_data_source=effective_latest_source,
+        fallback_used=fallback_used,
+    )
 
     if not result.rebalance_diagnostics.empty:
         latest_diag_row = result.rebalance_diagnostics.loc[:as_of_ts].iloc[-1].to_dict()
@@ -259,8 +430,12 @@ def _compute_latest_xsec_target_weights(
         "target_selected_count": latest_diag_row.get("target_selected_count"),
         "summary": result.summary,
         "skip_reasons": skip_reasons,
+        "historical_price_source": _historical_price_source(config),
+        "latest_price_source": effective_latest_source,
+        "latest_price_fallback_used": fallback_used,
+        **freshness_summary,
     }
-    return as_of, latest_target_weights.copy(), latest_target_weights, latest_prices, latest_scores, target_diagnostics, skipped_symbols
+    return as_of, latest_target_weights.copy(), latest_target_weights, latest_prices, latest_scores, target_diagnostics, skipped_symbols, price_snapshots
 
 
 def build_target_construction_result(
@@ -288,6 +463,55 @@ def build_target_construction_result(
                 for key, value in composite_targets.diagnostics.items()
                 if key != "target_construction"
             },
+            price_snapshots=composite_targets.price_snapshots,
+        )
+    if config.signal_source == "ensemble":
+        snapshot, snapshot_diagnostics = build_ensemble_paper_snapshot(config=config)
+        latest_prices = {
+            symbol: float(price)
+            for symbol, price in snapshot.closes.iloc[-1].fillna(0.0).items()
+            if float(price) > 0.0
+        }
+        latest_scores = {
+            symbol: float(score)
+            for symbol, score in snapshot.scores.iloc[-1].fillna(0.0).items()
+        }
+        as_of, latest_scheduled_weights, latest_effective_weights, target_diagnostics = compute_latest_target_weights(
+            config=config,
+            snapshot=snapshot,
+        )
+        target_diagnostics = {
+            **target_diagnostics,
+            **snapshot_diagnostics,
+        }
+        ensemble_snapshot = snapshot.metadata.get("ensemble_snapshot", pd.DataFrame())
+        if isinstance(ensemble_snapshot, pd.DataFrame) and not ensemble_snapshot.empty:
+            serializable_snapshot = ensemble_snapshot.copy()
+            if "timestamp" in serializable_snapshot.columns:
+                serializable_snapshot["timestamp"] = pd.to_datetime(
+                    serializable_snapshot["timestamp"],
+                    errors="coerce",
+                ).astype(str)
+        else:
+            serializable_snapshot = pd.DataFrame()
+        return TargetConstructionResult(
+            as_of=as_of,
+            scheduled_target_weights=latest_scheduled_weights,
+            effective_target_weights=latest_effective_weights,
+            latest_prices=latest_prices,
+            latest_scores=latest_scores,
+            target_diagnostics=target_diagnostics,
+            skipped_symbols=snapshot.skipped_symbols,
+            signal_snapshot=snapshot,
+            extra_diagnostics={
+                "ensemble_snapshot": serializable_snapshot.to_dict(orient="records")
+                if not serializable_snapshot.empty
+                else [],
+                "ensemble_member_summary": snapshot.metadata.get("ensemble_member_summary", pd.DataFrame()).to_dict(orient="records")
+                if isinstance(snapshot.metadata.get("ensemble_member_summary"), pd.DataFrame)
+                else [],
+            },
+            price_snapshots=list(snapshot.metadata.get("price_snapshots", [])),
         )
 
     if config.strategy == "xsec_momentum_topn":
@@ -299,6 +523,7 @@ def build_target_construction_result(
             latest_scores,
             target_diagnostics,
             skipped_symbols,
+            price_snapshots,
         ) = _compute_latest_xsec_target_weights(config=config)
         snapshot = PaperSignalSnapshot(
             asset_returns=pd.DataFrame(),
@@ -316,14 +541,15 @@ def build_target_construction_result(
             target_diagnostics=target_diagnostics,
             skipped_symbols=skipped_symbols,
             signal_snapshot=snapshot,
+            price_snapshots=price_snapshots,
         )
-
     snapshot = load_signal_snapshot(
         symbols=config.symbols,
         strategy=config.strategy,
         fast=config.fast,
         slow=config.slow,
         lookback=config.lookback,
+        config=config,
     )
     latest_prices = {
         symbol: float(price)
@@ -340,6 +566,13 @@ def build_target_construction_result(
             snapshot=snapshot,
         )
     )
+    target_diagnostics = {
+        **target_diagnostics,
+        "historical_price_source": snapshot.metadata.get("historical_source", "yfinance"),
+        "latest_price_source": snapshot.metadata.get("latest_source", "yfinance"),
+        "latest_price_fallback_used": snapshot.metadata.get("latest_fallback_used", False),
+        **dict(snapshot.metadata.get("freshness_summary", {})),
+    }
     return TargetConstructionResult(
         as_of=as_of,
         scheduled_target_weights=latest_scheduled_weights,
@@ -349,4 +582,5 @@ def build_target_construction_result(
         target_diagnostics=target_diagnostics,
         skipped_symbols=snapshot.skipped_symbols,
         signal_snapshot=snapshot,
+        price_snapshots=list(snapshot.metadata.get("price_snapshots", [])),
     )

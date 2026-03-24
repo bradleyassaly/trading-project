@@ -638,6 +638,12 @@ Use it to compare:
 - family concentration
 - run-config export readiness
 
+Current weighting guidance:
+
+- keep `equal_weight` as the simplest operator baseline
+- use `inverse_count_by_signal_family` as the next experimental default when promoted strategies span multiple signal families
+- use `capped_metric_weighted` when you want some score sensitivity without the concentration of fully `metric_weighted` allocations
+
 ### Live dry-run
 
 - `live_dry_run_summary.json`

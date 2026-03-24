@@ -9,7 +9,12 @@ import pandas as pd
 
 from trading_platform.execution.policies import ExecutionPolicy
 from trading_platform.execution.transforms import build_executed_weights
-from trading_platform.paper.models import PaperTradingConfig, PaperSignalSnapshot
+from trading_platform.ingestion.alpaca_data import fetch_alpaca_bars, merge_historical_with_latest
+from trading_platform.paper.models import PaperExecutionPriceSnapshot, PaperTradingConfig, PaperSignalSnapshot
+from trading_platform.paper.price_diagnostics import (
+    build_execution_price_snapshots,
+    summarize_execution_price_snapshots,
+)
 from trading_platform.research.approved_model_state import load_approved_model_state
 from trading_platform.research.alpha_lab.composite import (
     DEFAULT_COMPOSITE_CONFIG,
@@ -38,6 +43,59 @@ class CompositePaperTargetResult:
     latest_prices: dict[str, float]
     skipped_symbols: list[str]
     diagnostics: dict[str, Any]
+    price_snapshots: list[PaperExecutionPriceSnapshot]
+
+
+def _historical_price_source(config: PaperTradingConfig) -> str:
+    prices = config.data_sources.get("prices", {}) if isinstance(config.data_sources, dict) else {}
+    return str(prices.get("historical", "yfinance"))
+
+
+def _latest_price_source(config: PaperTradingConfig) -> str:
+    if config.use_alpaca_latest_data:
+        return "alpaca"
+    prices = config.data_sources.get("prices", {}) if isinstance(config.data_sources, dict) else {}
+    return str(prices.get("latest", "yfinance"))
+
+
+def _apply_latest_market_data(
+    *,
+    config: PaperTradingConfig,
+    feature_data_by_symbol: dict[str, pd.DataFrame],
+) -> tuple[dict[str, pd.DataFrame], bool]:
+    latest_source = _latest_price_source(config)
+    if latest_source.lower() != "alpaca" or not feature_data_by_symbol:
+        return feature_data_by_symbol, False
+
+    timestamps = [
+        pd.to_datetime(frame["timestamp"], errors="coerce").max()
+        for frame in feature_data_by_symbol.values()
+        if not frame.empty and "timestamp" in frame.columns
+    ]
+    timestamps = [timestamp for timestamp in timestamps if pd.notna(timestamp)]
+    if not timestamps:
+        return feature_data_by_symbol, False
+
+    start = (max(timestamps) - pd.Timedelta(days=5)).strftime("%Y-%m-%d")
+    end = (pd.Timestamp.utcnow() + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+    try:
+        latest_bars = fetch_alpaca_bars(sorted(feature_data_by_symbol), start=start, end=end)
+    except Exception:
+        return feature_data_by_symbol, True
+    if latest_bars.empty:
+        return feature_data_by_symbol, True
+
+    merged_frames: dict[str, pd.DataFrame] = {}
+    for symbol, frame in feature_data_by_symbol.items():
+        symbol_bars = latest_bars.loc[latest_bars["symbol"] == symbol].copy()
+        if symbol_bars.empty:
+            merged_frames[symbol] = frame
+            continue
+        latest_price_frame = symbol_bars.rename(columns={"date": "timestamp"})
+        if "volume" not in frame.columns and "volume" in latest_price_frame.columns:
+            latest_price_frame = latest_price_frame.drop(columns=["volume"])
+        merged_frames[symbol] = merge_historical_with_latest(frame, latest_price_frame)
+    return merged_frames, False
 
 
 def _read_artifact_csv(artifact_dir: Path, filename: str) -> pd.DataFrame:
@@ -247,11 +305,14 @@ def build_composite_paper_snapshot(
             redundancy_df = _read_artifact_csv(artifact_dir, "redundancy_diagnostics.csv")
 
     feature_data_by_symbol: dict[str, pd.DataFrame] = {}
+    historical_feature_data_by_symbol: dict[str, pd.DataFrame] = {}
     skipped_symbols: list[str] = []
     skipped_reasons: dict[str, str] = {}
     for symbol in config.symbols:
         try:
-            feature_data_by_symbol[symbol] = _load_feature_history(symbol)
+            loaded_frame = _load_feature_history(symbol)
+            feature_data_by_symbol[symbol] = loaded_frame
+            historical_feature_data_by_symbol[symbol] = loaded_frame.copy()
         except Exception as exc:
             skipped_symbols.append(symbol)
             skipped_reasons[symbol] = repr(exc)
@@ -260,6 +321,25 @@ def build_composite_paper_snapshot(
         raise ValueError(
             f"No valid symbol frames available for composite paper trading. Reasons: {skipped_reasons}"
         )
+
+    feature_data_by_symbol, latest_fallback_used = _apply_latest_market_data(
+        config=config,
+        feature_data_by_symbol=feature_data_by_symbol,
+    )
+    effective_latest_source = _latest_price_source(config) if not latest_fallback_used else _historical_price_source(config)
+    price_snapshots = build_execution_price_snapshots(
+        historical_frames=historical_feature_data_by_symbol,
+        final_frames=feature_data_by_symbol,
+        historical_source=_historical_price_source(config),
+        latest_data_source=effective_latest_source,
+        fallback_used=latest_fallback_used,
+        latest_data_max_age_seconds=int(config.latest_data_max_age_seconds),
+    )
+    freshness_summary = summarize_execution_price_snapshots(
+        price_snapshots,
+        latest_data_source=effective_latest_source,
+        fallback_used=latest_fallback_used,
+    )
 
     latest_timestamp = _latest_timestamp_from_features(feature_data_by_symbol)
     if latest_timestamp is None:
@@ -287,6 +367,7 @@ def build_composite_paper_snapshot(
             "latest_composite_scores": [],
             "skipped_symbols": skipped_symbols,
             "skipped_reasons": skipped_reasons,
+            **freshness_summary,
         }
         return (
             PaperSignalSnapshot(
@@ -294,7 +375,11 @@ def build_composite_paper_snapshot(
                 scores=empty_scores,
                 closes=closes,
                 skipped_symbols=skipped_symbols,
-                metadata={"feature_data_by_symbol": feature_data_by_symbol},
+                metadata={
+                    "feature_data_by_symbol": feature_data_by_symbol,
+                    "price_snapshots": price_snapshots,
+                    "freshness_summary": freshness_summary,
+                },
             ),
             diagnostics,
         )
@@ -375,6 +460,10 @@ def build_composite_paper_snapshot(
         "weighting_scheme": config.composite_weighting_scheme,
         "portfolio_mode": config.composite_portfolio_mode,
         "horizon": int(config.composite_horizon),
+        "historical_price_source": _historical_price_source(config),
+        "latest_price_source": effective_latest_source,
+        "latest_price_fallback_used": latest_fallback_used,
+        **freshness_summary,
     }
     return (
         PaperSignalSnapshot(
@@ -382,7 +471,11 @@ def build_composite_paper_snapshot(
             scores=score_matrix,
             closes=closes,
             skipped_symbols=skipped_symbols,
-            metadata={"feature_data_by_symbol": feature_data_by_symbol},
+            metadata={
+                "feature_data_by_symbol": feature_data_by_symbol,
+                "price_snapshots": price_snapshots,
+                "freshness_summary": freshness_summary,
+            },
         ),
         diagnostics,
     )
@@ -431,6 +524,7 @@ def compute_latest_composite_target_weights(
             latest_prices=latest_prices,
             skipped_symbols=snapshot.skipped_symbols,
             diagnostics=diagnostics,
+            price_snapshots=list(snapshot.metadata.get("price_snapshots", [])),
         )
 
     composite_scores_df = (
@@ -499,6 +593,7 @@ def compute_latest_composite_target_weights(
             latest_prices=latest_prices,
             skipped_symbols=snapshot.skipped_symbols,
             diagnostics=diagnostics,
+            price_snapshots=list(snapshot.metadata.get("price_snapshots", [])),
         )
 
     weight_matrix = (
@@ -556,4 +651,5 @@ def compute_latest_composite_target_weights(
         latest_prices=latest_prices,
         skipped_symbols=snapshot.skipped_symbols,
         diagnostics=diagnostics,
+        price_snapshots=list(snapshot.metadata.get("price_snapshots", [])),
     )

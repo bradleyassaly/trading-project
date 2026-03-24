@@ -4,6 +4,7 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
+from trading_platform.artifact_schemas import WorkflowArtifactSummary
 from trading_platform.cli.presets import build_decision_memo_payload
 
 
@@ -68,9 +69,27 @@ def cmd_decision_memo(args) -> None:
     stem = args.output_stem or payload["family_version"]
     markdown_path = output_dir / f"{stem}_decision_memo.md"
     json_path = output_dir / f"{stem}_decision_memo.json"
+    summary = WorkflowArtifactSummary(
+        summary_type="decision_memo",
+        workflow_stage="decision_memo",
+        timestamp=payload["generated_at_utc"],
+        status="succeeded",
+        name=payload["family_version"],
+        strategy=str(payload["strategy"]),
+        universe=str(payload["universe"]),
+        preset_name=str(payload["research_preset"]["name"]),
+        key_counts={"next_step_count": len(payload["next_steps"])},
+        key_metrics={},
+        details=payload,
+        artifact_paths={
+            "decision_memo_markdown": str(markdown_path),
+            "decision_memo_json": str(json_path),
+        },
+    )
 
     markdown_path.write_text(_render_markdown(payload), encoding="utf-8")
-    json_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    json_payload = {**payload, **summary.to_dict()}
+    json_path.write_text(json.dumps(json_payload, indent=2), encoding="utf-8")
 
     print(f"Generated decision memo markdown: {markdown_path}")
     print(f"Generated decision memo JSON: {json_path}")

@@ -7,6 +7,8 @@ from pathlib import Path
 
 import pandas as pd
 
+from trading_platform.artifact_schemas import WorkflowArtifactSummary
+from trading_platform.cli.config_support import apply_workflow_config, option_is_explicit
 from trading_platform.backtests.engine import run_backtest_on_df
 from trading_platform.cli.common import (
     build_strategy_params,
@@ -18,6 +20,7 @@ from trading_platform.cli.common import (
     resolve_turnover_cost,
 )
 from trading_platform.cli.presets import apply_cli_preset
+from trading_platform.config.loader import load_walkforward_workflow_config
 from trading_platform.experiments.reporting import (
     save_walkforward_html_report,
     save_walkforward_param_plot,
@@ -104,6 +107,48 @@ def _build_param_grid(args: argparse.Namespace) -> tuple[list[dict[str, int | No
 
 
 TRADING_BARS_PER_YEAR = 252
+
+
+def _write_workflow_summary_json(
+    *,
+    output_path: Path,
+    args: argparse.Namespace,
+    symbols: list[str],
+    out_df: pd.DataFrame,
+    summary_df: pd.DataFrame,
+    extra_paths: dict[str, str],
+) -> Path:
+    summary = WorkflowArtifactSummary(
+        summary_type="walkforward",
+        workflow_stage="walkforward",
+        timestamp=str(pd.Timestamp.now(tz="UTC").isoformat()),
+        status="succeeded",
+        name=output_path.stem,
+        strategy=args.strategy,
+        universe=args.universe if getattr(args, "universe", None) else ",".join(symbols),
+        preset_name=getattr(args, "_resolved_preset", getattr(args, "preset", None)),
+        key_counts={
+            "window_count": int(len(out_df)),
+            "completed_window_count": int((out_df["window_status"] == "completed").sum()) if "window_status" in out_df.columns else 0,
+            "summary_row_count": int(len(summary_df)),
+        },
+        key_metrics={
+            "avg_test_return_pct": float(summary_df["avg_test_return_pct"].mean()) if "avg_test_return_pct" in summary_df.columns and not summary_df.empty else None,
+            "avg_excess_return_pct": float(summary_df["avg_excess_return_pct"].mean()) if "avg_excess_return_pct" in summary_df.columns and not summary_df.empty else None,
+        },
+        details={
+            "engine": args.engine,
+            "symbols": symbols,
+            "select_by": args.select_by,
+            "train_bars": getattr(args, "train_bars", None),
+            "test_bars": getattr(args, "test_bars", None),
+            "step_bars": getattr(args, "step_bars", None),
+        },
+        artifact_paths=extra_paths,
+    )
+    summary_json_path = output_path.with_name(output_path.stem + "_workflow_summary.json")
+    summary_json_path.write_text(json.dumps(summary.to_dict(), indent=2), encoding="utf-8")
+    return summary_json_path
 
 
 def _resolve_window_spec(args: argparse.Namespace) -> dict[str, object]:
@@ -906,7 +951,16 @@ def run_xsec_walkforward_analysis(
 
 
 def cmd_walkforward(args: argparse.Namespace) -> None:
+    if getattr(args, "config", None):
+        loaded = load_walkforward_workflow_config(args.config)
+        if getattr(loaded, "preset", None) and not option_is_explicit(args, "preset"):
+            args.preset = loaded.preset
     apply_cli_preset(args)
+    apply_workflow_config(
+        args,
+        config_path=getattr(args, "config", None),
+        loader=load_walkforward_workflow_config,
+    )
     symbols = resolve_symbols(args)
     param_grid, invalid_warnings = _build_param_grid(args)
     window_spec = _resolve_window_spec(args)
@@ -960,12 +1014,28 @@ def cmd_walkforward(args: argparse.Namespace) -> None:
             returns_plot_path=returns_plot_path,
             params_plot_path=params_plot_path,
         )
+        workflow_summary_path = _write_workflow_summary_json(
+            output_path=output_path,
+            args=args,
+            symbols=symbols,
+            out_df=out_df,
+            summary_df=summary_df,
+            extra_paths={
+                "windows_csv": str(output_path),
+                "summary_csv": str(summary_path),
+                "report_html": str(report_path),
+                "returns_plot": str(returns_plot_path),
+                "params_plot": str(params_plot_path) if params_plot_path is not None else "",
+                "rebalance_diagnostics": str(rebalance_debug_path) if rebalance_debug_path is not None else "",
+            },
+        )
         print(f"Saved walk-forward returns plot to {returns_plot_path}")
         if params_plot_path is not None:
             print(f"Saved walk-forward parameter plot to {params_plot_path}")
         print(f"Saved walk-forward HTML report to {report_path}")
         print(f"\nSaved walk-forward window results to {output_path}")
         print(f"Saved walk-forward summary to {summary_path}")
+        print(f"Saved walk-forward workflow summary to {workflow_summary_path}")
         if rebalance_debug_path is not None:
             print(f"Saved walk-forward rebalance diagnostics to {rebalance_debug_path}")
         return
@@ -1184,6 +1254,21 @@ def cmd_walkforward(args: argparse.Namespace) -> None:
         returns_plot_path=returns_plot_path,
         params_plot_path=params_plot_path,
     )
+    workflow_summary_path = _write_workflow_summary_json(
+        output_path=output_path,
+        args=args,
+        symbols=symbols,
+        out_df=out_df,
+        summary_df=summary_df,
+        extra_paths={
+            "windows_csv": str(output_path),
+            "summary_csv": str(summary_path),
+            "overall_summary_csv": str(overall_summary_path) if overall_summary_path is not None else "",
+            "report_html": str(report_path),
+            "returns_plot": str(returns_plot_path),
+            "params_plot": str(params_plot_path) if params_plot_path is not None else "",
+        },
+    )
 
     print(f"Saved walk-forward returns plot to {returns_plot_path}")
     if params_plot_path is not None:
@@ -1191,5 +1276,6 @@ def cmd_walkforward(args: argparse.Namespace) -> None:
     print(f"Saved walk-forward HTML report to {report_path}")
     print(f"\nSaved walk-forward window results to {output_path}")
     print(f"Saved walk-forward summary to {summary_path}")
+    print(f"Saved walk-forward workflow summary to {workflow_summary_path}")
     if overall_summary_path is not None:
         print(f"Saved walk-forward overall universe summary to {overall_summary_path}")

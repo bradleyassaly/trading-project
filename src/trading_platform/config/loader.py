@@ -93,7 +93,53 @@ def load_walkforward_workflow_config(path: str | Path) -> WalkForwardWorkflowCon
 
 def load_paper_run_workflow_config(path: str | Path) -> PaperRunWorkflowConfig:
     data = _read_config_file(Path(path))
-    return PaperRunWorkflowConfig(**data)
+    payload = dict(data)
+    paper_section = payload.pop("paper", {}) if isinstance(payload.get("paper"), dict) else {}
+    execution_section = (
+        paper_section.get("execution", {})
+        if isinstance(paper_section.get("execution"), dict)
+        else {}
+    )
+    slippage_section = (
+        execution_section.get("slippage", {})
+        if isinstance(execution_section.get("slippage"), dict)
+        else {}
+    )
+    ensemble_section = (
+        paper_section.get("ensemble", {})
+        if isinstance(paper_section.get("ensemble"), dict)
+        else {}
+    )
+    if "latest_data_max_age_seconds" not in payload and "latest_data_max_age_seconds" in execution_section:
+        payload["latest_data_max_age_seconds"] = execution_section["latest_data_max_age_seconds"]
+    if "slippage_model" not in payload and slippage_section:
+        enabled = bool(slippage_section.get("enabled", False))
+        payload["slippage_model"] = str(slippage_section.get("model", "fixed_bps" if enabled else "none"))
+        if not enabled:
+            payload["slippage_model"] = "none"
+    if "slippage_buy_bps" not in payload and "buy_bps" in slippage_section:
+        payload["slippage_buy_bps"] = slippage_section["buy_bps"]
+    if "slippage_sell_bps" not in payload and "sell_bps" in slippage_section:
+        payload["slippage_sell_bps"] = slippage_section["sell_bps"]
+    if "ensemble_enabled" not in payload and ensemble_section:
+        payload["ensemble_enabled"] = bool(ensemble_section.get("enabled", False))
+    if "ensemble_mode" not in payload and "mode" in ensemble_section:
+        payload["ensemble_mode"] = ensemble_section["mode"]
+    if "ensemble_weight_method" not in payload and "weight_method" in ensemble_section:
+        payload["ensemble_weight_method"] = ensemble_section["weight_method"]
+    if "ensemble_normalize_scores" not in payload and "normalize_scores" in ensemble_section:
+        payload["ensemble_normalize_scores"] = ensemble_section["normalize_scores"]
+    if "ensemble_max_members" not in payload and "max_members" in ensemble_section:
+        payload["ensemble_max_members"] = ensemble_section["max_members"]
+    if "ensemble_require_promoted_only" not in payload and "require_promoted_only" in ensemble_section:
+        payload["ensemble_require_promoted_only"] = ensemble_section["require_promoted_only"]
+    if "ensemble_max_members_per_family" not in payload and "max_members_per_family" in ensemble_section:
+        payload["ensemble_max_members_per_family"] = ensemble_section["max_members_per_family"]
+    if "ensemble_minimum_member_observations" not in payload and "minimum_member_observations" in ensemble_section:
+        payload["ensemble_minimum_member_observations"] = ensemble_section["minimum_member_observations"]
+    if "ensemble_minimum_member_metric" not in payload and "minimum_member_metric" in ensemble_section:
+        payload["ensemble_minimum_member_metric"] = ensemble_section["minimum_member_metric"]
+    return PaperRunWorkflowConfig(**payload)
 
 
 def load_live_dry_run_workflow_config(path: str | Path) -> LiveDryRunWorkflowConfig:

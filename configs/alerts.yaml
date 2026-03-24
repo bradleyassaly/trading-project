@@ -5,17 +5,17 @@
 email_enabled: true
 sms_enabled: false
 # Replace with your real SMTP server, for example smtp.sendgrid.net or your mail provider host.
-smtp_host: smtp.example.com
+smtp_host: smtp.gmail.com
 smtp_port: 587
 # Replace with the SMTP login for your provider.
-smtp_username: alerts@example.com
+smtp_username: bradleyassaly@gmail.com
 smtp_password_env_var: TRADING_PLATFORM_SMTP_PASSWORD
 smtp_use_tls: true
 # Replace with the sender identity your SMTP provider allows.
-email_from: alerts@example.com
+email_from: bradleyassaly@gmail.com
 # Replace with the real operator inbox or distribution list.
 email_to:
-  - ops@example.com
+  - bradleyassaly@gmail.com
 subject_prefix: Trading Platform
 email_min_severity: info
 sms_provider: stub

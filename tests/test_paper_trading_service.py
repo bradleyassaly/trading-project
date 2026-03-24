@@ -417,3 +417,72 @@ def test_composite_paper_trading_handles_no_approved_signals(monkeypatch, tmp_pa
     assert paths["daily_composite_scores_path"].exists()
     assert paths["approved_target_weights_path"].exists()
     assert paths["composite_diagnostics_path"].exists()
+
+
+def test_run_paper_trading_cycle_supports_ensemble_signal_source(monkeypatch, tmp_path: Path) -> None:
+    artifact_dir = tmp_path / "alpha"
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(
+        [
+            {
+                "signal_family": "momentum",
+                "lookback": 1,
+                "horizon": 1,
+                "mean_spearman_ic": 0.10,
+                "promotion_status": "promote",
+                "total_obs": 60,
+                "candidate_id": "momentum|1|1",
+            },
+            {
+                "signal_family": "momentum",
+                "lookback": 2,
+                "horizon": 1,
+                "mean_spearman_ic": 0.08,
+                "promotion_status": "promote",
+                "total_obs": 60,
+                "candidate_id": "momentum|2|1",
+            },
+        ]
+    ).to_csv(artifact_dir / "promoted_signals.csv", index=False)
+
+    def fake_load_feature_frame(symbol: str) -> pd.DataFrame:
+        closes = {
+            "AAPL": [100.0, 105.0, 110.0],
+            "MSFT": [100.0, 100.0, 100.0],
+            "NVDA": [100.0, 95.0, 90.0],
+        }
+        return pd.DataFrame(
+            {
+                "timestamp": pd.date_range("2025-01-01", periods=3, freq="D"),
+                "close": closes[symbol],
+                "volume": [1_000_000.0] * 3,
+            }
+        )
+
+    monkeypatch.setattr("trading_platform.paper.composite.load_feature_frame", fake_load_feature_frame)
+
+    result = run_paper_trading_cycle(
+        config=PaperTradingConfig(
+            symbols=["AAPL", "MSFT", "NVDA"],
+            signal_source="ensemble",
+            composite_artifact_dir=str(artifact_dir),
+            composite_horizon=1,
+            top_n=1,
+            initial_cash=10_000.0,
+            min_trade_dollars=1.0,
+            ensemble_enabled=True,
+            ensemble_mode="candidate_weighted",
+            ensemble_weight_method="equal",
+            ensemble_normalize_scores="rank_pct",
+            ensemble_max_members=2,
+        ),
+        state_store=JsonPaperStateStore(tmp_path / "paper_state.json"),
+        auto_apply_fills=False,
+    )
+
+    assert result.diagnostics["signal_source"] == "ensemble"
+    assert result.diagnostics["paper_execution"]["ensemble_enabled"] is True
+    assert result.latest_target_weights
+    assert result.orders
+    paths = write_paper_trading_artifacts(result=result, output_dir=tmp_path / "artifacts")
+    assert paths["paper_ensemble_decision_snapshot_path"].exists()

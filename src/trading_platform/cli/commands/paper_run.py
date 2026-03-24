@@ -2,9 +2,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from trading_platform.cli.config_support import apply_workflow_config, option_is_explicit
 from trading_platform.cli.common import normalize_paper_weighting_scheme, resolve_symbols
 from trading_platform.cli.presets import apply_cli_preset
-from trading_platform.config.loader import load_execution_config
+from trading_platform.config.loader import load_execution_config, load_paper_run_workflow_config
 from trading_platform.paper.models import PaperTradingConfig
 from trading_platform.paper.persistence import persist_paper_run_outputs
 from trading_platform.paper.service import (
@@ -19,7 +20,18 @@ from trading_platform.research.experiment_tracking import (
 
 
 def cmd_paper_run(args) -> None:
+    loaded_config = None
+    if getattr(args, "config", None):
+        loaded = load_paper_run_workflow_config(args.config)
+        loaded_config = loaded
+        if getattr(loaded, "preset", None) and not option_is_explicit(args, "preset"):
+            args.preset = loaded.preset
     apply_cli_preset(args)
+    apply_workflow_config(
+        args,
+        config_path=getattr(args, "config", None),
+        loader=load_paper_run_workflow_config,
+    )
     symbols = resolve_symbols(args)
 
     config = PaperTradingConfig(
@@ -67,6 +79,21 @@ def cmd_paper_run(args) -> None:
         max_adv_participation=args.max_adv_participation,
         max_position_pct_of_adv=args.max_position_pct_of_adv,
         max_notional_per_name=args.max_notional_per_name,
+        use_alpaca_latest_data=bool(getattr(args, "use_alpaca_latest_data", False)),
+        latest_data_max_age_seconds=int(getattr(args, "latest_data_max_age_seconds", 86_400)),
+        slippage_model=str(getattr(args, "slippage_model", "none")),
+        slippage_buy_bps=float(getattr(args, "slippage_buy_bps", 0.0)),
+        slippage_sell_bps=float(getattr(args, "slippage_sell_bps", 0.0)),
+        ensemble_enabled=bool(getattr(args, "enable_ensemble", False) or getattr(args, "ensemble_enabled", False)),
+        ensemble_mode=str(getattr(args, "ensemble_mode", "disabled")),
+        ensemble_weight_method=str(getattr(args, "ensemble_weight_method", "equal")),
+        ensemble_normalize_scores=str(getattr(args, "ensemble_normalize_scores", "rank_pct")),
+        ensemble_max_members=int(getattr(args, "ensemble_max_members", 5)),
+        ensemble_require_promoted_only=bool(getattr(args, "ensemble_require_promoted_only", True)),
+        ensemble_max_members_per_family=getattr(args, "ensemble_max_members_per_family", None),
+        ensemble_minimum_member_observations=int(getattr(args, "ensemble_minimum_member_observations", 0)),
+        ensemble_minimum_member_metric=getattr(args, "ensemble_minimum_member_metric", None),
+        data_sources=getattr(loaded_config, "data_sources", {}) if loaded_config is not None else {},
     )
 
     print(
@@ -124,11 +151,18 @@ def cmd_paper_run(args) -> None:
         print(f"turnover_buffer_blocked_replacements: {target_diagnostics.get('turnover_buffer_blocked_replacements')}")
         print(f"semantic_warning: {target_diagnostics.get('semantic_warning') or 'none'}")
     execution_summary = result.diagnostics.get("execution", {}).get("execution_summary", {})
+    paper_execution = result.diagnostics.get("paper_execution", {})
     if execution_summary:
         print(f"Requested orders: {execution_summary.get('requested_order_count', 0)}")
         print(f"Executable orders: {execution_summary.get('executable_order_count', 0)}")
         print(f"Rejected orders: {execution_summary.get('rejected_order_count', 0)}")
         print(f"Expected total cost: {execution_summary.get('expected_total_cost', 0.0):.6f}")
+    if paper_execution:
+        print(f"Latest data source: {paper_execution.get('latest_data_source')}")
+        print(f"Latest data fallback used: {paper_execution.get('latest_data_fallback_used')}")
+        print(f"Latest data stale: {paper_execution.get('latest_data_stale')}")
+        print(f"Slippage model: {paper_execution.get('slippage_model')}")
+        print(f"Ensemble enabled: {paper_execution.get('ensemble_enabled')}")
     health_counts = {
         "pass": sum(1 for item in health_checks if item["status"] == "pass"),
         "warn": sum(1 for item in health_checks if item["status"] == "warn"),

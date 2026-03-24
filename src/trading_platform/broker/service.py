@@ -9,6 +9,7 @@ from typing import Protocol
 import pandas as pd
 
 from trading_platform.broker.alpaca_broker import AlpacaBroker, AlpacaBrokerConfig
+from trading_platform.broker.live_models import LiveBrokerOrderRequest
 from trading_platform.broker.models import (
     BrokerAccountSnapshot,
     BrokerConfig,
@@ -268,7 +269,38 @@ class AlpacaBrokerAdapter:
         ]
 
     def submit_orders(self, orders: list[BrokerOrderRequest]) -> list[BrokerOrderResult]:
-        raise NotImplementedError("Alpaca live submission is not implemented yet.")
+        submitted = self._broker.submit_orders(
+            [
+                LiveBrokerOrderRequest(
+                    symbol=order.symbol,
+                    side=order.side,
+                    quantity=order.quantity,
+                    order_type=order.order_type,
+                    time_in_force=order.time_in_force,
+                    limit_price=order.limit_price,
+                    client_order_id=order.client_order_id,
+                    reason=order.reason,
+                )
+                for order in orders
+            ]
+        )
+        return [
+            BrokerOrderResult(
+                symbol=item.symbol,
+                side=item.side,
+                quantity=item.quantity,
+                order_type=item.order_type,
+                time_in_force=item.time_in_force,
+                status="submitted" if item.status.lower() in {"accepted", "new", "held", "pending_new"} else item.status.lower(),
+                submitted=item.status.lower() not in {"rejected", "failed", "canceled", "cancelled"},
+                client_order_id=item.client_order_id,
+                broker_order_id=item.broker_order_id,
+                filled_quantity=item.filled_quantity,
+                submitted_at=item.submitted_at,
+                message=item.status,
+            )
+            for item in submitted
+        ]
 
     def cancel_order(self, broker_order_id: str) -> BrokerOrderResult:
         raise NotImplementedError("Alpaca single-order cancel is not implemented yet.")

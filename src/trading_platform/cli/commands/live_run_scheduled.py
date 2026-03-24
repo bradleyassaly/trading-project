@@ -1,15 +1,25 @@
 from __future__ import annotations
 
+from trading_platform.cli.config_support import apply_workflow_config, option_is_explicit
 from trading_platform.cli.commands.live_dry_run import _build_config
 from trading_platform.cli.presets import apply_cli_preset
-from trading_platform.config.loader import load_execution_config
+from trading_platform.config.loader import load_execution_config, load_live_dry_run_workflow_config
 from trading_platform.live.persistence import persist_live_scheduled_outputs
 from trading_platform.live.preview import run_live_dry_run_preview, write_live_dry_run_artifacts
 
 
 def cmd_live_run_scheduled(args) -> None:
     print("Starting scheduled live dry-run")
+    if getattr(args, "config", None):
+        loaded = load_live_dry_run_workflow_config(args.config)
+        if getattr(loaded, "preset", None) and not option_is_explicit(args, "preset"):
+            args.preset = loaded.preset
     apply_cli_preset(args)
+    apply_workflow_config(
+        args,
+        config_path=getattr(args, "config", None),
+        loader=load_live_dry_run_workflow_config,
+    )
     if not getattr(args, "preset", None):
         raise SystemExit("Scheduled live dry-run requires --preset")
 

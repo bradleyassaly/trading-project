@@ -80,6 +80,11 @@ def test_cmd_paper_run_writes_artifacts(monkeypatch, tmp_path: Path, capsys) -> 
         max_adv_participation=0.05,
         max_position_pct_of_adv=0.1,
         max_notional_per_name=None,
+        use_alpaca_latest_data=True,
+        latest_data_max_age_seconds=900,
+        slippage_model="fixed_bps",
+        slippage_buy_bps=5.0,
+        slippage_sell_bps=7.0,
         state_path=str(tmp_path / "paper_state.json"),
         output_dir=str(tmp_path / "paper"),
         auto_apply_fills=False,
@@ -98,6 +103,9 @@ def test_cmd_paper_run_writes_artifacts(monkeypatch, tmp_path: Path, capsys) -> 
     cmd_paper_run(args)
 
     assert captured["config"].symbols == ["AAPL", "MSFT"]
+    assert captured["config"].use_alpaca_latest_data is True
+    assert captured["config"].latest_data_max_age_seconds == 900
+    assert captured["config"].slippage_model == "fixed_bps"
     assert captured["auto_apply_fills"] is False
     assert captured["output_dir"] == tmp_path / "paper"
 

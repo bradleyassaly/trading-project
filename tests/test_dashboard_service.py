@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import json
 import os
+from collections import namedtuple
 from io import BytesIO
 from pathlib import Path
 
 import pandas as pd
 
+from trading_platform.dashboard.chart_service import build_trade_records_from_fills
 from trading_platform.dashboard.server import build_dashboard_static_data, create_dashboard_app
 from trading_platform.dashboard.service import DashboardDataService
 from trading_platform.governance.models import StrategyRegistry, StrategyRegistryEntry
@@ -651,14 +653,203 @@ def _call_app(app, path: str) -> tuple[str, dict[str, str], dict]:
         captured["status"] = status
         captured["headers"] = dict(headers)
 
+    path_info = path
+    query_string = ""
+    if "?" in path:
+        path_info, query_string = path.split("?", 1)
     environ = {
         "REQUEST_METHOD": "GET",
-        "PATH_INFO": path,
-        "QUERY_STRING": "",
+        "PATH_INFO": path_info,
+        "QUERY_STRING": query_string,
         "wsgi.input": BytesIO(b""),
     }
     body = b"".join(app(environ, start_response))
     return str(captured["status"]), captured["headers"], json.loads(body.decode("utf-8"))
+
+
+def _call_app_raw(app, path: str) -> tuple[str, dict[str, str], str]:
+    captured: dict[str, object] = {}
+
+    def start_response(status, headers):
+        captured["status"] = status
+        captured["headers"] = dict(headers)
+
+    path_info = path
+    query_string = ""
+    if "?" in path:
+        path_info, query_string = path.split("?", 1)
+    environ = {
+        "REQUEST_METHOD": "GET",
+        "PATH_INFO": path_info,
+        "QUERY_STRING": query_string,
+        "wsgi.input": BytesIO(b""),
+    }
+    body = b"".join(app(environ, start_response))
+    return str(captured["status"]), captured["headers"], body.decode("utf-8")
+
+
+def _write_chart_artifacts(root: Path, feature_dir: Path) -> None:
+    feature_dir.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(
+        [
+            {"timestamp": "2026-03-18T00:00:00+00:00", "symbol": "AAPL", "open": 100.0, "high": 102.0, "low": 99.0, "close": 101.0, "volume": 1000.0, "sma_20": 99.5},
+            {"timestamp": "2026-03-19T00:00:00+00:00", "symbol": "AAPL", "open": 101.0, "high": 104.0, "low": 100.0, "close": 103.0, "volume": 1100.0, "sma_20": 100.2},
+            {"timestamp": "2026-03-20T00:00:00+00:00", "symbol": "AAPL", "open": 103.0, "high": 105.0, "low": 102.0, "close": 104.0, "volume": 1200.0, "sma_20": 101.1},
+            {"timestamp": "2026-03-21T00:00:00+00:00", "symbol": "AAPL", "open": 104.0, "high": 106.0, "low": 103.0, "close": 105.0, "volume": 1250.0, "sma_20": 102.4},
+        ]
+    ).to_parquet(feature_dir / "AAPL.parquet", index=False)
+
+    alternate_research_dir = root / "research_alt" / "alternate_run"
+    alternate_research_dir.mkdir(parents=True, exist_ok=True)
+    (alternate_research_dir / "run_metadata.json").write_text(
+        json.dumps(
+            {
+                "run_id": "manifest-alt-run",
+                "source": "research_alt_manifest",
+                "mode": "paper",
+                "strategy_id": "breakout-alt",
+                "timeframe": "1d",
+                "lookback": 63,
+                "artifact_group": "research",
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    pd.DataFrame(
+        [
+            {"timestamp": "2026-03-18T00:00:00+00:00", "close": 101.0, "score": 0.0, "position": 0.0},
+            {"timestamp": "2026-03-19T00:00:00+00:00", "close": 103.0, "score": 0.2, "position": -1.0},
+            {"timestamp": "2026-03-20T00:00:00+00:00", "close": 104.0, "score": 0.3, "position": -1.0},
+            {"timestamp": "2026-03-21T00:00:00+00:00", "close": 105.0, "score": 0.0, "position": 0.0},
+        ]
+    ).to_csv(alternate_research_dir / "AAPL_breakout_hold_signals.csv", index=False)
+    research_dir = root / "research" / "sample_run"
+    research_dir.mkdir(parents=True, exist_ok=True)
+    (research_dir / "run_metadata.json").write_text(
+        json.dumps(
+            {
+                "run_id": "manifest-research-run",
+                "source": "research_manifest",
+                "mode": "paper",
+                "strategy_id": "momentum-core",
+                "timeframe": "1d",
+                "lookback": 84,
+                "artifact_group": "research",
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    pd.DataFrame(
+        [
+            {"timestamp": "2026-03-18T00:00:00+00:00", "close": 101.0, "score": 0.0, "position": 0.0},
+            {"timestamp": "2026-03-19T00:00:00+00:00", "close": 103.0, "score": 0.9, "position": 1.0},
+            {"timestamp": "2026-03-20T00:00:00+00:00", "close": 104.0, "score": 0.7, "position": 1.0},
+            {"timestamp": "2026-03-21T00:00:00+00:00", "close": 105.0, "score": 0.1, "position": 0.0},
+        ]
+    ).to_csv(research_dir / "AAPL_sma_cross_signals.csv", index=False)
+    pd.DataFrame(
+        [
+            {
+                "timestamp": "2026-03-19T00:00:00+00:00",
+                "symbol": "AAPL",
+                "trade_id": "ledger-1",
+                "strategy_id": "momentum-core",
+                "signal_type": "entry_long_signal",
+                "signal_value": 1.0,
+                "ranking_score": 0.91,
+                "universe_rank": 4,
+                "selection_included": True,
+                "target_weight": 0.12,
+                "sizing_rationale": "top-ranked sleeve allocation",
+                "constraint_hits": "max_symbol_weight",
+                "order_intent_summary": "Open long rebalance order",
+            },
+            {
+                "timestamp": "2026-03-21T00:00:00+00:00",
+                "symbol": "AAPL",
+                "trade_id": "ledger-1",
+                "strategy_id": "momentum-core",
+                "signal_type": "exit_long_signal",
+                "signal_value": 0.0,
+                "ranking_score": 0.10,
+                "universe_rank": 32,
+                "selection_included": False,
+                "exclusion_reason": "signal decayed below threshold",
+                "target_weight": 0.0,
+                "order_intent_summary": "Close long rebalance order",
+            },
+        ]
+    ).to_csv(research_dir / "decision_provenance.csv", index=False)
+
+    paper_dir = root / "paper_trading"
+    paper_dir.mkdir(parents=True, exist_ok=True)
+    (paper_dir / "run_metadata.json").write_text(
+        json.dumps(
+            {
+                "run_id": "manifest-paper-run",
+                "source": "paper_manifest",
+                "mode": "paper",
+                "strategy_id": "momentum-core",
+                "timeframe": "1d",
+                "lookback": 84,
+                "artifact_group": "paper",
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    pd.DataFrame(
+        [
+            {"as_of": "2026-03-19T00:00:00+00:00", "symbol": "AAPL", "side": "BUY", "quantity": 10, "fill_price": 103.0, "order_id": "ord-1", "status": "filled"},
+            {"as_of": "2026-03-21T00:00:00+00:00", "symbol": "AAPL", "side": "SELL", "quantity": 10, "fill_price": 105.0, "order_id": "ord-2", "status": "filled"},
+        ]
+    ).to_csv(paper_dir / "paper_fills.csv", index=False)
+    pd.DataFrame(
+        [
+            {"symbol": "AAPL", "side": "BUY", "quantity": 10, "estimated_fill_price": 103.0, "client_order_id": "ord-1", "reason": "rebalance"},
+            {"symbol": "AAPL", "side": "SELL", "quantity": 10, "estimated_fill_price": 105.0, "client_order_id": "ord-2", "reason": "rebalance"},
+        ]
+    ).to_csv(paper_dir / "paper_orders.csv", index=False)
+    pd.DataFrame(
+        [
+            {"symbol": "AAPL", "quantity": 0, "avg_price": 103.0, "market_value": 0.0},
+        ]
+    ).to_csv(paper_dir / "paper_positions.csv", index=False)
+    (paper_dir / "paper_summary.json").write_text(
+        json.dumps(
+            {
+                "preset_name": "momentum-core",
+                "strategy": "xsec_momentum_topn",
+                "equity": 100250.0,
+                "cash": 5010.0,
+                "gross_market_value": 95240.0,
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    pd.DataFrame(
+        [
+            {"symbol": "AAPL", "trade_id": "ledger-1", "side": "long", "qty": 10, "entry_ts": "2026-03-19T00:00:00+00:00", "entry_price": 103.0, "exit_ts": "2026-03-21T00:00:00+00:00", "exit_price": 105.0, "realized_pnl": 20.0, "status": "closed"},
+            {"symbol": "MSFT", "trade_id": "ledger-2", "side": "long", "qty": 5, "entry_ts": "2026-03-20T00:00:00+00:00", "entry_price": 210.0, "exit_ts": None, "exit_price": None, "realized_pnl": 0.0, "status": "open"},
+        ]
+    ).to_csv(paper_dir / "paper_trades.csv", index=False)
+    pd.DataFrame(
+        [
+            {
+                "timestamp": "2026-03-19T00:00:00+00:00",
+                "symbol": "AAPL",
+                "trade_id": "ledger-1",
+                "strategy_id": "momentum-core",
+                "selection_status": "included",
+                "target_weight": 0.12,
+                "order_intent_summary": "Submit opening buy order",
+                "constraint_hits": '["max_symbol_weight"]',
+            }
+        ]
+    ).to_csv(paper_dir / "order_intents.csv", index=False)
 
 
 def test_dashboard_data_loading_with_sample_artifacts(tmp_path: Path) -> None:
@@ -808,6 +999,250 @@ def test_dashboard_system_evaluation_normalization(tmp_path: Path) -> None:
     assert experiments["summary"]["experiment_count"] == 1
 
 
+def test_trade_reconstruction_from_fills_handles_closed_trade() -> None:
+    trades = build_trade_records_from_fills(
+        [
+            {"ts": "2026-03-19T00:00:00+00:00", "side": "buy", "qty": 10, "price": 103.0},
+            {"ts": "2026-03-21T00:00:00+00:00", "side": "sell", "qty": 10, "price": 105.0},
+        ]
+    )
+
+    assert len(trades) == 1
+    assert trades[0]["status"] == "closed"
+    assert trades[0]["realized_pnl"] == 20.0
+
+
+def test_dashboard_chart_payload_from_artifacts(tmp_path: Path) -> None:
+    feature_dir = tmp_path / "features"
+    _write_chart_artifacts(tmp_path, feature_dir)
+    service = DashboardDataService(tmp_path, feature_dir=feature_dir)
+
+    payload = service.chart_payload("AAPL", lookback=3)
+
+    assert payload["symbol"] == "AAPL"
+    assert len(payload["bars"]) == 3
+    assert payload["signals"][0]["type"] == "entry_long_signal"
+    assert payload["signals"][-1]["type"] == "exit_long_signal"
+    assert payload["fills"][0]["side"] == "buy"
+    assert payload["orders"][0]["ts"] is None
+    assert payload["trades"][0]["status"] == "closed"
+    assert payload["trades"][0]["trade_id"] == "ledger-1"
+    assert payload["position"]["qty"] == 0
+    assert payload["provenance"][0]["order_intent_summary"] is not None
+    assert payload["provenance"][0]["ranking_score"] is not None
+    assert payload["meta"]["has_indicators"] is True
+    assert payload["meta"]["has_ohlc"] is True
+    assert payload["meta"]["trade_source_mode"] == "explicit_ledger"
+    assert payload["meta"]["selected_source"] is None
+
+
+def test_dashboard_chart_payload_missing_artifacts_returns_empty(tmp_path: Path) -> None:
+    feature_dir = tmp_path / "features"
+    feature_dir.mkdir(parents=True, exist_ok=True)
+    service = DashboardDataService(tmp_path, feature_dir=feature_dir)
+
+    payload = service.chart_payload("AAPL")
+
+    assert payload["bars"] == []
+    assert payload["signals"] == []
+    assert payload["fills"] == []
+    assert payload["orders"] == []
+    assert payload["trades"] == []
+    assert payload["position"]["qty"] == 0
+
+
+def test_dashboard_trade_payload_falls_back_to_fill_reconstruction_without_ledger(tmp_path: Path) -> None:
+    feature_dir = tmp_path / "features"
+    _write_chart_artifacts(tmp_path, feature_dir)
+    (tmp_path / "paper_trading" / "paper_trades.csv").unlink()
+    service = DashboardDataService(tmp_path, feature_dir=feature_dir)
+
+    payload = service.trades_payload("AAPL")
+
+    assert payload["trades"][0]["trade_id"] == "T1"
+    assert payload["meta"]["trade_source_mode"] == "reconstructed_from_fills"
+
+
+def test_dashboard_source_selector_prefers_matching_run_and_source(tmp_path: Path) -> None:
+    feature_dir = tmp_path / "features"
+    _write_chart_artifacts(tmp_path, feature_dir)
+    service = DashboardDataService(tmp_path, feature_dir=feature_dir)
+
+    payload = service.chart_payload("AAPL", source="research_alt_manifest", run_id="manifest-alt-run")
+
+    assert payload["signals"][0]["type"] == "entry_short_signal"
+    assert payload["meta"]["selected_source"] == "research_alt_manifest"
+    assert payload["meta"]["selected_run_id"] == "manifest-alt-run"
+    assert len(payload["meta"]["available_chart_sources"]) >= 2
+
+
+def test_dashboard_manifest_preferred_source_inference(tmp_path: Path) -> None:
+    feature_dir = tmp_path / "features"
+    _write_chart_artifacts(tmp_path, feature_dir)
+    service = DashboardDataService(tmp_path, feature_dir=feature_dir)
+
+    payload = service.chart_payload("AAPL")
+
+    signal_sources = payload["meta"]["available_signal_sources"]
+    assert any(source["run_id"] == "manifest-research-run" for source in signal_sources)
+    assert any(source["source"] == "research_manifest" for source in signal_sources)
+
+
+def test_portfolio_overview_payload_generation(tmp_path: Path) -> None:
+    _write_sample_artifacts(tmp_path)
+    _write_chart_artifacts(tmp_path, tmp_path / "features")
+    service = DashboardDataService(tmp_path)
+
+    payload = service.portfolio_overview_payload()
+
+    assert payload["summary"]["equity"] is not None
+    assert len(payload["equity_curve"]) == 3
+    assert len(payload["drawdown_curve"]) == 3
+    assert payload["recent_activity"] != []
+    assert "best_trades" in payload
+    assert set(payload["best_trades"][0]) == {"trade_id", "symbol", "side", "realized_pnl", "entry_ts", "exit_ts", "strategy_id"}
+    assert set(payload["worst_trades"][0]) == {"trade_id", "symbol", "side", "realized_pnl", "entry_ts", "exit_ts", "strategy_id"}
+    assert "pnl_by_symbol" in payload
+
+
+def test_strategy_detail_payload_generation(tmp_path: Path) -> None:
+    feature_dir = tmp_path / "features"
+    _write_chart_artifacts(tmp_path, feature_dir)
+    service = DashboardDataService(tmp_path, feature_dir=feature_dir)
+
+    payload = service.strategy_detail_payload("momentum-core")
+
+    assert payload["summary"]["closed_trade_count"] == 1
+    assert payload["summary"]["open_trade_count"] == 1
+    assert payload["summary"]["win_rate"] == 1.0
+    assert "AAPL" in payload["summary"]["recent_symbols"]
+    assert payload["pnl_by_symbol"][0]["symbol"] == "AAPL"
+    assert payload["comparisons"][0]["source"] is not None
+
+
+def test_discovery_payload_generation(tmp_path: Path) -> None:
+    feature_dir = tmp_path / "features"
+    _write_chart_artifacts(tmp_path, feature_dir)
+    service = DashboardDataService(tmp_path, feature_dir=feature_dir)
+
+    payload = service.discovery_payload()
+
+    assert payload["summary"]["recent_trade_count"] >= 1
+    assert any(row["symbol"] == "AAPL" for row in payload["recent_symbols"])
+    assert payload["recent_trades"][0]["trade_id"] == "ledger-2" or payload["recent_trades"][0]["trade_id"] == "ledger-1"
+    assert any(row["strategy_id"] == "momentum-core" for row in payload["recent_strategies"])
+    assert payload["recent_run_contexts"] != []
+
+
+def test_trade_detail_payload_generation(tmp_path: Path) -> None:
+    feature_dir = tmp_path / "features"
+    _write_chart_artifacts(tmp_path, feature_dir)
+    service = DashboardDataService(tmp_path, feature_dir=feature_dir)
+
+    payload = service.trade_detail_payload("ledger-1")
+
+    assert payload["trade"]["trade_id"] == "ledger-1"
+    assert payload["trade"]["symbol"] == "AAPL"
+    assert payload["meta"]["strategy_id"] == "momentum-core"
+    assert payload["explain"]["signal"] is not None
+    assert payload["provenance"]["latest"]["order_intent_summary"] is not None
+    assert payload["lifecycle"][0]["kind"] in {"signal", "decision", "order", "fill", "trade_open", "trade_close"}
+    assert "related_trades" in payload["comparison"]
+    assert payload["chart"]["bars"] != []
+
+
+def test_execution_diagnostics_payload_generation(tmp_path: Path) -> None:
+    feature_dir = tmp_path / "features"
+    _write_chart_artifacts(tmp_path, feature_dir)
+    service = DashboardDataService(tmp_path, feature_dir=feature_dir)
+
+    payload = service.execution_diagnostics_payload()
+
+    assert payload["summary"]["filled_order_count"] == 2
+    assert payload["summary"]["average_signal_to_fill_latency_seconds"] is not None
+    assert payload["summary"]["average_slippage_bps"] is not None
+
+
+def test_dashboard_service_normalizes_malformed_payload_shapes(tmp_path: Path, monkeypatch) -> None:
+    _write_chart_artifacts(tmp_path, tmp_path / "features")
+    service = DashboardDataService(tmp_path, feature_dir=tmp_path / "features")
+
+    class TradeObject:
+        def to_dict(self) -> dict[str, object]:
+            return {
+                "trade_id": "obj-1",
+                "symbol": "AAPL",
+                "side": "long",
+                "realized_pnl": 12.5,
+                "entry_ts": "2026-03-19T00:00:00+00:00",
+                "exit_ts": "2026-03-21T00:00:00+00:00",
+                "strategy_id": "momentum-core",
+            }
+
+    monkeypatch.setattr(
+        "trading_platform.dashboard.service.build_portfolio_overview_payload",
+        lambda **_: {
+            "summary": None,
+            "equity_curve": [None, {"ts": pd.Timestamp("2026-03-20T00:00:00+00:00"), "equity": 100000.0}],
+            "drawdown_curve": "bad",
+            "positions": [TradeObject(), None],
+            "exposure": None,
+            "recent_activity": [TradeObject(), "bad-row"],
+            "pnl_by_symbol": [TradeObject()],
+            "recent_realized_pnl": [namedtuple("PnlRow", ["period", "realized_pnl"])("2026-03-20", 10.0)],
+            "best_trades": [TradeObject(), None],
+            "worst_trades": ["bad-row"],
+            "meta": None,
+        },
+    )
+    monkeypatch.setattr(
+        "trading_platform.dashboard.service.build_trade_detail_payload",
+        lambda **_: {
+            "trade": TradeObject(),
+            "chart": {"bars": [namedtuple("BarRow", ["ts", "open", "high", "low", "close", "volume"])("2026-03-19T00:00:00+00:00", 100.0, 101.0, 99.0, 100.5, 1000.0)], "signals": ["bad"], "fills": None, "orders": None, "trades": [TradeObject()], "provenance": [TradeObject()], "meta": None},
+            "signals": [TradeObject()],
+            "fills": None,
+            "orders": ["bad"],
+            "provenance": {"latest": TradeObject(), "rows": ["bad"]},
+            "lifecycle": [namedtuple("LifeRow", ["ts", "kind", "label", "detail", "status"])("2026-03-19T00:00:00+00:00", "signal", "entry", "detail", "ok")],
+            "comparison": {"related_trades": [TradeObject()], "available_chart_sources": None, "available_provenance_sources": ["bad"]},
+            "explain": None,
+            "meta": None,
+        },
+    )
+    monkeypatch.setattr(
+        "trading_platform.dashboard.service.build_discovery_payload",
+        lambda **_: {
+            "summary": None,
+            "recent_symbols": [TradeObject(), None],
+            "recent_trades": [TradeObject()],
+            "recent_strategies": ["bad"],
+            "recent_run_contexts": [namedtuple("RunRow", ["source", "run_id", "mode", "trade_count", "strategy_count", "symbol_count", "latest_entry_ts"])("paper", "run-1", "paper", 1, 1, 1, "2026-03-19T00:00:00+00:00")],
+        },
+    )
+    monkeypatch.setattr(
+        "trading_platform.dashboard.service.build_execution_diagnostics_payload",
+        lambda **_: {"summary": None, "rows": ["bad"], "meta": None},
+    )
+
+    portfolio = service.portfolio_overview_payload()
+    trade_detail = service.trade_detail_payload("obj-1")
+    discovery = service.discovery_payload()
+    execution = service.execution_diagnostics_payload()
+
+    assert isinstance(portfolio["summary"], dict)
+    assert portfolio["best_trades"][0]["trade_id"] == "obj-1"
+    assert portfolio["worst_trades"][0]["trade_id"] is None
+    assert portfolio["equity_curve"][1]["ts"] == "2026-03-20T00:00:00+00:00"
+    assert trade_detail["trade"]["trade_id"] == "obj-1"
+    assert trade_detail["chart"]["signals"][0]["ts"] is None
+    assert trade_detail["provenance"]["rows"][0]["trade_id"] is None
+    assert discovery["recent_symbols"][0]["symbol"] == "AAPL"
+    assert discovery["recent_strategies"][0]["strategy_id"] is None
+    assert isinstance(execution["summary"], dict)
+    assert execution["rows"][0]["symbol"] is None
+
+
 def test_dashboard_api_response_shapes(tmp_path: Path) -> None:
     _write_sample_artifacts(tmp_path)
     app = create_dashboard_app(tmp_path)
@@ -853,8 +1288,192 @@ def test_dashboard_api_response_shapes(tmp_path: Path) -> None:
     _status, _headers, experiments = _call_app(app, "/api/experiments/latest")
     assert {"generated_at", "summary", "latest", "rows"} <= set(experiments)
 
+    _status, _headers, discovery = _call_app(app, "/api/discovery/overview")
+    assert {"generated_at", "summary", "recent_symbols", "recent_trades", "recent_strategies", "recent_run_contexts"} <= set(discovery)
+
+    _status, _headers, recent_trades = _call_app(app, "/api/discovery/recent-trades")
+    assert {"generated_at", "recent_trades", "summary"} <= set(recent_trades)
+
+    _status, _headers, recent_symbols = _call_app(app, "/api/discovery/recent-symbols")
+    assert {"generated_at", "recent_symbols", "summary"} <= set(recent_symbols)
+
     _status, _headers, live = _call_app(app, "/api/live/latest")
     assert {"generated_at", "dry_run_summary", "submission_summary", "risk_checks", "blocked_checks", "duplicate_events", "broker_health"} <= set(live)
+
+    _status, _headers, portfolio_overview = _call_app(app, "/api/portfolio/overview")
+    assert {"generated_at", "summary", "equity_curve", "drawdown_curve", "positions", "exposure", "recent_activity", "meta"} <= set(portfolio_overview)
+
+    _status, _headers, portfolio_equity = _call_app(app, "/api/portfolio/equity")
+    assert {"equity_curve", "drawdown_curve", "meta"} <= set(portfolio_equity)
+
+    _status, _headers, portfolio_activity = _call_app(app, "/api/portfolio/activity")
+    assert {"recent_activity", "meta"} <= set(portfolio_activity)
+
+    _status, _headers, execution_diagnostics = _call_app(app, "/api/execution/diagnostics")
+    assert {"generated_at", "summary", "rows", "meta"} <= set(execution_diagnostics)
+
+    _status, _headers, trade_detail = _call_app(app, "/api/trade/ledger-1")
+    assert {"generated_at", "trade", "chart", "signals", "fills", "orders", "explain", "provenance", "lifecycle", "comparison", "meta"} <= set(trade_detail)
+
+
+def test_dashboard_chart_api_and_symbol_page(tmp_path: Path, monkeypatch) -> None:
+    feature_dir = tmp_path / "features"
+    _write_chart_artifacts(tmp_path, feature_dir)
+    monkeypatch.setattr("trading_platform.dashboard.service.FEATURES_DIR", feature_dir)
+    app = create_dashboard_app(tmp_path)
+
+    status, headers, payload = _call_app(app, "/api/chart/AAPL?lookback=2")
+    assert status.startswith("200")
+    assert headers["Content-Type"].startswith("application/json")
+    assert payload["symbol"] == "AAPL"
+    assert len(payload["bars"]) == 2
+    assert {"bars", "signals", "fills", "trades", "position", "meta"} <= set(payload)
+    assert payload["meta"]["chart_style_default"] == "candlestick"
+
+    _status, _headers, trades = _call_app(app, "/api/trades/AAPL")
+    assert {"symbol", "trades", "fills", "meta"} <= set(trades)
+    assert trades["meta"]["trade_source_mode"] == "explicit_ledger"
+
+    _status, _headers, signals = _call_app(app, "/api/signals/AAPL?lookback=2")
+    assert {"symbol", "signals", "meta"} <= set(signals)
+
+    html_status, html_headers, html_body = _call_app_raw(app, "/symbols/AAPL?lookback=2")
+    assert html_status.startswith("200")
+    assert html_headers["Content-Type"].startswith("text/html")
+    assert "Symbol Detail: AAPL" in html_body
+    assert "/api/chart/AAPL" in html_body
+    assert "trade-table" in html_body
+    assert "hasOhlc" in html_body
+    assert "toggle-signals" in html_body
+    assert "chart-readout" in html_body
+    assert "50 bars" in html_body
+
+    selected_status, _selected_headers, selected_payload = _call_app(
+        app,
+        "/api/chart/AAPL?lookback=2&source=research_alt_manifest&run_id=manifest-alt-run",
+    )
+    assert selected_status.startswith("200")
+    assert selected_payload["signals"][0]["type"] == "entry_short_signal"
+    assert selected_payload["meta"]["selected_source"] == "research_alt_manifest"
+
+    selected_html_status, _selected_html_headers, selected_html = _call_app_raw(
+        app,
+        "/symbols/AAPL?lookback=2&source=research_alt_manifest&run_id=manifest-alt-run",
+    )
+    assert selected_html_status.startswith("200")
+    assert "manifest-alt-run" in selected_html
+
+
+def test_dashboard_portfolio_and_strategy_pages(tmp_path: Path, monkeypatch) -> None:
+    feature_dir = tmp_path / "features"
+    _write_chart_artifacts(tmp_path, feature_dir)
+    _write_sample_artifacts(tmp_path)
+    monkeypatch.setattr("trading_platform.dashboard.service.FEATURES_DIR", feature_dir)
+    app = create_dashboard_app(tmp_path)
+
+    portfolio_status, portfolio_headers, portfolio_html = _call_app_raw(app, "/portfolio")
+    assert portfolio_status.startswith("200")
+    assert portfolio_headers["Content-Type"].startswith("text/html")
+    assert "Current Open Positions" in portfolio_html
+    assert "Recent Activity" in portfolio_html
+    assert "Portfolio Summary" in portfolio_html
+
+    overview_status, overview_headers, overview_html = _call_app_raw(app, "/")
+    assert overview_status.startswith("200")
+    assert overview_headers["Content-Type"].startswith("text/html")
+    assert "Recent Symbols" in overview_html
+    assert "Recent Trades" in overview_html
+    assert "/symbols/AAPL" in overview_html
+    assert "/trades/ledger-1" in overview_html
+    assert "/strategies/momentum-core" in overview_html
+
+    strategy_status, strategy_headers, strategy_html = _call_app_raw(app, "/strategies/momentum-core")
+    assert strategy_status.startswith("200")
+    assert strategy_headers["Content-Type"].startswith("text/html")
+    assert "Strategy Detail: momentum-core" in strategy_html
+    assert "/symbols/AAPL" in strategy_html
+    assert "/trades/ledger-1" in strategy_html
+
+    execution_status, execution_headers, execution_html = _call_app_raw(app, "/execution")
+    assert execution_status.startswith("200")
+    assert execution_headers["Content-Type"].startswith("text/html")
+    assert "Execution Diagnostics" in execution_html
+    assert "Orders Source" in execution_html
+
+    trade_status, trade_headers, trade_html = _call_app_raw(app, "/trades/ledger-1")
+    assert trade_status.startswith("200")
+    assert trade_headers["Content-Type"].startswith("text/html")
+    assert "Trade Detail: ledger-1" in trade_html
+    assert "Associated Signals" in trade_html
+    assert "Order Lifecycle" in trade_html
+    assert "Decision Provenance" in trade_html
+
+    symbol_status, symbol_headers, symbol_html = _call_app_raw(app, "/symbols/AAPL")
+    assert symbol_status.startswith("200")
+    assert symbol_headers["Content-Type"].startswith("text/html")
+    assert "Related Source Comparison" in symbol_html
+    assert "Decision Provenance Rows" in symbol_html
+
+    strategy_compare_status, strategy_compare_headers, strategy_compare_html = _call_app_raw(app, "/strategies/momentum-core")
+    assert strategy_compare_status.startswith("200")
+    assert strategy_compare_headers["Content-Type"].startswith("text/html")
+    assert "Run / Source Comparison" in strategy_compare_html
+
+
+def test_portfolio_page_tolerates_malformed_trade_rows(tmp_path: Path, monkeypatch) -> None:
+    _write_sample_artifacts(tmp_path)
+    _write_chart_artifacts(tmp_path, tmp_path / "features")
+
+    TradeTuple = namedtuple("TradeTuple", ["trade_id", "symbol", "side", "realized_pnl", "entry_ts", "exit_ts", "strategy_id"])
+
+    class TradeObject:
+        def to_dict(self) -> dict[str, object]:
+            return {
+                "trade_id": "obj-1",
+                "symbol": "MSFT",
+                "side": "long",
+                "realized_pnl": -5.0,
+                "entry_ts": "2026-03-18T00:00:00+00:00",
+                "exit_ts": "2026-03-19T00:00:00+00:00",
+                "strategy_id": "momentum-core",
+            }
+
+    original = DashboardDataService.portfolio_overview_payload
+
+    def broken_overview(self: DashboardDataService) -> dict:
+        payload = original(self)
+        payload["best_trades"] = [
+            TradeTuple("tuple-1", "AAPL", "long", 10.0, "2026-03-19T00:00:00+00:00", "2026-03-21T00:00:00+00:00", "momentum-core"),
+            TradeObject(),
+        ]
+        payload["worst_trades"] = [None, "unexpected-row-type", 123]
+        return payload
+
+    monkeypatch.setattr(DashboardDataService, "portfolio_overview_payload", broken_overview)
+    app = create_dashboard_app(tmp_path)
+
+    status, headers, body = _call_app_raw(app, "/portfolio")
+
+    assert status.startswith("200")
+    assert headers["Content-Type"].startswith("text/html")
+    assert "Portfolio Summary" in body
+    assert "Best Recent Trades" in body
+    assert "Worst Recent Trades" in body
+
+
+def test_portfolio_page_renders_normal_best_and_worst_trade_rows(tmp_path: Path) -> None:
+    _write_sample_artifacts(tmp_path)
+    _write_chart_artifacts(tmp_path, tmp_path / "features")
+    app = create_dashboard_app(tmp_path)
+
+    status, headers, body = _call_app_raw(app, "/portfolio")
+
+    assert status.startswith("200")
+    assert headers["Content-Type"].startswith("text/html")
+    assert "Best Recent Trades" in body
+    assert "Worst Recent Trades" in body
+    assert "/trades/ledger-1" in body
+    assert "/strategies/momentum-core" in body
 
 
 def test_dashboard_static_data_build(tmp_path: Path) -> None:

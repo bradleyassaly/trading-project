@@ -71,6 +71,14 @@ def _summary_markdown(summary: dict[str, Any], health_checks: list[dict[str, Any
         f"- Executable order count: `{summary.get('executable_order_count', 0)}`",
         f"- Estimated execution cost: `{summary.get('estimated_execution_cost', 0.0)}`",
         f"- Estimated slippage cost: `{summary.get('estimated_slippage_cost', 0.0)}`",
+        f"- Latest data source: `{summary.get('latest_data_source')}`",
+        f"- Latest data fallback used: `{summary.get('latest_data_fallback_used')}`",
+        f"- Latest data stale: `{summary.get('latest_data_stale')}`",
+        f"- Ensemble enabled: `{summary.get('ensemble_enabled')}`",
+        f"- Ensemble mode: `{summary.get('ensemble_mode')}`",
+        f"- Slippage model: `{summary.get('slippage_model')}`",
+        f"- Slippage buy bps: `{summary.get('slippage_buy_bps')}`",
+        f"- Slippage sell bps: `{summary.get('slippage_sell_bps')}`",
         f"- Rejected order count: `{summary.get('rejected_order_count', 0)}`",
         f"- Turnover before execution constraints: `{summary.get('turnover_before_execution_constraints', 0.0)}`",
         f"- Turnover after execution constraints: `{summary.get('turnover_after_execution_constraints', 0.0)}`",
@@ -211,6 +219,7 @@ def persist_paper_run_outputs(
     summary_stats = dict(target_diag.get("summary", {}))
     execution_diag = dict(result.diagnostics.get("execution", {}))
     execution_summary = dict(execution_diag.get("execution_summary", {}))
+    paper_execution_diag = dict(result.diagnostics.get("paper_execution", {}))
     timestamp = result.as_of
     rebalance_timestamp = str(target_diag.get("rebalance_timestamp", timestamp))
     gross_exposure = target_diag.get("average_gross_exposure")
@@ -246,6 +255,17 @@ def persist_paper_run_outputs(
         "skipped_symbol_count": int(len(result.skipped_symbols)),
         "estimated_execution_cost": float(execution_summary.get("expected_total_cost", 0.0) or 0.0),
         "estimated_slippage_cost": float(execution_summary.get("expected_slippage_cost_total", 0.0) or 0.0),
+        "latest_data_source": str(paper_execution_diag.get("latest_data_source", target_diag.get("latest_data_source", target_diag.get("latest_price_source", "yfinance"))) or "yfinance"),
+        "latest_data_fallback_used": bool(paper_execution_diag.get("latest_data_fallback_used", target_diag.get("latest_data_fallback_used", target_diag.get("latest_price_fallback_used", False)))),
+        "latest_bar_timestamp": paper_execution_diag.get("latest_bar_timestamp", target_diag.get("latest_bar_timestamp")),
+        "latest_bar_age_seconds": paper_execution_diag.get("latest_bar_age_seconds", target_diag.get("latest_bar_age_seconds")),
+        "latest_data_stale": paper_execution_diag.get("latest_data_stale", target_diag.get("latest_data_stale")),
+        "ensemble_enabled": bool(paper_execution_diag.get("ensemble_enabled", False)),
+        "ensemble_mode": paper_execution_diag.get("ensemble_mode", "disabled"),
+        "slippage_enabled": bool(paper_execution_diag.get("slippage_enabled", False)),
+        "slippage_model": str(paper_execution_diag.get("slippage_model", "none") or "none"),
+        "slippage_buy_bps": float(paper_execution_diag.get("slippage_buy_bps", 0.0) or 0.0),
+        "slippage_sell_bps": float(paper_execution_diag.get("slippage_sell_bps", 0.0) or 0.0),
         "rejected_order_count": int(execution_summary.get("rejected_order_count", 0) or 0),
         "requested_order_count": int(execution_summary.get("requested_order_count", 0) or len(result.orders)),
         "executable_order_count": int(execution_summary.get("executable_order_count", 0) or len(result.orders)),

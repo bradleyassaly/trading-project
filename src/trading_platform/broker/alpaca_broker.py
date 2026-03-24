@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from typing import Any
 
 from trading_platform.broker.live_models import (
     BrokerAccount,
@@ -14,16 +15,17 @@ from trading_platform.broker.live_models import (
 try:
     from alpaca.trading.client import TradingClient
     from alpaca.trading.requests import GetOrdersRequest
+    from alpaca.trading.requests import LimitOrderRequest, MarketOrderRequest
     from alpaca.trading.enums import QueryOrderStatus
+    from alpaca.trading.enums import OrderSide, TimeInForce
 except ImportError:  # pragma: no cover
     TradingClient = None
     GetOrdersRequest = None
     QueryOrderStatus = None
-
-try:
-    from alpaca.trading.client import TradingClient
-except ImportError:  # pragma: no cover
-    TradingClient = None
+    LimitOrderRequest = None
+    MarketOrderRequest = None
+    OrderSide = None
+    TimeInForce = None
 
 
 @dataclass(frozen=True)
@@ -158,13 +160,58 @@ class AlpacaBroker:
             "AlpacaBroker.cancel_open_orders is not implemented yet."
         )
 
+    def _submit_order_request(self, order: LiveBrokerOrderRequest) -> Any:
+        if MarketOrderRequest is None or LimitOrderRequest is None or OrderSide is None or TimeInForce is None:
+            raise ImportError(
+                "alpaca-py is not installed. Install it with: pip install alpaca-py"
+            )
+        side = OrderSide.BUY if str(order.side).upper() == "BUY" else OrderSide.SELL
+        tif = TimeInForce.DAY if str(order.time_in_force).lower() == "day" else TimeInForce.GTC
+        if str(order.order_type).lower() == "limit":
+            return LimitOrderRequest(
+                symbol=order.symbol,
+                qty=order.quantity,
+                side=side,
+                time_in_force=tif,
+                limit_price=float(order.limit_price or 0.0),
+                client_order_id=order.client_order_id,
+            )
+        return MarketOrderRequest(
+            symbol=order.symbol,
+            qty=order.quantity,
+            side=side,
+            time_in_force=tif,
+            client_order_id=order.client_order_id,
+        )
+
     def submit_orders(
         self,
         orders: list[LiveBrokerOrderRequest],
     ) -> list[LiveBrokerOrderStatus]:
-        raise NotImplementedError(
-            "AlpacaBroker.submit_orders is not implemented yet."
-        )
+        results: list[LiveBrokerOrderStatus] = []
+        for order in orders:
+            submitted = self._client.submit_order(order_data=self._submit_order_request(order))
+            qty_raw = getattr(submitted, "qty", order.quantity)
+            filled_qty_raw = getattr(submitted, "filled_qty", 0)
+            results.append(
+                LiveBrokerOrderStatus(
+                    broker_order_id=str(getattr(submitted, "id", None)),
+                    client_order_id=str(getattr(submitted, "client_order_id", order.client_order_id)),
+                    symbol=str(getattr(submitted, "symbol", order.symbol)),
+                    side=str(getattr(submitted, "side", order.side)).upper(),
+                    quantity=int(float(qty_raw or 0)),
+                    filled_quantity=int(float(filled_qty_raw or 0)),
+                    order_type=str(getattr(submitted, "order_type", order.order_type)),
+                    time_in_force=str(getattr(submitted, "time_in_force", order.time_in_force)),
+                    status=str(getattr(submitted, "status", "accepted")),
+                    submitted_at=(
+                        str(getattr(submitted, "submitted_at", None))
+                        if getattr(submitted, "submitted_at", None) is not None
+                        else None
+                    ),
+                )
+            )
+        return results
 
     def list_recent_fills(self) -> list[LiveBrokerFill]:
         raise NotImplementedError(

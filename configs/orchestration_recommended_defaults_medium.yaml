@@ -1,0 +1,45 @@
+run_name: experiment_medium_recommended_defaults
+schedule_frequency: manual
+research_artifacts_root: artifacts/promotion_fixture
+experiment_name: null
+feature_flags:
+  regime: false
+  adaptive: false
+  governance: true
+output_root_dir: artifacts/orchestration_runs_medium
+validation_output_dir: artifacts/orchestration_runs_medium/validation
+promotion_policy_config_path: configs/promotion_experiment.yaml
+strategy_validation_policy_config_path: configs/strategy_validation_experiment.yaml
+strategy_portfolio_policy_config_path: configs/strategy_portfolio.yaml
+strategy_monitoring_policy_config_path: configs/strategy_monitoring.yaml
+market_regime_policy_config_path: configs/market_regime.yaml
+adaptive_allocation_policy_config_path: configs/adaptive_allocation_experiment.yaml
+strategy_governance_policy_config_path: configs/strategy_governance_loose.yaml
+strategy_lifecycle_path: artifacts/governance/strategy_lifecycle_medium_debug.json
+execution_config_path: configs/execution.yaml
+paper_state_path: artifacts/paper/experiment_medium_debug_state.json
+max_promotions_per_run: 1
+min_selected_strategies_warning: 1
+promotion_dry_run: false
+promotion_inactive: false
+adaptive_allocation_dry_run: false
+kill_switch_include_review: true
+loop_sleep_seconds: 3600
+stages:
+  research: true
+  registry: true
+  validation: true
+  promotion: true
+  portfolio: true
+  allocation: true
+  paper: true
+  monitoring: true
+  regime: false
+  adaptive_allocation: false
+  governance: false
+  kill_switch: false
+tags:
+  - medium
+  - local
+  - recommended_defaults
+notes: "Medium experiment profile aligned with the current high-confidence repeated-medium recommendations: regime off, adaptive off, governance loose."

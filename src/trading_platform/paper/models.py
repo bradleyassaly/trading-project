@@ -53,6 +53,21 @@ class PaperTradingConfig:
     max_adv_participation: float = 0.05
     max_position_pct_of_adv: float = 0.1
     max_notional_per_name: float | None = None
+    use_alpaca_latest_data: bool = False
+    latest_data_max_age_seconds: int = 86_400
+    slippage_model: str = "none"
+    slippage_buy_bps: float = 0.0
+    slippage_sell_bps: float = 0.0
+    ensemble_enabled: bool = False
+    ensemble_mode: str = "disabled"
+    ensemble_weight_method: str = "equal"
+    ensemble_normalize_scores: str = "rank_pct"
+    ensemble_max_members: int = 5
+    ensemble_require_promoted_only: bool = True
+    ensemble_max_members_per_family: int | None = None
+    ensemble_minimum_member_observations: int = 0
+    ensemble_minimum_member_metric: float | None = None
+    data_sources: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -99,6 +114,21 @@ class PaperPortfolioState:
         return float(self.cash + self.gross_market_value)
 
 
+@dataclass
+class PaperExecutionPriceSnapshot:
+    symbol: str
+    decision_timestamp: str | None
+    historical_price: float | None
+    latest_price: float | None
+    final_price_used: float | None
+    price_source_used: str
+    fallback_used: bool
+    latest_bar_timestamp: str | None
+    latest_bar_age_seconds: float | None
+    latest_data_stale: bool | None
+    latest_data_source: str
+
+
 
 @dataclass
 class PaperTradingRunResult:
@@ -112,6 +142,7 @@ class PaperTradingRunResult:
     fills: list[BrokerFill] = field(default_factory=list)
     skipped_symbols: list[str] = field(default_factory=list)
     diagnostics: dict[str, Any] = field(default_factory=dict)
+    price_snapshots: list[PaperExecutionPriceSnapshot] = field(default_factory=list)
 
 @dataclass
 class PaperSignalSnapshot:

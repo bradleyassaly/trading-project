@@ -4,7 +4,9 @@ import argparse
 import json
 from pathlib import Path
 
+from trading_platform.artifact_schemas import WorkflowArtifactSummary
 from trading_platform.backtests.engine import run_backtest_on_df
+from trading_platform.cli.config_support import apply_workflow_config, option_is_explicit
 from trading_platform.cli.common import (
     build_strategy_params,
     prepare_research_frame,
@@ -13,6 +15,7 @@ from trading_platform.cli.common import (
     resolve_turnover_cost,
 )
 from trading_platform.cli.presets import apply_cli_preset
+from trading_platform.config.loader import load_research_run_workflow_config
 from trading_platform.execution.policies import ExecutionPolicy
 from trading_platform.experiments.tracker import log_experiment
 from trading_platform.research.diagnostics import activity_note
@@ -39,16 +42,33 @@ def _save_run_artifacts(
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     metadata_path = output_dir / f"{symbol}_{strategy}_{engine}_run_summary.json"
+    summary = WorkflowArtifactSummary(
+        summary_type="research_run",
+        workflow_stage="research_run",
+        timestamp=str(effective_end),
+        status="succeeded",
+        name=f"{symbol}_{strategy}",
+        strategy=strategy,
+        universe=symbol,
+        key_counts={"rows_used": rows_used},
+        key_metrics={
+            "return_pct": stats.get("Return [%]"),
+            "sharpe_ratio": stats.get("Sharpe Ratio"),
+            "max_drawdown_pct": stats.get("Max. Drawdown [%]"),
+        },
+        details={
+            "engine": engine,
+            "effective_start_date": effective_start,
+            "effective_end_date": effective_end,
+            "feature_path": str(feature_path),
+            "experiment_id": experiment_id,
+            "stats": stats,
+        },
+    )
     payload = {
+        **summary.to_dict(),
         "symbol": symbol,
-        "strategy": strategy,
         "engine": engine,
-        "effective_start_date": effective_start,
-        "effective_end_date": effective_end,
-        "rows_used": rows_used,
-        "feature_path": str(feature_path),
-        "experiment_id": experiment_id,
-        "stats": stats,
     }
     metadata_path.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
     print(f"  saved summary: {metadata_path}")
@@ -79,15 +99,32 @@ def _save_xsec_run_artifacts(
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     metadata_path = output_dir / f"{strategy}_{engine}_universe_run_summary.json"
+    summary = WorkflowArtifactSummary(
+        summary_type="research_run",
+        workflow_stage="research_run",
+        timestamp=str(effective_end),
+        status="succeeded",
+        name=f"{strategy}_{engine}",
+        strategy=strategy,
+        key_counts={"rows_used": rows_used, "symbol_count": len(symbols)},
+        key_metrics={
+            "gross_return_pct": stats.get("gross_return_pct"),
+            "net_return_pct": stats.get("net_return_pct"),
+            "sharpe_ratio": stats.get("Sharpe Ratio"),
+        },
+        details={
+            "symbols": symbols,
+            "engine": engine,
+            "effective_start_date": effective_start,
+            "effective_end_date": effective_end,
+            "experiment_id": experiment_id,
+            "stats": stats,
+        },
+    )
     payload = {
+        **summary.to_dict(),
         "symbols": symbols,
-        "strategy": strategy,
         "engine": engine,
-        "effective_start_date": effective_start,
-        "effective_end_date": effective_end,
-        "rows_used": rows_used,
-        "experiment_id": experiment_id,
-        "stats": stats,
     }
     metadata_path.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
     result.timeseries.to_csv(output_dir / f"{strategy}_portfolio_timeseries.csv", index=True)
@@ -186,7 +223,16 @@ def _run_xsec_research(args: argparse.Namespace, symbols: list[str]) -> None:
 
 
 def cmd_research(args: argparse.Namespace) -> None:
+    if getattr(args, "config", None):
+        loaded = load_research_run_workflow_config(args.config)
+        if getattr(loaded, "preset", None) and not option_is_explicit(args, "preset"):
+            args.preset = loaded.preset
     apply_cli_preset(args)
+    apply_workflow_config(
+        args,
+        config_path=getattr(args, "config", None),
+        loader=load_research_run_workflow_config,
+    )
     symbols = resolve_symbols(args)
     requested_range = f"requested_range={args.start or 'full'}->{args.end or 'full'}"
     print(

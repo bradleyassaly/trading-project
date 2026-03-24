@@ -50,6 +50,15 @@ def cmd_alpha_research(args) -> None:
         regime_exclude_mean_rank_ic=args.regime_exclude_mean_rank_ic,
         equity_context_enabled=getattr(args, "equity_context_enabled", False),
         equity_context_include_volume=getattr(args, "equity_context_include_volume", False),
+        ensemble_enabled=getattr(args, "enable_ensemble", False),
+        ensemble_mode=getattr(args, "ensemble_mode", "disabled"),
+        ensemble_weight_method=getattr(args, "ensemble_weight_method", "equal"),
+        ensemble_normalize_scores=getattr(args, "ensemble_normalize_scores", "rank_pct"),
+        ensemble_max_members=getattr(args, "ensemble_max_members", 5),
+        ensemble_require_promoted_only=getattr(args, "ensemble_require_promoted_only", True),
+        ensemble_max_members_per_family=getattr(args, "ensemble_max_members_per_family", None),
+        ensemble_minimum_member_observations=getattr(args, "ensemble_minimum_member_observations", 0),
+        ensemble_minimum_member_metric=getattr(args, "ensemble_minimum_member_metric", None),
     )
     tracker_dir_arg = getattr(args, "experiment_tracker_dir", None)
     tracker_dir = Path(tracker_dir_arg) if tracker_dir_arg else output_dir.parent / "experiment_tracking"
@@ -62,6 +71,7 @@ def cmd_alpha_research(args) -> None:
     print(f"Leaderboard: {result['leaderboard_path']}")
     print(f"Detailed results: {result['fold_results_path']}")
     print(f"Composite portfolio returns: {result['portfolio_returns_path']}")
+    print(f"Ensemble member summary: {result['ensemble_member_summary_path']}")
     print(f"Implementability report: {result['implementability_report_path']}")
     print(f"Research manifest: {result['research_manifest_path']}")
     print(f"Experiment registry: {registry_paths['experiment_registry_path']}")

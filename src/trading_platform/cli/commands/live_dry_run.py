@@ -2,9 +2,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from trading_platform.cli.config_support import apply_workflow_config, option_is_explicit
 from trading_platform.cli.common import resolve_symbols
 from trading_platform.cli.presets import apply_cli_preset
-from trading_platform.config.loader import load_execution_config
+from trading_platform.config.loader import load_execution_config, load_live_dry_run_workflow_config
 from trading_platform.live.preview import (
     LivePreviewConfig,
     run_live_dry_run_preview,
@@ -50,7 +51,16 @@ def _build_config(args) -> LivePreviewConfig:
 
 
 def cmd_live_dry_run(args) -> None:
+    if getattr(args, "config", None):
+        loaded = load_live_dry_run_workflow_config(args.config)
+        if getattr(loaded, "preset", None) and not option_is_explicit(args, "preset"):
+            args.preset = loaded.preset
     apply_cli_preset(args)
+    apply_workflow_config(
+        args,
+        config_path=getattr(args, "config", None),
+        loader=load_live_dry_run_workflow_config,
+    )
     config = _build_config(args)
     print(f"Running live dry-run for {len(config.symbols)} symbol(s): {', '.join(config.symbols)}")
 

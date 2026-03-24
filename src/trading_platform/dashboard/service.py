@@ -1,13 +1,24 @@
 from __future__ import annotations
 
 import json
+import math
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
 
+from trading_platform.dashboard.chart_service import build_chart_payload, build_signals_payload, build_trades_payload
+from trading_platform.dashboard.portfolio_service import (
+    build_discovery_payload,
+    build_execution_diagnostics_payload,
+    build_portfolio_overview_payload,
+    build_strategy_detail_payload,
+    build_trade_detail_payload,
+)
 from trading_platform.governance.persistence import load_strategy_registry
+from trading_platform.settings import FEATURES_DIR
 
 
 def _now_utc() -> str:
@@ -73,9 +84,226 @@ def _status_counts(values: list[str]) -> dict[str, int]:
     return dict(sorted(counts.items()))
 
 
+def _row_mapping(row: object) -> dict[str, Any]:
+    if isinstance(row, Mapping):
+        return dict(row)
+    if hasattr(row, "_asdict"):
+        try:
+            value = row._asdict()
+        except TypeError:
+            value = None
+        if isinstance(value, Mapping):
+            return dict(value)
+    if hasattr(row, "to_dict"):
+        try:
+            value = row.to_dict()
+        except TypeError:
+            value = None
+        if isinstance(value, Mapping):
+            return dict(value)
+    if hasattr(row, "__dict__"):
+        try:
+            value = vars(row)
+        except TypeError:
+            value = None
+        if isinstance(value, Mapping):
+            return dict(value)
+    return {}
+
+
+def _json_scalar(value: object) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, pd.Timestamp):
+        return value.isoformat() if not pd.isna(value) else None
+    if isinstance(value, (str, bool, int)):
+        return value
+    if isinstance(value, float):
+        return None if math.isnan(value) or math.isinf(value) else value
+    if pd.isna(value):
+        return None
+    item = getattr(value, "item", None)
+    if callable(item):
+        try:
+            return _json_scalar(item())
+        except (TypeError, ValueError):
+            pass
+    return str(value)
+
+
+def _json_safe(value: object) -> Any:
+    if isinstance(value, Mapping):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, tuple):
+        return [_json_safe(item) for item in value]
+    return _json_scalar(value)
+
+
+def _row_contract(row: object, keys: list[str]) -> dict[str, Any]:
+    mapping = _row_mapping(row)
+    return {key: _json_safe(mapping.get(key)) for key in keys}
+
+
+def _row_list_contract(rows: object, keys: list[str]) -> list[dict[str, Any]]:
+    if not isinstance(rows, list):
+        return []
+    return [_row_contract(row, keys) for row in rows]
+
+
+def _normalize_context_rows(rows: object) -> list[dict[str, Any]]:
+    if not isinstance(rows, list):
+        return []
+    return [dict(_json_safe(_row_mapping(row))) for row in rows]
+
+
+def _normalize_chart_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(_json_safe(payload))
+    normalized["bars"] = _row_list_contract(
+        payload.get("bars"),
+        ["ts", "open", "high", "low", "close", "volume"],
+    )
+    indicators = normalized.get("indicators")
+    if not isinstance(indicators, Mapping):
+        normalized["indicators"] = {}
+    else:
+        normalized["indicators"] = {
+            str(name): _row_list_contract(payload.get("indicators", {}).get(name), ["ts", "value"])
+            for name, rows in indicators.items()
+        }
+    normalized["signals"] = _row_list_contract(payload.get("signals"), ["ts", "type", "price", "label", "score"])
+    normalized["orders"] = _row_list_contract(payload.get("orders"), ["ts", "symbol", "side", "qty", "price", "order_id", "status", "reason", "source_type"])
+    normalized["fills"] = _row_list_contract(payload.get("fills"), ["ts", "symbol", "side", "qty", "price", "order_id", "status", "reason", "source_type"])
+    normalized["trades"] = _row_list_contract(
+        payload.get("trades"),
+        ["trade_id", "symbol", "side", "qty", "entry_ts", "entry_price", "exit_ts", "exit_price", "realized_pnl", "status", "strategy_id", "source", "run_id", "mode", "trade_source", "trade_source_mode", "hold_duration_hours"],
+    )
+    normalized["provenance"] = _row_list_contract(
+        payload.get("provenance"),
+        ["ts", "symbol", "trade_id", "strategy_id", "run_id", "source", "mode", "signal_type", "signal_value", "ranking_score", "universe_rank", "selection_included", "selection_status", "exclusion_reason", "target_weight", "sizing_rationale", "constraint_hits", "order_intent_summary", "label", "regime_context", "artifact_path", "metadata_path"],
+    )
+    normalized["position"] = dict(_json_safe(normalized.get("position") or {}))
+    normalized["meta"] = dict(_json_safe(normalized.get("meta") or {}))
+    return normalized
+
+
+def _normalize_portfolio_overview_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(_json_safe(payload))
+    normalized["summary"] = dict(_json_safe(normalized.get("summary") or {}))
+    normalized["equity_curve"] = _row_list_contract(payload.get("equity_curve"), ["ts", "equity"])
+    normalized["drawdown_curve"] = _row_list_contract(payload.get("drawdown_curve"), ["ts", "drawdown"])
+    normalized["positions"] = _row_list_contract(payload.get("positions"), ["symbol", "qty", "avg_price", "market_value", "side"])
+    normalized["exposure"] = _row_list_contract(payload.get("exposure"), ["symbol", "side", "market_value", "weight_proxy"])
+    normalized["recent_activity"] = _row_list_contract(payload.get("recent_activity"), ["kind", "ts", "symbol", "side", "qty", "price", "status"])
+    normalized["pnl_by_symbol"] = _row_list_contract(payload.get("pnl_by_symbol"), ["symbol", "trade_count", "closed_trade_count", "cumulative_realized_pnl", "win_rate"])
+    normalized["recent_realized_pnl"] = _row_list_contract(payload.get("recent_realized_pnl"), ["period", "realized_pnl"])
+    normalized["best_trades"] = _row_list_contract(payload.get("best_trades"), ["trade_id", "symbol", "side", "realized_pnl", "entry_ts", "exit_ts", "strategy_id"])
+    normalized["worst_trades"] = _row_list_contract(payload.get("worst_trades"), ["trade_id", "symbol", "side", "realized_pnl", "entry_ts", "exit_ts", "strategy_id"])
+    normalized["meta"] = dict(_json_safe(normalized.get("meta") or {}))
+    return normalized
+
+
+def _normalize_strategy_detail_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(_json_safe(payload))
+    normalized["summary"] = dict(_json_safe(normalized.get("summary") or {}))
+    normalized["trades"] = _row_list_contract(payload.get("trades"), ["trade_id", "symbol", "side", "qty", "entry_ts", "entry_price", "exit_ts", "exit_price", "realized_pnl", "status", "strategy_id", "source", "run_id", "mode"])
+    normalized["pnl_by_symbol"] = _row_list_contract(payload.get("pnl_by_symbol"), ["symbol", "trade_count", "closed_trade_count", "cumulative_realized_pnl", "win_rate"])
+    normalized["recent_realized_pnl"] = _row_list_contract(payload.get("recent_realized_pnl"), ["period", "realized_pnl"])
+    normalized["best_trades"] = _row_list_contract(payload.get("best_trades"), ["trade_id", "symbol", "side", "realized_pnl", "entry_ts", "exit_ts", "strategy_id"])
+    normalized["worst_trades"] = _row_list_contract(payload.get("worst_trades"), ["trade_id", "symbol", "side", "realized_pnl", "entry_ts", "exit_ts", "strategy_id"])
+    normalized["comparisons"] = _row_list_contract(payload.get("comparisons"), ["source", "run_id", "mode", "trade_count", "closed_trade_count", "open_trade_count", "cumulative_realized_pnl", "win_rate"])
+    normalized["meta"] = dict(_json_safe(normalized.get("meta") or {}))
+    normalized["meta"]["sources"] = _normalize_context_rows(normalized["meta"].get("sources"))
+    return normalized
+
+
+def _normalize_trade_detail_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(_json_safe(payload))
+    normalized["trade"] = _row_contract(payload.get("trade"), ["trade_id", "symbol", "side", "qty", "entry_ts", "entry_price", "exit_ts", "exit_price", "realized_pnl", "status", "strategy_id", "source", "run_id", "mode", "trade_source", "trade_source_mode", "hold_duration_hours"])
+    normalized["chart"] = _normalize_chart_payload(dict(payload.get("chart") or {}))
+    normalized["signals"] = _row_list_contract(payload.get("signals"), ["ts", "type", "price", "label", "score"])
+    normalized["fills"] = _row_list_contract(payload.get("fills"), ["ts", "symbol", "side", "qty", "price", "order_id", "status", "reason", "source_type"])
+    normalized["orders"] = _row_list_contract(payload.get("orders"), ["ts", "symbol", "side", "qty", "price", "order_id", "status", "reason", "source_type"])
+    normalized["provenance"] = dict(_json_safe(normalized.get("provenance") or {}))
+    normalized["provenance"]["latest"] = _row_contract((payload.get("provenance") or {}).get("latest"), ["ts", "symbol", "trade_id", "strategy_id", "run_id", "source", "mode", "signal_type", "signal_value", "ranking_score", "universe_rank", "selection_included", "selection_status", "exclusion_reason", "target_weight", "sizing_rationale", "constraint_hits", "order_intent_summary", "label", "regime_context", "artifact_path", "metadata_path"])
+    normalized["provenance"]["rows"] = _row_list_contract((payload.get("provenance") or {}).get("rows"), ["ts", "symbol", "trade_id", "strategy_id", "run_id", "source", "mode", "signal_type", "signal_value", "ranking_score", "universe_rank", "selection_included", "selection_status", "exclusion_reason", "target_weight", "sizing_rationale", "constraint_hits", "order_intent_summary", "label", "regime_context", "artifact_path", "metadata_path"])
+    normalized["lifecycle"] = _row_list_contract(payload.get("lifecycle"), ["ts", "kind", "label", "detail", "status"])
+    comparison = dict(_json_safe(normalized.get("comparison") or {}))
+    comparison["related_trades"] = _row_list_contract((payload.get("comparison") or {}).get("related_trades"), ["trade_id", "symbol", "side", "qty", "entry_ts", "exit_ts", "realized_pnl", "status", "strategy_id"])
+    comparison["available_chart_sources"] = _normalize_context_rows((payload.get("comparison") or {}).get("available_chart_sources"))
+    comparison["available_provenance_sources"] = _normalize_context_rows((payload.get("comparison") or {}).get("available_provenance_sources"))
+    normalized["comparison"] = comparison
+    normalized["explain"] = dict(_json_safe(normalized.get("explain") or {}))
+    normalized["meta"] = dict(_json_safe(normalized.get("meta") or {}))
+    return normalized
+
+
+def _normalize_execution_diagnostics_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(_json_safe(payload))
+    normalized["summary"] = dict(_json_safe(normalized.get("summary") or {}))
+    normalized["rows"] = _row_list_contract(payload.get("rows"), ["symbol", "signal_ts", "fill_ts", "latency_seconds", "signal_price", "fill_price", "slippage_bps"])
+    normalized["meta"] = dict(_json_safe(normalized.get("meta") or {}))
+    return normalized
+
+
+def _normalize_discovery_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(_json_safe(payload))
+    normalized["summary"] = dict(_json_safe(normalized.get("summary") or {}))
+    normalized["recent_symbols"] = _row_list_contract(payload.get("recent_symbols"), ["symbol", "trade_count", "latest_trade_id", "latest_entry_ts", "latest_strategy_id", "latest_source", "latest_run_id", "status"])
+    normalized["recent_trades"] = _row_list_contract(payload.get("recent_trades"), ["trade_id", "symbol", "strategy_id", "side", "qty", "entry_ts", "exit_ts", "entry_price", "exit_price", "realized_pnl", "status", "source", "run_id", "mode"])
+    normalized["recent_strategies"] = _row_list_contract(payload.get("recent_strategies"), ["strategy_id", "trade_count", "closed_trade_count", "latest_symbol", "latest_entry_ts", "latest_source", "latest_run_id"])
+    normalized["recent_run_contexts"] = _row_list_contract(payload.get("recent_run_contexts"), ["source", "run_id", "mode", "trade_count", "strategy_count", "symbol_count", "latest_entry_ts"])
+    return normalized
+
+
+def _normalize_portfolio_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(_json_safe(payload))
+    normalized["summary"] = dict(_json_safe(normalized.get("summary") or {}))
+    normalized["combined_positions"] = _normalize_context_rows(normalized.get("combined_positions"))
+    normalized["sleeve_weights"] = _normalize_context_rows(normalized.get("sleeve_weights"))
+    normalized["top_positions"] = _normalize_context_rows(normalized.get("top_positions"))
+    normalized["overlap"] = _normalize_context_rows(normalized.get("overlap"))
+    normalized["clipped_symbols"] = _normalize_context_rows(normalized.get("clipped_symbols"))
+    normalized["adaptive_allocation"] = dict(_json_safe(normalized.get("adaptive_allocation") or {}))
+    normalized["adaptive_allocation"]["top_changes"] = _normalize_context_rows(normalized["adaptive_allocation"].get("top_changes"))
+    normalized["adaptive_allocation"]["strategies"] = _normalize_context_rows(normalized["adaptive_allocation"].get("strategies"))
+    normalized["market_regime"] = dict(_json_safe(normalized.get("market_regime") or {}))
+    normalized["market_regime"]["summary"] = dict(_json_safe(normalized["market_regime"].get("summary") or {}))
+    normalized["market_regime"]["history"] = _normalize_context_rows(normalized["market_regime"].get("history"))
+    return normalized
+
+
+def _normalize_execution_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(_json_safe(payload))
+    normalized["summary"] = dict(_json_safe(normalized.get("summary") or {}))
+    normalized["requested_orders"] = _normalize_context_rows(normalized.get("requested_orders"))
+    normalized["executable_orders"] = _normalize_context_rows(normalized.get("executable_orders"))
+    normalized["rejected_orders"] = _normalize_context_rows(normalized.get("rejected_orders"))
+    normalized["liquidity_diagnostics"] = _normalize_context_rows(normalized.get("liquidity_diagnostics"))
+    normalized["turnover_summary"] = _normalize_context_rows(normalized.get("turnover_summary"))
+    return normalized
+
+
+def _normalize_live_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(_json_safe(payload))
+    normalized["dry_run_summary"] = dict(_json_safe(normalized.get("dry_run_summary") or {}))
+    normalized["submission_summary"] = dict(_json_safe(normalized.get("submission_summary") or {}))
+    normalized["risk_checks"] = _normalize_context_rows(normalized.get("risk_checks"))
+    normalized["blocked_checks"] = _normalize_context_rows(normalized.get("blocked_checks"))
+    normalized["duplicate_events"] = _normalize_context_rows(normalized.get("duplicate_events"))
+    normalized["broker_health"] = dict(_json_safe(normalized.get("broker_health") or {}))
+    return normalized
+
+
 class DashboardDataService:
-    def __init__(self, artifacts_root: str | Path) -> None:
+    def __init__(self, artifacts_root: str | Path, *, feature_dir: str | Path | None = None) -> None:
         self.artifacts_root = Path(artifacts_root)
+        self.feature_dir = Path(feature_dir) if feature_dir is not None else FEATURES_DIR
 
     def find_latest_run_dir(self) -> Path | None:
         summary = _latest_matching_file(self.artifacts_root, ["run_summary.json"])
@@ -679,17 +907,17 @@ class DashboardDataService:
         payload["adaptive_allocation"] = self.adaptive_allocation_payload()
         payload["market_regime"] = self.market_regime_payload()
         payload["generated_at"] = _now_utc()
-        return payload
+        return _normalize_portfolio_payload(payload)
 
     def execution_payload(self) -> dict[str, Any]:
         payload = self.latest_execution_payload()
         payload["generated_at"] = _now_utc()
-        return payload
+        return _normalize_execution_payload(payload)
 
     def live_payload(self) -> dict[str, Any]:
         payload = self.latest_live_payload()
         payload["generated_at"] = _now_utc()
-        return payload
+        return _normalize_live_payload(payload)
 
     def research_latest_payload(self) -> dict[str, Any]:
         payload = self.research_payload()
@@ -698,3 +926,96 @@ class DashboardDataService:
         payload["strategy_validation"] = self.strategy_validation_payload()
         payload["strategy_lifecycle"] = self.strategy_lifecycle_payload()
         return payload
+
+    def portfolio_overview_payload(self) -> dict[str, Any]:
+        payload = build_portfolio_overview_payload(artifacts_root=self.artifacts_root)
+        payload["generated_at"] = _now_utc()
+        return _normalize_portfolio_overview_payload(payload)
+
+    def execution_diagnostics_payload(self) -> dict[str, Any]:
+        payload = build_execution_diagnostics_payload(artifacts_root=self.artifacts_root)
+        payload["generated_at"] = _now_utc()
+        return _normalize_execution_diagnostics_payload(payload)
+
+    def strategy_detail_payload(self, strategy_id: str) -> dict[str, Any]:
+        payload = build_strategy_detail_payload(artifacts_root=self.artifacts_root, strategy_id=strategy_id)
+        payload["generated_at"] = _now_utc()
+        return _normalize_strategy_detail_payload(payload)
+
+    def trade_detail_payload(self, trade_id: str) -> dict[str, Any]:
+        payload = build_trade_detail_payload(
+            artifacts_root=self.artifacts_root,
+            feature_dir=self.feature_dir,
+            trade_id=trade_id,
+        )
+        payload["generated_at"] = _now_utc()
+        return _normalize_trade_detail_payload(payload)
+
+    def discovery_payload(self) -> dict[str, Any]:
+        payload = build_discovery_payload(artifacts_root=self.artifacts_root)
+        payload["generated_at"] = _now_utc()
+        return _normalize_discovery_payload(payload)
+
+    def chart_payload(
+        self,
+        symbol: str,
+        *,
+        timeframe: str = "1d",
+        lookback: int | None = 200,
+        run_id: str | None = None,
+        source: str | None = None,
+        mode: str | None = None,
+    ) -> dict[str, Any]:
+        return _normalize_chart_payload(build_chart_payload(
+            artifacts_root=self.artifacts_root,
+            feature_dir=self.feature_dir,
+            symbol=symbol,
+            timeframe=timeframe,
+            lookback=lookback,
+            run_id=run_id,
+            source=source,
+            mode=mode,
+        ))
+
+    def trades_payload(
+        self,
+        symbol: str,
+        *,
+        run_id: str | None = None,
+        source: str | None = None,
+        mode: str | None = None,
+    ) -> dict[str, Any]:
+        payload = build_trades_payload(
+            artifacts_root=self.artifacts_root,
+            symbol=symbol,
+            run_id=run_id,
+            source=source,
+            mode=mode,
+        )
+        normalized = dict(_json_safe(payload))
+        normalized["trades"] = _row_list_contract(normalized.get("trades"), ["trade_id", "symbol", "side", "qty", "entry_ts", "entry_price", "exit_ts", "exit_price", "realized_pnl", "status", "strategy_id", "source", "run_id", "mode"])
+        normalized["fills"] = _row_list_contract(normalized.get("fills"), ["ts", "symbol", "side", "qty", "price", "order_id", "status", "reason", "source_type"])
+        normalized["meta"] = dict(_json_safe(normalized.get("meta") or {}))
+        return normalized
+
+    def signals_payload(
+        self,
+        symbol: str,
+        *,
+        lookback: int | None = 200,
+        run_id: str | None = None,
+        source: str | None = None,
+        mode: str | None = None,
+    ) -> dict[str, Any]:
+        payload = build_signals_payload(
+            artifacts_root=self.artifacts_root,
+            symbol=symbol,
+            lookback=lookback,
+            run_id=run_id,
+            source=source,
+            mode=mode,
+        )
+        normalized = dict(_json_safe(payload))
+        normalized["signals"] = _row_list_contract(normalized.get("signals"), ["ts", "type", "price", "label", "score"])
+        normalized["meta"] = dict(_json_safe(normalized.get("meta") or {}))
+        return normalized
