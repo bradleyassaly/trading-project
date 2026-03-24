@@ -20,6 +20,7 @@ from trading_platform.db.repositories import (
 )
 from trading_platform.db.session import create_engine_from_settings, create_session_factory, session_scope
 from trading_platform.db.services import DecisionQueryService, OpsQueryService, RunQueryService
+from trading_platform.db.services.read_models import DecisionQueryFilters, RunQueryFilters
 from trading_platform.db.settings import resolve_database_settings
 
 
@@ -63,12 +64,13 @@ def _write_minimal_dashboard_artifacts(root: Path) -> None:
 
 def _call_app(app, path: str) -> tuple[str, dict[str, str], dict]:
     payload: dict[str, object] = {}
+    path_only, _, query_string = path.partition("?")
 
     def start_response(status, headers):
         payload["status"] = status
         payload["headers"] = {key: value for key, value in headers}
 
-    result = app({"PATH_INFO": path, "QUERY_STRING": "", "wsgi.input": BytesIO(b"")}, start_response)
+    result = app({"PATH_INFO": path_only, "QUERY_STRING": query_string, "wsgi.input": BytesIO(b"")}, start_response)
     body = b"".join(result)
     return str(payload["status"]), payload["headers"], json.loads(body.decode("utf-8"))
 
@@ -122,6 +124,17 @@ def _seed_dashboard_db(tmp_path: Path) -> tuple[object, str]:
             notes="paper finished",
         )
         portfolio_run.completed_at = started_at
+        second_run = run_repo.create_portfolio_run(
+            run_key="live|demo|meanrev-core",
+            mode="live",
+            status="failed",
+            started_at=started_at.replace(hour=12),
+            config_json={"workflow": "live"},
+            config_hash="cfg-live",
+            git_commit="abc124",
+            notes="live failed",
+        )
+        second_run.completed_at = started_at.replace(hour=12, minute=5)
 
         artifact = artifact_repo.register_artifact(
             artifact_type="paper:trade_decisions_json",
@@ -158,6 +171,23 @@ def _seed_dashboard_db(tmp_path: Path) -> tuple[object, str]:
             candidate_status="selected",
             rejection_reason=None,
             metadata_json={"screening_checks": [{"check_name": "min_price", "status": "pass"}]},
+        )
+        portfolio_repo.record_portfolio_decision(
+            portfolio_run_id=second_run.id,
+            symbol="MSFT",
+            side="sell",
+            target_weight=0.1,
+            target_shares=5,
+            rank_score=0.72,
+            decision_status="rejected",
+            explanation_json={
+                "timestamp": "2026-03-24T12:00:00+00:00",
+                "strategy_id": "meanrev-core",
+                "final_signal_score": 0.72,
+                "rejection_reason": "outranked_by_other_candidate",
+                "base_universe_id": "sp500",
+                "sub_universe_id": "meanrev_candidates",
+            },
         )
         provenance_repo.record_universe_filter_result(
             portfolio_run_id=portfolio_run.id,
@@ -202,6 +232,12 @@ def _seed_dashboard_db(tmp_path: Path) -> tuple[object, str]:
             config_json={"family": "momentum"},
             code_hash="code123",
         )
+        second_strategy = strategy_repo.upsert_strategy_definition(
+            name="meanrev-core",
+            version="v1",
+            config_json={"family": "mean_reversion"},
+            code_hash="code456",
+        )
         promotion = strategy_repo.record_promotion_decision(
             strategy_definition_id=strategy.id,
             source_research_run_id=research_run.id,
@@ -214,6 +250,19 @@ def _seed_dashboard_db(tmp_path: Path) -> tuple[object, str]:
             promotion_decision_id=promotion.id,
             active_from=started_at,
             status="active",
+        )
+        second_promotion = strategy_repo.record_promotion_decision(
+            strategy_definition_id=second_strategy.id,
+            source_research_run_id=research_run.id,
+            decision="reject",
+            reason="weak walk-forward",
+            metrics_json={"portfolio_sharpe": 0.2},
+        )
+        strategy_repo.record_promoted_strategy(
+            strategy_definition_id=second_strategy.id,
+            promotion_decision_id=second_promotion.id,
+            active_from=started_at,
+            status="inactive",
         )
         return settings, str(decision.id)
 
@@ -232,9 +281,9 @@ def test_db_query_services_shape_recent_runs_and_decisions(tmp_path: Path) -> No
     assert portfolio_runs[0].artifact_count == 1
 
     decisions = decision_queries.list_recent_trade_decisions(limit=5)
-    assert decisions[0].trade_id == decision_id
-    assert decisions[0].symbol == "AAPL"
-    assert decisions[0].order_status == "submitted"
+    matching = next(row for row in decisions if row.trade_id == decision_id)
+    assert matching.symbol == "AAPL"
+    assert matching.order_status == "submitted"
 
     detail = decision_queries.get_trade_decision_detail(decision_id)
     assert detail is not None
@@ -244,7 +293,28 @@ def test_db_query_services_shape_recent_runs_and_decisions(tmp_path: Path) -> No
 
     ops = ops_queries.get_ops_health_summary()
     assert ops["summary"]["latest_run_name"] == "paper|demo|momentum-core"
-    assert ops["recent_promotions"][0]["strategy_name"] == "momentum-core"
+    assert ops["recent_promotions"]["items"][0]["strategy_name"] in {"momentum-core", "meanrev-core"}
+
+
+def test_db_query_services_support_filtering_and_pagination(tmp_path: Path) -> None:
+    settings, _decision_id = _seed_dashboard_db(tmp_path)
+    session_factory = create_session_factory(settings)
+    assert session_factory is not None
+
+    run_queries = RunQueryService(session_factory)
+    decision_queries = DecisionQueryService(session_factory)
+
+    runs_page = run_queries.list_portfolio_runs(
+        filters=RunQueryFilters(mode="paper", limit=1, offset=0),
+    )
+    assert runs_page.total_count == 1
+    assert runs_page.items[0].run_name == "paper|demo|momentum-core"
+
+    trade_page = decision_queries.list_trade_decisions(
+        DecisionQueryFilters(strategy="momentum-core", limit=1, offset=0),
+    )
+    assert trade_page.total_count == 1
+    assert trade_page.items[0].strategy_id == "momentum-core"
 
 
 def test_hybrid_dashboard_service_falls_back_to_artifacts_when_db_disabled(tmp_path: Path) -> None:
@@ -287,7 +357,7 @@ def test_dashboard_app_prefers_db_when_records_exist(tmp_path: Path, monkeypatch
     ops = service.ops_payload()
 
     assert blotter["source"] == "db"
-    assert blotter["trades"][0]["trade_id"] == decision_id
+    assert any(row["trade_id"] == decision_id for row in blotter["trades"])
     assert detail["meta"]["source"] in {"db", "hybrid"}
     assert detail["provenance"]["filter_results"][0]["filter_name"] == "min_price"
     assert ops["source"] == "hybrid"
@@ -296,5 +366,17 @@ def test_dashboard_app_prefers_db_when_records_exist(tmp_path: Path, monkeypatch
     app = create_dashboard_app(tmp_path)
     _status, _headers, trades_payload = _call_app(app, "/api/trades-blotter")
     assert trades_payload["source"] == "db"
+    assert trades_payload["pagination"]["total_count"] >= 2
     _status, _headers, trade_payload = _call_app(app, f"/api/trade/{decision_id}")
     assert trade_payload["meta"]["source"] in {"db", "hybrid"}
+    _status, _headers, filtered_runs = _call_app(app, "/api/runs?mode=paper&limit=1")
+    assert filtered_runs["source"] == "hybrid"
+    assert filtered_runs["runs_pagination"]["limit"] == 1
+    assert filtered_runs["runs"][0]["run_name"] == "paper|demo|momentum-core"
+    run_id = filtered_runs["runs"][0]["run_id"]
+    _status, _headers, run_payload = _call_app(app, f"/api/runs/{run_id}")
+    assert run_payload["source"] == "db"
+    assert run_payload["linked_decisions"]["items"][0]["strategy_id"] == "momentum-core"
+    _status, _headers, strategies_payload = _call_app(app, "/api/strategies?limit=1")
+    assert strategies_payload["source"] == "hybrid"
+    assert strategies_payload["recent_promotions_pagination"]["limit"] == 1

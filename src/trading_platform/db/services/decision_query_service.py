@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from trading_platform.db.models.execution import Order
@@ -14,7 +15,7 @@ from trading_platform.db.models.reference import Symbol
 from trading_platform.db.models.runs import PortfolioRun
 from trading_platform.db.services.artifact_query_service import ArtifactQueryService
 from trading_platform.db.services.execution_query_service import ExecutionQueryService
-from trading_platform.db.services.read_models import CandidateEvaluationReadModel, TradeDecisionReadModel
+from trading_platform.db.services.read_models import CandidateEvaluationReadModel, DecisionQueryFilters, PagedResultReadModel, TradeDecisionReadModel
 
 
 def _iso(value: object) -> str | None:
@@ -26,6 +27,15 @@ def _iso(value: object) -> str | None:
 
 def _safe_dict(value: object) -> dict[str, Any]:
     return dict(value) if isinstance(value, dict) else {}
+
+
+def _parse_dt(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
 
 
 def _uuid_value(value: object) -> object:
@@ -47,25 +57,43 @@ class DecisionQueryService:
     def enabled(self) -> bool:
         return self.session_factory is not None
 
-    def list_recent_trade_decisions(
-        self,
-        *,
-        limit: int = 100,
-        statuses: Iterable[str] | None = None,
-    ) -> list[TradeDecisionReadModel]:
+    def default_filters(self, **overrides: Any) -> DecisionQueryFilters:
+        return DecisionQueryFilters(**overrides)
+
+    def list_trade_decisions(self, filters: DecisionQueryFilters | None = None) -> PagedResultReadModel:
+        filters = filters or DecisionQueryFilters()
         if not self.enabled:
-            return []
+            return PagedResultReadModel(items=[], total_count=0, limit=filters.limit, offset=filters.offset, source="db")
         with self.session_factory() as session:
             statement = (
                 select(PortfolioDecision, Symbol, PortfolioRun)
                 .join(Symbol, Symbol.id == PortfolioDecision.symbol_id)
                 .join(PortfolioRun, PortfolioRun.id == PortfolioDecision.portfolio_run_id)
-                .order_by(PortfolioDecision.created_at.desc())
-                .limit(limit)
             )
-            if statuses:
-                statement = statement.where(PortfolioDecision.decision_status.in_(list(statuses)))
-            rows = session.execute(statement).all()
+            count_statement = select(func.count(PortfolioDecision.id)).select_from(PortfolioDecision)
+            if filters.symbol:
+                statement = statement.where(Symbol.symbol == filters.symbol.upper())
+                count_statement = count_statement.join(Symbol, Symbol.id == PortfolioDecision.symbol_id).where(Symbol.symbol == filters.symbol.upper())
+            if filters.strategy:
+                statement = statement.where(PortfolioDecision.explanation_json["strategy_id"].as_string() == filters.strategy)
+                count_statement = count_statement.where(PortfolioDecision.explanation_json["strategy_id"].as_string() == filters.strategy)
+            if filters.decision_status:
+                statement = statement.where(PortfolioDecision.decision_status == filters.decision_status)
+                count_statement = count_statement.where(PortfolioDecision.decision_status == filters.decision_status)
+            if filters.run_id:
+                statement = statement.where(PortfolioDecision.portfolio_run_id == _uuid_value(filters.run_id))
+                count_statement = count_statement.where(PortfolioDecision.portfolio_run_id == _uuid_value(filters.run_id))
+            date_from = _parse_dt(filters.date_from)
+            if date_from is not None:
+                statement = statement.where(PortfolioDecision.created_at >= date_from)
+                count_statement = count_statement.where(PortfolioDecision.created_at >= date_from)
+            date_to = _parse_dt(filters.date_to)
+            if date_to is not None:
+                statement = statement.where(PortfolioDecision.created_at <= date_to)
+                count_statement = count_statement.where(PortfolioDecision.created_at <= date_to)
+            order_column = PortfolioDecision.created_at.desc() if filters.sort_desc else PortfolioDecision.created_at.asc()
+            rows = session.execute(statement.order_by(order_column).offset(filters.offset).limit(filters.limit)).all()
+            total_count = int(session.scalar(count_statement) or 0)
             decision_ids = [decision.id for decision, _symbol, _run in rows]
             order_rows = session.execute(
                 select(Order.portfolio_decision_id, Order.status)
@@ -77,10 +105,10 @@ class DecisionQueryService:
         for decision_id, status in order_rows:
             latest_order_status.setdefault(decision_id, status)
 
-        models: list[TradeDecisionReadModel] = []
+        items = []
         for decision, symbol, run in rows:
             explanation = _safe_dict(decision.explanation_json)
-            models.append(
+            items.append(
                 TradeDecisionReadModel(
                     trade_id=str(decision.id),
                     portfolio_run_id=str(run.id),
@@ -104,33 +132,65 @@ class DecisionQueryService:
                     explanation=explanation,
                 )
             )
-        return models
+        return PagedResultReadModel(items=items, total_count=total_count, limit=filters.limit, offset=filters.offset, source="db")
 
-    def list_candidate_evaluations_for_run(self, portfolio_run_id: str) -> list[CandidateEvaluationReadModel]:
+    def list_recent_trade_decisions(
+        self,
+        *,
+        limit: int = 100,
+        statuses: Iterable[str] | None = None,
+    ) -> list[TradeDecisionReadModel]:
+        status = None
+        if statuses:
+            status = list(statuses)[0]
+        return list(self.list_trade_decisions(DecisionQueryFilters(limit=limit, decision_status=status)).items)
+
+    def list_candidate_evaluations_for_run(
+        self,
+        portfolio_run_id: str,
+        *,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> PagedResultReadModel:
         if not self.enabled:
-            return []
+            return PagedResultReadModel(items=[], total_count=0, limit=limit, offset=offset, source="db")
         with self.session_factory() as session:
-            rows = session.execute(
+            statement = (
                 select(CandidateEvaluation, Symbol)
                 .join(Symbol, Symbol.id == CandidateEvaluation.symbol_id)
                 .where(CandidateEvaluation.portfolio_run_id == _uuid_value(portfolio_run_id))
                 .order_by(CandidateEvaluation.rank.asc().nulls_last(), CandidateEvaluation.created_at.desc())
-            ).all()
-        return [
-            CandidateEvaluationReadModel(
-                evaluation_id=str(evaluation.id),
-                portfolio_run_id=str(evaluation.portfolio_run_id),
-                symbol=symbol.symbol,
-                base_universe_id=evaluation.base_universe_id,
-                sub_universe_id=evaluation.sub_universe_id,
-                score=evaluation.score,
-                rank=evaluation.rank,
-                candidate_status=evaluation.candidate_status,
-                rejection_reason=evaluation.rejection_reason,
-                metadata=dict(evaluation.metadata_json or {}),
+                .offset(offset)
+                .limit(limit)
             )
-            for evaluation, symbol in rows
-        ]
+            rows = session.execute(statement).all()
+            total_count = int(
+                session.scalar(
+                    select(func.count(CandidateEvaluation.id)).where(CandidateEvaluation.portfolio_run_id == _uuid_value(portfolio_run_id))
+                )
+                or 0
+            )
+        return PagedResultReadModel(
+            items=[
+                CandidateEvaluationReadModel(
+                    evaluation_id=str(evaluation.id),
+                    portfolio_run_id=str(evaluation.portfolio_run_id),
+                    symbol=symbol.symbol,
+                    base_universe_id=evaluation.base_universe_id,
+                    sub_universe_id=evaluation.sub_universe_id,
+                    score=evaluation.score,
+                    rank=evaluation.rank,
+                    candidate_status=evaluation.candidate_status,
+                    rejection_reason=evaluation.rejection_reason,
+                    metadata=dict(evaluation.metadata_json or {}),
+                )
+                for evaluation, symbol in rows
+            ],
+            total_count=total_count,
+            limit=limit,
+            offset=offset,
+            source="db",
+        )
 
     def get_trade_decision_detail(self, trade_id: str) -> dict[str, Any] | None:
         if not self.enabled:

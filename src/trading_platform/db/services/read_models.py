@@ -5,6 +5,83 @@ from typing import Any
 
 
 @dataclass(frozen=True)
+class RunQueryFilters:
+    status: str | None = None
+    run_kind: str | None = None
+    run_type: str | None = None
+    mode: str | None = None
+    strategy: str | None = None
+    date_from: str | None = None
+    date_to: str | None = None
+    limit: int = 20
+    offset: int = 0
+    sort_desc: bool = True
+
+
+@dataclass(frozen=True)
+class DecisionQueryFilters:
+    symbol: str | None = None
+    strategy: str | None = None
+    decision_status: str | None = None
+    run_id: str | None = None
+    date_from: str | None = None
+    date_to: str | None = None
+    limit: int = 100
+    offset: int = 0
+    sort_desc: bool = True
+
+
+@dataclass(frozen=True)
+class StrategyHistoryFilters:
+    strategy: str | None = None
+    decision: str | None = None
+    active: bool | None = None
+    status: str | None = None
+    date_from: str | None = None
+    date_to: str | None = None
+    limit: int = 20
+    offset: int = 0
+    sort_desc: bool = True
+
+
+@dataclass(frozen=True)
+class OpsActivityFilters:
+    status: str | None = None
+    activity_type: str | None = None
+    date_from: str | None = None
+    date_to: str | None = None
+    limit: int = 20
+    offset: int = 0
+
+
+@dataclass(frozen=True)
+class PagedResultReadModel:
+    items: list[Any]
+    total_count: int
+    limit: int
+    offset: int
+    source: str = "db"
+
+    @property
+    def has_more(self) -> bool:
+        return self.offset + len(self.items) < self.total_count
+
+    def to_dict(self) -> dict[str, Any]:
+        serialized: list[Any] = []
+        for item in self.items:
+            to_dict = getattr(item, "to_dict", None)
+            serialized.append(to_dict() if callable(to_dict) else item)
+        return {
+            "items": serialized,
+            "total_count": self.total_count,
+            "limit": self.limit,
+            "offset": self.offset,
+            "has_more": self.has_more,
+            "source": self.source,
+        }
+
+
+@dataclass(frozen=True)
 class ArtifactReadModel:
     artifact_id: str
     artifact_type: str

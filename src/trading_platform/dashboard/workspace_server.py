@@ -98,6 +98,17 @@ def _parse_positive_int(value: str | None, default: int) -> int:
     return parsed if parsed > 0 else default
 
 
+def _query_filters(query: dict[str, list[str]], *keys: str, default_limit: int = 20) -> dict[str, str | int]:
+    payload: dict[str, str | int] = {}
+    for key in keys:
+        value = _query_value(query, key)
+        if value is not None:
+            payload[key] = value
+    payload["limit"] = _parse_positive_int(_query_value(query, "limit"), default_limit)
+    payload["offset"] = max(int(_query_value(query, "offset") or 0), 0)
+    return payload
+
+
 def _validate_symbol(symbol: str) -> str | None:
     normalized = symbol.strip().upper()
     if not normalized:
@@ -116,6 +127,8 @@ def _link_for(column: str, value: object) -> str | None:
         return f'<a class="table-link" href="/strategies/{text}">{text}</a>'
     if column == "trade_id":
         return f'<a class="table-link" href="/trades/{text}">{text}</a>'
+    if column == "run_id":
+        return f'<a class="table-link" href="/runs/{text}">{text}</a>'
     if column in {"run_dir", "artifact_dir", "path"}:
         return f'<span class="mono">{text}</span>'
     return None
@@ -265,23 +278,18 @@ def _overview_page(service: DashboardDataService) -> bytes:
 
 
 def _trades_page(service: DashboardDataService, query: dict[str, list[str]]) -> bytes:
-    payload = service.trade_blotter_payload()
+    filters = _query_filters(query, "status", "strategy", "symbol", "run_id", "date_from", "date_to", default_limit=50)
+    payload = service.trade_blotter_payload(filters)
     rows = payload.get("trades", [])
     status_filter = _query_value(query, "status")
     strategy_filter = _query_value(query, "strategy")
-    symbol_filter = _query_value(query, "symbol")
-    if status_filter:
-        rows = [row for row in rows if str(row.get("status")) == status_filter]
-    if strategy_filter:
-        rows = [row for row in rows if str(row.get("strategy_id") or "") == strategy_filter]
-    if symbol_filter:
-        rows = [row for row in rows if str(row.get("symbol") or "").upper() == symbol_filter.upper()]
     strategies = sorted({str(row.get("strategy_id")) for row in payload.get("trades", []) if row.get("strategy_id")})
     chips = [("All", "/trades", status_filter is None), ("Open", "/trades?status=open", status_filter == "open"), ("Closed", "/trades?status=closed", status_filter == "closed")]
     filter_links = "".join(f"<a class='filter-chip{' active' if active else ''}' href='{href}'>{label}</a>" for label, href, active in chips)
     filter_links += "".join(f"<a class='filter-chip{' active' if strategy_filter == strategy else ''}' href='/trades?strategy={html.escape(strategy)}'>{html.escape(strategy)}</a>" for strategy in strategies[:4])
-    body = _metric_cards([("Trade Count", payload.get("summary", {}).get("trade_count") or 0, "Across discovered explicit ledgers"), ("Open", payload.get("summary", {}).get("open_trade_count") or 0, "Currently active"), ("Closed", payload.get("summary", {}).get("closed_trade_count") or 0, "Completed trades"), ("Winning Trades", payload.get("summary", {}).get("winning_trade_count") or 0, "Closed trades with positive pnl"), ("Realized PnL", _format_number(payload.get("summary", {}).get("total_realized_pnl"), money=True), "Closed-trade total")])
-    body += f"<div class='filter-bar'>{filter_links}</div>"
+    pagination = payload.get("pagination", {})
+    body = _metric_cards([("Trade Count", payload.get("summary", {}).get("trade_count") or 0, "Across discovered explicit ledgers"), ("Open", payload.get("summary", {}).get("open_trade_count") or 0, "Currently active"), ("Closed", payload.get("summary", {}).get("closed_trade_count") or 0, "Completed trades"), ("Page Size", pagination.get("limit") or len(rows), "Requested slice"), ("Source", payload.get("source") or "n/a", "Read path")])
+    body += f"<section class='panel'><div class='subtle'>total={_escape(pagination.get('total_count') or len(rows))} offset={_escape(pagination.get('offset') or 0)} has_more={_escape(pagination.get('has_more'))} source={_escape(payload.get('source'))}</div><div class='filter-bar'>{filter_links}</div></section>"
     body += _section("Trades Blotter", _table(["trade_id", "timestamp", "symbol", "side", "qty", "target_weight", "strategy_id", "signal_score", "ranking_score", "expected_edge", "order_status", "realized_pnl", "unrealized_pnl", "status"], rows, empty="No trades match the current filters."), subtitle="The blotter centers the platform on inspectable trades rather than raw artifact files.")
     return _page_shell(title="Trades Blotter", active_path="/trades", body=body)
 
@@ -338,11 +346,13 @@ def _trade_detail_page(service: DashboardDataService, trade_id: str) -> bytes:
 
 
 def _strategies_page(service: DashboardDataService, query: dict[str, list[str]]) -> bytes:
-    payload = service.strategies_payload(); rows = payload.get("strategies", []); status_filter = _query_value(query, "status")
+    filters = _query_filters(query, "status", "strategy", "decision", "date_from", "date_to", default_limit=20)
+    payload = service.strategies_payload(filters); rows = payload.get("strategies", []); status_filter = _query_value(query, "status")
     if status_filter: rows = [row for row in rows if row.get("status") == status_filter]
     body = _metric_cards([("Strategy Count", len(payload.get("strategies", [])), "Registry entries"), ("Approved", payload.get("summary", {}).get("status_counts", {}).get("approved", 0), "Production-approved"), ("Families", len(payload.get("summary", {}).get("family_counts", {})), "Observed families"), ("Under Review", payload.get("summary", {}).get("lifecycle_counts", {}).get("under_review", 0), "Lifecycle governance")])
     body += _section("Strategy Registry", _table(["strategy_id", "status", "family", "version", "preset_name", "universe", "current_deployment_stage"], rows))
     body += _section("Lifecycle State", _table(["strategy_id", "preset_name", "current_state", "validation_status", "monitoring_recommendation", "adaptive_adjusted_weight", "latest_reasons"], payload.get("strategy_lifecycle", []), empty="No lifecycle rows found."))
+    body += _section("Recent Promotions", _table(["promotion_decision_id", "strategy_name", "strategy_version", "decision", "promoted_status", "source_research_run_name"], payload.get("recent_promotions", []), empty="No DB-backed promotions found."))
     body += _section("Champion / Challenger", _table(list(payload.get("champion_challenger", [{}])[0].keys()) if payload.get("champion_challenger") else ["family"], payload.get("champion_challenger", []), empty="No champion/challenger mapping found."))
     return _page_shell(title="Strategies", active_path="/strategies", body=body)
 
@@ -374,15 +384,18 @@ def _research_page(service: DashboardDataService) -> bytes:
     body = _metric_cards([("Research Runs", payload.get("summary", {}).get("run_count", 0), "Indexed research manifests"), ("Eligible Candidates", payload.get("summary", {}).get("eligible_candidate_count", 0), "Promotion ready"), ("Promoted Strategies", payload.get("summary", {}).get("promoted_strategy_count", 0), "Generated strategy presets"), ("Validated Pass", payload.get("strategy_validation", {}).get("summary", {}).get("pass_count", 0), "Walk-forward validation")])
     body += _section("Leaderboard", _table(["rank", "run_id", "signal_family", "universe", "metric_name", "metric_value", "promotion_recommendation"], payload.get("leaderboard", []), empty="No leaderboard rows found."))
     body += _section("Promotion Candidates", _table(["run_id", "eligible", "promotion_recommendation", "mean_spearman_ic", "portfolio_sharpe", "reasons"], payload.get("promotion_candidates", []), empty="No promotion candidates found."))
+    body += _section("Recent Promotions", _table(["promotion_decision_id", "strategy_name", "strategy_version", "decision", "promoted_status", "source_research_run_name"], payload.get("recent_promotions", []), empty="No DB-backed promotion history found."))
     body += _section("Selected Strategy Portfolio", _table(["preset_name", "allocation_weight", "signal_family", "universe", "selection_rank"], payload.get("strategy_portfolio", {}).get("selected_strategies", []), empty="No selected strategy portfolio found."))
     return _page_shell(title="Research", active_path="/research", body=body)
 
 
 def _ops_page(service: DashboardDataService) -> bytes:
-    payload = service.ops_payload(); latest_run = payload.get("latest_run", {})
+    filters = {}
+    payload = service.ops_payload(filters); latest_run = payload.get("latest_run", {})
     body = _metric_cards([("Latest Run", payload.get("summary", {}).get("latest_run_name") or "n/a", "Most recent pipeline"), ("Run Status", payload.get("summary", {}).get("latest_run_status") or "n/a", "Most recent pipeline"), ("Health", payload.get("summary", {}).get("health_status") or "n/a", "Latest run health"), ("Critical Alerts", payload.get("summary", {}).get("critical_alert_count") or 0, "Latest run"), ("Blocked Checks", payload.get("summary", {}).get("blocked_check_count") or 0, "Latest live submission"), ("Missing Fills", payload.get("summary", {}).get("missing_fill_count") or 0, "Execution diagnostics")])
     body += _section("Latest Run Detail", _table(["stage_name", "status", "started_at", "ended_at", "duration_seconds", "error_message"], latest_run.get("stages", []), empty="No stage records found."))
-    body += _section("Recent Runs", _table(["run_name", "status", "health_status", "schedule_type", "started_at", "failed_stage_count", "artifact_dir"], payload.get("runs", []), empty="No runs found."))
+    body += _section("Recent Runs", _table(["run_id", "run_name", "status", "health_status", "schedule_type", "started_at", "failed_stage_count", "artifact_dir"], payload.get("runs", []), empty="No runs found."))
+    body += _section("DB Activity Feed", _table(["activity_type", "symbol", "strategy_name", "run_name", "status", "submitted_at", "created_at", "timestamp"], payload.get("db_activity", {}).get("activity_feed", {}).get("items", []), empty="No DB activity found."))
     body += _section("Orchestration Runs", _table(["run_id", "run_name", "experiment_name", "variant_name", "status", "schedule_frequency", "selected_strategy_count", "total_return", "sharpe", "warning_strategy_count", "kill_switch_recommendation_count", "run_dir"], payload.get("orchestration_runs", []), empty="No orchestration runs found."))
     body += _section("Live Risk Checks", _table(["check_name", "passed", "hard_block", "severity", "message"], payload.get("live", {}).get("risk_checks", []), empty="No live risk checks found."))
     body += _section("Execution Diagnostics", _table(["symbol", "signal_ts", "fill_ts", "latency_seconds", "signal_price", "fill_price", "slippage_bps"], payload.get("execution_diagnostics", {}).get("rows", []), empty="No execution diagnostics found."))
@@ -409,6 +422,18 @@ def _execution_page(service: DashboardDataService) -> bytes:
 
 def _runs_page(service: DashboardDataService) -> bytes:
     return _ops_page(service)
+
+
+def _run_detail_page(service: DashboardDataService, run_id: str, query: dict[str, list[str]]) -> bytes:
+    payload = service.latest_run_detail_payload(run_id, run_kind=_query_value(query, "run_kind"))
+    summary = payload.get("summary", {})
+    body = _metric_cards([("Run", summary.get("run_name") or "n/a", "Run key"), ("Status", summary.get("status") or "n/a", "Lifecycle"), ("Artifacts", summary.get("artifact_count") or 0, "Linked artifact rows"), ("Source", payload.get("source") or "n/a", "Read path")])
+    body += _section("Run Metadata", _info_cards([("Run ID", summary.get("run_id") or run_id, "Stable DB id"), ("Run Kind", summary.get("run_kind") or "n/a", "Research vs portfolio"), ("Started", summary.get("started_at") or "n/a", "Start time"), ("Completed", summary.get("completed_at") or "n/a", "Completion time"), ("Artifact Dir", summary.get("artifact_dir") or "n/a", "Linked artifact root"), ("Git Commit", summary.get("git_commit") or "n/a", "Recorded at run start")]))
+    body += _section("Linked Artifacts", _table(["role", "artifact_type", "format", "row_count", "path"], payload.get("artifacts", []), empty="No linked artifacts found."))
+    body += _section("Linked Decisions", _table(["trade_id", "symbol", "side", "strategy_id", "ranking_score", "order_status", "status"], payload.get("linked_decisions", {}).get("items", []), empty="No linked decisions found."))
+    body += _section("Candidate Evaluations", _table(["evaluation_id", "symbol", "base_universe_id", "sub_universe_id", "score", "rank", "candidate_status", "rejection_reason"], payload.get("candidate_evaluations", {}).get("items", []), empty="No candidate evaluations found."))
+    body += _section("Linked Promotions", _table(["promotion_decision_id", "strategy_name", "strategy_version", "decision", "promoted_status", "source_research_run_name"], payload.get("linked_promotions", {}).get("items", []), empty="No linked promotions found."))
+    return _page_shell(title=f"Run Detail: {run_id}", active_path="/ops", body=body)
 
 
 def _symbol_detail_page(service: DashboardDataService, symbol: str, query: dict[str, list[str]]) -> bytes:
@@ -439,25 +464,30 @@ def create_dashboard_app(
     )
     def app(environ, start_response):
         path = environ.get("PATH_INFO", "/"); query = parse_qs(environ.get("QUERY_STRING", ""))
+        runs_filters = _query_filters(query, "status", "run_kind", "run_type", "mode", "strategy", "date_from", "date_to", default_limit=20)
+        trades_filters = _query_filters(query, "status", "decision_status", "strategy", "symbol", "run_id", "date_from", "date_to", default_limit=50)
+        ops_filters = _query_filters(query, "status", "activity_type", "date_from", "date_to", default_limit=20)
+        strategy_filters = _query_filters(query, "status", "strategy", "decision", "date_from", "date_to", default_limit=20)
         if path.startswith("/api/chart/"):
             symbol = _validate_symbol(path.removeprefix("/api/chart/")); status, headers, body = _not_found() if symbol is None else _json_response(service.chart_payload(symbol, timeframe=(query.get("timeframe") or ["1d"])[0], lookback=_parse_positive_int((query.get("lookback") or ["200"])[0], 200), run_id=_query_value(query, "run_id"), source=_query_value(query, "source"), mode=_query_value(query, "mode")))
         elif path.startswith("/api/trades/"):
             symbol = _validate_symbol(path.removeprefix("/api/trades/")); status, headers, body = _not_found() if symbol is None else _json_response(service.trades_payload(symbol, run_id=_query_value(query, "run_id"), source=_query_value(query, "source"), mode=_query_value(query, "mode")))
         elif path.startswith("/api/signals/"):
             symbol = _validate_symbol(path.removeprefix("/api/signals/")); status, headers, body = _not_found() if symbol is None else _json_response(service.signals_payload(symbol, lookback=_parse_positive_int((query.get("lookback") or ["200"])[0], 200), run_id=_query_value(query, "run_id"), source=_query_value(query, "source"), mode=_query_value(query, "mode")))
-        elif path == "/api/trades-blotter": status, headers, body = _json_response(service.trade_blotter_payload())
-        elif path == "/api/ops": status, headers, body = _json_response(service.ops_payload())
+        elif path == "/api/trades-blotter": status, headers, body = _json_response(service.trade_blotter_payload(trades_filters))
+        elif path == "/api/ops": status, headers, body = _json_response(service.ops_payload(ops_filters))
         elif path == "/api/overview": status, headers, body = _json_response(service.overview_payload())
         elif path == "/api/discovery/overview": status, headers, body = _json_response(service.discovery_payload())
         elif path == "/api/discovery/recent-trades": discovery = service.discovery_payload(); status, headers, body = _json_response({"generated_at": discovery.get("generated_at"), "recent_trades": discovery.get("recent_trades", []), "summary": discovery.get("summary", {})})
         elif path == "/api/discovery/recent-symbols": discovery = service.discovery_payload(); status, headers, body = _json_response({"generated_at": discovery.get("generated_at"), "recent_symbols": discovery.get("recent_symbols", []), "summary": discovery.get("summary", {})})
-        elif path == "/api/runs": status, headers, body = _json_response(service.runs_payload())
+        elif path == "/api/runs": status, headers, body = _json_response(service.runs_payload(runs_filters))
         elif path == "/api/runs/latest": status, headers, body = _json_response(service.latest_run_detail_payload())
+        elif path.startswith("/api/runs/"): run_id = path.removeprefix("/api/runs/"); status, headers, body = _not_found() if not run_id else _json_response(service.latest_run_detail_payload(run_id, run_kind=_query_value(query, "run_kind")))
         elif path == "/api/orchestration/latest": status, headers, body = _json_response(service.latest_automated_orchestration_payload())
         elif path == "/api/system-eval/latest": status, headers, body = _json_response(service.system_evaluation_payload())
         elif path == "/api/system-eval/history": status, headers, body = _json_response(service.system_evaluation_history_payload())
         elif path == "/api/experiments/latest": status, headers, body = _json_response(service.experiments_payload())
-        elif path == "/api/strategies": status, headers, body = _json_response(service.strategies_payload())
+        elif path == "/api/strategies": status, headers, body = _json_response(service.strategies_payload(strategy_filters))
         elif path == "/api/research/latest": status, headers, body = _json_response(service.research_latest_payload())
         elif path == "/api/strategy-validation/latest": status, headers, body = _json_response(service.strategy_validation_payload())
         elif path == "/api/strategy-lifecycle/latest": status, headers, body = _json_response(service.strategy_lifecycle_payload())
@@ -483,6 +513,7 @@ def create_dashboard_app(
         elif path == "/research": status, headers, body = "200 OK", [("Content-Type", "text/html; charset=utf-8")], _research_page(service)
         elif path == "/ops": status, headers, body = "200 OK", [("Content-Type", "text/html; charset=utf-8")], _ops_page(service)
         elif path == "/runs": status, headers, body = "200 OK", [("Content-Type", "text/html; charset=utf-8")], _runs_page(service)
+        elif path.startswith("/runs/"): run_id = path.removeprefix("/runs/"); status, headers, body = _not_found() if not run_id else ("200 OK", [("Content-Type", "text/html; charset=utf-8")], _run_detail_page(service, run_id, query))
         elif path == "/execution": status, headers, body = "200 OK", [("Content-Type", "text/html; charset=utf-8")], _execution_page(service)
         elif path == "/live": status, headers, body = "200 OK", [("Content-Type", "text/html; charset=utf-8")], _live_page(service)
         elif path.startswith("/symbols/"): symbol = _validate_symbol(path.removeprefix("/symbols/")); status, headers, body = _not_found() if symbol is None else ("200 OK", [("Content-Type", "text/html; charset=utf-8")], _symbol_detail_page(service, symbol, query))

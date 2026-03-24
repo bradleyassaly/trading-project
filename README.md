@@ -1143,6 +1143,7 @@ The dashboard is intentionally a lightweight internal trading terminal:
 Read-path policy:
 
 - ops, run history, recent trade decisions, and DB-linked trade lineage prefer PostgreSQL when DB metadata is enabled and populated
+- those DB-backed list/detail paths now support thin filtering and offset/limit pagination
 - charts, large signal history, heavy research tables, and other large payloads remain artifact-driven
 - if a DB-backed page cannot find the needed rows, it falls back to the artifact-derived payload for the same page
 - dashboard payloads now carry a lightweight `source` label such as `db`, `artifact`, or `hybrid` for testing and operator debugging
@@ -1198,6 +1199,8 @@ GET /api/trades/AAPL?source=paper_trading&run_id=2026-03-22T00-00-00+00-00
 GET /api/signals/AAPL?lookback=200&source=research&run_id=sample_run
 GET /api/trades-blotter
 GET /api/ops
+GET /api/runs
+GET /api/runs/<RUN_ID>
 GET /api/discovery/overview
 GET /api/discovery/recent-trades
 GET /api/discovery/recent-symbols
@@ -1210,10 +1213,12 @@ Dashboard pages that now prefer DB-backed reads when available:
 - `/ops`
   recent portfolio/research runs, recent failures, recent promotions, and recent DB-backed activity
 - `/trades`
-  recent portfolio decisions from `PortfolioDecision` plus linked candidate context where available
+  recent portfolio decisions from `PortfolioDecision` plus linked candidate context where available, with filter/pagination support
 - `/trades/<TRADE_ID>`
   DB-backed decision lineage, candidate evaluations, universe-filter facts, linked run artifacts, and linked order/fill lifecycle when the trade id maps to a DB decision id
-- `/api/runs`, `/api/runs/latest`, `/api/trades-blotter`, `/api/trade/<TRADE_ID>`, and `/api/ops`
+- `/runs/<RUN_ID>` and `/api/runs/<RUN_ID>`
+  normalized run metadata, linked artifacts, linked candidate/trade decisions, and linked promotions when the control-plane has those relationships
+- `/api/runs`, `/api/runs/latest`, `/api/trades-blotter`, `/api/trade/<TRADE_ID>`, `/api/ops`, and `/api/strategies`
   same hybrid preference rules as the HTML pages
 
 Read paths that still primarily rely on artifacts:
@@ -1311,6 +1316,34 @@ When DB metadata is enabled, the dashboard additionally uses the control-plane t
 - `UniverseFilterResult` context for candidate eligibility
 - linked `Order`, `OrderEvent`, and `Fill` metadata when a portfolio decision has direct execution linkage
 - recent promotion lineage from `PromotionDecision` and `PromotedStrategy`
+
+Supported DB-backed list filters are intentionally small and explicit:
+
+- runs:
+  `status`, `run_type`, `mode`, `strategy`, `date_from`, `date_to`, `limit`, `offset`
+- trades:
+  `symbol`, `strategy`, `status` or `decision_status`, `run_id`, `date_from`, `date_to`, `limit`, `offset`
+- ops:
+  `status`, `activity_type`, `date_from`, `date_to`, `limit`, `offset`
+- promotion history:
+  `strategy`, `decision`, `status`, `date_from`, `date_to`, `limit`, `offset`
+
+List payloads now include stable pagination metadata:
+
+- `total_count`
+- `limit`
+- `offset`
+- `has_more`
+- `source`
+
+Current DB-backed detail coverage:
+
+- run detail:
+  normalized run summary, linked artifacts, linked decisions/candidates for portfolio runs, and linked promotions for research runs
+- trade detail:
+  normalized decision lineage, candidate evaluations, universe filter results, signal contributions, and execution linkage when present
+- strategies/research:
+  recent promotion history from normalized promotion tables, while heavier research diagnostics remain artifact-backed
 
 Chart API query params:
 
