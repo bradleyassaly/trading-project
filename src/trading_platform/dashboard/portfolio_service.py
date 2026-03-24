@@ -15,7 +15,10 @@ from trading_platform.dashboard.chart_service import (
     _safe_int,
     _isoformat,
     artifact_context,
+    build_position_summary,
     build_chart_payload,
+    load_symbol_fills,
+    load_symbol_orders,
     load_symbol_provenance,
 )
 
@@ -277,10 +280,153 @@ def _trade_table_row(row: dict[str, Any] | object) -> dict[str, Any]:
         "trade_id": row.get("trade_id"),
         "symbol": row.get("symbol"),
         "side": row.get("side"),
+        "qty": row.get("qty"),
         "realized_pnl": row.get("realized_pnl"),
         "entry_ts": row.get("entry_ts"),
         "exit_ts": row.get("exit_ts"),
         "strategy_id": row.get("strategy_id"),
+        "status": row.get("status"),
+    }
+
+
+def _position_lookup(root: Path) -> dict[str, dict[str, Any]]:
+    positions_path = _latest_path(root, ["paper_positions.csv", "live_dry_run_current_positions.csv"])
+    rows = _position_rows(positions_path)
+    return {str(row.get("symbol") or "").upper(): row for row in rows if row.get("symbol")}
+
+
+def _latest_provenance_by_trade(root: Path, *, trades: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    latest: dict[str, dict[str, Any]] = {}
+    for symbol in sorted({str(row.get("symbol") or "").upper() for row in trades if row.get("symbol")}):
+        rows, _available = load_symbol_provenance(artifacts_root=root, symbol=symbol)
+        for row in rows:
+            trade_id = str(row.get("trade_id") or "").strip()
+            if not trade_id:
+                continue
+            existing = latest.get(trade_id)
+            if existing is None or str(row.get("ts") or "") > str(existing.get("ts") or ""):
+                latest[trade_id] = row
+    return latest
+
+
+def _latest_order_fill_by_trade(
+    root: Path,
+    *,
+    trade_rows: list[dict[str, Any]],
+) -> tuple[dict[str, list[dict[str, Any]]], dict[str, list[dict[str, Any]]]]:
+    orders_by_trade: dict[str, list[dict[str, Any]]] = {}
+    fills_by_trade: dict[str, list[dict[str, Any]]] = {}
+    trades_by_symbol: dict[str, list[dict[str, Any]]] = {}
+    for trade in trade_rows:
+        symbol = str(trade.get("symbol") or "").upper()
+        if not symbol:
+            continue
+        trades_by_symbol.setdefault(symbol, []).append(trade)
+
+    for symbol, trades in trades_by_symbol.items():
+        fills, _fill_source, _fill_options = load_symbol_fills(artifacts_root=root, symbol=symbol)
+        orders, _order_source, _order_options = load_symbol_orders(artifacts_root=root, symbol=symbol)
+        for trade in trades:
+            start = pd.to_datetime(trade.get("entry_ts"), errors="coerce")
+            end_anchor = pd.to_datetime(trade.get("exit_ts"), errors="coerce")
+            end = end_anchor if not pd.isna(end_anchor) else None
+            trade_id = str(trade.get("trade_id") or "")
+            if not trade_id:
+                continue
+            fill_matches: list[dict[str, Any]] = []
+            order_matches: list[dict[str, Any]] = []
+            for row in fills:
+                ts = pd.to_datetime(row.get("ts"), errors="coerce")
+                if pd.isna(ts):
+                    continue
+                if not pd.isna(start) and ts < start:
+                    continue
+                if end is not None and not pd.isna(end) and ts > end + pd.Timedelta(days=1):
+                    continue
+                fill_matches.append(row)
+            for row in orders:
+                ts = pd.to_datetime(row.get("ts"), errors="coerce")
+                if pd.isna(ts):
+                    order_matches.append(row)
+                    continue
+                if not pd.isna(start) and ts < start - pd.Timedelta(days=1):
+                    continue
+                if end is not None and not pd.isna(end) and ts > end + pd.Timedelta(days=1):
+                    continue
+                order_matches.append(row)
+            orders_by_trade[trade_id] = sorted(order_matches, key=lambda item: str(item.get("ts") or ""))
+            fills_by_trade[trade_id] = sorted(fill_matches, key=lambda item: str(item.get("ts") or ""))
+    return orders_by_trade, fills_by_trade
+
+
+def _trade_blotter_row(
+    trade: dict[str, Any],
+    *,
+    provenance: dict[str, Any] | None,
+    position: dict[str, Any] | None,
+    orders: list[dict[str, Any]],
+    fills: list[dict[str, Any]],
+) -> dict[str, Any]:
+    latest_fill = fills[-1] if fills else {}
+    latest_order = orders[-1] if orders else {}
+    status = str(trade.get("status") or latest_fill.get("status") or latest_order.get("status") or "open").lower()
+    return {
+        "trade_id": trade.get("trade_id"),
+        "timestamp": trade.get("entry_ts") or trade.get("exit_ts"),
+        "symbol": trade.get("symbol"),
+        "side": trade.get("side"),
+        "qty": trade.get("qty"),
+        "target_weight": (provenance or {}).get("target_weight"),
+        "strategy_id": trade.get("strategy_id"),
+        "signal_score": (provenance or {}).get("signal_value"),
+        "ranking_score": (provenance or {}).get("ranking_score"),
+        "universe_rank": (provenance or {}).get("universe_rank"),
+        "expected_edge": (provenance or {}).get("ranking_score"),
+        "order_status": latest_order.get("status") or latest_fill.get("status") or status,
+        "status": status,
+        "entry_ts": trade.get("entry_ts"),
+        "exit_ts": trade.get("exit_ts"),
+        "entry_price": trade.get("entry_price"),
+        "exit_price": trade.get("exit_price"),
+        "realized_pnl": trade.get("realized_pnl"),
+        "unrealized_pnl": (position or {}).get("unrealized_pnl"),
+        "portfolio_qty": (position or {}).get("qty"),
+        "portfolio_market_value": (position or {}).get("market_value"),
+        "source": trade.get("source"),
+        "run_id": trade.get("run_id"),
+        "mode": trade.get("mode"),
+    }
+
+
+def build_trade_blotter_payload(*, artifacts_root: str | Path) -> dict[str, Any]:
+    root = Path(artifacts_root)
+    trades = _all_explicit_trades(root)
+    provenance_by_trade = _latest_provenance_by_trade(root, trades=trades)
+    positions = _position_lookup(root)
+    orders_by_trade, fills_by_trade = _latest_order_fill_by_trade(root, trade_rows=trades)
+    blotter_rows = [
+        _trade_blotter_row(
+            trade,
+            provenance=provenance_by_trade.get(str(trade.get("trade_id") or "")),
+            position=positions.get(str(trade.get("symbol") or "").upper()),
+            orders=orders_by_trade.get(str(trade.get("trade_id") or ""), []),
+            fills=fills_by_trade.get(str(trade.get("trade_id") or ""), []),
+        )
+        for trade in trades
+    ]
+    return {
+        "summary": {
+            "trade_count": len(blotter_rows),
+            "open_trade_count": len([row for row in blotter_rows if row.get("status") != "closed"]),
+            "closed_trade_count": len([row for row in blotter_rows if row.get("status") == "closed"]),
+            "winning_trade_count": len([row for row in blotter_rows if float(row.get("realized_pnl") or 0.0) > 0.0]),
+            "total_realized_pnl": sum(float(row.get("realized_pnl") or 0.0) for row in blotter_rows if row.get("status") == "closed"),
+        },
+        "trades": blotter_rows[:250],
+        "meta": {
+            "trade_sources": [str(path) for path, _context in _trade_ledgers(root)],
+            "position_source": str(_latest_path(root, ["paper_positions.csv", "live_dry_run_current_positions.csv"]) or ""),
+        },
     }
 
 
@@ -737,6 +883,11 @@ def build_trade_detail_payload(
             "fills": [],
             "orders": [],
             "explain": {},
+            "trade_summary": {},
+            "portfolio_context": {},
+            "execution_review": {},
+            "outcome_review": {},
+            "related_metadata": {},
             "provenance": {},
             "lifecycle": [],
             "comparison": {},
@@ -797,6 +948,73 @@ def build_trade_detail_payload(
         for row in _all_explicit_trades(root)
         if row.get("symbol") == target_trade.get("symbol") and row.get("trade_id") != trade_id
     ][:5]
+    latest_price = chart_payload.get("bars", [{}])[-1].get("close") if chart_payload.get("bars") else None
+    position_summary, position_source = build_position_summary(
+        artifacts_root=artifacts_root,
+        symbol=str(target_trade.get("symbol") or ""),
+        latest_price=latest_price,
+        run_id=str(target_trade.get("run_id")) if target_trade.get("run_id") else None,
+        source=str(target_trade.get("source")) if target_trade.get("source") else None,
+        mode=str(target_trade.get("mode")) if target_trade.get("mode") else None,
+    )
+    executed_qty = sum(int(row.get("qty") or 0) for row in relevant_fills)
+    average_fill_price = (
+        sum(float(row.get("price") or 0.0) * int(row.get("qty") or 0) for row in relevant_fills) / executed_qty
+        if executed_qty > 0
+        else None
+    )
+    candidate_set = [row for row in provenance_rows if row.get("ts") == (relevant_provenance[0].get("ts") if relevant_provenance else None)]
+    trade_summary = {
+        "symbol": target_trade.get("symbol"),
+        "side": target_trade.get("side"),
+        "status": target_trade.get("status"),
+        "strategy_id": target_trade.get("strategy_id"),
+        "entry_ts": target_trade.get("entry_ts"),
+        "exit_ts": target_trade.get("exit_ts"),
+        "qty": target_trade.get("qty"),
+        "entry_price": target_trade.get("entry_price"),
+        "exit_price": target_trade.get("exit_price"),
+        "hold_duration_hours": target_trade.get("hold_duration_hours"),
+        "realized_pnl": target_trade.get("realized_pnl"),
+    }
+    portfolio_context = {
+        "selected_among_alternatives": (relevant_provenance[0].get("selection_included") if relevant_provenance else None),
+        "selection_status": (relevant_provenance[0].get("selection_status") if relevant_provenance else None),
+        "target_weight": (relevant_provenance[0].get("target_weight") if relevant_provenance else None),
+        "portfolio_qty": position_summary.get("qty"),
+        "portfolio_market_value": position_summary.get("market_value"),
+        "unrealized_pnl": position_summary.get("unrealized_pnl"),
+        "constraint_hits": (relevant_provenance[0].get("constraint_hits") if relevant_provenance else []),
+        "candidate_count": len(candidate_set),
+    }
+    execution_review = {
+        "order_count": len(relevant_orders),
+        "fill_count": len(relevant_fills),
+        "executed_qty": executed_qty,
+        "average_fill_price": average_fill_price,
+        "latest_order_status": (relevant_orders[-1].get("status") if relevant_orders else None),
+        "latest_fill_status": (relevant_fills[-1].get("status") if relevant_fills else None),
+        "position_source": position_source,
+    }
+    outcome_review = {
+        "trade_status": target_trade.get("status"),
+        "realized_pnl": target_trade.get("realized_pnl"),
+        "unrealized_pnl": position_summary.get("unrealized_pnl"),
+        "price_change": (
+            float(target_trade.get("exit_price")) - float(target_trade.get("entry_price"))
+            if target_trade.get("entry_price") is not None and target_trade.get("exit_price") is not None
+            else None
+        ),
+        "holding_period_hours": target_trade.get("hold_duration_hours"),
+    }
+    related_metadata = {
+        "run_id": target_trade.get("run_id"),
+        "source": target_trade.get("source"),
+        "mode": target_trade.get("mode"),
+        "trade_source": target_trade.get("trade_source"),
+        "trade_source_mode": target_trade.get("trade_source_mode"),
+        "position_source": position_source,
+    }
     return {
         "trade": target_trade,
         "chart": {
@@ -811,6 +1029,11 @@ def build_trade_detail_payload(
         "fills": relevant_fills,
         "orders": relevant_orders,
         "provenance": _build_decision_provenance_summary(relevant_provenance),
+        "trade_summary": trade_summary,
+        "portfolio_context": portfolio_context,
+        "execution_review": execution_review,
+        "outcome_review": outcome_review,
+        "related_metadata": related_metadata,
         "lifecycle": lifecycle,
         "comparison": {
             "related_trades": related_trades,

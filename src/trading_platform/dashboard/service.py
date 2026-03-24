@@ -15,6 +15,7 @@ from trading_platform.dashboard.portfolio_service import (
     build_execution_diagnostics_payload,
     build_portfolio_overview_payload,
     build_strategy_detail_payload,
+    build_trade_blotter_payload,
     build_trade_detail_payload,
 )
 from trading_platform.governance.persistence import load_strategy_registry
@@ -229,6 +230,11 @@ def _normalize_trade_detail_payload(payload: dict[str, Any]) -> dict[str, Any]:
     normalized["signals"] = _row_list_contract(payload.get("signals"), ["ts", "type", "price", "label", "score"])
     normalized["fills"] = _row_list_contract(payload.get("fills"), ["ts", "symbol", "side", "qty", "price", "order_id", "status", "reason", "source_type"])
     normalized["orders"] = _row_list_contract(payload.get("orders"), ["ts", "symbol", "side", "qty", "price", "order_id", "status", "reason", "source_type"])
+    normalized["trade_summary"] = dict(_json_safe(normalized.get("trade_summary") or {}))
+    normalized["portfolio_context"] = dict(_json_safe(normalized.get("portfolio_context") or {}))
+    normalized["execution_review"] = dict(_json_safe(normalized.get("execution_review") or {}))
+    normalized["outcome_review"] = dict(_json_safe(normalized.get("outcome_review") or {}))
+    normalized["related_metadata"] = dict(_json_safe(normalized.get("related_metadata") or {}))
     normalized["provenance"] = dict(_json_safe(normalized.get("provenance") or {}))
     normalized["provenance"]["latest"] = _row_contract((payload.get("provenance") or {}).get("latest"), ["ts", "symbol", "trade_id", "strategy_id", "run_id", "source", "mode", "signal_type", "signal_value", "ranking_score", "universe_rank", "selection_included", "selection_status", "exclusion_reason", "target_weight", "sizing_rationale", "constraint_hits", "order_intent_summary", "label", "regime_context", "artifact_path", "metadata_path"])
     normalized["provenance"]["rows"] = _row_list_contract((payload.get("provenance") or {}).get("rows"), ["ts", "symbol", "trade_id", "strategy_id", "run_id", "source", "mode", "signal_type", "signal_value", "ranking_score", "universe_rank", "selection_included", "selection_status", "exclusion_reason", "target_weight", "sizing_rationale", "constraint_hits", "order_intent_summary", "label", "regime_context", "artifact_path", "metadata_path"])
@@ -239,6 +245,42 @@ def _normalize_trade_detail_payload(payload: dict[str, Any]) -> dict[str, Any]:
     comparison["available_provenance_sources"] = _normalize_context_rows((payload.get("comparison") or {}).get("available_provenance_sources"))
     normalized["comparison"] = comparison
     normalized["explain"] = dict(_json_safe(normalized.get("explain") or {}))
+    normalized["meta"] = dict(_json_safe(normalized.get("meta") or {}))
+    return normalized
+
+
+def _normalize_trade_blotter_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(_json_safe(payload))
+    normalized["summary"] = dict(_json_safe(normalized.get("summary") or {}))
+    normalized["trades"] = _row_list_contract(
+        payload.get("trades"),
+        [
+            "trade_id",
+            "timestamp",
+            "symbol",
+            "side",
+            "qty",
+            "target_weight",
+            "strategy_id",
+            "signal_score",
+            "ranking_score",
+            "universe_rank",
+            "expected_edge",
+            "order_status",
+            "status",
+            "entry_ts",
+            "exit_ts",
+            "entry_price",
+            "exit_price",
+            "realized_pnl",
+            "unrealized_pnl",
+            "portfolio_qty",
+            "portfolio_market_value",
+            "source",
+            "run_id",
+            "mode",
+        ],
+    )
     normalized["meta"] = dict(_json_safe(normalized.get("meta") or {}))
     return normalized
 
@@ -950,6 +992,40 @@ class DashboardDataService:
         )
         payload["generated_at"] = _now_utc()
         return _normalize_trade_detail_payload(payload)
+
+    def trade_blotter_payload(self) -> dict[str, Any]:
+        payload = build_trade_blotter_payload(artifacts_root=self.artifacts_root)
+        payload["generated_at"] = _now_utc()
+        return _normalize_trade_blotter_payload(payload)
+
+    def ops_payload(self) -> dict[str, Any]:
+        latest_run = self.latest_run_payload()
+        latest_run_summary = latest_run.get("summary", {})
+        latest_run_health = latest_run.get("health", {})
+        live = self.live_payload()
+        alerts = self.latest_alerts_payload()
+        execution_diag = self.execution_diagnostics_payload()
+        orchestration = self.latest_automated_orchestration_payload()
+        runs = self.runs_payload()
+        return {
+            "generated_at": _now_utc(),
+            "summary": {
+                "latest_run_name": latest_run_summary.get("run_name"),
+                "latest_run_status": latest_run_summary.get("status"),
+                "health_status": latest_run_health.get("status"),
+                "critical_alert_count": int(latest_run_health.get("alert_counts", {}).get("critical", 0) or 0),
+                "warning_alert_count": int(latest_run_health.get("alert_counts", {}).get("warning", 0) or 0),
+                "blocked_check_count": len(live.get("blocked_checks", [])),
+                "missing_fill_count": execution_diag.get("summary", {}).get("missing_fill_count"),
+            },
+            "latest_run": latest_run,
+            "alerts": alerts,
+            "live": live,
+            "execution_diagnostics": execution_diag,
+            "orchestration": orchestration,
+            "runs": runs.get("runs", []),
+            "orchestration_runs": runs.get("orchestration_runs", []),
+        }
 
     def discovery_payload(self) -> dict[str, Any]:
         payload = build_discovery_payload(artifacts_root=self.artifacts_root)

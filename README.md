@@ -220,6 +220,8 @@ Experimental / advanced:
 Main pages and APIs:
 
 - `/`
+- `/trades`
+- `/ops`
 - `/api/discovery/overview`
 - `/api/discovery/recent-trades`
 - `/api/discovery/recent-symbols`
@@ -227,6 +229,8 @@ Main pages and APIs:
 - `/symbols/<SYMBOL>`
 - `/strategies/<STRATEGY_ID>`
 - `/trades/<TRADE_ID>`
+- `/api/trades-blotter`
+- `/api/ops`
 - `/api/chart/<SYMBOL>`
 - `/api/trades/<SYMBOL>`
 - `/api/signals/<SYMBOL>`
@@ -668,9 +672,10 @@ Current weighting guidance:
 The dashboard is intentionally a lightweight internal trading terminal:
 
 - server-rendered HTML
-- compact dark theme tuned for dense operational views
+- local-first multi-page trading workspace
 - artifact-driven and read-only
 - no SPA framework, database, or client-side trading logic
+- centered on trade explainability and drill-down analysis
 
 Run locally:
 
@@ -684,18 +689,35 @@ Build static dashboard data:
 trading-cli dashboard build-static-data --artifacts-root artifacts --output-dir artifacts/dashboard_data
 ```
 
-Symbol detail pages are available at:
+Key workspace pages:
 
 ```text
+http://127.0.0.1:8000/
+http://127.0.0.1:8000/trades
+http://127.0.0.1:8000/trades/<TRADE_ID>
+http://127.0.0.1:8000/strategies
+http://127.0.0.1:8000/strategies/<STRATEGY_ID>
+http://127.0.0.1:8000/portfolio
+http://127.0.0.1:8000/ops
 http://127.0.0.1:8000/symbols/AAPL
 ```
 
-The dashboard home page now acts as a discovery index:
+What each page is for:
 
-- recent symbols with direct links into `/symbols/<SYMBOL>`
-- recent trades with direct links into `/trades/<TRADE_ID>`
-- recent strategies with direct links into `/strategies/<STRATEGY_ID>`
-- recent run/source/mode contexts inferred from existing trade artifacts
+- `/`
+  top-level command center with equity/performance snapshot, recent trades, open positions, strategy pulse, and quick ops awareness
+- `/trades`
+  blotter for recent open and closed trades with direct links into individual trade detail pages
+- `/trades/<TRADE_ID>`
+  centerpiece trade intelligence view showing summary, signal evidence, decision provenance, portfolio context, execution review, outcome review, and related metadata
+- `/strategies/<STRATEGY_ID>`
+  strategy-linked trade history and run/source comparisons
+- `/portfolio`
+  open positions, exposure, recent activity, contributors/detractors, and allocation context
+- `/ops`
+  run health, latest stages, live risk checks, execution diagnostics, and orchestration history
+- `/symbols/<SYMBOL>`
+  symbol-centric trade and provenance inspection across available artifacts
 
 Chart payloads are exposed as stable read-only JSON:
 
@@ -704,6 +726,8 @@ GET /api/chart/AAPL?timeframe=1d&lookback=200
 GET /api/chart/AAPL?timeframe=1d&lookback=200&source=research&run_id=sample_run&mode=paper
 GET /api/trades/AAPL?source=paper_trading&run_id=2026-03-22T00-00-00+00-00
 GET /api/signals/AAPL?lookback=200&source=research&run_id=sample_run
+GET /api/trades-blotter
+GET /api/ops
 GET /api/discovery/overview
 GET /api/discovery/recent-trades
 GET /api/discovery/recent-symbols
@@ -717,6 +741,17 @@ The dashboard chart path stays artifact-driven:
 - if no trade ledger exists, the dashboard reconstructs trades from fills as a fallback
 - orders, fills, and positions come from matching paper/live CSV artifacts such as `paper_fills.csv`, `paper_orders.csv`, `paper_positions.csv`, and `live_dry_run_current_positions.csv`
 - optional decision provenance can come from lightweight artifacts such as `decision_provenance.csv`, `selection_decisions.csv`, `portfolio_selection.csv`, `order_intents.csv`, or matching `.json` variants
+
+Trade detail lineage is assembled opportunistically from the artifacts that exist today:
+
+- market data and indicators from feature parquet files
+- signal labels/scores from matching research signal CSVs
+- ranking, target-weight, and selection context from optional provenance artifacts
+- trade state from explicit trade ledgers
+- order/fill execution review from paper/live order and fill CSVs
+- current portfolio context from latest position artifacts
+
+If any layer is missing, the dashboard keeps the section visible but explicit about the missing evidence instead of inventing it.
 
 Expected trade ledger columns are intentionally lightweight:
 
@@ -761,6 +796,22 @@ The symbol page renders:
 - a compact decision provenance panel when optional provenance artifacts exist
 - a lightweight related-source comparison table when multiple matching sources/runs exist
 - explicit trade history when a ledger exists, otherwise reconstructed history from fills
+
+The trade detail page renders:
+
+- trade summary with timestamps, side, quantity, status, and pnl
+- "Why This Trade Happened" with nearby signal, rank, target weight, and constraint hits when available
+- portfolio context showing current position state and selection metadata
+- execution review using discovered orders and fills in the trade window
+- outcome review including realized/unrealized pnl and lifecycle timeline
+- related strategy/run metadata and nearby trades in the same symbol
+
+Minimal artifact assumptions for the upgraded workspace:
+
+- no new database is required
+- existing `paper_trades.csv`, `paper_orders.csv`, `paper_fills.csv`, `paper_positions.csv`, `*_signals.csv`, and provenance CSV/JSON files are reused
+- the blotter and trade detail pages enrich rows by joining those artifacts on `symbol`, `trade_id`, and nearby timestamps
+- static exports now include `trades_blotter.json` and `ops.json` in addition to the previous dashboard payloads
 
 Chart API query params:
 
