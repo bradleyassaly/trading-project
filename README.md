@@ -346,6 +346,215 @@ The dashboard and downstream tooling should prefer the summary and history files
 - `paper_positions_history.csv`
 - `paper_orders_history.csv`
 
+## Hybrid Data Architecture
+
+The platform now supports a conservative hybrid market-data split:
+
+- `yfinance` remains the historical research source
+- Alpaca can be used for the latest execution-time bars
+- research runs, feature generation, and walkforward stay on the existing historical path unless you explicitly opt into Alpaca latest data for paper execution
+
+Why this split:
+
+- `yfinance` keeps historical research and backtests simple, local, and reproducible
+- Alpaca gives paper and live-adjacent workflows a cleaner latest-bar source that matches the broker environment more closely
+
+Supported config shape for paper workflows:
+
+```yaml
+data_sources:
+  prices:
+    historical: yfinance
+    latest: alpaca
+```
+
+Enable Alpaca latest data from the CLI:
+
+```bash
+trading-cli paper run --preset xsec_nasdaq100_momentum_v1_deploy --state-path artifacts/paper/state.json --output-dir artifacts/paper/run_a --use-alpaca-latest-data
+```
+
+Or through a paper workflow config:
+
+```yaml
+preset: xsec_nasdaq100_momentum_v1_deploy
+state_path: artifacts/paper/state.json
+output_dir: artifacts/paper/run_a
+data_sources:
+  prices:
+    historical: yfinance
+    latest: alpaca
+```
+
+Current behavior:
+
+- historical frames still come from the existing parquet / yfinance-derived research path
+- when enabled, the latest Alpaca OHLCV bars are merged into that history for paper target construction
+- if Alpaca latest-bar fetch fails, the paper path falls back to the existing historical/yfinance-derived data and logs a warning
+
+## Data Freshness Diagnostics
+
+Paper runs now record the freshness of the market data actually used for execution decisions.
+
+- `latest_bar_timestamp`
+- `latest_bar_age_seconds`
+- `latest_data_stale`
+- `latest_data_source`
+- `latest_data_fallback_used`
+
+These diagnostics are included in the paper summary JSON and the target-construction diagnostics so operators can tell whether a run used fresh Alpaca bars, fell back to historical pricing, or is making decisions on stale data.
+
+Set the stale-data threshold from the CLI:
+
+```bash
+trading-cli paper run --preset xsec_nasdaq100_momentum_v1_deploy --use-alpaca-latest-data --latest-data-max-age-seconds 3600
+```
+
+Or in workflow YAML:
+
+```yaml
+paper:
+  execution:
+    latest_data_max_age_seconds: 3600
+```
+
+## Paper Execution Snapshot Artifact
+
+Each paper run now writes `execution_price_snapshot.csv` alongside the existing paper artifacts. It records the exact execution-time price inputs used for each symbol:
+
+- `symbol`
+- `decision_timestamp`
+- `historical_price`
+- `latest_price`
+- `final_price_used`
+- `price_source_used`
+- `fallback_used`
+- `latest_bar_timestamp`
+- `latest_bar_age_seconds`
+
+This is intended for operator debugging, not research. It helps explain which price path actually fed the paper rebalance and whether Alpaca latest-bar data replaced or failed back to historical prices.
+
+## Paper Slippage Modeling
+
+Paper-only slippage is now available and remains disabled by default.
+
+- supported models: `none`, `fixed_bps`
+- buy orders worsen upward by `buy_bps`
+- sell orders worsen downward by `sell_bps`
+- slippage is applied only to paper execution-price estimation and fills
+- research, walkforward, and historical price history are unchanged
+
+Enable from the CLI:
+
+```bash
+trading-cli paper run --preset xsec_nasdaq100_momentum_v1_deploy --slippage-model fixed_bps --slippage-buy-bps 5 --slippage-sell-bps 5
+```
+
+Or in workflow YAML:
+
+```yaml
+paper:
+  execution:
+    slippage:
+      enabled: true
+      model: fixed_bps
+      buy_bps: 5
+      sell_bps: 5
+```
+
+Why this stays paper-only:
+
+- it improves execution realism for operator monitoring
+- it avoids contaminating research and walkforward history with execution assumptions
+- it keeps the historical alpha path reproducible while making paper trading more honest
+
+Broader data-domain expansion is still intentionally deferred:
+
+- no macro
+- no derivatives
+- no FX
+- no crypto
+
+## Signal Ensembling
+
+The platform now supports an optional ensemble layer that combines multiple promoted signal members into one auditable portfolio input.
+
+Why this exists:
+
+- to reduce dependence on a single promoted candidate
+- to compare candidate-level versus family-level signal blending
+- to keep ensemble decisions interpretable and file-auditable
+
+Defaults:
+
+- disabled by default
+- existing single-signal and composite paths stay unchanged unless you enable ensemble mode
+- no learned meta-model or optimizer is used in this first version
+
+Supported ensemble modes:
+
+- `disabled`
+- `candidate_weighted`
+- `family_weighted`
+
+Supported weighting methods:
+
+- `equal`
+- `performance_weighted`
+- `rank_weighted`
+
+Supported score normalization:
+
+- `raw`
+- `zscore`
+- `rank_pct`
+
+Research CLI example:
+
+```bash
+trading-cli research alpha --symbols AAPL MSFT NVDA --signal-family momentum --lookbacks 5 10 --horizons 1 --enable-ensemble --ensemble-mode candidate_weighted --ensemble-weight-method equal --ensemble-normalize-scores rank_pct
+```
+
+Paper CLI example:
+
+```bash
+trading-cli paper run --symbols AAPL MSFT NVDA --signal-source ensemble --composite-artifact-dir artifacts/alpha_research/run_a --enable-ensemble --ensemble-mode family_weighted --ensemble-weight-method rank_weighted
+```
+
+Paper workflow YAML example:
+
+```yaml
+paper:
+  ensemble:
+    enabled: true
+    mode: family_weighted
+    weight_method: equal
+    normalize_scores: rank_pct
+    max_members: 5
+    require_promoted_only: true
+```
+
+Ensemble diagnostics and artifacts:
+
+- `ensemble_member_summary.csv`
+- `ensemble_signal_snapshot.csv`
+- `ensemble_research_summary.json`
+- `paper_ensemble_decision_snapshot.csv`
+
+These artifacts show:
+
+- which members were eligible
+- which members were included or excluded
+- normalized weights
+- top contributing candidates and families
+- the final ensemble score used by paper target construction
+
+Current limitations:
+
+- this is an arithmetic ensemble, not a learned meta-model
+- member selection currently relies on existing promoted-candidate metrics
+- ensemble paper trading is wired through the promoted-signal artifact path, not live trading
+
 ### Live dry-run
 
 - `live_dry_run_summary.json`
@@ -627,11 +836,64 @@ Daily run entrypoints:
 - Linux: `scripts/run_operating_baseline_daily.sh`
 - Windows PowerShell: `scripts/run_operating_baseline_daily.ps1`
 
-Those wrappers run:
+Those wrappers:
+
+1. activate the local virtualenv when present
+2. run `python -m trading_platform.system.operating_baseline_daily --config configs/orchestration_operating_baseline.yaml --summary-dir artifacts/operating_baseline_daily --alerts-config configs/alerts.yaml`
+3. append console output to the daily log under `artifacts/operating_baseline_daily/logs/`
+
+Run locally with:
+
+```bash
+bash scripts/run_operating_baseline_daily.sh
+```
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/run_operating_baseline_daily.ps1
+```
+
+Both wrappers pass through extra arguments to the Python entrypoint, so you can temporarily override the alert config for a local no-send validation run:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/run_operating_baseline_daily.ps1 --alerts-config artifacts/operating_baseline_daily/alerts_local_validation.yaml
+```
+
+```bash
+bash scripts/run_operating_baseline_daily.sh --alerts-config artifacts/operating_baseline_daily/alerts_local_validation.yaml
+```
+
+Before real email sending works, update the placeholder values in `configs/alerts.yaml`:
+
+- `smtp_host`: your real SMTP host
+- `smtp_port`: your provider port, usually `587` for TLS
+- `smtp_username`: your real SMTP username/login
+- `email_from`: the approved sender address for that SMTP account
+- `email_to`: the real operator inbox or distribution list
+
+Do not put the SMTP password in the file. Keep `smtp_password_env_var: TRADING_PLATFORM_SMTP_PASSWORD` and set the password through the environment instead.
+
+The SMTP password must come from the environment variable referenced by `configs/alerts.yaml`:
+
+```bash
+export TRADING_PLATFORM_SMTP_PASSWORD="your-smtp-password"
+```
+
+```powershell
+$env:TRADING_PLATFORM_SMTP_PASSWORD = "your-smtp-password"
+```
+
+Real-email checklist:
+
+1. edit `configs/alerts.yaml` and replace the example SMTP host, username, sender, and recipients
+2. set `TRADING_PLATFORM_SMTP_PASSWORD` in the shell, cron environment, or Task Scheduler environment
+3. run one local no-send validation first with an override config where `email_enabled: false`
+4. run the normal wrapper and confirm `daily_alerts.json` shows a non-null `email_result`
+
+The wrappers run:
 
 1. `configs/orchestration_operating_baseline.yaml`
 2. system-eval history refresh under `artifacts/orchestration_runs_operating_baseline/system_eval_history`
-3. daily summary refresh under `artifacts/operating_baseline_daily`
+3. daily summary and alert refresh under `artifacts/operating_baseline_daily`
 
 Local module entrypoint if you want to wire your own scheduler:
 
@@ -650,6 +912,8 @@ Predictable outputs:
 - daily log: `artifacts/operating_baseline_daily/logs/YYYY-MM-DD.log`
 - daily summary JSON: `artifacts/operating_baseline_daily/daily_baseline_summary.json`
 - daily summary Markdown: `artifacts/operating_baseline_daily/daily_baseline_summary.md`
+- daily alerts JSON: `artifacts/operating_baseline_daily/daily_alerts.json`
+- daily alerts Markdown: `artifacts/operating_baseline_daily/daily_alerts.md`
 - orchestration runs: `artifacts/orchestration_runs_operating_baseline/operating_baseline/<RUN_ID>`
 - system-eval history: `artifacts/orchestration_runs_operating_baseline/system_eval_history`
 
@@ -682,6 +946,12 @@ The daily baseline runner supports a small alerting layer through:
 Required secret environment variables:
 
 - `TRADING_PLATFORM_SMTP_PASSWORD` for the example config
+
+Operator note:
+
+- `configs/alerts.yaml` in the repo is intentionally an example file
+- `smtp.example.com`, `alerts@example.com`, and `ops@example.com` are placeholders and must be changed before real sending works
+- the wrappers do not inject credentials; they only read the environment variable named in `smtp_password_env_var`
 
 Alert config fields include:
 

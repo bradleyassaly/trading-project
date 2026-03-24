@@ -1,11 +1,19 @@
+# Operator setup notes:
+# - Replace the example SMTP host, username, sender, and recipient values below before enabling real email sending.
+# - Keep the SMTP password out of the repo and supply it through the env var named in smtp_password_env_var.
+# - Leave sms_enabled false unless you have a real high-severity SMS routing target configured.
 email_enabled: true
 sms_enabled: false
+# Replace with your real SMTP server, for example smtp.sendgrid.net or your mail provider host.
 smtp_host: smtp.example.com
 smtp_port: 587
+# Replace with the SMTP login for your provider.
 smtp_username: alerts@example.com
 smtp_password_env_var: TRADING_PLATFORM_SMTP_PASSWORD
 smtp_use_tls: true
+# Replace with the sender identity your SMTP provider allows.
 email_from: alerts@example.com
+# Replace with the real operator inbox or distribution list.
 email_to:
   - ops@example.com
 subject_prefix: Trading Platform
