@@ -4,10 +4,12 @@ from datetime import UTC, datetime
 import json
 from io import BytesIO
 from pathlib import Path
+from urllib.parse import quote
 
 import pandas as pd
 
 from trading_platform.dashboard.hybrid_dashboard_service import HybridDashboardDataService
+from trading_platform.dashboard.page_state import PageState
 from trading_platform.dashboard.server import create_dashboard_app
 from trading_platform.db import Base
 from trading_platform.db.repositories import (
@@ -73,6 +75,19 @@ def _call_app(app, path: str) -> tuple[str, dict[str, str], dict]:
     result = app({"PATH_INFO": path_only, "QUERY_STRING": query_string, "wsgi.input": BytesIO(b"")}, start_response)
     body = b"".join(result)
     return str(payload["status"]), payload["headers"], json.loads(body.decode("utf-8"))
+
+
+def _call_html_app(app, path: str) -> tuple[str, dict[str, str], str]:
+    payload: dict[str, object] = {}
+    path_only, _, query_string = path.partition("?")
+
+    def start_response(status, headers):
+        payload["status"] = status
+        payload["headers"] = {key: value for key, value in headers}
+
+    result = app({"PATH_INFO": path_only, "QUERY_STRING": query_string, "wsgi.input": BytesIO(b"")}, start_response)
+    body = b"".join(result)
+    return str(payload["status"]), payload["headers"], body.decode("utf-8")
 
 
 def _sqlite_settings(tmp_path: Path):
@@ -317,6 +332,18 @@ def test_db_query_services_support_filtering_and_pagination(tmp_path: Path) -> N
     assert trade_page.items[0].strategy_id == "momentum-core"
 
 
+def test_page_state_normalizes_filters_and_pagination() -> None:
+    state = PageState.from_query(
+        "/trades",
+        {"symbol": ["AAPL"], "limit": ["50"], "offset": ["20"], "status": ["open"]},
+        filter_keys=["symbol", "status"],
+        default_limit=25,
+    )
+    assert state.to_service_filters() == {"symbol": "AAPL", "status": "open", "limit": 50, "offset": 20}
+    assert state.url(offset=70) == "/trades?status=open&symbol=AAPL&limit=50&offset=70"
+    assert state.active_chips({"symbol": "Symbol"})[0].label in {"Symbol", "Status"}
+
+
 def test_hybrid_dashboard_service_falls_back_to_artifacts_when_db_disabled(tmp_path: Path) -> None:
     _write_minimal_dashboard_artifacts(tmp_path)
     service = HybridDashboardDataService(tmp_path)
@@ -380,3 +407,40 @@ def test_dashboard_app_prefers_db_when_records_exist(tmp_path: Path, monkeypatch
     _status, _headers, strategies_payload = _call_app(app, "/api/strategies?limit=1")
     assert strategies_payload["source"] == "hybrid"
     assert strategies_payload["recent_promotions_pagination"]["limit"] == 1
+
+
+def test_html_routes_render_page_state_controls_and_back_links(tmp_path: Path, monkeypatch) -> None:
+    _write_minimal_dashboard_artifacts(tmp_path)
+    settings, decision_id = _seed_dashboard_db(tmp_path)
+    monkeypatch.setenv("TRADING_PLATFORM_ENABLE_DATABASE_METADATA", "true")
+    monkeypatch.setenv("TRADING_PLATFORM_DATABASE_URL", settings.database_url or "")
+
+    app = create_dashboard_app(tmp_path)
+
+    status, _headers, runs_html = _call_html_app(app, "/runs?mode=paper&limit=1")
+    assert status == "200 OK"
+    assert "name='mode'" in runs_html
+    assert "Active filters" in runs_html
+    assert "Showing 1-1 of 1" in runs_html
+
+    status, _headers, trades_html = _call_html_app(app, "/trades?strategy=momentum-core&limit=1")
+    assert status == "200 OK"
+    assert "name='strategy'" in trades_html
+    assert "Strategy: momentum-core" in trades_html
+    assert "Trade Detail" not in trades_html
+
+    encoded_back = quote("/trades?strategy=momentum-core&limit=1", safe="")
+    status, _headers, trade_html = _call_html_app(app, f"/trades/{decision_id}?back_to={encoded_back}")
+    assert status == "200 OK"
+    assert "Back to Blotter" in trade_html
+    assert "/trades?strategy=momentum-core&amp;limit=1" in trade_html
+
+    status, _headers, ops_html = _call_html_app(app, "/ops?status=failed&limit=1")
+    assert status == "200 OK"
+    assert "name='activity_type'" in ops_html
+    assert "Recent Runs" in ops_html
+
+    status, _headers, strategies_html = _call_html_app(app, "/strategies?decision=promote&limit=1")
+    assert status == "200 OK"
+    assert "Recent Promotions" in strategies_html
+    assert "name='decision'" in strategies_html

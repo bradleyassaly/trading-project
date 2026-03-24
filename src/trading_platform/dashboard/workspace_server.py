@@ -5,10 +5,11 @@ import json
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Callable
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, urlencode
 from wsgiref.simple_server import make_server
 
 from trading_platform.dashboard.hybrid_dashboard_service import HybridDashboardDataService
+from trading_platform.dashboard.page_state import PageState
 from trading_platform.dashboard.service import DashboardDataService
 
 
@@ -109,6 +110,10 @@ def _query_filters(query: dict[str, list[str]], *keys: str, default_limit: int =
     return payload
 
 
+def _page_state(path: str, query: dict[str, list[str]], *, filter_keys: list[str], default_limit: int) -> PageState:
+    return PageState.from_query(path, query, filter_keys=filter_keys, default_limit=default_limit)
+
+
 def _validate_symbol(symbol: str) -> str | None:
     normalized = symbol.strip().upper()
     if not normalized:
@@ -117,7 +122,20 @@ def _validate_symbol(symbol: str) -> str | None:
     return normalized if all(char in allowed for char in normalized) else None
 
 
-def _link_for(column: str, value: object) -> str | None:
+def _detail_href(base_path: str, identifier: object, page_state: PageState | None = None, **extra_query: str | None) -> str:
+    href = f"{base_path}/{html.escape(str(identifier))}"
+    params: dict[str, str] = {}
+    if page_state is not None:
+        params["back_to"] = page_state.current_url()
+    for key, value in extra_query.items():
+        if value not in (None, ""):
+            params[key] = str(value)
+    if not params:
+        return href
+    return f"{href}?{urlencode(params)}"
+
+
+def _link_for(column: str, value: object, row: dict | None = None, page_state: PageState | None = None) -> str | None:
     if value in (None, ""):
         return None
     text = html.escape(str(value))
@@ -126,16 +144,17 @@ def _link_for(column: str, value: object) -> str | None:
     if column == "strategy_id":
         return f'<a class="table-link" href="/strategies/{text}">{text}</a>'
     if column == "trade_id":
-        return f'<a class="table-link" href="/trades/{text}">{text}</a>'
+        return f'<a class="table-link" href="{_detail_href("/trades", value, page_state)}">{text}</a>'
     if column == "run_id":
-        return f'<a class="table-link" href="/runs/{text}">{text}</a>'
+        run_kind = None if row is None else row.get("run_kind")
+        return f'<a class="table-link" href="{_detail_href("/runs", value, page_state, run_kind=run_kind)}">{text}</a>'
     if column in {"run_dir", "artifact_dir", "path"}:
         return f'<span class="mono">{text}</span>'
     return None
 
 
-def _render_value(column: str, value: object) -> str:
-    linked = _link_for(column, value)
+def _render_value(column: str, value: object, row: dict | None = None, page_state: PageState | None = None) -> str:
+    linked = _link_for(column, value, row=row, page_state=page_state)
     if linked:
         return linked
     if column.endswith("status") or column == "status":
@@ -153,15 +172,104 @@ def _render_value(column: str, value: object) -> str:
     return _escape(value)
 
 
-def _table(columns: list[str], rows: list[dict], *, empty: str = "No data available.") -> str:
+def _table(columns: list[str], rows: list[dict], *, empty: str = "No data available.", page_state: PageState | None = None) -> str:
     if not rows:
         return f"<section class='panel'><div class='empty'>{html.escape(empty)}</div></section>"
     head = "".join(f"<th>{html.escape(col.replace('_', ' '))}</th>" for col in columns)
     body = []
     for row in rows:
         mapping = _row_mapping(row)
-        body.append("<tr>" + "".join(f"<td>{_render_value(column, mapping.get(column))}</td>" for column in columns) + "</tr>")
+        body.append("<tr>" + "".join(f"<td>{_render_value(column, mapping.get(column), mapping, page_state)}</td>" for column in columns) + "</tr>")
     return f"<section class='panel'><div class='table-wrap'><table><thead><tr>{head}</tr></thead><tbody>{''.join(body)}</tbody></table></div></section>"
+
+
+def _filter_form(page_state: PageState, fields: list[dict[str, object]]) -> str:
+    controls: list[str] = []
+    for field in fields:
+        name = str(field["name"])
+        label = html.escape(str(field["label"]))
+        field_type = str(field.get("type", "text"))
+        value = page_state.filters.get(name, "")
+        if field_type == "select":
+            options = ["<option value=''>All</option>"]
+            for option in field.get("options", []):
+                option_value = str(option)
+                selected = " selected" if value == option_value else ""
+                options.append(f"<option value='{html.escape(option_value)}'{selected}>{html.escape(option_value)}</option>")
+            control = f"<select id='filter-{html.escape(name)}' name='{html.escape(name)}'>{''.join(options)}</select>"
+        else:
+            input_type = "date" if field_type == "date" else "text"
+            placeholder = html.escape(str(field.get("placeholder", "")))
+            control = (
+                f"<input id='filter-{html.escape(name)}' name='{html.escape(name)}' type='{input_type}' "
+                f"value='{html.escape(value)}' placeholder='{placeholder}'>"
+            )
+        controls.append(f"<label class='filter-control'><span>{label}</span>{control}</label>")
+    limit_options = "".join(
+        f"<option value='{size}'{' selected' if page_state.limit == size else ''}>{size}</option>"
+        for size in (10, 20, 50, 100)
+    )
+    controls.append(
+        "<label class='filter-control filter-control-small'>"
+        "<span>Limit</span>"
+        f"<select name='limit'>{limit_options}</select>"
+        "</label>"
+    )
+    return (
+        "<section class='panel'>"
+        "<form class='page-filters' method='get'>"
+        f"{''.join(controls)}"
+        "<div class='filter-actions'>"
+        "<button class='button-link' type='submit'>Apply</button>"
+        f"<a class='button-link secondary' href='{html.escape(page_state.clear_url())}'>Clear</a>"
+        "</div>"
+        "</form>"
+        "</section>"
+    )
+
+
+def _active_filter_chips(page_state: PageState, labels: dict[str, str]) -> str:
+    chips = page_state.active_chips(labels)
+    if not chips:
+        return "<section class='panel'><div class='subtle'>No active filters.</div></section>"
+    chip_html = "".join(
+        f"<a class='filter-chip' href='{html.escape(chip.clear_url)}'>{html.escape(chip.label)}: {html.escape(chip.value)} ×</a>"
+        for chip in chips
+    )
+    return (
+        "<section class='panel'>"
+        "<div class='section-subtitle'>Active filters</div>"
+        f"<div class='filter-bar'>{chip_html}<a class='filter-chip' href='{html.escape(page_state.clear_url())}'>Clear all</a></div>"
+        "</section>"
+    )
+
+
+def _pagination_controls(page_state: PageState, pagination: dict[str, object]) -> str:
+    total_count = int(pagination.get("total_count") or 0)
+    limit = int(pagination.get("limit") or page_state.limit)
+    offset = int(pagination.get("offset") or page_state.offset)
+    if total_count <= 0:
+        return "<section class='panel'><div class='subtle'>Showing 0 results.</div></section>"
+    start = offset + 1
+    end = min(offset + limit, total_count)
+    prev_link = ""
+    next_link = ""
+    if offset > 0:
+        prev_link = f"<a class='button-link secondary' href='{html.escape(page_state.url(offset=max(offset - limit, 0)))}'>Previous</a>"
+    if offset + limit < total_count:
+        next_link = f"<a class='button-link secondary' href='{html.escape(page_state.url(offset=offset + limit))}'>Next</a>"
+    return (
+        "<section class='panel pagination-panel'>"
+        f"<div class='subtle'>Showing {start}-{end} of {total_count} | source={html.escape(str(pagination.get('source') or 'n/a'))}</div>"
+        f"<div class='filter-actions'>{prev_link}{next_link}</div>"
+        "</section>"
+    )
+
+
+def _back_link(query: dict[str, list[str]], fallback_path: str, label: str) -> str:
+    back_to = _query_value(query, "back_to")
+    href = back_to or fallback_path
+    return f"<a class='action-link secondary' href='{html.escape(href)}'>{html.escape(label)}</a>"
 
 
 def _metric_cards(rows: list[tuple[str, object, str]]) -> str:
@@ -255,7 +363,7 @@ th,td { padding:12px 14px; text-align:left; border-bottom:1px solid rgba(104,129
 .trade-chart { width:100%; min-height:360px; border-radius:18px; background:linear-gradient(180deg, rgba(12,30,48,.98), rgba(17,37,57,.98)), repeating-linear-gradient(0deg, rgba(255,255,255,.05) 0 1px, transparent 1px 48px); }
 .readout { margin-top:12px; padding:12px 14px; border-radius:14px; background:rgba(15,33,54,.05); color:#40556c; } .timeline { display:grid; gap:10px; } .timeline-item { padding:14px 16px; border:1px solid rgba(104,129,156,.14); border-radius:16px; background:rgba(247,249,251,.72); }
 .timeline-title { display:flex; justify-content:space-between; gap:12px; align-items:center; } .filter-bar { display:flex; flex-wrap:wrap; gap:10px; padding:14px 0 4px; } .filter-chip { padding:8px 11px; border-radius:999px; background:rgba(22,75,122,.08); border:1px solid rgba(22,75,122,.12); color:#164b7a; text-decoration:none; font-weight:600; font-size:.84rem; }
-.filter-chip.active { background:#183b5d; border-color:#183b5d; color:white; } @media (max-width:1100px) { .workspace { grid-template-columns:1fr; } .sidebar { border-right:0; border-bottom:1px solid rgba(255,255,255,.08); } .hero-grid { grid-template-columns:1fr; } } @media (max-width:760px) { .main { padding:18px; } .topbar { flex-direction:column; } }
+.filter-chip.active { background:#183b5d; border-color:#183b5d; color:white; } .page-filters { display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:12px; align-items:end; } .filter-control { display:grid; gap:6px; color:#5b6c7f; font-size:.84rem; font-weight:600; } .filter-control input,.filter-control select { width:100%; padding:9px 10px; border:1px solid rgba(104,129,156,.22); border-radius:12px; background:white; color:#142233; } .filter-control-small { max-width:120px; } .filter-actions { display:flex; flex-wrap:wrap; gap:8px; align-items:center; } .button-link { display:inline-flex; align-items:center; justify-content:center; padding:9px 12px; border-radius:12px; border:1px solid #183b5d; background:#183b5d; color:white; text-decoration:none; font-weight:600; cursor:pointer; } .button-link.secondary { background:rgba(22,75,122,.08); color:#164b7a; border-color:rgba(22,75,122,.16); } .pagination-panel { display:flex; justify-content:space-between; align-items:center; gap:12px; } @media (max-width:1100px) { .workspace { grid-template-columns:1fr; } .sidebar { border-right:0; border-bottom:1px solid rgba(255,255,255,.08); } .hero-grid { grid-template-columns:1fr; } } @media (max-width:760px) { .main { padding:18px; } .topbar { flex-direction:column; } .pagination-panel { flex-direction:column; align-items:flex-start; } }
 """
     page = f"""<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>{html.escape(title)}</title><style>{css}</style></head><body><div class="workspace"><aside class="sidebar"><div class="brand"><div class="eyebrow">Trading Workspace</div><h1>Quant Control Center</h1><div class="brand-copy">Artifact-driven, local-first dashboard focused on explainability, portfolio context, and operational visibility.</div></div><nav class="nav">{nav}</nav><div class="sidebar-meta"><span class="sidebar-chip">Read-only</span><span class="sidebar-chip">Local artifacts</span><span class="sidebar-chip">Decision lineage</span></div></aside><main class="main"><header class="topbar"><div><div class="eyebrow">{html.escape(_route_name(active_path))}</div><h1>{html.escape(title)}</h1><div class="topbar-copy">Structured trade intelligence across signal generation, portfolio selection, execution, and outcomes.</div></div><div class="topbar-chips"><span class="topbar-chip">Professional workspace</span><span class="topbar-chip">Audit-first</span><span class="topbar-chip">Laptop-friendly</span></div></header>{body}</main></div></body></html>"""
     return page.encode("utf-8")
@@ -278,19 +386,22 @@ def _overview_page(service: DashboardDataService) -> bytes:
 
 
 def _trades_page(service: DashboardDataService, query: dict[str, list[str]]) -> bytes:
-    filters = _query_filters(query, "status", "strategy", "symbol", "run_id", "date_from", "date_to", default_limit=50)
-    payload = service.trade_blotter_payload(filters)
+    page_state = _page_state("/trades", query, filter_keys=["status", "strategy", "symbol", "run_id", "date_from", "date_to"], default_limit=50)
+    payload = service.trade_blotter_payload(page_state.to_service_filters())
     rows = payload.get("trades", [])
-    status_filter = _query_value(query, "status")
-    strategy_filter = _query_value(query, "strategy")
-    strategies = sorted({str(row.get("strategy_id")) for row in payload.get("trades", []) if row.get("strategy_id")})
-    chips = [("All", "/trades", status_filter is None), ("Open", "/trades?status=open", status_filter == "open"), ("Closed", "/trades?status=closed", status_filter == "closed")]
-    filter_links = "".join(f"<a class='filter-chip{' active' if active else ''}' href='{href}'>{label}</a>" for label, href, active in chips)
-    filter_links += "".join(f"<a class='filter-chip{' active' if strategy_filter == strategy else ''}' href='/trades?strategy={html.escape(strategy)}'>{html.escape(strategy)}</a>" for strategy in strategies[:4])
     pagination = payload.get("pagination", {})
     body = _metric_cards([("Trade Count", payload.get("summary", {}).get("trade_count") or 0, "Across discovered explicit ledgers"), ("Open", payload.get("summary", {}).get("open_trade_count") or 0, "Currently active"), ("Closed", payload.get("summary", {}).get("closed_trade_count") or 0, "Completed trades"), ("Page Size", pagination.get("limit") or len(rows), "Requested slice"), ("Source", payload.get("source") or "n/a", "Read path")])
-    body += f"<section class='panel'><div class='subtle'>total={_escape(pagination.get('total_count') or len(rows))} offset={_escape(pagination.get('offset') or 0)} has_more={_escape(pagination.get('has_more'))} source={_escape(payload.get('source'))}</div><div class='filter-bar'>{filter_links}</div></section>"
-    body += _section("Trades Blotter", _table(["trade_id", "timestamp", "symbol", "side", "qty", "target_weight", "strategy_id", "signal_score", "ranking_score", "expected_edge", "order_status", "realized_pnl", "unrealized_pnl", "status"], rows, empty="No trades match the current filters."), subtitle="The blotter centers the platform on inspectable trades rather than raw artifact files.")
+    body += _filter_form(page_state, [
+        {"name": "symbol", "label": "Symbol", "placeholder": "AAPL"},
+        {"name": "strategy", "label": "Strategy", "placeholder": "momentum-core"},
+        {"name": "status", "label": "Status", "type": "select", "options": ["open", "closed", "selected", "rejected", "failed"]},
+        {"name": "run_id", "label": "Run", "placeholder": "run id"},
+        {"name": "date_from", "label": "Date From", "type": "date"},
+        {"name": "date_to", "label": "Date To", "type": "date"},
+    ])
+    body += _active_filter_chips(page_state, {"run_id": "Run", "date_from": "From", "date_to": "To"})
+    body += _pagination_controls(page_state, pagination)
+    body += _section("Trades Blotter", _table(["trade_id", "timestamp", "symbol", "side", "qty", "target_weight", "strategy_id", "signal_score", "ranking_score", "expected_edge", "order_status", "realized_pnl", "unrealized_pnl", "status"], rows, empty="No trades match the current filters.", page_state=page_state), subtitle="The blotter centers the platform on inspectable trades rather than raw artifact files.")
     return _page_shell(title="Trades Blotter", active_path="/trades", body=body)
 
 
@@ -319,7 +430,7 @@ function renderTradeChart() {{
 }} renderTradeChart();</script>"""
 
 
-def _trade_detail_page(service: DashboardDataService, trade_id: str) -> bytes:
+def _trade_detail_page(service: DashboardDataService, trade_id: str, query: dict[str, list[str]]) -> bytes:
     payload = service.trade_detail_payload(trade_id)
     trade = payload.get("trade") or {}
     if not trade:
@@ -329,7 +440,7 @@ def _trade_detail_page(service: DashboardDataService, trade_id: str) -> bytes:
     body = "<section class='hero'><div class='hero-grid'><div class='hero-summary'>"
     body += f"<div class='eyebrow'>Trade Intelligence</div><div class='hero-title'>{_escape(trade.get('symbol'))} {html.escape(str(trade.get('side') or '').upper())} | {_escape(trade.get('trade_id'))}</div>"
     body += "<div class='hero-copy'>Decision lineage is organized from trade summary through signal evidence, portfolio selection context, execution trace, and realized outcome. Missing data remains explicit instead of fabricated.</div>"
-    body += f"<div class='hero-actions'><a class='action-link' href='/symbols/{html.escape(str(trade.get('symbol') or ''))}'>Open Symbol Context</a><a class='action-link secondary' href='/strategies/{html.escape(str(trade.get('strategy_id') or ''))}'>Open Strategy</a><a class='action-link secondary' href='/trades'>Back to Blotter</a></div></div>"
+    body += f"<div class='hero-actions'><a class='action-link' href='/symbols/{html.escape(str(trade.get('symbol') or ''))}'>Open Symbol Context</a><a class='action-link secondary' href='/strategies/{html.escape(str(trade.get('strategy_id') or ''))}'>Open Strategy</a>{_back_link(query, '/trades', 'Back to Blotter')}</div></div>"
     body += _info_cards([("Status", trade.get("status") or "n/a", "Lifecycle state"), ("Strategy", trade.get("strategy_id") or "n/a", "Generating strategy"), ("Run", payload.get("related_metadata", {}).get("run_id") or "latest", _freshness_badge(path=payload.get("related_metadata", {}).get("trade_source")))])
     body += "</div></section>"
     body += _section("Trade Summary", _metric_cards([("Side", trade.get("side") or "n/a", "Trade direction"), ("Quantity", trade.get("qty") or 0, "Ledger size"), ("Entry", trade.get("entry_price") or "n/a", _escape(trade.get("entry_ts"))), ("Exit", trade.get("exit_price") or "n/a", _escape(trade.get("exit_ts"))), ("Realized PnL", _format_number(trade.get("realized_pnl"), money=True), "Closed outcome"), ("Hold (hrs)", _format_number(trade.get("hold_duration_hours")), "Entry to exit")]))
@@ -346,13 +457,22 @@ def _trade_detail_page(service: DashboardDataService, trade_id: str) -> bytes:
 
 
 def _strategies_page(service: DashboardDataService, query: dict[str, list[str]]) -> bytes:
-    filters = _query_filters(query, "status", "strategy", "decision", "date_from", "date_to", default_limit=20)
-    payload = service.strategies_payload(filters); rows = payload.get("strategies", []); status_filter = _query_value(query, "status")
+    page_state = _page_state("/strategies", query, filter_keys=["status", "strategy", "decision", "date_from", "date_to"], default_limit=20)
+    payload = service.strategies_payload(page_state.to_service_filters()); rows = payload.get("strategies", []); status_filter = page_state.filters.get("status")
     if status_filter: rows = [row for row in rows if row.get("status") == status_filter]
     body = _metric_cards([("Strategy Count", len(payload.get("strategies", [])), "Registry entries"), ("Approved", payload.get("summary", {}).get("status_counts", {}).get("approved", 0), "Production-approved"), ("Families", len(payload.get("summary", {}).get("family_counts", {})), "Observed families"), ("Under Review", payload.get("summary", {}).get("lifecycle_counts", {}).get("under_review", 0), "Lifecycle governance")])
-    body += _section("Strategy Registry", _table(["strategy_id", "status", "family", "version", "preset_name", "universe", "current_deployment_stage"], rows))
+    body += _filter_form(page_state, [
+        {"name": "strategy", "label": "Strategy", "placeholder": "momentum-core"},
+        {"name": "decision", "label": "Promotion", "type": "select", "options": ["promote", "reject"]},
+        {"name": "status", "label": "Status", "type": "select", "options": ["approved", "active", "inactive", "under_review"]},
+        {"name": "date_from", "label": "Date From", "type": "date"},
+        {"name": "date_to", "label": "Date To", "type": "date"},
+    ])
+    body += _active_filter_chips(page_state, {"date_from": "From", "date_to": "To"})
+    body += _section("Strategy Registry", _table(["strategy_id", "status", "family", "version", "preset_name", "universe", "current_deployment_stage"], rows, page_state=page_state))
     body += _section("Lifecycle State", _table(["strategy_id", "preset_name", "current_state", "validation_status", "monitoring_recommendation", "adaptive_adjusted_weight", "latest_reasons"], payload.get("strategy_lifecycle", []), empty="No lifecycle rows found."))
-    body += _section("Recent Promotions", _table(["promotion_decision_id", "strategy_name", "strategy_version", "decision", "promoted_status", "source_research_run_name"], payload.get("recent_promotions", []), empty="No DB-backed promotions found."))
+    body += _pagination_controls(page_state, payload.get("recent_promotions_pagination", {"total_count": len(payload.get("recent_promotions", [])), "limit": page_state.limit, "offset": page_state.offset, "source": payload.get("source")}))
+    body += _section("Recent Promotions", _table(["promotion_decision_id", "strategy_name", "strategy_version", "decision", "promoted_status", "source_research_run_name"], payload.get("recent_promotions", []), empty="No DB-backed promotions found.", page_state=page_state))
     body += _section("Champion / Challenger", _table(list(payload.get("champion_challenger", [{}])[0].keys()) if payload.get("champion_challenger") else ["family"], payload.get("champion_challenger", []), empty="No champion/challenger mapping found."))
     return _page_shell(title="Strategies", active_path="/strategies", body=body)
 
@@ -389,13 +509,21 @@ def _research_page(service: DashboardDataService) -> bytes:
     return _page_shell(title="Research", active_path="/research", body=body)
 
 
-def _ops_page(service: DashboardDataService) -> bytes:
-    filters = {}
-    payload = service.ops_payload(filters); latest_run = payload.get("latest_run", {})
+def _ops_page(service: DashboardDataService, query: dict[str, list[str]]) -> bytes:
+    page_state = _page_state("/ops", query, filter_keys=["status", "activity_type", "date_from", "date_to"], default_limit=20)
+    payload = service.ops_payload(page_state.to_service_filters()); latest_run = payload.get("latest_run", {})
     body = _metric_cards([("Latest Run", payload.get("summary", {}).get("latest_run_name") or "n/a", "Most recent pipeline"), ("Run Status", payload.get("summary", {}).get("latest_run_status") or "n/a", "Most recent pipeline"), ("Health", payload.get("summary", {}).get("health_status") or "n/a", "Latest run health"), ("Critical Alerts", payload.get("summary", {}).get("critical_alert_count") or 0, "Latest run"), ("Blocked Checks", payload.get("summary", {}).get("blocked_check_count") or 0, "Latest live submission"), ("Missing Fills", payload.get("summary", {}).get("missing_fill_count") or 0, "Execution diagnostics")])
+    body += _filter_form(page_state, [
+        {"name": "status", "label": "Status", "type": "select", "options": ["completed", "failed", "running"]},
+        {"name": "activity_type", "label": "Activity", "type": "select", "options": ["portfolio_run", "research_run", "trade_decision", "promotion", "execution"]},
+        {"name": "date_from", "label": "Date From", "type": "date"},
+        {"name": "date_to", "label": "Date To", "type": "date"},
+    ])
+    body += _active_filter_chips(page_state, {"activity_type": "Activity", "date_from": "From", "date_to": "To"})
     body += _section("Latest Run Detail", _table(["stage_name", "status", "started_at", "ended_at", "duration_seconds", "error_message"], latest_run.get("stages", []), empty="No stage records found."))
-    body += _section("Recent Runs", _table(["run_id", "run_name", "status", "health_status", "schedule_type", "started_at", "failed_stage_count", "artifact_dir"], payload.get("runs", []), empty="No runs found."))
-    body += _section("DB Activity Feed", _table(["activity_type", "symbol", "strategy_name", "run_name", "status", "submitted_at", "created_at", "timestamp"], payload.get("db_activity", {}).get("activity_feed", {}).get("items", []), empty="No DB activity found."))
+    body += _pagination_controls(page_state, payload.get("runs_pagination", {"total_count": len(payload.get("runs", [])), "limit": page_state.limit, "offset": page_state.offset, "source": payload.get("source")}))
+    body += _section("Recent Runs", _table(["run_id", "run_name", "status", "health_status", "schedule_type", "started_at", "failed_stage_count", "artifact_dir"], payload.get("runs", []), empty="No runs found.", page_state=page_state))
+    body += _section("DB Activity Feed", _table(["activity_type", "symbol", "strategy_name", "run_name", "status", "submitted_at", "created_at", "timestamp"], payload.get("db_activity", {}).get("activity_feed", {}).get("items", []), empty="No DB activity found.", page_state=page_state))
     body += _section("Orchestration Runs", _table(["run_id", "run_name", "experiment_name", "variant_name", "status", "schedule_frequency", "selected_strategy_count", "total_return", "sharpe", "warning_strategy_count", "kill_switch_recommendation_count", "run_dir"], payload.get("orchestration_runs", []), empty="No orchestration runs found."))
     body += _section("Live Risk Checks", _table(["check_name", "passed", "hard_block", "severity", "message"], payload.get("live", {}).get("risk_checks", []), empty="No live risk checks found."))
     body += _section("Execution Diagnostics", _table(["symbol", "signal_ts", "fill_ts", "latency_seconds", "signal_price", "fill_price", "slippage_bps"], payload.get("execution_diagnostics", {}).get("rows", []), empty="No execution diagnostics found."))
@@ -420,14 +548,32 @@ def _execution_page(service: DashboardDataService) -> bytes:
     return _page_shell(title="Execution", active_path="/ops", body=body)
 
 
-def _runs_page(service: DashboardDataService) -> bytes:
-    return _ops_page(service)
+def _runs_page(service: DashboardDataService, query: dict[str, list[str]]) -> bytes:
+    page_state = _page_state("/runs", query, filter_keys=["status", "run_kind", "run_type", "mode", "strategy", "date_from", "date_to"], default_limit=20)
+    payload = service.runs_payload(page_state.to_service_filters())
+    runs = payload.get("runs", [])
+    research_runs = payload.get("research_runs", [])
+    body = _metric_cards([("Portfolio Runs", payload.get("runs_pagination", {}).get("total_count") or len(runs), "Normalized run history"), ("Research Runs", payload.get("research_runs_pagination", {}).get("total_count") or len(research_runs), "Research lineage"), ("Source", payload.get("source") or "n/a", "Read path"), ("Page Size", page_state.limit, "Requested slice")])
+    body += _filter_form(page_state, [
+        {"name": "status", "label": "Status", "type": "select", "options": ["completed", "failed", "running"]},
+        {"name": "mode", "label": "Mode", "type": "select", "options": ["paper", "live"]},
+        {"name": "run_kind", "label": "Run Kind", "type": "select", "options": ["portfolio", "research"]},
+        {"name": "strategy", "label": "Strategy", "placeholder": "momentum"},
+        {"name": "date_from", "label": "Date From", "type": "date"},
+        {"name": "date_to", "label": "Date To", "type": "date"},
+    ])
+    body += _active_filter_chips(page_state, {"run_kind": "Kind", "date_from": "From", "date_to": "To"})
+    body += _pagination_controls(page_state, payload.get("runs_pagination", {"total_count": len(runs), "limit": page_state.limit, "offset": page_state.offset, "source": payload.get("source")}))
+    body += _section("Portfolio Runs", _table(["run_id", "run_name", "status", "run_type", "mode", "started_at", "completed_at", "artifact_count"], runs, empty="No runs found.", page_state=page_state))
+    body += _section("Research Runs", _table(["run_id", "run_name", "status", "run_type", "started_at", "completed_at", "artifact_count"], research_runs, empty="No research runs found.", page_state=page_state))
+    return _page_shell(title="Runs", active_path="/ops", body=body)
 
 
 def _run_detail_page(service: DashboardDataService, run_id: str, query: dict[str, list[str]]) -> bytes:
     payload = service.latest_run_detail_payload(run_id, run_kind=_query_value(query, "run_kind"))
     summary = payload.get("summary", {})
     body = _metric_cards([("Run", summary.get("run_name") or "n/a", "Run key"), ("Status", summary.get("status") or "n/a", "Lifecycle"), ("Artifacts", summary.get("artifact_count") or 0, "Linked artifact rows"), ("Source", payload.get("source") or "n/a", "Read path")])
+    body += f"<section class='panel'><div class='filter-actions'>{_back_link(query, '/runs', 'Back to Runs')}</div></section>"
     body += _section("Run Metadata", _info_cards([("Run ID", summary.get("run_id") or run_id, "Stable DB id"), ("Run Kind", summary.get("run_kind") or "n/a", "Research vs portfolio"), ("Started", summary.get("started_at") or "n/a", "Start time"), ("Completed", summary.get("completed_at") or "n/a", "Completion time"), ("Artifact Dir", summary.get("artifact_dir") or "n/a", "Linked artifact root"), ("Git Commit", summary.get("git_commit") or "n/a", "Recorded at run start")]))
     body += _section("Linked Artifacts", _table(["role", "artifact_type", "format", "row_count", "path"], payload.get("artifacts", []), empty="No linked artifacts found."))
     body += _section("Linked Decisions", _table(["trade_id", "symbol", "side", "strategy_id", "ranking_score", "order_status", "status"], payload.get("linked_decisions", {}).get("items", []), empty="No linked decisions found."))
@@ -506,13 +652,13 @@ def create_dashboard_app(
         elif path.startswith("/api/strategies/"): strategy_id = path.removeprefix("/api/strategies/"); status, headers, body = _not_found() if not strategy_id else _json_response(service.strategy_detail_payload(strategy_id))
         elif path == "/": status, headers, body = "200 OK", [("Content-Type", "text/html; charset=utf-8")], _overview_page(service)
         elif path == "/trades": status, headers, body = "200 OK", [("Content-Type", "text/html; charset=utf-8")], _trades_page(service, query)
-        elif path.startswith("/trades/"): trade_id = path.removeprefix("/trades/"); status, headers, body = _not_found() if not trade_id else ("200 OK", [("Content-Type", "text/html; charset=utf-8")], _trade_detail_page(service, trade_id))
+        elif path.startswith("/trades/"): trade_id = path.removeprefix("/trades/"); status, headers, body = _not_found() if not trade_id else ("200 OK", [("Content-Type", "text/html; charset=utf-8")], _trade_detail_page(service, trade_id, query))
         elif path == "/strategies": status, headers, body = "200 OK", [("Content-Type", "text/html; charset=utf-8")], _strategies_page(service, query)
         elif path.startswith("/strategies/"): strategy_id = path.removeprefix("/strategies/"); status, headers, body = _not_found() if not strategy_id else ("200 OK", [("Content-Type", "text/html; charset=utf-8")], _strategy_detail_page(service, strategy_id))
         elif path == "/portfolio": status, headers, body = "200 OK", [("Content-Type", "text/html; charset=utf-8")], _portfolio_page(service)
         elif path == "/research": status, headers, body = "200 OK", [("Content-Type", "text/html; charset=utf-8")], _research_page(service)
-        elif path == "/ops": status, headers, body = "200 OK", [("Content-Type", "text/html; charset=utf-8")], _ops_page(service)
-        elif path == "/runs": status, headers, body = "200 OK", [("Content-Type", "text/html; charset=utf-8")], _runs_page(service)
+        elif path == "/ops": status, headers, body = "200 OK", [("Content-Type", "text/html; charset=utf-8")], _ops_page(service, query)
+        elif path == "/runs": status, headers, body = "200 OK", [("Content-Type", "text/html; charset=utf-8")], _runs_page(service, query)
         elif path.startswith("/runs/"): run_id = path.removeprefix("/runs/"); status, headers, body = _not_found() if not run_id else ("200 OK", [("Content-Type", "text/html; charset=utf-8")], _run_detail_page(service, run_id, query))
         elif path == "/execution": status, headers, body = "200 OK", [("Content-Type", "text/html; charset=utf-8")], _execution_page(service)
         elif path == "/live": status, headers, body = "200 OK", [("Content-Type", "text/html; charset=utf-8")], _live_page(service)

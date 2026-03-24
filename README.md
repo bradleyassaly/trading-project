@@ -1144,6 +1144,7 @@ Read-path policy:
 
 - ops, run history, recent trade decisions, and DB-linked trade lineage prefer PostgreSQL when DB metadata is enabled and populated
 - those DB-backed list/detail paths now support thin filtering and offset/limit pagination
+- the HTML workspace pages now use the same normalized paged payloads as the JSON endpoints, with URL-driven filter state, active filter chips, and previous/next pagination controls
 - charts, large signal history, heavy research tables, and other large payloads remain artifact-driven
 - if a DB-backed page cannot find the needed rows, it falls back to the artifact-derived payload for the same page
 - dashboard payloads now carry a lightweight `source` label such as `db`, `artifact`, or `hybrid` for testing and operator debugging
@@ -1178,9 +1179,13 @@ What each page is for:
 - `/`
   top-level command center with equity/performance snapshot, recent trades, open positions, strategy pulse, and quick ops awareness
 - `/trades`
-  blotter for recent open and closed trades with direct links into individual trade detail pages
+  blotter for recent open and closed trades with direct links into individual trade detail pages and server-rendered filter/pagination controls
+- `/runs`
+  normalized portfolio/research run history with server-rendered filters, pagination, and direct run-detail drill-down
 - `/trades/<TRADE_ID>`
   centerpiece trade intelligence view showing summary, signal evidence, decision provenance, portfolio context, execution review, outcome review, and related metadata
+- `/strategies`
+  strategy registry plus recent promotion history with server-rendered promotion filters and pagination
 - `/strategies/<STRATEGY_ID>`
   strategy-linked trade history and run/source comparisons
 - `/portfolio`
@@ -1207,6 +1212,24 @@ GET /api/discovery/recent-symbols
 ```
 
 Existing endpoints stay intentionally thin. The server-rendered workspace now uses the same hybrid service layer behind those payloads instead of introducing a broad new REST surface.
+
+HTML workspace pages that now accept query params directly:
+
+- `/runs`
+  `status`, `run_kind`, `run_type`, `mode`, `strategy`, `date_from`, `date_to`, `limit`, `offset`
+- `/trades`
+  `symbol`, `strategy`, `status`, `run_id`, `date_from`, `date_to`, `limit`, `offset`
+- `/ops`
+  `status`, `activity_type`, `date_from`, `date_to`, `limit`, `offset`
+- `/strategies`
+  `strategy`, `decision`, `status`, `date_from`, `date_to`, `limit`, `offset`
+
+Those HTML routes are intentionally URL-driven:
+
+- filter controls submit via standard query params
+- active filter chips are derived from the same normalized page state
+- previous/next pagination links preserve the active filters
+- run/trade detail links carry a lightweight `back_to` query param so list-state round-trips stay intact without a client-side router
 
 Dashboard pages that now prefer DB-backed reads when available:
 
@@ -1344,6 +1367,14 @@ Current DB-backed detail coverage:
   normalized decision lineage, candidate evaluations, universe filter results, signal contributions, and execution linkage when present
 - strategies/research:
   recent promotion history from normalized promotion tables, while heavier research diagnostics remain artifact-backed
+
+The HTML workspace and JSON endpoints intentionally share the same read-path contract:
+
+- the route parses query params into a small page-state object
+- the page-state is converted into service/query filters
+- the hybrid service prefers DB-backed rows when available
+- the rendered page reuses the same paged payload metadata for filter chips, pagination, and detail drill-down links
+- if the DB path is disabled or empty, the page still renders from the artifact-backed payload with the same URL state shape
 
 Chart API query params:
 
