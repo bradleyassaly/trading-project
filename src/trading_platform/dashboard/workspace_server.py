@@ -8,6 +8,7 @@ from typing import Callable
 from urllib.parse import parse_qs
 from wsgiref.simple_server import make_server
 
+from trading_platform.dashboard.hybrid_dashboard_service import HybridDashboardDataService
 from trading_platform.dashboard.service import DashboardDataService
 
 
@@ -423,8 +424,19 @@ def _symbol_detail_page(service: DashboardDataService, symbol: str, query: dict[
     return _page_shell(title=f"Symbol Detail: {symbol}", active_path="/trades", body=body)
 
 
-def create_dashboard_app(artifacts_root: str | Path) -> Callable:
-    service = DashboardDataService(artifacts_root)
+def create_dashboard_app(
+    artifacts_root: str | Path,
+    *,
+    enable_database_metadata: bool | None = None,
+    database_url: str | None = None,
+    database_schema: str | None = None,
+) -> Callable:
+    service: DashboardDataService = HybridDashboardDataService(
+        artifacts_root,
+        enable_database_metadata=enable_database_metadata,
+        database_url=database_url,
+        database_schema=database_schema,
+    )
     def app(environ, start_response):
         path = environ.get("PATH_INFO", "/"); query = parse_qs(environ.get("QUERY_STRING", ""))
         if path.startswith("/api/chart/"):
@@ -479,15 +491,29 @@ def create_dashboard_app(artifacts_root: str | Path) -> Callable:
     return app
 
 
-def serve_dashboard(*, artifacts_root: str | Path, host: str = "127.0.0.1", port: int = 8000) -> None:
-    app = create_dashboard_app(artifacts_root)
+def serve_dashboard(
+    *,
+    artifacts_root: str | Path,
+    host: str = "127.0.0.1",
+    port: int = 8000,
+    enable_database_metadata: bool | None = None,
+    database_url: str | None = None,
+    database_schema: str | None = None,
+) -> None:
+    app = create_dashboard_app(
+        artifacts_root,
+        enable_database_metadata=enable_database_metadata,
+        database_url=database_url,
+        database_schema=database_schema,
+    )
     with make_server(host, port, app) as server:
         print(f"Serving dashboard at http://{host}:{port}")
         server.serve_forever()
 
 
 def build_dashboard_static_data(*, artifacts_root: str | Path, output_dir: str | Path) -> dict[str, Path]:
-    service = DashboardDataService(artifacts_root); output_path = Path(output_dir); output_path.mkdir(parents=True, exist_ok=True)
+    service: DashboardDataService = HybridDashboardDataService(artifacts_root)
+    output_path = Path(output_dir); output_path.mkdir(parents=True, exist_ok=True)
     payloads = {"overview.json": service.overview_payload(), "trades_blotter.json": service.trade_blotter_payload(), "ops.json": service.ops_payload(), "runs.json": service.runs_payload(), "runs_latest.json": service.latest_run_detail_payload(), "orchestration_latest.json": service.latest_automated_orchestration_payload(), "experiments_latest.json": service.experiments_payload(), "system_evaluation_latest.json": service.system_evaluation_payload(), "system_evaluation_history.json": service.system_evaluation_history_payload(), "strategies.json": service.strategies_payload(), "research_latest.json": service.research_latest_payload(), "strategy_validation_latest.json": service.strategy_validation_payload(), "strategy_lifecycle_latest.json": service.strategy_lifecycle_payload(), "strategy_monitoring_latest.json": service.strategy_monitoring_payload(), "adaptive_allocation_latest.json": service.adaptive_allocation_payload(), "regime_latest.json": service.market_regime_payload(), "portfolio_latest.json": service.portfolio_payload(), "portfolio_overview.json": service.portfolio_overview_payload(), "execution_latest.json": service.execution_payload(), "execution_diagnostics.json": service.execution_diagnostics_payload(), "live_latest.json": service.live_payload(), "alerts_latest.json": service.latest_alerts_payload()}
     paths: dict[str, Path] = {}
     for name, payload in payloads.items():

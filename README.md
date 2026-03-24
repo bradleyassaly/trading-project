@@ -67,6 +67,7 @@ The platform now supports a pragmatic hybrid storage model:
 
 - files remain the primary data plane for heavy artifacts
 - PostgreSQL is an optional control plane for normalized metadata, lineage, and cross-run queryability
+- dashboard and ops reads can now prefer PostgreSQL for normalized history/lineage queries while still falling back to artifacts
 
 Artifact-first is still the rule.
 
@@ -89,6 +90,12 @@ Store these in PostgreSQL when DB metadata is enabled:
 
 When DB metadata is disabled, workflows continue to run in the existing artifact-first mode.
 When DB metadata is enabled, the same workflows still write artifacts first and additionally write normalized metadata rows.
+
+Read-path behavior follows the same rule:
+
+- dashboard pages prefer PostgreSQL for normalized run history, trade decision history, promotion history, and linked execution/provenance metadata when DB metadata is enabled and rows exist
+- dashboard pages fall back to the existing artifact readers when DB metadata is disabled or the relevant rows are missing
+- heavy feature, signal, chart, and diagnostics payloads remain artifact-backed even when DB reads are enabled
 
 ## Database Setup
 
@@ -138,6 +145,16 @@ The initial migration adds the phase-1 control-plane tables for:
 - portfolio decisions, signal contributions, and position snapshots
 - orders, order events, and fills
 - candidate evaluations and universe filter results
+
+The dashboard read path uses thin SQLAlchemy query services rather than exposing raw ORM rows directly:
+
+- `RunQueryService`
+- `DecisionQueryService`
+- `ExecutionQueryService`
+- `ArtifactQueryService`
+- `OpsQueryService`
+
+These services shape stable read models for the dashboard and ops tooling and keep the database layer optional.
 
 ## DB Lineage
 
@@ -1119,9 +1136,16 @@ The dashboard is intentionally a lightweight internal trading terminal:
 
 - server-rendered HTML
 - local-first multi-page trading workspace
-- artifact-driven and read-only
-- no SPA framework, database, or client-side trading logic
+- read-only with a hybrid read path
+- no SPA framework or client-side trading logic
 - centered on trade explainability and drill-down analysis
+
+Read-path policy:
+
+- ops, run history, recent trade decisions, and DB-linked trade lineage prefer PostgreSQL when DB metadata is enabled and populated
+- charts, large signal history, heavy research tables, and other large payloads remain artifact-driven
+- if a DB-backed page cannot find the needed rows, it falls back to the artifact-derived payload for the same page
+- dashboard payloads now carry a lightweight `source` label such as `db`, `artifact`, or `hybrid` for testing and operator debugging
 
 Run locally:
 
@@ -1178,6 +1202,26 @@ GET /api/discovery/overview
 GET /api/discovery/recent-trades
 GET /api/discovery/recent-symbols
 ```
+
+Existing endpoints stay intentionally thin. The server-rendered workspace now uses the same hybrid service layer behind those payloads instead of introducing a broad new REST surface.
+
+Dashboard pages that now prefer DB-backed reads when available:
+
+- `/ops`
+  recent portfolio/research runs, recent failures, recent promotions, and recent DB-backed activity
+- `/trades`
+  recent portfolio decisions from `PortfolioDecision` plus linked candidate context where available
+- `/trades/<TRADE_ID>`
+  DB-backed decision lineage, candidate evaluations, universe-filter facts, linked run artifacts, and linked order/fill lifecycle when the trade id maps to a DB decision id
+- `/api/runs`, `/api/runs/latest`, `/api/trades-blotter`, `/api/trade/<TRADE_ID>`, and `/api/ops`
+  same hybrid preference rules as the HTML pages
+
+Read paths that still primarily rely on artifacts:
+
+- chart bars, indicator overlays, and signal history
+- explicit trade ledgers and reconstructed trade history when no DB decision rows exist
+- portfolio equity curves, drawdown history, and execution diagnostics derived from CSV artifacts
+- research diagnostics, walk-forward outputs, large leaderboards, and image/report artifacts
 
 The dashboard chart path stays artifact-driven:
 
@@ -1258,6 +1302,15 @@ Minimal artifact assumptions for the upgraded workspace:
 - existing `paper_trades.csv`, `paper_orders.csv`, `paper_fills.csv`, `paper_positions.csv`, `*_signals.csv`, and provenance CSV/JSON files are reused
 - the blotter and trade detail pages enrich rows by joining those artifacts on `symbol`, `trade_id`, and nearby timestamps
 - static exports now include `trades_blotter.json` and `ops.json` in addition to the previous dashboard payloads
+
+When DB metadata is enabled, the dashboard additionally uses the control-plane tables for:
+
+- recent `ResearchRun` and `PortfolioRun` history
+- linked artifact registry lookups
+- `PortfolioDecision` and `CandidateEvaluation` history
+- `UniverseFilterResult` context for candidate eligibility
+- linked `Order`, `OrderEvent`, and `Fill` metadata when a portfolio decision has direct execution linkage
+- recent promotion lineage from `PromotionDecision` and `PromotedStrategy`
 
 Chart API query params:
 
