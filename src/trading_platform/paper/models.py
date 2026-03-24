@@ -6,6 +6,8 @@ from trading_platform.broker.base import BrokerFill
 
 import pandas as pd
 
+from trading_platform.decision_journal.models import DecisionJournalBundle
+
 
 @dataclass(frozen=True)
 class PaperTradingConfig:
@@ -143,6 +145,7 @@ class PaperTradingRunResult:
     skipped_symbols: list[str] = field(default_factory=list)
     diagnostics: dict[str, Any] = field(default_factory=dict)
     price_snapshots: list[PaperExecutionPriceSnapshot] = field(default_factory=list)
+    decision_bundle: DecisionJournalBundle | None = None
 
 @dataclass
 class PaperSignalSnapshot:

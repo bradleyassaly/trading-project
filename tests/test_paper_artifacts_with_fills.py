@@ -5,6 +5,7 @@ from pathlib import Path
 import pandas as pd
 
 from trading_platform.broker.base import BrokerFill
+from trading_platform.decision_journal.service import build_candidate_journal_for_snapshot
 from trading_platform.paper.models import (
     PaperOrder,
     PaperPortfolioState,
@@ -59,17 +60,31 @@ def test_write_paper_trading_artifacts_writes_fills_and_equity_curve(tmp_path: P
         ],
         skipped_symbols=[],
         diagnostics={"ok": True},
+        decision_bundle=build_candidate_journal_for_snapshot(
+            timestamp="2025-01-04",
+            run_id="manual|sma_cross|symbols|2025-01-04",
+            cycle_id="2025-01-04",
+            strategy_id="sma_cross",
+            universe_id=None,
+            score_map={"AAPL": 2.0},
+            latest_prices={"AAPL": 110.0},
+            selected_weights={"AAPL": 1.0},
+            scheduled_weights={"AAPL": 1.0},
+        ),
     )
 
     paths = write_paper_trading_artifacts(result=result, output_dir=tmp_path)
 
     assert paths["fills_path"].exists()
     assert paths["equity_snapshot_path"].exists()
+    assert paths["candidate_snapshot_csv"].exists()
 
     fills_df = pd.read_csv(paths["fills_path"])
     equity_df = pd.read_csv(paths["equity_snapshot_path"])
+    candidate_df = pd.read_csv(paths["candidate_snapshot_csv"])
 
     assert len(fills_df) == 1
     assert fills_df.iloc[0]["symbol"] == "AAPL"
     assert equity_df.iloc[0]["as_of"] == "2025-01-04"
     assert float(equity_df.iloc[0]["equity"]) == 10100.0
+    assert candidate_df.iloc[0]["symbol"] == "AAPL"

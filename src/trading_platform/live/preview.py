@@ -35,12 +35,10 @@ from trading_platform.execution.reconciliation import (
     ReconciliationResult,
     build_rebalance_orders_from_broker_state,
 )
+from trading_platform.decision_journal.models import DecisionJournalBundle
+from trading_platform.decision_journal.service import enrich_bundle_with_orders, write_decision_journal_artifacts
 from trading_platform.paper.models import PaperTradingConfig
-from trading_platform.paper.service import (
-    compute_latest_target_weights,
-    load_signal_snapshot,
-    _compute_latest_xsec_target_weights,
-)
+from trading_platform.services.target_construction_service import build_target_construction_result
 
 
 @dataclass(frozen=True)
@@ -106,6 +104,7 @@ class LivePreviewResult:
     execution_result: ExecutionSimulationResult | None
     reconciliation_rows: list[dict[str, Any]]
     health_checks: list[LivePreviewHealthCheck]
+    decision_bundle: DecisionJournalBundle | None = None
     artifacts: dict[str, Path] = field(default_factory=dict)
 
 
@@ -206,37 +205,16 @@ def _build_paper_config(config: LivePreviewConfig) -> PaperTradingConfig:
 
 def _build_target_preview(
     config: LivePreviewConfig,
-) -> tuple[str, dict[str, float], dict[str, float], dict[str, Any]]:
-    paper_config = _build_paper_config(config)
-    if config.strategy == "xsec_momentum_topn":
-        (
-            as_of,
-            _latest_scheduled_weights,
-            latest_effective_weights,
-            latest_prices,
-            _latest_scores,
-            target_diagnostics,
-            _skipped_symbols,
-        ) = _compute_latest_xsec_target_weights(config=paper_config)
-        return as_of, latest_effective_weights, latest_prices, target_diagnostics
-
-    snapshot = load_signal_snapshot(
-        symbols=config.symbols,
-        strategy=config.strategy,
-        fast=config.fast,
-        slow=config.slow,
-        lookback=config.lookback,
+) -> tuple[str, dict[str, float], dict[str, float], dict[str, Any], DecisionJournalBundle | None]:
+    target_result = build_target_construction_result(config=_build_paper_config(config))
+    return (
+        target_result.as_of,
+        target_result.scheduled_target_weights,
+        target_result.effective_target_weights,
+        target_result.latest_prices,
+        target_result.target_diagnostics,
+        target_result.decision_bundle,
     )
-    latest_prices = {
-        symbol: float(price)
-        for symbol, price in snapshot.closes.iloc[-1].fillna(0.0).items()
-        if float(price) > 0.0
-    }
-    as_of, _latest_scheduled_weights, latest_effective_weights, target_diagnostics = compute_latest_target_weights(
-        config=paper_config,
-        snapshot=snapshot,
-    )
-    return as_of, latest_effective_weights, latest_prices, target_diagnostics
 
 
 def _health_check(
@@ -450,13 +428,15 @@ def run_live_dry_run_preview(
     config: LivePreviewConfig,
     execution_config: ExecutionConfig | None = None,
 ) -> LivePreviewResult:
-    as_of, target_weights, latest_prices, target_diagnostics = _build_target_preview(config)
+    as_of, scheduled_target_weights, target_weights, latest_prices, target_diagnostics, decision_bundle = _build_target_preview(config)
     return run_live_dry_run_preview_for_targets(
         config=config,
         as_of=as_of,
+        scheduled_target_weights=scheduled_target_weights,
         target_weights=target_weights,
         latest_prices=latest_prices,
         target_diagnostics=target_diagnostics,
+        decision_bundle=decision_bundle,
         execution_config=execution_config,
     )
 
@@ -468,6 +448,8 @@ def run_live_dry_run_preview_for_targets(
     target_weights: dict[str, float],
     latest_prices: dict[str, float],
     target_diagnostics: dict[str, Any],
+    scheduled_target_weights: dict[str, float] | None = None,
+    decision_bundle: DecisionJournalBundle | None = None,
     execution_config: ExecutionConfig | None = None,
 ) -> LivePreviewResult:
     broker = _resolve_broker(config)
@@ -525,6 +507,22 @@ def run_live_dry_run_preview_for_targets(
         open_orders=open_orders,
     )
     run_id = f"{config.preset_name or 'manual'}|{config.strategy}|{config.universe_name or 'symbols'}|{as_of}"
+    journal_bundle = enrich_bundle_with_orders(
+        decision_bundle,
+        timestamp=as_of,
+        run_id=run_id,
+        cycle_id=as_of,
+        strategy_id=config.strategy,
+        universe_id=config.universe_name,
+        current_positions=positions,
+        latest_target_weights=target_weights,
+        scheduled_target_weights=scheduled_target_weights or target_weights,
+        latest_prices=latest_prices,
+        orders=adjustment.adjusted_orders,
+        execution_payload=execution_result.to_dict() if execution_result is not None else None,
+        reserve_cash_pct=config.reserve_cash_pct,
+        portfolio_equity=float(account.equity),
+    )
     return LivePreviewResult(
         run_id=run_id,
         as_of=as_of,
@@ -541,6 +539,7 @@ def run_live_dry_run_preview_for_targets(
         execution_result=execution_result,
         reconciliation_rows=reconciliation_rows,
         health_checks=health_checks,
+        decision_bundle=journal_bundle,
     )
 
 
@@ -717,6 +716,7 @@ def write_live_dry_run_artifacts(result: LivePreviewResult) -> dict[str, Path]:
     if result.execution_result is not None:
         execution_paths = write_execution_artifacts(result.execution_result, output_dir)
         paths.update(execution_paths)
+    paths.update(write_decision_journal_artifacts(bundle=result.decision_bundle, output_dir=output_dir))
     summary_payload["artifact_paths"] = {name: str(path) for name, path in paths.items()}
     summary_json_path.write_text(json.dumps(summary_payload, indent=2, default=str), encoding="utf-8")
     preview_summary_json_path.write_text(json.dumps(summary_payload, indent=2, default=str), encoding="utf-8")

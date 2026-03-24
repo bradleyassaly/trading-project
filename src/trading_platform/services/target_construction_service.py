@@ -9,6 +9,8 @@ import pandas as pd
 
 from trading_platform.cli.common import normalize_paper_weighting_scheme
 from trading_platform.construction.service import build_top_n_portfolio_weights
+from trading_platform.decision_journal.models import DecisionJournalBundle
+from trading_platform.decision_journal.service import build_candidate_journal_for_snapshot
 from trading_platform.execution.policies import ExecutionPolicy
 from trading_platform.execution.transforms import build_executed_weights
 from trading_platform.metadata.groups import build_group_series
@@ -47,6 +49,7 @@ class TargetConstructionResult:
     signal_snapshot: PaperSignalSnapshot | None = None
     extra_diagnostics: dict[str, Any] = field(default_factory=dict)
     price_snapshots: list[PaperExecutionPriceSnapshot] = field(default_factory=list)
+    decision_bundle: DecisionJournalBundle | None = None
 
 
 def _load_xsec_prepared_frames(
@@ -101,6 +104,45 @@ def _latest_fetch_window(frames: dict[str, pd.DataFrame]) -> tuple[str, str] | N
     start = (latest_timestamp - pd.Timedelta(days=7)).date().isoformat()
     end = (pd.Timestamp.now(tz="UTC") + pd.Timedelta(days=1)).date().isoformat()
     return start, end
+
+
+def _build_decision_bundle(
+    *,
+    config: PaperTradingConfig,
+    as_of: str,
+    latest_scores: dict[str, float],
+    latest_prices: dict[str, float],
+    scheduled_target_weights: dict[str, float],
+    effective_target_weights: dict[str, float],
+    skipped_symbols: list[str],
+    skip_reasons: dict[str, str] | None = None,
+    asset_return_map: dict[str, float | None] | None = None,
+    selected_rejection_reasons: dict[str, str] | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> DecisionJournalBundle:
+    run_id = (
+        f"{config.preset_name or 'manual'}|{config.strategy}|{config.universe_name or 'symbols'}|{as_of}"
+    )
+    return build_candidate_journal_for_snapshot(
+        timestamp=as_of,
+        run_id=run_id,
+        cycle_id=as_of,
+        strategy_id=config.strategy,
+        universe_id=config.universe_name,
+        score_map=latest_scores,
+        latest_prices=latest_prices,
+        selected_weights=effective_target_weights,
+        scheduled_weights=scheduled_target_weights,
+        skipped_symbols=skipped_symbols,
+        skip_reasons=skip_reasons,
+        asset_return_map=asset_return_map,
+        selected_rejection_reasons=selected_rejection_reasons,
+        metadata={
+            "preset_name": config.preset_name,
+            "signal_source": config.signal_source,
+            **dict(metadata or {}),
+        },
+    )
 
 
 def _merge_latest_bar_into_frame(historical_frame: pd.DataFrame, latest_bars: pd.DataFrame, symbol: str) -> pd.DataFrame:
@@ -265,6 +307,7 @@ def load_signal_snapshot(
         closes=closes,
         skipped_symbols=skipped_symbols,
         metadata={
+            "skip_reasons": skip_reasons,
             "historical_source": historical_source,
             "latest_source": latest_source_effective,
             "latest_fallback_used": latest_fallback_used,
@@ -415,6 +458,7 @@ def _compute_latest_xsec_target_weights(
         "portfolio_construction_mode": config.portfolio_construction_mode,
         "selected_symbols": latest_diag_row.get("selected_symbols", ""),
         "target_selected_symbols": latest_diag_row.get("target_selected_symbols", ""),
+        "excluded_reasons": latest_diag_row.get("excluded_reasons", {}),
         "realized_holdings_count": latest_diag_row.get("realized_holdings_count"),
         "realized_holdings_minus_top_n": latest_diag_row.get("realized_holdings_minus_top_n"),
         "average_gross_exposure": result.summary.get("average_gross_exposure"),
@@ -449,6 +493,24 @@ def build_target_construction_result(
             snapshot=snapshot,
             snapshot_diagnostics=snapshot_diagnostics,
         )
+        asset_return_map = {}
+        if not snapshot.asset_returns.empty:
+            asset_return_map = {
+                symbol: float(value)
+                for symbol, value in snapshot.asset_returns.iloc[-1].dropna().items()
+            }
+        decision_bundle = _build_decision_bundle(
+            config=config,
+            as_of=composite_targets.as_of,
+            latest_scores=composite_targets.latest_scores,
+            latest_prices=composite_targets.latest_prices,
+            scheduled_target_weights=composite_targets.scheduled_target_weights,
+            effective_target_weights=composite_targets.effective_target_weights,
+            skipped_symbols=snapshot.skipped_symbols,
+            skip_reasons=dict(snapshot.metadata.get("skip_reasons", {})),
+            asset_return_map=asset_return_map,
+            metadata={"target_construction_mode": "composite"},
+        )
         return TargetConstructionResult(
             as_of=composite_targets.as_of,
             scheduled_target_weights=composite_targets.scheduled_target_weights,
@@ -464,6 +526,7 @@ def build_target_construction_result(
                 if key != "target_construction"
             },
             price_snapshots=composite_targets.price_snapshots,
+            decision_bundle=decision_bundle,
         )
     if config.signal_source == "ensemble":
         snapshot, snapshot_diagnostics = build_ensemble_paper_snapshot(config=config)
@@ -494,6 +557,24 @@ def build_target_construction_result(
                 ).astype(str)
         else:
             serializable_snapshot = pd.DataFrame()
+        asset_return_map = {}
+        if not snapshot.asset_returns.empty:
+            asset_return_map = {
+                symbol: float(value)
+                for symbol, value in snapshot.asset_returns.iloc[-1].dropna().items()
+            }
+        decision_bundle = _build_decision_bundle(
+            config=config,
+            as_of=as_of,
+            latest_scores=latest_scores,
+            latest_prices=latest_prices,
+            scheduled_target_weights=latest_scheduled_weights,
+            effective_target_weights=latest_effective_weights,
+            skipped_symbols=snapshot.skipped_symbols,
+            skip_reasons=dict(snapshot.metadata.get("skip_reasons", {})),
+            asset_return_map=asset_return_map,
+            metadata={"target_construction_mode": "ensemble"},
+        )
         return TargetConstructionResult(
             as_of=as_of,
             scheduled_target_weights=latest_scheduled_weights,
@@ -512,6 +593,7 @@ def build_target_construction_result(
                 else [],
             },
             price_snapshots=list(snapshot.metadata.get("price_snapshots", [])),
+            decision_bundle=decision_bundle,
         )
 
     if config.strategy == "xsec_momentum_topn":
@@ -532,6 +614,26 @@ def build_target_construction_result(
             skipped_symbols=skipped_symbols,
             metadata={"mode": "xsec"},
         )
+        decision_bundle = _build_decision_bundle(
+            config=config,
+            as_of=as_of,
+            latest_scores=latest_scores,
+            latest_prices=latest_prices,
+            scheduled_target_weights=latest_scheduled_weights,
+            effective_target_weights=latest_effective_weights,
+            skipped_symbols=skipped_symbols,
+            skip_reasons=dict(target_diagnostics.get("skip_reasons", {})),
+            selected_rejection_reasons={
+                str(symbol): str(reason)
+                for symbol, reason in dict(target_diagnostics.get("excluded_reasons", {})).items()
+            }
+            if isinstance(target_diagnostics.get("excluded_reasons"), dict)
+            else None,
+            metadata={
+                "target_construction_mode": "xsec",
+                "excluded_reasons": target_diagnostics.get("excluded_reasons", {}),
+            },
+        )
         return TargetConstructionResult(
             as_of=as_of,
             scheduled_target_weights=latest_scheduled_weights,
@@ -542,6 +644,7 @@ def build_target_construction_result(
             skipped_symbols=skipped_symbols,
             signal_snapshot=snapshot,
             price_snapshots=price_snapshots,
+            decision_bundle=decision_bundle,
         )
     snapshot = load_signal_snapshot(
         symbols=config.symbols,
@@ -573,6 +676,24 @@ def build_target_construction_result(
         "latest_price_fallback_used": snapshot.metadata.get("latest_fallback_used", False),
         **dict(snapshot.metadata.get("freshness_summary", {})),
     }
+    asset_return_map = {}
+    if not snapshot.asset_returns.empty:
+        asset_return_map = {
+            symbol: float(value)
+            for symbol, value in snapshot.asset_returns.iloc[-1].dropna().items()
+        }
+    decision_bundle = _build_decision_bundle(
+        config=config,
+        as_of=as_of,
+        latest_scores=latest_scores,
+        latest_prices=latest_prices,
+        scheduled_target_weights=latest_scheduled_weights,
+        effective_target_weights=latest_effective_weights,
+        skipped_symbols=snapshot.skipped_symbols,
+        skip_reasons=dict(snapshot.metadata.get("skip_reasons", {})),
+        asset_return_map=asset_return_map,
+        metadata={"target_construction_mode": "signal_snapshot"},
+    )
     return TargetConstructionResult(
         as_of=as_of,
         scheduled_target_weights=latest_scheduled_weights,
@@ -583,4 +704,5 @@ def build_target_construction_result(
         skipped_symbols=snapshot.skipped_symbols,
         signal_snapshot=snapshot,
         price_snapshots=list(snapshot.metadata.get("price_snapshots", [])),
+        decision_bundle=decision_bundle,
     )

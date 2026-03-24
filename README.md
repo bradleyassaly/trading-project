@@ -347,8 +347,28 @@ The dashboard and downstream tooling should prefer the summary and history files
 - `paper_fills.csv`
 - `paper_positions.csv`
 - `paper_orders.csv`
+- `candidate_snapshot.json`
+- `candidate_snapshot.csv`
+- `trade_decisions.json`
+- `trade_decisions.csv`
+- `execution_decisions.json`
+- `execution_decisions.csv`
+- `exit_decisions.json`
+- `exit_decisions.csv`
+- `trade_lifecycle.json`
+- `trade_lifecycle.csv`
 - `paper_positions_history.csv`
 - `paper_orders_history.csv`
+
+### Live dry-run
+
+- `live_dry_run_summary.json`
+- `live_dry_run_reconciliation.csv`
+- `candidate_snapshot.json`
+- `trade_decisions.json`
+- `execution_decisions.json`
+- `exit_decisions.json`
+- `trade_lifecycle.json`
 
 ## Hybrid Data Architecture
 
@@ -437,6 +457,62 @@ Each paper run now writes `execution_price_snapshot.csv` alongside the existing 
 - `latest_bar_age_seconds`
 
 This is intended for operator debugging, not research. It helps explain which price path actually fed the paper rebalance and whether Alpaca latest-bar data replaced or failed back to historical prices.
+
+## Trade Decision Journal
+
+Paper runs and live dry-run previews now persist a structured decision journal so every proposed trade can be reconstructed from stored backend facts instead of inferred later in the UI.
+
+The journal is intentionally lightweight:
+
+- no database
+- JSON artifacts preserve nested detail
+- CSV artifacts provide flattened operator-friendly inspection
+- missing facts stay missing rather than being synthesized
+
+Decision stages currently recorded:
+
+- candidate evaluation
+- portfolio selection
+- sizing context
+- execution request / executable / rejected order outcomes
+- exit decisions for symbols removed by rebalance
+- lifecycle stage rows that connect those facts
+
+Primary artifacts:
+
+- `candidate_snapshot.json` and `candidate_snapshot.csv`
+- `trade_decisions.json` and `trade_decisions.csv`
+- `execution_decisions.json` and `execution_decisions.csv`
+- `exit_decisions.json` and `exit_decisions.csv`
+- `trade_lifecycle.json` and `trade_lifecycle.csv`
+
+What they capture when available:
+
+- `decision_id`, run context, symbol, side, strategy, and universe
+- feature snapshot fields such as latest price and latest asset return
+- decomposable signal output fields such as final score and raw signal components
+- pass/fail screening checks
+- candidate rank and rank percentile
+- selected versus rejected status and explicit rejection reason when determinable
+- scheduled versus effective target weights
+- sizing inputs such as investable equity, reserve cash, current quantity, and target quantity
+- execution provenance and rejection reasons from the execution realism layer
+- exit trigger type and rebalance-driven exit rationale
+
+Current limits:
+
+- generic signal paths only persist the fields already available from the current snapshot pipeline
+- richer screen-by-screen rejection reasons are strongest today in the xsec momentum path because that research pipeline already emits exclusion diagnostics
+- exit attribution is currently based on explicit rebalance and target-transition facts; richer stop-loss or regime-driven exit traces can be added as those rules become first-class artifacts
+
+How to inspect a decision:
+
+1. open `candidate_snapshot.csv` to see the evaluated universe, score, rank, screen results, and selected versus rejected candidates
+2. open `trade_decisions.csv` to see the selected/held/exited trade-level summary and sizing context
+3. open `execution_decisions.csv` to inspect requested, executable, and rejected orders with execution-layer provenance
+4. open `exit_decisions.csv` and `trade_lifecycle.json` to inspect why a symbol was removed and how the decision evolved end to end
+
+These artifacts are also what the dashboard trade detail pages should prefer for explainability, so the backend and UI now share the same persisted facts.
 
 ## Paper Slippage Modeling
 

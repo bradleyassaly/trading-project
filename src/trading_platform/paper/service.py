@@ -13,6 +13,11 @@ from trading_platform.broker.base import BrokerFill, BrokerOrder
 from trading_platform.broker.paper_broker import PaperBroker, PaperBrokerConfig
 from trading_platform.cli.common import normalize_paper_weighting_scheme
 from trading_platform.construction.service import build_top_n_portfolio_weights
+from trading_platform.decision_journal.service import (
+    enrich_bundle_with_orders,
+    write_decision_journal_artifacts,
+)
+from trading_platform.decision_journal.models import DecisionJournalBundle
 from trading_platform.execution.realism import (
     ExecutableOrder,
     ExecutionSimulationResult,
@@ -168,6 +173,7 @@ def generate_rebalance_orders(
     min_trade_dollars: float = 25.0,
     lot_size: int = 1,
     reserve_cash_pct: float = 0.0,
+    provenance_by_symbol: dict[str, dict[str, Any]] | None = None,
 ) -> OrderGenerationResult:
     equity = state.equity
     investable_equity = equity * (1.0 - reserve_cash_pct)
@@ -188,6 +194,7 @@ def generate_rebalance_orders(
         latest_prices=latest_prices,
         portfolio_equity=equity,
         reserve_cash_pct=reserve_cash_pct,
+        provenance_by_symbol=provenance_by_symbol,
     )
     for request in execution_requests:
         notional = float(request.requested_notional)
@@ -396,6 +403,7 @@ def run_paper_trading_cycle_for_targets(
     skipped_symbols: list[str],
     extra_diagnostics: dict[str, Any] | None = None,
     price_snapshots: list[PaperExecutionPriceSnapshot] | None = None,
+    decision_bundle: DecisionJournalBundle | None = None,
     execution_config: ExecutionConfig | None = None,
     auto_apply_fills: bool = False,
 ) -> PaperTradingRunResult:
@@ -412,6 +420,7 @@ def run_paper_trading_cycle_for_targets(
         min_trade_dollars=config.min_trade_dollars,
         lot_size=config.lot_size,
         reserve_cash_pct=config.reserve_cash_pct,
+        provenance_by_symbol=getattr(decision_bundle, "provenance_by_symbol", None),
     )
 
     execution_diagnostics: dict[str, Any] = {}
@@ -490,6 +499,24 @@ def run_paper_trading_cycle_for_targets(
     }
     diagnostics.update(extra_diagnostics or {})
 
+    run_id = f"{config.preset_name or 'manual'}|{config.strategy}|{config.universe_name or 'symbols'}|{as_of}"
+    decision_bundle = enrich_bundle_with_orders(
+        decision_bundle,
+        timestamp=as_of,
+        run_id=run_id,
+        cycle_id=as_of,
+        strategy_id=config.strategy,
+        universe_id=config.universe_name,
+        current_positions=state.positions,
+        latest_target_weights=latest_effective_weights,
+        scheduled_target_weights=latest_scheduled_weights,
+        latest_prices=latest_prices,
+        orders=executable_orders,
+        execution_payload=execution_diagnostics,
+        reserve_cash_pct=config.reserve_cash_pct,
+        portfolio_equity=state.equity,
+    )
+
     return PaperTradingRunResult(
         as_of=as_of,
         state=state,
@@ -502,6 +529,7 @@ def run_paper_trading_cycle_for_targets(
         skipped_symbols=skipped_symbols,
         diagnostics=diagnostics,
         price_snapshots=list(price_snapshots or []),
+        decision_bundle=decision_bundle,
     )
 
 
@@ -512,93 +540,30 @@ def run_paper_trading_cycle(
     execution_config: ExecutionConfig | None = None,
     auto_apply_fills: bool = False,
 ) -> PaperTradingRunResult:
-    if config.signal_source in {"composite", "ensemble"}:
-        target_result = build_target_construction_result(config=config)
-        return run_paper_trading_cycle_for_targets(
-            config=config,
-            state_store=state_store,
-            as_of=target_result.as_of,
-            latest_prices=target_result.latest_prices,
-            latest_scores=target_result.latest_scores,
-            latest_scheduled_weights=target_result.scheduled_target_weights,
-            latest_effective_weights=target_result.effective_target_weights,
-            target_diagnostics=target_result.target_diagnostics,
-            skipped_symbols=target_result.skipped_symbols,
-            extra_diagnostics=target_result.extra_diagnostics,
-            price_snapshots=target_result.price_snapshots,
-            execution_config=execution_config,
-            auto_apply_fills=auto_apply_fills,
-        )
-
-    if config.strategy == "xsec_momentum_topn":
-        (
-            as_of,
-            latest_scheduled_weights,
-            latest_effective_weights,
-            latest_prices,
-            latest_scores,
-            target_diagnostics,
-            skipped_symbols,
-            price_snapshots,
-        ) = _compute_latest_xsec_target_weights(config=config)
-        return run_paper_trading_cycle_for_targets(
-            config=config,
-            state_store=state_store,
-            as_of=as_of,
-            latest_prices=latest_prices,
-            latest_scores=latest_scores,
-            latest_scheduled_weights=latest_scheduled_weights,
-            latest_effective_weights=latest_effective_weights,
-            target_diagnostics=target_diagnostics,
-            skipped_symbols=skipped_symbols,
-            extra_diagnostics={},
-            price_snapshots=price_snapshots,
-            execution_config=execution_config,
-            auto_apply_fills=auto_apply_fills,
-        )
-
-    snapshot = load_signal_snapshot(
-        symbols=config.symbols,
-        strategy=config.strategy,
-        fast=config.fast,
-        slow=config.slow,
-        lookback=config.lookback,
-        config=config,
-    )
-    latest_prices = {
-        symbol: float(price)
-        for symbol, price in snapshot.closes.iloc[-1].fillna(0.0).items()
-        if float(price) > 0.0
-    }
-    latest_scores = {
-        symbol: float(score)
-        for symbol, score in snapshot.scores.iloc[-1].fillna(0.0).items()
-    }
-    as_of, latest_scheduled_weights, latest_effective_weights, target_diagnostics = (
-        compute_latest_target_weights(
-            config=config,
-            snapshot=snapshot,
-        )
-    )
-    target_diagnostics = {
-        **target_diagnostics,
-        "historical_price_source": snapshot.metadata.get("historical_source", "yfinance"),
-        "latest_price_source": snapshot.metadata.get("latest_source", "yfinance"),
-        "latest_price_fallback_used": snapshot.metadata.get("latest_fallback_used", False),
-        **dict(snapshot.metadata.get("freshness_summary", {})),
-    }
+    target_construction_service.load_feature_frame = load_feature_frame
+    target_construction_service.resolve_feature_frame_path = resolve_feature_frame_path
+    target_construction_service.run_xsec_momentum_topn = run_xsec_momentum_topn
+    target_construction_service.normalize_price_frame = normalize_price_frame
+    target_construction_service.SIGNAL_REGISTRY = SIGNAL_REGISTRY
+    target_construction_service.build_group_series = build_group_series
+    target_construction_service.build_top_n_portfolio_weights = build_top_n_portfolio_weights
+    target_construction_service.normalize_paper_weighting_scheme = normalize_paper_weighting_scheme
+    target_construction_service.ExecutionPolicy = ExecutionPolicy
+    target_construction_service.build_executed_weights = build_executed_weights
+    target_result = build_target_construction_result(config=config)
     return run_paper_trading_cycle_for_targets(
         config=config,
         state_store=state_store,
-        as_of=as_of,
-        latest_prices=latest_prices,
-        latest_scores=latest_scores,
-        latest_scheduled_weights=latest_scheduled_weights,
-        latest_effective_weights=latest_effective_weights,
-        target_diagnostics=target_diagnostics,
-        skipped_symbols=snapshot.skipped_symbols,
-        extra_diagnostics={},
-        price_snapshots=list(snapshot.metadata.get("price_snapshots", [])),
+        as_of=target_result.as_of,
+        latest_prices=target_result.latest_prices,
+        latest_scores=target_result.latest_scores,
+        latest_scheduled_weights=target_result.scheduled_target_weights,
+        latest_effective_weights=target_result.effective_target_weights,
+        target_diagnostics=target_result.target_diagnostics,
+        skipped_symbols=target_result.skipped_symbols,
+        extra_diagnostics=target_result.extra_diagnostics,
+        price_snapshots=target_result.price_snapshots,
+        decision_bundle=target_result.decision_bundle,
         execution_config=execution_config,
         auto_apply_fills=auto_apply_fills,
     )
@@ -739,6 +704,7 @@ def write_paper_trading_artifacts(
         )
         execution_paths = write_execution_artifacts(simulation_result, output_path)
         paths.update(execution_paths)
+    paths.update(write_decision_journal_artifacts(bundle=result.decision_bundle, output_dir=output_path))
     paths.update(extra_paths)
     return paths
 
