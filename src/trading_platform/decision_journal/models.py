@@ -62,6 +62,8 @@ class CandidateEvaluation:
     strategy_id: str | None
     universe_id: str | None
     candidate_status: str
+    base_universe_id: str | None = None
+    sub_universe_id: str | None = None
     final_signal_score: float | None = None
     rank: int | None = None
     rank_percentile: float | None = None
@@ -155,6 +157,8 @@ class TradeDecisionRecord:
     strategy_id: str | None
     universe_id: str | None
     candidate_status: str
+    base_universe_id: str | None = None
+    sub_universe_id: str | None = None
     entry_reason_summary: str | None = None
     rejection_reason: str | None = None
     final_signal_score: float | None = None

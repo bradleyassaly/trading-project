@@ -194,6 +194,55 @@ top_n: 2
     assert config.top_n == 2
 
 
+def test_load_paper_run_workflow_config_with_screening_section(tmp_path) -> None:
+    path = tmp_path / "paper_screening.yaml"
+    path.write_text(
+        """
+preset: xsec_nasdaq100_momentum_v1_deploy
+state_path: artifacts/paper/nasdaq100_state.json
+output_dir: artifacts/paper/nasdaq100
+screening:
+  sub_universe_id: liquid_trend_candidates
+  filters:
+    - filter_name: min_price
+      filter_type: min_price
+      threshold: 5
+    - filter_name: excluded_names
+      filter_type: symbol_exclude_list
+      symbols: [TSLA]
+""".strip(),
+        encoding="utf-8",
+    )
+
+    config = load_paper_run_workflow_config(path)
+
+    assert config.sub_universe_id == "liquid_trend_candidates"
+    assert len(config.universe_filters) == 2
+    assert config.universe_filters[0]["filter_type"] == "min_price"
+
+
+def test_load_live_dry_run_workflow_config_with_screening_section(tmp_path) -> None:
+    path = tmp_path / "live_screening.yaml"
+    path.write_text(
+        """
+preset: xsec_nasdaq100_momentum_v1_deploy
+output_dir: artifacts/live_dry_run/nasdaq100
+screening:
+  sub_universe_id: liquid_trend_candidates
+  filters:
+    - filter_name: min_history
+      filter_type: min_feature_history
+      threshold: 252
+""".strip(),
+        encoding="utf-8",
+    )
+
+    config = load_live_dry_run_workflow_config(path)
+
+    assert config.sub_universe_id == "liquid_trend_candidates"
+    assert config.universe_filters[0]["filter_type"] == "min_feature_history"
+
+
 def test_load_pipeline_run_config_from_yaml(tmp_path) -> None:
     path = tmp_path / "pipeline.yaml"
     path.write_text(

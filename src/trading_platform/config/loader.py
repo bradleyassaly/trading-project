@@ -94,6 +94,7 @@ def load_walkforward_workflow_config(path: str | Path) -> WalkForwardWorkflowCon
 def load_paper_run_workflow_config(path: str | Path) -> PaperRunWorkflowConfig:
     data = _read_config_file(Path(path))
     payload = dict(data)
+    screening_section = payload.pop("screening", {}) if isinstance(payload.get("screening"), dict) else {}
     paper_section = payload.pop("paper", {}) if isinstance(payload.get("paper"), dict) else {}
     execution_section = (
         paper_section.get("execution", {})
@@ -139,12 +140,22 @@ def load_paper_run_workflow_config(path: str | Path) -> PaperRunWorkflowConfig:
         payload["ensemble_minimum_member_observations"] = ensemble_section["minimum_member_observations"]
     if "ensemble_minimum_member_metric" not in payload and "minimum_member_metric" in ensemble_section:
         payload["ensemble_minimum_member_metric"] = ensemble_section["minimum_member_metric"]
+    if "sub_universe_id" not in payload and "sub_universe_id" in screening_section:
+        payload["sub_universe_id"] = screening_section["sub_universe_id"]
+    if "universe_filters" not in payload and isinstance(screening_section.get("filters"), list):
+        payload["universe_filters"] = screening_section["filters"]
     return PaperRunWorkflowConfig(**payload)
 
 
 def load_live_dry_run_workflow_config(path: str | Path) -> LiveDryRunWorkflowConfig:
     data = _read_config_file(Path(path))
-    return LiveDryRunWorkflowConfig(**data)
+    payload = dict(data)
+    screening_section = payload.pop("screening", {}) if isinstance(payload.get("screening"), dict) else {}
+    if "sub_universe_id" not in payload and "sub_universe_id" in screening_section:
+        payload["sub_universe_id"] = screening_section["sub_universe_id"]
+    if "universe_filters" not in payload and isinstance(screening_section.get("filters"), list):
+        payload["universe_filters"] = screening_section["filters"]
+    return LiveDryRunWorkflowConfig(**payload)
 
 
 def load_multi_strategy_portfolio_config(path: str | Path) -> MultiStrategyPortfolioConfig:

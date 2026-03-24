@@ -46,13 +46,17 @@ def _build_config(args) -> LivePreviewConfig:
         mock_equity=args.mock_equity,
         mock_cash=args.mock_cash,
         mock_positions_path=getattr(args, "mock_positions_path", None),
+        sub_universe_id=getattr(args, "sub_universe_id", None),
+        universe_filters=list(getattr(args, "universe_filters", []) or []),
         output_dir=Path(args.output_dir),
     )
 
 
 def cmd_live_dry_run(args) -> None:
+    loaded_config = None
     if getattr(args, "config", None):
         loaded = load_live_dry_run_workflow_config(args.config)
+        loaded_config = loaded
         if getattr(loaded, "preset", None) and not option_is_explicit(args, "preset"):
             args.preset = loaded.preset
     apply_cli_preset(args)
@@ -61,6 +65,9 @@ def cmd_live_dry_run(args) -> None:
         config_path=getattr(args, "config", None),
         loader=load_live_dry_run_workflow_config,
     )
+    if loaded_config is not None:
+        setattr(args, "sub_universe_id", getattr(loaded_config, "sub_universe_id", None))
+        setattr(args, "universe_filters", list(getattr(loaded_config, "universe_filters", []) or []))
     config = _build_config(args)
     print(f"Running live dry-run for {len(config.symbols)} symbol(s): {', '.join(config.symbols)}")
 

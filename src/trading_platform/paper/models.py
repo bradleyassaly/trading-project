@@ -7,6 +7,7 @@ from trading_platform.broker.base import BrokerFill
 import pandas as pd
 
 from trading_platform.decision_journal.models import DecisionJournalBundle
+from trading_platform.universe_provenance.models import UniverseBuildBundle
 
 
 @dataclass(frozen=True)
@@ -69,6 +70,8 @@ class PaperTradingConfig:
     ensemble_max_members_per_family: int | None = None
     ensemble_minimum_member_observations: int = 0
     ensemble_minimum_member_metric: float | None = None
+    sub_universe_id: str | None = None
+    universe_filters: list[dict[str, Any]] = field(default_factory=list)
     data_sources: dict[str, Any] = field(default_factory=dict)
 
 
@@ -146,6 +149,7 @@ class PaperTradingRunResult:
     diagnostics: dict[str, Any] = field(default_factory=dict)
     price_snapshots: list[PaperExecutionPriceSnapshot] = field(default_factory=list)
     decision_bundle: DecisionJournalBundle | None = None
+    universe_bundle: UniverseBuildBundle | None = None
 
 @dataclass
 class PaperSignalSnapshot:

@@ -116,6 +116,8 @@ def build_candidate_journal_for_snapshot(
     cycle_id: str | None,
     strategy_id: str | None,
     universe_id: str | None,
+    base_universe_id: str | None = None,
+    sub_universe_id: str | None = None,
     score_map: dict[str, float | None],
     latest_prices: dict[str, float],
     selected_weights: dict[str, float],
@@ -124,11 +126,17 @@ def build_candidate_journal_for_snapshot(
     skip_reasons: dict[str, str] | None = None,
     asset_return_map: dict[str, float | None] | None = None,
     selected_rejection_reasons: dict[str, str] | None = None,
+    filtered_out_symbols: list[str] | None = None,
+    filtered_reasons: dict[str, str] | None = None,
+    universe_metadata_by_symbol: dict[str, dict[str, Any]] | None = None,
     metadata: dict[str, Any] | None = None,
 ) -> DecisionJournalBundle:
     skipped = set(skipped_symbols or [])
+    filtered = set(filtered_out_symbols or [])
     score_map_full = dict(score_map)
     for symbol in skipped:
+        score_map_full.setdefault(symbol, None)
+    for symbol in filtered:
         score_map_full.setdefault(symbol, None)
     ranks, percentiles = _rank_map(score_map_full)
     selected_symbols = {symbol for symbol, weight in selected_weights.items() if abs(float(weight)) > 0.0}
@@ -138,19 +146,29 @@ def build_candidate_journal_for_snapshot(
     for symbol in sorted(score_map_full):
         score = score_map_full.get(symbol)
         rejection_reason = None
-        if symbol in skipped:
+        status = "selected" if symbol in selected_symbols else "rejected"
+        if symbol in filtered:
+            rejection_reason = (filtered_reasons or {}).get(symbol, "filtered_out_before_ranking")
+            status = "filtered_out"
+        elif symbol in skipped:
             rejection_reason = (skip_reasons or {}).get(symbol, "symbol_skipped")
+            status = "rejected"
         elif symbol not in selected_symbols:
             rejection_reason = (selected_rejection_reasons or {}).get(symbol) or "not_selected"
-        status = "selected" if symbol in selected_symbols else "rejected"
         feature_snapshot = {
             "latest_price": _safe_float(latest_prices.get(symbol)),
             "asset_return": _safe_float((asset_return_map or {}).get(symbol)),
         }
+        if symbol in (universe_metadata_by_symbol or {}):
+            for key, value in dict((universe_metadata_by_symbol or {}).get(symbol, {})).items():
+                if key not in feature_snapshot:
+                    feature_snapshot[key] = value
         checks = [
             ScreenCheckResult("price_available", "pass" if feature_snapshot["latest_price"] is not None else "fail", feature_snapshot["latest_price"] is not None, value=feature_snapshot["latest_price"]),
             ScreenCheckResult("score_available", "pass" if score is not None else "fail", score is not None, value=score),
         ]
+        if symbol in filtered:
+            checks.append(ScreenCheckResult("universe_eligibility", "fail", False, reason=rejection_reason))
         if symbol in skipped:
             checks.append(ScreenCheckResult("symbol_loaded", "fail", False, reason=rejection_reason))
         signal = SignalBreakdown(
@@ -170,6 +188,8 @@ def build_candidate_journal_for_snapshot(
             side="long" if (selected_weights.get(symbol, 0.0) or 0.0) >= 0 else "short",
             strategy_id=strategy_id,
             universe_id=universe_id,
+            base_universe_id=base_universe_id or universe_id,
+            sub_universe_id=sub_universe_id,
             candidate_status=status,
             final_signal_score=score,
             rank=ranks.get(symbol),
@@ -222,6 +242,8 @@ def build_candidate_journal_for_snapshot(
             "selection_status": status,
             "target_weight": _safe_float(selected_weights.get(symbol)),
             "reason": rejection_reason,
+            "base_universe_id": base_universe_id or universe_id,
+            "sub_universe_id": sub_universe_id,
         }
         bundle = _bundle_append(
             bundle,
@@ -290,6 +312,8 @@ def enrich_bundle_with_orders(
                 side=side,
                 strategy_id=strategy_id,
                 universe_id=universe_id,
+                base_universe_id=current.provenance_by_symbol.get(symbol, {}).get("base_universe_id", universe_id),
+                sub_universe_id=current.provenance_by_symbol.get(symbol, {}).get("sub_universe_id"),
                 candidate_status=status,
                 entry_reason_summary=reason if status == "selected" else None,
                 rejection_reason=reason if status == "exited" else None,

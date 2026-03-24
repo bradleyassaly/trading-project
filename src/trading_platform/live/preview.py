@@ -36,9 +36,23 @@ from trading_platform.execution.reconciliation import (
     build_rebalance_orders_from_broker_state,
 )
 from trading_platform.decision_journal.models import DecisionJournalBundle
-from trading_platform.decision_journal.service import enrich_bundle_with_orders, write_decision_journal_artifacts
+from trading_platform.decision_journal.service import (
+    build_candidate_journal_for_snapshot,
+    enrich_bundle_with_orders,
+    write_decision_journal_artifacts,
+)
 from trading_platform.paper.models import PaperTradingConfig
+from trading_platform.paper.service import (
+    _compute_latest_xsec_target_weights,
+    compute_latest_target_weights,
+    load_signal_snapshot,
+)
 from trading_platform.services.target_construction_service import build_target_construction_result
+from trading_platform.universe_provenance.models import UniverseBuildBundle
+from trading_platform.universe_provenance.service import (
+    build_universe_provenance_bundle,
+    write_universe_provenance_artifacts,
+)
 
 
 @dataclass(frozen=True)
@@ -73,6 +87,8 @@ class LivePreviewConfig:
     mock_equity: float = 100_000.0
     mock_cash: float = 100_000.0
     mock_positions_path: str | None = None
+    sub_universe_id: str | None = None
+    universe_filters: list[dict[str, Any]] = field(default_factory=list)
     output_dir: Path = Path("artifacts/live_dry_run")
 
 
@@ -105,6 +121,7 @@ class LivePreviewResult:
     reconciliation_rows: list[dict[str, Any]]
     health_checks: list[LivePreviewHealthCheck]
     decision_bundle: DecisionJournalBundle | None = None
+    universe_bundle: UniverseBuildBundle | None = None
     artifacts: dict[str, Path] = field(default_factory=dict)
 
 
@@ -200,12 +217,90 @@ def _build_paper_config(config: LivePreviewConfig) -> PaperTradingConfig:
         min_trade_dollars=config.min_trade_dollars,
         lot_size=config.lot_size,
         reserve_cash_pct=config.reserve_cash_pct,
+        sub_universe_id=config.sub_universe_id,
+        universe_filters=list(config.universe_filters),
     )
 
 
 def _build_target_preview(
     config: LivePreviewConfig,
-) -> tuple[str, dict[str, float], dict[str, float], dict[str, Any], DecisionJournalBundle | None]:
+) -> tuple[str, dict[str, float], dict[str, float], dict[str, Any], DecisionJournalBundle | None, UniverseBuildBundle | None]:
+    if not config.universe_filters and not config.sub_universe_id:
+        paper_config = _build_paper_config(config)
+        universe_bundle = build_universe_provenance_bundle(
+            symbols=config.symbols,
+            base_universe_id=config.universe_name,
+            sub_universe_id=config.sub_universe_id,
+            filter_definitions=[],
+        )
+        if config.strategy == "xsec_momentum_topn":
+            xsec_result = _compute_latest_xsec_target_weights(config=paper_config)
+            if len(xsec_result) == 8:
+                as_of, scheduled_target_weights, target_weights, latest_prices, latest_scores, target_diagnostics, skipped_symbols, _price_snapshots = xsec_result
+            else:
+                as_of, scheduled_target_weights, target_weights, latest_prices, latest_scores, target_diagnostics, skipped_symbols = xsec_result
+            decision_bundle = build_candidate_journal_for_snapshot(
+                timestamp=as_of,
+                run_id=f"{config.preset_name or 'manual'}|{config.strategy}|{config.universe_name or 'symbols'}|{as_of}",
+                cycle_id=as_of,
+                strategy_id=config.strategy,
+                universe_id=config.universe_name,
+                base_universe_id=universe_bundle.summary.base_universe_id if universe_bundle.summary is not None else config.universe_name,
+                sub_universe_id=universe_bundle.summary.sub_universe_id if universe_bundle.summary is not None else config.sub_universe_id,
+                score_map=latest_scores,
+                latest_prices=latest_prices,
+                selected_weights=target_weights,
+                scheduled_weights=scheduled_target_weights,
+                skipped_symbols=skipped_symbols,
+                selected_rejection_reasons=dict(target_diagnostics.get("excluded_reasons", {}))
+                if isinstance(target_diagnostics.get("excluded_reasons"), dict)
+                else None,
+                universe_metadata_by_symbol={row.symbol: dict(row.metadata) for row in universe_bundle.membership_records},
+            )
+            return as_of, scheduled_target_weights, target_weights, latest_prices, target_diagnostics, decision_bundle, universe_bundle
+
+        snapshot = load_signal_snapshot(
+            symbols=config.symbols,
+            strategy=config.strategy,
+            fast=config.fast,
+            slow=config.slow,
+            lookback=config.lookback,
+        )
+        latest_prices = {
+            symbol: float(price)
+            for symbol, price in snapshot.closes.iloc[-1].fillna(0.0).items()
+            if float(price) > 0.0
+        }
+        latest_scores = {
+            symbol: float(score)
+            for symbol, score in snapshot.scores.iloc[-1].fillna(0.0).items()
+        }
+        as_of, scheduled_target_weights, target_weights, target_diagnostics = compute_latest_target_weights(
+            config=paper_config,
+            snapshot=snapshot,
+        )
+        asset_return_map = {
+            symbol: float(value)
+            for symbol, value in snapshot.asset_returns.iloc[-1].dropna().items()
+        } if not snapshot.asset_returns.empty else {}
+        decision_bundle = build_candidate_journal_for_snapshot(
+            timestamp=as_of,
+            run_id=f"{config.preset_name or 'manual'}|{config.strategy}|{config.universe_name or 'symbols'}|{as_of}",
+            cycle_id=as_of,
+            strategy_id=config.strategy,
+            universe_id=config.universe_name,
+            base_universe_id=universe_bundle.summary.base_universe_id if universe_bundle.summary is not None else config.universe_name,
+            sub_universe_id=universe_bundle.summary.sub_universe_id if universe_bundle.summary is not None else config.sub_universe_id,
+            score_map=latest_scores,
+            latest_prices=latest_prices,
+            selected_weights=target_weights,
+            scheduled_weights=scheduled_target_weights,
+            skipped_symbols=snapshot.skipped_symbols,
+            asset_return_map=asset_return_map,
+            universe_metadata_by_symbol={row.symbol: dict(row.metadata) for row in universe_bundle.membership_records},
+        )
+        return as_of, scheduled_target_weights, target_weights, latest_prices, target_diagnostics, decision_bundle, universe_bundle
+
     target_result = build_target_construction_result(config=_build_paper_config(config))
     return (
         target_result.as_of,
@@ -214,6 +309,7 @@ def _build_target_preview(
         target_result.latest_prices,
         target_result.target_diagnostics,
         target_result.decision_bundle,
+        target_result.universe_bundle,
     )
 
 
@@ -428,7 +524,7 @@ def run_live_dry_run_preview(
     config: LivePreviewConfig,
     execution_config: ExecutionConfig | None = None,
 ) -> LivePreviewResult:
-    as_of, scheduled_target_weights, target_weights, latest_prices, target_diagnostics, decision_bundle = _build_target_preview(config)
+    as_of, scheduled_target_weights, target_weights, latest_prices, target_diagnostics, decision_bundle, universe_bundle = _build_target_preview(config)
     return run_live_dry_run_preview_for_targets(
         config=config,
         as_of=as_of,
@@ -437,6 +533,7 @@ def run_live_dry_run_preview(
         latest_prices=latest_prices,
         target_diagnostics=target_diagnostics,
         decision_bundle=decision_bundle,
+        universe_bundle=universe_bundle,
         execution_config=execution_config,
     )
 
@@ -450,6 +547,7 @@ def run_live_dry_run_preview_for_targets(
     target_diagnostics: dict[str, Any],
     scheduled_target_weights: dict[str, float] | None = None,
     decision_bundle: DecisionJournalBundle | None = None,
+    universe_bundle: UniverseBuildBundle | None = None,
     execution_config: ExecutionConfig | None = None,
 ) -> LivePreviewResult:
     broker = _resolve_broker(config)
@@ -540,6 +638,7 @@ def run_live_dry_run_preview_for_targets(
         reconciliation_rows=reconciliation_rows,
         health_checks=health_checks,
         decision_bundle=journal_bundle,
+        universe_bundle=universe_bundle,
     )
 
 
@@ -717,6 +816,7 @@ def write_live_dry_run_artifacts(result: LivePreviewResult) -> dict[str, Path]:
         execution_paths = write_execution_artifacts(result.execution_result, output_dir)
         paths.update(execution_paths)
     paths.update(write_decision_journal_artifacts(bundle=result.decision_bundle, output_dir=output_dir))
+    paths.update(write_universe_provenance_artifacts(bundle=result.universe_bundle, output_dir=output_dir))
     summary_payload["artifact_paths"] = {name: str(path) for name, path in paths.items()}
     summary_json_path.write_text(json.dumps(summary_payload, indent=2, default=str), encoding="utf-8")
     preview_summary_json_path.write_text(json.dumps(summary_payload, indent=2, default=str), encoding="utf-8")

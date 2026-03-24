@@ -347,6 +347,12 @@ The dashboard and downstream tooling should prefer the summary and history files
 - `paper_fills.csv`
 - `paper_positions.csv`
 - `paper_orders.csv`
+- `universe_membership.json`
+- `universe_membership.csv`
+- `universe_filter_results.json`
+- `universe_filter_results.csv`
+- `universe_build_summary.json`
+- `sub_universe_snapshot.csv`
 - `candidate_snapshot.json`
 - `candidate_snapshot.csv`
 - `trade_decisions.json`
@@ -364,6 +370,12 @@ The dashboard and downstream tooling should prefer the summary and history files
 
 - `live_dry_run_summary.json`
 - `live_dry_run_reconciliation.csv`
+- `universe_membership.json`
+- `universe_membership.csv`
+- `universe_filter_results.json`
+- `universe_filter_results.csv`
+- `universe_build_summary.json`
+- `sub_universe_snapshot.csv`
 - `candidate_snapshot.json`
 - `trade_decisions.json`
 - `execution_decisions.json`
@@ -513,6 +525,91 @@ How to inspect a decision:
 4. open `exit_decisions.csv` and `trade_lifecycle.json` to inspect why a symbol was removed and how the decision evolved end to end
 
 These artifacts are also what the dashboard trade detail pages should prefer for explainability, so the backend and UI now share the same persisted facts.
+
+## Universe And Screening Provenance
+
+The trade decision journal now has an upstream companion layer for universe construction and sub-universe screening.
+
+Conceptually the pipeline is now:
+
+- base universe
+- sequential filters / screens
+- final eligible sub-universe
+- candidate scoring and ranking
+- portfolio selection and sizing
+- order and execution outcomes
+
+Base universe versus sub-universe:
+
+- the base universe is the original symbol set, usually from `--universe` or explicit `--symbols`
+- the sub-universe is the eligible symbol set after screens are applied
+- when no filters are configured, the sub-universe defaults to the base universe
+
+Supported first-pass filters:
+
+- `symbol_include_list`
+- `symbol_exclude_list`
+- `min_price`
+- `min_feature_history`
+- `min_avg_dollar_volume`
+- `sector_include_list`
+- `sector_exclude_list`
+- `min_volatility`
+- `max_volatility`
+
+Current behavior:
+
+- price, feature-history, average-dollar-volume, and volatility filters use existing feature-frame data when available
+- sector filters use the existing symbol-group metadata path when a `group_map_path` is configured
+- if a configured metric is unavailable, the filter result is recorded as unavailable instead of being silently invented
+- excluded symbols are now distinguishable from later scored-but-not-selected candidates
+
+Universe provenance artifacts:
+
+- `universe_membership.json` and `universe_membership.csv`
+- `universe_filter_results.json` and `universe_filter_results.csv`
+- `universe_build_summary.json`
+- `sub_universe_snapshot.csv`
+
+These artifacts show:
+
+- which symbols were in the base universe
+- which filters ran and in what order
+- which symbols passed, failed, or were skipped at each stage
+- the final eligible sub-universe
+- per-filter failure counts and summary inclusion counts
+
+Integration with the decision journal:
+
+- `candidate_snapshot.*` now carries base-universe and sub-universe identifiers where available
+- candidates excluded before ranking are recorded as `filtered_out`
+- scored symbols that lost later remain separate from upstream universe exclusions
+- trade and execution provenance now carry forward base/sub-universe identifiers for later UI explanation
+
+Workflow config support:
+
+```yaml
+preset: xsec_nasdaq100_momentum_v1_deploy
+output_dir: artifacts/paper/nasdaq100_xsec
+screening:
+  sub_universe_id: liquid_trend_candidates
+  filters:
+    - filter_name: min_price
+      filter_type: min_price
+      threshold: 5
+    - filter_name: min_history
+      filter_type: min_feature_history
+      threshold: 252
+    - filter_name: banned_names
+      filter_type: symbol_exclude_list
+      symbols: [TSLA]
+```
+
+Current limitations:
+
+- filters are currently wired into paper trading and live dry-run target construction rather than the full research stack
+- sector filters depend on configured group metadata rather than a richer built-in taxonomy layer
+- regime-aware and benchmark-relative eligibility hooks are intentionally deferred, but the artifact schema leaves room for them
 
 ## Paper Slippage Modeling
 

@@ -56,6 +56,8 @@ from trading_platform.services.target_construction_service import (
     compute_latest_target_weights as shared_compute_latest_target_weights,
     load_signal_snapshot as shared_load_signal_snapshot,
 )
+from trading_platform.universe_provenance.models import UniverseBuildBundle
+from trading_platform.universe_provenance.service import write_universe_provenance_artifacts
 
 
 class JsonPaperStateStore:
@@ -404,6 +406,7 @@ def run_paper_trading_cycle_for_targets(
     extra_diagnostics: dict[str, Any] | None = None,
     price_snapshots: list[PaperExecutionPriceSnapshot] | None = None,
     decision_bundle: DecisionJournalBundle | None = None,
+    universe_bundle: UniverseBuildBundle | None = None,
     execution_config: ExecutionConfig | None = None,
     auto_apply_fills: bool = False,
 ) -> PaperTradingRunResult:
@@ -530,6 +533,7 @@ def run_paper_trading_cycle_for_targets(
         diagnostics=diagnostics,
         price_snapshots=list(price_snapshots or []),
         decision_bundle=decision_bundle,
+        universe_bundle=universe_bundle,
     )
 
 
@@ -564,6 +568,7 @@ def run_paper_trading_cycle(
         extra_diagnostics=target_result.extra_diagnostics,
         price_snapshots=target_result.price_snapshots,
         decision_bundle=target_result.decision_bundle,
+        universe_bundle=target_result.universe_bundle,
         execution_config=execution_config,
         auto_apply_fills=auto_apply_fills,
     )
@@ -705,6 +710,7 @@ def write_paper_trading_artifacts(
         execution_paths = write_execution_artifacts(simulation_result, output_path)
         paths.update(execution_paths)
     paths.update(write_decision_journal_artifacts(bundle=result.decision_bundle, output_dir=output_path))
+    paths.update(write_universe_provenance_artifacts(bundle=result.universe_bundle, output_dir=output_path))
     paths.update(extra_paths)
     return paths
 

@@ -93,6 +93,8 @@ def cmd_paper_run(args) -> None:
         ensemble_max_members_per_family=getattr(args, "ensemble_max_members_per_family", None),
         ensemble_minimum_member_observations=int(getattr(args, "ensemble_minimum_member_observations", 0)),
         ensemble_minimum_member_metric=getattr(args, "ensemble_minimum_member_metric", None),
+        sub_universe_id=getattr(args, "sub_universe_id", getattr(loaded_config, "sub_universe_id", None) if loaded_config is not None else None),
+        universe_filters=list(getattr(loaded_config, "universe_filters", []) or []),
         data_sources=getattr(loaded_config, "data_sources", {}) if loaded_config is not None else {},
     )
 

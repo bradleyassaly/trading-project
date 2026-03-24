@@ -168,6 +168,8 @@ class PaperRunWorkflowConfig:
     ensemble_max_members_per_family: int | None = None
     ensemble_minimum_member_observations: int = 0
     ensemble_minimum_member_metric: float | None = None
+    sub_universe_id: str | None = None
+    universe_filters: list[dict[str, Any]] = field(default_factory=list)
     data_sources: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -212,6 +214,8 @@ class LiveDryRunWorkflowConfig:
     turnover_buffer_bps: float = 0.0
     max_turnover_per_rebalance: float | None = None
     benchmark: str | None = None
+    sub_universe_id: str | None = None
+    universe_filters: list[dict[str, Any]] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         _validate_symbol_selection(
