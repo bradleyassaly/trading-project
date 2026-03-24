@@ -95,6 +95,8 @@ def cmd_paper_run(args) -> None:
         ensemble_minimum_member_metric=getattr(args, "ensemble_minimum_member_metric", None),
         sub_universe_id=getattr(args, "sub_universe_id", getattr(loaded_config, "sub_universe_id", None) if loaded_config is not None else None),
         universe_filters=list(getattr(loaded_config, "universe_filters", []) or []),
+        universe_membership_path=getattr(loaded_config, "universe_membership_path", None) if loaded_config is not None else None,
+        market_regime_path=getattr(loaded_config, "market_regime_path", None) if loaded_config is not None else None,
         data_sources=getattr(loaded_config, "data_sources", {}) if loaded_config is not None else {},
     )
 

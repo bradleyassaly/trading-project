@@ -89,6 +89,8 @@ class LivePreviewConfig:
     mock_positions_path: str | None = None
     sub_universe_id: str | None = None
     universe_filters: list[dict[str, Any]] = field(default_factory=list)
+    universe_membership_path: str | None = None
+    market_regime_path: str | None = None
     output_dir: Path = Path("artifacts/live_dry_run")
 
 
@@ -219,13 +221,20 @@ def _build_paper_config(config: LivePreviewConfig) -> PaperTradingConfig:
         reserve_cash_pct=config.reserve_cash_pct,
         sub_universe_id=config.sub_universe_id,
         universe_filters=list(config.universe_filters),
+        universe_membership_path=config.universe_membership_path,
+        market_regime_path=config.market_regime_path,
     )
 
 
 def _build_target_preview(
     config: LivePreviewConfig,
 ) -> tuple[str, dict[str, float], dict[str, float], dict[str, Any], DecisionJournalBundle | None, UniverseBuildBundle | None]:
-    if not config.universe_filters and not config.sub_universe_id:
+    if (
+        not config.universe_filters
+        and not config.sub_universe_id
+        and not config.universe_membership_path
+        and not config.market_regime_path
+    ):
         paper_config = _build_paper_config(config)
         universe_bundle = build_universe_provenance_bundle(
             symbols=config.symbols,

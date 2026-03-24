@@ -155,8 +155,15 @@ def _build_decision_bundle(
             if row.inclusion_status == "excluded"
         },
         universe_metadata_by_symbol={
-            row.symbol: dict(row.metadata)
-            for row in (universe_bundle.membership_records if universe_bundle is not None else [])
+            row.symbol: {
+                **dict(row.metadata_snapshot.to_dict()),
+                **dict(row.taxonomy.to_dict()),
+                **dict(row.benchmark_context.to_dict()),
+                "membership_resolution_status": row.membership.membership_resolution_status,
+                "membership_source": row.membership.membership_source,
+                "metadata_coverage_status": row.metadata_coverage_status,
+            }
+            for row in (universe_bundle.enrichment_records if universe_bundle is not None else [])
         },
         metadata={
             "preset_name": config.preset_name,
@@ -174,6 +181,9 @@ def _build_universe_bundle(config: PaperTradingConfig) -> UniverseBuildBundle:
         filter_definitions=config.universe_filters,
         feature_loader=load_feature_frame,
         group_map_path=config.group_map_path,
+        membership_history_path=config.universe_membership_path,
+        benchmark_id=config.benchmark,
+        market_regime_path=config.market_regime_path,
     )
 
 

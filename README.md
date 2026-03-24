@@ -353,6 +353,10 @@ The dashboard and downstream tooling should prefer the summary and history files
 - `universe_filter_results.csv`
 - `universe_build_summary.json`
 - `sub_universe_snapshot.csv`
+- `universe_enrichment.json`
+- `universe_enrichment.csv`
+- `point_in_time_membership.csv`
+- `universe_enrichment_summary.json`
 - `candidate_snapshot.json`
 - `candidate_snapshot.csv`
 - `trade_decisions.json`
@@ -376,6 +380,10 @@ The dashboard and downstream tooling should prefer the summary and history files
 - `universe_filter_results.csv`
 - `universe_build_summary.json`
 - `sub_universe_snapshot.csv`
+- `universe_enrichment.json`
+- `universe_enrichment.csv`
+- `point_in_time_membership.csv`
+- `universe_enrichment_summary.json`
 - `candidate_snapshot.json`
 - `trade_decisions.json`
 - `execution_decisions.json`
@@ -610,6 +618,82 @@ Current limitations:
 - filters are currently wired into paper trading and live dry-run target construction rather than the full research stack
 - sector filters depend on configured group metadata rather than a richer built-in taxonomy layer
 - regime-aware and benchmark-relative eligibility hooks are intentionally deferred, but the artifact schema leaves room for them
+
+## Point-In-Time Membership And Metadata Enrichment
+
+Universe provenance now includes a second pass for point-in-time membership resolution and symbol metadata enrichment.
+
+Why this exists:
+
+- to distinguish confirmed historical membership from present-day static fallback assumptions
+- to reduce `unavailable` screening context when taxonomy, benchmark, liquidity, volatility, and regime fields can be derived locally
+- to give candidate and trade explanations stronger upstream facts
+
+Membership resolution statuses:
+
+- `confirmed`
+- `inferred`
+- `static_fallback`
+- `unavailable`
+
+Current point-in-time behavior:
+
+- if a membership history CSV is configured, membership is resolved against `effective_start` / `effective_end`
+- if no point-in-time history is available, the system falls back to the configured base universe and labels it `static_fallback`
+- custom symbol lists remain explicit base-universe membership inputs
+- symbols outside a confirmed point-in-time membership window are excluded before later filters and ranking
+
+Suggested screening config shape:
+
+```yaml
+screening:
+  sub_universe_id: liquid_trend_candidates
+  membership_history_path: artifacts/universe_membership/nasdaq100_membership.csv
+  market_regime_path: artifacts/regime
+  filters:
+    - filter_name: min_price
+      filter_type: min_price
+      threshold: 5
+    - filter_name: min_history
+      filter_type: min_feature_history
+      threshold: 252
+```
+
+Reusable enrichment fields now captured when available:
+
+- point-in-time membership status, source, and resolution status
+- sector / industry / group taxonomy
+- benchmark context and simple relative-strength proxy
+- latest price, average dollar volume, volatility, and feature-history availability
+- current regime label from `market_regime.json` when configured
+- metadata coverage status and missing fields
+
+New enrichment artifacts:
+
+- `universe_enrichment.json`
+- `universe_enrichment.csv`
+- `point_in_time_membership.csv`
+- `universe_enrichment_summary.json`
+
+These artifacts show:
+
+- which symbols had confirmed versus fallback membership
+- which taxonomy and benchmark fields were resolved
+- which regime and feature-availability fields were attached
+- coverage summaries for complete, partial, and sparse enrichment
+
+How this improves downstream explainability:
+
+- candidate rows now carry membership resolution status, taxonomy, benchmark context, and regime context when available
+- trade explanations can distinguish static-survivor fallback membership from confirmed point-in-time membership
+- benchmark-relative and taxonomy-aware screens have more reusable upstream facts instead of ad hoc recomputation
+- metadata gaps are explicit through resolution-status fields and missing-field lists
+
+Current limits:
+
+- exact historical index membership still depends on user-provided membership-history files
+- benchmark context is currently lightweight and uses either a configured benchmark symbol or a synthetic equal-weight universe proxy
+- regime enrichment is optional and depends on an existing `market_regime.json` artifact
 
 ## Paper Slippage Modeling
 

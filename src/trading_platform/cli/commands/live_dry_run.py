@@ -48,6 +48,8 @@ def _build_config(args) -> LivePreviewConfig:
         mock_positions_path=getattr(args, "mock_positions_path", None),
         sub_universe_id=getattr(args, "sub_universe_id", None),
         universe_filters=list(getattr(args, "universe_filters", []) or []),
+        universe_membership_path=getattr(args, "universe_membership_path", None),
+        market_regime_path=getattr(args, "market_regime_path", None),
         output_dir=Path(args.output_dir),
     )
 
@@ -68,6 +70,8 @@ def cmd_live_dry_run(args) -> None:
     if loaded_config is not None:
         setattr(args, "sub_universe_id", getattr(loaded_config, "sub_universe_id", None))
         setattr(args, "universe_filters", list(getattr(loaded_config, "universe_filters", []) or []))
+        setattr(args, "universe_membership_path", getattr(loaded_config, "universe_membership_path", None))
+        setattr(args, "market_regime_path", getattr(loaded_config, "market_regime_path", None))
     config = _build_config(args)
     print(f"Running live dry-run for {len(config.symbols)} symbol(s): {', '.join(config.symbols)}")
 

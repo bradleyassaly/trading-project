@@ -203,6 +203,8 @@ state_path: artifacts/paper/nasdaq100_state.json
 output_dir: artifacts/paper/nasdaq100
 screening:
   sub_universe_id: liquid_trend_candidates
+  membership_history_path: artifacts/universe_membership/demo.csv
+  market_regime_path: artifacts/regime
   filters:
     - filter_name: min_price
       filter_type: min_price
@@ -217,6 +219,8 @@ screening:
     config = load_paper_run_workflow_config(path)
 
     assert config.sub_universe_id == "liquid_trend_candidates"
+    assert config.universe_membership_path == "artifacts/universe_membership/demo.csv"
+    assert config.market_regime_path == "artifacts/regime"
     assert len(config.universe_filters) == 2
     assert config.universe_filters[0]["filter_type"] == "min_price"
 
@@ -229,6 +233,8 @@ preset: xsec_nasdaq100_momentum_v1_deploy
 output_dir: artifacts/live_dry_run/nasdaq100
 screening:
   sub_universe_id: liquid_trend_candidates
+  membership_history_path: artifacts/universe_membership/demo.csv
+  market_regime_path: artifacts/regime
   filters:
     - filter_name: min_history
       filter_type: min_feature_history
@@ -240,6 +246,8 @@ screening:
     config = load_live_dry_run_workflow_config(path)
 
     assert config.sub_universe_id == "liquid_trend_candidates"
+    assert config.universe_membership_path == "artifacts/universe_membership/demo.csv"
+    assert config.market_regime_path == "artifacts/regime"
     assert config.universe_filters[0]["filter_type"] == "min_feature_history"
 
 

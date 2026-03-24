@@ -144,6 +144,10 @@ def load_paper_run_workflow_config(path: str | Path) -> PaperRunWorkflowConfig:
         payload["sub_universe_id"] = screening_section["sub_universe_id"]
     if "universe_filters" not in payload and isinstance(screening_section.get("filters"), list):
         payload["universe_filters"] = screening_section["filters"]
+    if "universe_membership_path" not in payload and "membership_history_path" in screening_section:
+        payload["universe_membership_path"] = screening_section["membership_history_path"]
+    if "market_regime_path" not in payload and "market_regime_path" in screening_section:
+        payload["market_regime_path"] = screening_section["market_regime_path"]
     return PaperRunWorkflowConfig(**payload)
 
 
@@ -155,6 +159,10 @@ def load_live_dry_run_workflow_config(path: str | Path) -> LiveDryRunWorkflowCon
         payload["sub_universe_id"] = screening_section["sub_universe_id"]
     if "universe_filters" not in payload and isinstance(screening_section.get("filters"), list):
         payload["universe_filters"] = screening_section["filters"]
+    if "universe_membership_path" not in payload and "membership_history_path" in screening_section:
+        payload["universe_membership_path"] = screening_section["membership_history_path"]
+    if "market_regime_path" not in payload and "market_regime_path" in screening_section:
+        payload["market_regime_path"] = screening_section["market_regime_path"]
     return LiveDryRunWorkflowConfig(**payload)
 
 
