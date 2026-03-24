@@ -604,6 +604,90 @@ Current baseline guidance:
 - keep experiment configs for campaign comparison, not routine operation
 - keep the equity-context research expansion out of the default operating path for now because it did not improve the richer ablation comparison
 
+### Running The Operating Baseline Daily On A Cloud Instance
+
+Recommended deployment model:
+
+- one small VM or instance
+- one checked-out repo with a local virtualenv
+- cron on Linux or Task Scheduler on Windows
+- file-based artifacts under `artifacts/`, no database required
+
+Setup:
+
+```bash
+python -m venv .venv
+. .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -e .[dev]
+```
+
+Daily run entrypoints:
+
+- Linux: `scripts/run_operating_baseline_daily.sh`
+- Windows PowerShell: `scripts/run_operating_baseline_daily.ps1`
+
+Those wrappers run:
+
+1. `configs/orchestration_operating_baseline.yaml`
+2. system-eval history refresh under `artifacts/orchestration_runs_operating_baseline/system_eval_history`
+3. daily summary refresh under `artifacts/operating_baseline_daily`
+
+Local module entrypoint if you want to wire your own scheduler:
+
+```bash
+python -m trading_platform.system.operating_baseline_daily --config configs/orchestration_operating_baseline.yaml --summary-dir artifacts/operating_baseline_daily
+```
+
+Predictable outputs:
+
+- daily log: `artifacts/operating_baseline_daily/logs/YYYY-MM-DD.log`
+- daily summary JSON: `artifacts/operating_baseline_daily/daily_baseline_summary.json`
+- daily summary Markdown: `artifacts/operating_baseline_daily/daily_baseline_summary.md`
+- orchestration runs: `artifacts/orchestration_runs_operating_baseline/operating_baseline/<RUN_ID>`
+- system-eval history: `artifacts/orchestration_runs_operating_baseline/system_eval_history`
+
+Inspect failures:
+
+- check the daily log first
+- inspect the latest orchestration run with `trading-cli ops orchestrate show-run --run <RUN_DIR>`
+- inspect the latest evaluation with `trading-cli ops system-eval show --evaluation artifacts/orchestration_runs_operating_baseline/system_eval_history`
+
+Rebuild system-eval history manually:
+
+```bash
+trading-cli ops system-eval build --runs-root artifacts/orchestration_runs_operating_baseline/operating_baseline --output-dir artifacts/orchestration_runs_operating_baseline/system_eval_history
+```
+
+Optional dashboard refresh:
+
+```bash
+python -m trading_platform.system.operating_baseline_daily --config configs/orchestration_operating_baseline.yaml --summary-dir artifacts/operating_baseline_daily --refresh-dashboard-static-data --dashboard-output-dir artifacts/dashboard_data
+```
+
+If you want to inspect the dashboard on the same instance:
+
+```bash
+trading-cli dashboard serve --artifacts-root artifacts --host 127.0.0.1 --port 8000
+```
+
+Scheduling guidance:
+
+Linux cron example:
+
+```cron
+15 18 * * 1-5 cd /opt/trading_platform && /bin/bash scripts/run_operating_baseline_daily.sh
+```
+
+Windows Task Scheduler action:
+
+- Program/script: `powershell.exe`
+- Arguments: `-ExecutionPolicy Bypass -File C:\path\to\trading_platform\scripts\run_operating_baseline_daily.ps1`
+
+Common operator note:
+
+- if system evaluation reports `null` for per-run return or sharpe, that usually means the latest paper run only produced one equity observation; use the history-level metrics in `system_eval_history` for recurring baseline tracking
+
 Portfolio and strategy pages:
 
 - `/portfolio` now includes portfolio equity, drawdown, current positions, exposure, and recent order/fill/trade activity when those artifacts exist
