@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import shutil
 from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
@@ -51,6 +53,37 @@ def _write_json(path: Path, payload: dict[str, Any]) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, sort_keys=False), encoding="utf-8")
     return path
+
+
+def _write_variant_config_manifest(
+    *,
+    variant_dir: Path,
+    stage_configs: dict[str, Path],
+) -> Path:
+    manifest_dir = variant_dir / "config_manifest"
+    manifest_dir.mkdir(parents=True, exist_ok=True)
+    entries: list[dict[str, str]] = []
+    for stage_name, source_path in stage_configs.items():
+        snapshot_path = manifest_dir / source_path.name
+        shutil.copy2(source_path, snapshot_path)
+        entries.append(
+            {
+                "stage": stage_name,
+                "source_path": str(source_path),
+                "snapshot_path": str(snapshot_path),
+                "content_hash": hashlib.sha256(snapshot_path.read_bytes()).hexdigest()[:12],
+            }
+        )
+    manifest_path = manifest_dir / "canonical_config_manifest.json"
+    _write_json(
+        manifest_path,
+        {
+            "manifest_type": "canonical_config_manifest",
+            "stage_count": len(entries),
+            "stages": entries,
+        },
+    )
+    return manifest_path
 
 
 def _resolve_run_bundle_path(bundle_path_or_dir: str | Path) -> Path:
@@ -331,6 +364,14 @@ def run_canonical_bundle_experiment(
             pipeline_config_path=pipeline_config_path,
             daily_pipeline_config_path=daily_pipeline_config_path,
         )
+        config_manifest_path = _write_variant_config_manifest(
+            variant_dir=variant_dir,
+            stage_configs={
+                "promotion_policy": effective_promotion_policy_path,
+                "strategy_portfolio_policy": effective_strategy_portfolio_policy_path,
+                "daily_pipeline_config": daily_pipeline_config_path,
+            },
+        )
 
         selected_rows = list(strategy_portfolio_payload.get("selected_strategies", []))
         summary = strategy_portfolio_payload.get("summary", {})
@@ -370,6 +411,7 @@ def run_canonical_bundle_experiment(
             "run_bundle_path": str(run_bundle_path),
             "effective_promotion_policy_path": str(effective_promotion_policy_path),
             "effective_strategy_portfolio_policy_path": str(effective_strategy_portfolio_policy_path),
+            "config_manifest_path": str(config_manifest_path),
             "promotion_candidates_path": (
                 str(registry_bundle.get("promotion_candidates_json_path")) if registry_bundle else None
             ),

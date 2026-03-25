@@ -1169,6 +1169,15 @@ def test_canonical_bundle_experiment_harness_reuses_exported_bundle(
         assert Path(row["run_bundle_path"]).exists()
         assert Path(row["effective_strategy_portfolio_policy_path"]).exists()
         assert Path(row["effective_promotion_policy_path"]).exists()
+        assert Path(row["config_manifest_path"]).exists()
+        config_manifest_payload = json.loads(Path(row["config_manifest_path"]).read_text(encoding="utf-8"))
+        assert config_manifest_payload["manifest_type"] == "canonical_config_manifest"
+        assert {entry["stage"] for entry in config_manifest_payload["stages"]} == {
+            "promotion_policy",
+            "strategy_portfolio_policy",
+            "daily_pipeline_config",
+        }
+        assert all(Path(entry["snapshot_path"]).exists() for entry in config_manifest_payload["stages"])
 
     comparison_df = pd.read_csv(comparison_csv_path)
     assert set(comparison_df["variant_name"]) == {
