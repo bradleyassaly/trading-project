@@ -179,6 +179,36 @@ tags:
     return config_path
 
 
+def _write_strategy_portfolio_policy_config(
+    *,
+    config_path: Path,
+) -> Path:
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(
+        """
+schema_version: 1
+max_strategies: 2
+max_strategies_per_signal_family: 1
+max_weight_per_strategy: 0.7
+min_weight_per_strategy: 0.0
+selection_metric: ranking_value
+weighting_mode: equal
+require_active_only: false
+require_promotion_eligible_only: true
+deduplicate_source_runs: true
+diversification_dimension: signal_family
+fallback_equal_weight_mode: true
+warn_on_same_family_overlap: true
+output_inactive_status: inactive
+notes: canonical smoke strategy portfolio policy
+tags:
+  - canonical_smoke
+""".strip(),
+        encoding="utf-8",
+    )
+    return config_path
+
+
 def _write_bundle_experiment_config(
     *,
     bundle: dict[str, Path],
@@ -395,10 +425,13 @@ failure_policy: fail
     assert Path(promoted_payload["promotion_candidates_path"]).exists()
 
     strategy_portfolio_dir = tmp_path / "artifacts" / "strategy_portfolio"
+    strategy_portfolio_config_path = _write_strategy_portfolio_policy_config(
+        config_path=tmp_path / "strategy_portfolio_policy.yaml",
+    )
     cmd_strategy_portfolio_build(
         SimpleNamespace(
             promoted_dir=str(promoted_dir),
-            policy_config=None,
+            policy_config=str(strategy_portfolio_config_path),
             lifecycle=None,
             output_dir=str(strategy_portfolio_dir),
         )
@@ -560,10 +593,13 @@ failure_policy: fail
     )
 
     strategy_portfolio_dir = tmp_path / "artifacts" / "strategy_portfolio"
+    strategy_portfolio_config_path = _write_strategy_portfolio_policy_config(
+        config_path=tmp_path / "strategy_portfolio_policy.yaml",
+    )
     cmd_strategy_portfolio_build(
         SimpleNamespace(
             promoted_dir=str(promoted_dir),
-            policy_config=None,
+            policy_config=str(strategy_portfolio_config_path),
             lifecycle=None,
             output_dir=str(strategy_portfolio_dir),
         )
