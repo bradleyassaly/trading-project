@@ -1945,6 +1945,12 @@ Run targeted tests while iterating:
 pytest tests/test_cli_grouping.py tests/test_config_loader.py
 ```
 
+Canonical supported-path smoke coverage now lives in:
+
+- `tests/test_canonical_workflow_smoke.py`
+
+That test exercises the supported sequence from config-driven research-input refresh through alpha research, promotion, strategy-portfolio export, and shared paper/live multi-strategy config readiness.
+
 Run the full suite:
 
 ```bash
