@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import shutil
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -269,6 +271,40 @@ cases:
     return config_path
 
 
+def _snapshot_canonical_config_manifest(
+    *,
+    output_dir: Path,
+    stage_configs: dict[str, Path],
+) -> Path:
+    manifest_dir = output_dir / "config_manifest"
+    manifest_dir.mkdir(parents=True, exist_ok=True)
+    manifest_entries: list[dict[str, str]] = []
+    for stage_name, source_path in stage_configs.items():
+        snapshot_path = manifest_dir / source_path.name
+        shutil.copy2(source_path, snapshot_path)
+        manifest_entries.append(
+            {
+                "stage": stage_name,
+                "source_path": str(source_path),
+                "snapshot_path": str(snapshot_path),
+                "content_hash": hashlib.sha256(snapshot_path.read_bytes()).hexdigest()[:12],
+            }
+        )
+    manifest_path = manifest_dir / "canonical_config_manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "manifest_type": "canonical_config_manifest",
+                "stage_count": len(manifest_entries),
+                "stages": manifest_entries,
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    return manifest_path
+
+
 def _build_canonical_exported_bundle(tmp_path: Path) -> dict[str, Path]:
     data_root = tmp_path / "data"
     normalized_dir = data_root / "normalized"
@@ -451,6 +487,10 @@ failure_policy: fail
         "feature_dir": feature_dir,
         "metadata_dir": metadata_dir,
         "alpha_output_dir": alpha_output_dir,
+        "refresh_config_path": refresh_config_path,
+        "alpha_config_path": alpha_config_path,
+        "promotion_config_path": promotion_config_path,
+        "strategy_portfolio_config_path": strategy_portfolio_config_path,
         "promoted_dir": promoted_dir,
         "strategy_portfolio_dir": strategy_portfolio_dir,
         "multi_strategy_config_path": Path(export_paths["multi_strategy_config_path"]),
@@ -616,6 +656,10 @@ failure_policy: fail
         "feature_dir": feature_dir,
         "metadata_dir": metadata_dir,
         "alpha_output_dir": alpha_output_dir,
+        "refresh_config_path": refresh_config_path,
+        "alpha_config_path": alpha_config_path,
+        "promotion_config_path": promotion_config_path,
+        "strategy_portfolio_config_path": strategy_portfolio_config_path,
         "promoted_dir": promoted_dir,
         "strategy_portfolio_dir": strategy_portfolio_dir,
         "multi_strategy_config_path": Path(export_paths["multi_strategy_config_path"]),
@@ -638,6 +682,10 @@ def test_canonical_config_driven_workflow_smoke(
     multi_strategy_config_path = bundle["multi_strategy_config_path"]
     pipeline_config_path = bundle["pipeline_config_path"]
     run_bundle_path = bundle["run_bundle_path"]
+    refresh_config_path = bundle["refresh_config_path"]
+    alpha_config_path = bundle["alpha_config_path"]
+    promotion_config_path = bundle["promotion_config_path"]
+    strategy_portfolio_config_path = bundle["strategy_portfolio_config_path"]
 
     assert (feature_dir / "AAPL.parquet").exists()
     assert (metadata_dir / "sub_universe_snapshot.csv").exists()
@@ -665,6 +713,17 @@ def test_canonical_config_driven_workflow_smoke(
         paper_state_path=tmp_path / "artifacts" / "live_multi_state.json",
         enable_paper_trading=False,
         enable_live_dry_run=True,
+    )
+    config_manifest_path = _snapshot_canonical_config_manifest(
+        output_dir=tmp_path / "artifacts",
+        stage_configs={
+            "refresh_research_inputs": refresh_config_path,
+            "alpha_research": alpha_config_path,
+            "promotion_policy": promotion_config_path,
+            "strategy_portfolio_policy": strategy_portfolio_config_path,
+            "paper_daily_pipeline": paper_pipeline_config_path,
+            "live_daily_pipeline": live_pipeline_config_path,
+        },
     )
 
     pipeline_checks: list[dict[str, object]] = []
@@ -726,6 +785,18 @@ def test_canonical_config_driven_workflow_smoke(
     assert pipeline_checks[1]["live_dry_run"] is True
     assert (paper_pipeline_dir / "paper_run_summary_latest.json").exists()
     assert (live_pipeline_dir / "live_dry_run_summary.json").exists()
+    manifest_payload = json.loads(config_manifest_path.read_text(encoding="utf-8"))
+    assert manifest_payload["manifest_type"] == "canonical_config_manifest"
+    assert manifest_payload["stage_count"] == 6
+    assert {entry["stage"] for entry in manifest_payload["stages"]} == {
+        "refresh_research_inputs",
+        "alpha_research",
+        "promotion_policy",
+        "strategy_portfolio_policy",
+        "paper_daily_pipeline",
+        "live_daily_pipeline",
+    }
+    assert all(Path(entry["snapshot_path"]).exists() for entry in manifest_payload["stages"])
 
 
 def test_canonical_paper_multi_strategy_bundle_reuse_for_scheduled_style_runs(
