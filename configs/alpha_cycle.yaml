@@ -1,0 +1,32 @@
+stages:
+  refresh: true
+  research: true
+  promotion: true
+  portfolio: true
+  export_bundle: true
+  report: true
+
+configs:
+  refresh_config: configs/research_input_refresh.yaml
+  research_config: configs/alpha_research.yaml
+  promotion_policy_config: configs/promotion.yaml
+  strategy_portfolio_policy_config: configs/strategy_portfolio.yaml
+
+paths:
+  output_root: artifacts/alpha_cycle
+
+run:
+  run_name: canonical_alpha_cycle
+
+mode:
+  strict_mode: true
+  best_effort_mode: false
+
+promotion:
+  top_n: 5
+  allow_overwrite: true
+  inactive: false
+  override_validation: false
+
+portfolio:
+  lifecycle: null

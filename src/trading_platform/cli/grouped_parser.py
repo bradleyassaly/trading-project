@@ -58,6 +58,7 @@ from trading_platform.cli.commands.paper_run import cmd_paper_run
 from trading_platform.cli.commands.paper_run_multi_strategy import cmd_paper_run_multi_strategy
 from trading_platform.cli.commands.paper_run_scheduled import cmd_paper_run_scheduled
 from trading_platform.cli.commands.pipeline import cmd_pipeline
+from trading_platform.cli.commands.pipeline_alpha_cycle import cmd_pipeline_alpha_cycle
 from trading_platform.cli.commands.pipeline_run import (
     cmd_pipeline_run,
     cmd_pipeline_run_daily,
@@ -941,6 +942,9 @@ def build_parser() -> argparse.ArgumentParser:
     ops_pipeline_weekly = ops_pipeline_subparsers.add_parser("run-weekly", help="Run a weekly pipeline config and validate schedule_type=weekly")
     ops_pipeline_weekly.add_argument("--config", type=str, required=True, help="Path to the pipeline JSON/YAML config.")
     ops_pipeline_weekly.set_defaults(func=cmd_pipeline_run_weekly)
+    ops_pipeline_alpha_cycle = ops_pipeline_subparsers.add_parser("alpha-cycle", help="Run the one-command research-to-portfolio alpha cycle")
+    ops_pipeline_alpha_cycle.add_argument("--config", type=str, required=True, help="Path to the alpha cycle JSON/YAML config.")
+    ops_pipeline_alpha_cycle.set_defaults(func=cmd_pipeline_alpha_cycle)
 
     ops_monitor = ops_subparsers.add_parser("monitor", help="Monitoring, alerting, and dashboard data builders")
     ops_monitor_subparsers = ops_monitor.add_subparsers(dest="ops_monitor_command", required=True)
@@ -1184,6 +1188,9 @@ def build_parser() -> argparse.ArgumentParser:
     pipeline_run_weekly = pipeline_subparsers.add_parser("run-weekly", help="Run a weekly pipeline config and validate schedule_type=weekly")
     pipeline_run_weekly.add_argument("--config", type=str, required=True, help="Path to the pipeline JSON/YAML config.")
     pipeline_run_weekly.set_defaults(func=cmd_pipeline_run_weekly)
+    pipeline_alpha_cycle = pipeline_subparsers.add_parser("alpha-cycle", help="Run the one-command research-to-portfolio alpha cycle")
+    pipeline_alpha_cycle.add_argument("--config", type=str, required=True, help="Path to the alpha cycle JSON/YAML config.")
+    pipeline_alpha_cycle.set_defaults(func=cmd_pipeline_alpha_cycle)
 
     execution_parser = subparsers.add_parser("execution", help="Execution realism simulation commands")
     execution_subparsers = execution_parser.add_subparsers(dest="execution_command", required=True)

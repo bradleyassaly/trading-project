@@ -5,6 +5,7 @@ from pathlib import Path
 
 from trading_platform.config.loader import (
     load_alpha_research_workflow_config,
+    load_alpha_cycle_workflow_config,
     load_canonical_bundle_experiment_matrix_workflow_config,
     load_canonical_bundle_experiment_workflow_config,
     load_live_dry_run_workflow_config,
@@ -333,6 +334,57 @@ signals:
     assert config.signal_family == "fundamental_quality_value"
     assert config.fundamentals_enabled is True
     assert config.fundamentals_daily_features_path == "data/fundamentals/daily_fundamental_features.parquet"
+
+
+def test_load_alpha_cycle_workflow_config(tmp_path) -> None:
+    path = tmp_path / "alpha_cycle.yaml"
+    path.write_text(
+        """
+stages:
+  refresh: true
+  research: true
+  promotion: true
+  portfolio: true
+  export_bundle: true
+  report: true
+configs:
+  refresh_config: configs/research_input_refresh.yaml
+  research_config: configs/alpha_research.yaml
+  promotion_policy_config: configs/promotion.yaml
+  strategy_portfolio_policy_config: configs/strategy_portfolio.yaml
+paths:
+  output_root: artifacts/alpha_cycle
+  promoted_dir: artifacts/promoted_strategies
+run:
+  run_name: canonical_alpha_cycle
+  run_id: run_001
+mode:
+  strict_mode: false
+  best_effort_mode: true
+promotion:
+  top_n: 3
+  allow_overwrite: true
+portfolio:
+  lifecycle: artifacts/governance/strategy_lifecycle.json
+""".strip(),
+        encoding="utf-8",
+    )
+
+    config = load_alpha_cycle_workflow_config(path)
+
+    assert config.refresh_config == "configs/research_input_refresh.yaml"
+    assert config.research_config == "configs/alpha_research.yaml"
+    assert config.promotion_policy_config == "configs/promotion.yaml"
+    assert config.strategy_portfolio_policy_config == "configs/strategy_portfolio.yaml"
+    assert config.output_root == "artifacts/alpha_cycle"
+    assert config.promoted_dir == "artifacts/promoted_strategies"
+    assert config.run_name == "canonical_alpha_cycle"
+    assert config.run_id == "run_001"
+    assert config.strict_mode is False
+    assert config.best_effort_mode is True
+    assert config.promotion_top_n == 3
+    assert config.allow_overwrite is True
+    assert config.lifecycle_path == "artifacts/governance/strategy_lifecycle.json"
 
 
 def test_load_walkforward_workflow_config_from_yaml(tmp_path) -> None:

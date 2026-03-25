@@ -15,6 +15,12 @@ The repository is now organized around one supported workflow:
 
 `data refresh-research-inputs -> research alpha -> research promote -> strategy-portfolio build -> paper run -> live dry-run`
 
+There is now also a one-command wrapper for the research-to-portfolio portion of that path:
+
+```bash
+trading-cli pipeline alpha-cycle --config configs/alpha_cycle.yaml
+```
+
 The next information-quality expansion on that path is point-in-time-safe fundamentals:
 
 - canonical fundamentals ingest and normalization stays artifact-first
@@ -374,6 +380,43 @@ trading-cli live dry-run --config configs/workflows/live_xsec_nasdaq100.yaml
 
 Secondary research commands such as `research run`, `research walkforward`, and `research memo` still exist for direct strategy research and validation, but they are no longer the primary end-to-end path documented here.
 
+## Alpha Cycle
+
+`pipeline alpha-cycle` runs the artifact-first research-to-portfolio cycle in one command by calling the existing Python services directly rather than shelling out:
+
+1. refresh research inputs
+2. run alpha research
+3. refresh the registry and apply promotion
+4. build the strategy portfolio
+5. export the run bundle
+6. emit a cycle summary report
+
+Example:
+
+```bash
+trading-cli pipeline alpha-cycle --config configs/alpha_cycle.yaml
+```
+
+The cycle always writes:
+
+- `artifacts/alpha_cycle/<run_name>/alpha_cycle_summary.json`
+- `artifacts/alpha_cycle/<run_name>/alpha_cycle_summary.md`
+
+Those summaries include:
+
+- stage status and duration
+- key artifact paths
+- promoted strategy count and promoted family names
+- selected portfolio strategy count and weights when available
+- top research metrics when available
+- warnings and errors
+
+Mode behavior:
+
+- `strict_mode: true` stops on the first hard error
+- `best_effort_mode: true` continues where reasonable and reports partial failures
+- zero promotions are treated as a valid business outcome and reported clearly, with downstream portfolio/export stages skipped instead of failing ambiguously
+
 ## Fundamentals Workflow
 
 Run fundamentals as a standalone artifact-first path when you want to refresh or inspect it separately from the broader canonical refresh:
@@ -503,6 +546,7 @@ Main pages and APIs:
 - `ops pipeline run`
 - `ops pipeline run-daily`
 - `ops pipeline run-weekly`
+- `ops pipeline alpha-cycle`
 - `ops monitor latest`
 - `ops monitor run-health`
 - `ops monitor strategy-health`

@@ -15,6 +15,8 @@ from trading_platform.config.models import (
 )
 from trading_platform.config.workflow_models import (
     AlphaResearchWorkflowConfig,
+    AlphaCycleStageToggles,
+    AlphaCycleWorkflowConfig,
     CanonicalBundleExperimentMatrixCaseConfig,
     CanonicalBundleExperimentMatrixWorkflowConfig,
     CanonicalBundleExperimentVariantConfig,
@@ -319,6 +321,46 @@ def load_alpha_research_workflow_config(path: str | Path) -> AlphaResearchWorkfl
     _set_if_missing(payload, "experiment_tracker_dir", tracking_section, "tracker_dir")
 
     return AlphaResearchWorkflowConfig(**payload)
+
+
+def load_alpha_cycle_workflow_config(path: str | Path) -> AlphaCycleWorkflowConfig:
+    data = _read_config_file(Path(path))
+    payload = dict(data)
+    stages_section = _pop_dict_section(payload, "stages")
+    configs_section = _pop_dict_section(payload, "configs")
+    paths_section = _pop_dict_section(payload, "paths")
+    run_section = _pop_dict_section(payload, "run")
+    mode_section = _pop_dict_section(payload, "mode")
+    promotion_section = _pop_dict_section(payload, "promotion")
+    portfolio_section = _pop_dict_section(payload, "portfolio")
+
+    _set_if_missing(payload, "refresh_config", configs_section)
+    _set_if_missing(payload, "research_config", configs_section)
+    _set_if_missing(payload, "promotion_policy_config", configs_section)
+    _set_if_missing(payload, "strategy_portfolio_policy_config", configs_section)
+
+    _set_if_missing(payload, "output_root", paths_section)
+    _set_if_missing(payload, "research_output_dir", paths_section)
+    _set_if_missing(payload, "registry_dir", paths_section)
+    _set_if_missing(payload, "promoted_dir", paths_section)
+    _set_if_missing(payload, "portfolio_dir", paths_section)
+    _set_if_missing(payload, "export_dir", paths_section)
+
+    _set_if_missing(payload, "run_name", run_section)
+    _set_if_missing(payload, "run_id", run_section)
+
+    _set_if_missing(payload, "strict_mode", mode_section)
+    _set_if_missing(payload, "best_effort_mode", mode_section)
+
+    _set_if_missing(payload, "validation_path", promotion_section)
+    _set_if_missing(payload, "promotion_top_n", promotion_section, "top_n")
+    _set_if_missing(payload, "allow_overwrite", promotion_section)
+    _set_if_missing(payload, "inactive", promotion_section)
+    _set_if_missing(payload, "override_validation", promotion_section)
+
+    _set_if_missing(payload, "lifecycle_path", portfolio_section, "lifecycle")
+    payload["stages"] = AlphaCycleStageToggles(**stages_section)
+    return AlphaCycleWorkflowConfig(**payload)
 
 
 def load_canonical_bundle_experiment_workflow_config(path: str | Path) -> CanonicalBundleExperimentWorkflowConfig:

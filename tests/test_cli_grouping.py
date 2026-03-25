@@ -1898,6 +1898,40 @@ def test_grouped_pipeline_run_weekly_command_parses() -> None:
     assert args.config == "configs/pipeline_weekly.yaml"
 
 
+def test_grouped_pipeline_alpha_cycle_command_parses() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "pipeline",
+            "alpha-cycle",
+            "--config",
+            "configs/alpha_cycle.yaml",
+        ]
+    )
+
+    assert args.command_family == "pipeline"
+    assert args.pipeline_command == "alpha-cycle"
+    assert args.config == "configs/alpha_cycle.yaml"
+
+
+def test_grouped_ops_pipeline_alpha_cycle_command_parses() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "ops",
+            "pipeline",
+            "alpha-cycle",
+            "--config",
+            "configs/alpha_cycle.yaml",
+        ]
+    )
+
+    assert args.command_family == "ops"
+    assert args.ops_command == "pipeline"
+    assert args.ops_pipeline_command == "alpha-cycle"
+    assert args.config == "configs/alpha_cycle.yaml"
+
+
 def test_grouped_monitor_run_health_command_parses() -> None:
     parser = build_parser()
     args = parser.parse_args(

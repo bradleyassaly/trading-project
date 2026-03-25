@@ -362,6 +362,69 @@ class AlphaResearchWorkflowConfig:
 
 
 @dataclass(frozen=True)
+class AlphaCycleStageToggles:
+    refresh: bool = True
+    research: bool = True
+    promotion: bool = True
+    portfolio: bool = True
+    export_bundle: bool = True
+    report: bool = True
+
+    def enabled_stage_names(self) -> list[str]:
+        return [
+            stage_name
+            for stage_name in ("refresh", "research", "promotion", "portfolio", "export_bundle", "report")
+            if bool(getattr(self, stage_name))
+        ]
+
+
+@dataclass(frozen=True)
+class AlphaCycleWorkflowConfig:
+    refresh_config: str | None = None
+    research_config: str | None = None
+    promotion_policy_config: str | None = None
+    strategy_portfolio_policy_config: str | None = None
+    output_root: str = "artifacts/alpha_cycle"
+    research_output_dir: str | None = None
+    registry_dir: str | None = None
+    promoted_dir: str | None = None
+    portfolio_dir: str | None = None
+    export_dir: str | None = None
+    run_name: str = "alpha_cycle"
+    run_id: str | None = None
+    strict_mode: bool = True
+    best_effort_mode: bool = False
+    validation_path: str | None = None
+    promotion_top_n: int | None = None
+    allow_overwrite: bool = False
+    inactive: bool = False
+    override_validation: bool = False
+    lifecycle_path: str | None = None
+    stages: AlphaCycleStageToggles = field(default_factory=AlphaCycleStageToggles)
+
+    def __post_init__(self) -> None:
+        if not str(self.run_name or "").strip():
+            raise ValueError("run_name must be a non-empty string")
+        if self.strict_mode and self.best_effort_mode:
+            raise ValueError("strict_mode and best_effort_mode cannot both be true")
+        if self.promotion_top_n is not None and self.promotion_top_n <= 0:
+            raise ValueError("promotion_top_n must be > 0 when provided")
+        if self.stages.refresh and not self.refresh_config:
+            raise ValueError("refresh_config is required when refresh stage is enabled")
+        if self.stages.research and not self.research_config:
+            raise ValueError("research_config is required when research stage is enabled")
+        if self.stages.promotion and not self.promotion_policy_config:
+            raise ValueError("promotion_policy_config is required when promotion stage is enabled")
+        if self.stages.portfolio and not self.strategy_portfolio_policy_config:
+            raise ValueError("strategy_portfolio_policy_config is required when portfolio stage is enabled")
+
+    def to_cli_defaults(self) -> dict[str, Any]:
+        payload = asdict(self)
+        payload["stages"] = asdict(self.stages)
+        return payload
+
+
+@dataclass(frozen=True)
 class CanonicalBundleExperimentVariantConfig:
     name: str
     promotion_policy_overrides: dict[str, Any] = field(default_factory=dict)
