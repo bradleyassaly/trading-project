@@ -1,0 +1,24 @@
+selection:
+  universe: nasdaq100
+  sub_universe_id: liquid_trend_candidates
+
+feature_groups:
+  - trend
+  - volatility
+  - liquidity
+
+outputs:
+  feature_dir: data/features
+  metadata_dir: data/metadata
+  normalized_dir: data/normalized
+
+reference_data:
+  root: artifacts/reference_data/v1
+  membership_history_path: artifacts/reference_data/v1/universe_membership_history.csv
+  taxonomy_snapshot_path: artifacts/reference_data/v1/taxonomy_snapshots.csv
+  benchmark_mapping_path: artifacts/reference_data/v1/benchmark_mapping_snapshots.csv
+  market_regime_path: artifacts/regime
+  benchmark: SPY
+
+failure_handling:
+  policy: partial_success

@@ -1486,6 +1486,7 @@ Standard metadata sidecar workflow:
 Dedicated research-input refresh command:
 
 - use `trading-cli data refresh-research-inputs --symbols ...` or `--universe ...` to rebuild research-ready feature files and metadata sidecars together in one deterministic step
+- the same command also supports a versioned JSON/YAML spec via `--config`
 - default locations:
   - features: `data/features/`
   - metadata: `data/metadata/`
@@ -1500,6 +1501,33 @@ Dedicated research-input refresh command:
   - `data/metadata/research_input_bundle_manifest.json`
 - optional failure rows are written to `data/metadata/research_input_refresh_failures.csv` when some symbols fail feature generation but others succeed
 - this command is now the primary intended way to prepare research inputs; paper/live still refresh metadata opportunistically but are no longer the main intended publisher path
+- config-driven runs use the same orchestration service and write the same outputs as flag-driven runs; the config path only changes how inputs are declared
+
+Config-driven refresh spec:
+
+- example config: `configs/research_input_refresh.yaml`
+- supported top-level fields:
+  - `symbols` or `universe`
+  - `feature_groups`
+  - `sub_universe_id`
+  - `feature_dir`
+  - `metadata_dir`
+  - `normalized_dir`
+  - `reference_data_root`
+  - `universe_membership_path`
+  - `taxonomy_snapshot_path`
+  - `benchmark_mapping_path`
+  - `market_regime_path`
+  - `group_map_path`
+  - `benchmark`
+  - `failure_policy`
+- the loader also supports nested sections for readability:
+  - `selection`
+  - `outputs`
+  - `reference_data`
+  - `failure_handling`
+- `failure_policy: partial_success` preserves the current behavior
+- `failure_policy: fail` still writes refresh summaries and failure rows, but marks the overall refresh status as failed when any symbol build fails
 
 Example:
 
@@ -1508,6 +1536,13 @@ trading-cli data refresh-research-inputs \
   --universe nasdaq100 \
   --sub-universe-id liquid_trend_candidates \
   --reference-data-root artifacts/reference_data/v1
+```
+
+Config example:
+
+```bash
+trading-cli data refresh-research-inputs \
+  --config configs/research_input_refresh.yaml
 ```
 
 Generation and fallback rules:

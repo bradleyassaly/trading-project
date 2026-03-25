@@ -14,6 +14,7 @@ from trading_platform.config.loader import (
     load_paper_run_workflow_config,
     load_pipeline_run_config,
     load_promotion_policy_config,
+    load_research_input_refresh_workflow_config,
     load_research_run_workflow_config,
     load_research_workflow_config,
     load_automated_orchestration_config,
@@ -124,6 +125,39 @@ conditional_research:
     assert config.conditional_min_sample_size == 30
     assert config.conditional_compare_to_baseline is True
     assert config.conditional_allow_variants is True
+
+
+def test_load_research_input_refresh_workflow_config_from_yaml(tmp_path) -> None:
+    path = tmp_path / "research_input_refresh.yaml"
+    path.write_text(
+        """
+selection:
+  symbols: [AAPL, MSFT]
+  sub_universe_id: liquid_trend_candidates
+outputs:
+  feature_dir: data/features
+  metadata_dir: data/metadata
+  normalized_dir: data/normalized
+reference_data:
+  root: artifacts/reference_data/v1
+  membership_history_path: artifacts/reference_data/v1/universe_membership_history.csv
+  taxonomy_snapshot_path: artifacts/reference_data/v1/taxonomy_snapshots.csv
+  benchmark_mapping_path: artifacts/reference_data/v1/benchmark_mapping_snapshots.csv
+  market_regime_path: artifacts/regime
+  benchmark: SPY
+failure_handling:
+  policy: fail
+""".strip(),
+        encoding="utf-8",
+    )
+
+    config = load_research_input_refresh_workflow_config(path)
+
+    assert config.symbols == ["AAPL", "MSFT"]
+    assert config.sub_universe_id == "liquid_trend_candidates"
+    assert config.reference_data_root == "artifacts/reference_data/v1"
+    assert config.benchmark == "SPY"
+    assert config.failure_policy == "fail"
 
 
 def test_load_walkforward_workflow_config_from_yaml(tmp_path) -> None:
@@ -845,6 +879,7 @@ def test_example_configs_load_from_repo() -> None:
     regime_campaign_medium_config = load_experiment_spec_config(root / "configs" / "experiment_campaign_regime_medium.yaml")
     adaptive_campaign_medium_config = load_experiment_spec_config(root / "configs" / "experiment_campaign_adaptive_medium.yaml")
     governance_campaign_medium_config = load_experiment_spec_config(root / "configs" / "experiment_campaign_governance_medium.yaml")
+    research_input_refresh_config = load_research_input_refresh_workflow_config(root / "configs" / "research_input_refresh.yaml")
     orchestration_experiment_base = load_automated_orchestration_config(root / "configs" / "orchestration_experiment_base.yaml")
     orchestration_experiment_fast = load_automated_orchestration_config(root / "configs" / "orchestration_experiment_fast.yaml")
     orchestration_experiment_medium = load_automated_orchestration_config(root / "configs" / "orchestration_experiment_medium.yaml")
@@ -885,6 +920,8 @@ def test_example_configs_load_from_repo() -> None:
     assert regime_campaign_medium_config.repeat_count == 5
     assert adaptive_campaign_medium_config.repeat_count == 5
     assert governance_campaign_medium_config.repeat_count == 5
+    assert research_input_refresh_config.universe == "nasdaq100"
+    assert research_input_refresh_config.sub_universe_id == "liquid_trend_candidates"
     assert orchestration_experiment_base.feature_flags["adaptive"] is True
     assert orchestration_experiment_fast.research_artifacts_root == "artifacts/promotion_fixture"
     assert orchestration_experiment_fast.output_root_dir == "artifacts/orchestration_runs_fast"

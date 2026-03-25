@@ -250,3 +250,32 @@ class LiveDryRunWorkflowConfig:
 
     def to_cli_defaults(self) -> dict[str, Any]:
         return asdict(self)
+
+
+@dataclass(frozen=True)
+class ResearchInputRefreshWorkflowConfig:
+    symbols: list[str] | None = None
+    universe: str | None = None
+    feature_groups: list[str] | None = None
+    sub_universe_id: str | None = None
+    feature_dir: str = "data/features"
+    metadata_dir: str = "data/metadata"
+    normalized_dir: str = "data/normalized"
+    reference_data_root: str | None = None
+    universe_membership_path: str | None = None
+    taxonomy_snapshot_path: str | None = None
+    benchmark_mapping_path: str | None = None
+    market_regime_path: str | None = None
+    group_map_path: str | None = None
+    benchmark: str | None = None
+    failure_policy: str = "partial_success"
+
+    def __post_init__(self) -> None:
+        selected = sum(bool(value) for value in (self.symbols, self.universe))
+        if selected != 1:
+            raise ValueError("exactly one of symbols or universe must be provided")
+        if self.failure_policy not in {"partial_success", "fail"}:
+            raise ValueError("failure_policy must be one of: partial_success, fail")
+
+    def to_cli_defaults(self) -> dict[str, Any]:
+        return asdict(self)

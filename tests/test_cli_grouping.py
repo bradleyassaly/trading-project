@@ -198,6 +198,22 @@ def test_grouped_data_refresh_research_inputs_command_parses() -> None:
     assert args.reference_data_root == "artifacts/reference_data/v1"
 
 
+def test_grouped_data_refresh_research_inputs_command_parses_config() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "data",
+            "refresh-research-inputs",
+            "--config",
+            "configs/research_input_refresh.yaml",
+        ]
+    )
+
+    assert args.command_family == "data"
+    assert args.data_command == "refresh-research-inputs"
+    assert args.config == "configs/research_input_refresh.yaml"
+
+
 def test_legacy_features_build_rewrites_to_data_features() -> None:
     argv, note = rewrite_legacy_cli_args(["features", "build", "--universe", "nasdaq100"])
 

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
@@ -29,9 +29,42 @@ class ResearchInputRefreshResult:
     summary: dict[str, Any]
 
 
+@dataclass(frozen=True)
+class ResearchInputRefreshRequest:
+    symbols: list[str]
+    feature_groups: list[str] | None = None
+    universe_name: str | None = None
+    sub_universe_id: str | None = None
+    reference_data_root: str | None = None
+    universe_membership_path: str | None = None
+    taxonomy_snapshot_path: str | None = None
+    benchmark_mapping_path: str | None = None
+    market_regime_path: str | None = None
+    group_map_path: str | None = None
+    benchmark_id: str | None = None
+    feature_dir: Path = FEATURES_DIR
+    metadata_dir: Path = METADATA_DIR
+    normalized_dir: Path = NORMALIZED_DATA_DIR
+    failure_policy: str = "partial_success"
+
+    def __post_init__(self) -> None:
+        if not self.symbols:
+            raise ValueError("symbols must contain at least one symbol")
+        if self.failure_policy not in {"partial_success", "fail"}:
+            raise ValueError("failure_policy must be one of: partial_success, fail")
+
+    def to_dict(self) -> dict[str, Any]:
+        payload = asdict(self)
+        payload["feature_dir"] = str(self.feature_dir)
+        payload["metadata_dir"] = str(self.metadata_dir)
+        payload["normalized_dir"] = str(self.normalized_dir)
+        return payload
+
+
 def refresh_research_inputs(
     *,
-    symbols: list[str],
+    request: ResearchInputRefreshRequest | None = None,
+    symbols: list[str] | None = None,
     feature_groups: list[str] | None = None,
     universe_name: str | None = None,
     sub_universe_id: str | None = None,
@@ -45,7 +78,40 @@ def refresh_research_inputs(
     feature_dir: Path = FEATURES_DIR,
     metadata_dir: Path = METADATA_DIR,
     normalized_dir: Path = NORMALIZED_DATA_DIR,
+    failure_policy: str = "partial_success",
 ) -> ResearchInputRefreshResult:
+    resolved_request = request or ResearchInputRefreshRequest(
+        symbols=list(symbols or []),
+        feature_groups=feature_groups,
+        universe_name=universe_name,
+        sub_universe_id=sub_universe_id,
+        reference_data_root=reference_data_root,
+        universe_membership_path=universe_membership_path,
+        taxonomy_snapshot_path=taxonomy_snapshot_path,
+        benchmark_mapping_path=benchmark_mapping_path,
+        market_regime_path=market_regime_path,
+        group_map_path=group_map_path,
+        benchmark_id=benchmark_id,
+        feature_dir=feature_dir,
+        metadata_dir=metadata_dir,
+        normalized_dir=normalized_dir,
+        failure_policy=failure_policy,
+    )
+    symbols = resolved_request.symbols
+    feature_groups = resolved_request.feature_groups
+    universe_name = resolved_request.universe_name
+    sub_universe_id = resolved_request.sub_universe_id
+    reference_data_root = resolved_request.reference_data_root
+    universe_membership_path = resolved_request.universe_membership_path
+    taxonomy_snapshot_path = resolved_request.taxonomy_snapshot_path
+    benchmark_mapping_path = resolved_request.benchmark_mapping_path
+    market_regime_path = resolved_request.market_regime_path
+    group_map_path = resolved_request.group_map_path
+    benchmark_id = resolved_request.benchmark_id
+    feature_dir = resolved_request.feature_dir
+    metadata_dir = resolved_request.metadata_dir
+    normalized_dir = resolved_request.normalized_dir
+
     feature_dir.mkdir(parents=True, exist_ok=True)
     metadata_dir.mkdir(parents=True, exist_ok=True)
     metadata_artifact_dir = metadata_dir / "universe_refresh"
@@ -100,9 +166,12 @@ def refresh_research_inputs(
         status = "partial_success"
     elif failures and not built_symbols:
         status = "failed"
+    if failures and resolved_request.failure_policy == "fail":
+        status = "failed"
 
     summary_payload: dict[str, Any] = {
         "status": status,
+        "request": resolved_request.to_dict(),
         "feature_symbols_requested": list(symbols),
         "feature_symbols_built": built_symbols,
         "feature_failures": failures,

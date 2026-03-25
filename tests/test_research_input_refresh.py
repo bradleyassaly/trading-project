@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pandas as pd
 
 from trading_platform.cli.commands.refresh_research_inputs import cmd_refresh_research_inputs
+from trading_platform.config.loader import load_research_input_refresh_workflow_config
 from trading_platform.services.research_input_refresh_service import refresh_research_inputs
 
 
@@ -122,6 +123,7 @@ def test_cmd_refresh_research_inputs_prints_operator_summary(
     )
 
     args = SimpleNamespace(
+        config=None,
         symbols=["AAPL", "MSFT"],
         universe=None,
         feature_groups=["trend"],
@@ -133,9 +135,11 @@ def test_cmd_refresh_research_inputs_prints_operator_summary(
         market_regime_path=None,
         group_map_path=None,
         benchmark=None,
+        failure_policy="partial_success",
         feature_dir=str(tmp_path / "features"),
         metadata_dir=str(tmp_path / "metadata"),
         normalized_dir=str(tmp_path / "normalized"),
+        _cli_argv=[],
     )
 
     cmd_refresh_research_inputs(args)
@@ -145,3 +149,114 @@ def test_cmd_refresh_research_inputs_prints_operator_summary(
     assert "Status: success" in output
     assert "Features dir:" in output
     assert "Metadata dir:" in output
+
+
+def test_load_research_input_refresh_workflow_config_from_yaml(tmp_path: Path) -> None:
+    path = tmp_path / "research_input_refresh.yaml"
+    path.write_text(
+        """
+selection:
+  universe: nasdaq100
+  sub_universe_id: liquid_trend_candidates
+feature_groups: [trend, volatility]
+outputs:
+  feature_dir: data/features
+  metadata_dir: data/metadata
+  normalized_dir: data/normalized
+reference_data:
+  root: artifacts/reference_data/v1
+  membership_history_path: artifacts/reference_data/v1/universe_membership_history.csv
+  taxonomy_snapshot_path: artifacts/reference_data/v1/taxonomy_snapshots.csv
+  benchmark_mapping_path: artifacts/reference_data/v1/benchmark_mapping_snapshots.csv
+  market_regime_path: artifacts/regime
+  group_map_path: artifacts/groups.csv
+  benchmark: SPY
+failure_handling:
+  policy: fail
+""".strip(),
+        encoding="utf-8",
+    )
+
+    config = load_research_input_refresh_workflow_config(path)
+
+    assert config.universe == "nasdaq100"
+    assert config.sub_universe_id == "liquid_trend_candidates"
+    assert config.feature_groups == ["trend", "volatility"]
+    assert config.reference_data_root == "artifacts/reference_data/v1"
+    assert config.universe_membership_path.endswith("universe_membership_history.csv")
+    assert config.failure_policy == "fail"
+
+
+def test_cmd_refresh_research_inputs_supports_config_input(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "research_input_refresh.yaml"
+    config_path.write_text(
+        """
+selection:
+  universe: nasdaq100
+outputs:
+  feature_dir: custom/features
+  metadata_dir: custom/metadata
+  normalized_dir: custom/normalized
+reference_data:
+  root: artifacts/reference_data/v1
+failure_handling:
+  policy: fail
+""".strip(),
+        encoding="utf-8",
+    )
+
+    captured: dict[str, object] = {}
+
+    def fake_refresh_research_inputs(*, request):
+        captured["request"] = request
+        return SimpleNamespace(
+            status="success",
+            feature_symbols_requested=["AAPL", "MSFT"],
+            feature_symbols_built=["AAPL", "MSFT"],
+            feature_failures=[],
+            feature_dir=request.feature_dir,
+            metadata_dir=request.metadata_dir,
+            paths={},
+        )
+
+    monkeypatch.setattr(
+        "trading_platform.cli.commands.refresh_research_inputs.refresh_research_inputs",
+        fake_refresh_research_inputs,
+    )
+    monkeypatch.setattr(
+        "trading_platform.cli.commands.refresh_research_inputs.resolve_symbols",
+        lambda args: ["AAPL", "MSFT"],
+    )
+
+    args = SimpleNamespace(
+        config=str(config_path),
+        symbols=None,
+        universe=None,
+        feature_groups=["trend"],
+        sub_universe_id=None,
+        reference_data_root=None,
+        universe_membership_path=None,
+        taxonomy_snapshot_path=None,
+        benchmark_mapping_path=None,
+        market_regime_path=None,
+        group_map_path=None,
+        benchmark=None,
+        failure_policy="partial_success",
+        feature_dir="data/features",
+        metadata_dir="data/metadata",
+        normalized_dir="data/normalized",
+        _cli_argv=["--config", str(config_path)],
+    )
+
+    cmd_refresh_research_inputs(args)
+
+    request = captured["request"]
+    assert request.universe_name == "nasdaq100"
+    assert str(request.feature_dir).endswith("custom\\features")
+    assert str(request.metadata_dir).endswith("custom\\metadata")
+    assert str(request.normalized_dir).endswith("custom\\normalized")
+    assert request.reference_data_root == "artifacts/reference_data/v1"
+    assert request.failure_policy == "fail"

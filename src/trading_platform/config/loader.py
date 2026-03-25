@@ -16,6 +16,7 @@ from trading_platform.config.models import (
 from trading_platform.config.workflow_models import (
     LiveDryRunWorkflowConfig,
     PaperRunWorkflowConfig,
+    ResearchInputRefreshWorkflowConfig,
     ResearchRunWorkflowConfig,
     WalkForwardWorkflowConfig,
 )
@@ -199,6 +200,60 @@ def load_live_dry_run_workflow_config(path: str | Path) -> LiveDryRunWorkflowCon
     if "market_regime_path" not in payload and "market_regime_path" in screening_section:
         payload["market_regime_path"] = screening_section["market_regime_path"]
     return LiveDryRunWorkflowConfig(**payload)
+
+
+def load_research_input_refresh_workflow_config(path: str | Path) -> ResearchInputRefreshWorkflowConfig:
+    data = _read_config_file(Path(path))
+    payload = dict(data)
+    selection_section = payload.pop("selection", {}) if isinstance(payload.get("selection"), dict) else {}
+    outputs_section = payload.pop("outputs", {}) if isinstance(payload.get("outputs"), dict) else {}
+    reference_section = payload.pop("reference_data", {}) if isinstance(payload.get("reference_data"), dict) else {}
+    metadata_section = payload.pop("metadata", {}) if isinstance(payload.get("metadata"), dict) else {}
+    failure_section = payload.pop("failure_handling", {}) if isinstance(payload.get("failure_handling"), dict) else {}
+
+    if "symbols" not in payload and isinstance(selection_section.get("symbols"), list):
+        payload["symbols"] = selection_section["symbols"]
+    if "universe" not in payload and "universe" in selection_section:
+        payload["universe"] = selection_section["universe"]
+    if "sub_universe_id" not in payload and "sub_universe_id" in selection_section:
+        payload["sub_universe_id"] = selection_section["sub_universe_id"]
+
+    if "feature_groups" not in payload and isinstance(payload.get("feature_groups"), list):
+        payload["feature_groups"] = payload["feature_groups"]
+    elif "feature_groups" not in payload and isinstance(outputs_section.get("feature_groups"), list):
+        payload["feature_groups"] = outputs_section["feature_groups"]
+
+    if "feature_dir" not in payload and "feature_dir" in outputs_section:
+        payload["feature_dir"] = outputs_section["feature_dir"]
+    if "metadata_dir" not in payload and "metadata_dir" in outputs_section:
+        payload["metadata_dir"] = outputs_section["metadata_dir"]
+    if "normalized_dir" not in payload and "normalized_dir" in outputs_section:
+        payload["normalized_dir"] = outputs_section["normalized_dir"]
+
+    if "reference_data_root" not in payload and "root" in reference_section:
+        payload["reference_data_root"] = reference_section["root"]
+    if "reference_data_root" not in payload and "reference_data_root" in reference_section:
+        payload["reference_data_root"] = reference_section["reference_data_root"]
+    if "universe_membership_path" not in payload and "membership_history_path" in reference_section:
+        payload["universe_membership_path"] = reference_section["membership_history_path"]
+    if "taxonomy_snapshot_path" not in payload and "taxonomy_snapshot_path" in reference_section:
+        payload["taxonomy_snapshot_path"] = reference_section["taxonomy_snapshot_path"]
+    if "benchmark_mapping_path" not in payload and "benchmark_mapping_path" in reference_section:
+        payload["benchmark_mapping_path"] = reference_section["benchmark_mapping_path"]
+    if "market_regime_path" not in payload and "market_regime_path" in reference_section:
+        payload["market_regime_path"] = reference_section["market_regime_path"]
+    if "group_map_path" not in payload and "group_map_path" in reference_section:
+        payload["group_map_path"] = reference_section["group_map_path"]
+    if "benchmark" not in payload and "benchmark" in reference_section:
+        payload["benchmark"] = reference_section["benchmark"]
+
+    if "sub_universe_id" not in payload and "sub_universe_id" in metadata_section:
+        payload["sub_universe_id"] = metadata_section["sub_universe_id"]
+
+    if "failure_policy" not in payload and "policy" in failure_section:
+        payload["failure_policy"] = failure_section["policy"]
+
+    return ResearchInputRefreshWorkflowConfig(**payload)
 
 
 def load_multi_strategy_portfolio_config(path: str | Path) -> MultiStrategyPortfolioConfig:
