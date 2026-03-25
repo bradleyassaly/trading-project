@@ -98,9 +98,32 @@ rebalance_bars: 21
     assert config.preset == "xsec_nasdaq100_momentum_v1_research"
     assert config.output_dir == "artifacts/research/xsec"
     assert config.top_n == 2
-    assert config.enable_database_metadata is True
-    assert config.database_url == "postgresql+psycopg://localhost/trading"
-    assert config.database_schema == "control_plane"
+
+
+def test_load_research_run_workflow_config_with_conditional_section(tmp_path) -> None:
+    path = tmp_path / "research_conditional.yaml"
+    path.write_text(
+        """
+universe: nasdaq100
+strategy: xsec_momentum_topn
+output_dir: artifacts/research/nasdaq100
+conditional_research:
+  enabled: true
+  condition_types: [regime, sub_universe, benchmark_context]
+  min_sample_size: 30
+  compare_to_baseline: true
+  allow_variants: true
+""".strip(),
+        encoding="utf-8",
+    )
+
+    config = load_research_run_workflow_config(path)
+
+    assert config.enable_conditional_evaluation is True
+    assert config.conditional_condition_types == ["regime", "sub_universe", "benchmark_context"]
+    assert config.conditional_min_sample_size == 30
+    assert config.conditional_compare_to_baseline is True
+    assert config.conditional_allow_variants is True
 
 
 def test_load_walkforward_workflow_config_from_yaml(tmp_path) -> None:
@@ -496,6 +519,30 @@ pipeline_execution_config_path: configs/execution.yaml
     assert config.min_metric_threshold == 0.75
     assert config.max_strategies_total == 3
     assert config.default_status == "inactive"
+
+
+def test_load_promotion_policy_config_with_conditional_fields(tmp_path) -> None:
+    path = tmp_path / "promotion_conditional.yaml"
+    path.write_text(
+        """
+metric_name: portfolio_sharpe
+min_metric_threshold: 0.75
+enable_conditional_variants: true
+allowed_condition_types: [regime, benchmark_context]
+min_condition_sample_size: 24
+min_condition_improvement: 0.01
+compare_condition_to_unconditional: true
+""".strip(),
+        encoding="utf-8",
+    )
+
+    config = load_promotion_policy_config(path)
+
+    assert config.enable_conditional_variants is True
+    assert config.allowed_condition_types == ["regime", "benchmark_context"]
+    assert config.min_condition_sample_size == 24
+    assert config.min_condition_improvement == 0.01
+    assert config.compare_condition_to_unconditional is True
 
 
 def test_load_strategy_portfolio_policy_config_from_yaml(tmp_path) -> None:

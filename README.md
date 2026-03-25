@@ -409,6 +409,12 @@ rebalance_bars: 21
 portfolio_construction_mode: pure_topn
 benchmark: equal_weight
 cost_bps: 10.0
+conditional_research:
+  enabled: true
+  condition_types: [regime, sub_universe, benchmark_context]
+  min_sample_size: 30
+  compare_to_baseline: true
+  allow_variants: true
 ```
 
 Example paper workflow config:
@@ -433,6 +439,10 @@ The dashboard and downstream tooling should prefer the summary and history files
 - `artifacts/research/.../*_run_summary.json`
 - `artifacts/research/.../*_timeseries.csv`
 - `artifacts/research/.../*_signals.csv`
+- `artifacts/research/.../conditional_signal_performance.csv`
+- `artifacts/research/.../conditional_signal_performance.json`
+- `artifacts/research/.../conditional_research_summary.json`
+- `artifacts/research/.../conditional_promotion_candidates.csv`
 - `data/features/<SYMBOL>.parquet`
 
 ### Walk-forward
@@ -1426,6 +1436,80 @@ Common failure mode to check first:
 - if leaderboard rows write `rejection_reason=none`, that sentinel should be normalized to null before promotion readiness is evaluated
 
 The promotion-viability diagnostic artifact records both the failing and fixed outcomes so this can be used as a quick regression check after research-registry changes.
+
+## Conditional Research And Promotion
+
+Conditional research is an additive layer on top of the existing broad research registry and promotion flow.
+
+The intent is to answer:
+
+- where a signal works better than its unconditional baseline
+- whether the improvement is large enough to matter
+- whether the supporting sample is large enough to trust
+- whether the promoted strategy should only be active when that condition is true
+
+Supported condition types in the current first pass:
+
+- `regime`
+  driven from existing `signal_performance_by_regime.csv` alpha-research artifacts
+- `sub_universe`
+  consumed when a run writes `signal_performance_by_sub_universe.csv`
+- `benchmark_context`
+  consumed when a run writes `signal_performance_by_benchmark_context.csv`
+
+Condition handling rules:
+
+- unconditional promotion remains the default
+- conditional slices are compared against the unconditional baseline using stored metrics
+- slices with missing metrics or small sample sizes are kept explicit and rejected rather than overinterpreted
+- conditional promotion is only considered when `enable_conditional_variants=true` in the promotion policy
+
+Condition-aware research artifacts:
+
+- `conditional_signal_performance.csv`
+  flattened condition-level metrics and baseline comparisons
+- `conditional_signal_performance.json`
+  JSON view of the same condition rows
+- `conditional_research_summary.json`
+  condition coverage summary, best slice, and promotion-candidate summaries
+- `conditional_promotion_candidates.csv`
+  promotion-ready conditional slices with eligibility, improvement, and rejection reasons
+
+Condition-aware manifest metadata:
+
+- each `research_run.json` now includes a `conditional_research` section
+- that section records:
+  - available vs unavailable condition types
+  - best condition summary
+  - promotion-candidate rows
+  - emitted conditional artifact paths
+
+Condition-aware promotion behavior:
+
+- `research promote` still supports broad unconditional promotion exactly as before
+- when the promotion policy enables conditional variants, the promotion pipeline can emit a conditional preset variant instead of the unconditional baseline for that research run
+- promoted rows now record:
+  - `promotion_variant`
+  - `condition_id`
+  - `condition_type`
+  - `conditional_promotion_summary`
+  - `activation_conditions`
+
+Those activation conditions are also carried into the generated preset payload and the promoted-strategy index so later paper/live portfolio logic can explain why a strategy is active or inactive under a given context.
+
+Promotion policy fields for conditional variants:
+
+- `enable_conditional_variants`
+- `allowed_condition_types`
+- `min_condition_sample_size`
+- `min_condition_improvement`
+- `compare_condition_to_unconditional`
+
+Current limitations:
+
+- regime is the strongest built-in condition source today because the alpha-research path already emits regime performance artifacts
+- sub-universe and benchmark-relative conditional promotion are supported when those slice artifacts exist, but the broad research runners do not yet emit every slice type automatically
+- this phase carries activation metadata forward; it does not yet fully gate live or paper trading on those conditions
 
 For repeated lightweight frequency checks, run:
 

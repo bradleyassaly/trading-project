@@ -94,7 +94,19 @@ def load_walk_forward_config(path: str | Path) -> WalkForwardConfig:
 
 def load_research_run_workflow_config(path: str | Path) -> ResearchRunWorkflowConfig:
     data = _read_config_file(Path(path))
-    return ResearchRunWorkflowConfig(**_apply_database_section(dict(data)))
+    payload = _apply_database_section(dict(data))
+    conditional_section = payload.pop("conditional_research", {}) if isinstance(payload.get("conditional_research"), dict) else {}
+    if "enable_conditional_evaluation" not in payload and "enabled" in conditional_section:
+        payload["enable_conditional_evaluation"] = conditional_section["enabled"]
+    if "conditional_condition_types" not in payload and isinstance(conditional_section.get("condition_types"), list):
+        payload["conditional_condition_types"] = conditional_section["condition_types"]
+    if "conditional_min_sample_size" not in payload and "min_sample_size" in conditional_section:
+        payload["conditional_min_sample_size"] = conditional_section["min_sample_size"]
+    if "conditional_compare_to_baseline" not in payload and "compare_to_baseline" in conditional_section:
+        payload["conditional_compare_to_baseline"] = conditional_section["compare_to_baseline"]
+    if "conditional_allow_variants" not in payload and "allow_variants" in conditional_section:
+        payload["conditional_allow_variants"] = conditional_section["allow_variants"]
+    return ResearchRunWorkflowConfig(**payload)
 
 
 def load_walkforward_workflow_config(path: str | Path) -> WalkForwardWorkflowConfig:

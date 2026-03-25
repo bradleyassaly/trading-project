@@ -48,6 +48,11 @@ class ResearchRunWorkflowConfig:
     vol_lookback_bars: int = 20
     benchmark: str = "equal_weight"
     cost_bps: float | None = None
+    enable_conditional_evaluation: bool = False
+    conditional_condition_types: list[str] = field(default_factory=list)
+    conditional_min_sample_size: int = 20
+    conditional_compare_to_baseline: bool = True
+    conditional_allow_variants: bool = False
     enable_database_metadata: bool = False
     database_url: str | None = None
     database_schema: str | None = None

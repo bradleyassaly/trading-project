@@ -9,6 +9,8 @@ from typing import Any
 
 import pandas as pd
 
+from trading_platform.research.conditional import evaluate_conditional_research
+
 
 MANIFEST_NAME = "research_run.json"
 REGISTRY_JSON_NAME = "research_registry.json"
@@ -17,6 +19,7 @@ LEADERBOARD_JSON_NAME = "research_leaderboard.json"
 LEADERBOARD_CSV_NAME = "research_leaderboard.csv"
 PROMOTION_CANDIDATES_JSON_NAME = "promotion_candidates.json"
 PROMOTION_CANDIDATES_CSV_NAME = "promotion_candidates.csv"
+CONDITIONAL_PROMOTION_CANDIDATES_CSV_NAME = "conditional_promotion_candidates.csv"
 COMPARE_RUNS_JSON_NAME = "research_run_comparison.json"
 COMPARE_RUNS_MD_NAME = "research_run_comparison.md"
 
@@ -70,6 +73,23 @@ PROMOTION_CANDIDATE_COLUMNS = [
     "promoted_signal_count",
     "folds_tested",
     "candidate_count",
+]
+
+CONDITIONAL_PROMOTION_CANDIDATE_COLUMNS = [
+    "run_id",
+    "timestamp",
+    "signal_family",
+    "universe",
+    "condition_id",
+    "condition_type",
+    "eligible",
+    "recommendation",
+    "sample_size",
+    "metric_name",
+    "metric_value",
+    "baseline_metric_value",
+    "improvement_vs_baseline",
+    "reason",
 ]
 
 
@@ -434,6 +454,22 @@ def build_research_run_manifest(
         manifest,
         rules=promotion_rules,
     ).to_dict()
+    conditional_result = evaluate_conditional_research(
+        output_dir=artifact_dir,
+        artifact_paths=normalized_artifacts,
+        signal_family=signal_family,
+        top_candidate=manifest["top_candidate"],
+        top_metrics=manifest["top_metrics"],
+        universe=universe,
+    )
+    manifest["conditional_research"] = {
+        "enabled": conditional_result.get("enabled", False),
+        "summary": conditional_result.get("summary", {}),
+        "promotion_candidates": conditional_result.get("promotion_candidates", []),
+        "artifacts": conditional_result.get("artifacts", {}),
+    }
+    normalized_artifacts.update(conditional_result.get("artifacts", {}))
+    manifest["artifact_paths"] = normalized_artifacts
     return manifest
 
 
@@ -616,6 +652,7 @@ def build_promotion_candidates(
 ) -> dict[str, Any]:
     manifests = load_research_manifests(artifacts_root)
     rows: list[dict[str, Any]] = []
+    conditional_rows: list[dict[str, Any]] = []
     for manifest in manifests:
         decision = evaluate_manifest_promotion_readiness(manifest, rules=rules)
         reasons = "; ".join(decision.reasons)
@@ -637,10 +674,35 @@ def build_promotion_candidates(
                 "candidate_count": manifest.get("candidate_count"),
             }
         )
+        for candidate in manifest.get("conditional_research", {}).get("promotion_candidates", []):
+            conditional_rows.append(
+                {
+                    "run_id": manifest.get("run_id"),
+                    "timestamp": manifest.get("timestamp"),
+                    "signal_family": manifest.get("signal_family"),
+                    "universe": manifest.get("universe"),
+                    "condition_id": candidate.get("condition_id"),
+                    "condition_type": candidate.get("condition_type"),
+                    "eligible": candidate.get("eligible"),
+                    "recommendation": candidate.get("recommendation"),
+                    "sample_size": candidate.get("sample_size"),
+                    "metric_name": candidate.get("metric_name"),
+                    "metric_value": candidate.get("metric_value"),
+                    "baseline_metric_value": candidate.get("baseline_metric_value"),
+                    "improvement_vs_baseline": candidate.get("improvement_vs_baseline"),
+                    "reason": candidate.get("reason"),
+                }
+            )
     candidates_df = pd.DataFrame(rows, columns=PROMOTION_CANDIDATE_COLUMNS)
+    conditional_df = pd.DataFrame(conditional_rows, columns=CONDITIONAL_PROMOTION_CANDIDATE_COLUMNS)
     if not candidates_df.empty:
         candidates_df = candidates_df.sort_values(
             by=["eligible", "portfolio_sharpe", "mean_spearman_ic", "timestamp", "run_id"],
+            ascending=[False, False, False, False, True],
+        ).reset_index(drop=True)
+    if not conditional_df.empty:
+        conditional_df = conditional_df.sort_values(
+            by=["eligible", "improvement_vs_baseline", "sample_size", "timestamp", "run_id"],
             ascending=[False, False, False, False, True],
         ).reset_index(drop=True)
 
@@ -650,13 +712,17 @@ def build_promotion_candidates(
         "generated_at": _now_utc(),
         "rules": asdict(rules or ResearchPromotionRules()),
         "rows": candidates_df.to_dict(orient="records"),
+        "conditional_rows": conditional_df.to_dict(orient="records"),
     }
     json_path = _write_json(output_path / PROMOTION_CANDIDATES_JSON_NAME, payload)
     csv_path = output_path / PROMOTION_CANDIDATES_CSV_NAME
     candidates_df.to_csv(csv_path, index=False)
+    conditional_csv_path = output_path / CONDITIONAL_PROMOTION_CANDIDATES_CSV_NAME
+    conditional_df.to_csv(conditional_csv_path, index=False)
     return {
         "promotion_candidates_json_path": json_path,
         "promotion_candidates_csv_path": csv_path,
+        "conditional_promotion_candidates_csv_path": conditional_csv_path,
         "eligible_count": int((candidates_df.get("eligible", pd.Series(dtype=bool)) == True).sum()) if not candidates_df.empty else 0,
     }
 
