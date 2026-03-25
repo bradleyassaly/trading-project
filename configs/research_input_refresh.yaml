@@ -5,7 +5,8 @@ selection:
 feature_groups:
   - trend
   - volatility
-  - liquidity
+  - momentum
+  - volume
 
 outputs:
   feature_dir: data/features
@@ -22,3 +23,17 @@ reference_data:
 
 failure_handling:
   policy: partial_success
+
+fundamentals:
+  enabled: true
+  artifact_root: data/fundamentals
+  providers:
+    - vendor
+  daily_features_path: data/fundamentals/daily_fundamental_features.parquet
+  # Prefer FMP_API_KEY in the shell or pass --fundamentals-vendor-api-key.
+  vendor_api_key: null
+  # Optional artifact-backed fallback for offline/vendor-normalized snapshots.
+  vendor_file_path: null
+  # Enable SEC alongside vendor only when local EDGAR artifacts are available.
+  sec_companyfacts_root: null
+  sec_submissions_root: null

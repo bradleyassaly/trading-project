@@ -182,6 +182,13 @@ def ingest_fundamentals(request: FundamentalsIngestionRequest) -> dict[str, str]
     filing_path = request.artifact_root / "fundamental_filings.parquet"
     values_path = request.artifact_root / "fundamental_values.parquet"
     summary_path = request.artifact_root / "fundamental_summary.json"
+    provider_errors = [
+        diagnostic.get("message")
+        for diagnostic in provider_diagnostics
+        if diagnostic.get("status") in {"api_key_missing", "error"}
+    ]
+    if values_df.empty and provider_errors:
+        raise RuntimeError("; ".join(str(error) for error in provider_errors if error))
 
     company_df.to_parquet(company_path, index=False)
     filing_df.to_parquet(filing_path, index=False)
@@ -194,6 +201,14 @@ def ingest_fundamentals(request: FundamentalsIngestionRequest) -> dict[str, str]
                 "company_count": int(len(company_df)),
                 "filing_count": int(len(filing_df)),
                 "value_count": int(len(values_df)),
+                "symbols_requested": len(request.symbols),
+                "symbols_with_values": int(values_df["symbol"].nunique()) if not values_df.empty else 0,
+                "warnings": [
+                    diagnostic.get("message")
+                    for diagnostic in provider_diagnostics
+                    if diagnostic.get("status") not in {None, "ok"}
+                    and diagnostic.get("message")
+                ],
             },
             indent=2,
             default=str,
@@ -315,6 +330,14 @@ def build_daily_fundamental_features(request: FundamentalFeatureBuildRequest) ->
                 lambda values: values - values.mean() if values.notna().sum() >= 1 else values
             )
 
+    if not daily_features_df.empty:
+        preserved_columns = [
+            column
+            for column in ("timestamp", "symbol", "sector", "industry", *DAILY_FUNDAMENTAL_FEATURE_COLUMNS)
+            if column in daily_features_df.columns
+        ]
+        daily_features_df = daily_features_df[preserved_columns].copy()
+
     daily_features_path = request.daily_features_path or artifact_root / "daily_fundamental_features.parquet"
     coverage_path = artifact_root / "fundamental_feature_coverage.csv"
     lag_audit_path = artifact_root / "fundamental_lag_audit.csv"
@@ -327,6 +350,9 @@ def build_daily_fundamental_features(request: FundamentalFeatureBuildRequest) ->
                 "feature_name": column,
                 "non_null_rows": int(daily_features_df[column].notna().sum()) if column in daily_features_df.columns else 0,
                 "coverage_ratio": float(daily_features_df[column].notna().mean()) if column in daily_features_df.columns and len(daily_features_df) else 0.0,
+                "symbols_with_values": int(daily_features_df.loc[daily_features_df[column].notna(), "symbol"].nunique())
+                if column in daily_features_df.columns and not daily_features_df.empty
+                else 0,
             }
             for column in DAILY_FUNDAMENTAL_FEATURE_COLUMNS
         ]
@@ -352,6 +378,11 @@ def build_daily_fundamental_features(request: FundamentalFeatureBuildRequest) ->
         "daily_feature_rows": int(len(daily_features_df)),
         "symbols_covered": int(daily_features_df["symbol"].nunique()) if not daily_features_df.empty else 0,
         "features": list(DAILY_FUNDAMENTAL_FEATURE_COLUMNS),
+        "feature_coverage": {
+            column: float(daily_features_df[column].notna().mean())
+            for column in DAILY_FUNDAMENTAL_FEATURE_COLUMNS
+            if column in daily_features_df.columns and len(daily_features_df)
+        },
     }
     summary_path.write_text(json.dumps(summary_payload, indent=2, default=str), encoding="utf-8")
     return {

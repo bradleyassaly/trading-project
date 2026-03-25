@@ -24,6 +24,7 @@ trading-cli pipeline alpha-cycle --config configs/alpha_cycle.yaml
 The next information-quality expansion on that path is point-in-time-safe fundamentals:
 
 - canonical fundamentals ingest and normalization stays artifact-first
+- the `vendor` path now supports real Financial Modeling Prep ingestion with `FMP_API_KEY`
 - filing availability dates control when fundamental features become visible
 - alpha research can opt into daily aligned fundamentals without breaking technical-only runs
 
@@ -216,6 +217,18 @@ Optional fundamentals refresh can run in the same canonical step by enabling the
 - `data/fundamentals/fundamental_feature_coverage.csv`
 - `data/fundamentals/fundamental_lag_audit.csv`
 - `data/fundamentals/fundamental_summary.json`
+
+For the vendor-backed path, export your FMP key in the shell instead of writing it into tracked config files:
+
+```powershell
+$env:FMP_API_KEY="YOUR_KEY"
+trading-cli data refresh-research-inputs --config configs/research_input_refresh.yaml
+```
+
+```bash
+export FMP_API_KEY="YOUR_KEY"
+trading-cli data refresh-research-inputs --config configs/research_input_refresh.yaml
+```
 
 ### 2. Run alpha research
 
@@ -422,8 +435,17 @@ Mode behavior:
 Run fundamentals as a standalone artifact-first path when you want to refresh or inspect it separately from the broader canonical refresh:
 
 ```bash
-trading-cli data fundamentals ingest --symbols AAPL MSFT --providers sec vendor --sec-companyfacts-root <SEC_COMPANYFACTS_DIR> --sec-submissions-root <SEC_SUBMISSIONS_DIR> --vendor-file-path <NORMALIZED_VENDOR_FILE>
-trading-cli data fundamentals features --symbols AAPL MSFT --artifact-root data/fundamentals --calendar-dir data/features
+$env:FMP_API_KEY="YOUR_KEY"
+trading-cli data fundamentals ingest --symbols AAPL MSFT NVDA --providers vendor --artifact-root data/fundamentals
+trading-cli data fundamentals features --symbols AAPL MSFT NVDA --artifact-root data/fundamentals --calendar-dir data/features
+```
+
+Or in POSIX shells:
+
+```bash
+export FMP_API_KEY="YOUR_KEY"
+trading-cli data fundamentals ingest --symbols AAPL MSFT NVDA --providers vendor --artifact-root data/fundamentals
+trading-cli data fundamentals features --symbols AAPL MSFT NVDA --artifact-root data/fundamentals --calendar-dir data/features
 ```
 
 Or keep the canonical one-command flow and enable fundamentals inside `data refresh-research-inputs`.
@@ -431,8 +453,19 @@ Or keep the canonical one-command flow and enable fundamentals inside `data refr
 Provider architecture:
 
 - `sec` is the authoritative raw-source path using local EDGAR-style JSON payloads
-- `vendor` is the normalized structured-provider path and currently supports artifact-backed JSON, CSV, or parquet input plus graceful degradation when only credentials are present
+- `vendor` is the normalized structured-provider path and now supports live Financial Modeling Prep ingestion plus artifact-backed JSON, CSV, or parquet fallback
 - providers are pluggable and preserve source provenance in the canonical artifacts
+
+Point-in-time rules for the FMP-backed vendor path:
+
+- `available_date` uses `acceptedDate` when FMP provides it
+- if `acceptedDate` is missing, the pipeline falls back to filing date
+- if neither timestamp is present, the pipeline uses a conservative fallback of `period_end_date + 90d` for annual filings or `period_end_date + 45d` for quarterly filings
+- daily aligned features still only forward-fill from `available_date` onward
+
+Current limitation:
+
+- FMP does not always expose the same timestamp precision as SEC accepted filing timestamps, so vendor-only `available_date` precision is conservative rather than exact intraday filing-time accurate
 
 Canonical automated coverage now exists at three levels:
 
