@@ -188,7 +188,12 @@ def _candidate_key(signal_family: str, lookback: int, horizon: int) -> tuple[str
 
 
 def _signal_family_requires_equity_context(signal_family: str) -> bool:
-    return signal_family in {"cross_sectional_relative_strength"}
+    return signal_family in {
+        "cross_sectional_relative_strength",
+        "cross_sectional_momentum",
+        "benchmark_relative_rotation",
+        "regime_conditioned_momentum",
+    }
 
 
 def _safe_series_corr(left: pd.Series, right: pd.Series) -> float:

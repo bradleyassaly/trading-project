@@ -113,6 +113,7 @@ def _write_alpha_research_config(
     output_dir: Path,
     tracker_dir: Path,
     config_path: Path,
+    signal_family: str = "momentum",
 ) -> Path:
     config_path.parent.mkdir(parents=True, exist_ok=True)
     symbol_block = "\n".join(f"    - {symbol}" for symbol in symbols)
@@ -127,7 +128,7 @@ selection:
 {symbol_block}
 
 signals:
-  family: momentum
+  family: {signal_family}
   lookbacks: [1, 2]
   horizons: [1]
   min_rows: 20
@@ -186,12 +187,13 @@ tags:
 def _write_strategy_portfolio_policy_config(
     *,
     config_path: Path,
+    max_strategies: int = 2,
 ) -> Path:
     config_path.parent.mkdir(parents=True, exist_ok=True)
     config_path.write_text(
-        """
+        f"""
 schema_version: 1
-max_strategies: 2
+max_strategies: {max_strategies}
 max_strategies_per_signal_family: 1
 max_weight_per_strategy: 0.7
 min_weight_per_strategy: 0.0
@@ -465,6 +467,7 @@ failure_policy: fail
     strategy_portfolio_dir = tmp_path / "artifacts" / "strategy_portfolio"
     strategy_portfolio_config_path = _write_strategy_portfolio_policy_config(
         config_path=tmp_path / "strategy_portfolio_policy.yaml",
+        max_strategies=4,
     )
     cmd_strategy_portfolio_build(
         SimpleNamespace(
@@ -637,6 +640,7 @@ failure_policy: fail
     strategy_portfolio_dir = tmp_path / "artifacts" / "strategy_portfolio"
     strategy_portfolio_config_path = _write_strategy_portfolio_policy_config(
         config_path=tmp_path / "strategy_portfolio_policy.yaml",
+        max_strategies=4,
     )
     cmd_strategy_portfolio_build(
         SimpleNamespace(
@@ -797,6 +801,178 @@ def test_canonical_config_driven_workflow_smoke(
         "live_daily_pipeline",
     }
     assert all(Path(entry["snapshot_path"]).exists() for entry in manifest_payload["stages"])
+
+
+def test_canonical_multi_family_flow_promotes_and_exports_distinct_signal_families(
+    tmp_path: Path,
+) -> None:
+    data_root = tmp_path / "data"
+    normalized_dir = data_root / "normalized"
+    feature_dir = data_root / "features"
+    metadata_dir = data_root / "metadata"
+    normalized_dir.mkdir(parents=True, exist_ok=True)
+
+    symbol_inputs = {
+        "AAPL": (100.0, 0.010),
+        "MSFT": (200.0, 0.012),
+        "NVDA": (300.0, 0.018),
+        "AMD": (75.0, 0.016),
+    }
+    for symbol, (base_price, daily_return) in symbol_inputs.items():
+        _write_normalized_frame(
+            normalized_dir,
+            symbol=symbol,
+            base_price=base_price,
+            daily_return=daily_return,
+        )
+
+    refresh_config_path = tmp_path / "research_input_refresh.yaml"
+    refresh_config_path.write_text(
+        f"""
+symbols:
+  - AAPL
+  - MSFT
+  - NVDA
+  - AMD
+sub_universe_id: canonical_multi_family
+feature_dir: {feature_dir.as_posix()}
+metadata_dir: {metadata_dir.as_posix()}
+normalized_dir: {normalized_dir.as_posix()}
+failure_policy: fail
+""".strip(),
+        encoding="utf-8",
+    )
+    cmd_refresh_research_inputs(
+        SimpleNamespace(
+            config=str(refresh_config_path),
+            symbols=None,
+            universe=None,
+            feature_groups=None,
+            sub_universe_id=None,
+            reference_data_root=None,
+            universe_membership_path=None,
+            taxonomy_snapshot_path=None,
+            benchmark_mapping_path=None,
+            market_regime_path=None,
+            group_map_path=None,
+            benchmark=None,
+            failure_policy="partial_success",
+            feature_dir="data/features",
+            metadata_dir="data/metadata",
+            normalized_dir="data/normalized",
+            _cli_argv=["--config", str(refresh_config_path)],
+        )
+    )
+
+    alpha_artifacts_root = tmp_path / "artifacts" / "alpha_research"
+    for signal_family in [
+        "momentum",
+        "breakout_continuation",
+        "benchmark_relative_rotation",
+        "regime_conditioned_momentum",
+    ]:
+        run_output_dir = alpha_artifacts_root / f"run_{signal_family}"
+        alpha_config_path = _write_alpha_research_config(
+            symbols=list(symbol_inputs),
+            feature_dir=feature_dir,
+            output_dir=run_output_dir,
+            tracker_dir=tmp_path / "artifacts" / "experiment_tracking",
+            config_path=tmp_path / f"alpha_research_{signal_family}.yaml",
+            signal_family=signal_family,
+        )
+        cmd_alpha_research(
+            SimpleNamespace(
+                config=str(alpha_config_path),
+                symbols=None,
+                universe=None,
+                feature_dir="data/features",
+                signal_family="momentum",
+                lookbacks=[5, 10, 20, 60],
+                horizons=[1, 5, 20],
+                min_rows=126,
+                equity_context_enabled=False,
+                equity_context_include_volume=False,
+                enable_ensemble=False,
+                ensemble_mode="disabled",
+                ensemble_weight_method="equal",
+                ensemble_normalize_scores="rank_pct",
+                ensemble_max_members=5,
+                ensemble_max_members_per_family=None,
+                ensemble_minimum_member_observations=0,
+                ensemble_minimum_member_metric=None,
+                top_quantile=0.2,
+                bottom_quantile=0.2,
+                output_dir="artifacts/alpha_research",
+                train_size=756,
+                test_size=63,
+                step_size=None,
+                min_train_size=None,
+                portfolio_top_n=10,
+                portfolio_long_quantile=0.2,
+                portfolio_short_quantile=0.2,
+                commission=0.0,
+                min_price=None,
+                min_volume=None,
+                min_avg_dollar_volume=None,
+                max_adv_participation=0.05,
+                max_position_pct_of_adv=0.1,
+                max_notional_per_name=None,
+                slippage_bps_per_turnover=0.0,
+                slippage_bps_per_adv=10.0,
+                dynamic_recent_quality_window=20,
+                dynamic_min_history=5,
+                dynamic_downweight_mean_rank_ic=0.01,
+                dynamic_deactivate_mean_rank_ic=-0.02,
+                regime_aware_enabled=False,
+                regime_min_history=5,
+                regime_underweight_mean_rank_ic=0.01,
+                regime_exclude_mean_rank_ic=-0.01,
+                experiment_tracker_dir=None,
+                _cli_argv=["--config", str(alpha_config_path)],
+            )
+        )
+
+    promoted_dir = tmp_path / "artifacts" / "promoted_strategies"
+    promotion_config_path = _write_promotion_policy_config(
+        config_path=tmp_path / "promotion_policy.yaml",
+    )
+    cmd_research_promote(
+        SimpleNamespace(
+            artifacts_root=str(alpha_artifacts_root),
+            registry_dir=None,
+            output_dir=str(promoted_dir),
+            policy_config=str(promotion_config_path),
+            validation=None,
+            top_n=4,
+            allow_overwrite=False,
+            dry_run=False,
+            inactive=False,
+            override_validation=False,
+        )
+    )
+
+    promoted_payload = json.loads((promoted_dir / "promoted_strategies.json").read_text(encoding="utf-8"))
+    promoted_families = {row["signal_family"] for row in promoted_payload["strategies"]}
+    assert {"momentum", "breakout_continuation", "benchmark_relative_rotation"} <= promoted_families
+
+    strategy_portfolio_dir = tmp_path / "artifacts" / "strategy_portfolio"
+    strategy_portfolio_config_path = _write_strategy_portfolio_policy_config(
+        config_path=tmp_path / "strategy_portfolio_policy.yaml",
+        max_strategies=4,
+    )
+    cmd_strategy_portfolio_build(
+        SimpleNamespace(
+            promoted_dir=str(promoted_dir),
+            policy_config=str(strategy_portfolio_config_path),
+            lifecycle=None,
+            output_dir=str(strategy_portfolio_dir),
+        )
+    )
+
+    strategy_portfolio_payload = load_strategy_portfolio(strategy_portfolio_dir)
+    family_counts = strategy_portfolio_payload["summary"]["signal_family_counts"]
+    assert len(family_counts) >= 3
+    assert {"momentum", "breakout_continuation", "benchmark_relative_rotation"} <= set(family_counts)
 
 
 def test_canonical_paper_multi_strategy_bundle_reuse_for_scheduled_style_runs(

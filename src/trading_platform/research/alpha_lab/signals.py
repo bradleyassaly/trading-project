@@ -12,7 +12,11 @@ SUPPORTED_SIGNAL_FAMILIES = (
     "equity_context_momentum",
     "short_horizon_mean_reversion",
     "momentum_acceleration",
+    "cross_sectional_momentum",
     "cross_sectional_relative_strength",
+    "breakout_continuation",
+    "benchmark_relative_rotation",
+    "regime_conditioned_momentum",
     "volume_shock_momentum",
 )
 
@@ -21,6 +25,23 @@ def _rolling_zscore(series: pd.Series, window: int) -> pd.Series:
     rolling_mean = series.rolling(window).mean()
     rolling_std = series.rolling(window).std()
     return (series - rolling_mean) / rolling_std.replace(0.0, np.nan)
+
+
+def _relative_strength_signal(
+    df: pd.DataFrame,
+    *,
+    lookback: int,
+    close: pd.Series,
+) -> pd.Series:
+    relative_column = f"relative_return_{lookback}"
+    if relative_column in df.columns:
+        return pd.to_numeric(df[relative_column], errors="coerce")
+    market_column = f"market_return_{lookback}"
+    raw_momentum = close.pct_change(lookback)
+    if market_column in df.columns:
+        market_return = pd.to_numeric(df[market_column], errors="coerce")
+        return raw_momentum - market_return
+    return raw_momentum
 
 
 def build_signal(
@@ -52,16 +73,44 @@ def build_signal(
         fast_lookback = max(1, lookback // 2)
         return close.pct_change(fast_lookback) - close.pct_change(lookback)
 
-    if signal_family == "cross_sectional_relative_strength":
-        relative_column = f"relative_return_{lookback}"
-        if relative_column in df.columns:
-            return pd.to_numeric(df[relative_column], errors="coerce")
-        market_column = f"market_return_{lookback}"
+    if signal_family in {"cross_sectional_relative_strength", "cross_sectional_momentum"}:
+        return _relative_strength_signal(df, lookback=lookback, close=close)
+
+    if signal_family == "breakout_continuation":
+        rolling_high = close.shift(1).rolling(lookback).max()
+        rolling_low = close.shift(1).rolling(lookback).min()
+        breakout_distance = (close - rolling_high) / rolling_high.replace(0.0, np.nan)
+        continuation_momentum = close.pct_change(lookback)
+        trading_range = (rolling_high - rolling_low) / rolling_low.replace(0.0, np.nan)
+        signal = continuation_momentum + breakout_distance / trading_range.replace(0.0, np.nan)
+        if f"market_return_{lookback}" in df.columns:
+            signal = signal + 0.25 * pd.to_numeric(df[f"market_return_{lookback}"], errors="coerce")
+        return signal
+
+    if signal_family == "benchmark_relative_rotation":
+        relative_signal = _relative_strength_signal(df, lookback=lookback, close=close)
+        breadth = pd.to_numeric(
+            df.get(f"breadth_impulse_{lookback}", pd.Series(0.0, index=df.index)),
+            errors="coerce",
+        ).fillna(0.0)
+        realized_vol = pd.to_numeric(
+            df.get("realized_vol_20", df.get(f"realized_vol_{lookback}", pd.Series(1.0, index=df.index))),
+            errors="coerce",
+        ).where(lambda values: values.abs() > 1e-6, 1.0).fillna(1.0)
+        return relative_signal * (1.0 + breadth.clip(lower=-0.5, upper=0.5)) / realized_vol
+
+    if signal_family == "regime_conditioned_momentum":
         raw_momentum = close.pct_change(lookback)
-        if market_column in df.columns:
-            market_return = pd.to_numeric(df[market_column], errors="coerce")
-            return raw_momentum - market_return
-        return raw_momentum
+        market_return = pd.to_numeric(
+            df.get(f"market_return_{lookback}", pd.Series(0.0, index=df.index)),
+            errors="coerce",
+        ).fillna(0.0)
+        breadth = pd.to_numeric(
+            df.get(f"breadth_impulse_{lookback}", pd.Series(0.0, index=df.index)),
+            errors="coerce",
+        ).fillna(0.0)
+        risk_multiplier = np.where(market_return >= 0.0, 1.0, 0.25)
+        return raw_momentum * risk_multiplier * (1.0 + breadth.clip(lower=-0.5, upper=0.5))
 
     if signal_family == "volume_shock_momentum":
         raw_momentum = close.pct_change(lookback)

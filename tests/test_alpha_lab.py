@@ -307,6 +307,65 @@ def test_build_signal_cross_sectional_relative_strength_prefers_relative_return_
     assert signal.iloc[3] == pytest.approx(0.03)
 
 
+def test_build_signal_cross_sectional_momentum_alias_matches_relative_strength() -> None:
+    df = pd.DataFrame(
+        {
+            "close": [100.0, 101.0, 102.0, 103.0],
+            "relative_return_1": [None, 0.02, 0.01, 0.03],
+        }
+    )
+
+    relative_strength = build_signal(df, signal_family="cross_sectional_relative_strength", lookback=1)
+    aliased = build_signal(df, signal_family="cross_sectional_momentum", lookback=1)
+
+    pd.testing.assert_series_equal(relative_strength, aliased)
+
+
+def test_build_signal_breakout_continuation_rewards_new_highs() -> None:
+    df = pd.DataFrame({"close": [100.0, 101.0, 102.0, 101.0, 104.0, 106.0]})
+
+    signal = build_signal(df, signal_family="breakout_continuation", lookback=3)
+
+    assert signal.notna().sum() > 0
+    assert signal.iloc[4] > 0.0
+    assert signal.iloc[5] > 0.0
+
+
+def test_build_signal_benchmark_relative_rotation_uses_relative_and_breadth_context() -> None:
+    df = pd.DataFrame(
+        {
+            "close": [100.0, 101.0, 102.0, 103.0],
+            "relative_return_1": [None, 0.02, 0.01, 0.03],
+            "breadth_impulse_1": [0.0, 0.20, -0.10, 0.10],
+            "realized_vol_20": [1.0, 0.5, 1.0, 2.0],
+        }
+    )
+
+    signal = build_signal(df, signal_family="benchmark_relative_rotation", lookback=1)
+
+    assert pd.isna(signal.iloc[0])
+    assert signal.iloc[1] == pytest.approx(0.048)
+    assert signal.iloc[2] == pytest.approx(0.009)
+    assert signal.iloc[3] == pytest.approx(0.0165)
+
+
+def test_build_signal_regime_conditioned_momentum_suppresses_risk_off_periods() -> None:
+    df = pd.DataFrame(
+        {
+            "close": [100.0, 102.0, 104.0, 103.0],
+            "market_return_1": [None, 0.01, -0.02, 0.01],
+            "breadth_impulse_1": [0.0, 0.20, -0.10, 0.10],
+        }
+    )
+
+    signal = build_signal(df, signal_family="regime_conditioned_momentum", lookback=1)
+
+    assert pd.isna(signal.iloc[0])
+    assert signal.iloc[1] == pytest.approx((102.0 / 100.0 - 1.0) * 1.2)
+    assert signal.iloc[2] == pytest.approx((104.0 / 102.0 - 1.0) * 0.25 * 0.9)
+    assert signal.iloc[3] == pytest.approx((103.0 / 104.0 - 1.0) * 1.1)
+
+
 def test_build_signal_volume_shock_momentum_scales_momentum_by_volume_ratio() -> None:
     df = pd.DataFrame(
         {

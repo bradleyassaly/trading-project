@@ -1094,6 +1094,10 @@ The alpha research path now includes a small set of additional equity-only signa
 - `short_horizon_mean_reversion`
 - `momentum_acceleration`
 - `cross_sectional_relative_strength`
+- `cross_sectional_momentum`
+- `breakout_continuation`
+- `benchmark_relative_rotation`
+- `regime_conditioned_momentum`
 - `volume_shock_momentum`
 
 These stay additive and experimental:
@@ -1119,12 +1123,17 @@ That diagnostic writes:
 Use it to compare which families actually produce:
 
 - promoted strategies
+- family diversity in promoted and exported portfolios
 - portfolio and paper-stage reach
 - better `portfolio_sharpe` distributions
 
 Current guidance:
 
 - keep `momentum` as the default baseline unless a family comparison run shows a clear win
+- use `cross_sectional_momentum` as a direct relative-strength alias when you want clearer family naming in portfolio outputs
+- use `breakout_continuation` when you want an explicit trend-continuation family instead of pure medium-horizon momentum
+- use `benchmark_relative_rotation` when you want benchmark-relative leadership to compete directly in promotion and portfolio construction
+- use `regime_conditioned_momentum` when you want a simple family that should interact naturally with conditional promotion and risk-on/risk-off context
 - treat the new families as equity-only experimental paths for controlled follow-up testing
 
 ## Strategy Portfolio Weighting Modes
