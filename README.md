@@ -245,8 +245,8 @@ The built-in `policy_sensitivity_v1` preset set keeps the canonical promoted/exp
 
 These vary only:
 
-- promotion policy conditional-variant thresholds and selection caps
-- strategy-portfolio weighting mode and selection limits
+- promotion policy conditional-variant thresholds, diversity safeguards, and selection caps
+- strategy-portfolio weighting mode, family-aware selection limits, and concentration smoothing
 
 It writes variant-isolated outputs plus compact comparison artifacts such as:
 
@@ -259,7 +259,9 @@ It writes variant-isolated outputs plus compact comparison artifacts such as:
 The quickest fields to compare are:
 
 - promoted strategy count
+- promoted signal family count
 - conditional variant count
+- selected conditional variant count
 - selected strategy count
 - signal family count
 - allocation concentration (`max_strategy_weight`, `effective_strategy_count`)
@@ -1678,10 +1680,24 @@ Those activation conditions are also carried into the generated preset payload a
 Promotion policy fields for conditional variants:
 
 - `enable_conditional_variants`
+- `emit_conditional_variants_alongside_baseline`
+- `conditional_variant_allowance`
+- `conditional_variant_score_bonus`
 - `allowed_condition_types`
 - `min_condition_sample_size`
 - `min_condition_improvement`
 - `compare_condition_to_unconditional`
+- `max_strategies_per_family`
+- `min_families_if_available`
+
+Strategy-portfolio diversity and concentration controls:
+
+- `max_strategies_per_signal_family`
+- `min_families_if_available`
+- `allow_conditional_variant_siblings`
+- `conditional_variant_score_bonus`
+- `weighting_smoothing_power`
+- `max_weight_per_strategy`
 
 Current limitations:
 

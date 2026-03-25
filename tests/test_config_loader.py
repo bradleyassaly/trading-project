@@ -672,6 +672,11 @@ def test_load_promotion_policy_config_with_conditional_fields(tmp_path) -> None:
 metric_name: portfolio_sharpe
 min_metric_threshold: 0.75
 enable_conditional_variants: true
+emit_conditional_variants_alongside_baseline: true
+conditional_variant_allowance: 2
+conditional_variant_score_bonus: 0.05
+max_strategies_per_family: 2
+min_families_if_available: 3
 allowed_condition_types: [regime, benchmark_context]
 min_condition_sample_size: 24
 min_condition_improvement: 0.01
@@ -683,6 +688,11 @@ compare_condition_to_unconditional: true
     config = load_promotion_policy_config(path)
 
     assert config.enable_conditional_variants is True
+    assert config.emit_conditional_variants_alongside_baseline is True
+    assert config.conditional_variant_allowance == 2
+    assert config.conditional_variant_score_bonus == 0.05
+    assert config.max_strategies_per_family == 2
+    assert config.min_families_if_available == 3
     assert config.allowed_condition_types == ["regime", "benchmark_context"]
     assert config.min_condition_sample_size == 24
     assert config.min_condition_improvement == 0.01
@@ -697,13 +707,17 @@ schema_version: 1
 max_strategies: 4
 max_strategies_per_signal_family: 1
 max_strategies_per_universe: 2
+min_families_if_available: 3
 max_weight_per_strategy: 0.4
 min_weight_per_strategy: 0.1
 selection_metric: ranking_value
 weighting_mode: equal
+weighting_smoothing_power: 0.8
 require_active_only: false
 require_promotion_eligible_only: true
 deduplicate_source_runs: true
+allow_conditional_variant_siblings: true
+conditional_variant_score_bonus: 0.05
 diversification_dimension: signal_family
 fallback_equal_weight_mode: true
 warn_on_same_family_overlap: true
@@ -715,7 +729,11 @@ warn_on_same_family_overlap: true
 
     assert config.max_strategies == 4
     assert config.max_strategies_per_signal_family == 1
+    assert config.min_families_if_available == 3
     assert config.max_weight_per_strategy == 0.4
+    assert config.weighting_smoothing_power == 0.8
+    assert config.allow_conditional_variant_siblings is True
+    assert config.conditional_variant_score_bonus == 0.05
 
 
 def test_load_strategy_portfolio_policy_config_accepts_new_weighting_modes(tmp_path) -> None:

@@ -182,6 +182,26 @@ def test_strategy_portfolio_inverse_count_by_signal_family_balances_family_weigh
     assert payload["summary"]["effective_family_count"] >= 2.0
 
 
+def test_strategy_portfolio_min_families_if_available_prefers_family_diversity(tmp_path: Path) -> None:
+    promoted_dir = _write_promoted_strategies(tmp_path / "promoted")
+
+    build_strategy_portfolio(
+        promoted_dir=promoted_dir,
+        output_dir=tmp_path / "diverse_portfolio",
+        policy=StrategyPortfolioPolicyConfig(
+            max_strategies=2,
+            max_strategies_per_signal_family=2,
+            deduplicate_source_runs=False,
+            min_families_if_available=2,
+        ),
+    )
+    payload = load_strategy_portfolio(tmp_path / "diverse_portfolio")
+
+    families = {row["signal_family"] for row in payload["selected_strategies"]}
+    assert len(payload["selected_strategies"]) == 2
+    assert families == {"momentum", "value"}
+
+
 def test_strategy_portfolio_score_then_cap_prefers_higher_ranked_strategies(tmp_path: Path) -> None:
     promoted_dir = _write_promoted_strategies(tmp_path / "promoted")
 
@@ -201,6 +221,94 @@ def test_strategy_portfolio_score_then_cap_prefers_higher_ranked_strategies(tmp_
 
     assert rows["generated_momentum_a"]["allocation_weight"] > rows["generated_value_a"]["allocation_weight"]
     assert payload["summary"]["weighting_mode_resolved"] == "score_then_cap"
+
+
+def test_strategy_portfolio_can_keep_conditional_sibling_for_same_run_when_enabled(tmp_path: Path) -> None:
+    promoted_dir = tmp_path / "promoted"
+    promoted_dir.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "strategies": [
+            {
+                "preset_name": "generated_momentum_base",
+                "source_run_id": "run-a",
+                "signal_family": "momentum",
+                "universe": "nasdaq100",
+                "status": "active",
+                "ranking_metric": "portfolio_sharpe",
+                "ranking_value": 1.2,
+                "promotion_variant": "unconditional",
+                "promotion_timestamp": "2026-03-22T00:00:00+00:00",
+                "generated_preset_path": str(promoted_dir / "generated_momentum_base.json"),
+                "generated_registry_path": str(promoted_dir / "generated_momentum_base_registry.json"),
+                "generated_pipeline_config_path": str(promoted_dir / "generated_momentum_base_pipeline.yaml"),
+            },
+            {
+                "preset_name": "generated_momentum_conditional",
+                "source_run_id": "run-a",
+                "signal_family": "momentum",
+                "universe": "nasdaq100",
+                "status": "active",
+                "ranking_metric": "portfolio_sharpe",
+                "ranking_value": 1.15,
+                "promotion_variant": "conditional",
+                "condition_id": "regime_risk_on",
+                "promotion_timestamp": "2026-03-22T00:00:01+00:00",
+                "generated_preset_path": str(promoted_dir / "generated_momentum_conditional.json"),
+                "generated_registry_path": str(promoted_dir / "generated_momentum_conditional_registry.json"),
+                "generated_pipeline_config_path": str(promoted_dir / "generated_momentum_conditional_pipeline.yaml"),
+            },
+        ]
+    }
+    (promoted_dir / "promoted_strategies.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+    build_strategy_portfolio(
+        promoted_dir=promoted_dir,
+        output_dir=tmp_path / "conditional_portfolio",
+        policy=StrategyPortfolioPolicyConfig(
+            max_strategies=2,
+            max_strategies_per_signal_family=2,
+            allow_conditional_variant_siblings=True,
+            conditional_variant_score_bonus=0.05,
+        ),
+    )
+    portfolio_payload = load_strategy_portfolio(tmp_path / "conditional_portfolio")
+
+    assert len(portfolio_payload["selected_strategies"]) == 2
+    assert portfolio_payload["summary"]["selected_conditional_variant_count"] == 1
+
+
+def test_strategy_portfolio_weight_smoothing_reduces_concentration(tmp_path: Path) -> None:
+    promoted_dir = _write_promoted_strategies(tmp_path / "promoted")
+
+    build_strategy_portfolio(
+        promoted_dir=promoted_dir,
+        output_dir=tmp_path / "unsmoothed_portfolio",
+        policy=StrategyPortfolioPolicyConfig(
+            max_strategies=3,
+            max_strategies_per_signal_family=2,
+            max_weight_per_strategy=0.8,
+            weighting_mode="metric_weighted",
+            deduplicate_source_runs=False,
+            weighting_smoothing_power=1.0,
+        ),
+    )
+    unsmoothed_payload = load_strategy_portfolio(tmp_path / "unsmoothed_portfolio")
+
+    build_strategy_portfolio(
+        promoted_dir=promoted_dir,
+        output_dir=tmp_path / "smoothed_portfolio",
+        policy=StrategyPortfolioPolicyConfig(
+            max_strategies=3,
+            max_strategies_per_signal_family=2,
+            max_weight_per_strategy=0.8,
+            weighting_mode="metric_weighted",
+            deduplicate_source_runs=False,
+            weighting_smoothing_power=0.5,
+        ),
+    )
+    smoothed_payload = load_strategy_portfolio(tmp_path / "smoothed_portfolio")
+
+    assert smoothed_payload["summary"]["max_strategy_weight"] < unsmoothed_payload["summary"]["max_strategy_weight"]
 
 
 def test_strategy_portfolio_excludes_demoted_lifecycle_entries(tmp_path: Path) -> None:

@@ -137,6 +137,35 @@ def _seed_registry(tmp_path: Path) -> Path:
     return registry_dir
 
 
+def _attach_conditional_promotion_candidate(
+    manifest_path: Path,
+    *,
+    condition_id: str = "regime_risk_on",
+    condition_type: str = "regime",
+    sample_size: int = 50,
+    improvement_vs_baseline: float = 0.2,
+) -> None:
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    payload["conditional_research"] = {
+        "enabled": True,
+        "promotion_candidates": [
+            {
+                "eligible": True,
+                "condition_id": condition_id,
+                "condition_type": condition_type,
+                "sample_size": sample_size,
+                "improvement_vs_baseline": improvement_vs_baseline,
+                "activation_condition": {
+                    "condition_id": condition_id,
+                    "condition_type": condition_type,
+                },
+                "promotion_summary": "conditional variant eligible",
+            }
+        ],
+    }
+    manifest_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
 def test_promotion_artifact_generation_and_policy_filtering(tmp_path: Path) -> None:
     registry_dir = _seed_registry(tmp_path)
     output_dir = tmp_path / "generated_strategies"
@@ -156,6 +185,87 @@ def test_promotion_artifact_generation_and_policy_filtering(tmp_path: Path) -> N
     assert Path(row["generated_preset_path"]).exists()
     assert Path(row["generated_registry_path"]).exists()
     assert Path(row["generated_pipeline_config_path"]).exists()
+
+
+def test_promotion_min_families_if_available_preserves_family_diversity(tmp_path: Path) -> None:
+    _write_research_run(
+        tmp_path,
+        run_name="run_a",
+        signal_family="momentum",
+        universe="nasdaq100",
+        mean_spearman_ic=0.04,
+        portfolio_sharpe=1.2,
+        promoted_signal_count=2,
+    )
+    _write_research_run(
+        tmp_path,
+        run_name="run_b",
+        signal_family="momentum",
+        universe="sp500",
+        mean_spearman_ic=0.03,
+        portfolio_sharpe=1.1,
+        promoted_signal_count=2,
+    )
+    _write_research_run(
+        tmp_path,
+        run_name="run_c",
+        signal_family="value",
+        universe="sp500",
+        mean_spearman_ic=0.025,
+        portfolio_sharpe=1.0,
+        promoted_signal_count=2,
+    )
+    registry_dir = tmp_path / "research_registry"
+    build_research_registry(artifacts_root=tmp_path, output_dir=registry_dir)
+    build_promotion_candidates(artifacts_root=tmp_path, output_dir=registry_dir)
+
+    result = apply_research_promotions(
+        artifacts_root=tmp_path,
+        registry_dir=registry_dir,
+        output_dir=tmp_path / "generated_strategies",
+        policy=PromotionPolicyConfig(
+            max_strategies_total=2,
+            max_strategies_per_group=2,
+            max_strategies_per_family=2,
+            min_families_if_available=2,
+        ),
+    )
+
+    families = {row["signal_family"] for row in result["promoted_rows"]}
+    assert result["selected_count"] == 2
+    assert families == {"momentum", "value"}
+
+
+def test_promotion_can_emit_conditional_variant_alongside_unconditional_baseline(tmp_path: Path) -> None:
+    manifest_path = _write_research_run(
+        tmp_path,
+        run_name="run_conditional",
+        signal_family="momentum",
+        universe="nasdaq100",
+        mean_spearman_ic=0.04,
+        portfolio_sharpe=1.2,
+        promoted_signal_count=2,
+    )
+    _attach_conditional_promotion_candidate(manifest_path)
+    registry_dir = tmp_path / "research_registry"
+    build_research_registry(artifacts_root=tmp_path, output_dir=registry_dir)
+    build_promotion_candidates(artifacts_root=tmp_path, output_dir=registry_dir)
+
+    result = apply_research_promotions(
+        artifacts_root=tmp_path,
+        registry_dir=registry_dir,
+        output_dir=tmp_path / "generated_strategies",
+        policy=PromotionPolicyConfig(
+            max_strategies_total=1,
+            enable_conditional_variants=True,
+            emit_conditional_variants_alongside_baseline=True,
+            conditional_variant_allowance=1,
+        ),
+    )
+
+    variants = {row["promotion_variant"] for row in result["promoted_rows"]}
+    assert result["selected_count"] == 2
+    assert variants == {"unconditional", "conditional"}
 
 
 def test_promotion_dry_run_and_duplicate_protection(tmp_path: Path) -> None:

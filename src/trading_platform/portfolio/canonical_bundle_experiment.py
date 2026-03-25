@@ -163,44 +163,62 @@ def _resolve_variants(
             name="strict_promotion",
             promotion_policy_overrides={
                 "enable_conditional_variants": True,
+                "emit_conditional_variants_alongside_baseline": True,
+                "conditional_variant_allowance": 1,
+                "conditional_variant_score_bonus": 0.05,
                 "min_condition_sample_size": 30,
                 "min_condition_improvement": 0.1,
                 "compare_condition_to_unconditional": True,
                 "max_strategies_total": 2,
                 "max_strategies_per_group": 1,
+                "min_families_if_available": 2,
             },
         ),
         CanonicalBundleExperimentVariantConfig(
             name="loose_promotion",
             promotion_policy_overrides={
                 "enable_conditional_variants": True,
+                "emit_conditional_variants_alongside_baseline": True,
+                "conditional_variant_allowance": 2,
+                "conditional_variant_score_bonus": 0.05,
                 "min_condition_sample_size": 0,
                 "min_condition_improvement": 0.0,
                 "compare_condition_to_unconditional": False,
                 "max_strategies_total": 5,
                 "max_strategies_per_group": 3,
+                "min_families_if_available": 3,
             },
         ),
         CanonicalBundleExperimentVariantConfig(
             name="alternate_weighting",
             strategy_portfolio_policy_overrides={
-                "weighting_mode": "metric_weighted",
-                "max_strategies": 3,
+                "weighting_mode": "inverse_count_by_signal_family",
+                "max_strategies": 4,
+                "min_families_if_available": 3,
+                "weighting_smoothing_power": 0.75,
             },
         ),
         CanonicalBundleExperimentVariantConfig(
             name="combined_strict_weighting",
             promotion_policy_overrides={
                 "enable_conditional_variants": True,
+                "emit_conditional_variants_alongside_baseline": True,
+                "conditional_variant_allowance": 1,
+                "conditional_variant_score_bonus": 0.05,
                 "min_condition_sample_size": 30,
                 "min_condition_improvement": 0.1,
                 "compare_condition_to_unconditional": True,
                 "max_strategies_total": 2,
                 "max_strategies_per_group": 1,
+                "min_families_if_available": 2,
             },
             strategy_portfolio_policy_overrides={
                 "weighting_mode": "score_then_cap",
-                "max_strategies": 2,
+                "max_strategies": 4,
+                "min_families_if_available": 3,
+                "allow_conditional_variant_siblings": True,
+                "conditional_variant_score_bonus": 0.05,
+                "weighting_smoothing_power": 0.8,
             },
         ),
     ]
@@ -382,6 +400,7 @@ def run_canonical_bundle_experiment(
             "is_baseline": variant.name == config.baseline_variant_name,
             "promotion_rerun": promotion_rerun,
             "promoted_strategy_count": len(promoted_rows),
+            "promoted_signal_family_count": len({str(item.get("signal_family") or "") for item in promoted_rows if item.get("signal_family")}),
             "selected_strategy_count": len(selected_rows),
             "conditional_variant_count": _count_conditional_variants(promoted_rows),
             "activation_condition_count": _count_activation_conditions(promoted_rows),
@@ -395,12 +414,19 @@ def run_canonical_bundle_experiment(
             "max_family_weight": float(summary.get("max_family_weight", 0.0) or 0.0),
             "effective_strategy_count": float(summary.get("effective_strategy_count", 0.0) or 0.0),
             "effective_family_count": float(summary.get("effective_family_count", 0.0) or 0.0),
+            "selected_conditional_variant_count": int(summary.get("selected_conditional_variant_count", 0) or 0),
             "promotion_enable_conditional_variants": effective_promotion_policy.enable_conditional_variants,
+            "promotion_emit_conditional_variants_alongside_baseline": effective_promotion_policy.emit_conditional_variants_alongside_baseline,
+            "promotion_conditional_variant_allowance": effective_promotion_policy.conditional_variant_allowance,
+            "promotion_min_families_if_available": effective_promotion_policy.min_families_if_available,
             "promotion_min_condition_sample_size": effective_promotion_policy.min_condition_sample_size,
             "promotion_min_condition_improvement": effective_promotion_policy.min_condition_improvement,
             "promotion_compare_condition_to_unconditional": effective_promotion_policy.compare_condition_to_unconditional,
             "promotion_max_strategies_total": effective_promotion_policy.max_strategies_total,
             "promotion_max_strategies_per_group": effective_promotion_policy.max_strategies_per_group,
+            "portfolio_min_families_if_available": effective_strategy_portfolio_policy.min_families_if_available,
+            "portfolio_allow_conditional_variant_siblings": effective_strategy_portfolio_policy.allow_conditional_variant_siblings,
+            "portfolio_weighting_smoothing_power": effective_strategy_portfolio_policy.weighting_smoothing_power,
             "paper_ready": paper_ready,
             "live_ready": live_ready,
             "promoted_dir": str(promoted_dir),
@@ -425,6 +451,7 @@ def run_canonical_bundle_experiment(
     if baseline_row is not None:
         for row in rows:
             row["promoted_strategy_count_delta"] = row["promoted_strategy_count"] - baseline_row["promoted_strategy_count"]
+            row["promoted_signal_family_count_delta"] = row["promoted_signal_family_count"] - baseline_row["promoted_signal_family_count"]
             row["selected_strategy_count_delta"] = row["selected_strategy_count"] - baseline_row["selected_strategy_count"]
             row["conditional_variant_count_delta"] = row["conditional_variant_count"] - baseline_row["conditional_variant_count"]
             row["activation_condition_count_delta"] = (
@@ -446,6 +473,7 @@ def run_canonical_bundle_experiment(
     else:
         for row in rows:
             row["promoted_strategy_count_delta"] = 0
+            row["promoted_signal_family_count_delta"] = 0
             row["selected_strategy_count_delta"] = 0
             row["conditional_variant_count_delta"] = 0
             row["activation_condition_count_delta"] = 0
@@ -465,8 +493,11 @@ def run_canonical_bundle_experiment(
         "is_baseline",
         "promoted_strategy_count",
         "promoted_strategy_count_delta",
+        "promoted_signal_family_count",
+        "promoted_signal_family_count_delta",
         "conditional_variant_count",
         "conditional_variant_count_delta",
+        "selected_conditional_variant_count",
         "activation_condition_count",
         "activation_condition_count_delta",
         "signal_family_count",

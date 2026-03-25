@@ -1325,11 +1325,13 @@ def test_canonical_bundle_experiment_harness_reuses_exported_bundle(
     assert baseline_row["is_baseline"] is True
     assert strict_row["promotion_rerun"] is True
     assert loose_row["promotion_rerun"] is True
-    assert metric_row["portfolio_weighting_mode"] == "metric_weighted"
+    assert metric_row["portfolio_weighting_mode"] == "inverse_count_by_signal_family"
     assert combined_row["portfolio_weighting_mode"] == "score_then_cap"
     assert metric_row["paper_ready"] is True
     assert metric_row["live_ready"] is True
     assert "conditional_variant_count" in strict_row
+    assert "promoted_signal_family_count" in strict_row
+    assert "selected_conditional_variant_count" in combined_row
     assert "max_strategy_weight" in metric_row
     assert "effective_strategy_count" in metric_row
     assert "signal_family_count" in metric_row
@@ -1366,6 +1368,7 @@ def test_canonical_bundle_experiment_harness_reuses_exported_bundle(
     assert "paper_ready" in comparison_df.columns
     assert "live_ready" in comparison_df.columns
     assert "conditional_variant_count" in comparison_df.columns
+    assert "selected_conditional_variant_count" in comparison_df.columns
     assert "allocation_l1_delta_vs_baseline" in comparison_df.columns
     assert "max_strategy_weight_delta" in comparison_df.columns
 

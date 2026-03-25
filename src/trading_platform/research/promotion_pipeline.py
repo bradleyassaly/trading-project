@@ -38,12 +38,17 @@ class PromotionPolicyConfig:
     allow_weak_validation: bool = False
     max_strategies_total: int | None = 5
     max_strategies_per_group: int | None = 1
+    max_strategies_per_family: int | None = None
+    min_families_if_available: int = 0
     group_by: str = "signal_family"
     require_eligible_candidates: bool = True
     default_status: str = "inactive"
     pipeline_monitoring_config_path: str | None = "configs/monitoring.yaml"
     pipeline_execution_config_path: str | None = "configs/execution.yaml"
     enable_conditional_variants: bool = False
+    emit_conditional_variants_alongside_baseline: bool = False
+    conditional_variant_allowance: int = 0
+    conditional_variant_score_bonus: float = 0.0
     allowed_condition_types: list[str] = field(default_factory=lambda: ["regime", "sub_universe", "benchmark_context"])
     min_condition_sample_size: int = 20
     min_condition_improvement: float = 0.0
@@ -62,6 +67,12 @@ class PromotionPolicyConfig:
             raise ValueError("max_strategies_total must be > 0 when provided")
         if self.max_strategies_per_group is not None and self.max_strategies_per_group <= 0:
             raise ValueError("max_strategies_per_group must be > 0 when provided")
+        if self.max_strategies_per_family is not None and self.max_strategies_per_family <= 0:
+            raise ValueError("max_strategies_per_family must be > 0 when provided")
+        if self.min_families_if_available < 0:
+            raise ValueError("min_families_if_available must be >= 0")
+        if self.conditional_variant_allowance < 0:
+            raise ValueError("conditional_variant_allowance must be >= 0")
         if self.min_condition_sample_size < 0:
             raise ValueError("min_condition_sample_size must be >= 0")
         if self.group_by not in {"signal_family", "universe", "workflow_type"}:
@@ -372,6 +383,19 @@ def _select_conditional_variant(manifest: dict[str, Any], policy: PromotionPolic
     )[0]
 
 
+def _manifest_metric_value(manifest: dict[str, Any], policy: PromotionPolicyConfig) -> float:
+    metric_value = _safe_float(manifest.get("top_metrics", {}).get(policy.metric_name))
+    return metric_value if metric_value is not None else float("-inf")
+
+
+def _promotion_group_value(manifest: dict[str, Any], policy: PromotionPolicyConfig) -> str:
+    return str(manifest.get(policy.group_by) or "ungrouped")
+
+
+def _promotion_family_value(manifest: dict[str, Any]) -> str:
+    return str(manifest.get("signal_family") or "ungrouped")
+
+
 def _load_candidate_rows(registry_dir: Path) -> list[dict[str, Any]]:
     payload = _safe_read_json(registry_dir / "promotion_candidates.json")
     return list(payload.get("rows", []))
@@ -402,22 +426,12 @@ def apply_research_promotions(
     existing_index = _load_promoted_index(output_dir_path)
     existing_run_ids = {row.get("source_run_id") for row in existing_index.get("strategies", [])}
     existing_preset_names = {row.get("preset_name") for row in existing_index.get("strategies", [])}
-    selected: list[tuple[dict[str, Any], dict[str, Any], list[str]]] = []
+    selected: list[dict[str, Any]] = []
     group_counts: dict[str, int] = {}
+    family_counts: dict[str, int] = {}
 
-    sorted_candidates = sorted(
-        candidates,
-        key=lambda row: (
-            _safe_float(row.get(policy.metric_name) if policy.metric_name in row else None)
-            if policy.metric_name in row
-            else _safe_float(manifests.get(row.get("run_id"), {}).get("top_metrics", {}).get(policy.metric_name))
-            or float("-inf"),
-            str(row.get("timestamp") or ""),
-            str(row.get("run_id") or ""),
-        ),
-        reverse=True,
-    )
-    for candidate in sorted_candidates:
+    prepared_candidates: list[dict[str, Any]] = []
+    for candidate in candidates:
         run_id = str(candidate.get("run_id") or "")
         manifest = manifests.get(run_id)
         if not manifest:
@@ -432,27 +446,113 @@ def apply_research_promotions(
                 continue
             if validation_status != "pass" and not (policy.allow_weak_validation and validation_status == "weak"):
                 continue
-        group_value = str(manifest.get(policy.group_by) or "ungrouped")
-        if policy.max_strategies_per_group is not None and group_counts.get(group_value, 0) >= policy.max_strategies_per_group:
-            continue
         if run_id in existing_run_ids and not allow_overwrite:
             continue
-        selected.append((candidate, manifest, reasons))
+        conditional_variant = _select_conditional_variant(manifest, policy)
+        effective_metric = _manifest_metric_value(manifest, policy) + (
+            policy.conditional_variant_score_bonus if conditional_variant is not None else 0.0
+        )
+        prepared_candidates.append(
+            {
+                "candidate": candidate,
+                "manifest": manifest,
+                "reasons": reasons,
+                "validation_row": validation_row,
+                "conditional_variant": conditional_variant,
+                "effective_metric": effective_metric,
+                "group_value": _promotion_group_value(manifest, policy),
+                "family_value": _promotion_family_value(manifest),
+            }
+        )
+
+    sorted_candidates = sorted(
+        prepared_candidates,
+        key=lambda row: (
+            float(row["effective_metric"]),
+            1 if row["conditional_variant"] is not None else 0,
+            str(row["candidate"].get("timestamp") or ""),
+            str(row["manifest"].get("run_id") or ""),
+        ),
+        reverse=True,
+    )
+
+    total_limit = top_n if top_n is not None else policy.max_strategies_total
+    distinct_families_available = {
+        str(row["family_value"])
+        for row in sorted_candidates
+        if str(row["family_value"] or "").strip()
+    }
+    target_min_families = min(
+        policy.min_families_if_available,
+        len(distinct_families_available),
+        total_limit if total_limit is not None else len(distinct_families_available),
+    )
+
+    selected_run_ids: set[str] = set()
+
+    def can_select(prepared: dict[str, Any]) -> bool:
+        run_id = str(prepared["manifest"].get("run_id") or "")
+        if run_id in selected_run_ids:
+            return False
+        group_value = str(prepared["group_value"])
+        family_value = str(prepared["family_value"])
+        if policy.max_strategies_per_group is not None and group_counts.get(group_value, 0) >= policy.max_strategies_per_group:
+            return False
+        if (
+            policy.max_strategies_per_family is not None
+            and family_value
+            and family_counts.get(family_value, 0) >= policy.max_strategies_per_family
+        ):
+            return False
+        return True
+
+    def add_selected(prepared: dict[str, Any]) -> None:
+        selected.append(prepared)
+        run_id = str(prepared["manifest"].get("run_id") or "")
+        if run_id:
+            selected_run_ids.add(run_id)
+        group_value = str(prepared["group_value"])
+        family_value = str(prepared["family_value"])
         group_counts[group_value] = group_counts.get(group_value, 0) + 1
-        total_limit = top_n if top_n is not None else policy.max_strategies_total
+        if family_value:
+            family_counts[family_value] = family_counts.get(family_value, 0) + 1
+
+    if target_min_families > 0:
+        chosen_families: set[str] = set()
+        for prepared in sorted_candidates:
+            if total_limit is not None and len(selected) >= total_limit:
+                break
+            family_value = str(prepared["family_value"])
+            if not family_value or family_value in chosen_families:
+                continue
+            if not can_select(prepared):
+                continue
+            add_selected(prepared)
+            chosen_families.add(family_value)
+            if len(chosen_families) >= target_min_families:
+                break
+
+    for prepared in sorted_candidates:
         if total_limit is not None and len(selected) >= total_limit:
             break
+        if not can_select(prepared):
+            continue
+        add_selected(prepared)
 
     promoted_rows: list[dict[str, Any]] = []
     generated_paths: dict[str, str] = {}
     existing_rows = [row for row in existing_index.get("strategies", [])]
 
-    for candidate, manifest, _reasons in selected:
-        conditional_variant = _select_conditional_variant(manifest, policy)
+    def emit_promoted_artifacts(
+        *,
+        candidate: dict[str, Any],
+        manifest: dict[str, Any],
+        validation_row: dict[str, Any] | None,
+        conditional_variant: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
         preset_name = _build_generated_preset_name(manifest, conditional_variant)
         status = "inactive" if inactive else policy.default_status
         warnings = _build_warning_list(manifest, policy)
-        validation_row = validation_lookup.get(str(manifest.get("run_id") or ""))
         preset_payload = _build_generated_preset_payload(
             preset_name=preset_name,
             manifest=manifest,
@@ -467,7 +567,7 @@ def apply_research_promotions(
         pipeline_config_path = output_dir_path / f"{preset_name}_pipeline.yaml"
         if (promoted_strategy_path.exists() or registry_path.exists() or pipeline_config_path.exists()) and not allow_overwrite:
             if preset_name in existing_preset_names:
-                continue
+                return None
             raise FileExistsError(
                 f"Generated strategy artifacts already exist for preset {preset_name}. Use --allow-overwrite to replace them."
             )
@@ -527,11 +627,43 @@ def apply_research_promotions(
         }
         promoted_rows.append(promoted_row)
         if dry_run:
-            continue
+            return promoted_row
         _write_payload(promoted_strategy_path, preset_payload)
         save_strategy_registry(registry, registry_path)
         _write_payload(pipeline_config_path, _serialize_pipeline_config(pipeline_config))
         generated_paths[preset_name] = str(promoted_strategy_path)
+        return promoted_row
+
+    conditional_allowance_remaining = int(policy.conditional_variant_allowance)
+    for prepared in selected:
+        candidate = dict(prepared["candidate"])
+        manifest = dict(prepared["manifest"])
+        validation_row = prepared["validation_row"]
+        conditional_variant = prepared["conditional_variant"]
+        base_variant = (
+            None
+            if policy.emit_conditional_variants_alongside_baseline
+            else conditional_variant
+        )
+        emit_promoted_artifacts(
+            candidate=candidate,
+            manifest=manifest,
+            validation_row=validation_row,
+            conditional_variant=base_variant,
+        )
+        if (
+            policy.emit_conditional_variants_alongside_baseline
+            and conditional_variant is not None
+            and conditional_allowance_remaining > 0
+        ):
+            emitted = emit_promoted_artifacts(
+                candidate=candidate,
+                manifest=manifest,
+                validation_row=validation_row,
+                conditional_variant=conditional_variant,
+            )
+            if emitted is not None:
+                conditional_allowance_remaining -= 1
 
     if not dry_run:
         retained = [

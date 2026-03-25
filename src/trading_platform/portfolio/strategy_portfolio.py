@@ -37,14 +37,18 @@ class StrategyPortfolioPolicyConfig:
     max_strategies: int | None = 5
     max_strategies_per_signal_family: int | None = 1
     max_strategies_per_universe: int | None = None
+    min_families_if_available: int = 0
     max_weight_per_strategy: float = 0.5
     min_weight_per_strategy: float = 0.0
     selection_metric: str = "ranking_value"
     weighting_mode: str = "equal"
     metric_weight_cap_multiple: float = 1.5
+    weighting_smoothing_power: float = 1.0
     require_active_only: bool = False
     require_promotion_eligible_only: bool = True
     deduplicate_source_runs: bool = True
+    allow_conditional_variant_siblings: bool = False
+    conditional_variant_score_bonus: float = 0.0
     diversification_dimension: str = "signal_family"
     fallback_equal_weight_mode: bool = True
     warn_on_same_family_overlap: bool = True
@@ -61,6 +65,8 @@ class StrategyPortfolioPolicyConfig:
             raise ValueError("max_strategies_per_signal_family must be > 0 when provided")
         if self.max_strategies_per_universe is not None and self.max_strategies_per_universe <= 0:
             raise ValueError("max_strategies_per_universe must be > 0 when provided")
+        if self.min_families_if_available < 0:
+            raise ValueError("min_families_if_available must be >= 0")
         if self.max_weight_per_strategy <= 0:
             raise ValueError("max_weight_per_strategy must be > 0")
         if self.min_weight_per_strategy < 0:
@@ -76,6 +82,8 @@ class StrategyPortfolioPolicyConfig:
             )
         if self.metric_weight_cap_multiple <= 0:
             raise ValueError("metric_weight_cap_multiple must be > 0")
+        if self.weighting_smoothing_power <= 0:
+            raise ValueError("weighting_smoothing_power must be > 0")
         if self.diversification_dimension not in {"none", "signal_family", "universe"}:
             raise ValueError("diversification_dimension must be one of: none, signal_family, universe")
 
@@ -142,11 +150,25 @@ def _row_metric_value(row: dict[str, Any], metric_name: str) -> float | None:
     return None
 
 
-def _rank_candidates(rows: list[dict[str, Any]], metric_name: str) -> list[dict[str, Any]]:
+def _is_conditional_variant(row: dict[str, Any]) -> bool:
+    return bool(
+        row.get("condition_id")
+        or row.get("condition_type")
+        or row.get("promotion_variant") == "conditional"
+    )
+
+
+def _rank_candidates(
+    rows: list[dict[str, Any]],
+    metric_name: str,
+    *,
+    conditional_variant_score_bonus: float = 0.0,
+) -> list[dict[str, Any]]:
     return sorted(
         rows,
         key=lambda row: (
-            _row_metric_value(row, metric_name) or float("-inf"),
+            (_row_metric_value(row, metric_name) or float("-inf"))
+            + (conditional_variant_score_bonus if _is_conditional_variant(row) else 0.0),
             str(row.get("promotion_timestamp") or ""),
             str(row.get("preset_name") or ""),
         ),
@@ -178,7 +200,11 @@ def _build_base_weights(rows: list[dict[str, Any]], policy: StrategyPortfolioPol
             for row in rows
         }
     if weighting_mode == "score_then_cap":
-        ranked = _rank_candidates(rows, policy.selection_metric)
+        ranked = _rank_candidates(
+            rows,
+            policy.selection_metric,
+            conditional_variant_score_bonus=policy.conditional_variant_score_bonus,
+        )
         count = len(ranked)
         return {
             str(row["preset_name"]): float(count - index)
@@ -188,6 +214,11 @@ def _build_base_weights(rows: list[dict[str, Any]], policy: StrategyPortfolioPol
         str(row["preset_name"]): max(_row_metric_value(row, policy.selection_metric) or 0.0, 0.0)
         for row in rows
     }
+    if policy.weighting_smoothing_power != 1.0:
+        raw = {
+            name: value ** policy.weighting_smoothing_power if value > 0 else value
+            for name, value in raw.items()
+        }
     if weighting_mode == "capped_metric_weighted":
         positive_metrics = sorted(value for value in raw.values() if value > 0)
         if positive_metrics:
@@ -299,55 +330,118 @@ def build_strategy_portfolio(
 
     selected_input: list[dict[str, Any]] = []
     excluded_rows: list[dict[str, Any]] = []
-    seen_run_ids: set[str] = set()
+    seen_run_keys: set[tuple[str, str]] = set()
     family_counts: dict[str, int] = {}
     universe_counts: dict[str, int] = {}
 
-    for row in _rank_candidates(promoted_rows, policy.selection_metric):
+    ranked_rows = _rank_candidates(
+        promoted_rows,
+        policy.selection_metric,
+        conditional_variant_score_bonus=policy.conditional_variant_score_bonus,
+    )
+
+    def row_family(row: dict[str, Any]) -> str:
+        return str(row.get("signal_family") or "")
+
+    def row_universe(row: dict[str, Any]) -> str:
+        return str(row.get("universe") or "")
+
+    def row_run_key(row: dict[str, Any]) -> tuple[str, str]:
+        source_run_id = str(row.get("source_run_id") or "")
+        if not source_run_id:
+            return ("", str(row.get("preset_name") or ""))
+        if policy.allow_conditional_variant_siblings:
+            variant_key = "conditional" if _is_conditional_variant(row) else "unconditional"
+            return (source_run_id, variant_key)
+        return (source_run_id, "any")
+
+    def can_select_row(row: dict[str, Any]) -> tuple[bool, str | None]:
         preset_name = str(row.get("preset_name") or "")
         if not preset_name:
-            continue
+            return False, None
         passes, reason = _passes_filters(row, policy)
         if not passes:
-            excluded_rows.append({"preset_name": preset_name, "reason": reason})
-            continue
+            return False, reason
         source_run_id = str(row.get("source_run_id") or "")
         lifecycle_row = lifecycle_lookup.get(preset_name) or lifecycle_lookup.get(source_run_id)
         lifecycle_state = str(lifecycle_row.get("current_state") or "") if lifecycle_row else ""
         if lifecycle_state == "demoted":
-            excluded_rows.append({"preset_name": preset_name, "reason": "lifecycle_demoted"})
-            continue
-        if policy.deduplicate_source_runs and source_run_id and source_run_id in seen_run_ids:
-            excluded_rows.append({"preset_name": preset_name, "reason": "duplicate_source_run"})
-            continue
-        signal_family = str(row.get("signal_family") or "")
+            return False, "lifecycle_demoted"
+        run_key = row_run_key(row)
+        if policy.deduplicate_source_runs and run_key[0] and run_key in seen_run_keys:
+            return False, "duplicate_source_run"
+        signal_family = row_family(row)
         if (
             policy.max_strategies_per_signal_family is not None
             and signal_family
             and family_counts.get(signal_family, 0) >= policy.max_strategies_per_signal_family
         ):
-            excluded_rows.append({"preset_name": preset_name, "reason": "signal_family_cap"})
-            continue
-        universe = str(row.get("universe") or "")
+            return False, "signal_family_cap"
+        universe = row_universe(row)
         if (
             policy.max_strategies_per_universe is not None
             and universe
             and universe_counts.get(universe, 0) >= policy.max_strategies_per_universe
         ):
-            excluded_rows.append({"preset_name": preset_name, "reason": "universe_cap"})
-            continue
+            return False, "universe_cap"
         if policy.max_strategies is not None and len(selected_input) >= policy.max_strategies:
-            excluded_rows.append({"preset_name": preset_name, "reason": "max_strategies_reached"})
-            continue
+            return False, "max_strategies_reached"
+        return True, None
+
+    def add_selected_row(row: dict[str, Any]) -> None:
+        preset_name = str(row.get("preset_name") or "")
+        source_run_id = str(row.get("source_run_id") or "")
+        lifecycle_row = lifecycle_lookup.get(preset_name) or lifecycle_lookup.get(source_run_id)
+        lifecycle_state = str(lifecycle_row.get("current_state") or "") if lifecycle_row else ""
 
         selected_input.append(row)
         row["lifecycle_state"] = lifecycle_state or None
-        if source_run_id:
-            seen_run_ids.add(source_run_id)
+        run_key = row_run_key(row)
+        if run_key[0]:
+            seen_run_keys.add(run_key)
+        signal_family = row_family(row)
         if signal_family:
             family_counts[signal_family] = family_counts.get(signal_family, 0) + 1
+        universe = row_universe(row)
         if universe:
             universe_counts[universe] = universe_counts.get(universe, 0) + 1
+
+    distinct_families_available = {row_family(row) for row in ranked_rows if row_family(row)}
+    target_min_families = min(
+        policy.min_families_if_available,
+        len(distinct_families_available),
+        policy.max_strategies if policy.max_strategies is not None else len(distinct_families_available),
+    )
+    if target_min_families > 0:
+        chosen_families: set[str] = set()
+        for row in ranked_rows:
+            if policy.max_strategies is not None and len(selected_input) >= policy.max_strategies:
+                break
+            family = row_family(row)
+            if not family or family in chosen_families:
+                continue
+            passes, reason = can_select_row(row)
+            if not passes:
+                if reason:
+                    excluded_rows.append({"preset_name": str(row.get("preset_name") or ""), "reason": reason})
+                continue
+            add_selected_row(row)
+            chosen_families.add(family)
+            if len(chosen_families) >= target_min_families:
+                break
+
+    selected_names = {str(row.get("preset_name") or "") for row in selected_input}
+    for row in ranked_rows:
+        preset_name = str(row.get("preset_name") or "")
+        if preset_name in selected_names:
+            continue
+        passes, reason = can_select_row(row)
+        if not passes:
+            if reason:
+                excluded_rows.append({"preset_name": preset_name, "reason": reason})
+            continue
+        add_selected_row(row)
+        selected_names.add(preset_name)
 
     weights, allocation_warnings = _normalize_with_caps(selected_input, policy)
     warnings = list(allocation_warnings)
@@ -393,6 +487,7 @@ def build_strategy_portfolio(
     family_weight_summary = _summarize_family_weights(selected_rows)
     family_effective_count = _effective_count(list(family_weight_summary.values()))
     effective_strategy_count = _effective_count([row["allocation_weight"] for row in selected_rows])
+    conditional_selected_count = sum(1 for row in selected_rows if _is_conditional_variant(row))
     preset_path_ready_count = sum(
         1 for row in selected_rows if row.get("generated_preset_path") and Path(str(row["generated_preset_path"])).suffix
     )
@@ -415,6 +510,7 @@ def build_strategy_portfolio(
             "max_family_weight": max(family_weight_summary.values(), default=0.0),
             "effective_strategy_count": effective_strategy_count,
             "effective_family_count": family_effective_count,
+            "selected_conditional_variant_count": conditional_selected_count,
             "preset_path_ready_count": preset_path_ready_count,
             "pipeline_path_ready_count": pipeline_path_ready_count,
             "warning_count": len(warnings),
