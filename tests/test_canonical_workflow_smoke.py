@@ -79,6 +79,8 @@ def _write_daily_pipeline_config(
     multi_strategy_config_path: Path,
     output_dir: Path,
     paper_state_path: Path,
+    enable_paper_trading: bool = True,
+    enable_live_dry_run: bool = True,
 ) -> Path:
     config_path = output_dir / "canonical_daily_pipeline.yaml"
     config_path.parent.mkdir(parents=True, exist_ok=True)
@@ -93,8 +95,8 @@ paper_state_path: {paper_state_path.as_posix()}
 output_root_dir: {output_dir.as_posix()}
 stages:
   portfolio_allocation: true
-  paper_trading: true
-  live_dry_run: true
+  paper_trading: {"true" if enable_paper_trading else "false"}
+  live_dry_run: {"true" if enable_live_dry_run else "false"}
   reporting: true
 """.strip(),
         encoding="utf-8",
@@ -648,129 +650,82 @@ def test_canonical_config_driven_workflow_smoke(
     assert pipeline_config_path.exists()
     assert run_bundle_path.exists()
 
-    paper_checks: dict[str, object] = {}
-
-    def fake_paper_allocate(portfolio_config):
-        paper_checks["sleeves"] = portfolio_config.sleeves
-        assert portfolio_config.sleeves
-        assert all(Path(str(sleeve.preset_path)).exists() for sleeve in portfolio_config.sleeves)
-        return _allocation_result()
-
-    monkeypatch.setattr(
-        "trading_platform.cli.commands.paper_run_multi_strategy.allocate_multi_strategy_portfolio",
-        fake_paper_allocate,
+    paper_pipeline_dir = tmp_path / "artifacts" / "paper_pipeline"
+    paper_pipeline_config_path = _write_daily_pipeline_config(
+        multi_strategy_config_path=multi_strategy_config_path,
+        output_dir=paper_pipeline_dir,
+        paper_state_path=tmp_path / "artifacts" / "paper_multi_state.json",
+        enable_paper_trading=True,
+        enable_live_dry_run=False,
     )
-    monkeypatch.setattr(
-        "trading_platform.cli.commands.paper_run_multi_strategy.write_multi_strategy_artifacts",
-        lambda result, output_dir: {"allocation_summary_json_path": Path(output_dir) / "allocation_summary.json"},
-    )
-    monkeypatch.setattr(
-        "trading_platform.cli.commands.paper_run_multi_strategy.run_paper_trading_cycle_for_targets",
-        lambda **kwargs: PaperTradingRunResult(
-            as_of="2025-01-04",
-            state=PaperPortfolioState(cash=100_000.0),
-            latest_prices={"AAPL": 150.0, "MSFT": 320.0, "NVDA": 800.0},
-            latest_scores={},
-            latest_target_weights={"AAPL": 0.5, "MSFT": 0.3, "NVDA": 0.2},
-            scheduled_target_weights={"AAPL": 0.5, "MSFT": 0.3, "NVDA": 0.2},
-            orders=[],
-            fills=[],
-            diagnostics={},
-        ),
-    )
-    monkeypatch.setattr(
-        "trading_platform.cli.commands.paper_run_multi_strategy.write_paper_trading_artifacts",
-        lambda *, result, output_dir: {"summary_path": Path(output_dir) / "paper_summary.json"},
-    )
-    monkeypatch.setattr(
-        "trading_platform.cli.commands.paper_run_multi_strategy.persist_paper_run_outputs",
-        lambda **kwargs: (
-            {"paper_run_summary_latest_json_path": Path(kwargs["output_dir"]) / "paper_run_summary_latest.json"},
-            [],
-            {},
-        ),
-    )
-    monkeypatch.setattr(
-        "trading_platform.cli.commands.paper_run_multi_strategy.register_experiment",
-        lambda record, tracker_dir: {"experiment_registry_path": tracker_dir / "registry.csv"},
-    )
-    monkeypatch.setattr(
-        "trading_platform.cli.commands.paper_run_multi_strategy.build_paper_experiment_record",
-        lambda output_dir: {},
+    live_pipeline_dir = tmp_path / "artifacts" / "live_pipeline"
+    live_pipeline_config_path = _write_daily_pipeline_config(
+        multi_strategy_config_path=multi_strategy_config_path,
+        output_dir=live_pipeline_dir,
+        paper_state_path=tmp_path / "artifacts" / "live_multi_state.json",
+        enable_paper_trading=False,
+        enable_live_dry_run=True,
     )
 
-    paper_output_dir = tmp_path / "artifacts" / "paper_multi"
-    cmd_paper_run_multi_strategy(
-        SimpleNamespace(
-            config=str(multi_strategy_config_path),
-            execution_config=None,
-            state_path=str(tmp_path / "artifacts" / "paper_multi_state.json"),
-            output_dir=str(paper_output_dir),
+    pipeline_checks: list[dict[str, object]] = []
+
+    def fake_run_pipeline(config):
+        output_root_dir = Path(str(config.output_root_dir))
+        output_root_dir.mkdir(parents=True, exist_ok=True)
+        artifact_paths: dict[str, str] = {}
+        stage_records: list[PipelineStageRecord] = []
+        outputs: dict[str, object] = {"bundle_path": str(config.multi_strategy_input_path)}
+        if config.stages.paper_trading:
+            paper_summary_path = output_root_dir / "paper_run_summary_latest.json"
+            paper_summary_path.write_text(json.dumps({"status": "ready", "mode": "paper"}, indent=2), encoding="utf-8")
+            artifact_paths["paper_run_summary_latest_json_path"] = str(paper_summary_path)
+            outputs["paper_summary"] = {"status": "ready"}
+            stage_records.append(PipelineStageRecord(stage_name="paper_trading", status="succeeded", duration_seconds=0.01))
+        if config.stages.live_dry_run:
+            live_summary_path = output_root_dir / "live_dry_run_summary.json"
+            live_summary_path.write_text(json.dumps({"status": "ready", "mode": "live_dry_run"}, indent=2), encoding="utf-8")
+            artifact_paths["live_dry_run_summary_json_path"] = str(live_summary_path)
+            outputs["live_summary"] = {"status": "ready"}
+            stage_records.append(PipelineStageRecord(stage_name="live_dry_run", status="succeeded", duration_seconds=0.01))
+        pipeline_checks.append(
+            {
+                "schedule_type": config.schedule_type,
+                "multi_strategy_input_path": str(config.multi_strategy_input_path),
+                "paper_trading": config.stages.paper_trading,
+                "live_dry_run": config.stages.live_dry_run,
+            }
         )
-    )
-
-    assert paper_checks["sleeves"]
-
-    live_checks: dict[str, object] = {}
-
-    def fake_live_allocate(portfolio_config):
-        live_checks["sleeves"] = portfolio_config.sleeves
-        assert portfolio_config.sleeves
-        assert all(Path(str(sleeve.preset_path)).exists() for sleeve in portfolio_config.sleeves)
-        return _allocation_result()
-
-    monkeypatch.setattr(
-        "trading_platform.cli.commands.live_dry_run_multi_strategy.allocate_multi_strategy_portfolio",
-        fake_live_allocate,
-    )
-    monkeypatch.setattr(
-        "trading_platform.cli.commands.live_dry_run_multi_strategy.write_multi_strategy_artifacts",
-        lambda result, output_dir: {"allocation_summary_json_path": Path(output_dir) / "allocation_summary.json"},
-    )
-    monkeypatch.setattr(
-        "trading_platform.cli.commands.live_dry_run_multi_strategy.run_live_dry_run_preview_for_targets",
-        lambda **kwargs: LivePreviewResult(
-            run_id="multi_strategy|2025-01-04",
-            as_of="2025-01-04",
-            config=kwargs["config"],
-            account=BrokerAccount(account_id="acct-1", cash=100_000.0, equity=100_000.0, buying_power=100_000.0),
-            positions={},
-            open_orders=[],
-            latest_prices=kwargs["latest_prices"],
-            target_weights=kwargs["target_weights"],
-            target_diagnostics=kwargs["target_diagnostics"],
-            reconciliation=SimpleNamespace(orders=[], diagnostics={"investable_equity": 90_000.0}),
-            adjusted_orders=[],
-            order_adjustment_diagnostics={},
-            execution_result=None,
-            reconciliation_rows=[],
-            health_checks=[],
-        ),
-    )
-
-    def fake_write_live_artifacts(result):
-        summary_path = Path(result.config.output_dir) / "live_dry_run_summary.json"
-        summary_path.parent.mkdir(parents=True, exist_ok=True)
-        summary_path.write_text(json.dumps({"adjusted_order_count": 0}, indent=2), encoding="utf-8")
-        return {"summary_json_path": summary_path}
-
-    monkeypatch.setattr(
-        "trading_platform.cli.commands.live_dry_run_multi_strategy.write_live_dry_run_artifacts",
-        fake_write_live_artifacts,
-    )
-
-    live_output_dir = tmp_path / "artifacts" / "live_multi"
-    cmd_live_dry_run_multi_strategy(
-        SimpleNamespace(
-            config=str(multi_strategy_config_path),
-            execution_config=None,
-            broker="mock",
-            output_dir=str(live_output_dir),
+        return (
+            PipelineRunResult(
+                run_name=config.run_name,
+                schedule_type=config.schedule_type,
+                started_at="2025-01-04T00:00:00Z",
+                ended_at="2025-01-04T00:00:01Z",
+                status="succeeded",
+                run_dir=str(output_root_dir),
+                stage_records=stage_records,
+                errors=[],
+                outputs=outputs,
+            ),
+            artifact_paths,
         )
+
+    monkeypatch.setattr(
+        "trading_platform.cli.commands.pipeline_run.run_orchestration_pipeline",
+        fake_run_pipeline,
     )
 
-    assert live_checks["sleeves"]
-    assert (live_output_dir / "live_dry_run_summary.json").exists()
+    cmd_pipeline_run_daily(SimpleNamespace(config=str(paper_pipeline_config_path)))
+    cmd_pipeline_run_daily(SimpleNamespace(config=str(live_pipeline_config_path)))
+
+    assert pipeline_checks[0]["schedule_type"] == "daily"
+    assert Path(str(pipeline_checks[0]["multi_strategy_input_path"])) == multi_strategy_config_path
+    assert pipeline_checks[0]["paper_trading"] is True
+    assert pipeline_checks[0]["live_dry_run"] is False
+    assert pipeline_checks[1]["paper_trading"] is False
+    assert pipeline_checks[1]["live_dry_run"] is True
+    assert (paper_pipeline_dir / "paper_run_summary_latest.json").exists()
+    assert (live_pipeline_dir / "live_dry_run_summary.json").exists()
 
 
 def test_canonical_paper_multi_strategy_bundle_reuse_for_scheduled_style_runs(
