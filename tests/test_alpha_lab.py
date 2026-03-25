@@ -41,6 +41,7 @@ from trading_platform.research.alpha_lab.promotion import (
     apply_promotion_rules,
 )
 from trading_platform.research.alpha_lab.runner import (
+    _add_equity_context_features,
     _load_symbol_feature_data,
     run_alpha_research,
 )
@@ -361,6 +362,77 @@ def test_build_signal_cross_sectional_momentum_variants_change_signal_profile() 
 
     assert breadth_confirmed.notna().sum() > 0
     assert breadth_confirmed.iloc[4] != pytest.approx(base.iloc[4])
+
+
+def test_build_signal_cross_sectional_momentum_composite_preset_uses_relative_context_and_flow() -> None:
+    df = pd.DataFrame(
+        {
+            "close": [100.0, 101.0, 103.0, 104.0, 106.0],
+            "relative_return_2": [None, None, 0.03, 0.01, 0.04],
+            "cross_sectional_relative_rank_2": [0.0, 0.0, 0.2, -0.1, 0.4],
+            "trend_slope_2": [0.0, 0.0, 0.3, 0.1, 0.25],
+            "trend_persistence_2": [0.0, 0.0, 0.5, 0.0, 0.5],
+            "breadth_impulse_2": [0.0, 0.0, 0.10, -0.05, 0.20],
+            "market_trend_strength_2": [0.0, 0.0, 0.15, -0.05, 0.10],
+            "realized_vol_2": [0.2, 0.2, 0.25, 0.35, 0.20],
+            "cross_sectional_vol_rank_2": [0.0, 0.0, -0.2, -0.4, 0.1],
+            "flow_confirmation_2": [0.0, 0.0, 0.10, -0.05, 0.30],
+        }
+    )
+
+    legacy = build_signal(df, signal_family="cross_sectional_momentum", lookback=2)
+    composite = build_signal(
+        df,
+        signal_family="cross_sectional_momentum",
+        lookback=2,
+        signal_composition_preset="composite_v1",
+    )
+
+    assert composite.notna().sum() > 0
+    assert composite.iloc[4] != pytest.approx(legacy.iloc[4])
+    assert composite.iloc[4] > composite.iloc[3]
+
+
+def test_add_equity_context_features_derives_richer_signal_inputs() -> None:
+    timestamps = pd.date_range("2024-01-01", periods=8, freq="D")
+    symbol_data = {
+        "AAPL": pd.DataFrame(
+            {
+                "timestamp": timestamps,
+                "symbol": ["AAPL"] * len(timestamps),
+                "close": [100.0, 101.0, 102.0, 104.0, 105.0, 107.0, 108.0, 110.0],
+                "volume": [1000, 1100, 1200, 1400, 1350, 1500, 1600, 1700],
+            }
+        ),
+        "MSFT": pd.DataFrame(
+            {
+                "timestamp": timestamps,
+                "symbol": ["MSFT"] * len(timestamps),
+                "close": [100.0, 100.5, 101.0, 101.5, 102.0, 102.2, 102.4, 102.6],
+                "volume": [1000, 980, 990, 995, 1005, 1010, 1015, 1020],
+            }
+        ),
+    }
+
+    enriched = _add_equity_context_features(symbol_data, lookbacks=[2, 3], include_volume=True)
+    aapl = enriched["AAPL"]
+
+    assert {
+        "return_2",
+        "trend_slope_2",
+        "trend_persistence_2",
+        "breakout_distance_2",
+        "breakout_percentile_2",
+        "reversal_intensity_2",
+        "cross_sectional_relative_rank_2",
+        "cross_sectional_vol_rank_2",
+        "market_trend_strength_2",
+        "market_dispersion_2",
+        "dollar_volume_ratio_2",
+        "flow_confirmation_2",
+    } <= set(aapl.columns)
+    assert aapl["cross_sectional_relative_rank_2"].notna().sum() > 0
+    assert aapl["flow_confirmation_2"].notna().sum() > 0
 
 
 def test_build_signal_breakout_continuation_rewards_new_highs() -> None:
@@ -1346,6 +1418,7 @@ def test_run_alpha_research_writes_leaderboard_and_fold_results(tmp_path: Path) 
     signal_performance_by_regime_path = Path(result["signal_performance_by_regime_path"])
     signal_performance_by_sub_universe_path = Path(result["signal_performance_by_sub_universe_path"])
     signal_performance_by_benchmark_context_path = Path(result["signal_performance_by_benchmark_context_path"])
+    signal_family_summary_path = Path(result["signal_family_summary_path"])
     regime_aware_signal_weights_path = Path(result["regime_aware_signal_weights_path"])
     regime_selection_report_path = Path(result["regime_selection_report_path"])
     composite_diagnostics_path = Path(result["composite_diagnostics_path"])
@@ -1375,6 +1448,7 @@ def test_run_alpha_research_writes_leaderboard_and_fold_results(tmp_path: Path) 
     assert signal_performance_by_regime_path.exists()
     assert signal_performance_by_sub_universe_path.exists()
     assert signal_performance_by_benchmark_context_path.exists()
+    assert signal_family_summary_path.exists()
     assert regime_aware_signal_weights_path.exists()
     assert regime_selection_report_path.exists()
     assert composite_diagnostics_path.exists()
@@ -1403,6 +1477,7 @@ def test_run_alpha_research_writes_leaderboard_and_fold_results(tmp_path: Path) 
     assert (output_dir / "signal_performance_by_regime.parquet").exists()
     assert (output_dir / "signal_performance_by_sub_universe.parquet").exists()
     assert (output_dir / "signal_performance_by_benchmark_context.parquet").exists()
+    assert (output_dir / "signal_family_summary.parquet").exists()
     assert (output_dir / "regime_aware_signal_weights.parquet").exists()
     assert (output_dir / "regime_selection_report.parquet").exists()
     assert (output_dir / "composite_diagnostics.json").exists()
@@ -1521,6 +1596,7 @@ def test_run_alpha_research_broad_candidate_grid_emits_variant_identity(tmp_path
         top_quantile=0.34,
         bottom_quantile=0.34,
         candidate_grid_preset="broad_v1",
+        signal_composition_preset="composite_v1",
         max_variants_per_family=4,
         output_dir=output_dir,
         train_size=20,
@@ -1541,7 +1617,12 @@ def test_run_alpha_research_broad_candidate_grid_emits_variant_identity(tmp_path
     assert leaderboard_df["signal_variant"].nunique() == 4
     assert len(leaderboard_df) == 8
     assert diagnostics["candidate_grid_preset"] == "broad_v1"
+    assert diagnostics["signal_composition_preset"] == "composite_v1"
+    assert diagnostics["signal_composition"]["preset"] == "composite_v1"
     assert diagnostics["generated_candidate_count"] == 8
+    signal_family_summary_df = pd.read_csv(result["signal_family_summary_path"])
+    assert "composite_candidate_count" in signal_family_summary_df.columns
+    assert signal_family_summary_df.loc[0, "candidate_count"] == 8
 
 
 def test_run_alpha_research_emits_sub_universe_and_benchmark_context_artifacts(
@@ -1870,6 +1951,7 @@ def test_run_alpha_research_adds_promotion_and_redundancy_outputs(tmp_path: Path
     redundancy_df = pd.read_csv(result["redundancy_path"])
     composite_scores_df = pd.read_csv(result["composite_scores_path"])
     composite_leaderboard_df = pd.read_csv(result["composite_leaderboard_path"])
+    signal_family_summary_df = pd.read_csv(result["signal_family_summary_path"])
     dynamic_signal_weights_df = pd.read_csv(result["dynamic_signal_weights_path"])
     active_signals_by_date_df = pd.read_csv(result["active_signals_by_date_path"])
     deactivated_signals_df = pd.read_csv(result["deactivated_signals_path"])
@@ -1902,6 +1984,7 @@ def test_run_alpha_research_adds_promotion_and_redundancy_outputs(tmp_path: Path
     assert len(redundancy_df) == 1
     assert not composite_scores_df.empty
     assert not composite_leaderboard_df.empty
+    assert not signal_family_summary_df.empty
     assert not dynamic_signal_weights_df.empty
     assert not active_signals_by_date_df.empty
     assert not signal_lifecycle_report_df.empty

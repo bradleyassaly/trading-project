@@ -20,6 +20,7 @@ class AlphaResearchRequest:
     output_dir: Path
     signal_family: str
     candidate_grid_preset: str
+    signal_composition_preset: str
     max_variants_per_family: int | None
     lookbacks: list[int]
     horizons: list[int]
@@ -52,6 +53,9 @@ class AlphaResearchRequest:
     regime_exclude_mean_rank_ic: float
     equity_context_enabled: bool
     equity_context_include_volume: bool
+    enable_context_confirmations: bool | None
+    enable_relative_features: bool | None
+    enable_flow_confirmations: bool | None
     ensemble_enabled: bool
     ensemble_mode: str
     ensemble_weight_method: str
@@ -73,6 +77,7 @@ def _build_alpha_research_request(args) -> AlphaResearchRequest:
         output_dir=output_dir,
         signal_family=args.signal_family,
         candidate_grid_preset=getattr(args, "candidate_grid_preset", "standard"),
+        signal_composition_preset=getattr(args, "signal_composition_preset", "standard"),
         max_variants_per_family=getattr(args, "max_variants_per_family", None),
         lookbacks=list(args.lookbacks),
         horizons=list(args.horizons),
@@ -105,6 +110,9 @@ def _build_alpha_research_request(args) -> AlphaResearchRequest:
         regime_exclude_mean_rank_ic=args.regime_exclude_mean_rank_ic,
         equity_context_enabled=getattr(args, "equity_context_enabled", False),
         equity_context_include_volume=getattr(args, "equity_context_include_volume", False),
+        enable_context_confirmations=getattr(args, "enable_context_confirmations", None),
+        enable_relative_features=getattr(args, "enable_relative_features", None),
+        enable_flow_confirmations=getattr(args, "enable_flow_confirmations", None),
         ensemble_enabled=getattr(args, "enable_ensemble", False),
         ensemble_mode=getattr(args, "ensemble_mode", "disabled"),
         ensemble_weight_method=getattr(args, "ensemble_weight_method", "equal"),
@@ -134,6 +142,7 @@ def cmd_alpha_research(args) -> None:
         top_quantile=request.top_quantile,
         bottom_quantile=request.bottom_quantile,
         candidate_grid_preset=request.candidate_grid_preset,
+        signal_composition_preset=request.signal_composition_preset,
         max_variants_per_family=request.max_variants_per_family,
         output_dir=request.output_dir,
         train_size=request.train_size,
@@ -162,6 +171,9 @@ def cmd_alpha_research(args) -> None:
         regime_exclude_mean_rank_ic=request.regime_exclude_mean_rank_ic,
         equity_context_enabled=request.equity_context_enabled,
         equity_context_include_volume=request.equity_context_include_volume,
+        enable_context_confirmations=request.enable_context_confirmations,
+        enable_relative_features=request.enable_relative_features,
+        enable_flow_confirmations=request.enable_flow_confirmations,
         ensemble_enabled=request.ensemble_enabled,
         ensemble_mode=request.ensemble_mode,
         ensemble_weight_method=request.ensemble_weight_method,

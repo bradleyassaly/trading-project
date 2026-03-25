@@ -236,11 +236,13 @@ selection:
 signals:
   family: momentum
   candidate_grid_preset: broad_v1
+  signal_composition_preset: composite_v1
   max_variants_per_family: 5
   lookbacks: [5, 10]
   horizons: [1, 5]
   min_rows: 80
   equity_context_enabled: true
+  enable_flow_confirmations: true
 portfolio:
   train_size: 252
   test_size: 63
@@ -264,11 +266,13 @@ tracking:
     assert config.output_dir == "artifacts/alpha_research/run_configured"
     assert config.signal_family == "momentum"
     assert config.candidate_grid_preset == "broad_v1"
+    assert config.signal_composition_preset == "composite_v1"
     assert config.max_variants_per_family == 5
     assert config.lookbacks == [5, 10]
     assert config.horizons == [1, 5]
     assert config.min_rows == 80
     assert config.equity_context_enabled is True
+    assert config.enable_flow_confirmations is True
     assert config.portfolio_top_n == 8
     assert config.enable_ensemble is True
     assert config.ensemble_mode == "family_weighted"

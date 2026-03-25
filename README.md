@@ -218,7 +218,11 @@ Key outputs include:
 Alpha research also supports structured candidate-depth expansion inside a single family:
 
 - `signals.candidate_grid_preset: standard | broad_v1`
+- `signals.signal_composition_preset: standard | composite_v1 | research_rich_v1`
 - `signals.max_variants_per_family: <int>`
+- `signals.enable_context_confirmations: true | false`
+- `signals.enable_relative_features: true | false`
+- `signals.enable_flow_confirmations: true | false`
 
 `broad_v1` keeps the family fixed and emits a finite set of auditable variants with stable IDs such as:
 
@@ -1136,7 +1140,24 @@ The current focus is candidate depth rather than more infrastructure:
 
 - major families can now emit multiple parameterized variants through the alpha config
 - `candidate_grid_preset: broad_v1` expands the candidate pool materially without turning into unrestricted search
+- `signal_composition_preset: composite_v1` upgrades those candidates from mostly single-measure scores into compact multi-factor composites
 - candidate identity remains inspectable in research, promotion, portfolio, and experiment artifacts via `signal_family`, `signal_variant`, `candidate_id`, and `candidate_name`
+
+The richer signal layer stays intentionally bounded and auditable:
+
+- multi-horizon price structure: return structure, trend slope/persistence, breakout distance/percentile, reversal intensity
+- relative context: benchmark-relative return, cross-sectional return rank, cross-sectional relative-strength rank
+- volatility/dispersion context: realized volatility, vol-adjusted return, cross-sectional volatility rank, market dispersion
+- liquidity/flow context: dollar volume, volume and dollar-volume ratios, bounded flow confirmations
+- promotion diagnostics now include `signal_family_summary.csv` so family survival is visible before portfolio export
+
+`composite_v1` is the next recommended experiment preset after candidate-grid expansion because it improves feature quality without changing the canonical path:
+
+- `data refresh-research-inputs`
+- `research alpha`
+- `research promote`
+- `strategy-portfolio build/export`
+- `paper/live daily readiness`
 
 Run a lightweight family comparison with:
 
@@ -1753,12 +1774,13 @@ That comparison keeps the baseline unchanged by default and only enables the add
 - `equity_context_enabled=true`
 - `equity_context_include_volume=false` in the default deterministic fixture comparison
 
-The current equity-only context features are intentionally narrow:
+The current equity-only context features now support richer but still bounded signal composition:
 
-- benchmark-relative return context via `relative_return_<lookback>`
-- realized-volatility context via `realized_vol_20`
-- simple breadth context via `breadth_positive_<lookback>` and `breadth_impulse_<lookback>`
-- optional volume regime context via `volume_ratio_20` when volume exists in the feature inputs
+- benchmark-relative return context via `relative_return_<lookback>` plus `cross_sectional_relative_rank_<lookback>`
+- realized-volatility context via `realized_vol_<lookback>`, `vol_adjusted_return_<lookback>`, and `cross_sectional_vol_rank_<lookback>`
+- trend structure via `trend_slope_<lookback>`, `trend_persistence_<lookback>`, `breakout_distance_<lookback>`, and `breakout_percentile_<lookback>`
+- simple breadth and benchmark regime context via `breadth_positive_<lookback>`, `breadth_impulse_<lookback>`, and `market_trend_strength_<lookback>`
+- optional liquidity confirmation via `volume_ratio_<lookback>`, `dollar_volume_ratio_<lookback>`, and `flow_confirmation_<lookback>` when volume exists in the feature inputs
 
 Broader data domains were intentionally deferred here:
 

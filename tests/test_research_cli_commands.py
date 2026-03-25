@@ -50,9 +50,12 @@ selection:
 signals:
   family: momentum
   candidate_grid_preset: broad_v1
+  signal_composition_preset: composite_v1
   max_variants_per_family: 5
   lookbacks: [5, 10]
   horizons: [1, 5]
+  enable_context_confirmations: true
+  enable_relative_features: true
 portfolio:
   top_quantile: 0.2
   bottom_quantile: 0.2
@@ -102,12 +105,16 @@ tracking:
         feature_dir="data/features",
         signal_family="momentum",
         candidate_grid_preset="standard",
+        signal_composition_preset="standard",
         max_variants_per_family=None,
         lookbacks=[20],
         horizons=[1],
         min_rows=126,
         equity_context_enabled=False,
         equity_context_include_volume=False,
+        enable_context_confirmations=None,
+        enable_relative_features=None,
+        enable_flow_confirmations=None,
         enable_ensemble=False,
         ensemble_mode="disabled",
         ensemble_weight_method="equal",
@@ -160,7 +167,11 @@ tracking:
 
     assert captured["symbols"] == ["AAPL"]
     assert captured["candidate_grid_preset"] == "broad_v1"
+    assert captured["signal_composition_preset"] == "composite_v1"
     assert captured["max_variants_per_family"] == 5
+    assert captured["enable_context_confirmations"] is True
+    assert captured["enable_relative_features"] is True
+    assert captured["enable_flow_confirmations"] is None
     assert captured["lookbacks"] == [20]
     assert captured["horizons"] == [1, 5]
     assert Path(str(captured["feature_dir"])) == tmp_path / "features"
@@ -181,6 +192,7 @@ selection:
 signals:
   family: sector_relative_momentum
   candidate_grid_preset: broad_v1
+  signal_composition_preset: composite_v1
   max_variants_per_family: 3
   lookbacks: [5]
   horizons: [1]
@@ -223,12 +235,16 @@ tracking:
         feature_dir="data/features",
         signal_family="momentum",
         candidate_grid_preset="standard",
+        signal_composition_preset="standard",
         max_variants_per_family=None,
         lookbacks=[20],
         horizons=[1],
         min_rows=126,
         equity_context_enabled=False,
         equity_context_include_volume=False,
+        enable_context_confirmations=None,
+        enable_relative_features=None,
+        enable_flow_confirmations=None,
         enable_ensemble=False,
         ensemble_mode="disabled",
         ensemble_weight_method="equal",
@@ -272,6 +288,7 @@ tracking:
 
     assert captured["signal_family"] == "sector_relative_momentum"
     assert captured["candidate_grid_preset"] == "broad_v1"
+    assert captured["signal_composition_preset"] == "composite_v1"
     assert captured["max_variants_per_family"] == 3
     assert captured["lookbacks"] == [5]
     assert captured["horizons"] == [1]

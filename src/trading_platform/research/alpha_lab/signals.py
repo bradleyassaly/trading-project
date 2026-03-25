@@ -27,6 +27,7 @@ SUPPORTED_SIGNAL_FAMILIES = (
 )
 
 CANDIDATE_GRID_PRESETS = ("standard", "broad_v1")
+SIGNAL_COMPOSITION_PRESETS = ("standard", "composite_v1", "research_rich_v1")
 
 
 @dataclass(frozen=True)
@@ -62,79 +63,79 @@ def _variant_templates_for_family(
     if signal_family in {"momentum", "cross_sectional_momentum", "cross_sectional_relative_strength"}:
         return [
             ("base", {}),
-            ("fast_trend", {"raw_momentum_weight": 0.35, "breadth_weight": 0.15}),
-            ("relative_strength_focus", {"market_relative_weight": 1.3, "raw_momentum_weight": 0.2}),
-            ("breadth_confirmed", {"market_relative_weight": 1.1, "breadth_weight": 0.4}),
-            ("volatility_filtered", {"market_relative_weight": 1.0, "volatility_penalty": 0.6}),
-            ("flow_confirmed", {"market_relative_weight": 0.9, "volume_confirmation_weight": 0.35}),
+            ("fast_trend", {"raw_momentum_weight": 0.35, "breadth_weight": 0.15, "trend_weight": 1.2}),
+            ("relative_strength_focus", {"market_relative_weight": 1.3, "raw_momentum_weight": 0.15, "relative_rank_weight": 0.35}),
+            ("breadth_confirmed", {"market_relative_weight": 1.1, "breadth_weight": 0.45, "context_confirmation_weight": 0.25}),
+            ("volatility_filtered", {"market_relative_weight": 1.0, "volatility_penalty": 0.6, "low_vol_preference_weight": 0.3}),
+            ("flow_confirmed", {"market_relative_weight": 0.9, "volume_confirmation_weight": 0.35, "flow_confirmation_weight": 0.3}),
         ]
 
     if signal_family == "breakout_continuation":
         return [
             ("base", {}),
-            ("tight_breakout", {"breakout_weight": 1.4, "range_penalty_weight": 0.7}),
-            ("range_expansion", {"breakout_weight": 1.2, "range_penalty_weight": 0.4}),
-            ("momentum_heavy", {"momentum_weight": 1.4, "breakout_weight": 0.9}),
-            ("market_confirmed", {"market_bias_weight": 0.5, "momentum_weight": 1.15}),
-            ("pure_breakout", {"momentum_weight": 0.6, "breakout_weight": 1.7}),
+            ("tight_breakout", {"breakout_weight": 1.35, "range_penalty_weight": 0.8, "breakout_percentile_weight": 0.35}),
+            ("range_expansion", {"breakout_weight": 1.15, "range_penalty_weight": 0.45, "trend_weight": 0.9}),
+            ("momentum_heavy", {"momentum_weight": 1.3, "breakout_weight": 0.95, "trend_weight": 1.1}),
+            ("market_confirmed", {"market_bias_weight": 0.35, "momentum_weight": 1.0, "context_confirmation_weight": 0.35}),
+            ("pure_breakout", {"momentum_weight": 0.55, "breakout_weight": 1.65, "breakout_percentile_weight": 0.5}),
         ]
 
     if signal_family == "benchmark_relative_rotation":
         return [
             ("base", {}),
-            ("breadth_confirmed", {"breadth_weight": 1.5, "volatility_penalty_power": 1.0}),
-            ("low_vol_leaders", {"breadth_weight": 1.0, "volatility_penalty_power": 1.35}),
-            ("offensive_rotation", {"breadth_weight": 1.3, "market_bias_weight": 0.35}),
-            ("defensive_rotation", {"breadth_weight": 0.7, "volatility_penalty_power": 1.6}),
-            ("relative_strength_max", {"breadth_weight": 0.9, "volatility_penalty_power": 0.8}),
+            ("breadth_confirmed", {"breadth_weight": 1.5, "volatility_penalty_power": 1.0, "relative_rank_weight": 0.2}),
+            ("low_vol_leaders", {"breadth_weight": 1.0, "volatility_penalty_power": 1.35, "low_vol_preference_weight": 0.4}),
+            ("offensive_rotation", {"breadth_weight": 1.2, "market_bias_weight": 0.35, "context_confirmation_weight": 0.2}),
+            ("defensive_rotation", {"breadth_weight": 0.75, "volatility_penalty_power": 1.6, "context_confirmation_weight": 0.25}),
+            ("relative_strength_max", {"breadth_weight": 0.9, "volatility_penalty_power": 0.8, "relative_rank_weight": 0.45}),
         ]
 
     if signal_family == "regime_conditioned_momentum":
         return [
             ("base", {}),
-            ("defensive", {"risk_off_multiplier": 0.10, "risk_on_multiplier": 0.95, "breadth_weight": 0.5}),
-            ("balanced", {"risk_off_multiplier": 0.35, "risk_on_multiplier": 1.0, "breadth_weight": 1.0}),
-            ("breadth_amplified", {"risk_off_multiplier": 0.25, "risk_on_multiplier": 1.0, "breadth_weight": 1.8}),
-            ("pro_cyclical", {"risk_off_multiplier": 0.55, "risk_on_multiplier": 1.1, "breadth_weight": 1.2}),
-            ("relative_regime", {"risk_off_multiplier": 0.3, "relative_strength_weight": 0.45, "breadth_weight": 0.9}),
+            ("defensive", {"risk_off_multiplier": 0.10, "risk_on_multiplier": 0.95, "breadth_weight": 0.5, "low_vol_preference_weight": 0.3}),
+            ("balanced", {"risk_off_multiplier": 0.35, "risk_on_multiplier": 1.0, "breadth_weight": 1.0, "relative_strength_weight": 0.2}),
+            ("breadth_amplified", {"risk_off_multiplier": 0.25, "risk_on_multiplier": 1.0, "breadth_weight": 1.8, "context_confirmation_weight": 0.25}),
+            ("pro_cyclical", {"risk_off_multiplier": 0.55, "risk_on_multiplier": 1.1, "breadth_weight": 1.2, "trend_weight": 1.1}),
+            ("relative_regime", {"risk_off_multiplier": 0.3, "relative_strength_weight": 0.45, "breadth_weight": 0.9, "relative_rank_weight": 0.25}),
         ]
 
     if signal_family == "volatility_adjusted_reversal":
         return [
             ("base", {}),
-            ("fast_reversal", {"volatility_power": 0.85, "return_zscore_window": 5}),
-            ("balanced_reversal", {"volatility_power": 1.0, "return_zscore_window": 10}),
-            ("shock_reversal", {"volatility_power": 1.15, "relative_strength_weight": 0.25}),
-            ("smoothed_reversal", {"volatility_power": 1.25, "return_zscore_window": 20}),
+            ("fast_reversal", {"volatility_power": 0.85, "return_zscore_window": 5, "reversal_intensity_weight": 0.4}),
+            ("balanced_reversal", {"volatility_power": 1.0, "return_zscore_window": 10, "reversal_intensity_weight": 0.3}),
+            ("shock_reversal", {"volatility_power": 1.15, "relative_strength_weight": 0.25, "flow_confirmation_weight": 0.15}),
+            ("smoothed_reversal", {"volatility_power": 1.25, "return_zscore_window": 20, "reversal_intensity_weight": 0.2}),
         ]
 
     if signal_family == "volatility_dispersion_selection":
         return [
             ("base", {}),
-            ("high_dispersion", {"dispersion_multiplier": 1.4, "vol_penalty_weight": 0.8}),
-            ("low_vol_quality", {"dispersion_multiplier": 0.9, "vol_penalty_weight": 1.4}),
-            ("breadth_supported", {"dispersion_multiplier": 1.1, "breadth_weight": 0.35}),
-            ("balanced_dispersion", {"dispersion_multiplier": 1.0, "vol_penalty_weight": 1.0}),
+            ("high_dispersion", {"dispersion_multiplier": 1.4, "vol_penalty_weight": 0.8, "dispersion_weight": 0.45}),
+            ("low_vol_quality", {"dispersion_multiplier": 0.9, "vol_penalty_weight": 1.4, "low_vol_preference_weight": 0.45}),
+            ("breadth_supported", {"dispersion_multiplier": 1.1, "breadth_weight": 0.35, "context_confirmation_weight": 0.2}),
+            ("balanced_dispersion", {"dispersion_multiplier": 1.0, "vol_penalty_weight": 1.0, "dispersion_weight": 0.3}),
         ]
 
     if signal_family == "sector_relative_momentum":
         return [
             ("base", {}),
-            ("sector_leader", {"sector_weight": 1.2, "market_context_weight": 0.0}),
-            ("sector_plus_market", {"sector_weight": 0.9, "market_context_weight": 0.3}),
-            ("sector_plus_breadth", {"sector_weight": 1.0, "breadth_weight": 0.35}),
-            ("market_neutral_sector", {"sector_weight": 1.3, "market_context_weight": -0.15}),
-            ("raw_sector_gap", {"sector_weight": 1.5, "market_context_weight": 0.0}),
+            ("sector_leader", {"sector_weight": 1.25, "market_context_weight": 0.0, "trend_weight": 0.25}),
+            ("sector_plus_market", {"sector_weight": 0.9, "market_context_weight": 0.3, "context_confirmation_weight": 0.2}),
+            ("sector_plus_breadth", {"sector_weight": 1.0, "breadth_weight": 0.35, "relative_rank_weight": 0.2}),
+            ("market_neutral_sector", {"sector_weight": 1.3, "market_context_weight": -0.15, "low_vol_preference_weight": 0.2}),
+            ("raw_sector_gap", {"sector_weight": 1.5, "market_context_weight": 0.0, "relative_rank_weight": 0.15}),
         ]
 
     if signal_family == "liquidity_flow_tilt":
         return [
             ("base", {}),
-            ("volume_emphasis", {"volume_weight": 0.8, "dollar_flow_weight": 0.2, "trend_weight": 1.0}),
-            ("dollar_flow_emphasis", {"volume_weight": 0.2, "dollar_flow_weight": 0.8, "trend_weight": 1.0}),
-            ("flow_with_trend", {"volume_weight": 0.5, "dollar_flow_weight": 0.5, "trend_weight": 1.3}),
+            ("volume_emphasis", {"volume_weight": 0.8, "dollar_flow_weight": 0.2, "trend_weight": 1.0, "flow_confirmation_weight": 0.3}),
+            ("dollar_flow_emphasis", {"volume_weight": 0.2, "dollar_flow_weight": 0.8, "trend_weight": 1.0, "flow_confirmation_weight": 0.35}),
+            ("flow_with_trend", {"volume_weight": 0.5, "dollar_flow_weight": 0.5, "trend_weight": 1.3, "breakout_weight": 0.2}),
             ("conservative_flow", {"volume_weight": 0.5, "dollar_flow_weight": 0.5, "flow_bias_weight": 0.15, "flow_clip_max": 1.75}),
-            ("aggressive_flow", {"volume_weight": 0.6, "dollar_flow_weight": 0.4, "trend_weight": 1.15, "flow_bias_weight": 0.35}),
+            ("aggressive_flow", {"volume_weight": 0.6, "dollar_flow_weight": 0.4, "trend_weight": 1.15, "flow_bias_weight": 0.35, "flow_confirmation_weight": 0.4}),
         ]
 
     return base_templates
@@ -181,6 +182,19 @@ def _rolling_zscore(series: pd.Series, window: int) -> pd.Series:
     return (series - rolling_mean) / rolling_std.replace(0.0, np.nan)
 
 
+def _feature(
+    df: pd.DataFrame,
+    *candidates: str,
+    default: float | pd.Series = 0.0,
+) -> pd.Series:
+    for column in candidates:
+        if column in df.columns:
+            return pd.to_numeric(df[column], errors="coerce")
+    if isinstance(default, pd.Series):
+        return pd.to_numeric(default, errors="coerce")
+    return pd.Series(float(default), index=df.index, dtype=float)
+
+
 def _relative_strength_signal(
     df: pd.DataFrame,
     *,
@@ -208,18 +222,87 @@ def _baseline_series(
     return None
 
 
-def build_signal(
+def _resolve_signal_composition(
+    *,
+    signal_composition_preset: str,
+    enable_context_confirmations: bool | None,
+    enable_relative_features: bool | None,
+    enable_flow_confirmations: bool | None,
+) -> dict[str, bool | float | str]:
+    normalized = str(signal_composition_preset or "standard").strip().lower()
+    if normalized not in SIGNAL_COMPOSITION_PRESETS:
+        raise ValueError(
+            f"Unsupported signal_composition_preset: {signal_composition_preset}. "
+            f"Expected one of {', '.join(SIGNAL_COMPOSITION_PRESETS)}."
+        )
+
+    preset_defaults = {
+        "standard": {"context": False, "relative": False, "flow": False, "richness": 1.0},
+        "composite_v1": {"context": True, "relative": True, "flow": True, "richness": 1.0},
+        "research_rich_v1": {"context": True, "relative": True, "flow": True, "richness": 1.15},
+    }[normalized]
+    return {
+        "preset": normalized,
+        "use_composite": normalized != "standard",
+        "context": preset_defaults["context"] if enable_context_confirmations is None else bool(enable_context_confirmations),
+        "relative": preset_defaults["relative"] if enable_relative_features is None else bool(enable_relative_features),
+        "flow": preset_defaults["flow"] if enable_flow_confirmations is None else bool(enable_flow_confirmations),
+        "richness": float(preset_defaults["richness"]),
+    }
+
+
+def _trend_features(df: pd.DataFrame, *, lookback: int, close: pd.Series) -> tuple[pd.Series, pd.Series]:
+    raw_momentum = close.pct_change(lookback)
+    trend_slope = _feature(df, f"trend_slope_{lookback}", default=raw_momentum)
+    trend_persistence = _feature(df, f"trend_persistence_{lookback}", default=0.0)
+    return trend_slope.fillna(0.0), trend_persistence.fillna(0.0)
+
+
+def _volatility_preference(df: pd.DataFrame, *, lookback: int, close: pd.Series) -> tuple[pd.Series, pd.Series]:
+    realized_vol = _feature(
+        df,
+        f"realized_vol_{lookback}",
+        "realized_vol_20",
+        default=close.pct_change().rolling(max(lookback, 2)).std(),
+    )
+    vol_rank = _feature(df, f"cross_sectional_vol_rank_{lookback}", default=_rolling_zscore(realized_vol, max(lookback, 5)))
+    return realized_vol, (-vol_rank).fillna(0.0)
+
+
+def _context_confirmation(df: pd.DataFrame, *, lookback: int) -> pd.Series:
+    breadth = _feature(df, f"breadth_impulse_{lookback}", default=0.0)
+    market_trend = _feature(df, f"market_trend_strength_{lookback}", f"market_return_{lookback}", default=0.0)
+    return (0.6 * breadth.fillna(0.0) + 0.4 * market_trend.fillna(0.0)).clip(lower=-2.0, upper=2.0)
+
+
+def _flow_confirmation(df: pd.DataFrame, *, lookback: int) -> pd.Series:
+    return _feature(
+        df,
+        f"flow_confirmation_{lookback}",
+        f"dollar_volume_ratio_{lookback}",
+        f"volume_ratio_{lookback}",
+        "volume_ratio_20",
+        default=0.0,
+    ).fillna(0.0)
+
+
+def _relative_rank(df: pd.DataFrame, *, lookback: int) -> pd.Series:
+    return _feature(
+        df,
+        f"cross_sectional_relative_rank_{lookback}",
+        f"cross_sectional_return_rank_{lookback}",
+        default=0.0,
+    ).fillna(0.0)
+
+
+def _legacy_signal(
     df: pd.DataFrame,
     *,
     signal_family: str,
     lookback: int,
-    signal_variant: str | None = None,
-    variant_params: dict[str, float | str | bool] | None = None,
-    close_column: str = "close",
+    params: dict[str, float | str | bool],
+    close: pd.Series,
 ) -> pd.Series:
-    close = df[close_column]
-    params = variant_params or {}
-
     if signal_family == "momentum":
         raw_momentum = close.pct_change(lookback)
         breadth_weight = float(params.get("breadth_weight", 0.0))
@@ -458,3 +541,243 @@ def build_signal(
         return raw_signal
 
     raise ValueError(f"Unsupported signal family: {signal_family}")
+
+
+def _composite_signal(
+    df: pd.DataFrame,
+    *,
+    signal_family: str,
+    lookback: int,
+    params: dict[str, float | str | bool],
+    close: pd.Series,
+    composition: dict[str, bool | float | str],
+) -> pd.Series:
+    richness = float(composition["richness"])
+    raw_momentum = close.pct_change(lookback).fillna(0.0)
+    relative_signal = _relative_strength_signal(df, lookback=lookback, close=close).fillna(0.0)
+    relative_rank = _relative_rank(df, lookback=lookback)
+    trend_slope, trend_persistence = _trend_features(df, lookback=lookback, close=close)
+    realized_vol, low_vol_preference = _volatility_preference(df, lookback=lookback, close=close)
+    context_confirmation = _context_confirmation(df, lookback=lookback) if bool(composition["context"]) else pd.Series(0.0, index=df.index, dtype=float)
+    flow_confirmation = _flow_confirmation(df, lookback=lookback) if bool(composition["flow"]) else pd.Series(0.0, index=df.index, dtype=float)
+    relative_component = relative_signal if bool(composition["relative"]) else raw_momentum
+
+    if signal_family in {"momentum", "cross_sectional_momentum", "cross_sectional_relative_strength"}:
+        signal = (
+            float(params.get("market_relative_weight", 1.0)) * relative_component
+            + float(params.get("raw_momentum_weight", 0.2)) * raw_momentum
+            + float(params.get("trend_weight", 0.35)) * (0.6 * trend_slope + 0.4 * trend_persistence)
+            + float(params.get("relative_rank_weight", 0.25)) * relative_rank
+            + float(params.get("low_vol_preference_weight", 0.2)) * low_vol_preference
+            + float(params.get("context_confirmation_weight", 0.15)) * context_confirmation
+            + float(params.get("flow_confirmation_weight", 0.15)) * flow_confirmation
+        )
+        breadth_weight = float(params.get("breadth_weight", 0.0))
+        if breadth_weight:
+            signal = signal + breadth_weight * _feature(df, f"breadth_impulse_{lookback}", default=0.0).fillna(0.0)
+        volatility_penalty = float(params.get("volatility_penalty", 0.0))
+        if volatility_penalty:
+            signal = signal - volatility_penalty * _rolling_zscore(realized_vol, max(lookback, 5)).fillna(0.0)
+        volume_confirmation_weight = float(params.get("volume_confirmation_weight", 0.0))
+        if volume_confirmation_weight:
+            signal = signal + volume_confirmation_weight * flow_confirmation
+        return signal.where(_relative_strength_signal(df, lookback=lookback, close=close).notna(), np.nan)
+
+    if signal_family == "breakout_continuation":
+        breakout_distance = _feature(df, f"breakout_distance_{lookback}", default=0.0).fillna(0.0)
+        breakout_percentile = _feature(df, f"breakout_percentile_{lookback}", default=0.0).fillna(0.0)
+        volatility_scale = realized_vol.where(realized_vol.abs() > 1e-6, 1.0).fillna(1.0)
+        signal = (
+            float(params.get("momentum_weight", 1.0)) * raw_momentum
+            + float(params.get("breakout_weight", 1.0)) * breakout_distance / volatility_scale.pow(float(params.get("range_penalty_weight", 1.0)))
+            + float(params.get("breakout_percentile_weight", 0.3)) * breakout_percentile
+            + 0.25 * trend_slope
+            + float(params.get("context_confirmation_weight", 0.2)) * context_confirmation
+            + 0.2 * flow_confirmation
+        )
+        market_bias_weight = float(params.get("market_bias_weight", 0.0))
+        if market_bias_weight:
+            signal = signal + market_bias_weight * _feature(df, f"market_return_{lookback}", default=0.0).fillna(0.0)
+        return signal * richness
+
+    if signal_family == "benchmark_relative_rotation":
+        signal = (
+            relative_component
+            + float(params.get("relative_rank_weight", 0.25)) * relative_rank
+            + float(params.get("breadth_weight", 1.0)) * _feature(df, f"breadth_impulse_{lookback}", default=0.0).fillna(0.0)
+            + 0.25 * context_confirmation
+            + float(params.get("low_vol_preference_weight", 0.2)) * low_vol_preference
+        ) / realized_vol.where(realized_vol.abs() > 1e-6, 1.0).fillna(1.0).pow(float(params.get("volatility_penalty_power", 1.0)))
+        market_bias_weight = float(params.get("market_bias_weight", 0.0))
+        if market_bias_weight:
+            signal = signal + market_bias_weight * _feature(df, f"market_return_{lookback}", default=0.0).fillna(0.0)
+        return signal * richness
+
+    if signal_family == "regime_conditioned_momentum":
+        market_return = _feature(df, f"market_return_{lookback}", default=0.0).fillna(0.0)
+        risk_multiplier = pd.Series(
+            np.where(
+                market_return >= 0.0,
+                float(params.get("risk_on_multiplier", 1.0)),
+                float(params.get("risk_off_multiplier", 0.25)),
+            ),
+            index=df.index,
+            dtype=float,
+        )
+        signal = (
+            raw_momentum
+            + float(params.get("relative_strength_weight", 0.2 if composition["relative"] else 0.0)) * relative_signal
+            + float(params.get("trend_weight", 0.35)) * (0.6 * trend_slope + 0.4 * trend_persistence)
+            + float(params.get("breadth_weight", 1.0)) * _feature(df, f"breadth_impulse_{lookback}", default=0.0).fillna(0.0)
+            + 0.25 * context_confirmation
+            + float(params.get("low_vol_preference_weight", 0.0)) * low_vol_preference
+        ) * risk_multiplier
+        return signal * richness
+
+    if signal_family == "volatility_adjusted_reversal":
+        raw_reversal = -close.pct_change(lookback).fillna(0.0)
+        reversal_intensity = _feature(
+            df,
+            f"reversal_intensity_{lookback}",
+            default=raw_reversal / realized_vol.where(realized_vol.abs() > 1e-6, 1.0).fillna(1.0),
+        ).fillna(0.0)
+        signal = raw_reversal / realized_vol.where(realized_vol.abs() > 1e-6, 1.0).fillna(1.0).pow(float(params.get("volatility_power", 1.0)))
+        return_zscore_window = int(params.get("return_zscore_window", 0) or 0)
+        if return_zscore_window > 1:
+            signal = signal + _rolling_zscore(raw_reversal, return_zscore_window).fillna(0.0)
+        signal = signal + float(params.get("reversal_intensity_weight", 0.3)) * reversal_intensity
+        relative_strength_weight = float(params.get("relative_strength_weight", 0.0))
+        if relative_strength_weight:
+            signal = signal - relative_strength_weight * relative_signal
+        signal = signal + 0.15 * low_vol_preference + 0.1 * flow_confirmation
+        return signal * richness
+
+    if signal_family == "volatility_dispersion_selection":
+        signal = (
+            relative_component
+            + 0.25 * relative_rank
+            + float(params.get("dispersion_weight", 0.3))
+            * float(params.get("dispersion_multiplier", 1.0))
+            * _feature(df, f"market_dispersion_{lookback}", "dispersion_state_score", default=0.0).fillna(0.0)
+            + float(params.get("low_vol_preference_weight", 0.25)) * low_vol_preference
+            + 0.15 * context_confirmation
+            - float(params.get("vol_penalty_weight", 1.0)) * _rolling_zscore(realized_vol, max(lookback, 5)).fillna(0.0)
+        )
+        breadth_weight = float(params.get("breadth_weight", 0.0))
+        if breadth_weight:
+            signal = signal + breadth_weight * _feature(df, f"breadth_impulse_{lookback}", default=0.0).fillna(0.0)
+        return signal * richness
+
+    if signal_family == "sector_relative_momentum":
+        sector_baseline = _baseline_series(
+            df,
+            (
+                f"sector_mean_return_{lookback}",
+                "sector_mean_return",
+                f"sector_momentum_{lookback}",
+                f"group_momentum_{lookback}",
+                f"industry_momentum_{lookback}",
+                f"sector_return_{lookback}",
+                f"group_return_{lookback}",
+                f"industry_return_{lookback}",
+                f"benchmark_return_{lookback}",
+            ),
+        )
+        sector_gap = relative_signal if sector_baseline is None else raw_momentum - sector_baseline.fillna(0.0)
+        signal = (
+            float(params.get("sector_weight", 1.0)) * sector_gap
+            + float(params.get("market_context_weight", 0.0)) * relative_signal
+            + float(params.get("relative_rank_weight", 0.2)) * relative_rank
+            + 0.25 * trend_slope
+            + 0.15 * context_confirmation
+            + float(params.get("low_vol_preference_weight", 0.0)) * low_vol_preference
+        )
+        breadth_weight = float(params.get("breadth_weight", 0.0))
+        if breadth_weight:
+            signal = signal + breadth_weight * _feature(df, f"breadth_impulse_{lookback}", default=0.0).fillna(0.0)
+        return signal * richness
+
+    if signal_family == "liquidity_flow_tilt":
+        volume_ratio = _feature(df, f"volume_ratio_{lookback}", "volume_ratio_20", default=1.0).fillna(1.0)
+        dollar_ratio = _feature(df, f"dollar_volume_ratio_{lookback}", "avg_dollar_volume_20", default=1.0).fillna(1.0)
+        breakout_distance = _feature(df, f"breakout_distance_{lookback}", default=0.0).fillna(0.0)
+        flow_tilt = (
+            float(params.get("volume_weight", 0.5)) * volume_ratio.clip(lower=0.5, upper=float(params.get("flow_clip_max", 2.5)))
+            + float(params.get("dollar_flow_weight", 0.5)) * dollar_ratio.clip(lower=0.5, upper=float(params.get("flow_clip_max", 2.5)))
+        )
+        signal = (
+            float(params.get("trend_weight", 1.0)) * (0.7 * relative_component + 0.3 * trend_slope) * flow_tilt
+            + float(params.get("flow_confirmation_weight", 0.25)) * flow_confirmation
+            + float(params.get("flow_bias_weight", 0.25)) * (flow_tilt - 1.0)
+            + float(params.get("breakout_weight", 0.1)) * breakout_distance
+        )
+        return signal * richness
+
+    if signal_family == "equity_context_momentum":
+        signal = (
+            relative_component
+            + 0.25 * (trend_slope + trend_persistence)
+            + 0.2 * context_confirmation
+            + 0.15 * flow_confirmation
+            + 0.15 * low_vol_preference
+        )
+        return signal * richness
+
+    if signal_family in {"vol_adjusted_momentum", "volatility_adjusted_momentum"}:
+        signal = (
+            _feature(
+                df,
+                f"vol_adjusted_return_{lookback}",
+                default=raw_momentum / realized_vol.where(realized_vol.abs() > 1e-6, 1.0).fillna(1.0),
+            ).fillna(0.0)
+            + 0.2 * trend_persistence
+            + 0.15 * low_vol_preference
+            + 0.1 * context_confirmation
+        )
+        return signal * richness
+
+    if signal_family == "volume_shock_momentum":
+        return raw_momentum * (1.0 + 0.5 * flow_confirmation.clip(lower=-1.0, upper=2.0)) * richness
+
+    return _legacy_signal(df, signal_family=signal_family, lookback=lookback, params=params, close=close)
+
+
+def build_signal(
+    df: pd.DataFrame,
+    *,
+    signal_family: str,
+    lookback: int,
+    signal_variant: str | None = None,
+    variant_params: dict[str, float | str | bool] | None = None,
+    close_column: str = "close",
+    signal_composition_preset: str = "standard",
+    enable_context_confirmations: bool | None = None,
+    enable_relative_features: bool | None = None,
+    enable_flow_confirmations: bool | None = None,
+) -> pd.Series:
+    close = df[close_column]
+    params = variant_params or {}
+    composition = _resolve_signal_composition(
+        signal_composition_preset=signal_composition_preset,
+        enable_context_confirmations=enable_context_confirmations,
+        enable_relative_features=enable_relative_features,
+        enable_flow_confirmations=enable_flow_confirmations,
+    )
+
+    if not bool(composition["use_composite"]):
+        return _legacy_signal(
+            df,
+            signal_family=signal_family,
+            lookback=lookback,
+            params=params,
+            close=close,
+        )
+
+    return _composite_signal(
+        df,
+        signal_family=signal_family,
+        lookback=lookback,
+        params=params,
+        close=close,
+        composition=composition,
+    )

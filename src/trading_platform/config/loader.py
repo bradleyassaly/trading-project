@@ -253,6 +253,7 @@ def load_alpha_research_workflow_config(path: str | Path) -> AlphaResearchWorkfl
 
     _set_if_missing(payload, "signal_family", signals_section, "family")
     _set_if_missing(payload, "candidate_grid_preset", signals_section, "candidate_grid_preset")
+    _set_if_missing(payload, "signal_composition_preset", signals_section, "signal_composition_preset")
     _set_if_missing(payload, "max_variants_per_family", signals_section, "max_variants_per_family")
     if "lookbacks" not in payload and isinstance(signals_section.get("lookbacks"), list):
         payload["lookbacks"] = signals_section["lookbacks"]
@@ -292,6 +293,9 @@ def load_alpha_research_workflow_config(path: str | Path) -> AlphaResearchWorkfl
 
     _set_if_missing(payload, "equity_context_enabled", signals_section)
     _set_if_missing(payload, "equity_context_include_volume", signals_section)
+    _set_if_missing(payload, "enable_context_confirmations", signals_section)
+    _set_if_missing(payload, "enable_relative_features", signals_section)
+    _set_if_missing(payload, "enable_flow_confirmations", signals_section)
     _set_if_missing(payload, "enable_ensemble", ensemble_section, "enabled")
     _set_if_missing(payload, "ensemble_mode", ensemble_section, "mode")
     _set_if_missing(payload, "ensemble_weight_method", ensemble_section, "weight_method")

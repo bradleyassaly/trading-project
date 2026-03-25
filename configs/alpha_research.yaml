@@ -8,6 +8,7 @@ selection:
 signals:
   family: momentum
   candidate_grid_preset: broad_v1
+  signal_composition_preset: composite_v1
   max_variants_per_family: 6
   lookbacks: [5, 10, 20, 60]
   horizons: [1, 5, 20]

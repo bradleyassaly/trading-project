@@ -25,6 +25,8 @@ def test_grouped_research_alpha_command_parses() -> None:
             "5",
             "--candidate-grid-preset",
             "broad_v1",
+            "--signal-composition-preset",
+            "composite_v1",
             "--max-variants-per-family",
             "4",
         ]
@@ -35,6 +37,7 @@ def test_grouped_research_alpha_command_parses() -> None:
     assert args.symbols == ["AAPL"]
     assert args.lookbacks == [5]
     assert args.candidate_grid_preset == "broad_v1"
+    assert args.signal_composition_preset == "composite_v1"
     assert args.max_variants_per_family == 4
 
 

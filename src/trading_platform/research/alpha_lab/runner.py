@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 from trading_platform.research.alpha_lab.data_loading import load_symbol_feature_data
 
@@ -65,6 +66,40 @@ from trading_platform.research.alpha_lab.signals import (
     build_candidate_name,
     build_signal,
 )
+
+
+def _centered_cross_sectional_rank(panel: pd.DataFrame) -> pd.DataFrame:
+    return panel.rank(axis=1, pct=True).sub(0.5).mul(2.0)
+
+
+def _build_signal_family_summary(leaderboard_df: pd.DataFrame) -> pd.DataFrame:
+    columns = [
+        "signal_family",
+        "candidate_count",
+        "variant_count",
+        "composite_candidate_count",
+        "promotion_count",
+        "mean_spearman_ic",
+        "top_spearman_ic",
+    ]
+    if leaderboard_df.empty:
+        return pd.DataFrame(columns=columns)
+
+    rows: list[dict[str, object]] = []
+    for signal_family, family_df in leaderboard_df.groupby("signal_family", dropna=False):
+        variant_series = family_df.get("signal_variant", pd.Series(index=family_df.index, dtype=object)).fillna("base").astype(str)
+        rows.append(
+            {
+                "signal_family": signal_family,
+                "candidate_count": int(len(family_df)),
+                "variant_count": int(variant_series.nunique()),
+                "composite_candidate_count": int((variant_series != "base").sum()),
+                "promotion_count": int((family_df["promotion_status"] == "promote").sum()),
+                "mean_spearman_ic": float(pd.to_numeric(family_df["mean_spearman_ic"], errors="coerce").mean()),
+                "top_spearman_ic": float(pd.to_numeric(family_df["mean_spearman_ic"], errors="coerce").max()),
+            }
+        )
+    return pd.DataFrame(rows, columns=columns).sort_values("signal_family").reset_index(drop=True)
 
 
 def _load_symbol_feature_data(feature_dir: Path, symbol: str) -> pd.DataFrame:
@@ -137,6 +172,7 @@ def _add_equity_context_features(
     if not symbol_data:
         return symbol_data
 
+    unique_lookbacks = sorted(set(int(lookback) for lookback in lookbacks))
     close_panel = pd.concat(
         [
             pd.Series(pd.to_numeric(df["close"], errors="coerce").to_numpy(), index=pd.to_datetime(df["timestamp"]), name=symbol)
@@ -145,13 +181,45 @@ def _add_equity_context_features(
         axis=1,
     ).sort_index()
     return_panel = close_panel.pct_change()
+    own_return_panels = {
+        lookback: close_panel.pct_change(lookback)
+        for lookback in unique_lookbacks
+    }
     market_return_panels = {
         lookback: close_panel.pct_change(lookback).mean(axis=1, skipna=True)
-        for lookback in sorted(set(lookbacks))
+        for lookback in unique_lookbacks
     }
     breadth_panels = {
         lookback: close_panel.pct_change(lookback).gt(0.0).mean(axis=1, skipna=True)
-        for lookback in sorted(set(lookbacks))
+        for lookback in unique_lookbacks
+    }
+    realized_vol_panels = {
+        lookback: return_panel.rolling(max(lookback, 2)).std()
+        for lookback in unique_lookbacks
+    }
+    market_dispersion_panels = {
+        lookback: own_return_panels[lookback].std(axis=1, skipna=True)
+        for lookback in unique_lookbacks
+    }
+    relative_return_panels = {
+        lookback: own_return_panels[lookback].sub(market_return_panels[lookback], axis=0)
+        for lookback in unique_lookbacks
+    }
+    cross_sectional_return_rank_panels = {
+        lookback: _centered_cross_sectional_rank(own_return_panels[lookback])
+        for lookback in unique_lookbacks
+    }
+    cross_sectional_relative_rank_panels = {
+        lookback: _centered_cross_sectional_rank(relative_return_panels[lookback])
+        for lookback in unique_lookbacks
+    }
+    cross_sectional_vol_rank_panels = {
+        lookback: _centered_cross_sectional_rank(realized_vol_panels[lookback])
+        for lookback in unique_lookbacks
+    }
+    market_vol_panels = {
+        lookback: market_return_panels[lookback].rolling(max(5, min(lookback * 2, 60))).std()
+        for lookback in unique_lookbacks
     }
 
     volume_panel: pd.DataFrame | None = None
@@ -169,20 +237,74 @@ def _add_equity_context_features(
         working = df.sort_values("timestamp").copy()
         timestamp_index = pd.to_datetime(working["timestamp"])
         symbol_close = pd.Series(pd.to_numeric(working["close"], errors="coerce").to_numpy(), index=timestamp_index)
-        working[f"realized_vol_{vol_window}"] = return_panel[symbol].rolling(vol_window).std().reindex(timestamp_index).to_numpy()
-        for lookback in sorted(set(lookbacks)):
-            own_return = symbol_close.pct_change(lookback)
+        symbol_returns = return_panel[symbol].reindex(timestamp_index)
+        working[f"realized_vol_{vol_window}"] = symbol_returns.rolling(vol_window).std().to_numpy()
+        for lookback in unique_lookbacks:
+            own_return = own_return_panels[lookback][symbol].reindex(timestamp_index)
             market_return = market_return_panels[lookback].reindex(timestamp_index)
             breadth = breadth_panels[lookback].reindex(timestamp_index)
+            realized_vol = realized_vol_panels[lookback][symbol].reindex(timestamp_index)
+            rolling_high = symbol_close.shift(1).rolling(lookback).max()
+            rolling_low = symbol_close.shift(1).rolling(lookback).min()
+            rolling_range = (rolling_high - rolling_low).replace(0.0, np.nan)
+            short_reversal_window = max(2, min(lookback, 5))
             working[f"market_return_{lookback}"] = market_return.to_numpy()
             working[f"relative_return_{lookback}"] = (own_return - market_return).to_numpy()
             working[f"breadth_positive_{lookback}"] = breadth.to_numpy()
             working[f"breadth_impulse_{lookback}"] = (breadth - 0.5).to_numpy()
+            working[f"return_{lookback}"] = own_return.to_numpy()
+            working[f"realized_vol_{lookback}"] = realized_vol.to_numpy()
+            working[f"vol_adjusted_return_{lookback}"] = (
+                own_return / realized_vol.replace(0.0, np.nan)
+            ).to_numpy()
+            working[f"trend_slope_{lookback}"] = (
+                own_return / realized_vol.replace(0.0, np.nan)
+            ).to_numpy()
+            working[f"trend_persistence_{lookback}"] = (
+                symbol_returns.gt(0.0).rolling(lookback).mean().sub(0.5).mul(2.0)
+            ).reindex(timestamp_index).to_numpy()
+            working[f"breakout_distance_{lookback}"] = (
+                (symbol_close - rolling_high) / rolling_high.replace(0.0, np.nan)
+            ).to_numpy()
+            working[f"breakout_percentile_{lookback}"] = (
+                ((symbol_close - rolling_low) / rolling_range) - 0.5
+            ).mul(2.0).to_numpy()
+            working[f"reversal_intensity_{lookback}"] = (
+                -symbol_close.pct_change(short_reversal_window) / realized_vol.replace(0.0, np.nan)
+            ).to_numpy()
+            working[f"market_trend_strength_{lookback}"] = (
+                market_return / market_vol_panels[lookback].reindex(timestamp_index).replace(0.0, np.nan)
+            ).to_numpy()
+            working[f"market_dispersion_{lookback}"] = market_dispersion_panels[lookback].reindex(timestamp_index).to_numpy()
+            working[f"cross_sectional_return_rank_{lookback}"] = (
+                cross_sectional_return_rank_panels[lookback][symbol].reindex(timestamp_index)
+            ).to_numpy()
+            working[f"cross_sectional_relative_rank_{lookback}"] = (
+                cross_sectional_relative_rank_panels[lookback][symbol].reindex(timestamp_index)
+            ).to_numpy()
+            working[f"cross_sectional_vol_rank_{lookback}"] = (
+                cross_sectional_vol_rank_panels[lookback][symbol].reindex(timestamp_index)
+            ).to_numpy()
         if volume_panel is not None:
             symbol_volume = volume_panel[symbol].reindex(timestamp_index)
+            dollar_volume = symbol_close * symbol_volume
+            working["dollar_volume"] = dollar_volume.to_numpy()
             working[f"volume_ratio_{volume_window}"] = (
                 symbol_volume / symbol_volume.rolling(volume_window).mean()
             ).to_numpy()
+            working[f"avg_dollar_volume_{volume_window}"] = dollar_volume.rolling(volume_window).mean().to_numpy()
+            for lookback in unique_lookbacks:
+                volume_ratio = symbol_volume / symbol_volume.rolling(lookback).mean()
+                dollar_volume_ratio = dollar_volume / dollar_volume.rolling(lookback).mean()
+                own_return = own_return_panels[lookback][symbol].reindex(timestamp_index)
+                working[f"volume_ratio_{lookback}"] = volume_ratio.to_numpy()
+                working[f"avg_dollar_volume_{lookback}"] = dollar_volume.rolling(lookback).mean().to_numpy()
+                working[f"dollar_volume_ratio_{lookback}"] = dollar_volume_ratio.to_numpy()
+                flow_confirmation = (
+                    0.5 * volume_ratio.clip(lower=0.5, upper=2.5).sub(1.0)
+                    + 0.5 * dollar_volume_ratio.clip(lower=0.5, upper=2.5).sub(1.0)
+                ) * np.sign(own_return.fillna(0.0))
+                working[f"flow_confirmation_{lookback}"] = flow_confirmation.to_numpy()
         enriched[symbol] = working
     return enriched
 
@@ -358,6 +480,7 @@ def run_alpha_research(
     top_quantile: float,
     bottom_quantile: float,
     candidate_grid_preset: str = "standard",
+    signal_composition_preset: str = "standard",
     max_variants_per_family: int | None = None,
     output_dir: Path,
     train_size: int = 252 * 3,
@@ -386,6 +509,9 @@ def run_alpha_research(
     regime_exclude_mean_rank_ic: float = DEFAULT_REGIME_CONFIG.exclude_mean_rank_ic,
     equity_context_enabled: bool = False,
     equity_context_include_volume: bool = False,
+    enable_context_confirmations: bool | None = None,
+    enable_relative_features: bool | None = None,
+    enable_flow_confirmations: bool | None = None,
     ensemble_enabled: bool = False,
     ensemble_mode: str = "disabled",
     ensemble_weight_method: str = "equal",
@@ -415,7 +541,13 @@ def run_alpha_research(
 
         symbol_data[symbol] = add_forward_return_labels(df, horizons=horizons)
 
-    if equity_context_enabled or _signal_family_requires_equity_context(signal_family):
+    requires_rich_signal_context = (
+        str(signal_composition_preset or "standard").strip().lower() != "standard"
+        or bool(enable_context_confirmations)
+        or bool(enable_relative_features)
+        or bool(enable_flow_confirmations)
+    )
+    if equity_context_enabled or _signal_family_requires_equity_context(signal_family) or requires_rich_signal_context:
         symbol_data = _add_equity_context_features(
             symbol_data,
             lookbacks=lookbacks,
@@ -476,6 +608,10 @@ def run_alpha_research(
                 lookback=candidate_spec.lookback,
                 signal_variant=candidate_spec.signal_variant,
                 variant_params=candidate_spec.variant_params,
+                signal_composition_preset=signal_composition_preset,
+                enable_context_confirmations=enable_context_confirmations,
+                enable_relative_features=enable_relative_features,
+                enable_flow_confirmations=enable_flow_confirmations,
             )
         label_col = f"fwd_return_{candidate_spec.horizon}d"
 
@@ -672,6 +808,7 @@ def run_alpha_research(
     promoted_signals_df = leaderboard_df.loc[
         leaderboard_df["promotion_status"] == "promote"
     ].reset_index(drop=True)
+    signal_family_summary_df = _build_signal_family_summary(leaderboard_df)
     ensemble_config = EnsembleConfig(
         enabled=ensemble_enabled,
         mode=ensemble_mode if ensemble_enabled else "disabled",
@@ -1170,6 +1307,8 @@ def run_alpha_research(
     leaderboard_path_parquet = output_dir / "leaderboard.parquet"
     promoted_signals_path_csv = output_dir / "promoted_signals.csv"
     promoted_signals_path_parquet = output_dir / "promoted_signals.parquet"
+    signal_family_summary_path_csv = output_dir / "signal_family_summary.csv"
+    signal_family_summary_path_parquet = output_dir / "signal_family_summary.parquet"
     redundancy_report_path_csv = output_dir / "redundancy_report.csv"
     redundancy_report_path_parquet = output_dir / "redundancy_report.parquet"
     redundancy_path_csv = output_dir / "redundancy_diagnostics.csv"
@@ -1228,6 +1367,7 @@ def run_alpha_research(
     detailed_df.to_csv(detailed_path_csv, index=False)
     leaderboard_df.to_csv(leaderboard_path_csv, index=False)
     promoted_signals_df.to_csv(promoted_signals_path_csv, index=False)
+    signal_family_summary_df.to_csv(signal_family_summary_path_csv, index=False)
     redundancy_df.to_csv(redundancy_report_path_csv, index=False)
     redundancy_df.to_csv(redundancy_path_csv, index=False)
     composite_scores_df.to_csv(composite_scores_path_csv, index=False)
@@ -1256,6 +1396,7 @@ def run_alpha_research(
     detailed_df.to_parquet(detailed_path_parquet, index=False)
     leaderboard_df.to_parquet(leaderboard_path_parquet, index=False)
     promoted_signals_df.to_parquet(promoted_signals_path_parquet, index=False)
+    signal_family_summary_df.to_parquet(signal_family_summary_path_parquet, index=False)
     redundancy_df.to_parquet(redundancy_report_path_parquet, index=False)
     redundancy_df.to_parquet(redundancy_path_parquet, index=False)
     composite_scores_df.to_parquet(composite_scores_path_parquet, index=False)
@@ -1309,9 +1450,16 @@ def run_alpha_research(
         "lookbacks": lookbacks,
         "horizons": horizons,
         "candidate_grid_preset": candidate_grid_preset,
+        "signal_composition_preset": signal_composition_preset,
         "max_variants_per_family": max_variants_per_family,
         "generated_candidate_count": len(candidate_specs),
         "generated_signal_variants": sorted({spec.signal_variant for spec in candidate_specs}),
+        "signal_composition": {
+            "preset": signal_composition_preset,
+            "enable_context_confirmations": enable_context_confirmations,
+            "enable_relative_features": enable_relative_features,
+            "enable_flow_confirmations": enable_flow_confirmations,
+        },
         "min_rows": min_rows,
         "feature_dir": str(feature_dir),
         "evaluation_mode": "cross_sectional_long_short",
@@ -1328,6 +1476,7 @@ def run_alpha_research(
             "include_volume": equity_context_include_volume,
         },
         "research_context": context_coverage_summary,
+        "signal_family_summary": signal_family_summary_df.to_dict(orient="records"),
         "ensemble": {
             "enabled": ensemble_config.enabled,
             "mode": ensemble_config.mode,
@@ -1343,6 +1492,7 @@ def run_alpha_research(
         "leaderboard_path": str(leaderboard_path_csv),
         "fold_results_path": str(detailed_path_csv),
         "promoted_signals_path": str(promoted_signals_path_csv),
+        "signal_family_summary_path": str(signal_family_summary_path_csv),
         "redundancy_report_path": str(redundancy_report_path_csv),
         "redundancy_path": str(redundancy_path_csv),
         "composite_scores_path": str(composite_scores_path_csv),

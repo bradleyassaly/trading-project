@@ -288,12 +288,16 @@ class AlphaResearchWorkflowConfig:
     feature_dir: str = "data/features"
     signal_family: str = "momentum"
     candidate_grid_preset: str = "standard"
+    signal_composition_preset: str = "standard"
     max_variants_per_family: int | None = None
     lookbacks: list[int] = field(default_factory=lambda: [5, 10, 20, 60])
     horizons: list[int] = field(default_factory=lambda: [1, 5, 20])
     min_rows: int = 126
     equity_context_enabled: bool = False
     equity_context_include_volume: bool = False
+    enable_context_confirmations: bool | None = None
+    enable_relative_features: bool | None = None
+    enable_flow_confirmations: bool | None = None
     enable_ensemble: bool = False
     ensemble_mode: str = "disabled"
     ensemble_weight_method: str = "equal"
@@ -337,6 +341,10 @@ class AlphaResearchWorkflowConfig:
             raise ValueError("exactly one of symbols or universe must be provided")
         if self.candidate_grid_preset not in {"standard", "broad_v1"}:
             raise ValueError("candidate_grid_preset must be one of: standard, broad_v1")
+        if self.signal_composition_preset not in {"standard", "composite_v1", "research_rich_v1"}:
+            raise ValueError(
+                "signal_composition_preset must be one of: standard, composite_v1, research_rich_v1"
+            )
         if self.max_variants_per_family is not None and self.max_variants_per_family <= 0:
             raise ValueError("max_variants_per_family must be > 0 when provided")
 
