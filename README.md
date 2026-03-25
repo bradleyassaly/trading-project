@@ -1465,11 +1465,19 @@ Alpha-research condition-slice artifacts:
   signal performance by `sub_universe_id` when the research feature panels carry explicit sub-universe membership columns such as `sub_universe_id`, `sub_universe`, `sub_universe_label`, or boolean `sub_universe_*` flags
 - `signal_performance_by_benchmark_context.csv`
   signal performance by benchmark-relative context label; the runner prefers explicit `benchmark_context_label` or `benchmark_context` columns and otherwise derives labels from the existing equity-context features `market_return_<lookback>`, `relative_return_<lookback>`, and `breadth_impulse_<lookback>`
+- `context_features/<SYMBOL>.parquet`
+  per-run context-enriched research panels with persisted explicit labels such as `sub_universe_id`, `sub_universe_label`, and lookback-specific `benchmark_context_label_<lookback>` columns
+- `research_context_coverage.json`
+  lightweight coverage summary showing whether the run used explicit upstream labels, metadata-sidecar labels, or derived benchmark-context fallbacks
 
 Generation and fallback rules:
 
 - unconditional research still runs exactly as before
 - the alpha runner emits the new sub-universe and benchmark-context artifacts on every run so downstream conditional research sees stable paths
+- the runner now also writes context-enriched symbol panels under `context_features/` so the label state used during research is persisted and auditable
+- if a sibling `metadata/` directory exists next to the feature directory, the runner automatically looks for `sub_universe_snapshot.csv` or `universe_enrichment.csv` and persists those explicit sub-universe labels into the context feature panels before evaluation
+- benchmark-context labels are now persisted upstream into the run-local context panels as explicit `benchmark_context_label_<lookback>` columns whenever the required equity-context inputs exist
+- downstream slicing prefers those explicit lookback-specific label columns first and only falls back to on-the-fly derivation when no explicit labels are present
 - when sub-universe metadata is missing, `signal_performance_by_sub_universe.csv` is written with the expected columns but no rows
 - when benchmark context is unavailable and equity-context features are not present, `signal_performance_by_benchmark_context.csv` is written with the expected columns but no rows
 - derived benchmark-context labels are explicit and auditable rather than inferred later by the promotion layer

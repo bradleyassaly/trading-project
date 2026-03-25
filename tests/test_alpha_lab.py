@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pandas as pd
@@ -1397,12 +1398,152 @@ def test_run_alpha_research_emits_sub_universe_and_benchmark_context_artifacts(
         "growth_leaders",
     }
     assert set(signal_performance_by_sub_universe_df["context_status"]) == {"confirmed"}
-    assert set(signal_performance_by_benchmark_context_df["context_status"]) == {"derived"}
-    assert set(signal_performance_by_benchmark_context_df["context_source"]) == {
-        "equity_context_features"
+    assert set(signal_performance_by_benchmark_context_df["context_status"]) == {"confirmed"}
+    assert set(signal_performance_by_benchmark_context_df["context_source"]) <= {
+        "benchmark_context_label_1",
+        "benchmark_context_label_2",
     }
     assert signal_performance_by_benchmark_context_df["benchmark_context_label"].str.len().gt(0).all()
     assert signal_performance_by_benchmark_context_df["coverage_ratio"].gt(0.0).all()
+
+
+def test_run_alpha_research_persists_context_feature_labels_from_metadata_and_equity_context(
+    tmp_path: Path,
+) -> None:
+    feature_dir = tmp_path / "features"
+    metadata_dir = tmp_path / "metadata"
+    output_dir = tmp_path / "alpha_outputs"
+    feature_dir.mkdir(parents=True, exist_ok=True)
+    metadata_dir.mkdir(parents=True, exist_ok=True)
+
+    pd.DataFrame(
+        [
+            {"symbol": "AAPL", "sub_universe_id": "liquid_trend"},
+            {"symbol": "MSFT", "sub_universe_id": "liquid_trend"},
+            {"symbol": "NVDA", "sub_universe_id": "growth_leaders"},
+            {"symbol": "AMD", "sub_universe_id": "growth_leaders"},
+        ]
+    ).to_csv(metadata_dir / "sub_universe_snapshot.csv", index=False)
+
+    timestamps = pd.date_range("2024-01-01", periods=80, freq="D")
+    daily_returns = {
+        "AAPL": 0.010,
+        "MSFT": 0.015,
+        "NVDA": 0.020,
+        "AMD": 0.018,
+    }
+    for symbol, daily_return in daily_returns.items():
+        closes = [100.0]
+        for _ in range(79):
+            closes.append(closes[-1] * (1.0 + daily_return))
+        pd.DataFrame(
+            {
+                "timestamp": timestamps,
+                "symbol": [symbol] * len(timestamps),
+                "close": closes,
+            }
+        ).to_parquet(feature_dir / f"{symbol}.parquet", index=False)
+
+    result = run_alpha_research(
+        symbols=["AAPL", "MSFT", "NVDA", "AMD"],
+        universe=None,
+        feature_dir=feature_dir,
+        signal_family="momentum",
+        lookbacks=[1, 2],
+        horizons=[1],
+        min_rows=20,
+        top_quantile=0.34,
+        bottom_quantile=0.34,
+        output_dir=output_dir,
+        train_size=20,
+        test_size=10,
+        step_size=10,
+        equity_context_enabled=True,
+    )
+
+    context_features_dir = Path(result["context_features_dir"])
+    coverage_payload = json.loads(
+        Path(result["research_context_coverage_path"]).read_text(encoding="utf-8")
+    )
+    context_frame = pd.read_parquet(context_features_dir / "AAPL.parquet")
+
+    assert context_features_dir.exists()
+    assert result["research_context_coverage_path"]
+    assert context_frame["sub_universe_id"].dropna().eq("liquid_trend").all()
+    assert context_frame["sub_universe_context_source"].dropna().eq("context_artifact").all()
+    assert context_frame["benchmark_context_label_1"].notna().any()
+    assert context_frame["benchmark_context_label_2"].notna().any()
+    assert context_frame["benchmark_context_source_1"].dropna().eq("equity_context_features").all()
+    assert coverage_payload["symbols_with_sub_universe_labels"] == 4
+    assert coverage_payload["symbols_with_derived_benchmark_labels"] == 4
+
+
+def test_run_alpha_research_prefers_explicit_benchmark_context_labels_when_present(
+    tmp_path: Path,
+) -> None:
+    feature_dir = tmp_path / "features"
+    output_dir = tmp_path / "alpha_outputs"
+    feature_dir.mkdir(parents=True, exist_ok=True)
+
+    timestamps = pd.date_range("2024-01-01", periods=80, freq="D")
+    explicit_labels = {
+        "AAPL": "explicit_risk_on",
+        "MSFT": "explicit_risk_on",
+        "NVDA": "explicit_risk_off",
+        "AMD": "explicit_risk_off",
+    }
+    daily_returns = {
+        "AAPL": 0.010,
+        "MSFT": 0.015,
+        "NVDA": 0.020,
+        "AMD": 0.018,
+    }
+    for symbol, daily_return in daily_returns.items():
+        closes = [100.0]
+        for _ in range(79):
+            closes.append(closes[-1] * (1.0 + daily_return))
+        pd.DataFrame(
+            {
+                "timestamp": timestamps,
+                "symbol": [symbol] * len(timestamps),
+                "close": closes,
+                "benchmark_context_label_1": [explicit_labels[symbol]] * len(timestamps),
+            }
+        ).to_parquet(feature_dir / f"{symbol}.parquet", index=False)
+
+    result = run_alpha_research(
+        symbols=["AAPL", "MSFT", "NVDA", "AMD"],
+        universe=None,
+        feature_dir=feature_dir,
+        signal_family="momentum",
+        lookbacks=[1],
+        horizons=[1],
+        min_rows=20,
+        top_quantile=0.34,
+        bottom_quantile=0.34,
+        output_dir=output_dir,
+        train_size=20,
+        test_size=10,
+        step_size=10,
+        equity_context_enabled=True,
+    )
+
+    signal_performance_by_benchmark_context_df = pd.read_csv(
+        result["signal_performance_by_benchmark_context_path"]
+    )
+    context_frame = pd.read_parquet(Path(result["context_features_dir"]) / "AAPL.parquet")
+
+    assert not signal_performance_by_benchmark_context_df.empty
+    assert set(signal_performance_by_benchmark_context_df["context_status"]) == {"confirmed"}
+    assert set(signal_performance_by_benchmark_context_df["context_source"]) == {
+        "benchmark_context_label_1"
+    }
+    assert set(signal_performance_by_benchmark_context_df["benchmark_context_label"]) == {
+        "explicit_risk_on",
+        "explicit_risk_off",
+    }
+    assert context_frame["benchmark_context_label_1"].dropna().eq("explicit_risk_on").all()
+    assert context_frame["benchmark_context_source_1"].dropna().eq("benchmark_context_label_1").all()
 
 
 def test_add_forward_return_labels_does_not_use_current_bar_as_future_return() -> None:

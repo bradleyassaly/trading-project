@@ -31,6 +31,8 @@ from trading_platform.research.alpha_lab.context import (
     build_sub_universe_membership_by_symbol_date,
     compute_signal_performance_by_benchmark_context,
     compute_signal_performance_by_sub_universe,
+    enrich_symbol_data_with_explicit_context,
+    write_context_feature_panels,
 )
 from trading_platform.research.alpha_lab.composite_portfolio import (
     DEFAULT_COMPOSITE_PORTFOLIO_CONFIG,
@@ -385,6 +387,17 @@ def run_alpha_research(
             lookbacks=lookbacks,
             include_volume=equity_context_include_volume,
         )
+    context_artifact_dir = feature_dir.parent / "metadata"
+    symbol_data, context_coverage_summary = enrich_symbol_data_with_explicit_context(
+        symbol_data,
+        lookbacks=lookbacks,
+        context_artifact_dir=context_artifact_dir if context_artifact_dir.exists() else None,
+    )
+    context_artifact_paths = write_context_feature_panels(
+        symbol_data,
+        output_dir=output_dir,
+        coverage_summary=context_coverage_summary,
+    )
 
     folds = _build_shared_folds(
         symbol_data,
@@ -1234,6 +1247,7 @@ def run_alpha_research(
             "enabled": equity_context_enabled,
             "include_volume": equity_context_include_volume,
         },
+        "research_context": context_coverage_summary,
         "ensemble": {
             "enabled": ensemble_config.enabled,
             "mode": ensemble_config.mode,
@@ -1278,6 +1292,7 @@ def run_alpha_research(
         "liquidity_filtered_portfolio_metrics_path": str(liquidity_filtered_metrics_path_csv),
         "capacity_scenarios_path": str(capacity_scenarios_path_csv),
         "signal_diagnostics_path": str(diagnostics_path),
+        **context_artifact_paths,
         **approved_model_state_paths,
     }
     manifest_path = write_research_run_manifest(
