@@ -22,7 +22,27 @@ CANONICAL_FUNDAMENTAL_METRICS = (
     "shares_outstanding",
 )
 
-DAILY_FUNDAMENTAL_FEATURE_COLUMNS = (
+FUNDAMENTAL_FILING_COLUMNS = (
+    "symbol",
+    "cik",
+    "fiscal_year",
+    "fiscal_period",
+    "period_type",
+    "period_end_date",
+    "filing_date",
+    "available_date",
+    "form_type",
+    "accession_number",
+    "source",
+)
+
+FUNDAMENTAL_VALUE_COLUMNS = (
+    *FUNDAMENTAL_FILING_COLUMNS,
+    "metric_name",
+    "metric_value",
+)
+
+RAW_DAILY_FUNDAMENTAL_FEATURE_COLUMNS = (
     "earnings_yield",
     "book_to_market",
     "sales_to_price",
@@ -45,6 +65,23 @@ DAILY_FUNDAMENTAL_FEATURE_COLUMNS = (
     "sector_neutral_growth_score",
     "sector_neutral_quality_value_score",
     "days_since_available",
+)
+
+CROSS_SECTIONAL_FUNDAMENTAL_SIGNAL_BASE_COLUMNS = tuple(
+    column
+    for column in RAW_DAILY_FUNDAMENTAL_FEATURE_COLUMNS
+    if column != "days_since_available"
+)
+
+TRANSFORMED_DAILY_FUNDAMENTAL_FEATURE_COLUMNS = tuple(
+    f"{column}_{suffix}"
+    for column in CROSS_SECTIONAL_FUNDAMENTAL_SIGNAL_BASE_COLUMNS
+    for suffix in ("rank_pct", "zscore")
+)
+
+DAILY_FUNDAMENTAL_FEATURE_COLUMNS = (
+    *RAW_DAILY_FUNDAMENTAL_FEATURE_COLUMNS,
+    *TRANSFORMED_DAILY_FUNDAMENTAL_FEATURE_COLUMNS,
 )
 
 
@@ -94,21 +131,8 @@ class FundamentalValueRecord:
     form_type: str | None
     accession_number: str | None
     source: str
-    revenue: float | None = None
-    gross_profit: float | None = None
-    operating_income: float | None = None
-    net_income: float | None = None
-    total_assets: float | None = None
-    total_liabilities: float | None = None
-    shareholders_equity: float | None = None
-    cash_and_equivalents: float | None = None
-    current_assets: float | None = None
-    current_liabilities: float | None = None
-    long_term_debt: float | None = None
-    operating_cash_flow: float | None = None
-    capital_expenditures: float | None = None
-    free_cash_flow: float | None = None
-    shares_outstanding: float | None = None
+    metric_name: str
+    metric_value: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

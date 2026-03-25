@@ -9,7 +9,14 @@ import numpy as np
 import pandas as pd
 
 from trading_platform.data.canonical import load_research_symbol_frame
-from trading_platform.data.fundamentals.models import DAILY_FUNDAMENTAL_FEATURE_COLUMNS
+from trading_platform.data.fundamentals.models import (
+    CROSS_SECTIONAL_FUNDAMENTAL_SIGNAL_BASE_COLUMNS,
+    CANONICAL_FUNDAMENTAL_METRICS,
+    DAILY_FUNDAMENTAL_FEATURE_COLUMNS,
+    FUNDAMENTAL_FILING_COLUMNS,
+    FUNDAMENTAL_VALUE_COLUMNS,
+    RAW_DAILY_FUNDAMENTAL_FEATURE_COLUMNS,
+)
 from trading_platform.data.fundamentals.providers.base import FundamentalsProvider
 from trading_platform.data.fundamentals.providers.sec import SECFundamentalsProvider
 from trading_platform.data.fundamentals.providers.vendor import VendorFundamentalsProvider
@@ -50,6 +57,55 @@ class FundamentalFeatureBuildRequest:
 def _safe_ratio(numerator: pd.Series, denominator: pd.Series) -> pd.Series:
     denominator = pd.to_numeric(denominator, errors="coerce").replace(0.0, np.nan)
     return pd.to_numeric(numerator, errors="coerce") / denominator
+
+
+def _winsorize_series(series: pd.Series, *, lower_quantile: float = 0.05, upper_quantile: float = 0.95) -> pd.Series:
+    numeric = pd.to_numeric(series, errors="coerce")
+    non_null = numeric.dropna()
+    if len(non_null) < 3:
+        return numeric
+    lower = non_null.quantile(lower_quantile)
+    upper = non_null.quantile(upper_quantile)
+    return numeric.clip(lower=lower, upper=upper)
+
+
+def _cross_section_rank_pct(series: pd.Series) -> pd.Series:
+    winsorized = _winsorize_series(series)
+    non_null = winsorized.dropna()
+    if len(non_null) < 2 or non_null.nunique() <= 1:
+        return pd.Series(np.nan, index=series.index, dtype=float)
+    return winsorized.rank(method="average", pct=True)
+
+
+def _cross_section_zscore(series: pd.Series) -> pd.Series:
+    winsorized = _winsorize_series(series)
+    non_null = winsorized.dropna()
+    if len(non_null) < 2 or non_null.nunique() <= 1:
+        return pd.Series(np.nan, index=series.index, dtype=float)
+    std = non_null.std(ddof=0)
+    if pd.isna(std) or std == 0.0:
+        return pd.Series(np.nan, index=series.index, dtype=float)
+    mean = non_null.mean()
+    return (winsorized - mean) / std
+
+
+def _apply_cross_sectional_fundamental_transforms(daily_features_df: pd.DataFrame) -> pd.DataFrame:
+    if daily_features_df.empty:
+        return daily_features_df
+
+    transformed = daily_features_df.copy()
+    for base_column in CROSS_SECTIONAL_FUNDAMENTAL_SIGNAL_BASE_COLUMNS:
+        if base_column not in transformed.columns:
+            transformed[f"{base_column}_rank_pct"] = pd.Series(np.nan, index=transformed.index, dtype=float)
+            transformed[f"{base_column}_zscore"] = pd.Series(np.nan, index=transformed.index, dtype=float)
+            continue
+        transformed[f"{base_column}_rank_pct"] = transformed.groupby("timestamp", dropna=False)[base_column].transform(
+            _cross_section_rank_pct
+        )
+        transformed[f"{base_column}_zscore"] = transformed.groupby("timestamp", dropna=False)[base_column].transform(
+            _cross_section_zscore
+        )
+    return transformed
 
 
 def _provider_instances(request: FundamentalsIngestionRequest) -> list[FundamentalsProvider]:
@@ -104,36 +160,81 @@ def _coalesce_filing_metadata(filing_frames: list[pd.DataFrame]) -> pd.DataFrame
 
 
 def _coalesce_fundamental_values(value_frames: list[pd.DataFrame]) -> pd.DataFrame:
+    def _normalize_value_frame(frame: pd.DataFrame) -> pd.DataFrame:
+        if frame.empty:
+            return pd.DataFrame(columns=FUNDAMENTAL_VALUE_COLUMNS)
+        normalized = frame.copy()
+        if "metric_name" not in normalized.columns or "metric_value" not in normalized.columns:
+            metadata_columns = [column for column in FUNDAMENTAL_FILING_COLUMNS if column in normalized.columns]
+            value_columns = [column for column in CANONICAL_FUNDAMENTAL_METRICS if column in normalized.columns]
+            if not value_columns:
+                return pd.DataFrame(columns=FUNDAMENTAL_VALUE_COLUMNS)
+            normalized = normalized.melt(
+                id_vars=metadata_columns,
+                value_vars=value_columns,
+                var_name="metric_name",
+                value_name="metric_value",
+            )
+        normalized = normalized.dropna(subset=["metric_name"]).copy()
+        normalized["metric_name"] = normalized["metric_name"].astype(str)
+        normalized["metric_value"] = pd.to_numeric(normalized["metric_value"], errors="coerce")
+        normalized = normalized.loc[normalized["metric_name"].isin(CANONICAL_FUNDAMENTAL_METRICS)].copy()
+        normalized = normalized.loc[normalized["metric_value"].notna()].copy()
+        for column in FUNDAMENTAL_VALUE_COLUMNS:
+            if column not in normalized.columns:
+                normalized[column] = pd.NA
+        return normalized[list(FUNDAMENTAL_VALUE_COLUMNS)].copy()
+
     if not value_frames:
-        return pd.DataFrame(
-            columns=[
-                "symbol",
-                "cik",
-                "fiscal_year",
-                "fiscal_period",
-                "period_type",
-                "period_end_date",
-                "filing_date",
-                "available_date",
-                "form_type",
-                "accession_number",
-                "source",
-            ]
-        )
-    combined = pd.concat(value_frames, ignore_index=True)
+        return pd.DataFrame(columns=FUNDAMENTAL_VALUE_COLUMNS)
+    combined = pd.concat([_normalize_value_frame(frame) for frame in value_frames], ignore_index=True)
+    if combined.empty:
+        return pd.DataFrame(columns=FUNDAMENTAL_VALUE_COLUMNS)
     combined["symbol"] = combined["symbol"].astype(str).str.upper()
     combined["available_date"] = pd.to_datetime(combined["available_date"], errors="coerce")
     combined["filing_date"] = pd.to_datetime(combined["filing_date"], errors="coerce")
     combined["period_end_date"] = pd.to_datetime(combined["period_end_date"], errors="coerce")
-    combined = combined.sort_values(["symbol", "available_date", "source"]).drop_duplicates(
-        subset=["symbol", "accession_number", "period_end_date", "fiscal_year", "fiscal_period"],
+    combined = combined.sort_values(["symbol", "available_date", "metric_name", "source"]).drop_duplicates(
+        subset=["symbol", "accession_number", "period_end_date", "fiscal_year", "fiscal_period", "metric_name"],
         keep="first",
     )
-    if "free_cash_flow" not in combined.columns or combined["free_cash_flow"].isna().all():
-        combined["free_cash_flow"] = (
-            pd.to_numeric(combined.get("operating_cash_flow"), errors="coerce")
-            - pd.to_numeric(combined.get("capital_expenditures"), errors="coerce")
+    free_cash_flow_keys = set(
+        tuple(row)
+        for row in combined.loc[combined["metric_name"].eq("free_cash_flow"), ["symbol", "accession_number", "period_end_date", "fiscal_year", "fiscal_period"]].itertuples(index=False, name=None)
+    )
+    operating_cash_flow = combined.loc[combined["metric_name"].eq("operating_cash_flow")].rename(columns={"metric_value": "operating_cash_flow"})
+    capital_expenditures = combined.loc[combined["metric_name"].eq("capital_expenditures")].rename(columns={"metric_value": "capital_expenditures"})
+    derived_free_cash_flow = operating_cash_flow.merge(
+        capital_expenditures[
+            ["symbol", "accession_number", "period_end_date", "fiscal_year", "fiscal_period", "capital_expenditures"]
+        ],
+        on=["symbol", "accession_number", "period_end_date", "fiscal_year", "fiscal_period"],
+        how="inner",
+    )
+    if not derived_free_cash_flow.empty:
+        derived_free_cash_flow["dedupe_key"] = list(
+            zip(
+                derived_free_cash_flow["symbol"],
+                derived_free_cash_flow["accession_number"],
+                derived_free_cash_flow["period_end_date"],
+                derived_free_cash_flow["fiscal_year"],
+                derived_free_cash_flow["fiscal_period"],
+            )
         )
+        derived_free_cash_flow = derived_free_cash_flow.loc[~derived_free_cash_flow["dedupe_key"].isin(free_cash_flow_keys)].copy()
+        if not derived_free_cash_flow.empty:
+            derived_free_cash_flow["metric_name"] = "free_cash_flow"
+            derived_free_cash_flow["metric_value"] = (
+                pd.to_numeric(derived_free_cash_flow["operating_cash_flow"], errors="coerce")
+                - pd.to_numeric(derived_free_cash_flow["capital_expenditures"], errors="coerce")
+            )
+            combined = pd.concat(
+                [
+                    combined,
+                    derived_free_cash_flow[list(FUNDAMENTAL_VALUE_COLUMNS)],
+                ],
+                ignore_index=True,
+            )
     return combined.reset_index(drop=True)
 
 
@@ -160,21 +261,7 @@ def ingest_fundamentals(request: FundamentalsIngestionRequest) -> dict[str, str]
     if filing_df.empty and not values_df.empty:
         filing_df = _coalesce_filing_metadata(
             [
-                values_df[
-                    [
-                        "symbol",
-                        "cik",
-                        "fiscal_year",
-                        "fiscal_period",
-                        "period_type",
-                        "period_end_date",
-                        "filing_date",
-                        "available_date",
-                        "form_type",
-                        "accession_number",
-                        "source",
-                    ]
-                ]
+                values_df[list(FUNDAMENTAL_FILING_COLUMNS)]
             ]
         )
 
@@ -201,8 +288,16 @@ def ingest_fundamentals(request: FundamentalsIngestionRequest) -> dict[str, str]
                 "company_count": int(len(company_df)),
                 "filing_count": int(len(filing_df)),
                 "value_count": int(len(values_df)),
+                "metric_row_count": int(len(values_df)),
+                "metrics_by_name": {
+                    metric_name: int(count)
+                    for metric_name, count in values_df["metric_name"].value_counts().sort_index().items()
+                }
+                if not values_df.empty
+                else {},
                 "symbols_requested": len(request.symbols),
                 "symbols_with_values": int(values_df["symbol"].nunique()) if not values_df.empty else 0,
+                "symbols_with_metric_coverage": sorted(values_df["symbol"].dropna().astype(str).str.upper().unique().tolist()) if not values_df.empty else [],
                 "warnings": [
                     diagnostic.get("message")
                     for diagnostic in provider_diagnostics
@@ -237,7 +332,23 @@ def _align_symbol_daily_features(
             base[column] = pd.Series(dtype="float64")
         return base
 
-    symbol_values = symbol_values.sort_values("available_date").copy()
+    symbol_values["metric_value"] = pd.to_numeric(symbol_values["metric_value"], errors="coerce")
+    symbol_values = symbol_values.sort_values(["available_date", "metric_name"]).copy()
+    symbol_values = (
+        symbol_values.pivot_table(
+            index=list(FUNDAMENTAL_FILING_COLUMNS),
+            columns="metric_name",
+            values="metric_value",
+            aggfunc="last",
+        )
+        .reset_index()
+    )
+    symbol_values.columns.name = None
+    if "free_cash_flow" not in symbol_values.columns:
+        symbol_values["free_cash_flow"] = (
+            pd.to_numeric(symbol_values.get("operating_cash_flow"), errors="coerce")
+            - pd.to_numeric(symbol_values.get("capital_expenditures"), errors="coerce")
+        )
     symbol_values["previous_year_revenue"] = symbol_values.groupby("fiscal_period")["revenue"].shift(1)
     symbol_values["previous_year_net_income"] = symbol_values.groupby("fiscal_period")["net_income"].shift(1)
 
@@ -296,6 +407,8 @@ def build_daily_fundamental_features(request: FundamentalFeatureBuildRequest) ->
     values_df = pd.read_parquet(artifact_root / "fundamental_values.parquet") if (artifact_root / "fundamental_values.parquet").exists() else pd.DataFrame()
     company_master_df = pd.read_parquet(artifact_root / "company_master.parquet") if (artifact_root / "company_master.parquet").exists() else pd.DataFrame()
     if not values_df.empty:
+        if "metric_name" not in values_df.columns or "metric_value" not in values_df.columns:
+            values_df = _coalesce_fundamental_values([values_df])
         for column in ("period_end_date", "filing_date", "available_date"):
             if column in values_df.columns:
                 values_df[column] = pd.to_datetime(values_df[column], errors="coerce")
@@ -329,13 +442,25 @@ def build_daily_fundamental_features(request: FundamentalFeatureBuildRequest) ->
             daily_features_df[output_name] = daily_features_df.groupby(["timestamp", "sector"], dropna=False)[score_name].transform(
                 lambda values: values - values.mean() if values.notna().sum() >= 1 else values
             )
+    daily_features_df = _apply_cross_sectional_fundamental_transforms(daily_features_df)
 
     if not daily_features_df.empty:
-        preserved_columns = [
-            column
-            for column in ("timestamp", "symbol", "sector", "industry", *DAILY_FUNDAMENTAL_FEATURE_COLUMNS)
-            if column in daily_features_df.columns
-        ]
+        preserved_columns = list(
+            dict.fromkeys(
+                [
+                    column
+                    for column in (
+                        "timestamp",
+                        "symbol",
+                        "sector",
+                        "industry",
+                        *RAW_DAILY_FUNDAMENTAL_FEATURE_COLUMNS,
+                        *DAILY_FUNDAMENTAL_FEATURE_COLUMNS,
+                    )
+                    if column in daily_features_df.columns
+                ]
+            )
+        )
         daily_features_df = daily_features_df[preserved_columns].copy()
 
     daily_features_path = request.daily_features_path or artifact_root / "daily_fundamental_features.parquet"

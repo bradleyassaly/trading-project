@@ -10,6 +10,7 @@ from trading_platform.data.fundamentals.models import (
     CANONICAL_FUNDAMENTAL_METRICS,
     CompanyMasterRecord,
     FilingMetadataRecord,
+    FUNDAMENTAL_FILING_COLUMNS,
     FundamentalValueRecord,
 )
 from trading_platform.data.fundamentals.providers.base import (
@@ -86,6 +87,7 @@ def _empty_value_frame(provider_name: str) -> pd.DataFrame:
                 form_type=None,
                 accession_number=None,
                 source=provider_name,
+                metric_name="",
             ).to_dict()
         ]
     ).iloc[0:0].copy()
@@ -147,6 +149,7 @@ class SECFundamentalsProvider(FundamentalsProvider):
         companyfacts_payload: dict[str, Any],
     ) -> tuple[pd.DataFrame, pd.DataFrame]:
         filing_rows: dict[tuple[str | None, int | None, str | None, str | None, str | None], dict[str, Any]] = {}
+        value_rows: list[dict[str, Any]] = []
         for metric_name in CANONICAL_FUNDAMENTAL_METRICS:
             if metric_name == "free_cash_flow":
                 continue
@@ -176,30 +179,28 @@ class SECFundamentalsProvider(FundamentalsProvider):
                         "source": self.provider_name,
                     },
                 )
-                filing_rows[key][metric_name] = entry.get("val")
+                value_rows.append(
+                    FundamentalValueRecord(
+                        symbol=symbol.upper(),
+                        cik=cik,
+                        fiscal_year=fiscal_year,
+                        fiscal_period=fiscal_period,
+                        period_type="annual" if str(form_type).upper() == "10-K" else "quarterly",
+                        period_end_date=period_end_date,
+                        filing_date=filing_date,
+                        available_date=filing_date,
+                        form_type=form_type,
+                        accession_number=accession_number,
+                        source=self.provider_name,
+                        metric_name=metric_name,
+                        metric_value=entry.get("val"),
+                    ).to_dict()
+                )
 
-        values_df = pd.DataFrame(filing_rows.values())
+        values_df = pd.DataFrame(value_rows)
         if values_df.empty:
             return pd.DataFrame(), pd.DataFrame()
-        if "free_cash_flow" not in values_df.columns:
-            values_df["free_cash_flow"] = (
-                pd.to_numeric(values_df.get("operating_cash_flow"), errors="coerce")
-                - pd.to_numeric(values_df.get("capital_expenditures"), errors="coerce")
-            )
-        filing_columns = [
-            "symbol",
-            "cik",
-            "fiscal_year",
-            "fiscal_period",
-            "period_type",
-            "period_end_date",
-            "filing_date",
-            "available_date",
-            "form_type",
-            "accession_number",
-            "source",
-        ]
-        filing_df = values_df[filing_columns].drop_duplicates().reset_index(drop=True)
+        filing_df = pd.DataFrame(filing_rows.values(), columns=FUNDAMENTAL_FILING_COLUMNS).drop_duplicates().reset_index(drop=True)
         return filing_df, values_df
 
     def fetch(self, *, symbols: list[str]) -> ProviderFetchResult:

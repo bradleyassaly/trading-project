@@ -15,6 +15,8 @@ from trading_platform.data.fundamentals.models import (
     CANONICAL_FUNDAMENTAL_METRICS,
     CompanyMasterRecord,
     FilingMetadataRecord,
+    FUNDAMENTAL_FILING_COLUMNS,
+    FUNDAMENTAL_VALUE_COLUMNS,
     FundamentalValueRecord,
 )
 from trading_platform.data.fundamentals.providers.base import (
@@ -96,6 +98,7 @@ def _empty_value_frame(provider_name: str) -> pd.DataFrame:
                 form_type=None,
                 accession_number=None,
                 source=provider_name,
+                metric_name="",
             ).to_dict()
         ]
     ).iloc[0:0].copy()
@@ -177,7 +180,7 @@ def _conservative_available_date(
 @dataclass(frozen=True)
 class _NormalizedFMPStatement:
     filing: dict[str, Any]
-    values: dict[str, Any]
+    values: list[dict[str, Any]]
     available_date_method: str
 
 
@@ -257,29 +260,41 @@ class VendorFundamentalsProvider(FundamentalsProvider):
         values_df = values_df.loc[values_df["symbol"].isin(normalized_symbols)].copy()
         if "source" not in values_df.columns:
             values_df["source"] = self.provider_name
-        for metric in CANONICAL_FUNDAMENTAL_METRICS:
-            if metric not in values_df.columns:
-                values_df[metric] = pd.Series(dtype="float64")
-        if "free_cash_flow" not in values_df.columns or values_df["free_cash_flow"].isna().all():
-            values_df["free_cash_flow"] = (
-                pd.to_numeric(values_df.get("operating_cash_flow"), errors="coerce")
-                - pd.to_numeric(values_df.get("capital_expenditures"), errors="coerce")
+        if "metric_name" not in values_df.columns or "metric_value" not in values_df.columns:
+            metadata_columns = [column for column in FUNDAMENTAL_FILING_COLUMNS if column in values_df.columns]
+            value_columns = [column for column in CANONICAL_FUNDAMENTAL_METRICS if column in values_df.columns]
+            values_df = values_df.melt(
+                id_vars=metadata_columns,
+                value_vars=value_columns,
+                var_name="metric_name",
+                value_name="metric_value",
             )
-        filing_df = values_df[
-            [
-                "symbol",
-                "cik",
-                "fiscal_year",
-                "fiscal_period",
-                "period_type",
-                "period_end_date",
-                "filing_date",
-                "available_date",
-                "form_type",
-                "accession_number",
-                "source",
-            ]
-        ].drop_duplicates().reset_index(drop=True)
+            values_df = values_df.dropna(subset=["metric_value"]).reset_index(drop=True)
+        if "free_cash_flow" not in set(values_df["metric_name"].astype(str)):
+            operating_cash_flow = values_df.loc[values_df["metric_name"] == "operating_cash_flow"].rename(columns={"metric_value": "operating_cash_flow"})
+            capital_expenditures = values_df.loc[values_df["metric_name"] == "capital_expenditures"].rename(columns={"metric_value": "capital_expenditures"})
+            derived = operating_cash_flow.merge(
+                capital_expenditures[
+                    ["symbol", "accession_number", "period_end_date", "fiscal_year", "fiscal_period", "capital_expenditures"]
+                ],
+                on=["symbol", "accession_number", "period_end_date", "fiscal_year", "fiscal_period"],
+                how="inner",
+            )
+            if not derived.empty:
+                derived["metric_name"] = "free_cash_flow"
+                derived["metric_value"] = (
+                    pd.to_numeric(derived["operating_cash_flow"], errors="coerce")
+                    - pd.to_numeric(derived["capital_expenditures"], errors="coerce")
+                )
+                values_df = pd.concat(
+                    [
+                        values_df,
+                        derived[list(FUNDAMENTAL_VALUE_COLUMNS)],
+                    ],
+                    ignore_index=True,
+                )
+        values_df = values_df[[column for column in FUNDAMENTAL_VALUE_COLUMNS if column in values_df.columns]].copy()
+        filing_df = values_df[list(FUNDAMENTAL_FILING_COLUMNS)].drop_duplicates().reset_index(drop=True)
         company_df = tables.get("company_master", pd.DataFrame()).copy()
         if not company_df.empty:
             company_df["symbol"] = company_df["symbol"].astype(str).str.upper()
@@ -348,7 +363,7 @@ class VendorFundamentalsProvider(FundamentalsProvider):
         )
         form_type = str(_first_non_empty(merged_statement, ("formType",)) or ("10-K" if inferred_period_type == "annual" else "10-Q"))
 
-        row: dict[str, Any] = {
+        filing_row: dict[str, Any] = {
             "symbol": symbol.upper(),
             "cik": cik,
             "fiscal_year": fiscal_year,
@@ -361,33 +376,32 @@ class VendorFundamentalsProvider(FundamentalsProvider):
             "accession_number": accession_number,
             "source": FMP_SOURCE,
         }
+        value_rows: list[dict[str, Any]] = []
         for metric_name, field_names in FMP_STATEMENT_FIELD_MAP.items():
-            row[metric_name] = _coerce_float(_first_non_empty(merged_statement, field_names))
-        if row.get("free_cash_flow") is None:
-            operating_cash_flow = row.get("operating_cash_flow")
-            capital_expenditures = row.get("capital_expenditures")
-            if operating_cash_flow is not None and capital_expenditures is not None:
-                row["free_cash_flow"] = operating_cash_flow - capital_expenditures
-
-        filing_row = {
-            key: row[key]
-            for key in (
-                "symbol",
-                "cik",
-                "fiscal_year",
-                "fiscal_period",
-                "period_type",
-                "period_end_date",
-                "filing_date",
-                "available_date",
-                "form_type",
-                "accession_number",
-                "source",
+            metric_value = _coerce_float(_first_non_empty(merged_statement, field_names))
+            if metric_value is None:
+                continue
+            value_rows.append(
+                FundamentalValueRecord(
+                    **filing_row,
+                    metric_name=metric_name,
+                    metric_value=metric_value,
+                ).to_dict()
             )
-        }
+        if not any(row["metric_name"] == "free_cash_flow" for row in value_rows):
+            operating_cash_flow = next((row["metric_value"] for row in value_rows if row["metric_name"] == "operating_cash_flow"), None)
+            capital_expenditures = next((row["metric_value"] for row in value_rows if row["metric_name"] == "capital_expenditures"), None)
+            if operating_cash_flow is not None and capital_expenditures is not None:
+                value_rows.append(
+                    FundamentalValueRecord(
+                        **filing_row,
+                        metric_name="free_cash_flow",
+                        metric_value=operating_cash_flow - capital_expenditures,
+                    ).to_dict()
+                )
         return _NormalizedFMPStatement(
             filing=filing_row,
-            values=row,
+            values=value_rows,
             available_date_method=available_date_method,
         )
 
@@ -423,7 +437,7 @@ class VendorFundamentalsProvider(FundamentalsProvider):
                 if normalized is None:
                     continue
                 filing_rows.append(normalized.filing)
-                value_rows.append(normalized.values)
+                value_rows.extend(normalized.values)
                 method_counts[normalized.available_date_method] = method_counts.get(normalized.available_date_method, 0) + 1
 
         return filing_rows, value_rows, method_counts
@@ -490,27 +504,13 @@ class VendorFundamentalsProvider(FundamentalsProvider):
         values_df = pd.DataFrame(value_rows) if value_rows else _empty_value_frame(FMP_SOURCE)
         if not values_df.empty:
             values_df = values_df.sort_values(
-                ["symbol", "available_date", "period_end_date", "fiscal_period", "source"],
+                ["symbol", "available_date", "period_end_date", "fiscal_period", "metric_name", "source"],
                 na_position="last",
             ).drop_duplicates(
-                subset=["symbol", "period_end_date", "fiscal_period", "fiscal_year", "accession_number"],
+                subset=["symbol", "period_end_date", "fiscal_period", "fiscal_year", "accession_number", "metric_name"],
                 keep="last",
             ).reset_index(drop=True)
-            filing_df = values_df[
-                [
-                    "symbol",
-                    "cik",
-                    "fiscal_year",
-                    "fiscal_period",
-                    "period_type",
-                    "period_end_date",
-                    "filing_date",
-                    "available_date",
-                    "form_type",
-                    "accession_number",
-                    "source",
-                ]
-            ].drop_duplicates().reset_index(drop=True)
+            filing_df = values_df[list(FUNDAMENTAL_FILING_COLUMNS)].drop_duplicates().reset_index(drop=True)
 
         return ProviderFetchResult(
             company_master_df=company_df,

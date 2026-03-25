@@ -7,6 +7,7 @@ from typing import Any
 import pandas as pd
 import pytest
 
+from trading_platform.data.fundamentals.models import CANONICAL_FUNDAMENTAL_METRICS
 from trading_platform.data.fundamentals.providers.sec import SECFundamentalsProvider
 from trading_platform.data.fundamentals.providers import vendor as vendor_module
 from trading_platform.data.fundamentals.providers.vendor import VendorFundamentalsProvider
@@ -148,6 +149,34 @@ def _fmp_payloads_for_symbol(symbol: str) -> dict[str, Any]:
     }
 
 
+def _long_fundamental_values(rows: list[dict[str, Any]]) -> pd.DataFrame:
+    frame = pd.DataFrame(rows)
+    metadata_columns = [
+        "symbol",
+        "cik",
+        "fiscal_year",
+        "fiscal_period",
+        "period_type",
+        "period_end_date",
+        "filing_date",
+        "available_date",
+        "form_type",
+        "accession_number",
+        "source",
+    ]
+    metric_columns = [column for column in CANONICAL_FUNDAMENTAL_METRICS if column in frame.columns]
+    return (
+        frame.melt(
+            id_vars=metadata_columns,
+            value_vars=metric_columns,
+            var_name="metric_name",
+            value_name="metric_value",
+        )
+        .dropna(subset=["metric_value"])
+        .reset_index(drop=True)
+    )
+
+
 def test_vendor_provider_normalizes_symbols_and_derives_free_cash_flow(tmp_path: Path) -> None:
     vendor_path = tmp_path / "vendor_fundamentals.json"
     vendor_path.write_text(
@@ -183,7 +212,9 @@ def test_vendor_provider_normalizes_symbols_and_derives_free_cash_flow(tmp_path:
     assert result.diagnostics["status"] == "ok"
     assert result.company_master_df.loc[0, "symbol"] == "AAPL"
     assert result.fundamental_values_df.loc[0, "symbol"] == "AAPL"
-    assert result.fundamental_values_df.loc[0, "free_cash_flow"] == 25.0
+    free_cash_flow_rows = result.fundamental_values_df.loc[result.fundamental_values_df["metric_name"] == "free_cash_flow"]
+    assert not free_cash_flow_rows.empty
+    assert free_cash_flow_rows.iloc[0]["metric_value"] == 25.0
 
 
 def test_sec_provider_normalizes_companyfacts_into_canonical_rows(tmp_path: Path) -> None:
@@ -254,8 +285,10 @@ def test_sec_provider_normalizes_companyfacts_into_canonical_rows(tmp_path: Path
     assert result.diagnostics["configured"] is True
     assert result.company_master_df.loc[0, "company_name"] == "Apple Inc."
     assert result.company_master_df.loc[0, "exchange"] == "NASDAQ"
-    assert result.fundamental_values_df.loc[0, "revenue"] == 100.0
-    assert result.fundamental_values_df.loc[0, "net_income"] == 22.0
+    revenue_rows = result.fundamental_values_df.loc[result.fundamental_values_df["metric_name"] == "revenue"]
+    net_income_rows = result.fundamental_values_df.loc[result.fundamental_values_df["metric_name"] == "net_income"]
+    assert revenue_rows.iloc[0]["metric_value"] == 100.0
+    assert net_income_rows.iloc[0]["metric_value"] == 22.0
     assert result.filing_metadata_df.loc[0, "available_date"] == "2024-11-01"
 
 
@@ -269,13 +302,13 @@ def test_vendor_provider_fetches_and_normalizes_fmp_responses(monkeypatch: pytes
     assert result.diagnostics["mode"] == "fmp"
     assert result.company_master_df.loc[0, "symbol"] == "AAPL"
     assert result.company_master_df.loc[0, "source"] == "vendor:fmp"
-    assert len(result.fundamental_values_df) == 2
-    latest_row = result.fundamental_values_df.sort_values("period_end_date").iloc[-1]
-    assert latest_row["revenue"] == 120.0
-    assert latest_row["shareholders_equity"] == 150.0
-    assert latest_row["operating_cash_flow"] == 32.0
-    assert latest_row["free_cash_flow"] == 24.0
-    assert latest_row["available_date"] == "2025-02-20"
+    assert not result.fundamental_values_df.empty
+    latest_rows = result.fundamental_values_df.loc[result.fundamental_values_df["period_end_date"] == "2024-12-31"]
+    assert latest_rows.loc[latest_rows["metric_name"] == "revenue", "metric_value"].iloc[0] == 120.0
+    assert latest_rows.loc[latest_rows["metric_name"] == "shareholders_equity", "metric_value"].iloc[0] == 150.0
+    assert latest_rows.loc[latest_rows["metric_name"] == "operating_cash_flow", "metric_value"].iloc[0] == 32.0
+    assert latest_rows.loc[latest_rows["metric_name"] == "free_cash_flow", "metric_value"].iloc[0] == 24.0
+    assert latest_rows["available_date"].iloc[0] == "2025-02-20"
 
 
 def test_ingest_fundamentals_raises_clear_error_when_vendor_api_key_missing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -323,7 +356,7 @@ def test_build_daily_fundamental_features_respects_available_date_and_forward_fi
     pd.DataFrame(
         [{"symbol": "AAPL", "sector": "Technology", "industry": "Hardware"}]
     ).to_parquet(artifact_root / "company_master.parquet", index=False)
-    pd.DataFrame(
+    _long_fundamental_values(
         [
             {
                 "symbol": "AAPL",
@@ -417,6 +450,152 @@ def test_build_daily_fundamental_features_respects_available_date_and_forward_fi
     assert second_available["days_since_available"] == 0
 
 
+def test_build_daily_fundamental_features_adds_cross_sectional_rank_pct_and_zscore(tmp_path: Path) -> None:
+    artifact_root = tmp_path / "fundamentals"
+    calendar_dir = tmp_path / "features"
+    artifact_root.mkdir()
+    calendar_dir.mkdir()
+
+    pd.DataFrame(
+        [
+            {"symbol": "AAPL", "sector": "Technology", "industry": "Hardware"},
+            {"symbol": "MSFT", "sector": "Technology", "industry": "Software"},
+            {"symbol": "NVDA", "sector": "Technology", "industry": "Semiconductors"},
+        ]
+    ).to_parquet(artifact_root / "company_master.parquet", index=False)
+    _long_fundamental_values(
+        [
+            {
+                "symbol": symbol,
+                "cik": f"0000{index}",
+                "fiscal_year": 2023,
+                "fiscal_period": "FY",
+                "period_type": "annual",
+                "period_end_date": "2023-12-31",
+                "filing_date": "2024-02-15",
+                "available_date": "2024-02-15",
+                "form_type": "10-K",
+                "accession_number": f"accn-{symbol}",
+                "source": "vendor:fmp",
+                "revenue": revenue,
+                "gross_profit": revenue * 0.4,
+                "operating_income": revenue * 0.2,
+                "net_income": net_income,
+                "total_assets": assets,
+                "total_liabilities": liabilities,
+                "shareholders_equity": equity,
+                "cash_and_equivalents": 25.0 + index,
+                "current_assets": 90.0 + index,
+                "current_liabilities": 30.0,
+                "long_term_debt": 20.0 + index,
+                "operating_cash_flow": net_income + 4.0,
+                "capital_expenditures": 4.0,
+                "free_cash_flow": net_income,
+                "shares_outstanding": 10.0,
+            }
+            for index, (symbol, revenue, net_income, assets, liabilities, equity) in enumerate(
+                (
+                    ("AAPL", 100.0, 10.0, 200.0, 80.0, 120.0),
+                    ("MSFT", 120.0, 20.0, 240.0, 90.0, 150.0),
+                    ("NVDA", 140.0, 30.0, 280.0, 100.0, 180.0),
+                ),
+                start=1,
+            )
+        ]
+    ).to_parquet(artifact_root / "fundamental_values.parquet", index=False)
+    for symbol in ("AAPL", "MSFT", "NVDA"):
+        pd.DataFrame(
+            {
+                "timestamp": pd.date_range("2024-02-15", periods=3, freq="D"),
+                "symbol": [symbol] * 3,
+                "close": [20.0] * 3,
+            }
+        ).to_parquet(calendar_dir / f"{symbol}.parquet", index=False)
+
+    result = build_daily_fundamental_features(
+        FundamentalFeatureBuildRequest(
+            artifact_root=artifact_root,
+            calendar_dir=calendar_dir,
+            symbols=["AAPL", "MSFT", "NVDA"],
+        )
+    )
+    daily_df = pd.read_parquet(result["daily_fundamental_features_path"])
+    snapshot = daily_df.loc[daily_df["timestamp"] == pd.Timestamp("2024-02-15")].sort_values("symbol").reset_index(drop=True)
+
+    assert "earnings_yield_rank_pct" in daily_df.columns
+    assert "earnings_yield_zscore" in daily_df.columns
+    assert snapshot["earnings_yield_rank_pct"].tolist() == [1.0 / 3.0, 2.0 / 3.0, 1.0]
+    assert snapshot["fundamental_value_score_rank_pct"].nunique(dropna=True) == 3
+    assert abs(snapshot["earnings_yield_zscore"].mean()) < 1e-9
+
+
+def test_cross_sectional_fundamental_transforms_drop_constant_dates(tmp_path: Path) -> None:
+    artifact_root = tmp_path / "fundamentals"
+    calendar_dir = tmp_path / "features"
+    artifact_root.mkdir()
+    calendar_dir.mkdir()
+
+    pd.DataFrame(
+        [
+            {"symbol": "AAPL", "sector": "Technology", "industry": "Hardware"},
+            {"symbol": "MSFT", "sector": "Technology", "industry": "Software"},
+        ]
+    ).to_parquet(artifact_root / "company_master.parquet", index=False)
+    _long_fundamental_values(
+        [
+            {
+                "symbol": symbol,
+                "cik": f"0000{index}",
+                "fiscal_year": 2023,
+                "fiscal_period": "FY",
+                "period_type": "annual",
+                "period_end_date": "2023-12-31",
+                "filing_date": "2024-02-15",
+                "available_date": "2024-02-15",
+                "form_type": "10-K",
+                "accession_number": f"accn-{symbol}",
+                "source": "vendor:fmp",
+                "revenue": 100.0,
+                "gross_profit": 40.0,
+                "operating_income": 20.0,
+                "net_income": 10.0,
+                "total_assets": 200.0,
+                "total_liabilities": 80.0,
+                "shareholders_equity": 120.0,
+                "cash_and_equivalents": 25.0,
+                "current_assets": 90.0,
+                "current_liabilities": 30.0,
+                "long_term_debt": 20.0,
+                "operating_cash_flow": 14.0,
+                "capital_expenditures": 4.0,
+                "free_cash_flow": 10.0,
+                "shares_outstanding": 10.0,
+            }
+            for index, symbol in enumerate(("AAPL", "MSFT"), start=1)
+        ]
+    ).to_parquet(artifact_root / "fundamental_values.parquet", index=False)
+    for symbol in ("AAPL", "MSFT"):
+        pd.DataFrame(
+            {
+                "timestamp": pd.date_range("2024-02-15", periods=2, freq="D"),
+                "symbol": [symbol] * 2,
+                "close": [20.0] * 2,
+            }
+        ).to_parquet(calendar_dir / f"{symbol}.parquet", index=False)
+
+    result = build_daily_fundamental_features(
+        FundamentalFeatureBuildRequest(
+            artifact_root=artifact_root,
+            calendar_dir=calendar_dir,
+            symbols=["AAPL", "MSFT"],
+        )
+    )
+    daily_df = pd.read_parquet(result["daily_fundamental_features_path"])
+
+    assert daily_df["earnings_yield_rank_pct"].isna().all()
+    assert daily_df["earnings_yield_zscore"].isna().all()
+
+
 def test_fmp_ingest_and_feature_build_generate_non_empty_daily_features(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -442,6 +621,7 @@ def test_fmp_ingest_and_feature_build_generate_non_empty_daily_features(
             vendor_api_key="test-key",
         )
     )
+    values_df = pd.read_parquet(ingest_result["fundamental_values_path"])
     feature_result = build_daily_fundamental_features(
         FundamentalFeatureBuildRequest(
             artifact_root=artifact_root,
@@ -453,6 +633,12 @@ def test_fmp_ingest_and_feature_build_generate_non_empty_daily_features(
     daily_df = pd.read_parquet(feature_result["daily_fundamental_features_path"])
 
     assert summary["provider_diagnostics"][0]["mode"] == "fmp"
+    assert not values_df.empty
+    assert set(values_df.columns) >= {"metric_name", "metric_value", "available_date", "period_end_date"}
+    assert "revenue" in set(values_df["metric_name"])
+    assert summary["metric_row_count"] == len(values_df)
+    assert summary["metrics_by_name"]["revenue"] >= 1
+    assert summary["symbols_with_metric_coverage"] == ["AAPL"]
     assert not daily_df.empty
     assert daily_df["earnings_yield"].notna().any()
     assert daily_df["fundamental_quality_value_score"].notna().any()
@@ -531,6 +717,7 @@ def test_ingest_and_feature_build_write_expected_artifacts(tmp_path: Path) -> No
         )
     )
     summary = json.loads(Path(feature_result["fundamental_summary_path"]).read_text(encoding="utf-8"))
+    values_df = pd.read_parquet(ingest_result["fundamental_values_path"])
 
     assert Path(ingest_result["company_master_path"]).exists()
     assert Path(ingest_result["fundamental_filings_path"]).exists()
@@ -539,6 +726,9 @@ def test_ingest_and_feature_build_write_expected_artifacts(tmp_path: Path) -> No
     assert Path(feature_result["fundamental_feature_coverage_path"]).exists()
     assert Path(feature_result["fundamental_lag_audit_path"]).exists()
     assert summary["company_count"] == 1
+    assert not values_df.empty
+    assert "metric_name" in values_df.columns
+    assert "metric_value" in values_df.columns
     assert summary["daily_feature_build"]["daily_feature_rows"] == 10
 
 
@@ -549,7 +739,7 @@ def test_run_alpha_research_integrates_fundamental_features_without_breaking_flo
     feature_dir.mkdir()
 
     timestamps = pd.date_range("2024-01-01", periods=60, freq="D")
-    for symbol, drift in {"AAPL": 0.003, "MSFT": 0.001}.items():
+    for symbol, drift in {"AAPL": 0.003, "MSFT": 0.001, "NVDA": 0.004}.items():
         closes = [100.0]
         for _ in range(59):
             closes.append(closes[-1] * (1.0 + drift))
@@ -591,6 +781,48 @@ def test_run_alpha_research_integrates_fundamental_features_without_breaking_flo
                 "sector_neutral_quality_score": [quality_score - 0.5] * len(timestamps),
                 "sector_neutral_growth_score": [0.05 if symbol == "AAPL" else -0.05] * len(timestamps),
                 "sector_neutral_quality_value_score": [0.10 if symbol == "AAPL" else -0.10] * len(timestamps),
+                "earnings_yield_rank_pct": [1.0 if symbol == "AAPL" else 0.5] * len(timestamps),
+                "earnings_yield_zscore": [1.0 if symbol == "AAPL" else -1.0] * len(timestamps),
+                "book_to_market_rank_pct": [1.0 if symbol == "AAPL" else 0.5] * len(timestamps),
+                "book_to_market_zscore": [1.0 if symbol == "AAPL" else -1.0] * len(timestamps),
+                "sales_to_price_rank_pct": [1.0 if symbol == "AAPL" else 0.5] * len(timestamps),
+                "sales_to_price_zscore": [1.0 if symbol == "AAPL" else -1.0] * len(timestamps),
+                "roe_rank_pct": [1.0 if symbol == "AAPL" else 0.5] * len(timestamps),
+                "roe_zscore": [1.0 if symbol == "AAPL" else -1.0] * len(timestamps),
+                "roa_rank_pct": [1.0 if symbol == "AAPL" else 0.5] * len(timestamps),
+                "roa_zscore": [1.0 if symbol == "AAPL" else -1.0] * len(timestamps),
+                "gross_margin_rank_pct": [1.0 if symbol == "AAPL" else 0.5] * len(timestamps),
+                "gross_margin_zscore": [1.0 if symbol == "AAPL" else -1.0] * len(timestamps),
+                "operating_margin_rank_pct": [1.0 if symbol == "AAPL" else 0.5] * len(timestamps),
+                "operating_margin_zscore": [1.0 if symbol == "AAPL" else -1.0] * len(timestamps),
+                "revenue_growth_yoy_rank_pct": [1.0 if symbol == "AAPL" else 0.5] * len(timestamps),
+                "revenue_growth_yoy_zscore": [1.0 if symbol == "AAPL" else -1.0] * len(timestamps),
+                "net_income_growth_yoy_rank_pct": [1.0 if symbol == "AAPL" else 0.5] * len(timestamps),
+                "net_income_growth_yoy_zscore": [1.0 if symbol == "AAPL" else -1.0] * len(timestamps),
+                "debt_to_equity_rank_pct": [0.5 if symbol == "AAPL" else 1.0] * len(timestamps),
+                "debt_to_equity_zscore": [-1.0 if symbol == "AAPL" else 1.0] * len(timestamps),
+                "current_ratio_rank_pct": [1.0 if symbol == "AAPL" else 0.5] * len(timestamps),
+                "current_ratio_zscore": [1.0 if symbol == "AAPL" else -1.0] * len(timestamps),
+                "free_cash_flow_yield_rank_pct": [1.0 if symbol == "AAPL" else 0.5] * len(timestamps),
+                "free_cash_flow_yield_zscore": [1.0 if symbol == "AAPL" else -1.0] * len(timestamps),
+                "accruals_proxy_rank_pct": [0.5 if symbol == "AAPL" else 1.0] * len(timestamps),
+                "accruals_proxy_zscore": [-1.0 if symbol == "AAPL" else 1.0] * len(timestamps),
+                "fundamental_value_score_rank_pct": [1.0 if symbol == "AAPL" else 0.5] * len(timestamps),
+                "fundamental_value_score_zscore": [1.0 if symbol == "AAPL" else -1.0] * len(timestamps),
+                "fundamental_quality_score_rank_pct": [1.0 if symbol == "AAPL" else 0.5] * len(timestamps),
+                "fundamental_quality_score_zscore": [1.0 if symbol == "AAPL" else -1.0] * len(timestamps),
+                "fundamental_growth_score_rank_pct": [1.0 if symbol == "AAPL" else 0.5] * len(timestamps),
+                "fundamental_growth_score_zscore": [1.0 if symbol == "AAPL" else -1.0] * len(timestamps),
+                "fundamental_quality_value_score_rank_pct": [1.0 if symbol == "AAPL" else 0.5] * len(timestamps),
+                "fundamental_quality_value_score_zscore": [1.0 if symbol == "AAPL" else -1.0] * len(timestamps),
+                "sector_neutral_value_score_rank_pct": [1.0 if symbol == "AAPL" else 0.5] * len(timestamps),
+                "sector_neutral_value_score_zscore": [1.0 if symbol == "AAPL" else -1.0] * len(timestamps),
+                "sector_neutral_quality_score_rank_pct": [1.0 if symbol == "AAPL" else 0.5] * len(timestamps),
+                "sector_neutral_quality_score_zscore": [1.0 if symbol == "AAPL" else -1.0] * len(timestamps),
+                "sector_neutral_growth_score_rank_pct": [1.0 if symbol == "AAPL" else 0.5] * len(timestamps),
+                "sector_neutral_growth_score_zscore": [1.0 if symbol == "AAPL" else -1.0] * len(timestamps),
+                "sector_neutral_quality_value_score_rank_pct": [1.0 if symbol == "AAPL" else 0.5] * len(timestamps),
+                "sector_neutral_quality_value_score_zscore": [1.0 if symbol == "AAPL" else -1.0] * len(timestamps),
                 "days_since_available": list(range(len(timestamps))),
             }
         )
@@ -622,7 +854,7 @@ def test_run_alpha_research_integrates_fundamental_features_without_breaking_flo
     assert not leaderboard_df.empty
     assert set(leaderboard_df["signal_family"]) == {"fundamental_value"}
     assert not ic_summary_df.empty
-    assert "fundamental_value_score" in set(ic_summary_df["feature_name"])
+    assert "fundamental_value_score_rank_pct" in set(ic_summary_df["feature_name"])
     assert diagnostics["fundamentals"]["enabled"] is True
     assert diagnostics["fundamentals"]["symbols_with_features"] == 2
 
@@ -637,7 +869,7 @@ def test_run_alpha_research_with_generated_fmp_fundamentals_supports_fundamental
     feature_dir.mkdir()
 
     timestamps = pd.date_range("2024-01-01", periods=120, freq="D")
-    for symbol, drift in {"AAPL": 0.003, "MSFT": 0.001}.items():
+    for symbol, drift in {"AAPL": 0.003, "MSFT": 0.001, "NVDA": 0.004}.items():
         closes = [100.0]
         for _ in range(len(timestamps) - 1):
             closes.append(closes[-1] * (1.0 + drift))
@@ -659,11 +891,19 @@ def test_run_alpha_research_with_generated_fmp_fundamentals_supports_fundamental
     msft_payloads["balance-sheet-statement?symbol=MSFT&period=annual"][0]["totalStockholdersEquity"] = 110.0
     msft_payloads["balance-sheet-statement?symbol=MSFT&period=annual"][1]["totalStockholdersEquity"] = 100.0
     payloads.update(msft_payloads)
+    nvda_payloads = _fmp_payloads_for_symbol("NVDA")
+    nvda_payloads["income-statement?symbol=NVDA&period=annual"][0]["revenue"] = 160.0
+    nvda_payloads["income-statement?symbol=NVDA&period=annual"][0]["netIncome"] = 28.0
+    nvda_payloads["income-statement?symbol=NVDA&period=annual"][1]["revenue"] = 120.0
+    nvda_payloads["income-statement?symbol=NVDA&period=annual"][1]["netIncome"] = 18.0
+    nvda_payloads["balance-sheet-statement?symbol=NVDA&period=annual"][0]["totalStockholdersEquity"] = 175.0
+    nvda_payloads["balance-sheet-statement?symbol=NVDA&period=annual"][1]["totalStockholdersEquity"] = 140.0
+    payloads.update(nvda_payloads)
     _install_fmp_urlopen(monkeypatch, payloads)
 
     ingest_fundamentals(
         FundamentalsIngestionRequest(
-            symbols=["AAPL", "MSFT"],
+            symbols=["AAPL", "MSFT", "NVDA"],
             artifact_root=artifact_root,
             providers=("vendor",),
             vendor_api_key="test-key",
@@ -673,12 +913,12 @@ def test_run_alpha_research_with_generated_fmp_fundamentals_supports_fundamental
         FundamentalFeatureBuildRequest(
             artifact_root=artifact_root,
             calendar_dir=feature_dir,
-            symbols=["AAPL", "MSFT"],
+            symbols=["AAPL", "MSFT", "NVDA"],
         )
     )
 
     result = run_alpha_research(
-        symbols=["AAPL", "MSFT"],
+        symbols=["AAPL", "MSFT", "NVDA"],
         universe=None,
         feature_dir=feature_dir,
         signal_family="fundamental_quality_value",
@@ -701,3 +941,6 @@ def test_run_alpha_research_with_generated_fmp_fundamentals_supports_fundamental
     assert not leaderboard_df.empty
     assert set(leaderboard_df["signal_family"]) == {"fundamental_quality_value"}
     assert not ic_summary_df.empty
+    transformed_rows = ic_summary_df.loc[ic_summary_df["feature_name"] == "fundamental_quality_value_score_rank_pct"]
+    assert not transformed_rows.empty
+    assert transformed_rows["spearman_ic"].notna().any()
