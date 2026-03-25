@@ -564,6 +564,17 @@ def run_canonical_bundle_experiment_matrix(
                 "output_dir": str(case_output_dir),
                 "summary_json_path": result["experiment_summary_json_path"],
                 "policy_comparison_csv_path": result["experiment_policy_comparison_csv_path"],
+                "variants": [
+                    {
+                        "variant_name": row["variant_name"],
+                        "variant_output_dir": str(Path(row["config_manifest_path"]).parent.parent),
+                        "config_manifest_path": row["config_manifest_path"],
+                        "strategy_portfolio_json_path": row["strategy_portfolio_json_path"],
+                        "run_bundle_path": row["run_bundle_path"],
+                        "daily_pipeline_config_path": row["daily_pipeline_config_path"],
+                    }
+                    for row in result["variant_rows"]
+                ],
             }
         )
         for row in result["variant_rows"]:

@@ -1244,6 +1244,20 @@ def test_canonical_bundle_experiment_matrix_summarizes_policy_stability_across_c
         "2026-03-20",
         "2026-03-21",
     }
+    for case_row in case_results_payload["cases"]:
+        assert {variant["variant_name"] for variant in case_row["variants"]} == {
+            "baseline",
+            "strict_promotion",
+            "loose_promotion",
+            "alternate_weighting",
+            "combined_strict_weighting",
+        }
+        for variant in case_row["variants"]:
+            assert Path(variant["config_manifest_path"]).exists()
+            assert Path(variant["variant_output_dir"]).exists()
+            assert Path(variant["strategy_portfolio_json_path"]).exists()
+            assert Path(variant["run_bundle_path"]).exists()
+            assert Path(variant["daily_pipeline_config_path"]).exists()
 
     stability_summary = json.loads(stability_summary_path.read_text(encoding="utf-8"))
     assert stability_summary["experiment_name"] == "policy_sensitivity_time_stability"
