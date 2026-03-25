@@ -163,6 +163,37 @@ failure_handling:
     assert config.failure_policy == "fail"
 
 
+def test_load_research_input_refresh_workflow_config_with_fundamentals_section(tmp_path) -> None:
+    path = tmp_path / "research_input_refresh_fundamentals.yaml"
+    path.write_text(
+        """
+selection:
+  symbols: [AAPL, MSFT]
+outputs:
+  feature_dir: data/features
+  metadata_dir: data/metadata
+  normalized_dir: data/normalized
+fundamentals:
+  enabled: true
+  artifact_root: data/fundamentals
+  providers: [sec, vendor]
+  sec_companyfacts_root: data/sec/companyfacts
+  sec_submissions_root: data/sec/submissions
+  vendor_file_path: data/vendor/fundamentals.parquet
+""".strip(),
+        encoding="utf-8",
+    )
+
+    config = load_research_input_refresh_workflow_config(path)
+
+    assert config.fundamentals_enabled is True
+    assert config.fundamentals_artifact_root == "data/fundamentals"
+    assert config.fundamentals_providers == ["sec", "vendor"]
+    assert config.fundamentals_sec_companyfacts_root == "data/sec/companyfacts"
+    assert config.fundamentals_sec_submissions_root == "data/sec/submissions"
+    assert config.fundamentals_vendor_file_path == "data/vendor/fundamentals.parquet"
+
+
 def test_load_canonical_bundle_experiment_workflow_config(tmp_path) -> None:
     path = tmp_path / "canonical_bundle_experiment.yaml"
     path.write_text(
@@ -276,6 +307,32 @@ tracking:
     assert config.portfolio_top_n == 8
     assert config.enable_ensemble is True
     assert config.ensemble_mode == "family_weighted"
+
+
+def test_load_alpha_research_workflow_config_with_fundamentals(tmp_path) -> None:
+    path = tmp_path / "alpha_research_fundamentals.yaml"
+    path.write_text(
+        """
+paths:
+  feature_path: data/features
+  output_dir: artifacts/alpha_research/fundamental_run
+selection:
+  universe: nasdaq100
+signals:
+  family: fundamental_quality_value
+  lookbacks: [20]
+  horizons: [1]
+  fundamentals_enabled: true
+  fundamentals_daily_features_path: data/fundamentals/daily_fundamental_features.parquet
+""".strip(),
+        encoding="utf-8",
+    )
+
+    config = load_alpha_research_workflow_config(path)
+
+    assert config.signal_family == "fundamental_quality_value"
+    assert config.fundamentals_enabled is True
+    assert config.fundamentals_daily_features_path == "data/fundamentals/daily_fundamental_features.parquet"
 
 
 def test_load_walkforward_workflow_config_from_yaml(tmp_path) -> None:

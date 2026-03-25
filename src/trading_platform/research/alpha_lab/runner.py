@@ -102,6 +102,110 @@ def _build_signal_family_summary(leaderboard_df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=columns).sort_values("signal_family").reset_index(drop=True)
 
 
+def _load_daily_fundamental_features(
+    daily_features_path: Path | None,
+    *,
+    symbols: list[str],
+) -> pd.DataFrame:
+    if daily_features_path is None or not daily_features_path.exists():
+        return pd.DataFrame()
+    frame = pd.read_parquet(daily_features_path)
+    if frame.empty:
+        return frame
+    frame["symbol"] = frame["symbol"].astype(str).str.upper()
+    frame["timestamp"] = pd.to_datetime(frame["timestamp"], errors="coerce")
+    return frame.loc[frame["symbol"].isin([symbol.upper() for symbol in symbols])].copy()
+
+
+def _merge_daily_fundamental_features(
+    symbol_data: dict[str, pd.DataFrame],
+    *,
+    daily_features_df: pd.DataFrame,
+) -> tuple[dict[str, pd.DataFrame], dict[str, object]]:
+    if daily_features_df.empty:
+        return symbol_data, {"enabled": False, "rows": 0, "symbols_with_features": 0}
+
+    enriched: dict[str, pd.DataFrame] = {}
+    symbols_with_features = 0
+    for symbol, df in symbol_data.items():
+        symbol_features = daily_features_df.loc[daily_features_df["symbol"] == symbol.upper()].copy()
+        if symbol_features.empty:
+            enriched[symbol] = df
+            continue
+        symbols_with_features += 1
+        merged = df.merge(
+            symbol_features.drop(columns=["symbol"], errors="ignore"),
+            on="timestamp",
+            how="left",
+        )
+        enriched[symbol] = merged
+    return enriched, {
+        "enabled": True,
+        "rows": int(len(daily_features_df)),
+        "symbols_with_features": symbols_with_features,
+        "feature_columns": sorted(
+            column for column in daily_features_df.columns if column not in {"timestamp", "symbol"}
+        ),
+    }
+
+
+def _build_fundamental_feature_ic_summary(
+    symbol_data: dict[str, pd.DataFrame],
+    *,
+    horizons: list[int],
+    top_quantile: float,
+    bottom_quantile: float,
+) -> pd.DataFrame:
+    rows: list[dict[str, object]] = []
+    fundamental_columns = set()
+    for df in symbol_data.values():
+        fundamental_columns.update(
+            column
+            for column in df.columns
+            if column.startswith("fundamental_")
+            or column.startswith("sector_neutral_")
+            or column in {
+                "earnings_yield",
+                "book_to_market",
+                "sales_to_price",
+                "roe",
+                "roa",
+                "gross_margin",
+                "operating_margin",
+                "revenue_growth_yoy",
+                "net_income_growth_yoy",
+                "debt_to_equity",
+                "current_ratio",
+                "free_cash_flow_yield",
+                "accruals_proxy",
+            }
+        )
+    for horizon in horizons:
+        label_col = f"fwd_return_{horizon}d"
+        for feature_name in sorted(fundamental_columns):
+            frames: list[pd.DataFrame] = []
+            for symbol, df in symbol_data.items():
+                if feature_name not in df.columns or label_col not in df.columns:
+                    continue
+                frames.append(
+                    df[["timestamp", "symbol", feature_name, label_col]]
+                    .rename(columns={feature_name: "signal", label_col: "forward_return"})
+                    .dropna(subset=["signal", "forward_return"])
+                )
+            if not frames:
+                continue
+            panel = pd.concat(frames, ignore_index=True)
+            if panel.empty:
+                continue
+            metrics = evaluate_cross_sectional_signal(
+                panel,
+                top_quantile=top_quantile,
+                bottom_quantile=bottom_quantile,
+            )
+            rows.append({"feature_name": feature_name, "horizon": int(horizon), **metrics})
+    return pd.DataFrame(rows)
+
+
 def _load_symbol_feature_data(feature_dir: Path, symbol: str) -> pd.DataFrame:
     return load_symbol_feature_data(feature_dir, symbol)
 
@@ -509,6 +613,8 @@ def run_alpha_research(
     regime_exclude_mean_rank_ic: float = DEFAULT_REGIME_CONFIG.exclude_mean_rank_ic,
     equity_context_enabled: bool = False,
     equity_context_include_volume: bool = False,
+    fundamentals_enabled: bool = False,
+    fundamentals_daily_features_path: Path | None = None,
     enable_context_confirmations: bool | None = None,
     enable_relative_features: bool | None = None,
     enable_flow_confirmations: bool | None = None,
@@ -540,6 +646,15 @@ def run_alpha_research(
             raise ValueError(f"{symbol} feature data must include a 'timestamp' column.")
 
         symbol_data[symbol] = add_forward_return_labels(df, horizons=horizons)
+
+    daily_fundamental_features_df = _load_daily_fundamental_features(
+        fundamentals_daily_features_path,
+        symbols=resolved_symbols,
+    )
+    symbol_data, fundamentals_summary = _merge_daily_fundamental_features(
+        symbol_data,
+        daily_features_df=daily_fundamental_features_df if fundamentals_enabled else pd.DataFrame(),
+    )
 
     requires_rich_signal_context = (
         str(signal_composition_preset or "standard").strip().lower() != "standard"
@@ -809,6 +924,12 @@ def run_alpha_research(
         leaderboard_df["promotion_status"] == "promote"
     ].reset_index(drop=True)
     signal_family_summary_df = _build_signal_family_summary(leaderboard_df)
+    fundamental_feature_ic_summary_df = _build_fundamental_feature_ic_summary(
+        symbol_data,
+        horizons=horizons,
+        top_quantile=top_quantile,
+        bottom_quantile=bottom_quantile,
+    ) if fundamentals_enabled else pd.DataFrame()
     ensemble_config = EnsembleConfig(
         enabled=ensemble_enabled,
         mode=ensemble_mode if ensemble_enabled else "disabled",
@@ -1309,6 +1430,8 @@ def run_alpha_research(
     promoted_signals_path_parquet = output_dir / "promoted_signals.parquet"
     signal_family_summary_path_csv = output_dir / "signal_family_summary.csv"
     signal_family_summary_path_parquet = output_dir / "signal_family_summary.parquet"
+    fundamental_feature_ic_summary_path_csv = output_dir / "fundamental_feature_ic_summary.csv"
+    fundamental_feature_ic_summary_path_parquet = output_dir / "fundamental_feature_ic_summary.parquet"
     redundancy_report_path_csv = output_dir / "redundancy_report.csv"
     redundancy_report_path_parquet = output_dir / "redundancy_report.parquet"
     redundancy_path_csv = output_dir / "redundancy_diagnostics.csv"
@@ -1368,6 +1491,7 @@ def run_alpha_research(
     leaderboard_df.to_csv(leaderboard_path_csv, index=False)
     promoted_signals_df.to_csv(promoted_signals_path_csv, index=False)
     signal_family_summary_df.to_csv(signal_family_summary_path_csv, index=False)
+    fundamental_feature_ic_summary_df.to_csv(fundamental_feature_ic_summary_path_csv, index=False)
     redundancy_df.to_csv(redundancy_report_path_csv, index=False)
     redundancy_df.to_csv(redundancy_path_csv, index=False)
     composite_scores_df.to_csv(composite_scores_path_csv, index=False)
@@ -1397,6 +1521,7 @@ def run_alpha_research(
     leaderboard_df.to_parquet(leaderboard_path_parquet, index=False)
     promoted_signals_df.to_parquet(promoted_signals_path_parquet, index=False)
     signal_family_summary_df.to_parquet(signal_family_summary_path_parquet, index=False)
+    fundamental_feature_ic_summary_df.to_parquet(fundamental_feature_ic_summary_path_parquet, index=False)
     redundancy_df.to_parquet(redundancy_report_path_parquet, index=False)
     redundancy_df.to_parquet(redundancy_path_parquet, index=False)
     composite_scores_df.to_parquet(composite_scores_path_parquet, index=False)
@@ -1475,6 +1600,11 @@ def run_alpha_research(
             "enabled": equity_context_enabled,
             "include_volume": equity_context_include_volume,
         },
+        "fundamentals": {
+            "enabled": fundamentals_enabled,
+            "daily_features_path": str(fundamentals_daily_features_path) if fundamentals_daily_features_path is not None else None,
+            **fundamentals_summary,
+        },
         "research_context": context_coverage_summary,
         "signal_family_summary": signal_family_summary_df.to_dict(orient="records"),
         "ensemble": {
@@ -1493,6 +1623,7 @@ def run_alpha_research(
         "fold_results_path": str(detailed_path_csv),
         "promoted_signals_path": str(promoted_signals_path_csv),
         "signal_family_summary_path": str(signal_family_summary_path_csv),
+        "fundamental_feature_ic_summary_path": str(fundamental_feature_ic_summary_path_csv),
         "redundancy_report_path": str(redundancy_report_path_csv),
         "redundancy_path": str(redundancy_path_csv),
         "composite_scores_path": str(composite_scores_path_csv),

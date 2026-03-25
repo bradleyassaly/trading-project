@@ -202,6 +202,7 @@ def load_research_input_refresh_workflow_config(path: str | Path) -> ResearchInp
     reference_section = _pop_dict_section(payload, "reference_data")
     metadata_section = _pop_dict_section(payload, "metadata")
     failure_section = _pop_dict_section(payload, "failure_handling")
+    fundamentals_section = _pop_dict_section(payload, "fundamentals")
 
     if "symbols" not in payload and isinstance(selection_section.get("symbols"), list):
         payload["symbols"] = selection_section["symbols"]
@@ -226,6 +227,14 @@ def load_research_input_refresh_workflow_config(path: str | Path) -> ResearchInp
 
     _set_if_missing(payload, "sub_universe_id", metadata_section)
     _set_if_missing(payload, "failure_policy", failure_section, "policy")
+    _set_if_missing(payload, "fundamentals_enabled", fundamentals_section, "enabled")
+    _set_if_missing(payload, "fundamentals_artifact_root", fundamentals_section, "artifact_root")
+    if "fundamentals_providers" not in payload and isinstance(fundamentals_section.get("providers"), list):
+        payload["fundamentals_providers"] = fundamentals_section["providers"]
+    _set_if_missing(payload, "fundamentals_sec_companyfacts_root", fundamentals_section, "sec_companyfacts_root")
+    _set_if_missing(payload, "fundamentals_sec_submissions_root", fundamentals_section, "sec_submissions_root")
+    _set_if_missing(payload, "fundamentals_vendor_file_path", fundamentals_section, "vendor_file_path")
+    _set_if_missing(payload, "fundamentals_vendor_api_key", fundamentals_section, "vendor_api_key")
 
     return ResearchInputRefreshWorkflowConfig(**payload)
 
@@ -293,6 +302,8 @@ def load_alpha_research_workflow_config(path: str | Path) -> AlphaResearchWorkfl
 
     _set_if_missing(payload, "equity_context_enabled", signals_section)
     _set_if_missing(payload, "equity_context_include_volume", signals_section)
+    _set_if_missing(payload, "fundamentals_enabled", signals_section)
+    _set_if_missing(payload, "fundamentals_daily_features_path", signals_section)
     _set_if_missing(payload, "enable_context_confirmations", signals_section)
     _set_if_missing(payload, "enable_relative_features", signals_section)
     _set_if_missing(payload, "enable_flow_confirmations", signals_section)

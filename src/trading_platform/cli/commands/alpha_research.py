@@ -53,6 +53,8 @@ class AlphaResearchRequest:
     regime_exclude_mean_rank_ic: float
     equity_context_enabled: bool
     equity_context_include_volume: bool
+    fundamentals_enabled: bool
+    fundamentals_daily_features_path: Path | None
     enable_context_confirmations: bool | None
     enable_relative_features: bool | None
     enable_flow_confirmations: bool | None
@@ -71,6 +73,8 @@ def _build_alpha_research_request(args) -> AlphaResearchRequest:
     output_dir = Path(args.output_dir)
     tracker_dir_arg = getattr(args, "experiment_tracker_dir", None)
     tracker_dir = Path(tracker_dir_arg) if tracker_dir_arg else output_dir.parent / "experiment_tracking"
+    fundamentals_enabled = bool(getattr(args, "fundamentals_enabled", False))
+    fundamentals_daily_features_arg = getattr(args, "fundamentals_daily_features_path", None)
     return AlphaResearchRequest(
         symbols=resolve_symbols(args),
         feature_dir=Path(args.feature_dir),
@@ -110,6 +114,12 @@ def _build_alpha_research_request(args) -> AlphaResearchRequest:
         regime_exclude_mean_rank_ic=args.regime_exclude_mean_rank_ic,
         equity_context_enabled=getattr(args, "equity_context_enabled", False),
         equity_context_include_volume=getattr(args, "equity_context_include_volume", False),
+        fundamentals_enabled=fundamentals_enabled,
+        fundamentals_daily_features_path=(
+            Path(fundamentals_daily_features_arg)
+            if fundamentals_daily_features_arg
+            else (Path("data/fundamentals/daily_fundamental_features.parquet") if fundamentals_enabled else None)
+        ),
         enable_context_confirmations=getattr(args, "enable_context_confirmations", None),
         enable_relative_features=getattr(args, "enable_relative_features", None),
         enable_flow_confirmations=getattr(args, "enable_flow_confirmations", None),
@@ -171,6 +181,8 @@ def cmd_alpha_research(args) -> None:
         regime_exclude_mean_rank_ic=request.regime_exclude_mean_rank_ic,
         equity_context_enabled=request.equity_context_enabled,
         equity_context_include_volume=request.equity_context_include_volume,
+        fundamentals_enabled=request.fundamentals_enabled,
+        fundamentals_daily_features_path=request.fundamentals_daily_features_path,
         enable_context_confirmations=request.enable_context_confirmations,
         enable_relative_features=request.enable_relative_features,
         enable_flow_confirmations=request.enable_flow_confirmations,

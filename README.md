@@ -15,6 +15,12 @@ The repository is now organized around one supported workflow:
 
 `data refresh-research-inputs -> research alpha -> research promote -> strategy-portfolio build -> paper run -> live dry-run`
 
+The next information-quality expansion on that path is point-in-time-safe fundamentals:
+
+- canonical fundamentals ingest and normalization stays artifact-first
+- filing availability dates control when fundamental features become visible
+- alpha research can opt into daily aligned fundamentals without breaking technical-only runs
+
 The primary validated operational example is:
 
 - `xsec_nasdaq100_momentum_v1_research`
@@ -195,6 +201,16 @@ This refreshes the canonical research inputs together:
 - `data/metadata/research_metadata_sidecar_summary.json`
 - `data/metadata/research_input_refresh_summary.json`
 
+Optional fundamentals refresh can run in the same canonical step by enabling the `fundamentals` section in `configs/research_input_refresh.yaml` or by passing the corresponding CLI flags. That path writes:
+
+- `data/fundamentals/company_master.parquet`
+- `data/fundamentals/fundamental_filings.parquet`
+- `data/fundamentals/fundamental_values.parquet`
+- `data/fundamentals/daily_fundamental_features.parquet`
+- `data/fundamentals/fundamental_feature_coverage.csv`
+- `data/fundamentals/fundamental_lag_audit.csv`
+- `data/fundamentals/fundamental_summary.json`
+
 ### 2. Run alpha research
 
 ```bash
@@ -236,6 +252,32 @@ The resulting artifacts preserve:
 - `signal_variant`
 - `candidate_id`
 - `candidate_name`
+
+Alpha research can now also opt into point-in-time daily fundamentals:
+
+- `signals.fundamentals_enabled: true | false`
+- `signals.fundamentals_daily_features_path: <parquet path>`
+
+When enabled, the runner merges `daily_fundamental_features.parquet` by `symbol` and `timestamp`, emits `fundamental_feature_ic_summary.csv`, and supports bounded fundamental families such as:
+
+- `fundamental_value`
+- `fundamental_quality`
+- `fundamental_growth`
+- `fundamental_quality_value`
+
+Those families remain transparent and auditable. They are built from stable daily features such as:
+
+- value: `earnings_yield`, `book_to_market`, `sales_to_price`, `free_cash_flow_yield`
+- quality: `roe`, `roa`, `gross_margin`, `operating_margin`, `current_ratio`, `debt_to_equity`, `accruals_proxy`
+- growth: `revenue_growth_yoy`, `net_income_growth_yoy`
+- sector-neutral variants of the composite value, quality, growth, and quality-value scores when sector labels exist
+
+Point-in-time safety rules for fundamentals:
+
+- each filing stores `period_end_date`, `filing_date`, and `available_date`
+- daily features only become eligible on or after `available_date`
+- forward fill is only applied from `available_date` forward
+- no future filing is allowed to backfill prior dates
 
 ### 3. Promote condition-aware strategies
 
@@ -332,6 +374,23 @@ trading-cli live dry-run --config configs/workflows/live_xsec_nasdaq100.yaml
 
 Secondary research commands such as `research run`, `research walkforward`, and `research memo` still exist for direct strategy research and validation, but they are no longer the primary end-to-end path documented here.
 
+## Fundamentals Workflow
+
+Run fundamentals as a standalone artifact-first path when you want to refresh or inspect it separately from the broader canonical refresh:
+
+```bash
+trading-cli data fundamentals ingest --symbols AAPL MSFT --providers sec vendor --sec-companyfacts-root <SEC_COMPANYFACTS_DIR> --sec-submissions-root <SEC_SUBMISSIONS_DIR> --vendor-file-path <NORMALIZED_VENDOR_FILE>
+trading-cli data fundamentals features --symbols AAPL MSFT --artifact-root data/fundamentals --calendar-dir data/features
+```
+
+Or keep the canonical one-command flow and enable fundamentals inside `data refresh-research-inputs`.
+
+Provider architecture:
+
+- `sec` is the authoritative raw-source path using local EDGAR-style JSON payloads
+- `vendor` is the normalized structured-provider path and currently supports artifact-backed JSON, CSV, or parquet input plus graceful degradation when only credentials are present
+- providers are pluggable and preserve source provenance in the canonical artifacts
+
 Canonical automated coverage now exists at three levels:
 
 - one-shot config-driven supported-path smoke coverage
@@ -354,6 +413,8 @@ Canonical automated coverage now exists at three levels:
 
 - `data ingest`
 - `data features`
+- `data fundamentals ingest`
+- `data fundamentals features`
 - `data universes list`
 - `data universes export`
 
@@ -521,7 +582,18 @@ The dashboard and downstream tooling should prefer the summary and history files
 - `artifacts/research/.../conditional_signal_performance.json`
 - `artifacts/research/.../conditional_research_summary.json`
 - `artifacts/research/.../conditional_promotion_candidates.csv`
+- `artifacts/alpha_research/.../fundamental_feature_ic_summary.csv`
 - `data/features/<SYMBOL>.parquet`
+
+### Fundamentals
+
+- `data/fundamentals/company_master.parquet`
+- `data/fundamentals/fundamental_filings.parquet`
+- `data/fundamentals/fundamental_values.parquet`
+- `data/fundamentals/daily_fundamental_features.parquet`
+- `data/fundamentals/fundamental_feature_coverage.csv`
+- `data/fundamentals/fundamental_lag_audit.csv`
+- `data/fundamentals/fundamental_summary.json`
 
 ### Walk-forward
 

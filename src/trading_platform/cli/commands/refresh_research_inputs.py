@@ -33,6 +33,13 @@ def cmd_refresh_research_inputs(args) -> None:
         metadata_dir=Path(getattr(args, "metadata_dir", "data/metadata")),
         normalized_dir=Path(getattr(args, "normalized_dir", "data/normalized")),
         failure_policy=getattr(args, "failure_policy", "partial_success"),
+        fundamentals_enabled=bool(getattr(args, "fundamentals_enabled", False)),
+        fundamentals_artifact_root=Path(getattr(args, "fundamentals_artifact_root")) if getattr(args, "fundamentals_artifact_root", None) else None,
+        fundamentals_providers=list(getattr(args, "fundamentals_providers", []) or []),
+        fundamentals_sec_companyfacts_root=getattr(args, "fundamentals_sec_companyfacts_root", None),
+        fundamentals_sec_submissions_root=getattr(args, "fundamentals_sec_submissions_root", None),
+        fundamentals_vendor_file_path=getattr(args, "fundamentals_vendor_file_path", None),
+        fundamentals_vendor_api_key=getattr(args, "fundamentals_vendor_api_key", None),
     )
     result = refresh_research_inputs(
         request=request,

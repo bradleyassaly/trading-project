@@ -230,6 +230,28 @@ def test_grouped_data_refresh_research_inputs_command_parses() -> None:
     assert args.reference_data_root == "artifacts/reference_data/v1"
 
 
+def test_grouped_data_refresh_research_inputs_command_parses_fundamentals_args() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "data",
+            "refresh-research-inputs",
+            "--symbols",
+            "AAPL",
+            "--fundamentals-enabled",
+            "--fundamentals-providers",
+            "sec",
+            "vendor",
+            "--fundamentals-artifact-root",
+            "data/fundamentals",
+        ]
+    )
+
+    assert args.fundamentals_enabled is True
+    assert args.fundamentals_providers == ["sec", "vendor"]
+    assert args.fundamentals_artifact_root == "data/fundamentals"
+
+
 def test_grouped_data_refresh_research_inputs_command_parses_config() -> None:
     parser = build_parser()
     args = parser.parse_args(
@@ -244,6 +266,42 @@ def test_grouped_data_refresh_research_inputs_command_parses_config() -> None:
     assert args.command_family == "data"
     assert args.data_command == "refresh-research-inputs"
     assert args.config == "configs/research_input_refresh.yaml"
+
+
+def test_grouped_data_fundamentals_commands_parse() -> None:
+    parser = build_parser()
+    ingest_args = parser.parse_args(
+        [
+            "data",
+            "fundamentals",
+            "ingest",
+            "--symbols",
+            "AAPL",
+            "--providers",
+            "vendor",
+            "--vendor-file-path",
+            "data/vendor/fundamentals.parquet",
+        ]
+    )
+    features_args = parser.parse_args(
+        [
+            "data",
+            "fundamentals",
+            "features",
+            "--symbols",
+            "AAPL",
+            "--artifact-root",
+            "data/fundamentals",
+            "--calendar-dir",
+            "data/features",
+        ]
+    )
+
+    assert ingest_args.data_command == "fundamentals"
+    assert ingest_args.fundamentals_command == "ingest"
+    assert ingest_args.providers == ["vendor"]
+    assert features_args.fundamentals_command == "features"
+    assert features_args.calendar_dir == "data/features"
 
 
 def test_legacy_features_build_rewrites_to_data_features() -> None:

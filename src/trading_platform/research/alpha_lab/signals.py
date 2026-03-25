@@ -24,6 +24,10 @@ SUPPORTED_SIGNAL_FAMILIES = (
     "sector_relative_momentum",
     "liquidity_flow_tilt",
     "volume_shock_momentum",
+    "fundamental_value",
+    "fundamental_quality",
+    "fundamental_growth",
+    "fundamental_quality_value",
 )
 
 CANDIDATE_GRID_PRESETS = ("standard", "broad_v1")
@@ -136,6 +140,42 @@ def _variant_templates_for_family(
             ("flow_with_trend", {"volume_weight": 0.5, "dollar_flow_weight": 0.5, "trend_weight": 1.3, "breakout_weight": 0.2}),
             ("conservative_flow", {"volume_weight": 0.5, "dollar_flow_weight": 0.5, "flow_bias_weight": 0.15, "flow_clip_max": 1.75}),
             ("aggressive_flow", {"volume_weight": 0.6, "dollar_flow_weight": 0.4, "trend_weight": 1.15, "flow_bias_weight": 0.35, "flow_confirmation_weight": 0.4}),
+        ]
+
+    if signal_family == "fundamental_value":
+        return [
+            ("base", {}),
+            ("earnings_yield_focus", {"earnings_yield_weight": 1.4, "book_to_market_weight": 0.7}),
+            ("book_to_market_focus", {"earnings_yield_weight": 0.7, "book_to_market_weight": 1.4}),
+            ("cash_flow_value", {"free_cash_flow_yield_weight": 1.3, "sales_to_price_weight": 0.7}),
+            ("sector_neutral_value", {"sector_neutral_weight": 1.2}),
+        ]
+
+    if signal_family == "fundamental_quality":
+        return [
+            ("base", {}),
+            ("profitability_focus", {"profitability_weight": 1.3, "balance_sheet_weight": 0.7}),
+            ("balance_sheet_focus", {"profitability_weight": 0.7, "balance_sheet_weight": 1.3}),
+            ("cash_flow_quality", {"cash_flow_quality_weight": 1.25}),
+            ("sector_neutral_quality", {"sector_neutral_weight": 1.2}),
+        ]
+
+    if signal_family == "fundamental_growth":
+        return [
+            ("base", {}),
+            ("revenue_growth_focus", {"revenue_growth_weight": 1.4, "net_income_growth_weight": 0.7}),
+            ("earnings_growth_focus", {"revenue_growth_weight": 0.7, "net_income_growth_weight": 1.4}),
+            ("balanced_growth", {"revenue_growth_weight": 1.0, "net_income_growth_weight": 1.0}),
+            ("sector_neutral_growth", {"sector_neutral_weight": 1.2}),
+        ]
+
+    if signal_family == "fundamental_quality_value":
+        return [
+            ("base", {}),
+            ("value_tilt", {"value_weight": 1.3, "quality_weight": 0.8}),
+            ("quality_tilt", {"value_weight": 0.8, "quality_weight": 1.3}),
+            ("balanced_compounder", {"value_weight": 1.0, "quality_weight": 1.0}),
+            ("sector_neutral_blend", {"sector_neutral_weight": 1.2}),
         ]
 
     return base_templates
@@ -293,6 +333,67 @@ def _relative_rank(df: pd.DataFrame, *, lookback: int) -> pd.Series:
         f"cross_sectional_return_rank_{lookback}",
         default=0.0,
     ).fillna(0.0)
+
+
+def _fundamental_recency_weight(df: pd.DataFrame, *, lookback: int) -> pd.Series:
+    filing_age_days = _feature(df, "days_since_available", default=np.nan)
+    return np.exp(-pd.to_numeric(filing_age_days, errors="coerce").clip(lower=0.0) / max(float(lookback), 1.0))
+
+
+def _fundamental_signal(df: pd.DataFrame, *, signal_family: str, lookback: int, params: dict[str, float | str | bool]) -> pd.Series:
+    value_score = _feature(df, "fundamental_value_score", default=0.0).fillna(0.0)
+    quality_score = _feature(df, "fundamental_quality_score", default=0.0).fillna(0.0)
+    growth_score = _feature(df, "fundamental_growth_score", default=0.0).fillna(0.0)
+    quality_value_score = _feature(df, "fundamental_quality_value_score", default=0.0).fillna(0.0)
+    recency_weight = _fundamental_recency_weight(df, lookback=lookback)
+
+    if signal_family == "fundamental_value":
+        sector_neutral_weight = float(params.get("sector_neutral_weight", 0.0))
+        sector_neutral_score = _feature(df, "sector_neutral_value_score", default=value_score).fillna(0.0)
+        signal = (
+            float(params.get("earnings_yield_weight", 1.0)) * _feature(df, "earnings_yield", default=0.0).fillna(0.0)
+            + float(params.get("book_to_market_weight", 1.0)) * _feature(df, "book_to_market", default=0.0).fillna(0.0)
+            + float(params.get("sales_to_price_weight", 1.0)) * _feature(df, "sales_to_price", default=0.0).fillna(0.0)
+            + float(params.get("free_cash_flow_yield_weight", 1.0)) * _feature(df, "free_cash_flow_yield", default=0.0).fillna(0.0)
+            + sector_neutral_weight * sector_neutral_score
+        ) / max(4.0 + sector_neutral_weight, 1.0)
+        return signal.fillna(value_score) * recency_weight
+
+    if signal_family == "fundamental_quality":
+        sector_neutral_weight = float(params.get("sector_neutral_weight", 0.0))
+        sector_neutral_score = _feature(df, "sector_neutral_quality_score", default=quality_score).fillna(0.0)
+        profitability = _feature(df, "roe", default=0.0).fillna(0.0) + _feature(df, "roa", default=0.0).fillna(0.0) + _feature(df, "gross_margin", default=0.0).fillna(0.0) + _feature(df, "operating_margin", default=0.0).fillna(0.0)
+        balance_sheet = _feature(df, "current_ratio", default=0.0).fillna(0.0) - _feature(df, "debt_to_equity", default=0.0).fillna(0.0)
+        cash_flow_quality = _feature(df, "free_cash_flow_yield", default=0.0).fillna(0.0) - _feature(df, "accruals_proxy", default=0.0).fillna(0.0)
+        signal = (
+            float(params.get("profitability_weight", 1.0)) * profitability / 4.0
+            + float(params.get("balance_sheet_weight", 1.0)) * balance_sheet / 2.0
+            + float(params.get("cash_flow_quality_weight", 1.0)) * cash_flow_quality / 2.0
+            + sector_neutral_weight * sector_neutral_score
+        ) / max(3.0 + sector_neutral_weight, 1.0)
+        return signal.fillna(quality_score) * recency_weight
+
+    if signal_family == "fundamental_growth":
+        sector_neutral_weight = float(params.get("sector_neutral_weight", 0.0))
+        sector_neutral_score = _feature(df, "sector_neutral_growth_score", default=growth_score).fillna(0.0)
+        signal = (
+            float(params.get("revenue_growth_weight", 1.0)) * _feature(df, "revenue_growth_yoy", default=0.0).fillna(0.0)
+            + float(params.get("net_income_growth_weight", 1.0)) * _feature(df, "net_income_growth_yoy", default=0.0).fillna(0.0)
+            + sector_neutral_weight * sector_neutral_score
+        ) / max(2.0 + sector_neutral_weight, 1.0)
+        return signal.fillna(growth_score) * recency_weight
+
+    if signal_family == "fundamental_quality_value":
+        sector_neutral_weight = float(params.get("sector_neutral_weight", 0.0))
+        sector_neutral_score = _feature(df, "sector_neutral_quality_value_score", default=quality_value_score).fillna(0.0)
+        signal = (
+            float(params.get("value_weight", 1.0)) * value_score
+            + float(params.get("quality_weight", 1.0)) * quality_score
+            + sector_neutral_weight * sector_neutral_score
+        ) / max(float(params.get("value_weight", 1.0)) + float(params.get("quality_weight", 1.0)) + sector_neutral_weight, 1.0)
+        return signal.fillna(quality_value_score) * recency_weight
+
+    raise ValueError(f"Unsupported signal family: {signal_family}")
 
 
 def _legacy_signal(
@@ -757,6 +858,8 @@ def build_signal(
 ) -> pd.Series:
     close = df[close_column]
     params = variant_params or {}
+    if signal_family in {"fundamental_value", "fundamental_quality", "fundamental_growth", "fundamental_quality_value"}:
+        return _fundamental_signal(df, signal_family=signal_family, lookback=lookback, params=params)
     composition = _resolve_signal_composition(
         signal_composition_preset=signal_composition_preset,
         enable_context_confirmations=enable_context_confirmations,

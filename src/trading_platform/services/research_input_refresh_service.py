@@ -9,6 +9,12 @@ import pandas as pd
 
 from trading_platform.config.models import FeatureConfig
 from trading_platform.data.canonical import load_research_symbol_frame
+from trading_platform.data.fundamentals.service import (
+    FundamentalFeatureBuildRequest,
+    FundamentalsIngestionRequest,
+    build_daily_fundamental_features,
+    ingest_fundamentals,
+)
 from trading_platform.services.feature_service import run_feature_build_with_dirs
 from trading_platform.settings import FEATURES_DIR, METADATA_DIR, NORMALIZED_DATA_DIR
 from trading_platform.universe_provenance.service import (
@@ -46,6 +52,13 @@ class ResearchInputRefreshRequest:
     metadata_dir: Path = METADATA_DIR
     normalized_dir: Path = NORMALIZED_DATA_DIR
     failure_policy: str = "partial_success"
+    fundamentals_enabled: bool = False
+    fundamentals_artifact_root: Path | None = None
+    fundamentals_providers: list[str] | None = None
+    fundamentals_sec_companyfacts_root: str | None = None
+    fundamentals_sec_submissions_root: str | None = None
+    fundamentals_vendor_file_path: str | None = None
+    fundamentals_vendor_api_key: str | None = None
 
     def __post_init__(self) -> None:
         if not self.symbols:
@@ -197,6 +210,44 @@ def refresh_research_inputs(
     summary_path = metadata_dir / "research_input_refresh_summary.json"
     manifest_path = metadata_dir / "research_input_bundle_manifest.json"
     failure_report_path = metadata_dir / "research_input_refresh_failures.csv"
+    paths: dict[str, Path] = dict(provenance_paths)
+    paths["research_input_refresh_summary_json"] = summary_path
+    paths["research_input_bundle_manifest_json"] = manifest_path
+
+    if resolved_request.fundamentals_enabled:
+        fundamentals_root = resolved_request.fundamentals_artifact_root or (feature_dir.parent / "fundamentals")
+        ingestion_paths = ingest_fundamentals(
+            FundamentalsIngestionRequest(
+                symbols=list(symbols),
+                artifact_root=fundamentals_root,
+                providers=tuple(resolved_request.fundamentals_providers or ["sec", "vendor"]),
+                sec_companyfacts_root=resolved_request.fundamentals_sec_companyfacts_root,
+                sec_submissions_root=resolved_request.fundamentals_sec_submissions_root,
+                vendor_file_path=resolved_request.fundamentals_vendor_file_path,
+                vendor_api_key=resolved_request.fundamentals_vendor_api_key,
+            )
+        )
+        feature_paths = build_daily_fundamental_features(
+            FundamentalFeatureBuildRequest(
+                artifact_root=fundamentals_root,
+                calendar_dir=feature_dir,
+                symbols=list(symbols),
+            )
+        )
+        for key, value in {**ingestion_paths, **feature_paths}.items():
+            paths[key] = Path(value)
+        summary_payload["fundamentals"] = {
+            "enabled": True,
+            "artifact_root": str(fundamentals_root),
+            "paths": {key: str(value) for key, value in {**ingestion_paths, **feature_paths}.items()},
+        }
+    else:
+        summary_payload["fundamentals"] = {"enabled": False}
+
+    if failures:
+        pd.DataFrame(failures).to_csv(failure_report_path, index=False)
+        paths["research_input_refresh_failures_csv"] = failure_report_path
+
     summary_path.write_text(json.dumps(summary_payload, indent=2, default=str), encoding="utf-8")
     manifest_path.write_text(
         json.dumps(
@@ -204,7 +255,7 @@ def refresh_research_inputs(
                 "feature_dir": str(feature_dir),
                 "metadata_dir": str(metadata_dir),
                 "metadata_artifact_dir": str(metadata_artifact_dir),
-                "paths": {key: str(value) for key, value in provenance_paths.items()},
+                "paths": {key: str(value) for key, value in paths.items()},
                 "symbols": built_symbols,
             },
             indent=2,
@@ -212,12 +263,6 @@ def refresh_research_inputs(
         ),
         encoding="utf-8",
     )
-    paths: dict[str, Path] = dict(provenance_paths)
-    paths["research_input_refresh_summary_json"] = summary_path
-    paths["research_input_bundle_manifest_json"] = manifest_path
-    if failures:
-        pd.DataFrame(failures).to_csv(failure_report_path, index=False)
-        paths["research_input_refresh_failures_csv"] = failure_report_path
 
     return ResearchInputRefreshResult(
         status=status,

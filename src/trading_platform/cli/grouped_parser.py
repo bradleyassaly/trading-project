@@ -30,6 +30,8 @@ from trading_platform.cli.commands.experiments_latest_model import cmd_experimen
 from trading_platform.cli.commands.experiments_list import cmd_experiments_list
 from trading_platform.cli.commands.export_universes import cmd_export_universes
 from trading_platform.cli.commands.features import cmd_features
+from trading_platform.cli.commands.fundamentals_features import cmd_fundamentals_features
+from trading_platform.cli.commands.fundamentals_ingest import cmd_fundamentals_ingest
 from trading_platform.cli.commands.refresh_research_inputs import cmd_refresh_research_inputs
 from trading_platform.cli.commands.ingest import cmd_ingest
 from trading_platform.cli.commands.list_strategies import cmd_list_strategies
@@ -402,6 +404,8 @@ def _add_alpha_research_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--min-rows", type=int, default=126, help="Minimum number of usable rows required per symbol.")
     parser.add_argument("--equity-context-enabled", action="store_true", help="Enable a small equity-only context feature expansion derived from the current universe price history.")
     parser.add_argument("--equity-context-include-volume", action="store_true", help="Include a simple volume-ratio context when the feature inputs contain volume.")
+    parser.add_argument("--fundamentals-enabled", action="store_true", help="Merge daily point-in-time fundamental features into alpha research when available.")
+    parser.add_argument("--fundamentals-daily-features-path", type=str, default=None, help="Optional parquet path for the daily aligned fundamental feature panel.")
     parser.add_argument("--enable-context-confirmations", action="store_true", default=None, help="Add benchmark, breadth, and regime-aware confirmation terms to composite scores.")
     parser.add_argument("--enable-relative-features", action="store_true", default=None, help="Emphasize relative-strength, cross-sectional rank, and benchmark-relative inputs in composite scores.")
     parser.add_argument("--enable-flow-confirmations", action="store_true", default=None, help="Add bounded volume and dollar-flow confirmation terms where current inputs support them.")
@@ -605,7 +609,31 @@ def build_parser() -> argparse.ArgumentParser:
     data_refresh_inputs.add_argument("--group-map-path", type=str, default=None, help="Optional legacy group-map CSV used when taxonomy snapshots are absent.")
     data_refresh_inputs.add_argument("--benchmark", type=str, default=None, help="Optional benchmark id stored with enriched metadata context.")
     data_refresh_inputs.add_argument("--failure-policy", type=str, default="partial_success", choices=["partial_success", "fail"], help="Whether symbol-level feature failures produce a partial-success result or fail the refresh summary.")
+    data_refresh_inputs.add_argument("--fundamentals-enabled", action="store_true", help="Also refresh point-in-time-safe fundamentals artifacts and daily aligned fundamental features.")
+    data_refresh_inputs.add_argument("--fundamentals-artifact-root", type=str, default=None, help="Directory where canonical fundamentals artifacts are written.")
+    data_refresh_inputs.add_argument("--fundamentals-providers", nargs="+", default=None, choices=["sec", "vendor"], help="Ordered list of fundamentals providers to use.")
+    data_refresh_inputs.add_argument("--fundamentals-sec-companyfacts-root", type=str, default=None, help="Local SEC companyfacts JSON directory.")
+    data_refresh_inputs.add_argument("--fundamentals-sec-submissions-root", type=str, default=None, help="Local SEC submissions JSON directory.")
+    data_refresh_inputs.add_argument("--fundamentals-vendor-file-path", type=str, default=None, help="Optional normalized vendor fundamentals JSON/CSV/parquet file.")
+    data_refresh_inputs.add_argument("--fundamentals-vendor-api-key", type=str, default=None, help="Optional vendor API key. Current implementation stays artifact-first and degrades gracefully when not configured.")
     data_refresh_inputs.set_defaults(func=cmd_refresh_research_inputs)
+    data_fundamentals = data_subparsers.add_parser("fundamentals", help="Canonical fundamentals ingest and daily feature generation commands")
+    data_fundamentals_subparsers = data_fundamentals.add_subparsers(dest="fundamentals_command", required=True)
+    data_fundamentals_ingest = data_fundamentals_subparsers.add_parser("ingest", help="Ingest canonical company master, filing, and normalized fundamental value artifacts")
+    add_shared_symbol_args(data_fundamentals_ingest)
+    data_fundamentals_ingest.add_argument("--artifact-root", type=str, default="data/fundamentals", help="Directory where canonical fundamentals artifacts are written.")
+    data_fundamentals_ingest.add_argument("--providers", nargs="+", default=["sec", "vendor"], choices=["sec", "vendor"], help="Ordered list of fundamentals providers to use.")
+    data_fundamentals_ingest.add_argument("--sec-companyfacts-root", type=str, default=None, help="Local SEC companyfacts JSON directory.")
+    data_fundamentals_ingest.add_argument("--sec-submissions-root", type=str, default=None, help="Local SEC submissions JSON directory.")
+    data_fundamentals_ingest.add_argument("--vendor-file-path", type=str, default=None, help="Optional normalized vendor fundamentals JSON/CSV/parquet file.")
+    data_fundamentals_ingest.add_argument("--vendor-api-key", type=str, default=None, help="Optional vendor API key. Current implementation is prepared for future vendor fetch support.")
+    data_fundamentals_ingest.set_defaults(func=cmd_fundamentals_ingest)
+    data_fundamentals_features = data_fundamentals_subparsers.add_parser("features", help="Build point-in-time-safe daily fundamental features aligned to a research calendar")
+    add_shared_symbol_args(data_fundamentals_features)
+    data_fundamentals_features.add_argument("--artifact-root", type=str, default="data/fundamentals", help="Directory containing canonical fundamentals artifacts.")
+    data_fundamentals_features.add_argument("--calendar-dir", type=str, default="data/features", help="Directory containing per-symbol research calendar parquet files used for daily alignment.")
+    data_fundamentals_features.add_argument("--daily-features-path", type=str, default=None, help="Optional output parquet path for the daily fundamental feature panel.")
+    data_fundamentals_features.set_defaults(func=cmd_fundamentals_features)
     data_universes = data_subparsers.add_parser("universes", help="Inspect or export named universes")
     data_universe_subparsers = data_universes.add_subparsers(dest="universe_command", required=True)
     data_universe_list = data_universe_subparsers.add_parser("list", help="Show available named universes")

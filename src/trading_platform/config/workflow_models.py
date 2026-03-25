@@ -269,6 +269,13 @@ class ResearchInputRefreshWorkflowConfig:
     group_map_path: str | None = None
     benchmark: str | None = None
     failure_policy: str = "partial_success"
+    fundamentals_enabled: bool = False
+    fundamentals_artifact_root: str | None = None
+    fundamentals_providers: list[str] | None = None
+    fundamentals_sec_companyfacts_root: str | None = None
+    fundamentals_sec_submissions_root: str | None = None
+    fundamentals_vendor_file_path: str | None = None
+    fundamentals_vendor_api_key: str | None = None
 
     def __post_init__(self) -> None:
         selected = sum(bool(value) for value in (self.symbols, self.universe))
@@ -295,6 +302,8 @@ class AlphaResearchWorkflowConfig:
     min_rows: int = 126
     equity_context_enabled: bool = False
     equity_context_include_volume: bool = False
+    fundamentals_enabled: bool = False
+    fundamentals_daily_features_path: str | None = None
     enable_context_confirmations: bool | None = None
     enable_relative_features: bool | None = None
     enable_flow_confirmations: bool | None = None
