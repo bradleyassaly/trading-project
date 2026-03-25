@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pandas as pd
 
 from trading_platform.broker.live_models import BrokerAccount
+from trading_platform.cli.commands.alpha_research import cmd_alpha_research
 from trading_platform.cli.commands.live_dry_run_multi_strategy import cmd_live_dry_run_multi_strategy
 from trading_platform.cli.commands.pipeline_run import cmd_pipeline_run_daily
 from trading_platform.cli.commands.refresh_research_inputs import cmd_refresh_research_inputs
@@ -24,7 +25,6 @@ from trading_platform.live.preview import LivePreviewResult
 from trading_platform.orchestration.models import PipelineRunResult, PipelineStageRecord
 from trading_platform.paper.models import PaperPortfolioState, PaperTradingRunResult
 from trading_platform.portfolio.strategy_portfolio import export_strategy_portfolio_run_config, load_strategy_portfolio
-from trading_platform.research.alpha_lab.runner import run_alpha_research
 
 
 def _write_normalized_frame(
@@ -96,6 +96,48 @@ stages:
   paper_trading: true
   live_dry_run: true
   reporting: true
+""".strip(),
+        encoding="utf-8",
+    )
+    return config_path
+
+
+def _write_alpha_research_config(
+    *,
+    symbols: list[str],
+    feature_dir: Path,
+    output_dir: Path,
+    tracker_dir: Path,
+    config_path: Path,
+) -> Path:
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    symbol_block = "\n".join(f"    - {symbol}" for symbol in symbols)
+    config_path.write_text(
+        f"""
+paths:
+  feature_path: {feature_dir.as_posix()}
+  output_dir: {output_dir.as_posix()}
+
+selection:
+  symbols:
+{symbol_block}
+
+signals:
+  family: momentum
+  lookbacks: [1, 2]
+  horizons: [1]
+  min_rows: 20
+  equity_context_enabled: true
+
+portfolio:
+  top_quantile: 0.34
+  bottom_quantile: 0.34
+  train_size: 20
+  test_size: 10
+  step_size: 10
+
+tracking:
+  tracker_dir: {tracker_dir.as_posix()}
 """.strip(),
         encoding="utf-8",
     )
@@ -226,27 +268,71 @@ failure_policy: fail
     assert (metadata_dir / "research_input_refresh_summary.json").exists()
 
     alpha_output_dir = tmp_path / "artifacts" / "alpha_research" / "run_smoke"
-    alpha_result = run_alpha_research(
+    alpha_config_path = _write_alpha_research_config(
         symbols=list(symbol_inputs),
-        universe=None,
         feature_dir=feature_dir,
-        signal_family="momentum",
-        lookbacks=[1, 2],
-        horizons=[1],
-        min_rows=20,
-        top_quantile=0.34,
-        bottom_quantile=0.34,
         output_dir=alpha_output_dir,
-        train_size=20,
-        test_size=10,
-        step_size=10,
-        equity_context_enabled=True,
+        tracker_dir=tmp_path / "artifacts" / "experiment_tracking",
+        config_path=tmp_path / "alpha_research.yaml",
+    )
+    cmd_alpha_research(
+        SimpleNamespace(
+            config=str(alpha_config_path),
+            symbols=None,
+            universe=None,
+            feature_dir="data/features",
+            signal_family="momentum",
+            lookbacks=[5, 10, 20, 60],
+            horizons=[1, 5, 20],
+            min_rows=126,
+            equity_context_enabled=False,
+            equity_context_include_volume=False,
+            enable_ensemble=False,
+            ensemble_mode="disabled",
+            ensemble_weight_method="equal",
+            ensemble_normalize_scores="rank_pct",
+            ensemble_max_members=5,
+            ensemble_max_members_per_family=None,
+            ensemble_minimum_member_observations=0,
+            ensemble_minimum_member_metric=None,
+            top_quantile=0.2,
+            bottom_quantile=0.2,
+            output_dir="artifacts/alpha_research",
+            train_size=756,
+            test_size=63,
+            step_size=None,
+            min_train_size=None,
+            portfolio_top_n=10,
+            portfolio_long_quantile=0.2,
+            portfolio_short_quantile=0.2,
+            commission=0.0,
+            min_price=None,
+            min_volume=None,
+            min_avg_dollar_volume=None,
+            max_adv_participation=0.05,
+            max_position_pct_of_adv=0.1,
+            max_notional_per_name=None,
+            slippage_bps_per_turnover=0.0,
+            slippage_bps_per_adv=10.0,
+            dynamic_recent_quality_window=20,
+            dynamic_min_history=5,
+            dynamic_downweight_mean_rank_ic=0.01,
+            dynamic_deactivate_mean_rank_ic=-0.02,
+            regime_aware_enabled=False,
+            regime_min_history=5,
+            regime_underweight_mean_rank_ic=0.01,
+            regime_exclude_mean_rank_ic=-0.01,
+            experiment_tracker_dir=None,
+            _cli_argv=["--config", str(alpha_config_path)],
+        )
     )
 
-    assert Path(alpha_result["research_manifest_path"]).exists()
-    assert Path(alpha_result["signal_performance_by_sub_universe_path"]).exists()
-    assert Path(alpha_result["signal_performance_by_benchmark_context_path"]).exists()
-    assert Path(alpha_result["research_context_coverage_path"]).exists()
+    alpha_result = json.loads((alpha_output_dir / "research_run.json").read_text(encoding="utf-8"))
+    artifact_paths = alpha_result["artifact_paths"]
+    assert (alpha_output_dir / "research_run.json").exists()
+    assert Path(artifact_paths["signal_performance_by_sub_universe_path"]).exists()
+    assert Path(artifact_paths["signal_performance_by_benchmark_context_path"]).exists()
+    assert Path(artifact_paths["research_context_coverage_path"]).exists()
 
     promoted_dir = tmp_path / "artifacts" / "promoted_strategies"
     cmd_research_promote(
@@ -356,22 +442,65 @@ failure_policy: fail
     )
 
     alpha_output_dir = tmp_path / "artifacts" / "alpha_research" / "run_smoke"
-    alpha_result = run_alpha_research(
+    alpha_config_path = _write_alpha_research_config(
         symbols=list(symbol_inputs),
-        universe=None,
         feature_dir=feature_dir,
-        signal_family="momentum",
-        lookbacks=[1, 2],
-        horizons=[1],
-        min_rows=20,
-        top_quantile=0.34,
-        bottom_quantile=0.34,
         output_dir=alpha_output_dir,
-        train_size=20,
-        test_size=10,
-        step_size=10,
-        equity_context_enabled=True,
+        tracker_dir=tmp_path / "artifacts" / "experiment_tracking",
+        config_path=tmp_path / "alpha_research.yaml",
     )
+    cmd_alpha_research(
+        SimpleNamespace(
+            config=str(alpha_config_path),
+            symbols=None,
+            universe=None,
+            feature_dir="data/features",
+            signal_family="momentum",
+            lookbacks=[5, 10, 20, 60],
+            horizons=[1, 5, 20],
+            min_rows=126,
+            equity_context_enabled=False,
+            equity_context_include_volume=False,
+            enable_ensemble=False,
+            ensemble_mode="disabled",
+            ensemble_weight_method="equal",
+            ensemble_normalize_scores="rank_pct",
+            ensemble_max_members=5,
+            ensemble_max_members_per_family=None,
+            ensemble_minimum_member_observations=0,
+            ensemble_minimum_member_metric=None,
+            top_quantile=0.2,
+            bottom_quantile=0.2,
+            output_dir="artifacts/alpha_research",
+            train_size=756,
+            test_size=63,
+            step_size=None,
+            min_train_size=None,
+            portfolio_top_n=10,
+            portfolio_long_quantile=0.2,
+            portfolio_short_quantile=0.2,
+            commission=0.0,
+            min_price=None,
+            min_volume=None,
+            min_avg_dollar_volume=None,
+            max_adv_participation=0.05,
+            max_position_pct_of_adv=0.1,
+            max_notional_per_name=None,
+            slippage_bps_per_turnover=0.0,
+            slippage_bps_per_adv=10.0,
+            dynamic_recent_quality_window=20,
+            dynamic_min_history=5,
+            dynamic_downweight_mean_rank_ic=0.01,
+            dynamic_deactivate_mean_rank_ic=-0.02,
+            regime_aware_enabled=False,
+            regime_min_history=5,
+            regime_underweight_mean_rank_ic=0.01,
+            regime_exclude_mean_rank_ic=-0.01,
+            experiment_tracker_dir=None,
+            _cli_argv=["--config", str(alpha_config_path)],
+        )
+    )
+    alpha_result = json.loads((alpha_output_dir / "research_run.json").read_text(encoding="utf-8"))
 
     promoted_dir = tmp_path / "artifacts" / "promoted_strategies"
     cmd_research_promote(
@@ -413,7 +542,7 @@ failure_policy: fail
         "multi_strategy_config_path": Path(export_paths["multi_strategy_config_path"]),
         "pipeline_config_path": Path(export_paths["pipeline_config_path"]),
         "run_bundle_path": Path(export_paths["run_bundle_path"]),
-        "research_manifest_path": Path(alpha_result["research_manifest_path"]),
+        "research_manifest_path": alpha_output_dir / "research_run.json",
     }
 
 
