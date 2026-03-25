@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from trading_platform.cli.commands.alpha_research import cmd_alpha_research
 from trading_platform.cli.commands.research import cmd_research
 from trading_platform.cli.commands.sweep import cmd_sweep
 from trading_platform.cli.common import prepare_research_frame
@@ -34,6 +35,130 @@ def test_prepare_research_frame_applies_date_slicing(monkeypatch, tmp_path: Path
     assert prepared["rows"] == 2
     assert prepared["effective_start"] == "2020-01-02"
     assert prepared["effective_end"] == "2020-01-03"
+
+
+def test_cmd_alpha_research_supports_config_and_cli_overrides(monkeypatch, tmp_path: Path) -> None:
+    captured: dict[str, object] = {}
+    config_path = tmp_path / "alpha_research.yaml"
+    config_path.write_text(
+        f"""
+paths:
+  feature_path: {(tmp_path / "features").as_posix()}
+  output_dir: {(tmp_path / "artifacts" / "alpha_from_config").as_posix()}
+selection:
+  universe: nasdaq100
+signals:
+  family: momentum
+  lookbacks: [5, 10]
+  horizons: [1, 5]
+portfolio:
+  top_quantile: 0.2
+  bottom_quantile: 0.2
+  train_size: 252
+  test_size: 63
+tracking:
+  tracker_dir: {(tmp_path / "tracking").as_posix()}
+""".strip(),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        "trading_platform.cli.commands.alpha_research.resolve_symbols",
+        lambda args: args.symbols if getattr(args, "symbols", None) else ["AAPL", "MSFT"],
+    )
+
+    def fake_run_alpha_research(**kwargs):
+        captured.update(kwargs)
+        return {
+            "leaderboard_path": str(tmp_path / "leaderboard.csv"),
+            "fold_results_path": str(tmp_path / "fold_results.csv"),
+            "portfolio_returns_path": str(tmp_path / "portfolio_returns.csv"),
+            "ensemble_member_summary_path": str(tmp_path / "ensemble_member_summary.csv"),
+            "implementability_report_path": str(tmp_path / "implementability_report.csv"),
+            "signal_performance_by_sub_universe_path": str(tmp_path / "signal_performance_by_sub_universe.csv"),
+            "signal_performance_by_benchmark_context_path": str(tmp_path / "signal_performance_by_benchmark_context.csv"),
+            "research_manifest_path": str(tmp_path / "research_manifest.json"),
+        }
+
+    monkeypatch.setattr(
+        "trading_platform.cli.commands.alpha_research.run_alpha_research",
+        fake_run_alpha_research,
+    )
+    monkeypatch.setattr(
+        "trading_platform.cli.commands.alpha_research.build_alpha_experiment_record",
+        lambda output_dir: {"output_dir": str(output_dir)},
+    )
+    monkeypatch.setattr(
+        "trading_platform.cli.commands.alpha_research.register_experiment",
+        lambda record, tracker_dir: {"experiment_registry_path": tracker_dir / "registry.csv"},
+    )
+
+    args = argparse.Namespace(
+        config=str(config_path),
+        symbols=["AAPL"],
+        universe=None,
+        feature_dir="data/features",
+        signal_family="momentum",
+        lookbacks=[20],
+        horizons=[1],
+        min_rows=126,
+        equity_context_enabled=False,
+        equity_context_include_volume=False,
+        enable_ensemble=False,
+        ensemble_mode="disabled",
+        ensemble_weight_method="equal",
+        ensemble_normalize_scores="rank_pct",
+        ensemble_max_members=5,
+        ensemble_max_members_per_family=None,
+        ensemble_minimum_member_observations=0,
+        ensemble_minimum_member_metric=None,
+        top_quantile=0.2,
+        bottom_quantile=0.2,
+        output_dir=str(tmp_path / "artifacts" / "cli_override"),
+        train_size=756,
+        test_size=63,
+        step_size=None,
+        min_train_size=None,
+        portfolio_top_n=10,
+        portfolio_long_quantile=0.2,
+        portfolio_short_quantile=0.2,
+        commission=0.0,
+        min_price=None,
+        min_volume=None,
+        min_avg_dollar_volume=None,
+        max_adv_participation=0.05,
+        max_position_pct_of_adv=0.1,
+        max_notional_per_name=None,
+        slippage_bps_per_turnover=0.0,
+        slippage_bps_per_adv=10.0,
+        dynamic_recent_quality_window=20,
+        dynamic_min_history=5,
+        dynamic_downweight_mean_rank_ic=0.01,
+        dynamic_deactivate_mean_rank_ic=-0.02,
+        regime_aware_enabled=False,
+        regime_min_history=5,
+        regime_underweight_mean_rank_ic=0.01,
+        regime_exclude_mean_rank_ic=-0.01,
+        experiment_tracker_dir=None,
+        _cli_argv=[
+            "--config",
+            str(config_path),
+            "--symbols",
+            "AAPL",
+            "--lookbacks",
+            "20",
+            "--output-dir",
+            str(tmp_path / "artifacts" / "cli_override"),
+        ],
+    )
+
+    cmd_alpha_research(args)
+
+    assert captured["symbols"] == ["AAPL"]
+    assert captured["lookbacks"] == [20]
+    assert captured["horizons"] == [1, 5]
+    assert Path(str(captured["feature_dir"])) == tmp_path / "features"
+    assert Path(str(captured["output_dir"])) == tmp_path / "artifacts" / "cli_override"
 
 
 def test_cmd_research_reports_effective_range_rows_and_feature_path(monkeypatch, capsys, tmp_path: Path) -> None:

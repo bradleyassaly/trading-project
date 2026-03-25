@@ -389,6 +389,7 @@ def _add_validate_signal_arguments(parser: argparse.ArgumentParser) -> None:
 
 def _add_alpha_research_arguments(parser: argparse.ArgumentParser) -> None:
     add_experiment_tracker_argument(parser)
+    parser.add_argument("--config", type=str, default=None, help="Optional YAML or JSON alpha research workflow config file.")
     parser.add_argument("--symbols", nargs="+", default=None, help="Symbols to include in the alpha research run.")
     parser.add_argument("--universe", type=str, default=None, help="Named universe to evaluate instead of passing --symbols.")
     parser.add_argument("--feature-dir", type=str, default="data/features", help="Directory containing per-symbol feature parquet files.")

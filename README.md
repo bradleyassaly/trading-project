@@ -198,7 +198,7 @@ This refreshes the canonical research inputs together:
 ### 2. Run alpha research
 
 ```bash
-trading-cli research alpha --symbols AAPL MSFT NVDA --feature-dir data/features --output-dir artifacts/alpha_research/run_a
+trading-cli research alpha --config configs/alpha_research.yaml
 ```
 
 Key outputs include:
@@ -208,6 +208,12 @@ Key outputs include:
 - `signal_performance_by_sub_universe.csv`
 - `signal_performance_by_benchmark_context.csv`
 - `context_features/<SYMBOL>.parquet`
+
+`research alpha` now follows the same config-first pattern as the rest of the canonical flow:
+
+- use `--config` for the primary path
+- keep direct flags for ad hoc runs
+- explicit CLI flags override config values when both are provided
 
 ### 3. Promote condition-aware strategies
 

@@ -1,0 +1,54 @@
+paths:
+  feature_path: data/features
+  output_dir: artifacts/alpha_research/run_configured
+
+selection:
+  universe: nasdaq100
+
+signals:
+  family: momentum
+  lookbacks: [5, 10, 20, 60]
+  horizons: [1, 5, 20]
+  min_rows: 126
+  equity_context_enabled: true
+  equity_context_include_volume: true
+
+portfolio:
+  top_quantile: 0.2
+  bottom_quantile: 0.2
+  train_size: 756
+  test_size: 63
+  portfolio_top_n: 10
+  long_quantile: 0.2
+  short_quantile: 0.2
+  commission: 0.0
+  slippage_bps_per_turnover: 0.0
+  slippage_bps_per_adv: 10.0
+
+liquidity:
+  min_price: 5.0
+  min_avg_dollar_volume: 1000000.0
+  max_adv_participation: 0.05
+  max_position_pct_of_adv: 0.1
+
+dynamic:
+  recent_quality_window: 20
+  min_history: 5
+  downweight_mean_rank_ic: 0.01
+  deactivate_mean_rank_ic: -0.02
+
+regime:
+  enabled: true
+  min_history: 5
+  underweight_mean_rank_ic: 0.01
+  exclude_mean_rank_ic: -0.01
+
+ensemble:
+  enabled: false
+  mode: disabled
+  weight_method: equal
+  normalize_scores: rank_pct
+  max_members: 5
+
+tracking:
+  tracker_dir: artifacts/experiment_tracking

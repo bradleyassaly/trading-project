@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 
+from trading_platform.cli.config_support import load_and_apply_workflow_config
 from trading_platform.cli.common import resolve_symbols
+from trading_platform.config.loader import load_alpha_research_workflow_config
 from trading_platform.research.experiment_tracking import (
     build_alpha_experiment_record,
     register_experiment,
@@ -10,20 +13,68 @@ from trading_platform.research.experiment_tracking import (
 from trading_platform.research.alpha_lab.runner import run_alpha_research
 
 
-def cmd_alpha_research(args) -> None:
+@dataclass(frozen=True)
+class AlphaResearchRequest:
+    symbols: list[str]
+    feature_dir: Path
+    output_dir: Path
+    signal_family: str
+    lookbacks: list[int]
+    horizons: list[int]
+    min_rows: int
+    top_quantile: float
+    bottom_quantile: float
+    train_size: int
+    test_size: int
+    step_size: int | None
+    min_train_size: int | None
+    portfolio_top_n: int
+    portfolio_long_quantile: float
+    portfolio_short_quantile: float
+    commission: float
+    min_price: float | None
+    min_volume: float | None
+    min_avg_dollar_volume: float | None
+    max_adv_participation: float
+    max_position_pct_of_adv: float
+    max_notional_per_name: float | None
+    slippage_bps_per_turnover: float
+    slippage_bps_per_adv: float
+    dynamic_recent_quality_window: int
+    dynamic_min_history: int
+    dynamic_downweight_mean_rank_ic: float
+    dynamic_deactivate_mean_rank_ic: float
+    regime_aware_enabled: bool
+    regime_min_history: int
+    regime_underweight_mean_rank_ic: float
+    regime_exclude_mean_rank_ic: float
+    equity_context_enabled: bool
+    equity_context_include_volume: bool
+    ensemble_enabled: bool
+    ensemble_mode: str
+    ensemble_weight_method: str
+    ensemble_normalize_scores: str
+    ensemble_max_members: int
+    ensemble_max_members_per_family: int | None
+    ensemble_minimum_member_observations: int
+    ensemble_minimum_member_metric: float | None
+    experiment_tracker_dir: Path
+
+
+def _build_alpha_research_request(args) -> AlphaResearchRequest:
     output_dir = Path(args.output_dir)
-    symbols = resolve_symbols(args)
-    result = run_alpha_research(
-        symbols=symbols,
-        universe=None,
+    tracker_dir_arg = getattr(args, "experiment_tracker_dir", None)
+    tracker_dir = Path(tracker_dir_arg) if tracker_dir_arg else output_dir.parent / "experiment_tracking"
+    return AlphaResearchRequest(
+        symbols=resolve_symbols(args),
         feature_dir=Path(args.feature_dir),
+        output_dir=output_dir,
         signal_family=args.signal_family,
-        lookbacks=args.lookbacks,
-        horizons=args.horizons,
+        lookbacks=list(args.lookbacks),
+        horizons=list(args.horizons),
         min_rows=args.min_rows,
         top_quantile=args.top_quantile,
         bottom_quantile=args.bottom_quantile,
-        output_dir=output_dir,
         train_size=args.train_size,
         test_size=args.test_size,
         step_size=args.step_size,
@@ -55,16 +106,69 @@ def cmd_alpha_research(args) -> None:
         ensemble_weight_method=getattr(args, "ensemble_weight_method", "equal"),
         ensemble_normalize_scores=getattr(args, "ensemble_normalize_scores", "rank_pct"),
         ensemble_max_members=getattr(args, "ensemble_max_members", 5),
-        ensemble_require_promoted_only=getattr(args, "ensemble_require_promoted_only", True),
         ensemble_max_members_per_family=getattr(args, "ensemble_max_members_per_family", None),
         ensemble_minimum_member_observations=getattr(args, "ensemble_minimum_member_observations", 0),
         ensemble_minimum_member_metric=getattr(args, "ensemble_minimum_member_metric", None),
+        experiment_tracker_dir=tracker_dir,
     )
-    tracker_dir_arg = getattr(args, "experiment_tracker_dir", None)
-    tracker_dir = Path(tracker_dir_arg) if tracker_dir_arg else output_dir.parent / "experiment_tracking"
+
+
+def cmd_alpha_research(args) -> None:
+    load_and_apply_workflow_config(
+        args,
+        loader=load_alpha_research_workflow_config,
+    )
+    request = _build_alpha_research_request(args)
+    result = run_alpha_research(
+        symbols=request.symbols,
+        universe=None,
+        feature_dir=request.feature_dir,
+        signal_family=request.signal_family,
+        lookbacks=request.lookbacks,
+        horizons=request.horizons,
+        min_rows=request.min_rows,
+        top_quantile=request.top_quantile,
+        bottom_quantile=request.bottom_quantile,
+        output_dir=request.output_dir,
+        train_size=request.train_size,
+        test_size=request.test_size,
+        step_size=request.step_size,
+        min_train_size=request.min_train_size,
+        portfolio_top_n=request.portfolio_top_n,
+        portfolio_long_quantile=request.portfolio_long_quantile,
+        portfolio_short_quantile=request.portfolio_short_quantile,
+        commission=request.commission,
+        min_price=request.min_price,
+        min_volume=request.min_volume,
+        min_avg_dollar_volume=request.min_avg_dollar_volume,
+        max_adv_participation=request.max_adv_participation,
+        max_position_pct_of_adv=request.max_position_pct_of_adv,
+        max_notional_per_name=request.max_notional_per_name,
+        slippage_bps_per_turnover=request.slippage_bps_per_turnover,
+        slippage_bps_per_adv=request.slippage_bps_per_adv,
+        dynamic_recent_quality_window=request.dynamic_recent_quality_window,
+        dynamic_min_history=request.dynamic_min_history,
+        dynamic_downweight_mean_rank_ic=request.dynamic_downweight_mean_rank_ic,
+        dynamic_deactivate_mean_rank_ic=request.dynamic_deactivate_mean_rank_ic,
+        regime_aware_enabled=request.regime_aware_enabled,
+        regime_min_history=request.regime_min_history,
+        regime_underweight_mean_rank_ic=request.regime_underweight_mean_rank_ic,
+        regime_exclude_mean_rank_ic=request.regime_exclude_mean_rank_ic,
+        equity_context_enabled=request.equity_context_enabled,
+        equity_context_include_volume=request.equity_context_include_volume,
+        ensemble_enabled=request.ensemble_enabled,
+        ensemble_mode=request.ensemble_mode,
+        ensemble_weight_method=request.ensemble_weight_method,
+        ensemble_normalize_scores=request.ensemble_normalize_scores,
+        ensemble_max_members=request.ensemble_max_members,
+        ensemble_require_promoted_only=True,
+        ensemble_max_members_per_family=request.ensemble_max_members_per_family,
+        ensemble_minimum_member_observations=request.ensemble_minimum_member_observations,
+        ensemble_minimum_member_metric=request.ensemble_minimum_member_metric,
+    )
     registry_paths = register_experiment(
-        build_alpha_experiment_record(output_dir),
-        tracker_dir=tracker_dir,
+        build_alpha_experiment_record(request.output_dir),
+        tracker_dir=request.experiment_tracker_dir,
     )
 
     print("Alpha research complete.")

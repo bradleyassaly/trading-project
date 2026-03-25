@@ -23,6 +23,22 @@ def test_grouped_research_alpha_command_parses() -> None:
     assert args.lookbacks == [5]
 
 
+def test_grouped_research_alpha_command_parses_config() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "research",
+            "alpha",
+            "--config",
+            "configs/alpha_research.yaml",
+        ]
+    )
+
+    assert args.command_family == "research"
+    assert args.research_command == "alpha"
+    assert args.config == "configs/alpha_research.yaml"
+
+
 def test_grouped_research_alpha_command_parses_ensemble_args() -> None:
     parser = build_parser()
     args = parser.parse_args(

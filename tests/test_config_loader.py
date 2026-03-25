@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 from trading_platform.config.loader import (
+    load_alpha_research_workflow_config,
     load_canonical_bundle_experiment_matrix_workflow_config,
     load_canonical_bundle_experiment_workflow_config,
     load_live_dry_run_workflow_config,
@@ -221,6 +222,52 @@ cases:
     assert config.output_dir == "artifacts/portfolio_experiments/policy_stability"
     assert config.preset_set == "policy_sensitivity_v1"
     assert [case.case_id for case in config.cases] == ["2026-03-20", "2026-03-21"]
+
+
+def test_load_alpha_research_workflow_config(tmp_path) -> None:
+    path = tmp_path / "alpha_research.yaml"
+    path.write_text(
+        """
+paths:
+  feature_path: data/features
+  output_dir: artifacts/alpha_research/run_configured
+selection:
+  universe: nasdaq100
+signals:
+  family: momentum
+  lookbacks: [5, 10]
+  horizons: [1, 5]
+  min_rows: 80
+  equity_context_enabled: true
+portfolio:
+  train_size: 252
+  test_size: 63
+  top_quantile: 0.25
+  bottom_quantile: 0.25
+  top_n: 8
+ensemble:
+  enabled: true
+  mode: family_weighted
+  max_members: 4
+tracking:
+  tracker_dir: artifacts/experiment_tracking
+""".strip(),
+        encoding="utf-8",
+    )
+
+    config = load_alpha_research_workflow_config(path)
+
+    assert config.universe == "nasdaq100"
+    assert config.feature_dir == "data/features"
+    assert config.output_dir == "artifacts/alpha_research/run_configured"
+    assert config.signal_family == "momentum"
+    assert config.lookbacks == [5, 10]
+    assert config.horizons == [1, 5]
+    assert config.min_rows == 80
+    assert config.equity_context_enabled is True
+    assert config.portfolio_top_n == 8
+    assert config.enable_ensemble is True
+    assert config.ensemble_mode == "family_weighted"
 
 
 def test_load_walkforward_workflow_config_from_yaml(tmp_path) -> None:

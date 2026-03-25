@@ -282,6 +282,63 @@ class ResearchInputRefreshWorkflowConfig:
 
 
 @dataclass(frozen=True)
+class AlphaResearchWorkflowConfig:
+    symbols: list[str] | None = None
+    universe: str | None = None
+    feature_dir: str = "data/features"
+    signal_family: str = "momentum"
+    lookbacks: list[int] = field(default_factory=lambda: [5, 10, 20, 60])
+    horizons: list[int] = field(default_factory=lambda: [1, 5, 20])
+    min_rows: int = 126
+    equity_context_enabled: bool = False
+    equity_context_include_volume: bool = False
+    enable_ensemble: bool = False
+    ensemble_mode: str = "disabled"
+    ensemble_weight_method: str = "equal"
+    ensemble_normalize_scores: str = "rank_pct"
+    ensemble_max_members: int = 5
+    ensemble_max_members_per_family: int | None = None
+    ensemble_minimum_member_observations: int = 0
+    ensemble_minimum_member_metric: float | None = None
+    top_quantile: float = 0.2
+    bottom_quantile: float = 0.2
+    output_dir: str = "artifacts/alpha_research"
+    train_size: int = 756
+    test_size: int = 63
+    step_size: int | None = None
+    min_train_size: int | None = None
+    portfolio_top_n: int = 10
+    portfolio_long_quantile: float = 0.2
+    portfolio_short_quantile: float = 0.2
+    commission: float = 0.0
+    min_price: float | None = None
+    min_volume: float | None = None
+    min_avg_dollar_volume: float | None = None
+    max_adv_participation: float = 0.05
+    max_position_pct_of_adv: float = 0.1
+    max_notional_per_name: float | None = None
+    slippage_bps_per_turnover: float = 0.0
+    slippage_bps_per_adv: float = 10.0
+    dynamic_recent_quality_window: int = 20
+    dynamic_min_history: int = 5
+    dynamic_downweight_mean_rank_ic: float = 0.01
+    dynamic_deactivate_mean_rank_ic: float = -0.02
+    regime_aware_enabled: bool = False
+    regime_min_history: int = 5
+    regime_underweight_mean_rank_ic: float = 0.01
+    regime_exclude_mean_rank_ic: float = -0.01
+    experiment_tracker_dir: str | None = None
+
+    def __post_init__(self) -> None:
+        selected = sum(bool(value) for value in (self.symbols, self.universe))
+        if selected != 1:
+            raise ValueError("exactly one of symbols or universe must be provided")
+
+    def to_cli_defaults(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
 class CanonicalBundleExperimentVariantConfig:
     name: str
     promotion_policy_overrides: dict[str, Any] = field(default_factory=dict)

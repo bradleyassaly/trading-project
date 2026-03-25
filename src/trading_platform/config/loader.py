@@ -14,6 +14,7 @@ from trading_platform.config.models import (
     WalkForwardConfig,
 )
 from trading_platform.config.workflow_models import (
+    AlphaResearchWorkflowConfig,
     CanonicalBundleExperimentMatrixCaseConfig,
     CanonicalBundleExperimentMatrixWorkflowConfig,
     CanonicalBundleExperimentVariantConfig,
@@ -227,6 +228,80 @@ def load_research_input_refresh_workflow_config(path: str | Path) -> ResearchInp
     _set_if_missing(payload, "failure_policy", failure_section, "policy")
 
     return ResearchInputRefreshWorkflowConfig(**payload)
+
+
+def load_alpha_research_workflow_config(path: str | Path) -> AlphaResearchWorkflowConfig:
+    data = _read_config_file(Path(path))
+    payload = dict(data)
+    selection_section = _pop_dict_section(payload, "selection")
+    signals_section = _pop_dict_section(payload, "signals")
+    paths_section = _pop_dict_section(payload, "paths")
+    portfolio_section = _pop_dict_section(payload, "portfolio")
+    liquidity_section = _pop_dict_section(payload, "liquidity")
+    dynamic_section = _pop_dict_section(payload, "dynamic")
+    regime_section = _pop_dict_section(payload, "regime")
+    ensemble_section = _pop_dict_section(payload, "ensemble")
+    tracking_section = _pop_dict_section(payload, "tracking")
+
+    if "symbols" not in payload and isinstance(selection_section.get("symbols"), list):
+        payload["symbols"] = selection_section["symbols"]
+    _set_if_missing(payload, "universe", selection_section)
+
+    _set_if_missing(payload, "feature_dir", paths_section, "feature_path")
+    _set_if_missing(payload, "feature_dir", paths_section)
+    _set_if_missing(payload, "output_dir", paths_section)
+
+    _set_if_missing(payload, "signal_family", signals_section, "family")
+    if "lookbacks" not in payload and isinstance(signals_section.get("lookbacks"), list):
+        payload["lookbacks"] = signals_section["lookbacks"]
+    if "horizons" not in payload and isinstance(signals_section.get("horizons"), list):
+        payload["horizons"] = signals_section["horizons"]
+    _set_if_missing(payload, "min_rows", signals_section)
+
+    _set_if_missing(payload, "top_quantile", portfolio_section)
+    _set_if_missing(payload, "bottom_quantile", portfolio_section)
+    _set_if_missing(payload, "train_size", portfolio_section)
+    _set_if_missing(payload, "test_size", portfolio_section)
+    _set_if_missing(payload, "step_size", portfolio_section)
+    _set_if_missing(payload, "min_train_size", portfolio_section)
+    _set_if_missing(payload, "portfolio_top_n", portfolio_section, "top_n")
+    _set_if_missing(payload, "portfolio_long_quantile", portfolio_section, "long_quantile")
+    _set_if_missing(payload, "portfolio_short_quantile", portfolio_section, "short_quantile")
+    _set_if_missing(payload, "commission", portfolio_section)
+    _set_if_missing(payload, "slippage_bps_per_turnover", portfolio_section)
+    _set_if_missing(payload, "slippage_bps_per_adv", portfolio_section)
+
+    _set_if_missing(payload, "min_price", liquidity_section)
+    _set_if_missing(payload, "min_volume", liquidity_section)
+    _set_if_missing(payload, "min_avg_dollar_volume", liquidity_section)
+    _set_if_missing(payload, "max_adv_participation", liquidity_section)
+    _set_if_missing(payload, "max_position_pct_of_adv", liquidity_section)
+    _set_if_missing(payload, "max_notional_per_name", liquidity_section)
+
+    _set_if_missing(payload, "dynamic_recent_quality_window", dynamic_section, "recent_quality_window")
+    _set_if_missing(payload, "dynamic_min_history", dynamic_section, "min_history")
+    _set_if_missing(payload, "dynamic_downweight_mean_rank_ic", dynamic_section, "downweight_mean_rank_ic")
+    _set_if_missing(payload, "dynamic_deactivate_mean_rank_ic", dynamic_section, "deactivate_mean_rank_ic")
+
+    _set_if_missing(payload, "regime_aware_enabled", regime_section, "enabled")
+    _set_if_missing(payload, "regime_min_history", regime_section, "min_history")
+    _set_if_missing(payload, "regime_underweight_mean_rank_ic", regime_section, "underweight_mean_rank_ic")
+    _set_if_missing(payload, "regime_exclude_mean_rank_ic", regime_section, "exclude_mean_rank_ic")
+
+    _set_if_missing(payload, "equity_context_enabled", signals_section)
+    _set_if_missing(payload, "equity_context_include_volume", signals_section)
+    _set_if_missing(payload, "enable_ensemble", ensemble_section, "enabled")
+    _set_if_missing(payload, "ensemble_mode", ensemble_section, "mode")
+    _set_if_missing(payload, "ensemble_weight_method", ensemble_section, "weight_method")
+    _set_if_missing(payload, "ensemble_normalize_scores", ensemble_section, "normalize_scores")
+    _set_if_missing(payload, "ensemble_max_members", ensemble_section, "max_members")
+    _set_if_missing(payload, "ensemble_max_members_per_family", ensemble_section, "max_members_per_family")
+    _set_if_missing(payload, "ensemble_minimum_member_observations", ensemble_section, "minimum_member_observations")
+    _set_if_missing(payload, "ensemble_minimum_member_metric", ensemble_section, "minimum_member_metric")
+
+    _set_if_missing(payload, "experiment_tracker_dir", tracking_section, "tracker_dir")
+
+    return AlphaResearchWorkflowConfig(**payload)
 
 
 def load_canonical_bundle_experiment_workflow_config(path: str | Path) -> CanonicalBundleExperimentWorkflowConfig:
