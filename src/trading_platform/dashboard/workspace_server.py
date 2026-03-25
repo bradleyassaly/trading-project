@@ -99,17 +99,6 @@ def _parse_positive_int(value: str | None, default: int) -> int:
     return parsed if parsed > 0 else default
 
 
-def _query_filters(query: dict[str, list[str]], *keys: str, default_limit: int = 20) -> dict[str, str | int]:
-    payload: dict[str, str | int] = {}
-    for key in keys:
-        value = _query_value(query, key)
-        if value is not None:
-            payload[key] = value
-    payload["limit"] = _parse_positive_int(_query_value(query, "limit"), default_limit)
-    payload["offset"] = max(int(_query_value(query, "offset") or 0), 0)
-    return payload
-
-
 def _page_state(path: str, query: dict[str, list[str]], *, filter_keys: list[str], default_limit: int) -> PageState:
     return PageState.from_query(path, query, filter_keys=filter_keys, default_limit=default_limit)
 
@@ -610,10 +599,10 @@ def create_dashboard_app(
     )
     def app(environ, start_response):
         path = environ.get("PATH_INFO", "/"); query = parse_qs(environ.get("QUERY_STRING", ""))
-        runs_filters = _query_filters(query, "status", "run_kind", "run_type", "mode", "strategy", "date_from", "date_to", default_limit=20)
-        trades_filters = _query_filters(query, "status", "decision_status", "strategy", "symbol", "run_id", "date_from", "date_to", default_limit=50)
-        ops_filters = _query_filters(query, "status", "activity_type", "date_from", "date_to", default_limit=20)
-        strategy_filters = _query_filters(query, "status", "strategy", "decision", "date_from", "date_to", default_limit=20)
+        runs_filters = _page_state("/runs", query, filter_keys=["status", "run_kind", "run_type", "mode", "strategy", "date_from", "date_to"], default_limit=20).to_service_filters()
+        trades_filters = _page_state("/trades", query, filter_keys=["status", "decision_status", "strategy", "symbol", "run_id", "date_from", "date_to"], default_limit=50).to_service_filters()
+        ops_filters = _page_state("/ops", query, filter_keys=["status", "activity_type", "date_from", "date_to"], default_limit=20).to_service_filters()
+        strategy_filters = _page_state("/strategies", query, filter_keys=["status", "strategy", "decision", "date_from", "date_to"], default_limit=20).to_service_filters()
         if path.startswith("/api/chart/"):
             symbol = _validate_symbol(path.removeprefix("/api/chart/")); status, headers, body = _not_found() if symbol is None else _json_response(service.chart_payload(symbol, timeframe=(query.get("timeframe") or ["1d"])[0], lookback=_parse_positive_int((query.get("lookback") or ["200"])[0], 200), run_id=_query_value(query, "run_id"), source=_query_value(query, "source"), mode=_query_value(query, "mode")))
         elif path.startswith("/api/trades/"):

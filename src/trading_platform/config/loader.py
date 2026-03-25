@@ -78,6 +78,18 @@ def _apply_database_section(payload: dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
+def _pop_dict_section(payload: dict[str, Any], key: str) -> dict[str, Any]:
+    value = payload.pop(key, {})
+    return value if isinstance(value, dict) else {}
+
+
+def _set_if_missing(payload: dict[str, Any], target_key: str, source: dict[str, Any], source_key: str | None = None) -> None:
+    if target_key not in payload:
+        lookup_key = source_key or target_key
+        if lookup_key in source:
+            payload[target_key] = source[lookup_key]
+
+
 def load_research_workflow_config(path: str | Path) -> ResearchWorkflowConfig:
     data = _read_config_file(Path(path))
     return ResearchWorkflowConfig(**data)
@@ -96,17 +108,13 @@ def load_walk_forward_config(path: str | Path) -> WalkForwardConfig:
 def load_research_run_workflow_config(path: str | Path) -> ResearchRunWorkflowConfig:
     data = _read_config_file(Path(path))
     payload = _apply_database_section(dict(data))
-    conditional_section = payload.pop("conditional_research", {}) if isinstance(payload.get("conditional_research"), dict) else {}
-    if "enable_conditional_evaluation" not in payload and "enabled" in conditional_section:
-        payload["enable_conditional_evaluation"] = conditional_section["enabled"]
+    conditional_section = _pop_dict_section(payload, "conditional_research")
+    _set_if_missing(payload, "enable_conditional_evaluation", conditional_section, "enabled")
     if "conditional_condition_types" not in payload and isinstance(conditional_section.get("condition_types"), list):
         payload["conditional_condition_types"] = conditional_section["condition_types"]
-    if "conditional_min_sample_size" not in payload and "min_sample_size" in conditional_section:
-        payload["conditional_min_sample_size"] = conditional_section["min_sample_size"]
-    if "conditional_compare_to_baseline" not in payload and "compare_to_baseline" in conditional_section:
-        payload["conditional_compare_to_baseline"] = conditional_section["compare_to_baseline"]
-    if "conditional_allow_variants" not in payload and "allow_variants" in conditional_section:
-        payload["conditional_allow_variants"] = conditional_section["allow_variants"]
+    _set_if_missing(payload, "conditional_min_sample_size", conditional_section, "min_sample_size")
+    _set_if_missing(payload, "conditional_compare_to_baseline", conditional_section, "compare_to_baseline")
+    _set_if_missing(payload, "conditional_allow_variants", conditional_section, "allow_variants")
     return ResearchRunWorkflowConfig(**payload)
 
 
@@ -118,8 +126,8 @@ def load_walkforward_workflow_config(path: str | Path) -> WalkForwardWorkflowCon
 def load_paper_run_workflow_config(path: str | Path) -> PaperRunWorkflowConfig:
     data = _read_config_file(Path(path))
     payload = _apply_database_section(dict(data))
-    screening_section = payload.pop("screening", {}) if isinstance(payload.get("screening"), dict) else {}
-    paper_section = payload.pop("paper", {}) if isinstance(payload.get("paper"), dict) else {}
+    screening_section = _pop_dict_section(payload, "screening")
+    paper_section = _pop_dict_section(payload, "paper")
     execution_section = (
         paper_section.get("execution", {})
         if isinstance(paper_section.get("execution"), dict)
@@ -135,8 +143,7 @@ def load_paper_run_workflow_config(path: str | Path) -> PaperRunWorkflowConfig:
         if isinstance(paper_section.get("ensemble"), dict)
         else {}
     )
-    if "latest_data_max_age_seconds" not in payload and "latest_data_max_age_seconds" in execution_section:
-        payload["latest_data_max_age_seconds"] = execution_section["latest_data_max_age_seconds"]
+    _set_if_missing(payload, "latest_data_max_age_seconds", execution_section)
     if "slippage_model" not in payload and slippage_section:
         enabled = bool(slippage_section.get("enabled", False))
         payload["slippage_model"] = str(slippage_section.get("model", "fixed_bps" if enabled else "none"))
@@ -148,110 +155,72 @@ def load_paper_run_workflow_config(path: str | Path) -> PaperRunWorkflowConfig:
         payload["slippage_sell_bps"] = slippage_section["sell_bps"]
     if "ensemble_enabled" not in payload and ensemble_section:
         payload["ensemble_enabled"] = bool(ensemble_section.get("enabled", False))
-    if "ensemble_mode" not in payload and "mode" in ensemble_section:
-        payload["ensemble_mode"] = ensemble_section["mode"]
-    if "ensemble_weight_method" not in payload and "weight_method" in ensemble_section:
-        payload["ensemble_weight_method"] = ensemble_section["weight_method"]
-    if "ensemble_normalize_scores" not in payload and "normalize_scores" in ensemble_section:
-        payload["ensemble_normalize_scores"] = ensemble_section["normalize_scores"]
-    if "ensemble_max_members" not in payload and "max_members" in ensemble_section:
-        payload["ensemble_max_members"] = ensemble_section["max_members"]
-    if "ensemble_require_promoted_only" not in payload and "require_promoted_only" in ensemble_section:
-        payload["ensemble_require_promoted_only"] = ensemble_section["require_promoted_only"]
-    if "ensemble_max_members_per_family" not in payload and "max_members_per_family" in ensemble_section:
-        payload["ensemble_max_members_per_family"] = ensemble_section["max_members_per_family"]
-    if "ensemble_minimum_member_observations" not in payload and "minimum_member_observations" in ensemble_section:
-        payload["ensemble_minimum_member_observations"] = ensemble_section["minimum_member_observations"]
-    if "ensemble_minimum_member_metric" not in payload and "minimum_member_metric" in ensemble_section:
-        payload["ensemble_minimum_member_metric"] = ensemble_section["minimum_member_metric"]
-    if "sub_universe_id" not in payload and "sub_universe_id" in screening_section:
-        payload["sub_universe_id"] = screening_section["sub_universe_id"]
+    _set_if_missing(payload, "ensemble_mode", ensemble_section, "mode")
+    _set_if_missing(payload, "ensemble_weight_method", ensemble_section, "weight_method")
+    _set_if_missing(payload, "ensemble_normalize_scores", ensemble_section, "normalize_scores")
+    _set_if_missing(payload, "ensemble_max_members", ensemble_section, "max_members")
+    _set_if_missing(payload, "ensemble_require_promoted_only", ensemble_section, "require_promoted_only")
+    _set_if_missing(payload, "ensemble_max_members_per_family", ensemble_section, "max_members_per_family")
+    _set_if_missing(payload, "ensemble_minimum_member_observations", ensemble_section, "minimum_member_observations")
+    _set_if_missing(payload, "ensemble_minimum_member_metric", ensemble_section, "minimum_member_metric")
+    _set_if_missing(payload, "sub_universe_id", screening_section)
     if "universe_filters" not in payload and isinstance(screening_section.get("filters"), list):
         payload["universe_filters"] = screening_section["filters"]
-    if "reference_data_root" not in payload and "reference_data_root" in screening_section:
-        payload["reference_data_root"] = screening_section["reference_data_root"]
-    if "universe_membership_path" not in payload and "membership_history_path" in screening_section:
-        payload["universe_membership_path"] = screening_section["membership_history_path"]
-    if "taxonomy_snapshot_path" not in payload and "taxonomy_snapshot_path" in screening_section:
-        payload["taxonomy_snapshot_path"] = screening_section["taxonomy_snapshot_path"]
-    if "benchmark_mapping_path" not in payload and "benchmark_mapping_path" in screening_section:
-        payload["benchmark_mapping_path"] = screening_section["benchmark_mapping_path"]
-    if "market_regime_path" not in payload and "market_regime_path" in screening_section:
-        payload["market_regime_path"] = screening_section["market_regime_path"]
+    _set_if_missing(payload, "reference_data_root", screening_section)
+    _set_if_missing(payload, "universe_membership_path", screening_section, "membership_history_path")
+    _set_if_missing(payload, "taxonomy_snapshot_path", screening_section)
+    _set_if_missing(payload, "benchmark_mapping_path", screening_section)
+    _set_if_missing(payload, "market_regime_path", screening_section)
     return PaperRunWorkflowConfig(**payload)
 
 
 def load_live_dry_run_workflow_config(path: str | Path) -> LiveDryRunWorkflowConfig:
     data = _read_config_file(Path(path))
     payload = _apply_database_section(dict(data))
-    screening_section = payload.pop("screening", {}) if isinstance(payload.get("screening"), dict) else {}
-    if "sub_universe_id" not in payload and "sub_universe_id" in screening_section:
-        payload["sub_universe_id"] = screening_section["sub_universe_id"]
+    screening_section = _pop_dict_section(payload, "screening")
+    _set_if_missing(payload, "sub_universe_id", screening_section)
     if "universe_filters" not in payload and isinstance(screening_section.get("filters"), list):
         payload["universe_filters"] = screening_section["filters"]
-    if "reference_data_root" not in payload and "reference_data_root" in screening_section:
-        payload["reference_data_root"] = screening_section["reference_data_root"]
-    if "universe_membership_path" not in payload and "membership_history_path" in screening_section:
-        payload["universe_membership_path"] = screening_section["membership_history_path"]
-    if "taxonomy_snapshot_path" not in payload and "taxonomy_snapshot_path" in screening_section:
-        payload["taxonomy_snapshot_path"] = screening_section["taxonomy_snapshot_path"]
-    if "benchmark_mapping_path" not in payload and "benchmark_mapping_path" in screening_section:
-        payload["benchmark_mapping_path"] = screening_section["benchmark_mapping_path"]
-    if "market_regime_path" not in payload and "market_regime_path" in screening_section:
-        payload["market_regime_path"] = screening_section["market_regime_path"]
+    _set_if_missing(payload, "reference_data_root", screening_section)
+    _set_if_missing(payload, "universe_membership_path", screening_section, "membership_history_path")
+    _set_if_missing(payload, "taxonomy_snapshot_path", screening_section)
+    _set_if_missing(payload, "benchmark_mapping_path", screening_section)
+    _set_if_missing(payload, "market_regime_path", screening_section)
     return LiveDryRunWorkflowConfig(**payload)
 
 
 def load_research_input_refresh_workflow_config(path: str | Path) -> ResearchInputRefreshWorkflowConfig:
     data = _read_config_file(Path(path))
     payload = dict(data)
-    selection_section = payload.pop("selection", {}) if isinstance(payload.get("selection"), dict) else {}
-    outputs_section = payload.pop("outputs", {}) if isinstance(payload.get("outputs"), dict) else {}
-    reference_section = payload.pop("reference_data", {}) if isinstance(payload.get("reference_data"), dict) else {}
-    metadata_section = payload.pop("metadata", {}) if isinstance(payload.get("metadata"), dict) else {}
-    failure_section = payload.pop("failure_handling", {}) if isinstance(payload.get("failure_handling"), dict) else {}
+    selection_section = _pop_dict_section(payload, "selection")
+    outputs_section = _pop_dict_section(payload, "outputs")
+    reference_section = _pop_dict_section(payload, "reference_data")
+    metadata_section = _pop_dict_section(payload, "metadata")
+    failure_section = _pop_dict_section(payload, "failure_handling")
 
     if "symbols" not in payload and isinstance(selection_section.get("symbols"), list):
         payload["symbols"] = selection_section["symbols"]
-    if "universe" not in payload and "universe" in selection_section:
-        payload["universe"] = selection_section["universe"]
-    if "sub_universe_id" not in payload and "sub_universe_id" in selection_section:
-        payload["sub_universe_id"] = selection_section["sub_universe_id"]
+    _set_if_missing(payload, "universe", selection_section)
+    _set_if_missing(payload, "sub_universe_id", selection_section)
 
-    if "feature_groups" not in payload and isinstance(payload.get("feature_groups"), list):
-        payload["feature_groups"] = payload["feature_groups"]
-    elif "feature_groups" not in payload and isinstance(outputs_section.get("feature_groups"), list):
+    if "feature_groups" not in payload and isinstance(outputs_section.get("feature_groups"), list):
         payload["feature_groups"] = outputs_section["feature_groups"]
 
-    if "feature_dir" not in payload and "feature_dir" in outputs_section:
-        payload["feature_dir"] = outputs_section["feature_dir"]
-    if "metadata_dir" not in payload and "metadata_dir" in outputs_section:
-        payload["metadata_dir"] = outputs_section["metadata_dir"]
-    if "normalized_dir" not in payload and "normalized_dir" in outputs_section:
-        payload["normalized_dir"] = outputs_section["normalized_dir"]
+    _set_if_missing(payload, "feature_dir", outputs_section)
+    _set_if_missing(payload, "metadata_dir", outputs_section)
+    _set_if_missing(payload, "normalized_dir", outputs_section)
 
-    if "reference_data_root" not in payload and "root" in reference_section:
-        payload["reference_data_root"] = reference_section["root"]
-    if "reference_data_root" not in payload and "reference_data_root" in reference_section:
-        payload["reference_data_root"] = reference_section["reference_data_root"]
-    if "universe_membership_path" not in payload and "membership_history_path" in reference_section:
-        payload["universe_membership_path"] = reference_section["membership_history_path"]
-    if "taxonomy_snapshot_path" not in payload and "taxonomy_snapshot_path" in reference_section:
-        payload["taxonomy_snapshot_path"] = reference_section["taxonomy_snapshot_path"]
-    if "benchmark_mapping_path" not in payload and "benchmark_mapping_path" in reference_section:
-        payload["benchmark_mapping_path"] = reference_section["benchmark_mapping_path"]
-    if "market_regime_path" not in payload and "market_regime_path" in reference_section:
-        payload["market_regime_path"] = reference_section["market_regime_path"]
-    if "group_map_path" not in payload and "group_map_path" in reference_section:
-        payload["group_map_path"] = reference_section["group_map_path"]
-    if "benchmark" not in payload and "benchmark" in reference_section:
-        payload["benchmark"] = reference_section["benchmark"]
+    _set_if_missing(payload, "reference_data_root", reference_section, "root")
+    _set_if_missing(payload, "reference_data_root", reference_section)
+    _set_if_missing(payload, "universe_membership_path", reference_section, "membership_history_path")
+    _set_if_missing(payload, "taxonomy_snapshot_path", reference_section)
+    _set_if_missing(payload, "benchmark_mapping_path", reference_section)
+    _set_if_missing(payload, "market_regime_path", reference_section)
+    _set_if_missing(payload, "group_map_path", reference_section)
+    _set_if_missing(payload, "benchmark", reference_section)
 
-    if "sub_universe_id" not in payload and "sub_universe_id" in metadata_section:
-        payload["sub_universe_id"] = metadata_section["sub_universe_id"]
-
-    if "failure_policy" not in payload and "policy" in failure_section:
-        payload["failure_policy"] = failure_section["policy"]
+    _set_if_missing(payload, "sub_universe_id", metadata_section)
+    _set_if_missing(payload, "failure_policy", failure_section, "policy")
 
     return ResearchInputRefreshWorkflowConfig(**payload)
 

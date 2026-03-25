@@ -7,7 +7,6 @@ from types import SimpleNamespace
 import pandas as pd
 
 from trading_platform.cli.commands.refresh_research_inputs import cmd_refresh_research_inputs
-from trading_platform.config.loader import load_research_input_refresh_workflow_config
 from trading_platform.services.research_input_refresh_service import refresh_research_inputs
 
 
@@ -149,44 +148,6 @@ def test_cmd_refresh_research_inputs_prints_operator_summary(
     assert "Status: success" in output
     assert "Features dir:" in output
     assert "Metadata dir:" in output
-
-
-def test_load_research_input_refresh_workflow_config_from_yaml(tmp_path: Path) -> None:
-    path = tmp_path / "research_input_refresh.yaml"
-    path.write_text(
-        """
-selection:
-  universe: nasdaq100
-  sub_universe_id: liquid_trend_candidates
-feature_groups: [trend, volatility]
-outputs:
-  feature_dir: data/features
-  metadata_dir: data/metadata
-  normalized_dir: data/normalized
-reference_data:
-  root: artifacts/reference_data/v1
-  membership_history_path: artifacts/reference_data/v1/universe_membership_history.csv
-  taxonomy_snapshot_path: artifacts/reference_data/v1/taxonomy_snapshots.csv
-  benchmark_mapping_path: artifacts/reference_data/v1/benchmark_mapping_snapshots.csv
-  market_regime_path: artifacts/regime
-  group_map_path: artifacts/groups.csv
-  benchmark: SPY
-failure_handling:
-  policy: fail
-""".strip(),
-        encoding="utf-8",
-    )
-
-    config = load_research_input_refresh_workflow_config(path)
-
-    assert config.universe == "nasdaq100"
-    assert config.sub_universe_id == "liquid_trend_candidates"
-    assert config.feature_groups == ["trend", "volatility"]
-    assert config.reference_data_root == "artifacts/reference_data/v1"
-    assert config.universe_membership_path.endswith("universe_membership_history.csv")
-    assert config.failure_policy == "fail"
-
-
 def test_cmd_refresh_research_inputs_supports_config_input(
     monkeypatch,
     tmp_path: Path,

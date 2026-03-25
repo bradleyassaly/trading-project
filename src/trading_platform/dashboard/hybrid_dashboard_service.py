@@ -41,6 +41,76 @@ def _pagination(total_count: int, limit: int, offset: int, source: str) -> dict[
     }
 
 
+def _paginate_rows(rows: list[dict[str, Any]], *, limit: int, offset: int, source: str) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    total_count = len(rows)
+    return rows[offset : offset + limit], _pagination(total_count, limit, offset, source)
+
+
+def _within_date_range(row: dict[str, Any], *, date_from: str | None, date_to: str | None, keys: tuple[str, ...]) -> bool:
+    candidate = None
+    for key in keys:
+        candidate = _parse_dt(row.get(key))
+        if candidate is not None:
+            break
+    if date_from:
+        start = _parse_dt(date_from)
+        if start is not None and (candidate is None or candidate < start):
+            return False
+    if date_to:
+        end = _parse_dt(date_to)
+        if end is not None and (candidate is None or candidate > end):
+            return False
+    return True
+
+
+def _filter_artifact_runs(rows: list[dict[str, Any]], filters: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if not filters:
+        return rows
+    filtered = list(rows)
+    if filters.get("status"):
+        filtered = [row for row in filtered if str(row.get("status")) == str(filters["status"])]
+    if filters.get("mode") or filters.get("run_type"):
+        desired = str(filters.get("mode") or filters.get("run_type"))
+        filtered = [
+            row for row in filtered
+            if str(row.get("schedule_type") or row.get("mode") or row.get("run_type") or "") == desired
+        ]
+    if filters.get("date_from") or filters.get("date_to"):
+        filtered = [
+            row for row in filtered
+            if _within_date_range(row, date_from=filters.get("date_from"), date_to=filters.get("date_to"), keys=("started_at",))
+        ]
+    return filtered
+
+
+def _filter_artifact_trades(rows: list[dict[str, Any]], filters: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if not filters:
+        return rows
+    filtered = list(rows)
+    if filters.get("status"):
+        filtered = [row for row in filtered if str(row.get("status")) == str(filters["status"])]
+    if filters.get("strategy"):
+        filtered = [row for row in filtered if str(row.get("strategy_id") or "") == str(filters["strategy"])]
+    if filters.get("symbol"):
+        filtered = [
+            row for row in filtered
+            if str(row.get("symbol") or "").upper() == str(filters["symbol"]).upper()
+        ]
+    if filters.get("run_id"):
+        filtered = [row for row in filtered if str(row.get("run_id") or "") == str(filters["run_id"])]
+    if filters.get("date_from") or filters.get("date_to"):
+        filtered = [
+            row for row in filtered
+            if _within_date_range(
+                row,
+                date_from=filters.get("date_from"),
+                date_to=filters.get("date_to"),
+                keys=("timestamp", "entry_ts"),
+            )
+        ]
+    return filtered
+
+
 class HybridDashboardDataService(DashboardDataService):
     def __init__(
         self,
@@ -102,28 +172,12 @@ class HybridDashboardDataService(DashboardDataService):
         if db_payload is not None:
             return db_payload
         payload = super().runs_payload()
-        rows = list(payload.get("runs", []))
-        if filters:
-            if filters.get("status"):
-                rows = [row for row in rows if str(row.get("status")) == str(filters["status"])]
-            if filters.get("mode") or filters.get("run_type"):
-                desired = str(filters.get("mode") or filters.get("run_type"))
-                rows = [row for row in rows if str(row.get("schedule_type") or row.get("mode") or row.get("run_type") or "") == desired]
-            if filters.get("date_from"):
-                start = _parse_dt(filters["date_from"])
-                rows = [row for row in rows if start is None or (_parse_dt(row.get("started_at")) and _parse_dt(row.get("started_at")) >= start)]
-            if filters.get("date_to"):
-                end = _parse_dt(filters["date_to"])
-                rows = [row for row in rows if end is None or (_parse_dt(row.get("started_at")) and _parse_dt(row.get("started_at")) <= end)]
-            limit = int(filters.get("limit", len(rows)))
-            offset = int(filters.get("offset", 0))
-        else:
-            limit = len(rows)
-            offset = 0
-        total_count = len(rows)
-        rows = rows[offset : offset + limit]
+        rows = _filter_artifact_runs(list(payload.get("runs", [])), filters)
+        limit = int(filters.get("limit", len(rows))) if filters else len(rows)
+        offset = int(filters.get("offset", 0)) if filters else 0
+        rows, pagination = _paginate_rows(rows, limit=limit, offset=offset, source="artifact")
         payload["runs"] = rows
-        payload["runs_pagination"] = _pagination(total_count, limit, offset, "artifact")
+        payload["runs_pagination"] = pagination
         payload["source"] = "artifact"
         return payload
 
@@ -216,31 +270,12 @@ class HybridDashboardDataService(DashboardDataService):
                     "source": "db",
                 }
         payload = super().trade_blotter_payload()
-        rows = list(payload.get("trades", []))
-        if filters:
-            if filters.get("status"):
-                rows = [row for row in rows if str(row.get("status")) == str(filters["status"])]
-            if filters.get("strategy"):
-                rows = [row for row in rows if str(row.get("strategy_id") or "") == str(filters["strategy"])]
-            if filters.get("symbol"):
-                rows = [row for row in rows if str(row.get("symbol") or "").upper() == str(filters["symbol"]).upper()]
-            if filters.get("run_id"):
-                rows = [row for row in rows if str(row.get("run_id") or "") == str(filters["run_id"])]
-            if filters.get("date_from"):
-                start = _parse_dt(filters["date_from"])
-                rows = [row for row in rows if start is None or (_parse_dt(row.get("timestamp") or row.get("entry_ts")) and _parse_dt(row.get("timestamp") or row.get("entry_ts")) >= start)]
-            if filters.get("date_to"):
-                end = _parse_dt(filters["date_to"])
-                rows = [row for row in rows if end is None or (_parse_dt(row.get("timestamp") or row.get("entry_ts")) and _parse_dt(row.get("timestamp") or row.get("entry_ts")) <= end)]
-            limit = int(filters.get("limit", len(rows)))
-            offset = int(filters.get("offset", 0))
-        else:
-            limit = len(rows)
-            offset = 0
-        total_count = len(rows)
-        rows = rows[offset : offset + limit]
+        rows = _filter_artifact_trades(list(payload.get("trades", [])), filters)
+        limit = int(filters.get("limit", len(rows))) if filters else len(rows)
+        offset = int(filters.get("offset", 0)) if filters else 0
+        rows, pagination = _paginate_rows(rows, limit=limit, offset=offset, source="artifact")
         payload["trades"] = rows
-        payload["pagination"] = _pagination(total_count, limit, offset, "artifact")
+        payload["pagination"] = pagination
         payload["source"] = "artifact"
         payload.setdefault("meta", {})["source"] = "artifact"
         return payload
@@ -432,24 +467,12 @@ class HybridDashboardDataService(DashboardDataService):
                 "source": "hybrid",
             }
         payload = super().ops_payload()
-        runs = list(payload.get("runs", []))
-        if filters:
-            if filters.get("status"):
-                runs = [row for row in runs if str(row.get("status")) == str(filters["status"])]
-            if filters.get("date_from"):
-                start = _parse_dt(filters["date_from"])
-                runs = [row for row in runs if start is None or (_parse_dt(row.get("started_at")) and _parse_dt(row.get("started_at")) >= start)]
-            if filters.get("date_to"):
-                end = _parse_dt(filters["date_to"])
-                runs = [row for row in runs if end is None or (_parse_dt(row.get("started_at")) and _parse_dt(row.get("started_at")) <= end)]
-            limit = int(filters.get("limit", len(runs)))
-            offset = int(filters.get("offset", 0))
-        else:
-            limit = len(runs)
-            offset = 0
-        total_count = len(runs)
-        payload["runs"] = runs[offset : offset + limit]
-        payload["runs_pagination"] = _pagination(total_count, limit, offset, "artifact")
+        runs = _filter_artifact_runs(list(payload.get("runs", [])), filters)
+        limit = int(filters.get("limit", len(runs))) if filters else len(runs)
+        offset = int(filters.get("offset", 0)) if filters else 0
+        runs, pagination = _paginate_rows(runs, limit=limit, offset=offset, source="artifact")
+        payload["runs"] = runs
+        payload["runs_pagination"] = pagination
         payload["source"] = "artifact"
         return payload
 

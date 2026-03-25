@@ -75,15 +75,44 @@ def apply_workflow_config(
     config_path: str | None,
     loader: Callable[[str], Any],
     option_aliases: dict[str, list[str]] | None = None,
+    loaded: Any | None = None,
 ) -> Any | None:
     if not config_path:
         return None
 
-    loaded = loader(config_path)
-    for attr_name, value in loaded.to_cli_defaults().items():
+    resolved = loaded if loaded is not None else loader(config_path)
+    for attr_name, value in resolved.to_cli_defaults().items():
         if not hasattr(args, attr_name):
             continue
         if option_is_explicit(args, attr_name, option_aliases=option_aliases):
             continue
         setattr(args, attr_name, value)
-    return loaded
+    return resolved
+
+
+def load_and_apply_workflow_config(
+    args: Any,
+    *,
+    loader: Callable[[str], Any],
+    config_path: str | None = None,
+    preset_attr: str | None = None,
+    option_aliases: dict[str, list[str]] | None = None,
+) -> Any | None:
+    resolved_config_path = config_path if config_path is not None else getattr(args, "config", None)
+    if not resolved_config_path:
+        return None
+
+    loaded = loader(resolved_config_path)
+    if preset_attr and getattr(loaded, preset_attr, None) and not option_is_explicit(
+        args,
+        preset_attr,
+        option_aliases=option_aliases,
+    ):
+        setattr(args, preset_attr, getattr(loaded, preset_attr))
+    return apply_workflow_config(
+        args,
+        config_path=resolved_config_path,
+        loader=loader,
+        option_aliases=option_aliases,
+        loaded=loaded,
+    )

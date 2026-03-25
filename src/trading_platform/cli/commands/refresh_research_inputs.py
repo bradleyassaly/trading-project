@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from trading_platform.cli.config_support import apply_workflow_config
+from trading_platform.cli.config_support import load_and_apply_workflow_config
 from trading_platform.cli.common import print_symbol_list, resolve_symbols
 from trading_platform.config.loader import load_research_input_refresh_workflow_config
 from trading_platform.services.research_input_refresh_service import (
@@ -12,12 +12,10 @@ from trading_platform.services.research_input_refresh_service import (
 
 
 def cmd_refresh_research_inputs(args) -> None:
-    if getattr(args, "config", None):
-        apply_workflow_config(
-            args,
-            config_path=args.config,
-            loader=load_research_input_refresh_workflow_config,
-        )
+    load_and_apply_workflow_config(
+        args,
+        loader=load_research_input_refresh_workflow_config,
+    )
     symbols = resolve_symbols(args)
     request = ResearchInputRefreshRequest(
         symbols=symbols,

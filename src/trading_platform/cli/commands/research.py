@@ -7,7 +7,7 @@ from typing import Any
 
 from trading_platform.artifact_schemas import WorkflowArtifactSummary
 from trading_platform.backtests.engine import run_backtest_on_df
-from trading_platform.cli.config_support import apply_workflow_config, option_is_explicit
+from trading_platform.cli.config_support import load_and_apply_workflow_config
 from trading_platform.cli.common import (
     build_strategy_params,
     prepare_research_frame,
@@ -257,18 +257,12 @@ def _run_xsec_research(args: argparse.Namespace, symbols: list[str]) -> None:
 
 
 def cmd_research(args: argparse.Namespace) -> None:
-    loaded_config = None
-    if getattr(args, "config", None):
-        loaded = load_research_run_workflow_config(args.config)
-        loaded_config = loaded
-        if getattr(loaded, "preset", None) and not option_is_explicit(args, "preset"):
-            args.preset = loaded.preset
-    apply_cli_preset(args)
-    apply_workflow_config(
+    loaded_config = load_and_apply_workflow_config(
         args,
-        config_path=getattr(args, "config", None),
         loader=load_research_run_workflow_config,
+        preset_attr="preset",
     )
+    apply_cli_preset(args)
     symbols = resolve_symbols(args)
     requested_range = f"requested_range={args.start or 'full'}->{args.end or 'full'}"
     print(

@@ -42,7 +42,7 @@ Those presets represent the current supported Nasdaq-100 cross-sectional momentu
 - `research multi-universe-report`
 - `research refresh`
 - `research monitor`
-- legacy flat command aliases and older top-level groups preserved for migration
+- legacy flat command aliases and older top-level groups preserved only as thin rewrites to the canonical grouped commands
 - legacy strategy workflows outside the validated Nasdaq-100 xsec momentum preset path
 - broader orchestration/experimentation surfaces that are still useful, but not the primary supported operating path
 
@@ -1222,6 +1222,13 @@ GET /api/discovery/recent-symbols
 ```
 
 Existing endpoints stay intentionally thin. The server-rendered workspace now uses the same hybrid service layer behind those payloads instead of introducing a broad new REST surface.
+
+Internally, the supported read path is now:
+
+- DB query services for normalized run/decision/execution history when available
+- one hybrid dashboard service that composes DB-backed reads with artifact fallback
+- one shared page-state helper for filtered/paginated HTML list views
+- route handlers that stay thin and avoid page-local query logic
 
 HTML workspace pages that now accept query params directly:
 

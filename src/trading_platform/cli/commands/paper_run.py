@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from trading_platform.cli.config_support import apply_workflow_config, option_is_explicit
+from trading_platform.cli.config_support import load_and_apply_workflow_config
 from trading_platform.cli.common import normalize_paper_weighting_scheme, resolve_symbols
 from trading_platform.cli.presets import apply_cli_preset
 from trading_platform.config.loader import load_execution_config, load_paper_run_workflow_config
@@ -27,18 +27,12 @@ from trading_platform.research.experiment_tracking import (
 
 
 def cmd_paper_run(args) -> None:
-    loaded_config = None
-    if getattr(args, "config", None):
-        loaded = load_paper_run_workflow_config(args.config)
-        loaded_config = loaded
-        if getattr(loaded, "preset", None) and not option_is_explicit(args, "preset"):
-            args.preset = loaded.preset
-    apply_cli_preset(args)
-    apply_workflow_config(
+    loaded_config = load_and_apply_workflow_config(
         args,
-        config_path=getattr(args, "config", None),
         loader=load_paper_run_workflow_config,
+        preset_attr="preset",
     )
+    apply_cli_preset(args)
     symbols = resolve_symbols(args)
 
     config = PaperTradingConfig(
