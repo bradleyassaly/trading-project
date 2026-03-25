@@ -89,6 +89,9 @@ from trading_platform.cli.commands.strategy_portfolio_build import cmd_strategy_
 from trading_platform.cli.commands.strategy_portfolio_experiment_bundle import (
     cmd_strategy_portfolio_experiment_bundle,
 )
+from trading_platform.cli.commands.strategy_portfolio_experiment_bundle_matrix import (
+    cmd_strategy_portfolio_experiment_bundle_matrix,
+)
 from trading_platform.cli.commands.strategy_portfolio_export_run_config import cmd_strategy_portfolio_export_run_config
 from trading_platform.cli.commands.strategy_portfolio_show import cmd_strategy_portfolio_show
 from trading_platform.cli.commands.strategy_monitor_build import cmd_strategy_monitor_build
@@ -1235,6 +1238,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="Path to the canonical bundle experiment JSON/YAML config.",
     )
     strategy_portfolio_experiment.set_defaults(func=cmd_strategy_portfolio_experiment_bundle)
+    strategy_portfolio_experiment_matrix = strategy_portfolio_subparsers.add_parser(
+        "experiment-bundle-matrix",
+        help="Run the same canonical policy-sensitivity preset set across multiple bundle/date cases",
+    )
+    strategy_portfolio_experiment_matrix.add_argument(
+        "--config",
+        type=str,
+        required=True,
+        help="Path to the canonical bundle matrix experiment JSON/YAML config.",
+    )
+    strategy_portfolio_experiment_matrix.set_defaults(func=cmd_strategy_portfolio_experiment_bundle_matrix)
 
     strategy_monitor_parser = subparsers.add_parser("strategy-monitor", help="Build monitoring snapshots and kill-switch recommendations for strategy portfolios")
     strategy_monitor_subparsers = strategy_monitor_parser.add_subparsers(dest="strategy_monitor_command", required=True)

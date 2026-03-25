@@ -326,3 +326,54 @@ class CanonicalBundleExperimentWorkflowConfig:
 
     def to_cli_defaults(self) -> dict[str, Any]:
         return asdict(self)
+
+
+@dataclass(frozen=True)
+class CanonicalBundleExperimentMatrixCaseConfig:
+    case_id: str
+    bundle_dir: str
+    promoted_dir: str
+    label: str | None = None
+    artifacts_root: str | None = None
+    lifecycle: str | None = None
+
+    def __post_init__(self) -> None:
+        normalized_case_id = str(self.case_id or "").strip()
+        if not normalized_case_id:
+            raise ValueError("case_id is required")
+        object.__setattr__(self, "case_id", normalized_case_id)
+        if self.label is not None:
+            object.__setattr__(self, "label", str(self.label))
+        if not str(self.bundle_dir or "").strip():
+            raise ValueError("bundle_dir is required")
+        if not str(self.promoted_dir or "").strip():
+            raise ValueError("promoted_dir is required")
+
+
+@dataclass(frozen=True)
+class CanonicalBundleExperimentMatrixWorkflowConfig:
+    experiment_name: str
+    output_dir: str
+    baseline_variant_name: str = "baseline"
+    preset_set: str = "policy_sensitivity_v1"
+    base_promotion_policy_config: str | None = None
+    base_strategy_portfolio_policy_config: str | None = None
+    cases: list[CanonicalBundleExperimentMatrixCaseConfig] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        if not str(self.experiment_name or "").strip():
+            raise ValueError("experiment_name is required")
+        if not str(self.output_dir or "").strip():
+            raise ValueError("output_dir is required")
+        if self.baseline_variant_name != "baseline":
+            raise ValueError("baseline_variant_name must be `baseline` for the canonical policy stability matrix")
+        if self.preset_set != "policy_sensitivity_v1":
+            raise ValueError("preset_set must be `policy_sensitivity_v1`")
+        if not self.cases:
+            raise ValueError("at least one matrix case is required")
+        case_ids = [case.case_id for case in self.cases]
+        if len(set(case_ids)) != len(case_ids):
+            raise ValueError("matrix case_ids must be unique")
+
+    def to_cli_defaults(self) -> dict[str, Any]:
+        return asdict(self)

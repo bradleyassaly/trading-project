@@ -15,6 +15,9 @@ from trading_platform.cli.commands.strategy_portfolio_build import cmd_strategy_
 from trading_platform.cli.commands.strategy_portfolio_experiment_bundle import (
     cmd_strategy_portfolio_experiment_bundle,
 )
+from trading_platform.cli.commands.strategy_portfolio_experiment_bundle_matrix import (
+    cmd_strategy_portfolio_experiment_bundle_matrix,
+)
 from trading_platform.cli.commands.paper_run_multi_strategy import cmd_paper_run_multi_strategy
 from trading_platform.config.loader import load_pipeline_run_config
 from trading_platform.live.preview import LivePreviewResult
@@ -117,6 +120,40 @@ paths:
 baseline_variant_name: baseline
 policy_inputs:
   preset_set: policy_sensitivity_v1
+""".strip(),
+        encoding="utf-8",
+    )
+    return config_path
+
+
+def _write_bundle_experiment_matrix_config(
+    *,
+    bundles: list[tuple[str, dict[str, Path]]],
+    output_dir: Path,
+) -> Path:
+    case_blocks: list[str] = []
+    for case_id, bundle in bundles:
+        case_blocks.append(
+            f"""
+  - case_id: {case_id}
+    label: {case_id}
+    bundle_dir: {bundle['run_bundle_path'].parent.as_posix()}
+    promoted_dir: {bundle['promoted_dir'].as_posix()}
+    artifacts_root: {(bundle['alpha_output_dir'].parent).as_posix()}
+""".rstrip()
+        )
+    config_path = output_dir / "canonical_bundle_experiment_matrix.yaml"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(
+        f"""
+experiment_name: policy_sensitivity_time_stability
+baseline_variant_name: baseline
+paths:
+  output_dir: {output_dir.as_posix()}
+policy_inputs:
+  preset_set: policy_sensitivity_v1
+cases:
+{chr(10).join(case_blocks)}
 """.strip(),
         encoding="utf-8",
     )
@@ -260,6 +297,123 @@ failure_policy: fail
         "multi_strategy_config_path": Path(export_paths["multi_strategy_config_path"]),
         "pipeline_config_path": Path(export_paths["pipeline_config_path"]),
         "run_bundle_path": Path(export_paths["run_bundle_path"]),
+    }
+
+
+def _build_canonical_exported_bundle_with_inputs(
+    tmp_path: Path,
+    *,
+    symbol_inputs: dict[str, tuple[float, float]],
+) -> dict[str, Path]:
+    data_root = tmp_path / "data"
+    normalized_dir = data_root / "normalized"
+    feature_dir = data_root / "features"
+    metadata_dir = data_root / "metadata"
+    normalized_dir.mkdir(parents=True, exist_ok=True)
+
+    for symbol, (base_price, daily_return) in symbol_inputs.items():
+        _write_normalized_frame(
+            normalized_dir,
+            symbol=symbol,
+            base_price=base_price,
+            daily_return=daily_return,
+        )
+
+    refresh_config_path = tmp_path / "research_input_refresh.yaml"
+    refresh_config_path.write_text(
+        f"""
+symbols:
+  - {"\n  - ".join(symbol_inputs.keys())}
+sub_universe_id: canonical_smoke
+feature_dir: {feature_dir.as_posix()}
+metadata_dir: {metadata_dir.as_posix()}
+normalized_dir: {normalized_dir.as_posix()}
+failure_policy: fail
+""".strip(),
+        encoding="utf-8",
+    )
+
+    cmd_refresh_research_inputs(
+        SimpleNamespace(
+            config=str(refresh_config_path),
+            symbols=None,
+            universe=None,
+            feature_groups=None,
+            sub_universe_id=None,
+            reference_data_root=None,
+            universe_membership_path=None,
+            taxonomy_snapshot_path=None,
+            benchmark_mapping_path=None,
+            market_regime_path=None,
+            group_map_path=None,
+            benchmark=None,
+            failure_policy="partial_success",
+            feature_dir="data/features",
+            metadata_dir="data/metadata",
+            normalized_dir="data/normalized",
+            _cli_argv=["--config", str(refresh_config_path)],
+        )
+    )
+
+    alpha_output_dir = tmp_path / "artifacts" / "alpha_research" / "run_smoke"
+    alpha_result = run_alpha_research(
+        symbols=list(symbol_inputs),
+        universe=None,
+        feature_dir=feature_dir,
+        signal_family="momentum",
+        lookbacks=[1, 2],
+        horizons=[1],
+        min_rows=20,
+        top_quantile=0.34,
+        bottom_quantile=0.34,
+        output_dir=alpha_output_dir,
+        train_size=20,
+        test_size=10,
+        step_size=10,
+        equity_context_enabled=True,
+    )
+
+    promoted_dir = tmp_path / "artifacts" / "promoted_strategies"
+    cmd_research_promote(
+        SimpleNamespace(
+            artifacts_root=str(tmp_path / "artifacts" / "alpha_research"),
+            registry_dir=None,
+            output_dir=str(promoted_dir),
+            policy_config=None,
+            validation=None,
+            top_n=1,
+            allow_overwrite=False,
+            dry_run=False,
+            inactive=False,
+            override_validation=False,
+        )
+    )
+
+    strategy_portfolio_dir = tmp_path / "artifacts" / "strategy_portfolio"
+    cmd_strategy_portfolio_build(
+        SimpleNamespace(
+            promoted_dir=str(promoted_dir),
+            policy_config=None,
+            lifecycle=None,
+            output_dir=str(strategy_portfolio_dir),
+        )
+    )
+
+    export_dir = tmp_path / "artifacts" / "strategy_portfolio_bundle"
+    export_paths = export_strategy_portfolio_run_config(
+        strategy_portfolio_path=strategy_portfolio_dir,
+        output_dir=export_dir,
+    )
+    return {
+        "feature_dir": feature_dir,
+        "metadata_dir": metadata_dir,
+        "alpha_output_dir": alpha_output_dir,
+        "promoted_dir": promoted_dir,
+        "strategy_portfolio_dir": strategy_portfolio_dir,
+        "multi_strategy_config_path": Path(export_paths["multi_strategy_config_path"]),
+        "pipeline_config_path": Path(export_paths["pipeline_config_path"]),
+        "run_bundle_path": Path(export_paths["run_bundle_path"]),
+        "research_manifest_path": Path(alpha_result["research_manifest_path"]),
     }
 
 
@@ -797,3 +951,79 @@ def test_canonical_bundle_experiment_harness_reuses_exported_bundle(
     assert "conditional_variant_count" in comparison_df.columns
     assert "allocation_l1_delta_vs_baseline" in comparison_df.columns
     assert "max_strategy_weight_delta" in comparison_df.columns
+
+
+def test_canonical_bundle_experiment_matrix_summarizes_policy_stability_across_cases(
+    tmp_path: Path,
+) -> None:
+    bundle_a = _build_canonical_exported_bundle_with_inputs(
+        tmp_path / "case_a",
+        symbol_inputs={
+            "AAPL": (100.0, 0.010),
+            "MSFT": (210.0, 0.011),
+            "NVDA": (290.0, 0.017),
+            "AMD": (80.0, 0.015),
+        },
+    )
+    bundle_b = _build_canonical_exported_bundle_with_inputs(
+        tmp_path / "case_b",
+        symbol_inputs={
+            "AAPL": (105.0, 0.008),
+            "MSFT": (205.0, 0.014),
+            "NVDA": (315.0, 0.020),
+            "AMD": (78.0, 0.012),
+        },
+    )
+    matrix_output_dir = tmp_path / "artifacts" / "bundle_experiment_matrix"
+    config_path = _write_bundle_experiment_matrix_config(
+        bundles=[
+            ("2026-03-20", bundle_a),
+            ("2026-03-21", bundle_b),
+        ],
+        output_dir=matrix_output_dir,
+    )
+
+    cmd_strategy_portfolio_experiment_bundle_matrix(
+        SimpleNamespace(
+            config=str(config_path),
+        )
+    )
+
+    case_results_path = matrix_output_dir / "bundle_case_results.json"
+    stability_csv_path = matrix_output_dir / "experiment_time_stability.csv"
+    stability_json_path = matrix_output_dir / "experiment_time_stability.json"
+    stability_summary_path = matrix_output_dir / "bundle_policy_stability_summary.json"
+    assert case_results_path.exists()
+    assert stability_csv_path.exists()
+    assert stability_json_path.exists()
+    assert stability_summary_path.exists()
+
+    case_results_payload = json.loads(case_results_path.read_text(encoding="utf-8"))
+    assert {row["case_id"] for row in case_results_payload["cases"]} == {
+        "2026-03-20",
+        "2026-03-21",
+    }
+
+    stability_summary = json.loads(stability_summary_path.read_text(encoding="utf-8"))
+    assert stability_summary["experiment_name"] == "policy_sensitivity_time_stability"
+    assert stability_summary["preset_set"] == "policy_sensitivity_v1"
+    assert stability_summary["case_count"] == 2
+
+    variant_rows = stability_summary["variant_stability"]
+    assert {row["variant_name"] for row in variant_rows} == {
+        "baseline",
+        "strict_promotion",
+        "loose_promotion",
+        "alternate_weighting",
+        "combined_strict_weighting",
+    }
+    baseline_row = next(row for row in variant_rows if row["variant_name"] == "baseline")
+    assert "allocation_l1_delta_vs_baseline_mean" in baseline_row
+    assert "paper_ready_pass_count" in baseline_row
+    assert "live_ready_pass_count" in baseline_row
+
+    stability_df = pd.read_csv(stability_csv_path)
+    assert set(stability_df["case_id"]) == {"2026-03-20", "2026-03-21"}
+    assert "variant_name" in stability_df.columns
+    assert "paper_ready" in stability_df.columns
+    assert "live_ready" in stability_df.columns

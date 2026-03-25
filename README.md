@@ -260,6 +260,34 @@ The quickest fields to compare are:
 - allocation change vs baseline (`allocation_l1_delta_vs_baseline`)
 - paper/live readiness
 
+To compare the same preset set across multiple promoted bundles or dates:
+
+```bash
+trading-cli strategy-portfolio experiment-bundle-matrix --config configs/canonical_bundle_experiment_matrix.yaml
+```
+
+This keeps the policy matrix fixed and varies only the bundle/date case. The top-level outputs are:
+
+- `bundle_case_results.json`
+- `experiment_time_stability.csv`
+- `experiment_time_stability.json`
+- `bundle_policy_stability_summary.json`
+
+The most useful cross-date stability fields are:
+
+- promoted strategy count mean/range by variant
+- conditional variant count mean/range by variant
+- selected strategy count mean/range by variant
+- effective strategy count mean/range by variant
+- max strategy weight mean/range by variant
+- allocation L1 delta vs baseline mean/range by variant
+- paper/live readiness pass counts
+
+Use this before adding new strategy families:
+
+- if policy sensitivity is stable across dates, the next step is broader strategy diversity
+- if policy sensitivity is highly date-dependent, promotion and portfolio robustness should be improved first
+
 ### 5. Run paper trading
 
 ```bash

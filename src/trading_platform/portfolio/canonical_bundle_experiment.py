@@ -15,6 +15,8 @@ from trading_platform.config.loader import (
     load_strategy_portfolio_policy_config,
 )
 from trading_platform.config.workflow_models import (
+    CanonicalBundleExperimentMatrixCaseConfig,
+    CanonicalBundleExperimentMatrixWorkflowConfig,
     CanonicalBundleExperimentVariantConfig,
     CanonicalBundleExperimentWorkflowConfig,
 )
@@ -470,4 +472,137 @@ def run_canonical_bundle_experiment(
         "experiment_variant_results_csv_path": str(rows_csv_path),
         "experiment_policy_comparison_csv_path": str(comparison_csv_path),
         "experiment_summary_json_path": str(summary_json_path),
+    }
+
+
+def _build_case_experiment_config(
+    *,
+    matrix_config: CanonicalBundleExperimentMatrixWorkflowConfig,
+    case: CanonicalBundleExperimentMatrixCaseConfig,
+    output_dir: Path,
+) -> CanonicalBundleExperimentWorkflowConfig:
+    return CanonicalBundleExperimentWorkflowConfig(
+        bundle_dir=case.bundle_dir,
+        promoted_dir=case.promoted_dir,
+        output_dir=str(output_dir),
+        artifacts_root=case.artifacts_root,
+        lifecycle=case.lifecycle,
+        base_promotion_policy_config=matrix_config.base_promotion_policy_config,
+        base_strategy_portfolio_policy_config=matrix_config.base_strategy_portfolio_policy_config,
+        baseline_variant_name=matrix_config.baseline_variant_name,
+        preset_set=matrix_config.preset_set,
+    )
+
+
+def _float_series(values: list[Any]) -> pd.Series:
+    return pd.to_numeric(pd.Series(values, dtype="object"), errors="coerce").fillna(0.0)
+
+
+def run_canonical_bundle_experiment_matrix(
+    config: CanonicalBundleExperimentMatrixWorkflowConfig,
+) -> dict[str, Any]:
+    output_dir = Path(config.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    case_rows: list[dict[str, Any]] = []
+    case_results: list[dict[str, Any]] = []
+    for case in config.cases:
+        case_output_dir = output_dir / case.case_id
+        result = run_canonical_bundle_experiment(
+            _build_case_experiment_config(
+                matrix_config=config,
+                case=case,
+                output_dir=case_output_dir,
+            )
+        )
+        case_results.append(
+            {
+                "case_id": case.case_id,
+                "label": case.label or case.case_id,
+                "output_dir": str(case_output_dir),
+                "summary_json_path": result["experiment_summary_json_path"],
+                "policy_comparison_csv_path": result["experiment_policy_comparison_csv_path"],
+            }
+        )
+        for row in result["variant_rows"]:
+            case_rows.append(
+                {
+                    "case_id": case.case_id,
+                    "case_label": case.label or case.case_id,
+                    **row,
+                }
+            )
+
+    case_results_json_path = output_dir / "bundle_case_results.json"
+    stability_csv_path = output_dir / "experiment_time_stability.csv"
+    stability_json_path = output_dir / "experiment_time_stability.json"
+    stability_summary_json_path = output_dir / "bundle_policy_stability_summary.json"
+
+    case_df = pd.DataFrame(case_rows)
+    case_df.to_csv(stability_csv_path, index=False)
+    _write_json(stability_json_path, {"rows": case_rows})
+
+    stability_rows: list[dict[str, Any]] = []
+    for variant_name, group in case_df.groupby("variant_name", dropna=False):
+        promoted_series = _float_series(group["promoted_strategy_count"].tolist())
+        conditional_series = _float_series(group["conditional_variant_count"].tolist())
+        selected_series = _float_series(group["selected_strategy_count"].tolist())
+        effective_series = _float_series(group["effective_strategy_count"].tolist())
+        weight_series = _float_series(group["max_strategy_weight"].tolist())
+        allocation_series = _float_series(group["allocation_l1_delta_vs_baseline"].tolist())
+        readiness_paper = int(group["paper_ready"].astype(bool).sum())
+        readiness_live = int(group["live_ready"].astype(bool).sum())
+        stability_rows.append(
+            {
+                "variant_name": variant_name,
+                "case_count": int(len(group.index)),
+                "paper_ready_pass_count": readiness_paper,
+                "live_ready_pass_count": readiness_live,
+                "promoted_strategy_count_mean": float(promoted_series.mean()),
+                "promoted_strategy_count_min": float(promoted_series.min()),
+                "promoted_strategy_count_max": float(promoted_series.max()),
+                "promoted_strategy_count_range": float(promoted_series.max() - promoted_series.min()),
+                "conditional_variant_count_mean": float(conditional_series.mean()),
+                "conditional_variant_count_range": float(conditional_series.max() - conditional_series.min()),
+                "selected_strategy_count_mean": float(selected_series.mean()),
+                "selected_strategy_count_range": float(selected_series.max() - selected_series.min()),
+                "effective_strategy_count_mean": float(effective_series.mean()),
+                "effective_strategy_count_range": float(effective_series.max() - effective_series.min()),
+                "max_strategy_weight_mean": float(weight_series.mean()),
+                "max_strategy_weight_range": float(weight_series.max() - weight_series.min()),
+                "allocation_l1_delta_vs_baseline_mean": float(allocation_series.mean()),
+                "allocation_l1_delta_vs_baseline_range": float(allocation_series.max() - allocation_series.min()),
+                "material_divergence_case_count": int((allocation_series > 0.25).sum()),
+            }
+        )
+
+    _write_json(case_results_json_path, {"cases": case_results})
+    _write_json(stability_json_path, {"rows": case_rows})
+    pd.DataFrame(case_rows).to_csv(stability_csv_path, index=False)
+    _write_json(
+        stability_summary_json_path,
+        {
+            "generated_at": _now_utc(),
+            "experiment_name": config.experiment_name,
+            "preset_set": config.preset_set,
+            "case_count": len(config.cases),
+            "variant_count": len(stability_rows),
+            "cases": case_results,
+            "variant_stability": stability_rows,
+            "paths": {
+                "bundle_case_results_json_path": str(case_results_json_path),
+                "experiment_time_stability_csv_path": str(stability_csv_path),
+                "experiment_time_stability_json_path": str(stability_json_path),
+                "bundle_policy_stability_summary_json_path": str(stability_summary_json_path),
+            },
+        },
+    )
+    return {
+        "output_dir": str(output_dir),
+        "case_rows": case_rows,
+        "variant_stability": stability_rows,
+        "bundle_case_results_json_path": str(case_results_json_path),
+        "experiment_time_stability_csv_path": str(stability_csv_path),
+        "experiment_time_stability_json_path": str(stability_json_path),
+        "bundle_policy_stability_summary_json_path": str(stability_summary_json_path),
     }

@@ -1,0 +1,25 @@
+experiment_name: policy_sensitivity_time_stability
+baseline_variant_name: baseline
+
+paths:
+  output_dir: artifacts/portfolio_experiments/policy_stability
+
+policy_inputs:
+  preset_set: policy_sensitivity_v1
+
+cases:
+  - case_id: 2026-03-20
+    label: 2026-03-20 promoted bundle
+    bundle_dir: artifacts/strategy_portfolio_bundle_2026-03-20
+    promoted_dir: artifacts/promoted_strategies_2026-03-20
+    artifacts_root: artifacts/alpha_research_2026-03-20
+  - case_id: 2026-03-21
+    label: 2026-03-21 promoted bundle
+    bundle_dir: artifacts/strategy_portfolio_bundle_2026-03-21
+    promoted_dir: artifacts/promoted_strategies_2026-03-21
+    artifacts_root: artifacts/alpha_research_2026-03-21
+  - case_id: 2026-03-22
+    label: 2026-03-22 promoted bundle
+    bundle_dir: artifacts/strategy_portfolio_bundle_2026-03-22
+    promoted_dir: artifacts/promoted_strategies_2026-03-22
+    artifacts_root: artifacts/alpha_research_2026-03-22

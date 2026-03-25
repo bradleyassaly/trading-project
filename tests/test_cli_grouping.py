@@ -565,6 +565,21 @@ def test_grouped_strategy_portfolio_experiment_bundle_command_parses() -> None:
     assert args.config == "configs/canonical_bundle_experiment.yaml"
 
 
+def test_grouped_strategy_portfolio_experiment_bundle_matrix_command_parses() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "strategy-portfolio",
+            "experiment-bundle-matrix",
+            "--config",
+            "configs/canonical_bundle_experiment_matrix.yaml",
+        ]
+    )
+
+    assert args.strategy_portfolio_command == "experiment-bundle-matrix"
+    assert args.config == "configs/canonical_bundle_experiment_matrix.yaml"
+
+
 def test_grouped_strategy_monitor_build_command_parses() -> None:
     parser = build_parser()
     args = parser.parse_args(

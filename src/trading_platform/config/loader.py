@@ -14,6 +14,8 @@ from trading_platform.config.models import (
     WalkForwardConfig,
 )
 from trading_platform.config.workflow_models import (
+    CanonicalBundleExperimentMatrixCaseConfig,
+    CanonicalBundleExperimentMatrixWorkflowConfig,
     CanonicalBundleExperimentVariantConfig,
     CanonicalBundleExperimentWorkflowConfig,
     LiveDryRunWorkflowConfig,
@@ -260,6 +262,32 @@ def load_canonical_bundle_experiment_workflow_config(path: str | Path) -> Canoni
         for item in raw_variants
     ]
     return CanonicalBundleExperimentWorkflowConfig(**payload)
+
+
+def load_canonical_bundle_experiment_matrix_workflow_config(
+    path: str | Path,
+) -> CanonicalBundleExperimentMatrixWorkflowConfig:
+    data = _read_config_file(Path(path))
+    payload = dict(data)
+    paths_section = _pop_dict_section(payload, "paths")
+    policy_section = _pop_dict_section(payload, "policy_inputs")
+
+    _set_if_missing(payload, "output_dir", paths_section)
+    _set_if_missing(payload, "preset_set", policy_section, "preset_set")
+    _set_if_missing(payload, "base_promotion_policy_config", policy_section, "promotion_policy_config")
+    _set_if_missing(
+        payload,
+        "base_strategy_portfolio_policy_config",
+        policy_section,
+        "strategy_portfolio_policy_config",
+    )
+
+    raw_cases = payload.get("cases", [])
+    payload["cases"] = [
+        CanonicalBundleExperimentMatrixCaseConfig(**item)
+        for item in raw_cases
+    ]
+    return CanonicalBundleExperimentMatrixWorkflowConfig(**payload)
 
 
 def load_multi_strategy_portfolio_config(path: str | Path) -> MultiStrategyPortfolioConfig:

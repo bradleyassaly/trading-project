@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 from trading_platform.config.loader import (
+    load_canonical_bundle_experiment_matrix_workflow_config,
     load_canonical_bundle_experiment_workflow_config,
     load_live_dry_run_workflow_config,
     load_broker_config,
@@ -189,6 +190,37 @@ baseline_variant_name: baseline
     assert config.base_strategy_portfolio_policy_config == "configs/strategy_portfolio.yaml"
     assert config.baseline_variant_name == "baseline"
     assert config.variants == []
+
+
+def test_load_canonical_bundle_experiment_matrix_workflow_config(tmp_path) -> None:
+    path = tmp_path / "canonical_bundle_experiment_matrix.yaml"
+    path.write_text(
+        """
+experiment_name: policy_sensitivity_time_stability
+baseline_variant_name: baseline
+paths:
+  output_dir: artifacts/portfolio_experiments/policy_stability
+policy_inputs:
+  preset_set: policy_sensitivity_v1
+cases:
+  - case_id: 2026-03-20
+    label: 2026-03-20 promoted bundle
+    bundle_dir: artifacts/strategy_portfolio_bundle_2026-03-20
+    promoted_dir: artifacts/promoted_strategies_2026-03-20
+    artifacts_root: artifacts/alpha_research_2026-03-20
+  - case_id: 2026-03-21
+    bundle_dir: artifacts/strategy_portfolio_bundle_2026-03-21
+    promoted_dir: artifacts/promoted_strategies_2026-03-21
+""".strip(),
+        encoding="utf-8",
+    )
+
+    config = load_canonical_bundle_experiment_matrix_workflow_config(path)
+
+    assert config.experiment_name == "policy_sensitivity_time_stability"
+    assert config.output_dir == "artifacts/portfolio_experiments/policy_stability"
+    assert config.preset_set == "policy_sensitivity_v1"
+    assert [case.case_id for case in config.cases] == ["2026-03-20", "2026-03-21"]
 
 
 def test_load_walkforward_workflow_config_from_yaml(tmp_path) -> None:
