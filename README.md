@@ -1953,6 +1953,7 @@ That test now covers both:
 
 - one-shot supported-path validation from config-driven research-input refresh through alpha research, promotion, strategy-portfolio export, and shared paper/live multi-strategy config readiness
 - repeated scheduled-style reuse of the same exported promoted multi-strategy bundle for paper and live dry-run command readiness
+- repeated real `schedule_type: daily` pipeline-config reuse against that same exported multi-strategy bundle
 
 Run the full suite:
 

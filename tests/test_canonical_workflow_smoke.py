@@ -8,11 +8,14 @@ import pandas as pd
 
 from trading_platform.broker.live_models import BrokerAccount
 from trading_platform.cli.commands.live_dry_run_multi_strategy import cmd_live_dry_run_multi_strategy
+from trading_platform.cli.commands.pipeline_run import cmd_pipeline_run_daily
 from trading_platform.cli.commands.refresh_research_inputs import cmd_refresh_research_inputs
 from trading_platform.cli.commands.research_promote import cmd_research_promote
 from trading_platform.cli.commands.strategy_portfolio_build import cmd_strategy_portfolio_build
 from trading_platform.cli.commands.paper_run_multi_strategy import cmd_paper_run_multi_strategy
+from trading_platform.config.loader import load_pipeline_run_config
 from trading_platform.live.preview import LivePreviewResult
+from trading_platform.orchestration.models import PipelineRunResult, PipelineStageRecord
 from trading_platform.paper.models import PaperPortfolioState, PaperTradingRunResult
 from trading_platform.portfolio.strategy_portfolio import export_strategy_portfolio_run_config, load_strategy_portfolio
 from trading_platform.research.alpha_lab.runner import run_alpha_research
@@ -63,6 +66,34 @@ def _allocation_result():
             "symbols_removed_or_clipped": [],
         },
     )
+
+
+def _write_daily_pipeline_config(
+    *,
+    multi_strategy_config_path: Path,
+    output_dir: Path,
+    paper_state_path: Path,
+) -> Path:
+    config_path = output_dir / "canonical_daily_pipeline.yaml"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(
+        f"""
+run_name: canonical_daily_bundle
+schedule_type: daily
+universes:
+  - canonical_smoke
+multi_strategy_input_path: {multi_strategy_config_path.as_posix()}
+paper_state_path: {paper_state_path.as_posix()}
+output_root_dir: {output_dir.as_posix()}
+stages:
+  portfolio_allocation: true
+  paper_trading: true
+  live_dry_run: true
+  reporting: true
+""".strip(),
+        encoding="utf-8",
+    )
+    return config_path
 
 
 def _build_canonical_exported_bundle(tmp_path: Path) -> dict[str, Path]:
@@ -554,4 +585,106 @@ def test_canonical_live_multi_strategy_bundle_reuse_for_scheduled_style_runs(
     latest_payload = json.loads((output_dir / "live_dry_run_summary.json").read_text(encoding="utf-8"))
     history_df = pd.read_csv(output_dir / "live_dry_run_history.csv")
     assert latest_payload["run_id"].endswith("5")
+    assert len(history_df.index) == 2
+
+
+def test_canonical_daily_pipeline_config_reuses_exported_bundle_across_runs(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    bundle = _build_canonical_exported_bundle(tmp_path)
+    multi_strategy_config_path = bundle["multi_strategy_config_path"]
+    daily_root = tmp_path / "artifacts" / "daily_pipeline"
+    pipeline_config_path = _write_daily_pipeline_config(
+        multi_strategy_config_path=multi_strategy_config_path,
+        output_dir=daily_root,
+        paper_state_path=tmp_path / "artifacts" / "daily_pipeline_state.json",
+    )
+    loaded_config = load_pipeline_run_config(pipeline_config_path)
+    assert loaded_config.schedule_type == "daily"
+    assert Path(str(loaded_config.multi_strategy_input_path)) == multi_strategy_config_path
+    assert loaded_config.stages.paper_trading is True
+    assert loaded_config.stages.live_dry_run is True
+
+    call_count = {"runs": 0}
+
+    def fake_run_pipeline(config):
+        call_count["runs"] += 1
+        assert config.schedule_type == "daily"
+        assert Path(str(config.multi_strategy_input_path)) == multi_strategy_config_path
+        assert config.stages.paper_trading is True
+        assert config.stages.live_dry_run is True
+        history_path = daily_root / "canonical_daily_history.csv"
+        latest_path = daily_root / "canonical_daily_latest.json"
+        history_df = (
+            pd.read_csv(history_path)
+            if history_path.exists()
+            else pd.DataFrame(columns=["iteration", "run_name", "schedule_type", "bundle_path"])
+        )
+        history_df = pd.concat(
+            [
+                history_df,
+                pd.DataFrame(
+                    [
+                        {
+                            "iteration": call_count["runs"],
+                            "run_name": config.run_name,
+                            "schedule_type": config.schedule_type,
+                            "bundle_path": config.multi_strategy_input_path,
+                        }
+                    ]
+                ),
+            ],
+            ignore_index=True,
+        )
+        history_df.to_csv(history_path, index=False)
+        latest_path.write_text(
+            json.dumps(
+                {
+                    "iteration": call_count["runs"],
+                    "run_name": config.run_name,
+                    "schedule_type": config.schedule_type,
+                    "bundle_path": config.multi_strategy_input_path,
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        result = PipelineRunResult(
+            run_name=config.run_name,
+            schedule_type=config.schedule_type,
+            started_at="2025-01-04T09:30:00+00:00",
+            ended_at="2025-01-04T09:31:00+00:00",
+            status="succeeded",
+            run_dir=str(daily_root / f"run_{call_count['runs']}"),
+            stage_records=[
+                PipelineStageRecord(stage_name="portfolio_allocation", status="succeeded"),
+                PipelineStageRecord(stage_name="paper_trading", status="succeeded"),
+                PipelineStageRecord(stage_name="live_dry_run", status="succeeded"),
+            ],
+            errors=[],
+            outputs={
+                "multi_strategy_input_path": config.multi_strategy_input_path,
+                "paper_ready": True,
+                "live_ready": True,
+            },
+        )
+        return result, {
+            "canonical_daily_latest_path": latest_path,
+            "canonical_daily_history_path": history_path,
+        }
+
+    monkeypatch.setattr(
+        "trading_platform.cli.commands.pipeline_run.run_orchestration_pipeline",
+        fake_run_pipeline,
+    )
+
+    args = SimpleNamespace(config=str(pipeline_config_path))
+    cmd_pipeline_run_daily(args)
+    cmd_pipeline_run_daily(args)
+
+    latest_payload = json.loads((daily_root / "canonical_daily_latest.json").read_text(encoding="utf-8"))
+    history_df = pd.read_csv(daily_root / "canonical_daily_history.csv")
+    assert latest_payload["iteration"] == 2
+    assert Path(str(latest_payload["bundle_path"])) == multi_strategy_config_path
     assert len(history_df.index) == 2
