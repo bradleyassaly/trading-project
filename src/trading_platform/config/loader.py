@@ -14,6 +14,8 @@ from trading_platform.config.models import (
     WalkForwardConfig,
 )
 from trading_platform.config.workflow_models import (
+    CanonicalBundleExperimentVariantConfig,
+    CanonicalBundleExperimentWorkflowConfig,
     LiveDryRunWorkflowConfig,
     PaperRunWorkflowConfig,
     ResearchInputRefreshWorkflowConfig,
@@ -223,6 +225,40 @@ def load_research_input_refresh_workflow_config(path: str | Path) -> ResearchInp
     _set_if_missing(payload, "failure_policy", failure_section, "policy")
 
     return ResearchInputRefreshWorkflowConfig(**payload)
+
+
+def load_canonical_bundle_experiment_workflow_config(path: str | Path) -> CanonicalBundleExperimentWorkflowConfig:
+    data = _read_config_file(Path(path))
+    payload = dict(data)
+    baseline_section = _pop_dict_section(payload, "baseline")
+    paths_section = _pop_dict_section(payload, "paths")
+    policy_section = _pop_dict_section(payload, "policy_inputs")
+
+    _set_if_missing(payload, "bundle_dir", baseline_section)
+    _set_if_missing(payload, "promoted_dir", baseline_section)
+    _set_if_missing(payload, "artifacts_root", baseline_section)
+    _set_if_missing(payload, "lifecycle", baseline_section)
+
+    _set_if_missing(payload, "bundle_dir", paths_section)
+    _set_if_missing(payload, "promoted_dir", paths_section)
+    _set_if_missing(payload, "output_dir", paths_section)
+    _set_if_missing(payload, "artifacts_root", paths_section)
+    _set_if_missing(payload, "lifecycle", paths_section)
+
+    _set_if_missing(payload, "base_promotion_policy_config", policy_section, "promotion_policy_config")
+    _set_if_missing(
+        payload,
+        "base_strategy_portfolio_policy_config",
+        policy_section,
+        "strategy_portfolio_policy_config",
+    )
+
+    raw_variants = payload.get("variants", [])
+    payload["variants"] = [
+        CanonicalBundleExperimentVariantConfig(**item)
+        for item in raw_variants
+    ]
+    return CanonicalBundleExperimentWorkflowConfig(**payload)
 
 
 def load_multi_strategy_portfolio_config(path: str | Path) -> MultiStrategyPortfolioConfig:

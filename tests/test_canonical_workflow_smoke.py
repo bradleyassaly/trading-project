@@ -12,6 +12,9 @@ from trading_platform.cli.commands.pipeline_run import cmd_pipeline_run_daily
 from trading_platform.cli.commands.refresh_research_inputs import cmd_refresh_research_inputs
 from trading_platform.cli.commands.research_promote import cmd_research_promote
 from trading_platform.cli.commands.strategy_portfolio_build import cmd_strategy_portfolio_build
+from trading_platform.cli.commands.strategy_portfolio_experiment_bundle import (
+    cmd_strategy_portfolio_experiment_bundle,
+)
 from trading_platform.cli.commands.paper_run_multi_strategy import cmd_paper_run_multi_strategy
 from trading_platform.config.loader import load_pipeline_run_config
 from trading_platform.live.preview import LivePreviewResult
@@ -90,6 +93,41 @@ stages:
   paper_trading: true
   live_dry_run: true
   reporting: true
+""".strip(),
+        encoding="utf-8",
+    )
+    return config_path
+
+
+def _write_bundle_experiment_config(
+    *,
+    bundle: dict[str, Path],
+    output_dir: Path,
+) -> Path:
+    config_path = output_dir / "canonical_bundle_experiment.yaml"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(
+        f"""
+baseline:
+  bundle_dir: {bundle['run_bundle_path'].parent.as_posix()}
+  promoted_dir: {bundle['promoted_dir'].as_posix()}
+  artifacts_root: {(bundle['alpha_output_dir'].parent).as_posix()}
+paths:
+  output_dir: {output_dir.as_posix()}
+baseline_variant_name: baseline
+variants:
+  - name: baseline
+  - name: conditional_variants
+    promotion_policy_overrides:
+      enable_conditional_variants: true
+      min_condition_sample_size: 0
+      min_condition_improvement: 0.0
+      max_strategies_total: 3
+      max_strategies_per_group: 3
+  - name: metric_weighted
+    strategy_portfolio_policy_overrides:
+      weighting_mode: metric_weighted
+      max_strategies: 3
 """.strip(),
         encoding="utf-8",
     )
@@ -688,3 +726,55 @@ def test_canonical_daily_pipeline_config_reuses_exported_bundle_across_runs(
     assert latest_payload["iteration"] == 2
     assert Path(str(latest_payload["bundle_path"])) == multi_strategy_config_path
     assert len(history_df.index) == 2
+
+
+def test_canonical_bundle_experiment_harness_reuses_exported_bundle(
+    tmp_path: Path,
+) -> None:
+    bundle = _build_canonical_exported_bundle(tmp_path)
+    experiment_output_dir = tmp_path / "artifacts" / "bundle_experiment"
+    config_path = _write_bundle_experiment_config(
+        bundle=bundle,
+        output_dir=experiment_output_dir,
+    )
+
+    cmd_strategy_portfolio_experiment_bundle(
+        SimpleNamespace(
+            config=str(config_path),
+        )
+    )
+
+    summary_path = experiment_output_dir / "experiment_summary.json"
+    results_json_path = experiment_output_dir / "experiment_variant_results.json"
+    results_csv_path = experiment_output_dir / "experiment_variant_results.csv"
+    assert summary_path.exists()
+    assert results_json_path.exists()
+    assert results_csv_path.exists()
+
+    summary_payload = json.loads(summary_path.read_text(encoding="utf-8"))
+    result_rows = summary_payload["variants"]
+    assert summary_payload["baseline_variant_name"] == "baseline"
+    assert {row["variant_name"] for row in result_rows} == {
+        "baseline",
+        "conditional_variants",
+        "metric_weighted",
+    }
+
+    baseline_row = next(row for row in result_rows if row["variant_name"] == "baseline")
+    conditional_row = next(row for row in result_rows if row["variant_name"] == "conditional_variants")
+    metric_row = next(row for row in result_rows if row["variant_name"] == "metric_weighted")
+
+    assert baseline_row["is_baseline"] is True
+    assert conditional_row["promotion_rerun"] is True
+    assert metric_row["portfolio_weighting_mode"] == "metric_weighted"
+    assert metric_row["paper_ready"] is True
+    assert metric_row["live_ready"] is True
+
+    for row in result_rows:
+        assert Path(row["strategy_portfolio_json_path"]).exists()
+        assert Path(row["multi_strategy_config_path"]).exists()
+        assert Path(row["pipeline_config_path"]).exists()
+        assert Path(row["daily_pipeline_config_path"]).exists()
+        assert Path(row["run_bundle_path"]).exists()
+        assert Path(row["effective_strategy_portfolio_policy_path"]).exists()
+        assert Path(row["effective_promotion_policy_path"]).exists()

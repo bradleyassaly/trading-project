@@ -86,6 +86,9 @@ from trading_platform.cli.commands.run_sweep import cmd_run_sweep
 from trading_platform.cli.commands.run_walk_forward import cmd_run_walk_forward
 from trading_platform.cli.commands.sweep import cmd_sweep
 from trading_platform.cli.commands.strategy_portfolio_build import cmd_strategy_portfolio_build
+from trading_platform.cli.commands.strategy_portfolio_experiment_bundle import (
+    cmd_strategy_portfolio_experiment_bundle,
+)
 from trading_platform.cli.commands.strategy_portfolio_export_run_config import cmd_strategy_portfolio_export_run_config
 from trading_platform.cli.commands.strategy_portfolio_show import cmd_strategy_portfolio_show
 from trading_platform.cli.commands.strategy_monitor_build import cmd_strategy_monitor_build
@@ -1221,6 +1224,17 @@ def build_parser() -> argparse.ArgumentParser:
     strategy_portfolio_export.add_argument("--portfolio", type=str, required=True, help="Path to strategy_portfolio.json or its parent directory.")
     strategy_portfolio_export.add_argument("--output-dir", type=str, required=True, help="Directory where runnable config artifacts will be written.")
     strategy_portfolio_export.set_defaults(func=cmd_strategy_portfolio_export_run_config)
+    strategy_portfolio_experiment = strategy_portfolio_subparsers.add_parser(
+        "experiment-bundle",
+        help="Run a small canonical-bundle experiment matrix by varying promotion and portfolio policy inputs",
+    )
+    strategy_portfolio_experiment.add_argument(
+        "--config",
+        type=str,
+        required=True,
+        help="Path to the canonical bundle experiment JSON/YAML config.",
+    )
+    strategy_portfolio_experiment.set_defaults(func=cmd_strategy_portfolio_experiment_bundle)
 
     strategy_monitor_parser = subparsers.add_parser("strategy-monitor", help="Build monitoring snapshots and kill-switch recommendations for strategy portfolios")
     strategy_monitor_subparsers = strategy_monitor_parser.add_subparsers(dest="strategy_monitor_command", required=True)

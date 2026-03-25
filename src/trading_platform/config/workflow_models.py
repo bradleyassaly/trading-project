@@ -279,3 +279,45 @@ class ResearchInputRefreshWorkflowConfig:
 
     def to_cli_defaults(self) -> dict[str, Any]:
         return asdict(self)
+
+
+@dataclass(frozen=True)
+class CanonicalBundleExperimentVariantConfig:
+    name: str
+    promotion_policy_overrides: dict[str, Any] = field(default_factory=dict)
+    strategy_portfolio_policy_overrides: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not str(self.name or "").strip():
+            raise ValueError("variant name is required")
+
+
+@dataclass(frozen=True)
+class CanonicalBundleExperimentWorkflowConfig:
+    bundle_dir: str
+    promoted_dir: str
+    output_dir: str
+    artifacts_root: str | None = None
+    lifecycle: str | None = None
+    base_promotion_policy_config: str | None = None
+    base_strategy_portfolio_policy_config: str | None = None
+    baseline_variant_name: str = "baseline"
+    variants: list[CanonicalBundleExperimentVariantConfig] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        if not str(self.bundle_dir or "").strip():
+            raise ValueError("bundle_dir is required")
+        if not str(self.promoted_dir or "").strip():
+            raise ValueError("promoted_dir is required")
+        if not str(self.output_dir or "").strip():
+            raise ValueError("output_dir is required")
+        variant_names = [variant.name for variant in self.variants]
+        if not variant_names:
+            raise ValueError("at least one experiment variant is required")
+        if len(set(variant_names)) != len(variant_names):
+            raise ValueError("experiment variant names must be unique")
+        if self.baseline_variant_name not in set(variant_names):
+            raise ValueError("baseline_variant_name must match one of the configured variants")
+
+    def to_cli_defaults(self) -> dict[str, Any]:
+        return asdict(self)

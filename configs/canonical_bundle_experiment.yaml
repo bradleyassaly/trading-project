@@ -1,0 +1,23 @@
+baseline:
+  bundle_dir: artifacts/strategy_portfolio_bundle
+  promoted_dir: artifacts/promoted_strategies
+  artifacts_root: artifacts/alpha_research
+
+paths:
+  output_dir: artifacts/portfolio_experiments/canonical_bundle
+
+baseline_variant_name: baseline
+
+variants:
+  - name: baseline
+  - name: conditional_variants
+    promotion_policy_overrides:
+      enable_conditional_variants: true
+      min_condition_sample_size: 0
+      min_condition_improvement: 0.0
+      max_strategies_total: 3
+      max_strategies_per_group: 3
+  - name: metric_weighted
+    strategy_portfolio_policy_overrides:
+      weighting_mode: metric_weighted
+      max_strategies: 3

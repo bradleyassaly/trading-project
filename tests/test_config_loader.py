@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 from trading_platform.config.loader import (
+    load_canonical_bundle_experiment_workflow_config,
     load_live_dry_run_workflow_config,
     load_broker_config,
     load_dashboard_config,
@@ -158,6 +159,48 @@ failure_handling:
     assert config.reference_data_root == "artifacts/reference_data/v1"
     assert config.benchmark == "SPY"
     assert config.failure_policy == "fail"
+
+
+def test_load_canonical_bundle_experiment_workflow_config(tmp_path) -> None:
+    path = tmp_path / "canonical_bundle_experiment.yaml"
+    path.write_text(
+        """
+baseline:
+  bundle_dir: artifacts/strategy_portfolio_bundle
+  promoted_dir: artifacts/promoted_strategies
+  artifacts_root: artifacts/alpha_research
+paths:
+  output_dir: artifacts/portfolio_experiments/canonical_bundle
+policy_inputs:
+  strategy_portfolio_policy_config: configs/strategy_portfolio.yaml
+baseline_variant_name: baseline
+variants:
+  - name: baseline
+  - name: metric_weighted
+    strategy_portfolio_policy_overrides:
+      weighting_mode: metric_weighted
+      max_strategies: 3
+  - name: conditional_variants
+    promotion_policy_overrides:
+      enable_conditional_variants: true
+      min_condition_sample_size: 0
+""".strip(),
+        encoding="utf-8",
+    )
+
+    config = load_canonical_bundle_experiment_workflow_config(path)
+
+    assert config.bundle_dir == "artifacts/strategy_portfolio_bundle"
+    assert config.promoted_dir == "artifacts/promoted_strategies"
+    assert config.artifacts_root == "artifacts/alpha_research"
+    assert config.output_dir == "artifacts/portfolio_experiments/canonical_bundle"
+    assert config.base_strategy_portfolio_policy_config == "configs/strategy_portfolio.yaml"
+    assert config.baseline_variant_name == "baseline"
+    assert [variant.name for variant in config.variants] == [
+        "baseline",
+        "metric_weighted",
+        "conditional_variants",
+    ]
 
 
 def test_load_walkforward_workflow_config_from_yaml(tmp_path) -> None:

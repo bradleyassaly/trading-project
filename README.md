@@ -30,6 +30,7 @@ Those presets still represent the clearest single-strategy Nasdaq-100 momentum e
 - config-driven research-input refresh plus standard `data/features` + `data/metadata` prep
 - alpha research with explicit context slicing and conditional promotion support
 - promoted-strategy to strategy-portfolio handoff
+- canonical-bundle experiment harness for small promotion-policy and portfolio-policy variant comparisons
 - config-first paper runs and live dry-runs
 - scheduled paper trading artifacts
 - broker-safe live dry-run artifacts
@@ -222,6 +223,25 @@ The canonical `research promote` path now refreshes the research registry and pr
 trading-cli strategy-portfolio build --promoted-dir artifacts/promoted_strategies --output-dir artifacts/strategy_portfolio
 ```
 
+Optional first-pass policy experiments can now start from the same hardened exported bundle instead of rebuilding the full upstream path:
+
+```bash
+trading-cli strategy-portfolio experiment-bundle --config configs/canonical_bundle_experiment.yaml
+```
+
+This harness keeps the canonical promoted/exported bundle fixed and varies only small policy-layer inputs such as:
+
+- promotion policy conditional-variant thresholds
+- strategy-portfolio weighting mode
+- strategy-portfolio selection limits
+
+It writes variant-isolated outputs plus compact comparison artifacts such as:
+
+- `experiment_summary.json`
+- `experiment_variant_results.csv`
+- `experiment_variant_results.json`
+- per-variant `strategy_portfolio/`, `run_bundle/`, and `daily_pipeline_config.json`
+
 ### 5. Run paper trading
 
 ```bash
@@ -235,6 +255,12 @@ trading-cli live dry-run --config configs/workflows/live_xsec_nasdaq100.yaml
 ```
 
 Secondary research commands such as `research run`, `research walkforward`, and `research memo` still exist for direct strategy research and validation, but they are no longer the primary end-to-end path documented here.
+
+Canonical automated coverage now exists at three levels:
+
+- one-shot config-driven supported-path smoke coverage
+- repeated scheduled-style reuse coverage for the exported multi-strategy bundle
+- repeated daily-config reuse coverage plus canonical bundle experiment coverage for small policy variant comparisons
 
 ## Main CLI Layout
 

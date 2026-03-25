@@ -550,6 +550,21 @@ def test_grouped_strategy_portfolio_export_run_config_command_parses() -> None:
     assert args.output_dir == "artifacts/strategy_portfolio_run"
 
 
+def test_grouped_strategy_portfolio_experiment_bundle_command_parses() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "strategy-portfolio",
+            "experiment-bundle",
+            "--config",
+            "configs/canonical_bundle_experiment.yaml",
+        ]
+    )
+
+    assert args.strategy_portfolio_command == "experiment-bundle"
+    assert args.config == "configs/canonical_bundle_experiment.yaml"
+
+
 def test_grouped_strategy_monitor_build_command_parses() -> None:
     parser = build_parser()
     args = parser.parse_args(
