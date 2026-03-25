@@ -1949,7 +1949,10 @@ Canonical supported-path smoke coverage now lives in:
 
 - `tests/test_canonical_workflow_smoke.py`
 
-That test exercises the supported sequence from config-driven research-input refresh through alpha research, promotion, strategy-portfolio export, and shared paper/live multi-strategy config readiness.
+That test now covers both:
+
+- one-shot supported-path validation from config-driven research-input refresh through alpha research, promotion, strategy-portfolio export, and shared paper/live multi-strategy config readiness
+- repeated scheduled-style reuse of the same exported promoted multi-strategy bundle for paper and live dry-run command readiness
 
 Run the full suite:
 

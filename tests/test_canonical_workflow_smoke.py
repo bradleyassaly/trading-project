@@ -11,6 +11,7 @@ from trading_platform.cli.commands.live_dry_run_multi_strategy import cmd_live_d
 from trading_platform.cli.commands.refresh_research_inputs import cmd_refresh_research_inputs
 from trading_platform.cli.commands.research_promote import cmd_research_promote
 from trading_platform.cli.commands.strategy_portfolio_build import cmd_strategy_portfolio_build
+from trading_platform.cli.commands.paper_run_multi_strategy import cmd_paper_run_multi_strategy
 from trading_platform.live.preview import LivePreviewResult
 from trading_platform.paper.models import PaperPortfolioState, PaperTradingRunResult
 from trading_platform.portfolio.strategy_portfolio import export_strategy_portfolio_run_config, load_strategy_portfolio
@@ -64,10 +65,7 @@ def _allocation_result():
     )
 
 
-def test_canonical_config_driven_workflow_smoke(
-    monkeypatch,
-    tmp_path: Path,
-) -> None:
+def _build_canonical_exported_bundle(tmp_path: Path) -> dict[str, Path]:
     data_root = tmp_path / "data"
     normalized_dir = data_root / "normalized"
     feature_dir = data_root / "features"
@@ -195,10 +193,39 @@ failure_policy: fail
         strategy_portfolio_path=strategy_portfolio_dir,
         output_dir=export_dir,
     )
-    multi_strategy_config_path = Path(export_paths["multi_strategy_config_path"])
-    pipeline_config_path = Path(export_paths["pipeline_config_path"])
-    run_bundle_path = Path(export_paths["run_bundle_path"])
+    return {
+        "feature_dir": feature_dir,
+        "metadata_dir": metadata_dir,
+        "alpha_output_dir": alpha_output_dir,
+        "promoted_dir": promoted_dir,
+        "strategy_portfolio_dir": strategy_portfolio_dir,
+        "multi_strategy_config_path": Path(export_paths["multi_strategy_config_path"]),
+        "pipeline_config_path": Path(export_paths["pipeline_config_path"]),
+        "run_bundle_path": Path(export_paths["run_bundle_path"]),
+    }
 
+
+def test_canonical_config_driven_workflow_smoke(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    bundle = _build_canonical_exported_bundle(tmp_path)
+    feature_dir = bundle["feature_dir"]
+    metadata_dir = bundle["metadata_dir"]
+    alpha_output_dir = bundle["alpha_output_dir"]
+    promoted_dir = bundle["promoted_dir"]
+    strategy_portfolio_dir = bundle["strategy_portfolio_dir"]
+    multi_strategy_config_path = bundle["multi_strategy_config_path"]
+    pipeline_config_path = bundle["pipeline_config_path"]
+    run_bundle_path = bundle["run_bundle_path"]
+
+    assert (feature_dir / "AAPL.parquet").exists()
+    assert (metadata_dir / "sub_universe_snapshot.csv").exists()
+    assert (metadata_dir / "universe_enrichment.csv").exists()
+    assert (metadata_dir / "research_input_refresh_summary.json").exists()
+    assert (alpha_output_dir / "research_run.json").exists()
+    assert (promoted_dir / "promoted_strategies.json").exists()
+    assert (strategy_portfolio_dir / "strategy_portfolio.json").exists()
     assert multi_strategy_config_path.exists()
     assert pipeline_config_path.exists()
     assert run_bundle_path.exists()
@@ -253,8 +280,6 @@ failure_policy: fail
         "trading_platform.cli.commands.paper_run_multi_strategy.build_paper_experiment_record",
         lambda output_dir: {},
     )
-
-    from trading_platform.cli.commands.paper_run_multi_strategy import cmd_paper_run_multi_strategy
 
     paper_output_dir = tmp_path / "artifacts" / "paper_multi"
     cmd_paper_run_multi_strategy(
@@ -328,3 +353,205 @@ failure_policy: fail
 
     assert live_checks["sleeves"]
     assert (live_output_dir / "live_dry_run_summary.json").exists()
+
+
+def test_canonical_paper_multi_strategy_bundle_reuse_for_scheduled_style_runs(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    bundle = _build_canonical_exported_bundle(tmp_path)
+    multi_strategy_config_path = bundle["multi_strategy_config_path"]
+    output_dir = tmp_path / "artifacts" / "paper_multi_scheduled"
+    state_path = tmp_path / "artifacts" / "paper_multi_scheduled_state.json"
+    call_counts = {"allocate": 0, "paper": 0, "persist": 0}
+
+    def fake_allocate(portfolio_config):
+        call_counts["allocate"] += 1
+        assert portfolio_config.sleeves
+        assert all(Path(str(sleeve.preset_path)).exists() for sleeve in portfolio_config.sleeves)
+        return _allocation_result()
+
+    def fake_run(**kwargs):
+        call_counts["paper"] += 1
+        return PaperTradingRunResult(
+            as_of=f"2025-01-0{call_counts['paper'] + 3}",
+            state=PaperPortfolioState(cash=100_000.0),
+            latest_prices={"AAPL": 150.0, "MSFT": 320.0, "NVDA": 800.0},
+            latest_scores={},
+            latest_target_weights={"AAPL": 0.5, "MSFT": 0.3, "NVDA": 0.2},
+            scheduled_target_weights={"AAPL": 0.5, "MSFT": 0.3, "NVDA": 0.2},
+            orders=[],
+            fills=[],
+            diagnostics={},
+        )
+
+    def fake_write_paper_artifacts(*, result, output_dir):
+        summary_path = Path(output_dir) / "paper_summary.json"
+        summary_path.parent.mkdir(parents=True, exist_ok=True)
+        summary_path.write_text(json.dumps({"as_of": result.as_of}, indent=2), encoding="utf-8")
+        return {"summary_path": summary_path}
+
+    def fake_persist(**kwargs):
+        call_counts["persist"] += 1
+        latest_path = Path(kwargs["output_dir"]) / "paper_run_summary_latest.json"
+        history_path = Path(kwargs["output_dir"]) / "paper_run_summary_history.csv"
+        latest_path.write_text(
+            json.dumps({"iteration": call_counts["persist"], "as_of": kwargs["result"].as_of}, indent=2),
+            encoding="utf-8",
+        )
+        history_df = (
+            pd.read_csv(history_path)
+            if history_path.exists()
+            else pd.DataFrame(columns=["iteration", "as_of"])
+        )
+        history_df = pd.concat(
+            [
+                history_df,
+                pd.DataFrame([{"iteration": call_counts["persist"], "as_of": kwargs["result"].as_of}]),
+            ],
+            ignore_index=True,
+        )
+        history_df.to_csv(history_path, index=False)
+        return (
+            {
+                "paper_run_summary_latest_json_path": latest_path,
+                "paper_run_summary_history_csv_path": history_path,
+            },
+            [],
+            {},
+        )
+
+    monkeypatch.setattr(
+        "trading_platform.cli.commands.paper_run_multi_strategy.allocate_multi_strategy_portfolio",
+        fake_allocate,
+    )
+    monkeypatch.setattr(
+        "trading_platform.cli.commands.paper_run_multi_strategy.write_multi_strategy_artifacts",
+        lambda result, output_dir: {"allocation_summary_json_path": Path(output_dir) / "allocation_summary.json"},
+    )
+    monkeypatch.setattr(
+        "trading_platform.cli.commands.paper_run_multi_strategy.run_paper_trading_cycle_for_targets",
+        fake_run,
+    )
+    monkeypatch.setattr(
+        "trading_platform.cli.commands.paper_run_multi_strategy.write_paper_trading_artifacts",
+        fake_write_paper_artifacts,
+    )
+    monkeypatch.setattr(
+        "trading_platform.cli.commands.paper_run_multi_strategy.persist_paper_run_outputs",
+        fake_persist,
+    )
+    monkeypatch.setattr(
+        "trading_platform.cli.commands.paper_run_multi_strategy.register_experiment",
+        lambda record, tracker_dir: {"experiment_registry_path": tracker_dir / "registry.csv"},
+    )
+    monkeypatch.setattr(
+        "trading_platform.cli.commands.paper_run_multi_strategy.build_paper_experiment_record",
+        lambda output_dir: {},
+    )
+
+    args = SimpleNamespace(
+        config=str(multi_strategy_config_path),
+        execution_config=None,
+        state_path=str(state_path),
+        output_dir=str(output_dir),
+    )
+    cmd_paper_run_multi_strategy(args)
+    cmd_paper_run_multi_strategy(args)
+
+    assert call_counts == {"allocate": 2, "paper": 2, "persist": 2}
+    latest_payload = json.loads((output_dir / "paper_run_summary_latest.json").read_text(encoding="utf-8"))
+    history_df = pd.read_csv(output_dir / "paper_run_summary_history.csv")
+    assert latest_payload["iteration"] == 2
+    assert len(history_df.index) == 2
+
+
+def test_canonical_live_multi_strategy_bundle_reuse_for_scheduled_style_runs(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    bundle = _build_canonical_exported_bundle(tmp_path)
+    multi_strategy_config_path = bundle["multi_strategy_config_path"]
+    output_dir = tmp_path / "artifacts" / "live_multi_scheduled"
+    call_counts = {"allocate": 0, "live": 0}
+
+    def fake_allocate(portfolio_config):
+        call_counts["allocate"] += 1
+        assert portfolio_config.sleeves
+        assert all(Path(str(sleeve.preset_path)).exists() for sleeve in portfolio_config.sleeves)
+        return _allocation_result()
+
+    def fake_preview(**kwargs):
+        call_counts["live"] += 1
+        return LivePreviewResult(
+            run_id=f"multi_strategy|2025-01-0{call_counts['live'] + 3}",
+            as_of=f"2025-01-0{call_counts['live'] + 3}",
+            config=kwargs["config"],
+            account=BrokerAccount(account_id="acct-1", cash=100_000.0, equity=100_000.0, buying_power=100_000.0),
+            positions={},
+            open_orders=[],
+            latest_prices=kwargs["latest_prices"],
+            target_weights=kwargs["target_weights"],
+            target_diagnostics=kwargs["target_diagnostics"],
+            reconciliation=SimpleNamespace(orders=[], diagnostics={"investable_equity": 90_000.0}),
+            adjusted_orders=[],
+            order_adjustment_diagnostics={},
+            execution_result=None,
+            reconciliation_rows=[],
+            health_checks=[],
+        )
+
+    def fake_write_live_artifacts(result):
+        summary_path = Path(result.config.output_dir) / "live_dry_run_summary.json"
+        history_path = Path(result.config.output_dir) / "live_dry_run_history.csv"
+        summary_path.parent.mkdir(parents=True, exist_ok=True)
+        summary_path.write_text(
+            json.dumps({"run_id": result.run_id, "as_of": result.as_of, "adjusted_order_count": 0}, indent=2),
+            encoding="utf-8",
+        )
+        history_df = (
+            pd.read_csv(history_path)
+            if history_path.exists()
+            else pd.DataFrame(columns=["run_id", "as_of"])
+        )
+        history_df = pd.concat(
+            [
+                history_df,
+                pd.DataFrame([{"run_id": result.run_id, "as_of": result.as_of}]),
+            ],
+            ignore_index=True,
+        )
+        history_df.to_csv(history_path, index=False)
+        return {"summary_json_path": summary_path, "history_csv_path": history_path}
+
+    monkeypatch.setattr(
+        "trading_platform.cli.commands.live_dry_run_multi_strategy.allocate_multi_strategy_portfolio",
+        fake_allocate,
+    )
+    monkeypatch.setattr(
+        "trading_platform.cli.commands.live_dry_run_multi_strategy.write_multi_strategy_artifacts",
+        lambda result, output_dir: {"allocation_summary_json_path": Path(output_dir) / "allocation_summary.json"},
+    )
+    monkeypatch.setattr(
+        "trading_platform.cli.commands.live_dry_run_multi_strategy.run_live_dry_run_preview_for_targets",
+        fake_preview,
+    )
+    monkeypatch.setattr(
+        "trading_platform.cli.commands.live_dry_run_multi_strategy.write_live_dry_run_artifacts",
+        fake_write_live_artifacts,
+    )
+
+    args = SimpleNamespace(
+        config=str(multi_strategy_config_path),
+        execution_config=None,
+        broker="mock",
+        output_dir=str(output_dir),
+    )
+    cmd_live_dry_run_multi_strategy(args)
+    cmd_live_dry_run_multi_strategy(args)
+
+    assert call_counts == {"allocate": 2, "live": 2}
+    latest_payload = json.loads((output_dir / "live_dry_run_summary.json").read_text(encoding="utf-8"))
+    history_df = pd.read_csv(output_dir / "live_dry_run_history.csv")
+    assert latest_payload["run_id"].endswith("5")
+    assert len(history_df.index) == 2
