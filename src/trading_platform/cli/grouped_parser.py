@@ -30,6 +30,7 @@ from trading_platform.cli.commands.experiments_latest_model import cmd_experimen
 from trading_platform.cli.commands.experiments_list import cmd_experiments_list
 from trading_platform.cli.commands.export_universes import cmd_export_universes
 from trading_platform.cli.commands.features import cmd_features
+from trading_platform.cli.commands.refresh_research_inputs import cmd_refresh_research_inputs
 from trading_platform.cli.commands.ingest import cmd_ingest
 from trading_platform.cli.commands.list_strategies import cmd_list_strategies
 from trading_platform.cli.commands.list_universes import cmd_list_universes
@@ -572,6 +573,24 @@ def build_parser() -> argparse.ArgumentParser:
     add_shared_symbol_args(data_features)
     add_feature_arguments(data_features)
     data_features.set_defaults(func=cmd_features)
+    data_refresh_inputs = data_subparsers.add_parser(
+        "refresh-research-inputs",
+        help="Refresh research-ready features plus metadata sidecars in one deterministic step.",
+    )
+    add_shared_symbol_args(data_refresh_inputs)
+    add_feature_arguments(data_refresh_inputs)
+    data_refresh_inputs.add_argument("--feature-dir", type=str, default="data/features", help="Directory where research-ready feature parquet files are written.")
+    data_refresh_inputs.add_argument("--metadata-dir", type=str, default="data/metadata", help="Directory where research metadata sidecars are written.")
+    data_refresh_inputs.add_argument("--normalized-dir", type=str, default="data/normalized", help="Directory containing normalized OHLCV parquet inputs.")
+    data_refresh_inputs.add_argument("--sub-universe-id", type=str, default=None, help="Optional sub-universe identifier to persist in refreshed metadata sidecars.")
+    data_refresh_inputs.add_argument("--reference-data-root", type=str, default=None, help="Optional root directory for versioned reference-data artifacts.")
+    data_refresh_inputs.add_argument("--universe-membership-path", type=str, default=None, help="Optional point-in-time universe membership history dataset.")
+    data_refresh_inputs.add_argument("--taxonomy-snapshot-path", type=str, default=None, help="Optional taxonomy snapshot dataset used for enrichment.")
+    data_refresh_inputs.add_argument("--benchmark-mapping-path", type=str, default=None, help="Optional benchmark mapping snapshot dataset used for enrichment.")
+    data_refresh_inputs.add_argument("--market-regime-path", type=str, default=None, help="Optional market-regime artifact used to persist regime context in enrichment rows.")
+    data_refresh_inputs.add_argument("--group-map-path", type=str, default=None, help="Optional legacy group-map CSV used when taxonomy snapshots are absent.")
+    data_refresh_inputs.add_argument("--benchmark", type=str, default=None, help="Optional benchmark id stored with enriched metadata context.")
+    data_refresh_inputs.set_defaults(func=cmd_refresh_research_inputs)
     data_universes = data_subparsers.add_parser("universes", help="Inspect or export named universes")
     data_universe_subparsers = data_universes.add_subparsers(dest="universe_command", required=True)
     data_universe_list = data_universe_subparsers.add_parser("list", help="Show available named universes")

@@ -13,10 +13,15 @@ from trading_platform.settings import FEATURES_DIR, NORMALIZED_DATA_DIR
 def build_features(
     symbol: str,
     feature_groups: list[str] | None = None,
+    *,
+    normalized_data_dir=None,
+    features_dir=None,
 ) -> str:
     groups = feature_groups or DEFAULT_FEATURE_GROUPS
+    normalized_root = normalized_data_dir or NORMALIZED_DATA_DIR
+    feature_root = features_dir or FEATURES_DIR
 
-    normalized_path = NORMALIZED_DATA_DIR / f"{symbol}.parquet"
+    normalized_path = normalized_root / f"{symbol}.parquet"
     if not normalized_path.exists():
         raise FileNotFoundError(
             f"Normalized data file not found for {symbol}: {normalized_path}. "
@@ -40,6 +45,7 @@ def build_features(
             )
         df = FEATURE_BUILDERS[group](df)
 
-    out_path = FEATURES_DIR / f"{symbol}.parquet"
+    feature_root.mkdir(parents=True, exist_ok=True)
+    out_path = feature_root / f"{symbol}.parquet"
     df.write_parquet(out_path)
     return str(out_path)

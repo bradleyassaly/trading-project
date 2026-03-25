@@ -176,6 +176,28 @@ def test_grouped_data_features_command_parses_for_universe() -> None:
     assert args.universe == "nasdaq100"
 
 
+def test_grouped_data_refresh_research_inputs_command_parses() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "data",
+            "refresh-research-inputs",
+            "--universe",
+            "nasdaq100",
+            "--sub-universe-id",
+            "liquid_trend_candidates",
+            "--reference-data-root",
+            "artifacts/reference_data/v1",
+        ]
+    )
+
+    assert args.command_family == "data"
+    assert args.data_command == "refresh-research-inputs"
+    assert args.universe == "nasdaq100"
+    assert args.sub_universe_id == "liquid_trend_candidates"
+    assert args.reference_data_root == "artifacts/reference_data/v1"
+
+
 def test_legacy_features_build_rewrites_to_data_features() -> None:
     argv, note = rewrite_legacy_cli_args(["features", "build", "--universe", "nasdaq100"])
 

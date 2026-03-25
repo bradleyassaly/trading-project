@@ -1483,6 +1483,33 @@ Standard metadata sidecar workflow:
 - alpha research keeps the same discovery rule as before:
   it looks for a sibling `metadata/` directory next to the feature directory, which means the default `data/features` layout naturally resolves to `data/metadata`
 
+Dedicated research-input refresh command:
+
+- use `trading-cli data refresh-research-inputs --symbols ...` or `--universe ...` to rebuild research-ready feature files and metadata sidecars together in one deterministic step
+- default locations:
+  - features: `data/features/`
+  - metadata: `data/metadata/`
+  - normalized inputs: `data/normalized/`
+- the command reuses the standard feature builder plus the maintained universe-provenance/enrichment writer
+- it writes:
+  - refreshed `data/features/<SYMBOL>.parquet`
+  - refreshed `data/metadata/sub_universe_snapshot.csv`
+  - refreshed `data/metadata/universe_enrichment.csv`
+  - refreshed `data/metadata/research_metadata_sidecar_summary.json`
+  - `data/metadata/research_input_refresh_summary.json`
+  - `data/metadata/research_input_bundle_manifest.json`
+- optional failure rows are written to `data/metadata/research_input_refresh_failures.csv` when some symbols fail feature generation but others succeed
+- this command is now the primary intended way to prepare research inputs; paper/live still refresh metadata opportunistically but are no longer the main intended publisher path
+
+Example:
+
+```bash
+trading-cli data refresh-research-inputs \
+  --universe nasdaq100 \
+  --sub-universe-id liquid_trend_candidates \
+  --reference-data-root artifacts/reference_data/v1
+```
+
 Generation and fallback rules:
 
 - unconditional research still runs exactly as before
