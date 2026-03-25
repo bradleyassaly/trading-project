@@ -287,6 +287,8 @@ class AlphaResearchWorkflowConfig:
     universe: str | None = None
     feature_dir: str = "data/features"
     signal_family: str = "momentum"
+    candidate_grid_preset: str = "standard"
+    max_variants_per_family: int | None = None
     lookbacks: list[int] = field(default_factory=lambda: [5, 10, 20, 60])
     horizons: list[int] = field(default_factory=lambda: [1, 5, 20])
     min_rows: int = 126
@@ -333,6 +335,10 @@ class AlphaResearchWorkflowConfig:
         selected = sum(bool(value) for value in (self.symbols, self.universe))
         if selected != 1:
             raise ValueError("exactly one of symbols or universe must be provided")
+        if self.candidate_grid_preset not in {"standard", "broad_v1"}:
+            raise ValueError("candidate_grid_preset must be one of: standard, broad_v1")
+        if self.max_variants_per_family is not None and self.max_variants_per_family <= 0:
+            raise ValueError("max_variants_per_family must be > 0 when provided")
 
     def to_cli_defaults(self) -> dict[str, Any]:
         return asdict(self)

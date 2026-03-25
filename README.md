@@ -215,6 +215,24 @@ Key outputs include:
 - keep direct flags for ad hoc runs
 - explicit CLI flags override config values when both are provided
 
+Alpha research also supports structured candidate-depth expansion inside a single family:
+
+- `signals.candidate_grid_preset: standard | broad_v1`
+- `signals.max_variants_per_family: <int>`
+
+`broad_v1` keeps the family fixed and emits a finite set of auditable variants with stable IDs such as:
+
+- `cross_sectional_momentum_breadth_confirmed_lb20_hz5`
+- `breakout_continuation_tight_breakout_lb10_hz1`
+- `liquidity_flow_tilt_dollar_flow_emphasis_lb20_hz5`
+
+The resulting artifacts preserve:
+
+- `signal_family`
+- `signal_variant`
+- `candidate_id`
+- `candidate_name`
+
 ### 3. Promote condition-aware strategies
 
 ```bash
@@ -1113,6 +1131,12 @@ These stay additive and experimental:
 - no FX
 - no crypto
 - no ML meta-model
+
+The current focus is candidate depth rather than more infrastructure:
+
+- major families can now emit multiple parameterized variants through the alpha config
+- `candidate_grid_preset: broad_v1` expands the candidate pool materially without turning into unrestricted search
+- candidate identity remains inspectable in research, promotion, portfolio, and experiment artifacts via `signal_family`, `signal_variant`, `candidate_id`, and `candidate_name`
 
 Run a lightweight family comparison with:
 

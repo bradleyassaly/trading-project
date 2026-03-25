@@ -60,7 +60,11 @@ from trading_platform.research.alpha_lab.promotion import (
     DEFAULT_PROMOTION_THRESHOLDS,
     apply_promotion_rules,
 )
-from trading_platform.research.alpha_lab.signals import build_signal
+from trading_platform.research.alpha_lab.signals import (
+    build_candidate_grid,
+    build_candidate_name,
+    build_signal,
+)
 
 
 def _load_symbol_feature_data(feature_dir: Path, symbol: str) -> pd.DataFrame:
@@ -183,8 +187,18 @@ def _add_equity_context_features(
     return enriched
 
 
-def _candidate_key(signal_family: str, lookback: int, horizon: int) -> tuple[str, int, int]:
-    return signal_family, lookback, horizon
+def _candidate_key(
+    signal_family: str,
+    lookback: int,
+    horizon: int,
+    signal_variant: str | None = None,
+) -> str:
+    return candidate_id(
+        signal_family,
+        int(lookback),
+        int(horizon),
+        signal_variant,
+    )
 
 
 def _signal_family_requires_equity_context(signal_family: str) -> bool:
@@ -223,14 +237,18 @@ def _safe_series_corr(left: pd.Series, right: pd.Series) -> float:
 def _compute_redundancy_diagnostics(
     leaderboard_df: pd.DataFrame,
     *,
-    daily_metrics_by_candidate: dict[tuple[str, int, int], pd.DataFrame],
-    score_panel_by_candidate: dict[tuple[str, int, int], pd.DataFrame],
+    daily_metrics_by_candidate: dict[str, pd.DataFrame],
+    score_panel_by_candidate: dict[str, pd.DataFrame],
 ) -> pd.DataFrame:
     columns = [
+        "candidate_id_a",
         "signal_family_a",
+        "signal_variant_a",
         "lookback_a",
         "horizon_a",
+        "candidate_id_b",
         "signal_family_b",
+        "signal_variant_b",
         "lookback_b",
         "horizon_b",
         "overlap_dates",
@@ -250,11 +268,13 @@ def _compute_redundancy_diagnostics(
                 str(left_row["signal_family"]),
                 int(left_row["lookback"]),
                 int(left_row["horizon"]),
+                str(left_row.get("signal_variant") or "base"),
             )
             right_key = _candidate_key(
                 str(right_row["signal_family"]),
                 int(right_row["lookback"]),
                 int(right_row["horizon"]),
+                str(right_row.get("signal_variant") or "base"),
             )
             if left_key >= right_key:
                 continue
@@ -305,12 +325,16 @@ def _compute_redundancy_diagnostics(
 
             rows.append(
                 {
-                    "signal_family_a": left_key[0],
-                    "lookback_a": left_key[1],
-                    "horizon_a": left_key[2],
-                    "signal_family_b": right_key[0],
-                    "lookback_b": right_key[1],
-                    "horizon_b": right_key[2],
+                    "candidate_id_a": left_key,
+                    "signal_family_a": str(left_row["signal_family"]),
+                    "signal_variant_a": str(left_row.get("signal_variant") or "base"),
+                    "lookback_a": int(left_row["lookback"]),
+                    "horizon_a": int(left_row["horizon"]),
+                    "candidate_id_b": right_key,
+                    "signal_family_b": str(right_row["signal_family"]),
+                    "signal_variant_b": str(right_row.get("signal_variant") or "base"),
+                    "lookback_b": int(right_row["lookback"]),
+                    "horizon_b": int(right_row["horizon"]),
                     "overlap_dates": int(len(daily_overlap)),
                     "overlap_scores": int(len(score_overlap)),
                     "performance_corr": performance_corr,
@@ -333,6 +357,8 @@ def run_alpha_research(
     min_rows: int,
     top_quantile: float,
     bottom_quantile: float,
+    candidate_grid_preset: str = "standard",
+    max_variants_per_family: int | None = None,
     output_dir: Path,
     train_size: int = 252 * 3,
     test_size: int = 63,
@@ -415,86 +441,113 @@ def run_alpha_research(
         min_train_size=min_train_size,
     )
 
-    signal_cache: dict[tuple[str, int], pd.Series] = {}
+    candidate_specs = build_candidate_grid(
+        signal_family=signal_family,
+        lookbacks=lookbacks,
+        horizons=horizons,
+        candidate_grid_preset=candidate_grid_preset,
+        max_variants_per_family=max_variants_per_family,
+    )
+
+    signal_cache: dict[tuple[str, str], pd.Series] = {}
     detailed_rows: list[dict] = []
-    daily_metrics_by_candidate: dict[tuple[str, int, int], list[pd.DataFrame]] = {}
-    score_panel_by_candidate: dict[tuple[str, int, int], list[pd.DataFrame]] = {}
+    daily_metrics_by_candidate: dict[str, list[pd.DataFrame]] = {}
+    score_panel_by_candidate: dict[str, list[pd.DataFrame]] = {}
     label_panel_by_horizon: dict[int, list[pd.DataFrame]] = {}
-    candidate_panel_by_candidate: dict[tuple[str, int, int], list[pd.DataFrame]] = {}
+    candidate_panel_by_candidate: dict[str, list[pd.DataFrame]] = {}
 
-    for lookback in lookbacks:
+    for candidate_spec in candidate_specs:
+        current_candidate_id = _candidate_key(
+            candidate_spec.signal_family,
+            candidate_spec.lookback,
+            candidate_spec.horizon,
+            candidate_spec.signal_variant,
+        )
+        current_candidate_name = build_candidate_name(
+            candidate_spec.signal_family,
+            signal_variant=candidate_spec.signal_variant,
+            lookback=candidate_spec.lookback,
+            horizon=candidate_spec.horizon,
+        )
         for symbol, df in symbol_data.items():
-            signal_cache[(symbol, lookback)] = build_signal(
+            signal_cache[(symbol, current_candidate_id)] = build_signal(
                 df,
-                signal_family=signal_family,
-                lookback=lookback,
+                signal_family=candidate_spec.signal_family,
+                lookback=candidate_spec.lookback,
+                signal_variant=candidate_spec.signal_variant,
+                variant_params=candidate_spec.variant_params,
             )
+        label_col = f"fwd_return_{candidate_spec.horizon}d"
 
-        for horizon in horizons:
-            label_col = f"fwd_return_{horizon}d"
+        for fold in folds:
+            fold_frames: list[pd.DataFrame] = []
 
-            for fold in folds:
-                fold_frames: list[pd.DataFrame] = []
+            for symbol, df in symbol_data.items():
+                test_df = _slice_fold(
+                    df.assign(_signal=signal_cache[(symbol, current_candidate_id)]),
+                    test_start=fold.test_start,
+                    test_end=fold.test_end,
+                )
 
-                for symbol, df in symbol_data.items():
-                    test_df = _slice_fold(
-                        df.assign(_signal=signal_cache[(symbol, lookback)]),
-                        test_start=fold.test_start,
-                        test_end=fold.test_end,
-                    )
-
-                    if test_df.empty:
-                        continue
-
-                    fold_frames.append(
-                        test_df[["timestamp", "symbol", "_signal", label_col]].rename(
-                            columns={"_signal": "signal", label_col: "forward_return"}
-                        )
-                    )
-
-                if not fold_frames:
+                if test_df.empty:
                     continue
 
-                fold_panel = pd.concat(fold_frames, ignore_index=True)
-                candidate_key = _candidate_key(signal_family, lookback, horizon)
-                metrics = evaluate_cross_sectional_signal(
-                    fold_panel,
-                    top_quantile=top_quantile,
-                    bottom_quantile=bottom_quantile,
-                )
-                daily_metrics = compute_cross_sectional_daily_metrics(
-                    fold_panel,
-                    top_quantile=top_quantile,
-                    bottom_quantile=bottom_quantile,
+                fold_frames.append(
+                    test_df[["timestamp", "symbol", "_signal", label_col]].rename(
+                        columns={"_signal": "signal", label_col: "forward_return"}
+                    )
                 )
 
-                if not daily_metrics.empty:
-                    daily_metrics_by_candidate.setdefault(candidate_key, []).append(daily_metrics)
-                candidate_panel_by_candidate.setdefault(candidate_key, []).append(fold_panel.copy())
+            if not fold_frames:
+                continue
 
-                score_panel = fold_panel[["timestamp", "symbol", "signal"]].dropna().copy()
-                if not score_panel.empty:
-                    score_panel_by_candidate.setdefault(candidate_key, []).append(score_panel)
-                label_panel = fold_panel[["timestamp", "symbol", "forward_return"]].dropna().copy()
-                if not label_panel.empty:
-                    label_panel_by_horizon.setdefault(horizon, []).append(label_panel)
+            fold_panel = pd.concat(fold_frames, ignore_index=True)
+            metrics = evaluate_cross_sectional_signal(
+                fold_panel,
+                top_quantile=top_quantile,
+                bottom_quantile=bottom_quantile,
+            )
+            daily_metrics = compute_cross_sectional_daily_metrics(
+                fold_panel,
+                top_quantile=top_quantile,
+                bottom_quantile=bottom_quantile,
+            )
 
-                detailed_rows.append(
-                    {
-                        "signal_family": signal_family,
-                        "lookback": lookback,
-                        "horizon": horizon,
-                        "fold_id": fold.fold_id,
-                        "train_start": fold.train_start,
-                        "train_end": fold.train_end,
-                        "test_start": fold.test_start,
-                        "test_end": fold.test_end,
-                        **metrics,
-                    }
-                )
+            if not daily_metrics.empty:
+                daily_metrics_by_candidate.setdefault(current_candidate_id, []).append(daily_metrics)
+            candidate_panel_by_candidate.setdefault(current_candidate_id, []).append(fold_panel.copy())
+
+            score_panel = fold_panel[["timestamp", "symbol", "signal"]].dropna().copy()
+            if not score_panel.empty:
+                score_panel_by_candidate.setdefault(current_candidate_id, []).append(score_panel)
+            label_panel = fold_panel[["timestamp", "symbol", "forward_return"]].dropna().copy()
+            if not label_panel.empty:
+                label_panel_by_horizon.setdefault(candidate_spec.horizon, []).append(label_panel)
+
+            detailed_rows.append(
+                {
+                    "candidate_id": current_candidate_id,
+                    "candidate_name": current_candidate_name,
+                    "signal_family": candidate_spec.signal_family,
+                    "signal_variant": candidate_spec.signal_variant,
+                    "variant_parameters_json": json.dumps(candidate_spec.variant_params, sort_keys=True),
+                    "lookback": candidate_spec.lookback,
+                    "horizon": candidate_spec.horizon,
+                    "fold_id": fold.fold_id,
+                    "train_start": fold.train_start,
+                    "train_end": fold.train_end,
+                    "test_start": fold.test_start,
+                    "test_end": fold.test_end,
+                    **metrics,
+                }
+            )
 
     detailed_columns = [
+        "candidate_id",
+        "candidate_name",
         "signal_family",
+        "signal_variant",
+        "variant_parameters_json",
         "lookback",
         "horizon",
         "fold_id",
@@ -517,7 +570,11 @@ def run_alpha_research(
     if detailed_df.empty:
         leaderboard_df = pd.DataFrame(
             columns=[
+                "candidate_id",
+                "candidate_name",
                 "signal_family",
+                "signal_variant",
+                "variant_parameters_json",
                 "lookback",
                 "horizon",
                 "symbols_tested",
@@ -537,7 +594,10 @@ def run_alpha_research(
         )
     else:
         leaderboard_df = (
-            detailed_df.groupby(["signal_family", "lookback", "horizon"], as_index=False)
+            detailed_df.groupby(
+                ["candidate_id", "candidate_name", "signal_family", "signal_variant", "variant_parameters_json", "lookback", "horizon"],
+                as_index=False,
+            )
             .agg(
                 symbols_tested=("symbols_evaluated", "max"),
                 folds_tested=("fold_id", "nunique"),
@@ -672,6 +732,7 @@ def run_alpha_research(
                 str(row["signal_family"]),
                 int(row["lookback"]),
                 int(row["horizon"]),
+                str(row.get("signal_variant") or "base"),
             ),
             axis=1,
         )
@@ -688,6 +749,7 @@ def run_alpha_research(
                         str(row["signal_family"]),
                         int(row["lookback"]),
                         int(row["horizon"]),
+                        str(row.get("signal_variant") or "base"),
                     ),
                     pd.DataFrame(columns=["timestamp", "symbol", "signal"]),
                 )
@@ -741,7 +803,7 @@ def run_alpha_research(
         )
         composite_diagnostics["horizons"][str(int(horizon))] = {
             "selected_signals": selected_signals_df[
-                ["signal_family", "lookback", "horizon"]
+                ["candidate_id", "signal_family", "signal_variant", "lookback", "horizon"]
             ].to_dict(orient="records"),
             "excluded_signals": excluded_rows,
         }
@@ -835,6 +897,7 @@ def run_alpha_research(
                 "timestamp",
                 "candidate_id",
                 "signal_family",
+                "signal_variant",
                 "lookback",
                 "horizon",
                 "weighting_scheme",
@@ -870,6 +933,7 @@ def run_alpha_research(
                 "weighting_scheme",
                 "candidate_id",
                 "signal_family",
+                "signal_variant",
                 "lookback",
                 "entry_date",
                 "exit_date",
@@ -891,6 +955,7 @@ def run_alpha_research(
             columns=[
                 "candidate_id",
                 "signal_family",
+                "signal_variant",
                 "lookback",
                 "horizon",
                 "regime_key",
@@ -910,6 +975,7 @@ def run_alpha_research(
             columns=[
                 "candidate_id",
                 "signal_family",
+                "signal_variant",
                 "lookback",
                 "horizon",
                 "sub_universe_id",
@@ -930,6 +996,7 @@ def run_alpha_research(
             columns=[
                 "candidate_id",
                 "signal_family",
+                "signal_variant",
                 "lookback",
                 "horizon",
                 "benchmark_context_label",
@@ -953,6 +1020,7 @@ def run_alpha_research(
                 "timestamp",
                 "candidate_id",
                 "signal_family",
+                "signal_variant",
                 "lookback",
                 "horizon",
                 "weighting_scheme",
@@ -1240,6 +1308,10 @@ def run_alpha_research(
         "signal_family_requires_equity_context": _signal_family_requires_equity_context(signal_family),
         "lookbacks": lookbacks,
         "horizons": horizons,
+        "candidate_grid_preset": candidate_grid_preset,
+        "max_variants_per_family": max_variants_per_family,
+        "generated_candidate_count": len(candidate_specs),
+        "generated_signal_variants": sorted({spec.signal_variant for spec in candidate_specs}),
         "min_rows": min_rows,
         "feature_dir": str(feature_dir),
         "evaluation_mode": "cross_sectional_long_short",

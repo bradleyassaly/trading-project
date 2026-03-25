@@ -235,6 +235,8 @@ selection:
   universe: nasdaq100
 signals:
   family: momentum
+  candidate_grid_preset: broad_v1
+  max_variants_per_family: 5
   lookbacks: [5, 10]
   horizons: [1, 5]
   min_rows: 80
@@ -261,6 +263,8 @@ tracking:
     assert config.feature_dir == "data/features"
     assert config.output_dir == "artifacts/alpha_research/run_configured"
     assert config.signal_family == "momentum"
+    assert config.candidate_grid_preset == "broad_v1"
+    assert config.max_variants_per_family == 5
     assert config.lookbacks == [5, 10]
     assert config.horizons == [1, 5]
     assert config.min_rows == 80

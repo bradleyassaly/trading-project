@@ -19,6 +19,8 @@ class AlphaResearchRequest:
     feature_dir: Path
     output_dir: Path
     signal_family: str
+    candidate_grid_preset: str
+    max_variants_per_family: int | None
     lookbacks: list[int]
     horizons: list[int]
     min_rows: int
@@ -70,6 +72,8 @@ def _build_alpha_research_request(args) -> AlphaResearchRequest:
         feature_dir=Path(args.feature_dir),
         output_dir=output_dir,
         signal_family=args.signal_family,
+        candidate_grid_preset=getattr(args, "candidate_grid_preset", "standard"),
+        max_variants_per_family=getattr(args, "max_variants_per_family", None),
         lookbacks=list(args.lookbacks),
         horizons=list(args.horizons),
         min_rows=args.min_rows,
@@ -129,6 +133,8 @@ def cmd_alpha_research(args) -> None:
         min_rows=request.min_rows,
         top_quantile=request.top_quantile,
         bottom_quantile=request.bottom_quantile,
+        candidate_grid_preset=request.candidate_grid_preset,
+        max_variants_per_family=request.max_variants_per_family,
         output_dir=request.output_dir,
         train_size=request.train_size,
         test_size=request.test_size,

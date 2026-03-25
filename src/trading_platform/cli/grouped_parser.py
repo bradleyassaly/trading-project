@@ -394,6 +394,8 @@ def _add_alpha_research_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--universe", type=str, default=None, help="Named universe to evaluate instead of passing --symbols.")
     parser.add_argument("--feature-dir", type=str, default="data/features", help="Directory containing per-symbol feature parquet files.")
     parser.add_argument("--signal-family", type=str, default="momentum", choices=list(SUPPORTED_SIGNAL_FAMILIES), help="Signal family to evaluate.")
+    parser.add_argument("--candidate-grid-preset", type=str, default="standard", choices=["standard", "broad_v1"], help="Structured candidate-variant preset applied within the selected signal family.")
+    parser.add_argument("--max-variants-per-family", type=int, default=None, help="Optional cap on the number of generated variants retained from the selected candidate-grid preset.")
     parser.add_argument("--lookbacks", type=int, nargs="+", default=[5, 10, 20, 60], help="Lookback windows to test.")
     parser.add_argument("--horizons", type=int, nargs="+", default=[1, 5, 20], help="Forward return horizons to test.")
     parser.add_argument("--min-rows", type=int, default=126, help="Minimum number of usable rows required per symbol.")

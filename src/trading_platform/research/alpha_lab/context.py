@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from trading_platform.research.alpha_lab.composite import candidate_id
 from trading_platform.research.alpha_lab.metrics import compute_cross_sectional_daily_metrics
 
 
@@ -363,7 +364,7 @@ def build_benchmark_context_by_symbol_date(
 def compute_signal_performance_by_sub_universe(
     selected_signals_df: pd.DataFrame,
     *,
-    candidate_panels_by_candidate: dict[tuple[str, int, int], pd.DataFrame],
+    candidate_panels_by_candidate: dict[str, pd.DataFrame],
     sub_universe_membership_df: pd.DataFrame,
     horizon: int,
     top_quantile: float,
@@ -372,6 +373,7 @@ def compute_signal_performance_by_sub_universe(
     columns = [
         "candidate_id",
         "signal_family",
+        "signal_variant",
         "lookback",
         "horizon",
         "sub_universe_id",
@@ -389,8 +391,16 @@ def compute_signal_performance_by_sub_universe(
 
     rows: list[dict[str, object]] = []
     for _, row in selected.iterrows():
-        candidate_key = (str(row["signal_family"]), int(row["lookback"]), int(row["horizon"]))
-        panel = candidate_panels_by_candidate.get(candidate_key, pd.DataFrame())
+        signal_candidate_id = str(
+            row.get("candidate_id")
+            or candidate_id(
+                str(row["signal_family"]),
+                int(row["lookback"]),
+                int(row["horizon"]),
+                str(row.get("signal_variant") or "base"),
+            )
+        )
+        panel = candidate_panels_by_candidate.get(signal_candidate_id, pd.DataFrame())
         if panel.empty:
             continue
         merged = panel.merge(sub_universe_membership_df, on=["timestamp", "symbol"], how="inner")
@@ -410,10 +420,11 @@ def compute_signal_performance_by_sub_universe(
                 continue
             rows.append(
                 {
-                    "candidate_id": f"{candidate_key[0]}|{candidate_key[1]}|{candidate_key[2]}",
-                    "signal_family": candidate_key[0],
-                    "lookback": candidate_key[1],
-                    "horizon": candidate_key[2],
+                    "candidate_id": signal_candidate_id,
+                    "signal_family": str(row["signal_family"]),
+                    "signal_variant": str(row.get("signal_variant") or "base"),
+                    "lookback": int(row["lookback"]),
+                    "horizon": int(row["horizon"]),
                     "sub_universe_id": sub_universe_id,
                     "dates_evaluated": int(daily_metrics["timestamp"].nunique()),
                     "sample_size": int(len(group)),
@@ -430,7 +441,7 @@ def compute_signal_performance_by_sub_universe(
 def compute_signal_performance_by_benchmark_context(
     selected_signals_df: pd.DataFrame,
     *,
-    candidate_panels_by_candidate: dict[tuple[str, int, int], pd.DataFrame],
+    candidate_panels_by_candidate: dict[str, pd.DataFrame],
     benchmark_context_by_lookback: dict[int, pd.DataFrame],
     horizon: int,
     top_quantile: float,
@@ -439,6 +450,7 @@ def compute_signal_performance_by_benchmark_context(
     columns = [
         "candidate_id",
         "signal_family",
+        "signal_variant",
         "lookback",
         "horizon",
         "benchmark_context_label",
@@ -458,8 +470,16 @@ def compute_signal_performance_by_benchmark_context(
 
     rows: list[dict[str, object]] = []
     for _, row in selected.iterrows():
-        candidate_key = (str(row["signal_family"]), int(row["lookback"]), int(row["horizon"]))
-        panel = candidate_panels_by_candidate.get(candidate_key, pd.DataFrame())
+        signal_candidate_id = str(
+            row.get("candidate_id")
+            or candidate_id(
+                str(row["signal_family"]),
+                int(row["lookback"]),
+                int(row["horizon"]),
+                str(row.get("signal_variant") or "base"),
+            )
+        )
+        panel = candidate_panels_by_candidate.get(signal_candidate_id, pd.DataFrame())
         context_df = benchmark_context_by_lookback.get(int(row["lookback"]), pd.DataFrame())
         if panel.empty or context_df.empty:
             continue
@@ -480,10 +500,11 @@ def compute_signal_performance_by_benchmark_context(
                 continue
             rows.append(
                 {
-                    "candidate_id": f"{candidate_key[0]}|{candidate_key[1]}|{candidate_key[2]}",
-                    "signal_family": candidate_key[0],
-                    "lookback": candidate_key[1],
-                    "horizon": candidate_key[2],
+                    "candidate_id": signal_candidate_id,
+                    "signal_family": str(row["signal_family"]),
+                    "signal_variant": str(row.get("signal_variant") or "base"),
+                    "lookback": int(row["lookback"]),
+                    "horizon": int(row["horizon"]),
                     "benchmark_context_label": context_label,
                     "dates_evaluated": int(daily_metrics["timestamp"].nunique()),
                     "sample_size": int(len(group)),

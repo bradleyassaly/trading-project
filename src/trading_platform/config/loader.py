@@ -252,6 +252,8 @@ def load_alpha_research_workflow_config(path: str | Path) -> AlphaResearchWorkfl
     _set_if_missing(payload, "output_dir", paths_section)
 
     _set_if_missing(payload, "signal_family", signals_section, "family")
+    _set_if_missing(payload, "candidate_grid_preset", signals_section, "candidate_grid_preset")
+    _set_if_missing(payload, "max_variants_per_family", signals_section, "max_variants_per_family")
     if "lookbacks" not in payload and isinstance(signals_section.get("lookbacks"), list):
         payload["lookbacks"] = signals_section["lookbacks"]
     if "horizons" not in payload and isinstance(signals_section.get("horizons"), list):

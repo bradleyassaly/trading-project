@@ -49,6 +49,8 @@ selection:
   universe: nasdaq100
 signals:
   family: momentum
+  candidate_grid_preset: broad_v1
+  max_variants_per_family: 5
   lookbacks: [5, 10]
   horizons: [1, 5]
 portfolio:
@@ -99,6 +101,8 @@ tracking:
         universe=None,
         feature_dir="data/features",
         signal_family="momentum",
+        candidate_grid_preset="standard",
+        max_variants_per_family=None,
         lookbacks=[20],
         horizons=[1],
         min_rows=126,
@@ -155,6 +159,8 @@ tracking:
     cmd_alpha_research(args)
 
     assert captured["symbols"] == ["AAPL"]
+    assert captured["candidate_grid_preset"] == "broad_v1"
+    assert captured["max_variants_per_family"] == 5
     assert captured["lookbacks"] == [20]
     assert captured["horizons"] == [1, 5]
     assert Path(str(captured["feature_dir"])) == tmp_path / "features"
@@ -174,6 +180,8 @@ selection:
     - AAPL
 signals:
   family: sector_relative_momentum
+  candidate_grid_preset: broad_v1
+  max_variants_per_family: 3
   lookbacks: [5]
   horizons: [1]
 tracking:
@@ -214,6 +222,8 @@ tracking:
         universe=None,
         feature_dir="data/features",
         signal_family="momentum",
+        candidate_grid_preset="standard",
+        max_variants_per_family=None,
         lookbacks=[20],
         horizons=[1],
         min_rows=126,
@@ -261,6 +271,8 @@ tracking:
     cmd_alpha_research(args)
 
     assert captured["signal_family"] == "sector_relative_momentum"
+    assert captured["candidate_grid_preset"] == "broad_v1"
+    assert captured["max_variants_per_family"] == 3
     assert captured["lookbacks"] == [5]
     assert captured["horizons"] == [1]
 

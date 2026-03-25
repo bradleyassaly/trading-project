@@ -5,6 +5,8 @@ from dataclasses import asdict, dataclass
 import numpy as np
 import pandas as pd
 
+from trading_platform.research.alpha_lab.composite import candidate_id
+
 
 @dataclass(frozen=True)
 class SignalLifecycleConfig:
@@ -27,7 +29,15 @@ DEFAULT_SIGNAL_LIFECYCLE_CONFIG = SignalLifecycleConfig()
 
 
 def _candidate_id_from_row(row: pd.Series) -> str:
-    return f"{row['signal_family']}|{int(row['lookback'])}|{int(row['horizon'])}"
+    return str(
+        row.get("candidate_id")
+        or candidate_id(
+            str(row["signal_family"]),
+            int(row["lookback"]),
+            int(row["horizon"]),
+            str(row.get("signal_variant") or "base"),
+        )
+    )
 
 
 def _compute_recent_quality_frame(
@@ -168,7 +178,7 @@ def _normalize_group_weights(group: pd.DataFrame) -> pd.DataFrame:
 def build_dynamic_signal_weights(
     selected_signals_df: pd.DataFrame,
     *,
-    daily_metrics_by_candidate: dict[tuple[str, int, int], pd.DataFrame],
+    daily_metrics_by_candidate: dict[str, pd.DataFrame],
     horizon: int,
     config: SignalLifecycleConfig = DEFAULT_SIGNAL_LIFECYCLE_CONFIG,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
@@ -176,6 +186,7 @@ def build_dynamic_signal_weights(
         "timestamp",
         "candidate_id",
         "signal_family",
+        "signal_variant",
         "lookback",
         "horizon",
         "weighting_scheme",
@@ -195,6 +206,7 @@ def build_dynamic_signal_weights(
         "weighting_scheme",
         "candidate_id",
         "signal_family",
+        "signal_variant",
         "lookback",
         "entry_date",
         "exit_date",
@@ -215,12 +227,18 @@ def build_dynamic_signal_weights(
 
     signal_frames: list[pd.DataFrame] = []
     for _, row in selected.iterrows():
-        candidate_key = (
-            str(row["signal_family"]),
-            int(row["lookback"]),
-            int(row["horizon"]),
-        )
-        daily_metrics_df = daily_metrics_by_candidate.get(candidate_key, pd.DataFrame())
+        signal_candidate_id = _candidate_id_from_row(row)
+        daily_metrics_df = daily_metrics_by_candidate.get(signal_candidate_id)
+        if daily_metrics_df is None:
+            daily_metrics_df = daily_metrics_by_candidate.get(
+                (
+                    str(row["signal_family"]),
+                    int(row["lookback"]),
+                    int(row["horizon"]),
+                )
+            )
+        if daily_metrics_df is None:
+            daily_metrics_df = pd.DataFrame()
         recent_quality = _compute_recent_quality_frame(
             daily_metrics_df,
             window=config.recent_quality_window,
@@ -228,8 +246,9 @@ def build_dynamic_signal_weights(
         if recent_quality.empty:
             continue
 
-        recent_quality["candidate_id"] = _candidate_id_from_row(row)
+        recent_quality["candidate_id"] = signal_candidate_id
         recent_quality["signal_family"] = str(row["signal_family"])
+        recent_quality["signal_variant"] = str(row.get("signal_variant") or "base")
         recent_quality["lookback"] = int(row["lookback"])
         recent_quality["horizon"] = int(row["horizon"])
         signal_frames.append(recent_quality)
@@ -298,6 +317,7 @@ def build_dynamic_signal_weights(
                 "weighting_scheme": str(keys[1]),
                 "candidate_id": str(keys[2]),
                 "signal_family": str(ordered["signal_family"].iloc[0]),
+                "signal_variant": str(ordered["signal_variant"].iloc[0]),
                 "lookback": int(ordered["lookback"].iloc[0]),
                 "entry_date": ordered["timestamp"].min(),
                 "exit_date": ordered["timestamp"].max(),
@@ -328,6 +348,7 @@ def build_dynamic_signal_weights(
             "weighting_scheme": str(keys[1]),
             "candidate_id": pd.NA,
             "signal_family": pd.NA,
+            "signal_variant": pd.NA,
             "lookback": pd.NA,
             "entry_date": pd.NaT,
             "exit_date": pd.NaT,

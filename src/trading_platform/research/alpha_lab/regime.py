@@ -4,6 +4,8 @@ from dataclasses import asdict, dataclass
 
 import pandas as pd
 
+from trading_platform.research.alpha_lab.composite import candidate_id
+
 
 @dataclass(frozen=True)
 class RegimeConfig:
@@ -98,13 +100,14 @@ def build_regime_labels_by_date(
 def compute_signal_performance_by_regime(
     selected_signals_df: pd.DataFrame,
     *,
-    daily_metrics_by_candidate: dict[tuple[str, int, int], pd.DataFrame],
+    daily_metrics_by_candidate: dict[str, pd.DataFrame],
     regime_labels_df: pd.DataFrame,
     horizon: int,
 ) -> pd.DataFrame:
     columns = [
         "candidate_id",
         "signal_family",
+        "signal_variant",
         "lookback",
         "horizon",
         "regime_key",
@@ -121,12 +124,26 @@ def compute_signal_performance_by_regime(
 
     rows: list[dict[str, object]] = []
     for _, row in selected.iterrows():
-        candidate_key = (
-            str(row["signal_family"]),
-            int(row["lookback"]),
-            int(row["horizon"]),
+        signal_candidate_id = str(
+            row.get("candidate_id")
+            or candidate_id(
+                str(row["signal_family"]),
+                int(row["lookback"]),
+                int(row["horizon"]),
+                str(row.get("signal_variant") or "base"),
+            )
         )
-        daily_metrics_df = daily_metrics_by_candidate.get(candidate_key, pd.DataFrame())
+        daily_metrics_df = daily_metrics_by_candidate.get(signal_candidate_id)
+        if daily_metrics_df is None:
+            daily_metrics_df = daily_metrics_by_candidate.get(
+                (
+                    str(row["signal_family"]),
+                    int(row["lookback"]),
+                    int(row["horizon"]),
+                )
+            )
+        if daily_metrics_df is None:
+            daily_metrics_df = pd.DataFrame()
         if daily_metrics_df.empty:
             continue
         merged = daily_metrics_df.merge(
@@ -149,10 +166,11 @@ def compute_signal_performance_by_regime(
                 mean_long_short_spread=("long_short_spread", "mean"),
             )
         )
-        summary["candidate_id"] = f"{candidate_key[0]}|{candidate_key[1]}|{candidate_key[2]}"
-        summary["signal_family"] = candidate_key[0]
-        summary["lookback"] = candidate_key[1]
-        summary["horizon"] = candidate_key[2]
+        summary["candidate_id"] = signal_candidate_id
+        summary["signal_family"] = str(row["signal_family"])
+        summary["signal_variant"] = str(row.get("signal_variant") or "base")
+        summary["lookback"] = int(row["lookback"])
+        summary["horizon"] = int(row["horizon"])
         rows.extend(summary[columns].to_dict(orient="records"))
     return pd.DataFrame(rows, columns=columns)
 
@@ -160,7 +178,7 @@ def compute_signal_performance_by_regime(
 def build_regime_aware_signal_weights(
     base_dynamic_weights_df: pd.DataFrame,
     *,
-    daily_metrics_by_candidate: dict[tuple[str, int, int], pd.DataFrame],
+    daily_metrics_by_candidate: dict[str, pd.DataFrame],
     regime_labels_df: pd.DataFrame,
     horizon: int,
     config: RegimeConfig = DEFAULT_REGIME_CONFIG,
@@ -169,6 +187,7 @@ def build_regime_aware_signal_weights(
         "timestamp",
         "candidate_id",
         "signal_family",
+        "signal_variant",
         "lookback",
         "horizon",
         "weighting_scheme",
@@ -203,13 +222,22 @@ def build_regime_aware_signal_weights(
     ].copy()
     if base.empty:
         return pd.DataFrame(columns=weight_columns), pd.DataFrame(columns=report_columns)
+    if "signal_variant" not in base.columns:
+        base["signal_variant"] = "base"
 
     history_frames: list[pd.DataFrame] = []
     for candidate_id, group in base.groupby("candidate_id", sort=False):
-        signal_family = str(group["signal_family"].iloc[0])
-        lookback = int(group["lookback"].iloc[0])
-        candidate_key = (signal_family, lookback, int(horizon))
-        metrics_df = daily_metrics_by_candidate.get(candidate_key, pd.DataFrame())
+        metrics_df = daily_metrics_by_candidate.get(str(candidate_id))
+        if metrics_df is None:
+            metrics_df = daily_metrics_by_candidate.get(
+                (
+                    str(group["signal_family"].iloc[0]),
+                    int(group["lookback"].iloc[0]),
+                    int(horizon),
+                )
+            )
+        if metrics_df is None:
+            metrics_df = pd.DataFrame()
         if metrics_df.empty:
             continue
         merged = metrics_df.merge(

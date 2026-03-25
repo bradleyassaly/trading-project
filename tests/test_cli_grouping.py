@@ -15,12 +15,27 @@ def test_grouped_data_ingest_command_parses() -> None:
 
 def test_grouped_research_alpha_command_parses() -> None:
     parser = build_parser()
-    args = parser.parse_args(["research", "alpha", "--symbols", "AAPL", "--lookbacks", "5"])
+    args = parser.parse_args(
+        [
+            "research",
+            "alpha",
+            "--symbols",
+            "AAPL",
+            "--lookbacks",
+            "5",
+            "--candidate-grid-preset",
+            "broad_v1",
+            "--max-variants-per-family",
+            "4",
+        ]
+    )
 
     assert args.command_family == "research"
     assert args.research_command == "alpha"
     assert args.symbols == ["AAPL"]
     assert args.lookbacks == [5]
+    assert args.candidate_grid_preset == "broad_v1"
+    assert args.max_variants_per_family == 4
 
 
 def test_grouped_research_alpha_command_parses_config() -> None:

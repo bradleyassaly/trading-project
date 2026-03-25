@@ -44,7 +44,7 @@ from trading_platform.research.alpha_lab.runner import (
     _load_symbol_feature_data,
     run_alpha_research,
 )
-from trading_platform.research.alpha_lab.signals import build_signal
+from trading_platform.research.alpha_lab.signals import build_candidate_grid, build_signal
 
 
 def test_load_symbol_feature_data_preserves_existing_timestamp_column(tmp_path: Path) -> None:
@@ -319,6 +319,48 @@ def test_build_signal_cross_sectional_momentum_alias_matches_relative_strength()
     aliased = build_signal(df, signal_family="cross_sectional_momentum", lookback=1)
 
     pd.testing.assert_series_equal(relative_strength, aliased)
+
+
+def test_build_candidate_grid_broad_v1_expands_variants_with_stable_names() -> None:
+    candidates = build_candidate_grid(
+        signal_family="cross_sectional_momentum",
+        lookbacks=[5, 20],
+        horizons=[1, 5],
+        candidate_grid_preset="broad_v1",
+    )
+
+    assert len(candidates) == 24
+    assert candidates[0].signal_variant == "base"
+    assert {candidate.signal_variant for candidate in candidates} >= {
+        "base",
+        "relative_strength_focus",
+        "breadth_confirmed",
+        "volatility_filtered",
+    }
+
+
+def test_build_signal_cross_sectional_momentum_variants_change_signal_profile() -> None:
+    df = pd.DataFrame(
+        {
+            "close": [100.0, 101.0, 103.0, 104.0, 106.0],
+            "relative_return_2": [None, None, 0.03, 0.01, 0.04],
+            "breadth_impulse_2": [0.0, 0.0, 0.10, -0.05, 0.20],
+            "realized_vol_20": [0.15, 0.18, 0.25, 0.35, 0.20],
+            "volume_ratio_20": [1.0, 1.1, 1.4, 0.9, 1.8],
+        }
+    )
+
+    base = build_signal(df, signal_family="cross_sectional_momentum", lookback=2)
+    breadth_confirmed = build_signal(
+        df,
+        signal_family="cross_sectional_momentum",
+        lookback=2,
+        signal_variant="breadth_confirmed",
+        variant_params={"market_relative_weight": 1.1, "breadth_weight": 0.4},
+    )
+
+    assert breadth_confirmed.notna().sum() > 0
+    assert breadth_confirmed.iloc[4] != pytest.approx(base.iloc[4])
 
 
 def test_build_signal_breakout_continuation_rewards_new_highs() -> None:
@@ -1443,6 +1485,63 @@ def test_run_alpha_research_writes_leaderboard_and_fold_results(tmp_path: Path) 
     assert "spearman_ic" in fold_results_df.columns
     assert "long_short_spread" in fold_results_df.columns
     assert fold_results_df["symbols_evaluated"].max() == pytest.approx(2.0)
+
+
+def test_run_alpha_research_broad_candidate_grid_emits_variant_identity(tmp_path: Path) -> None:
+    feature_dir = tmp_path / "features"
+    output_dir = tmp_path / "alpha_outputs"
+    feature_dir.mkdir(parents=True, exist_ok=True)
+
+    timestamps = pd.date_range("2024-01-01", periods=60, freq="D")
+    for symbol, base_price, daily_return, volume_bias in (
+        ("AAPL", 100.0, 0.006, 1.1),
+        ("MSFT", 120.0, 0.004, 0.9),
+        ("NVDA", 90.0, 0.009, 1.4),
+    ):
+        closes = [base_price]
+        for _ in range(len(timestamps) - 1):
+            closes.append(closes[-1] * (1.0 + daily_return))
+        pd.DataFrame(
+            {
+                "timestamp": timestamps,
+                "symbol": [symbol] * len(timestamps),
+                "close": closes,
+                "volume": [1_000_000 * volume_bias * (1.0 + 0.01 * idx) for idx in range(len(timestamps))],
+            }
+        ).to_parquet(feature_dir / f"{symbol}.parquet", index=False)
+
+    result = run_alpha_research(
+        symbols=["AAPL", "MSFT", "NVDA"],
+        universe=None,
+        feature_dir=feature_dir,
+        signal_family="cross_sectional_momentum",
+        lookbacks=[5, 10],
+        horizons=[1],
+        min_rows=20,
+        top_quantile=0.34,
+        bottom_quantile=0.34,
+        candidate_grid_preset="broad_v1",
+        max_variants_per_family=4,
+        output_dir=output_dir,
+        train_size=20,
+        test_size=10,
+        step_size=10,
+        equity_context_enabled=True,
+        equity_context_include_volume=True,
+    )
+
+    leaderboard_df = pd.read_csv(result["leaderboard_path"])
+    fold_results_df = pd.read_csv(result["fold_results_path"])
+    diagnostics = json.loads(Path(result["signal_diagnostics_path"]).read_text(encoding="utf-8"))
+
+    assert {"candidate_id", "candidate_name", "signal_variant", "variant_parameters_json"} <= set(
+        leaderboard_df.columns
+    )
+    assert {"candidate_id", "candidate_name", "signal_variant"} <= set(fold_results_df.columns)
+    assert leaderboard_df["signal_variant"].nunique() == 4
+    assert len(leaderboard_df) == 8
+    assert diagnostics["candidate_grid_preset"] == "broad_v1"
+    assert diagnostics["generated_candidate_count"] == 8
 
 
 def test_run_alpha_research_emits_sub_universe_and_benchmark_context_artifacts(

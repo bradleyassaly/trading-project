@@ -20,7 +20,15 @@ class CompositeConfig:
 DEFAULT_COMPOSITE_CONFIG = CompositeConfig()
 
 
-def candidate_id(signal_family: str, lookback: int, horizon: int) -> str:
+def candidate_id(
+    signal_family: str,
+    lookback: int,
+    horizon: int,
+    signal_variant: str | None = None,
+) -> str:
+    normalized_variant = str(signal_variant or "base").strip()
+    if normalized_variant and normalized_variant != "base":
+        return f"{signal_family}|{normalized_variant}|{lookback}|{horizon}"
     return f"{signal_family}|{lookback}|{horizon}"
 
 
@@ -67,6 +75,7 @@ def select_low_redundancy_signals(
                 str(row["signal_family"]),
                 int(row["lookback"]),
                 int(row["horizon"]),
+                str(row.get("signal_variant") or "base"),
             ),
             axis=1,
         )
@@ -79,6 +88,7 @@ def select_low_redundancy_signals(
                 str(row["signal_family_a"]),
                 int(row["lookback_a"]),
                 int(row["horizon_a"]),
+                str(row.get("signal_variant_a") or "base"),
             )
         right_id = row.get("candidate_id_b")
         if pd.isna(right_id):
@@ -86,6 +96,7 @@ def select_low_redundancy_signals(
                 str(row["signal_family_b"]),
                 int(row["lookback_b"]),
                 int(row["horizon_b"]),
+                str(row.get("signal_variant_b") or "base"),
             )
         corr_value = row["score_corr"]
         if pd.isna(corr_value):
@@ -153,7 +164,7 @@ def build_component_weights(
 def build_composite_scores(
     selected_signals_df: pd.DataFrame,
     *,
-    score_panel_by_candidate: dict[tuple[str, int, int], pd.DataFrame],
+    score_panel_by_candidate: dict[str, pd.DataFrame],
     weighting_scheme: str,
     quality_metric: str,
     dynamic_signal_weights_df: pd.DataFrame | None = None,
@@ -179,13 +190,24 @@ def build_composite_scores(
 
     component_frames: list[pd.DataFrame] = []
     for _, row in weighted_components.iterrows():
-        candidate_key = (
-            str(row["signal_family"]),
-            int(row["lookback"]),
-            int(row["horizon"]),
+        signal_candidate_id = str(
+            row.get("candidate_id")
+            or candidate_id(
+                str(row["signal_family"]),
+                int(row["lookback"]),
+                int(row["horizon"]),
+                str(row.get("signal_variant") or "base"),
+            )
         )
-        signal_candidate_id = row.get("candidate_id", candidate_id(*candidate_key))
-        score_panel = score_panel_by_candidate.get(candidate_key)
+        score_panel = score_panel_by_candidate.get(signal_candidate_id)
+        if score_panel is None:
+            score_panel = score_panel_by_candidate.get(
+                (
+                    str(row["signal_family"]),
+                    int(row["lookback"]),
+                    int(row["horizon"]),
+                )
+            )
         if score_panel is None or score_panel.empty:
             continue
 
