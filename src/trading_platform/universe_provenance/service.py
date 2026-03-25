@@ -955,6 +955,7 @@ def write_universe_provenance_artifacts(
     *,
     bundle: UniverseBuildBundle | None,
     output_dir: str | Path,
+    metadata_dir: str | Path | None = None,
 ) -> dict[str, Path]:
     if bundle is None:
         return {}
@@ -975,6 +976,62 @@ def write_universe_provenance_artifacts(
         path = output_path / name
         pd.DataFrame(rows).to_csv(path, index=False)
         paths[name.replace(".", "_")] = path
+
+    def _write_sidecar_payloads(sidecar_path: Path) -> None:
+        sidecar_path.mkdir(parents=True, exist_ok=True)
+
+        def _sidecar_csv(name: str, rows: list[dict[str, Any]]) -> None:
+            if not rows:
+                return
+            path = sidecar_path / name
+            pd.DataFrame(rows).to_csv(path, index=False)
+            paths[f"metadata_{name.replace('.', '_')}"] = path
+
+        def _sidecar_json(name: str, payload: Any) -> None:
+            if payload in (None, [], {}):
+                return
+            path = sidecar_path / name
+            path.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
+            paths[f"metadata_{name.replace('.', '_')}"] = path
+
+        sub_universe_rows = [
+            {
+                "symbol": row.symbol,
+                "base_universe_id": row.base_universe_id,
+                "sub_universe_id": row.sub_universe_id,
+                "inclusion_status": row.inclusion_status,
+                "inclusion_reason": row.inclusion_reason,
+                "exclusion_reason": row.exclusion_reason,
+                "group_label": row.group_label,
+            }
+            for row in bundle.membership_records
+            if row.inclusion_status == "included"
+        ]
+        enrichment_rows = [row.flat_dict() for row in bundle.enrichment_records]
+        _sidecar_csv("sub_universe_snapshot.csv", sub_universe_rows)
+        _sidecar_csv("universe_enrichment.csv", enrichment_rows)
+        _sidecar_json(
+            "research_metadata_sidecar_summary.json",
+            {
+                "base_universe_id": bundle.summary.base_universe_id if bundle.summary is not None else None,
+                "sub_universe_id": bundle.summary.sub_universe_id if bundle.summary is not None else None,
+                "eligible_symbol_count": len(sub_universe_rows),
+                "enrichment_row_count": len(enrichment_rows),
+                "reference_data_coverage_summary": (
+                    bundle.reference_data_coverage_summary.to_dict()
+                    if bundle.reference_data_coverage_summary is not None
+                    else None
+                ),
+                "generated_files": [
+                    name
+                    for name, rows in (
+                        ("sub_universe_snapshot.csv", sub_universe_rows),
+                        ("universe_enrichment.csv", enrichment_rows),
+                    )
+                    if rows
+                ],
+            },
+        )
 
     _write_json("universe_membership.json", [row.to_dict() for row in bundle.membership_records])
     _write_csv("universe_membership.csv", [row.flat_dict() for row in bundle.membership_records])
@@ -1061,4 +1118,6 @@ def write_universe_provenance_artifacts(
     )
     if bundle.reference_data_manifest is not None:
         _write_json("reference_data_manifest.json", bundle.reference_data_manifest.to_dict())
+    if metadata_dir is not None:
+        _write_sidecar_payloads(Path(metadata_dir))
     return paths

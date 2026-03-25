@@ -47,6 +47,7 @@ from trading_platform.paper.service import (
     compute_latest_target_weights,
     load_signal_snapshot,
 )
+from trading_platform.settings import METADATA_DIR
 from trading_platform.services.target_construction_service import build_target_construction_result
 from trading_platform.universe_provenance.models import UniverseBuildBundle
 from trading_platform.universe_provenance.service import (
@@ -689,7 +690,11 @@ def _write_markdown_summary(payload: dict[str, Any], health_checks: list[dict[st
     return "\n".join(lines) + "\n"
 
 
-def write_live_dry_run_artifacts(result: LivePreviewResult) -> dict[str, Path]:
+def write_live_dry_run_artifacts(
+    result: LivePreviewResult,
+    *,
+    metadata_dir: str | Path | None = METADATA_DIR,
+) -> dict[str, Path]:
     output_dir = Path(result.config.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -840,7 +845,13 @@ def write_live_dry_run_artifacts(result: LivePreviewResult) -> dict[str, Path]:
         execution_paths = write_execution_artifacts(result.execution_result, output_dir)
         paths.update(execution_paths)
     paths.update(write_decision_journal_artifacts(bundle=result.decision_bundle, output_dir=output_dir))
-    paths.update(write_universe_provenance_artifacts(bundle=result.universe_bundle, output_dir=output_dir))
+    paths.update(
+        write_universe_provenance_artifacts(
+            bundle=result.universe_bundle,
+            output_dir=output_dir,
+            metadata_dir=metadata_dir,
+        )
+    )
     summary_payload["artifact_paths"] = {name: str(path) for name, path in paths.items()}
     summary_json_path.write_text(json.dumps(summary_payload, indent=2, default=str), encoding="utf-8")
     preview_summary_json_path.write_text(json.dumps(summary_payload, indent=2, default=str), encoding="utf-8")

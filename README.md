@@ -1470,12 +1470,26 @@ Alpha-research condition-slice artifacts:
 - `research_context_coverage.json`
   lightweight coverage summary showing whether the run used explicit upstream labels, metadata-sidecar labels, or derived benchmark-context fallbacks
 
+Standard metadata sidecar workflow:
+
+- maintained universe/enrichment workflows now publish lightweight research sidecars into the standard sibling metadata directory:
+  `data/metadata/`
+- the normal paper-trading and live-preview artifact writers refresh that directory whenever they emit universe provenance artifacts
+- the canonical sidecar set is:
+  - `data/metadata/sub_universe_snapshot.csv`
+  - `data/metadata/universe_enrichment.csv`
+  - `data/metadata/research_metadata_sidecar_summary.json`
+- these sidecars are generated from the same maintained universe provenance bundle used for paper/live explainability; they are not a separate source of truth
+- alpha research keeps the same discovery rule as before:
+  it looks for a sibling `metadata/` directory next to the feature directory, which means the default `data/features` layout naturally resolves to `data/metadata`
+
 Generation and fallback rules:
 
 - unconditional research still runs exactly as before
 - the alpha runner emits the new sub-universe and benchmark-context artifacts on every run so downstream conditional research sees stable paths
 - the runner now also writes context-enriched symbol panels under `context_features/` so the label state used during research is persisted and auditable
 - if a sibling `metadata/` directory exists next to the feature directory, the runner automatically looks for `sub_universe_snapshot.csv` or `universe_enrichment.csv` and persists those explicit sub-universe labels into the context feature panels before evaluation
+- with the default project layout, those sidecars are now refreshed automatically in `data/metadata` by the standard paper/live universe-provenance workflow
 - benchmark-context labels are now persisted upstream into the run-local context panels as explicit `benchmark_context_label_<lookback>` columns whenever the required equity-context inputs exist
 - downstream slicing prefers those explicit lookback-specific label columns first and only falls back to on-the-fly derivation when no explicit labels are present
 - when sub-universe metadata is missing, `signal_performance_by_sub_universe.csv` is written with the expected columns but no rows

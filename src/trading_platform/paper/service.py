@@ -43,6 +43,7 @@ from trading_platform.paper.models import (
     PaperTradingConfig,
     PaperTradingRunResult,
 )
+from trading_platform.settings import METADATA_DIR
 from trading_platform.paper.ledger import append_equity_snapshot, append_fills
 from trading_platform.paper.slippage import apply_order_slippage, validate_slippage_config
 from trading_platform.risk.pre_trade_checks import validate_orders
@@ -578,6 +579,7 @@ def write_paper_trading_artifacts(
     *,
     result: PaperTradingRunResult,
     output_dir: str | Path,
+    metadata_dir: str | Path | None = METADATA_DIR,
 ) -> dict[str, Path]:
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
@@ -710,7 +712,13 @@ def write_paper_trading_artifacts(
         execution_paths = write_execution_artifacts(simulation_result, output_path)
         paths.update(execution_paths)
     paths.update(write_decision_journal_artifacts(bundle=result.decision_bundle, output_dir=output_path))
-    paths.update(write_universe_provenance_artifacts(bundle=result.universe_bundle, output_dir=output_path))
+    paths.update(
+        write_universe_provenance_artifacts(
+            bundle=result.universe_bundle,
+            output_dir=output_path,
+            metadata_dir=metadata_dir,
+        )
+    )
     paths.update(extra_paths)
     return paths
 

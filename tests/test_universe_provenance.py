@@ -63,6 +63,35 @@ def test_write_universe_provenance_artifacts_writes_expected_files(tmp_path: Pat
     assert membership_df.iloc[0]["symbol"] == "AAPL"
 
 
+def test_write_universe_provenance_artifacts_writes_metadata_sidecars(tmp_path: Path) -> None:
+    bundle = build_universe_provenance_bundle(
+        symbols=["AAPL"],
+        base_universe_id="demo",
+        sub_universe_id="demo_screened",
+        filter_definitions=[{"filter_name": "include", "filter_type": "symbol_include_list", "symbols": ["AAPL"]}],
+        feature_loader=lambda _symbol: pd.DataFrame(
+            {"timestamp": pd.date_range("2025-01-01", periods=3), "close": [10.0, 11.0, 12.0]}
+        ),
+    )
+
+    metadata_dir = tmp_path / "metadata"
+    paths = write_universe_provenance_artifacts(
+        bundle=bundle,
+        output_dir=tmp_path / "run",
+        metadata_dir=metadata_dir,
+    )
+
+    assert paths["metadata_sub_universe_snapshot_csv"].exists()
+    assert paths["metadata_universe_enrichment_csv"].exists()
+    assert paths["metadata_research_metadata_sidecar_summary_json"].exists()
+
+    sub_universe_df = pd.read_csv(paths["metadata_sub_universe_snapshot_csv"])
+    enrichment_df = pd.read_csv(paths["metadata_universe_enrichment_csv"])
+
+    assert sub_universe_df.iloc[0]["sub_universe_id"] == "demo_screened"
+    assert enrichment_df.iloc[0]["symbol"] == "AAPL"
+
+
 def test_build_target_construction_result_integrates_universe_filters(monkeypatch) -> None:
     frames = {
         "AAPL": pd.DataFrame({"timestamp": pd.date_range("2025-01-01", periods=4), "close": [10.0, 11.0, 12.0, 13.0], "volume": [1_000_000] * 4}),

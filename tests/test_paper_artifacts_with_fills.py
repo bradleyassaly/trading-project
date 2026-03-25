@@ -13,9 +13,11 @@ from trading_platform.paper.models import (
     PaperTradingRunResult,
 )
 from trading_platform.paper.service import write_paper_trading_artifacts
+from trading_platform.universe_provenance.service import build_universe_provenance_bundle
 
 
 def test_write_paper_trading_artifacts_writes_fills_and_equity_curve(tmp_path: Path) -> None:
+    metadata_dir = tmp_path / "metadata"
     result = PaperTradingRunResult(
         as_of="2025-01-04",
         state=PaperPortfolioState(
@@ -73,7 +75,7 @@ def test_write_paper_trading_artifacts_writes_fills_and_equity_curve(tmp_path: P
         ),
     )
 
-    paths = write_paper_trading_artifacts(result=result, output_dir=tmp_path)
+    paths = write_paper_trading_artifacts(result=result, output_dir=tmp_path, metadata_dir=metadata_dir)
 
     assert paths["fills_path"].exists()
     assert paths["equity_snapshot_path"].exists()
@@ -88,3 +90,40 @@ def test_write_paper_trading_artifacts_writes_fills_and_equity_curve(tmp_path: P
     assert equity_df.iloc[0]["as_of"] == "2025-01-04"
     assert float(equity_df.iloc[0]["equity"]) == 10100.0
     assert candidate_df.iloc[0]["symbol"] == "AAPL"
+    assert not any(key.startswith("metadata_") for key in paths)
+
+
+def test_write_paper_trading_artifacts_refreshes_metadata_sidecars_when_universe_bundle_exists(
+    tmp_path: Path,
+) -> None:
+    metadata_dir = tmp_path / "metadata"
+    universe_bundle = build_universe_provenance_bundle(
+        symbols=["AAPL"],
+        base_universe_id="demo",
+        sub_universe_id="demo_screened",
+        filter_definitions=[{"filter_name": "include", "filter_type": "symbol_include_list", "symbols": ["AAPL"]}],
+        feature_loader=lambda _symbol: pd.DataFrame(
+            {"timestamp": pd.date_range("2025-01-01", periods=3), "close": [10.0, 11.0, 12.0]}
+        ),
+    )
+    result = PaperTradingRunResult(
+        as_of="2025-01-04",
+        state=PaperPortfolioState(cash=10_000.0, positions={}, last_targets={}),
+        latest_prices={},
+        latest_scores={},
+        latest_target_weights={},
+        scheduled_target_weights={},
+        orders=[],
+        universe_bundle=universe_bundle,
+    )
+
+    paths = write_paper_trading_artifacts(
+        result=result,
+        output_dir=tmp_path / "artifacts",
+        metadata_dir=metadata_dir,
+    )
+
+    assert paths["metadata_sub_universe_snapshot_csv"].exists()
+    assert paths["metadata_universe_enrichment_csv"].exists()
+    sidecar_df = pd.read_csv(paths["metadata_sub_universe_snapshot_csv"])
+    assert sidecar_df.iloc[0]["sub_universe_id"] == "demo_screened"
