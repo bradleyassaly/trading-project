@@ -29,6 +29,9 @@ from trading_platform.research.promotion_pipeline import PromotionPolicyConfig, 
 from trading_platform.research.registry import refresh_research_registry_bundle
 
 
+_PRESET_SET_NAME = "policy_sensitivity_v1"
+
+
 def _now_utc() -> str:
     return datetime.now(UTC).isoformat()
 
@@ -92,6 +95,80 @@ def _resolve_strategy_portfolio_policy(
 
 def _count_activation_conditions(rows: list[dict[str, Any]]) -> int:
     return sum(len(row.get("activation_conditions", []) or []) for row in rows)
+
+
+def _count_conditional_variants(rows: list[dict[str, Any]]) -> int:
+    return sum(
+        1
+        for row in rows
+        if row.get("condition_id") or row.get("condition_type") or row.get("promotion_variant") == "conditional"
+    )
+
+
+def _allocation_weight_map(rows: list[dict[str, Any]]) -> dict[str, float]:
+    return {
+        str(row.get("preset_name") or ""): float(
+            row.get("allocation_weight", row.get("target_capital_fraction", 0.0)) or 0.0
+        )
+        for row in rows
+        if row.get("preset_name")
+    }
+
+
+def _resolve_variants(
+    config: CanonicalBundleExperimentWorkflowConfig,
+) -> list[CanonicalBundleExperimentVariantConfig]:
+    if config.variants:
+        return list(config.variants)
+    if config.preset_set != _PRESET_SET_NAME:
+        raise ValueError(f"Unsupported canonical bundle experiment preset_set: {config.preset_set}")
+    return [
+        CanonicalBundleExperimentVariantConfig(name="baseline"),
+        CanonicalBundleExperimentVariantConfig(
+            name="strict_promotion",
+            promotion_policy_overrides={
+                "enable_conditional_variants": True,
+                "min_condition_sample_size": 30,
+                "min_condition_improvement": 0.1,
+                "compare_condition_to_unconditional": True,
+                "max_strategies_total": 2,
+                "max_strategies_per_group": 1,
+            },
+        ),
+        CanonicalBundleExperimentVariantConfig(
+            name="loose_promotion",
+            promotion_policy_overrides={
+                "enable_conditional_variants": True,
+                "min_condition_sample_size": 0,
+                "min_condition_improvement": 0.0,
+                "compare_condition_to_unconditional": False,
+                "max_strategies_total": 5,
+                "max_strategies_per_group": 3,
+            },
+        ),
+        CanonicalBundleExperimentVariantConfig(
+            name="alternate_weighting",
+            strategy_portfolio_policy_overrides={
+                "weighting_mode": "metric_weighted",
+                "max_strategies": 3,
+            },
+        ),
+        CanonicalBundleExperimentVariantConfig(
+            name="combined_strict_weighting",
+            promotion_policy_overrides={
+                "enable_conditional_variants": True,
+                "min_condition_sample_size": 30,
+                "min_condition_improvement": 0.1,
+                "compare_condition_to_unconditional": True,
+                "max_strategies_total": 2,
+                "max_strategies_per_group": 1,
+            },
+            strategy_portfolio_policy_overrides={
+                "weighting_mode": "score_then_cap",
+                "max_strategies": 2,
+            },
+        ),
+    ]
 
 
 def _write_daily_pipeline_config(
@@ -188,11 +265,13 @@ def run_canonical_bundle_experiment(
     baseline_bundle_payload = _safe_read_json(baseline_bundle_path)
     output_dir = Path(config.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    variants = _resolve_variants(config)
 
     rows: list[dict[str, Any]] = []
     baseline_row: dict[str, Any] | None = None
+    baseline_allocation_map: dict[str, float] | None = None
 
-    for variant in config.variants:
+    for variant in variants:
         variant_dir = output_dir / variant.name
         variant_dir.mkdir(parents=True, exist_ok=True)
 
@@ -252,18 +331,33 @@ def run_canonical_bundle_experiment(
         )
 
         selected_rows = list(strategy_portfolio_payload.get("selected_strategies", []))
+        summary = strategy_portfolio_payload.get("summary", {})
+        family_weights = summary.get("signal_family_weights", {}) or {}
+        allocation_map = _allocation_weight_map(selected_rows)
         row = {
             "variant_name": variant.name,
             "is_baseline": variant.name == config.baseline_variant_name,
             "promotion_rerun": promotion_rerun,
             "promoted_strategy_count": len(promoted_rows),
             "selected_strategy_count": len(selected_rows),
+            "conditional_variant_count": _count_conditional_variants(promoted_rows),
             "activation_condition_count": _count_activation_conditions(promoted_rows),
-            "portfolio_weighting_mode": strategy_portfolio_payload.get("summary", {}).get("weighting_mode_resolved"),
+            "portfolio_weighting_mode": summary.get("weighting_mode_resolved"),
             "portfolio_max_strategies": effective_strategy_portfolio_policy.max_strategies,
+            "signal_family_count": len(family_weights),
+            "signal_family_weight_summary": json.dumps(family_weights, sort_keys=True),
+            "selected_preset_names": json.dumps(sorted(allocation_map.keys())),
+            "total_active_weight": float(summary.get("total_active_weight", 0.0) or 0.0),
+            "max_strategy_weight": float(summary.get("max_strategy_weight", 0.0) or 0.0),
+            "max_family_weight": float(summary.get("max_family_weight", 0.0) or 0.0),
+            "effective_strategy_count": float(summary.get("effective_strategy_count", 0.0) or 0.0),
+            "effective_family_count": float(summary.get("effective_family_count", 0.0) or 0.0),
             "promotion_enable_conditional_variants": effective_promotion_policy.enable_conditional_variants,
             "promotion_min_condition_sample_size": effective_promotion_policy.min_condition_sample_size,
             "promotion_min_condition_improvement": effective_promotion_policy.min_condition_improvement,
+            "promotion_compare_condition_to_unconditional": effective_promotion_policy.compare_condition_to_unconditional,
+            "promotion_max_strategies_total": effective_promotion_policy.max_strategies_total,
+            "promotion_max_strategies_per_group": effective_promotion_policy.max_strategies_per_group,
             "paper_ready": paper_ready,
             "live_ready": live_ready,
             "promoted_dir": str(promoted_dir),
@@ -281,31 +375,81 @@ def run_canonical_bundle_experiment(
         }
         if row["is_baseline"]:
             baseline_row = row
+            baseline_allocation_map = allocation_map
         rows.append(row)
 
     if baseline_row is not None:
         for row in rows:
             row["promoted_strategy_count_delta"] = row["promoted_strategy_count"] - baseline_row["promoted_strategy_count"]
             row["selected_strategy_count_delta"] = row["selected_strategy_count"] - baseline_row["selected_strategy_count"]
+            row["conditional_variant_count_delta"] = row["conditional_variant_count"] - baseline_row["conditional_variant_count"]
             row["activation_condition_count_delta"] = (
                 row["activation_condition_count"] - baseline_row["activation_condition_count"]
+            )
+            row["max_strategy_weight_delta"] = row["max_strategy_weight"] - baseline_row["max_strategy_weight"]
+            row["effective_strategy_count_delta"] = row["effective_strategy_count"] - baseline_row["effective_strategy_count"]
+            row["signal_family_count_delta"] = row["signal_family_count"] - baseline_row["signal_family_count"]
+            current_allocation_map = json.loads(row["selected_preset_names"])
+            allocation_names = set(current_allocation_map)
+            baseline_names = set(baseline_allocation_map or {})
+            union_names = allocation_names | baseline_names
+            current_portfolio_payload = load_strategy_portfolio(Path(row["strategy_portfolio_json_path"]).parent)
+            current_map = _allocation_weight_map(list(current_portfolio_payload.get("selected_strategies", [])))
+            baseline_map = baseline_allocation_map or {}
+            row["allocation_l1_delta_vs_baseline"] = float(
+                sum(abs(current_map.get(name, 0.0) - baseline_map.get(name, 0.0)) for name in union_names)
             )
     else:
         for row in rows:
             row["promoted_strategy_count_delta"] = 0
             row["selected_strategy_count_delta"] = 0
+            row["conditional_variant_count_delta"] = 0
             row["activation_condition_count_delta"] = 0
+            row["max_strategy_weight_delta"] = 0.0
+            row["effective_strategy_count_delta"] = 0.0
+            row["signal_family_count_delta"] = 0
+            row["allocation_l1_delta_vs_baseline"] = 0.0
 
     rows_json_path = output_dir / "experiment_variant_results.json"
     rows_csv_path = output_dir / "experiment_variant_results.csv"
+    comparison_csv_path = output_dir / "experiment_policy_comparison.csv"
     summary_json_path = output_dir / "experiment_summary.json"
     _write_json(rows_json_path, {"variants": rows})
     pd.DataFrame(rows).to_csv(rows_csv_path, index=False)
+    comparison_columns = [
+        "variant_name",
+        "is_baseline",
+        "promoted_strategy_count",
+        "promoted_strategy_count_delta",
+        "conditional_variant_count",
+        "conditional_variant_count_delta",
+        "activation_condition_count",
+        "activation_condition_count_delta",
+        "signal_family_count",
+        "signal_family_count_delta",
+        "selected_strategy_count",
+        "selected_strategy_count_delta",
+        "portfolio_weighting_mode",
+        "allocation_l1_delta_vs_baseline",
+        "max_strategy_weight",
+        "max_strategy_weight_delta",
+        "effective_strategy_count",
+        "effective_strategy_count_delta",
+        "promotion_enable_conditional_variants",
+        "promotion_min_condition_sample_size",
+        "promotion_min_condition_improvement",
+        "promotion_compare_condition_to_unconditional",
+        "paper_ready",
+        "live_ready",
+        "run_bundle_path",
+    ]
+    pd.DataFrame(rows)[comparison_columns].to_csv(comparison_csv_path, index=False)
     _write_json(
         summary_json_path,
         {
             "generated_at": _now_utc(),
             "baseline_variant_name": config.baseline_variant_name,
+            "preset_set": config.preset_set,
             "baseline_bundle_path": str(baseline_bundle_path),
             "baseline_bundle_payload": baseline_bundle_payload,
             "variant_count": len(rows),
@@ -313,6 +457,7 @@ def run_canonical_bundle_experiment(
             "paths": {
                 "experiment_variant_results_json_path": str(rows_json_path),
                 "experiment_variant_results_csv_path": str(rows_csv_path),
+                "experiment_policy_comparison_csv_path": str(comparison_csv_path),
                 "experiment_summary_json_path": str(summary_json_path),
             },
         },
@@ -323,5 +468,6 @@ def run_canonical_bundle_experiment(
         "variant_rows": rows,
         "experiment_variant_results_json_path": str(rows_json_path),
         "experiment_variant_results_csv_path": str(rows_csv_path),
+        "experiment_policy_comparison_csv_path": str(comparison_csv_path),
         "experiment_summary_json_path": str(summary_json_path),
     }

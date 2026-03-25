@@ -252,6 +252,7 @@ def load_canonical_bundle_experiment_workflow_config(path: str | Path) -> Canoni
         policy_section,
         "strategy_portfolio_policy_config",
     )
+    _set_if_missing(payload, "preset_set", policy_section, "preset_set")
 
     raw_variants = payload.get("variants", [])
     payload["variants"] = [

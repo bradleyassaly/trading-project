@@ -229,18 +229,36 @@ Optional first-pass policy experiments can now start from the same hardened expo
 trading-cli strategy-portfolio experiment-bundle --config configs/canonical_bundle_experiment.yaml
 ```
 
-This harness keeps the canonical promoted/exported bundle fixed and varies only small policy-layer inputs such as:
+The built-in `policy_sensitivity_v1` preset set keeps the canonical promoted/exported bundle fixed and compares:
 
-- promotion policy conditional-variant thresholds
-- strategy-portfolio weighting mode
-- strategy-portfolio selection limits
+- `baseline`
+- `strict_promotion`
+- `loose_promotion`
+- `alternate_weighting`
+- `combined_strict_weighting`
+
+These vary only:
+
+- promotion policy conditional-variant thresholds and selection caps
+- strategy-portfolio weighting mode and selection limits
 
 It writes variant-isolated outputs plus compact comparison artifacts such as:
 
 - `experiment_summary.json`
 - `experiment_variant_results.csv`
 - `experiment_variant_results.json`
+- `experiment_policy_comparison.csv`
 - per-variant `strategy_portfolio/`, `run_bundle/`, and `daily_pipeline_config.json`
+
+The quickest fields to compare are:
+
+- promoted strategy count
+- conditional variant count
+- selected strategy count
+- signal family count
+- allocation concentration (`max_strategy_weight`, `effective_strategy_count`)
+- allocation change vs baseline (`allocation_l1_delta_vs_baseline`)
+- paper/live readiness
 
 ### 5. Run paper trading
 

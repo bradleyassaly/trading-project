@@ -115,19 +115,8 @@ baseline:
 paths:
   output_dir: {output_dir.as_posix()}
 baseline_variant_name: baseline
-variants:
-  - name: baseline
-  - name: conditional_variants
-    promotion_policy_overrides:
-      enable_conditional_variants: true
-      min_condition_sample_size: 0
-      min_condition_improvement: 0.0
-      max_strategies_total: 3
-      max_strategies_per_group: 3
-  - name: metric_weighted
-    strategy_portfolio_policy_overrides:
-      weighting_mode: metric_weighted
-      max_strategies: 3
+policy_inputs:
+  preset_set: policy_sensitivity_v1
 """.strip(),
         encoding="utf-8",
     )
@@ -747,28 +736,44 @@ def test_canonical_bundle_experiment_harness_reuses_exported_bundle(
     summary_path = experiment_output_dir / "experiment_summary.json"
     results_json_path = experiment_output_dir / "experiment_variant_results.json"
     results_csv_path = experiment_output_dir / "experiment_variant_results.csv"
+    comparison_csv_path = experiment_output_dir / "experiment_policy_comparison.csv"
     assert summary_path.exists()
     assert results_json_path.exists()
     assert results_csv_path.exists()
+    assert comparison_csv_path.exists()
 
     summary_payload = json.loads(summary_path.read_text(encoding="utf-8"))
     result_rows = summary_payload["variants"]
     assert summary_payload["baseline_variant_name"] == "baseline"
+    assert summary_payload["preset_set"] == "policy_sensitivity_v1"
     assert {row["variant_name"] for row in result_rows} == {
         "baseline",
-        "conditional_variants",
-        "metric_weighted",
+        "strict_promotion",
+        "loose_promotion",
+        "alternate_weighting",
+        "combined_strict_weighting",
     }
 
     baseline_row = next(row for row in result_rows if row["variant_name"] == "baseline")
-    conditional_row = next(row for row in result_rows if row["variant_name"] == "conditional_variants")
-    metric_row = next(row for row in result_rows if row["variant_name"] == "metric_weighted")
+    strict_row = next(row for row in result_rows if row["variant_name"] == "strict_promotion")
+    loose_row = next(row for row in result_rows if row["variant_name"] == "loose_promotion")
+    metric_row = next(row for row in result_rows if row["variant_name"] == "alternate_weighting")
+    combined_row = next(row for row in result_rows if row["variant_name"] == "combined_strict_weighting")
 
     assert baseline_row["is_baseline"] is True
-    assert conditional_row["promotion_rerun"] is True
+    assert strict_row["promotion_rerun"] is True
+    assert loose_row["promotion_rerun"] is True
     assert metric_row["portfolio_weighting_mode"] == "metric_weighted"
+    assert combined_row["portfolio_weighting_mode"] == "score_then_cap"
     assert metric_row["paper_ready"] is True
     assert metric_row["live_ready"] is True
+    assert "conditional_variant_count" in strict_row
+    assert "max_strategy_weight" in metric_row
+    assert "effective_strategy_count" in metric_row
+    assert "signal_family_count" in metric_row
+    assert "allocation_l1_delta_vs_baseline" in metric_row
+    assert "promotion_compare_condition_to_unconditional" in strict_row
+    assert "experiment_policy_comparison_csv_path" in summary_payload["paths"]
 
     for row in result_rows:
         assert Path(row["strategy_portfolio_json_path"]).exists()
@@ -778,3 +783,17 @@ def test_canonical_bundle_experiment_harness_reuses_exported_bundle(
         assert Path(row["run_bundle_path"]).exists()
         assert Path(row["effective_strategy_portfolio_policy_path"]).exists()
         assert Path(row["effective_promotion_policy_path"]).exists()
+
+    comparison_df = pd.read_csv(comparison_csv_path)
+    assert set(comparison_df["variant_name"]) == {
+        "baseline",
+        "strict_promotion",
+        "loose_promotion",
+        "alternate_weighting",
+        "combined_strict_weighting",
+    }
+    assert "paper_ready" in comparison_df.columns
+    assert "live_ready" in comparison_df.columns
+    assert "conditional_variant_count" in comparison_df.columns
+    assert "allocation_l1_delta_vs_baseline" in comparison_df.columns
+    assert "max_strategy_weight_delta" in comparison_df.columns

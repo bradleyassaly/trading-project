@@ -172,18 +172,9 @@ baseline:
 paths:
   output_dir: artifacts/portfolio_experiments/canonical_bundle
 policy_inputs:
+  preset_set: policy_sensitivity_v1
   strategy_portfolio_policy_config: configs/strategy_portfolio.yaml
 baseline_variant_name: baseline
-variants:
-  - name: baseline
-  - name: metric_weighted
-    strategy_portfolio_policy_overrides:
-      weighting_mode: metric_weighted
-      max_strategies: 3
-  - name: conditional_variants
-    promotion_policy_overrides:
-      enable_conditional_variants: true
-      min_condition_sample_size: 0
 """.strip(),
         encoding="utf-8",
     )
@@ -194,13 +185,10 @@ variants:
     assert config.promoted_dir == "artifacts/promoted_strategies"
     assert config.artifacts_root == "artifacts/alpha_research"
     assert config.output_dir == "artifacts/portfolio_experiments/canonical_bundle"
+    assert config.preset_set == "policy_sensitivity_v1"
     assert config.base_strategy_portfolio_policy_config == "configs/strategy_portfolio.yaml"
     assert config.baseline_variant_name == "baseline"
-    assert [variant.name for variant in config.variants] == [
-        "baseline",
-        "metric_weighted",
-        "conditional_variants",
-    ]
+    assert config.variants == []
 
 
 def test_load_walkforward_workflow_config_from_yaml(tmp_path) -> None:

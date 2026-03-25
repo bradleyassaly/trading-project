@@ -302,6 +302,7 @@ class CanonicalBundleExperimentWorkflowConfig:
     base_promotion_policy_config: str | None = None
     base_strategy_portfolio_policy_config: str | None = None
     baseline_variant_name: str = "baseline"
+    preset_set: str | None = None
     variants: list[CanonicalBundleExperimentVariantConfig] = field(default_factory=list)
 
     def __post_init__(self) -> None:
@@ -312,8 +313,12 @@ class CanonicalBundleExperimentWorkflowConfig:
         if not str(self.output_dir or "").strip():
             raise ValueError("output_dir is required")
         variant_names = [variant.name for variant in self.variants]
+        if not variant_names and not self.preset_set:
+            raise ValueError("at least one experiment variant or preset_set is required")
         if not variant_names:
-            raise ValueError("at least one experiment variant is required")
+            if self.preset_set and self.baseline_variant_name != "baseline":
+                raise ValueError("baseline_variant_name must be `baseline` when using preset_set variants")
+            return
         if len(set(variant_names)) != len(variant_names):
             raise ValueError("experiment variant names must be unique")
         if self.baseline_variant_name not in set(variant_names):

@@ -11,6 +11,7 @@ def cmd_strategy_portfolio_experiment_bundle(args) -> None:
     print(f"Experiment output dir: {result['output_dir']}")
     print(f"Experiment summary JSON: {result['experiment_summary_json_path']}")
     print(f"Experiment results CSV: {result['experiment_variant_results_csv_path']}")
+    print(f"Policy comparison CSV: {result['experiment_policy_comparison_csv_path']}")
     for row in result["variant_rows"]:
         print(
             f"- {row['variant_name']}: promoted={row['promoted_strategy_count']} "
