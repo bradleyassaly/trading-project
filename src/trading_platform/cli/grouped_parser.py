@@ -397,6 +397,7 @@ def _add_alpha_research_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--universe", type=str, default=None, help="Named universe to evaluate instead of passing --symbols.")
     parser.add_argument("--feature-dir", type=str, default="data/features", help="Directory containing per-symbol feature parquet files.")
     parser.add_argument("--signal-family", type=str, default="momentum", choices=list(SUPPORTED_SIGNAL_FAMILIES), help="Signal family to evaluate.")
+    parser.add_argument("--signal-families", nargs="+", default=None, choices=list(SUPPORTED_SIGNAL_FAMILIES), help="Optional list of signal families to evaluate sequentially within one run.")
     parser.add_argument("--candidate-grid-preset", type=str, default="standard", choices=["standard", "broad_v1"], help="Structured candidate-variant preset applied within the selected signal family.")
     parser.add_argument("--signal-composition-preset", type=str, default="standard", choices=["standard", "composite_v1", "research_rich_v1"], help="Bounded multi-factor composition preset used to upgrade raw features into compact auditable composites.")
     parser.add_argument("--max-variants-per-family", type=int, default=None, help="Optional cap on the number of generated variants retained from the selected candidate-grid preset.")

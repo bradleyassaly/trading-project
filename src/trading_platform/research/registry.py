@@ -255,6 +255,13 @@ def _sorted_unique_strings(values: list[Any]) -> list[str]:
     return sorted(cleaned)
 
 
+def _manifest_signal_families(manifest: dict[str, Any]) -> list[str]:
+    families = manifest.get("signal_families")
+    if isinstance(families, list):
+        return _sorted_unique_strings(families)
+    return _sorted_unique_strings([manifest.get("signal_family")])
+
+
 def _normalize_paths(paths: dict[str, Any]) -> dict[str, str]:
     normalized: dict[str, str] = {}
     for key, value in sorted(paths.items()):
@@ -360,6 +367,7 @@ def build_research_run_manifest(
     command: str | None,
     feature_dir: str | Path | None,
     signal_family: str | None,
+    signal_families: list[str] | None = None,
     universe: str | None,
     symbols_requested: list[str] | None,
     lookbacks: list[int] | None,
@@ -408,6 +416,7 @@ def build_research_run_manifest(
         "symbols_requested": sorted(symbols_requested or []),
         "symbols_requested_count": len(symbols_requested or []),
         "signal_family": signal_family,
+        "signal_families": sorted(signal_families or ([signal_family] if signal_family else [])),
         "candidate_count": int(len(leaderboard_df.index)),
         "promoted_signal_count": int(len(promoted_signals_df.index)),
         "folds_tested": int(fold_results_df["fold_id"].nunique()) if not fold_results_df.empty and "fold_id" in fold_results_df.columns else 0,
@@ -480,6 +489,7 @@ def write_research_run_manifest(
     command: str | None,
     feature_dir: str | Path | None,
     signal_family: str | None,
+    signal_families: list[str] | None = None,
     universe: str | None,
     symbols_requested: list[str] | None,
     lookbacks: list[int] | None,
@@ -501,6 +511,7 @@ def write_research_run_manifest(
         command=command,
         feature_dir=feature_dir,
         signal_family=signal_family,
+        signal_families=signal_families,
         universe=universe,
         symbols_requested=symbols_requested,
         lookbacks=lookbacks,
@@ -568,7 +579,13 @@ def build_research_registry(
         "generated_at": _now_utc(),
         "artifacts_root": str(Path(artifacts_root)),
         "run_count": len(manifests),
-        "signal_families": _sorted_unique_strings([manifest.get("signal_family") for manifest in manifests]),
+        "signal_families": _sorted_unique_strings(
+            [
+                family
+                for manifest in manifests
+                for family in _manifest_signal_families(manifest)
+            ]
+        ),
         "universes": _sorted_unique_strings([manifest.get("universe") for manifest in manifests]),
         "workflow_types": _sorted_unique_strings([manifest.get("workflow_type") for manifest in manifests]),
     }

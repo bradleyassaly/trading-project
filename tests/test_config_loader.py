@@ -336,6 +336,29 @@ signals:
     assert config.fundamentals_daily_features_path == "data/fundamentals/daily_fundamental_features.parquet"
 
 
+def test_load_alpha_research_workflow_config_with_multiple_signal_families(tmp_path) -> None:
+    path = tmp_path / "alpha_research_multi_family.yaml"
+    path.write_text(
+        """
+paths:
+  feature_path: data/features
+  output_dir: artifacts/alpha_research/multi_family
+selection:
+  universe: nasdaq100
+signals:
+  families: [momentum, fundamental_value, fundamental_quality]
+  lookbacks: [5]
+  horizons: [1]
+""".strip(),
+        encoding="utf-8",
+    )
+
+    config = load_alpha_research_workflow_config(path)
+
+    assert config.signal_families == ["momentum", "fundamental_value", "fundamental_quality"]
+    assert config.signal_family == "momentum"
+
+
 def test_load_alpha_cycle_workflow_config(tmp_path) -> None:
     path = tmp_path / "alpha_cycle.yaml"
     path.write_text(

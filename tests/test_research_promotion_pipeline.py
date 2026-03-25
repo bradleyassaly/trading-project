@@ -236,6 +236,74 @@ def test_promotion_min_families_if_available_preserves_family_diversity(tmp_path
     assert families == {"momentum", "value"}
 
 
+def test_promotion_candidates_built_from_multi_family_manifest_preserve_registry_family_summary(tmp_path: Path) -> None:
+    manifest_path = _write_research_run(
+        tmp_path,
+        run_name="run_multi_family",
+        signal_family="multi_family",
+        universe="nasdaq100",
+        mean_spearman_ic=0.04,
+        portfolio_sharpe=1.2,
+        promoted_signal_count=2,
+    )
+    leaderboard_path = tmp_path / "run_multi_family" / "leaderboard.csv"
+    pd.DataFrame(
+        [
+            {
+                "candidate_id": "momentum_candidate",
+                "candidate_name": "momentum_candidate",
+                "signal_family": "momentum",
+                "signal_variant": "baseline",
+                "lookback": 20,
+                "horizon": 5,
+                "mean_spearman_ic": 0.04,
+                "mean_hit_rate": 0.55,
+                "mean_turnover": 0.12,
+                "promotion_status": "promote",
+                "rejection_reason": "",
+            },
+            {
+                "candidate_id": "fundamental_value_candidate",
+                "candidate_name": "fundamental_value_candidate",
+                "signal_family": "fundamental_value",
+                "signal_variant": "baseline",
+                "lookback": 20,
+                "horizon": 5,
+                "mean_spearman_ic": 0.035,
+                "mean_hit_rate": 0.54,
+                "mean_turnover": 0.08,
+                "promotion_status": "promote",
+                "rejection_reason": "",
+            },
+        ]
+    ).to_csv(leaderboard_path, index=False)
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    payload["signal_families"] = ["momentum", "fundamental_value"]
+    manifest_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+    registry_dir = tmp_path / "research_registry"
+    registry_result = build_research_registry(artifacts_root=tmp_path, output_dir=registry_dir)
+    candidate_result = build_promotion_candidates(artifacts_root=tmp_path, output_dir=registry_dir)
+    registry_payload = json.loads(Path(registry_result["registry_json_path"]).read_text(encoding="utf-8"))
+
+    result = apply_research_promotions(
+        artifacts_root=tmp_path,
+        registry_dir=registry_dir,
+        output_dir=tmp_path / "generated_strategies",
+        policy=PromotionPolicyConfig(
+            max_strategies_total=2,
+            max_strategies_per_group=2,
+            max_strategies_per_family=1,
+            min_families_if_available=2,
+        ),
+    )
+
+    assert registry_payload["summary"]["signal_families"] == ["fundamental_value", "momentum"]
+    assert candidate_result["eligible_count"] == 1
+    assert result["selected_count"] == 1
+    assert result["promoted_rows"][0]["signal_family"] == "multi_family"
+
+
 def test_promotion_can_emit_conditional_variant_alongside_unconditional_baseline(tmp_path: Path) -> None:
     manifest_path = _write_research_run(
         tmp_path,

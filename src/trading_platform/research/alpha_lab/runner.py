@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 
 import numpy as np
@@ -66,6 +67,10 @@ from trading_platform.research.alpha_lab.signals import (
     build_candidate_name,
     build_signal,
 )
+
+
+def _now_utc() -> str:
+    return datetime.now(UTC).isoformat()
 
 
 def _centered_cross_sectional_rank(panel: pd.DataFrame) -> pd.DataFrame:
@@ -164,6 +169,8 @@ def _build_fundamental_feature_ic_summary(
             for column in df.columns
             if column.startswith("fundamental_")
             or column.startswith("sector_neutral_")
+            or column.endswith("_rank_pct")
+            or column.endswith("_zscore")
             or column in {
                 "earnings_yield",
                 "book_to_market",
@@ -578,6 +585,7 @@ def run_alpha_research(
     universe: str | None,
     feature_dir: Path,
     signal_family: str,
+    signal_families: list[str] | None = None,
     lookbacks: list[int],
     horizons: list[int],
     min_rows: int,
@@ -631,6 +639,16 @@ def run_alpha_research(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     resolved_symbols = _resolve_symbols(symbols, universe)
+    normalized_signal_families = list(
+        dict.fromkeys(
+            str(value).strip()
+            for value in (signal_families or [signal_family])
+            if str(value).strip()
+        )
+    )
+    if not normalized_signal_families:
+        raise ValueError("at least one signal family must be provided")
+    primary_signal_family = normalized_signal_families[0]
     symbol_data: dict[str, pd.DataFrame] = {}
 
     for symbol in resolved_symbols:
@@ -662,7 +680,7 @@ def run_alpha_research(
         or bool(enable_relative_features)
         or bool(enable_flow_confirmations)
     )
-    if equity_context_enabled or _signal_family_requires_equity_context(signal_family) or requires_rich_signal_context:
+    if equity_context_enabled or any(_signal_family_requires_equity_context(family) for family in normalized_signal_families) or requires_rich_signal_context:
         symbol_data = _add_equity_context_features(
             symbol_data,
             lookbacks=lookbacks,
@@ -688,13 +706,17 @@ def run_alpha_research(
         min_train_size=min_train_size,
     )
 
-    candidate_specs = build_candidate_grid(
-        signal_family=signal_family,
-        lookbacks=lookbacks,
-        horizons=horizons,
-        candidate_grid_preset=candidate_grid_preset,
-        max_variants_per_family=max_variants_per_family,
-    )
+    candidate_specs: list = []
+    for current_signal_family in normalized_signal_families:
+        candidate_specs.extend(
+            build_candidate_grid(
+                signal_family=current_signal_family,
+                lookbacks=lookbacks,
+                horizons=horizons,
+                candidate_grid_preset=candidate_grid_preset,
+                max_variants_per_family=max_variants_per_family,
+            )
+        )
 
     signal_cache: dict[tuple[str, str], pd.Series] = {}
     detailed_rows: list[dict] = []
@@ -1426,6 +1448,10 @@ def run_alpha_research(
     leaderboard_path_csv = output_dir / "leaderboard.csv"
     detailed_path_parquet = output_dir / "fold_results.parquet"
     leaderboard_path_parquet = output_dir / "leaderboard.parquet"
+    research_registry_path_csv = output_dir / "research_registry.csv"
+    research_registry_path_json = output_dir / "research_registry.json"
+    promotion_candidates_path_csv = output_dir / "promotion_candidates.csv"
+    promotion_candidates_path_json = output_dir / "promotion_candidates.json"
     promoted_signals_path_csv = output_dir / "promoted_signals.csv"
     promoted_signals_path_parquet = output_dir / "promoted_signals.parquet"
     signal_family_summary_path_csv = output_dir / "signal_family_summary.csv"
@@ -1489,7 +1515,9 @@ def run_alpha_research(
 
     detailed_df.to_csv(detailed_path_csv, index=False)
     leaderboard_df.to_csv(leaderboard_path_csv, index=False)
+    leaderboard_df.to_csv(research_registry_path_csv, index=False)
     promoted_signals_df.to_csv(promoted_signals_path_csv, index=False)
+    promoted_signals_df.to_csv(promotion_candidates_path_csv, index=False)
     signal_family_summary_df.to_csv(signal_family_summary_path_csv, index=False)
     fundamental_feature_ic_summary_df.to_csv(fundamental_feature_ic_summary_path_csv, index=False)
     redundancy_df.to_csv(redundancy_report_path_csv, index=False)
@@ -1570,14 +1598,19 @@ def run_alpha_research(
 
     diagnostics = {
         "symbols_requested": resolved_symbols,
-        "signal_family": signal_family,
-        "signal_family_requires_equity_context": _signal_family_requires_equity_context(signal_family),
+        "signal_family": primary_signal_family,
+        "signal_families": normalized_signal_families,
+        "signal_family_requires_equity_context": any(_signal_family_requires_equity_context(family) for family in normalized_signal_families),
         "lookbacks": lookbacks,
         "horizons": horizons,
         "candidate_grid_preset": candidate_grid_preset,
         "signal_composition_preset": signal_composition_preset,
         "max_variants_per_family": max_variants_per_family,
         "generated_candidate_count": len(candidate_specs),
+        "generated_candidate_count_by_family": {
+            family: int(sum(1 for spec in candidate_specs if spec.signal_family == family))
+            for family in normalized_signal_families
+        },
         "generated_signal_variants": sorted({spec.signal_variant for spec in candidate_specs}),
         "signal_composition": {
             "preset": signal_composition_preset,
@@ -1620,6 +1653,8 @@ def run_alpha_research(
     approved_model_state_paths = write_approved_model_state(artifact_dir=output_dir)
     result_paths = {
         "leaderboard_path": str(leaderboard_path_csv),
+        "research_registry_path": str(research_registry_path_csv),
+        "promotion_candidates_path": str(promotion_candidates_path_csv),
         "fold_results_path": str(detailed_path_csv),
         "promoted_signals_path": str(promoted_signals_path_csv),
         "signal_family_summary_path": str(signal_family_summary_path_csv),
@@ -1661,7 +1696,8 @@ def run_alpha_research(
         workflow_type="alpha_research",
         command="service:run_alpha_research",
         feature_dir=feature_dir,
-        signal_family=signal_family,
+        signal_family=primary_signal_family if len(normalized_signal_families) == 1 else "multi_family",
+        signal_families=normalized_signal_families,
         universe=universe,
         symbols_requested=resolved_symbols,
         lookbacks=lookbacks,
@@ -1675,4 +1711,30 @@ def run_alpha_research(
     )
     result_paths["research_manifest_path"] = str(manifest_path)
 
+    research_registry_path_json.write_text(
+        json.dumps(
+            {
+                "generated_at": _now_utc(),
+                "signal_families": normalized_signal_families,
+                "row_count": int(len(leaderboard_df)),
+                "rows": leaderboard_df.to_dict(orient="records"),
+            },
+            indent=2,
+            default=str,
+        ),
+        encoding="utf-8",
+    )
     return result_paths
+    promotion_candidates_path_json.write_text(
+        json.dumps(
+            {
+                "generated_at": _now_utc(),
+                "signal_families": normalized_signal_families,
+                "row_count": int(len(promoted_signals_df)),
+                "rows": promoted_signals_df.to_dict(orient="records"),
+            },
+            indent=2,
+            default=str,
+        ),
+        encoding="utf-8",
+    )

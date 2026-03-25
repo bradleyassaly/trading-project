@@ -134,6 +134,7 @@ def _research_kwargs(
         "universe": None,
         "feature_dir": feature_dir,
         "signal_family": config.signal_family,
+        "signal_families": list(config.signal_families or [config.signal_family]),
         "lookbacks": config.lookbacks,
         "horizons": config.horizons,
         "min_rows": config.min_rows,

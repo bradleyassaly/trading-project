@@ -259,6 +259,13 @@ Alpha research also supports structured candidate-depth expansion inside a singl
 - `signals.enable_relative_features: true | false`
 - `signals.enable_flow_confirmations: true | false`
 
+Alpha research can also evaluate multiple families inside one run:
+
+- `signals.family: momentum`
+- `signals.families: [momentum, fundamental_value, fundamental_quality]`
+
+If both are present, `families` is treated as the authoritative list and `family` remains a backward-compatible single-family alias for older configs and CLI usage.
+
 `broad_v1` keeps the family fixed and emits a finite set of auditable variants with stable IDs such as:
 
 - `cross_sectional_momentum_breadth_confirmed_lb20_hz5`
@@ -271,6 +278,15 @@ The resulting artifacts preserve:
 - `signal_variant`
 - `candidate_id`
 - `candidate_name`
+
+When `signals.families` is used, one run now emits a single combined candidate universe and writes unified:
+
+- `leaderboard.csv`
+- `research_registry.csv`
+- `promotion_candidates.csv`
+- `signal_family_summary.csv`
+
+All candidate rows still preserve `signal_family` so downstream grouping and diversification logic can operate on the merged run output.
 
 Alpha research can now also opt into point-in-time daily fundamentals:
 

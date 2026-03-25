@@ -19,6 +19,7 @@ class AlphaResearchRequest:
     feature_dir: Path
     output_dir: Path
     signal_family: str
+    signal_families: list[str]
     candidate_grid_preset: str
     signal_composition_preset: str
     max_variants_per_family: int | None
@@ -80,6 +81,7 @@ def _build_alpha_research_request(args) -> AlphaResearchRequest:
         feature_dir=Path(args.feature_dir),
         output_dir=output_dir,
         signal_family=args.signal_family,
+        signal_families=list(getattr(args, "signal_families", None) or [args.signal_family]),
         candidate_grid_preset=getattr(args, "candidate_grid_preset", "standard"),
         signal_composition_preset=getattr(args, "signal_composition_preset", "standard"),
         max_variants_per_family=getattr(args, "max_variants_per_family", None),
@@ -146,6 +148,7 @@ def cmd_alpha_research(args) -> None:
         universe=None,
         feature_dir=request.feature_dir,
         signal_family=request.signal_family,
+        signal_families=request.signal_families,
         lookbacks=request.lookbacks,
         horizons=request.horizons,
         min_rows=request.min_rows,

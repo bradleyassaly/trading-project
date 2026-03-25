@@ -1562,6 +1562,97 @@ def test_run_alpha_research_writes_leaderboard_and_fold_results(tmp_path: Path) 
     assert fold_results_df["symbols_evaluated"].max() == pytest.approx(2.0)
 
 
+def test_run_alpha_research_supports_multiple_signal_families_in_one_run(tmp_path: Path) -> None:
+    feature_dir = tmp_path / "features"
+    output_dir = tmp_path / "alpha_outputs"
+    fundamentals_path = tmp_path / "daily_fundamental_features.parquet"
+    feature_dir.mkdir(parents=True, exist_ok=True)
+
+    timestamps = pd.date_range("2024-01-01", periods=120, freq="D")
+    for symbol, drift in {"AAPL": 0.004, "MSFT": 0.002, "NVDA": 0.006}.items():
+        closes = [100.0]
+        for _ in range(len(timestamps) - 1):
+            closes.append(closes[-1] * (1.0 + drift))
+        pd.DataFrame(
+            {
+                "timestamp": timestamps,
+                "symbol": [symbol] * len(timestamps),
+                "close": closes,
+                "volume": [1_000_000 + idx * 5_000 for idx in range(len(timestamps))],
+            }
+        ).to_parquet(feature_dir / f"{symbol}.parquet", index=False)
+
+    fundamentals_frames: list[pd.DataFrame] = []
+    for symbol, raw_value, rank_pct, zscore in (
+        ("AAPL", 0.08, 2.0 / 3.0, 0.0),
+        ("MSFT", 0.04, 1.0 / 3.0, -1.0),
+        ("NVDA", 0.12, 1.0, 1.0),
+    ):
+        fundamentals_frames.append(
+            pd.DataFrame(
+                {
+                    "timestamp": timestamps,
+                    "symbol": [symbol] * len(timestamps),
+                    "sector": ["Technology"] * len(timestamps),
+                    "industry": ["Software"] * len(timestamps),
+                    "earnings_yield": [raw_value] * len(timestamps),
+                    "book_to_market": [raw_value * 0.8] * len(timestamps),
+                    "sales_to_price": [raw_value * 0.6] * len(timestamps),
+                    "free_cash_flow_yield": [raw_value * 0.7] * len(timestamps),
+                    "fundamental_value_score": [raw_value] * len(timestamps),
+                    "sector_neutral_value_score": [zscore] * len(timestamps),
+                    "earnings_yield_rank_pct": [rank_pct] * len(timestamps),
+                    "earnings_yield_zscore": [zscore] * len(timestamps),
+                    "book_to_market_rank_pct": [rank_pct] * len(timestamps),
+                    "book_to_market_zscore": [zscore] * len(timestamps),
+                    "sales_to_price_rank_pct": [rank_pct] * len(timestamps),
+                    "sales_to_price_zscore": [zscore] * len(timestamps),
+                    "free_cash_flow_yield_rank_pct": [rank_pct] * len(timestamps),
+                    "free_cash_flow_yield_zscore": [zscore] * len(timestamps),
+                    "fundamental_value_score_rank_pct": [rank_pct] * len(timestamps),
+                    "fundamental_value_score_zscore": [zscore] * len(timestamps),
+                    "sector_neutral_value_score_rank_pct": [rank_pct] * len(timestamps),
+                    "sector_neutral_value_score_zscore": [zscore] * len(timestamps),
+                    "days_since_available": list(range(len(timestamps))),
+                }
+            )
+        )
+    pd.concat(fundamentals_frames, ignore_index=True).to_parquet(fundamentals_path, index=False)
+
+    result = run_alpha_research(
+        symbols=["AAPL", "MSFT", "NVDA"],
+        universe=None,
+        feature_dir=feature_dir,
+        signal_family="momentum",
+        signal_families=["momentum", "fundamental_value"],
+        lookbacks=[5],
+        horizons=[1],
+        min_rows=30,
+        top_quantile=0.34,
+        bottom_quantile=0.34,
+        output_dir=output_dir,
+        train_size=40,
+        test_size=20,
+        step_size=20,
+        fundamentals_enabled=True,
+        fundamentals_daily_features_path=fundamentals_path,
+    )
+
+    leaderboard_df = pd.read_csv(result["leaderboard_path"])
+    signal_family_summary_df = pd.read_csv(result["signal_family_summary_path"])
+    research_registry_df = pd.read_csv(result["research_registry_path"])
+    promotion_candidates_df = pd.read_csv(result["promotion_candidates_path"])
+    diagnostics = json.loads(Path(result["signal_diagnostics_path"]).read_text(encoding="utf-8"))
+
+    assert set(leaderboard_df["signal_family"]) == {"momentum", "fundamental_value"}
+    assert set(signal_family_summary_df["signal_family"]) == {"fundamental_value", "momentum"}
+    assert set(research_registry_df["signal_family"]) == {"momentum", "fundamental_value"}
+    assert set(promotion_candidates_df.columns) >= {"candidate_id", "signal_family", "promotion_status"}
+    assert diagnostics["signal_families"] == ["momentum", "fundamental_value"]
+    assert diagnostics["generated_candidate_count_by_family"]["momentum"] > 0
+    assert diagnostics["generated_candidate_count_by_family"]["fundamental_value"] > 0
+
+
 def test_run_alpha_research_broad_candidate_grid_emits_variant_identity(tmp_path: Path) -> None:
     feature_dir = tmp_path / "features"
     output_dir = tmp_path / "alpha_outputs"

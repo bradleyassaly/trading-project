@@ -41,6 +41,23 @@ def test_grouped_research_alpha_command_parses() -> None:
     assert args.max_variants_per_family == 4
 
 
+def test_grouped_research_alpha_command_parses_signal_families() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "research",
+            "alpha",
+            "--symbols",
+            "AAPL",
+            "--signal-families",
+            "momentum",
+            "fundamental_value",
+        ]
+    )
+
+    assert args.signal_families == ["momentum", "fundamental_value"]
+
+
 def test_grouped_research_alpha_command_parses_config() -> None:
     parser = build_parser()
     args = parser.parse_args(

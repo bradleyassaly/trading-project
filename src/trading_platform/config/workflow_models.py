@@ -293,7 +293,8 @@ class AlphaResearchWorkflowConfig:
     symbols: list[str] | None = None
     universe: str | None = None
     feature_dir: str = "data/features"
-    signal_family: str = "momentum"
+    signal_family: str | None = "momentum"
+    signal_families: list[str] | None = None
     candidate_grid_preset: str = "standard"
     signal_composition_preset: str = "standard"
     max_variants_per_family: int | None = None
@@ -348,6 +349,11 @@ class AlphaResearchWorkflowConfig:
         selected = sum(bool(value) for value in (self.symbols, self.universe))
         if selected != 1:
             raise ValueError("exactly one of symbols or universe must be provided")
+        normalized_families = list(dict.fromkeys(str(value).strip() for value in (self.signal_families or ([self.signal_family] if self.signal_family else [])) if str(value).strip()))
+        if not normalized_families:
+            raise ValueError("at least one signal family must be provided")
+        object.__setattr__(self, "signal_families", normalized_families)
+        object.__setattr__(self, "signal_family", normalized_families[0])
         if self.candidate_grid_preset not in {"standard", "broad_v1"}:
             raise ValueError("candidate_grid_preset must be one of: standard, broad_v1")
         if self.signal_composition_preset not in {"standard", "composite_v1", "research_rich_v1"}:
