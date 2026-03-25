@@ -1453,9 +1453,27 @@ Supported condition types in the current first pass:
 - `regime`
   driven from existing `signal_performance_by_regime.csv` alpha-research artifacts
 - `sub_universe`
-  consumed when a run writes `signal_performance_by_sub_universe.csv`
+  now emitted directly by the alpha-research runner as `signal_performance_by_sub_universe.csv`
 - `benchmark_context`
-  consumed when a run writes `signal_performance_by_benchmark_context.csv`
+  now emitted directly by the alpha-research runner as `signal_performance_by_benchmark_context.csv`
+
+Alpha-research condition-slice artifacts:
+
+- `signal_performance_by_regime.csv`
+  regime-sliced signal performance using the existing regime labels
+- `signal_performance_by_sub_universe.csv`
+  signal performance by `sub_universe_id` when the research feature panels carry explicit sub-universe membership columns such as `sub_universe_id`, `sub_universe`, `sub_universe_label`, or boolean `sub_universe_*` flags
+- `signal_performance_by_benchmark_context.csv`
+  signal performance by benchmark-relative context label; the runner prefers explicit `benchmark_context_label` or `benchmark_context` columns and otherwise derives labels from the existing equity-context features `market_return_<lookback>`, `relative_return_<lookback>`, and `breadth_impulse_<lookback>`
+
+Generation and fallback rules:
+
+- unconditional research still runs exactly as before
+- the alpha runner emits the new sub-universe and benchmark-context artifacts on every run so downstream conditional research sees stable paths
+- when sub-universe metadata is missing, `signal_performance_by_sub_universe.csv` is written with the expected columns but no rows
+- when benchmark context is unavailable and equity-context features are not present, `signal_performance_by_benchmark_context.csv` is written with the expected columns but no rows
+- derived benchmark-context labels are explicit and auditable rather than inferred later by the promotion layer
+- `research_run.json` and the run manifest include artifact-path references for the new slice outputs so conditional research and promotion can discover them automatically
 
 Condition handling rules:
 

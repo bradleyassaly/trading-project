@@ -1176,6 +1176,8 @@ def test_run_alpha_research_writes_leaderboard_and_fold_results(tmp_path: Path) 
     signal_lifecycle_report_path = Path(result["signal_lifecycle_report_path"])
     regime_labels_by_date_path = Path(result["regime_labels_by_date_path"])
     signal_performance_by_regime_path = Path(result["signal_performance_by_regime_path"])
+    signal_performance_by_sub_universe_path = Path(result["signal_performance_by_sub_universe_path"])
+    signal_performance_by_benchmark_context_path = Path(result["signal_performance_by_benchmark_context_path"])
     regime_aware_signal_weights_path = Path(result["regime_aware_signal_weights_path"])
     regime_selection_report_path = Path(result["regime_selection_report_path"])
     composite_diagnostics_path = Path(result["composite_diagnostics_path"])
@@ -1203,6 +1205,8 @@ def test_run_alpha_research_writes_leaderboard_and_fold_results(tmp_path: Path) 
     assert signal_lifecycle_report_path.exists()
     assert regime_labels_by_date_path.exists()
     assert signal_performance_by_regime_path.exists()
+    assert signal_performance_by_sub_universe_path.exists()
+    assert signal_performance_by_benchmark_context_path.exists()
     assert regime_aware_signal_weights_path.exists()
     assert regime_selection_report_path.exists()
     assert composite_diagnostics_path.exists()
@@ -1229,6 +1233,8 @@ def test_run_alpha_research_writes_leaderboard_and_fold_results(tmp_path: Path) 
     assert (output_dir / "signal_lifecycle_report.parquet").exists()
     assert (output_dir / "regime_labels_by_date.parquet").exists()
     assert (output_dir / "signal_performance_by_regime.parquet").exists()
+    assert (output_dir / "signal_performance_by_sub_universe.parquet").exists()
+    assert (output_dir / "signal_performance_by_benchmark_context.parquet").exists()
     assert (output_dir / "regime_aware_signal_weights.parquet").exists()
     assert (output_dir / "regime_selection_report.parquet").exists()
     assert (output_dir / "composite_diagnostics.json").exists()
@@ -1256,6 +1262,8 @@ def test_run_alpha_research_writes_leaderboard_and_fold_results(tmp_path: Path) 
     signal_lifecycle_report_df = pd.read_csv(signal_lifecycle_report_path)
     regime_labels_by_date_df = pd.read_csv(regime_labels_by_date_path)
     signal_performance_by_regime_df = pd.read_csv(signal_performance_by_regime_path)
+    signal_performance_by_sub_universe_df = pd.read_csv(signal_performance_by_sub_universe_path)
+    signal_performance_by_benchmark_context_df = pd.read_csv(signal_performance_by_benchmark_context_path)
     regime_aware_signal_weights_df = pd.read_csv(regime_aware_signal_weights_path)
     regime_selection_report_df = pd.read_csv(regime_selection_report_path)
     portfolio_returns_df = pd.read_csv(portfolio_returns_path)
@@ -1279,6 +1287,8 @@ def test_run_alpha_research_writes_leaderboard_and_fold_results(tmp_path: Path) 
     assert signal_lifecycle_report_df.empty
     assert not regime_labels_by_date_df.empty
     assert signal_performance_by_regime_df.empty
+    assert signal_performance_by_sub_universe_df.empty
+    assert signal_performance_by_benchmark_context_df.empty
     assert regime_aware_signal_weights_df.empty
     assert regime_selection_report_df.empty
     assert portfolio_returns_df.empty
@@ -1307,6 +1317,93 @@ def test_run_alpha_research_writes_leaderboard_and_fold_results(tmp_path: Path) 
     assert "spearman_ic" in fold_results_df.columns
     assert "long_short_spread" in fold_results_df.columns
     assert fold_results_df["symbols_evaluated"].max() == pytest.approx(2.0)
+
+
+def test_run_alpha_research_emits_sub_universe_and_benchmark_context_artifacts(
+    tmp_path: Path,
+) -> None:
+    feature_dir = tmp_path / "features"
+    output_dir = tmp_path / "alpha_outputs"
+    feature_dir.mkdir(parents=True, exist_ok=True)
+
+    timestamps = pd.date_range("2024-01-01", periods=80, freq="D")
+    daily_returns = {
+        "AAPL": 0.010,
+        "MSFT": 0.015,
+        "NVDA": 0.020,
+        "AMD": 0.018,
+    }
+    sub_universe_map = {
+        "AAPL": "mega_cap",
+        "MSFT": "mega_cap",
+        "NVDA": "growth_leaders",
+        "AMD": "growth_leaders",
+    }
+
+    for symbol, daily_return in daily_returns.items():
+        closes = [100.0]
+        for _ in range(79):
+            closes.append(closes[-1] * (1.0 + daily_return))
+        pd.DataFrame(
+            {
+                "timestamp": timestamps,
+                "symbol": [symbol] * len(timestamps),
+                "close": closes,
+                "sub_universe_id": [sub_universe_map[symbol]] * len(timestamps),
+            }
+        ).to_parquet(feature_dir / f"{symbol}.parquet", index=False)
+
+    result = run_alpha_research(
+        symbols=["AAPL", "MSFT", "NVDA", "AMD"],
+        universe=None,
+        feature_dir=feature_dir,
+        signal_family="momentum",
+        lookbacks=[1, 2],
+        horizons=[1],
+        min_rows=20,
+        top_quantile=0.34,
+        bottom_quantile=0.34,
+        output_dir=output_dir,
+        train_size=20,
+        test_size=10,
+        step_size=10,
+        regime_aware_enabled=True,
+        regime_min_history=1,
+        equity_context_enabled=True,
+    )
+
+    signal_performance_by_sub_universe_df = pd.read_csv(
+        result["signal_performance_by_sub_universe_path"]
+    )
+    signal_performance_by_benchmark_context_df = pd.read_csv(
+        result["signal_performance_by_benchmark_context_path"]
+    )
+
+    assert not signal_performance_by_sub_universe_df.empty
+    assert not signal_performance_by_benchmark_context_df.empty
+    assert {"candidate_id", "sub_universe_id", "sample_size", "coverage_ratio"} <= set(
+        signal_performance_by_sub_universe_df.columns
+    )
+    assert {
+        "candidate_id",
+        "benchmark_context_label",
+        "mean_relative_return",
+        "mean_market_return",
+        "context_source",
+        "context_status",
+    } <= set(signal_performance_by_benchmark_context_df.columns)
+    assert set(signal_performance_by_sub_universe_df["sub_universe_id"]) == {
+        "mega_cap",
+        "growth_leaders",
+    }
+    assert set(signal_performance_by_sub_universe_df["context_status"]) == {"confirmed"}
+    assert set(signal_performance_by_benchmark_context_df["context_status"]) == {"derived"}
+    assert set(signal_performance_by_benchmark_context_df["context_source"]) == {
+        "equity_context_features"
+    }
+    assert signal_performance_by_benchmark_context_df["benchmark_context_label"].str.len().gt(0).all()
+    assert signal_performance_by_benchmark_context_df["coverage_ratio"].gt(0.0).all()
+
 
 def test_add_forward_return_labels_does_not_use_current_bar_as_future_return() -> None:
     df = pd.DataFrame({"close": [100.0, 110.0, 121.0]})
@@ -1414,6 +1511,12 @@ def test_run_alpha_research_adds_promotion_and_redundancy_outputs(tmp_path: Path
     signal_lifecycle_report_df = pd.read_csv(result["signal_lifecycle_report_path"])
     regime_labels_by_date_df = pd.read_csv(result["regime_labels_by_date_path"])
     signal_performance_by_regime_df = pd.read_csv(result["signal_performance_by_regime_path"])
+    signal_performance_by_sub_universe_df = pd.read_csv(
+        result["signal_performance_by_sub_universe_path"]
+    )
+    signal_performance_by_benchmark_context_df = pd.read_csv(
+        result["signal_performance_by_benchmark_context_path"]
+    )
     regime_aware_signal_weights_df = pd.read_csv(result["regime_aware_signal_weights_path"])
     regime_selection_report_df = pd.read_csv(result["regime_selection_report_path"])
     portfolio_returns_df = pd.read_csv(result["portfolio_returns_path"])
@@ -1439,6 +1542,8 @@ def test_run_alpha_research_adds_promotion_and_redundancy_outputs(tmp_path: Path
     assert not signal_lifecycle_report_df.empty
     assert not regime_labels_by_date_df.empty
     assert not signal_performance_by_regime_df.empty
+    assert signal_performance_by_sub_universe_df.empty
+    assert signal_performance_by_benchmark_context_df.empty
     assert not regime_aware_signal_weights_df.empty
     assert not regime_selection_report_df.empty
     assert not portfolio_returns_df.empty
@@ -1510,6 +1615,12 @@ def test_run_alpha_research_handles_empty_outputs_and_edge_case_rejections(
     signal_lifecycle_report_df = pd.read_csv(result["signal_lifecycle_report_path"])
     regime_labels_by_date_df = pd.read_csv(result["regime_labels_by_date_path"])
     signal_performance_by_regime_df = pd.read_csv(result["signal_performance_by_regime_path"])
+    signal_performance_by_sub_universe_df = pd.read_csv(
+        result["signal_performance_by_sub_universe_path"]
+    )
+    signal_performance_by_benchmark_context_df = pd.read_csv(
+        result["signal_performance_by_benchmark_context_path"]
+    )
     regime_aware_signal_weights_df = pd.read_csv(result["regime_aware_signal_weights_path"])
     regime_selection_report_df = pd.read_csv(result["regime_selection_report_path"])
     portfolio_returns_df = pd.read_csv(result["portfolio_returns_path"])
@@ -1534,6 +1645,8 @@ def test_run_alpha_research_handles_empty_outputs_and_edge_case_rejections(
     assert signal_lifecycle_report_df.empty
     assert regime_labels_by_date_df.empty
     assert signal_performance_by_regime_df.empty
+    assert signal_performance_by_sub_universe_df.empty
+    assert signal_performance_by_benchmark_context_df.empty
     assert regime_aware_signal_weights_df.empty
     assert regime_selection_report_df.empty
     assert portfolio_returns_df.empty

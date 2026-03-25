@@ -26,6 +26,12 @@ from trading_platform.research.alpha_lab.regime import (
     build_regime_labels_by_date,
     compute_signal_performance_by_regime,
 )
+from trading_platform.research.alpha_lab.context import (
+    build_benchmark_context_by_symbol_date,
+    build_sub_universe_membership_by_symbol_date,
+    compute_signal_performance_by_benchmark_context,
+    compute_signal_performance_by_sub_universe,
+)
 from trading_platform.research.alpha_lab.composite_portfolio import (
     DEFAULT_COMPOSITE_PORTFOLIO_CONFIG,
     CompositePortfolioConfig,
@@ -393,6 +399,7 @@ def run_alpha_research(
     daily_metrics_by_candidate: dict[tuple[str, int, int], list[pd.DataFrame]] = {}
     score_panel_by_candidate: dict[tuple[str, int, int], list[pd.DataFrame]] = {}
     label_panel_by_horizon: dict[int, list[pd.DataFrame]] = {}
+    candidate_panel_by_candidate: dict[tuple[str, int, int], list[pd.DataFrame]] = {}
 
     for lookback in lookbacks:
         for symbol, df in symbol_data.items():
@@ -442,6 +449,7 @@ def run_alpha_research(
 
                 if not daily_metrics.empty:
                     daily_metrics_by_candidate.setdefault(candidate_key, []).append(daily_metrics)
+                candidate_panel_by_candidate.setdefault(candidate_key, []).append(fold_panel.copy())
 
                 score_panel = fold_panel[["timestamp", "symbol", "signal"]].dropna().copy()
                 if not score_panel.empty:
@@ -551,6 +559,14 @@ def run_alpha_research(
         for horizon, frames in label_panel_by_horizon.items()
         if frames
     }
+    combined_candidate_panels = {
+        key: pd.concat(frames, ignore_index=True)
+        .drop_duplicates(subset=["timestamp", "symbol"])
+        .sort_values(["timestamp", "symbol"])
+        .reset_index(drop=True)
+        for key, frames in candidate_panel_by_candidate.items()
+        if frames
+    }
     asset_returns_matrix = build_asset_return_matrix(symbol_data)
     regime_config = RegimeConfig(
         enabled=regime_aware_enabled,
@@ -561,6 +577,11 @@ def run_alpha_research(
     regime_labels_df = build_regime_labels_by_date(
         asset_returns_matrix,
         config=regime_config,
+    )
+    sub_universe_membership_df = build_sub_universe_membership_by_symbol_date(symbol_data)
+    benchmark_context_by_lookback = build_benchmark_context_by_symbol_date(
+        symbol_data,
+        lookbacks=lookbacks,
     )
     redundancy_df = _compute_redundancy_diagnostics(
         leaderboard_df,
@@ -680,6 +701,8 @@ def run_alpha_research(
     deactivated_signal_frames: list[pd.DataFrame] = []
     lifecycle_report_frames: list[pd.DataFrame] = []
     signal_performance_by_regime_frames: list[pd.DataFrame] = []
+    signal_performance_by_sub_universe_frames: list[pd.DataFrame] = []
+    signal_performance_by_benchmark_context_frames: list[pd.DataFrame] = []
     regime_aware_weight_frames: list[pd.DataFrame] = []
     regime_selection_report_frames: list[pd.DataFrame] = []
     composite_diagnostics: dict[str, object] = {
@@ -723,6 +746,26 @@ def run_alpha_research(
         )
         if not signal_performance_by_regime_df.empty:
             signal_performance_by_regime_frames.append(signal_performance_by_regime_df)
+        signal_performance_by_sub_universe_df = compute_signal_performance_by_sub_universe(
+            selected_signals_df,
+            candidate_panels_by_candidate=combined_candidate_panels,
+            sub_universe_membership_df=sub_universe_membership_df,
+            horizon=int(horizon),
+            top_quantile=top_quantile,
+            bottom_quantile=bottom_quantile,
+        )
+        if not signal_performance_by_sub_universe_df.empty:
+            signal_performance_by_sub_universe_frames.append(signal_performance_by_sub_universe_df)
+        signal_performance_by_benchmark_context_df = compute_signal_performance_by_benchmark_context(
+            selected_signals_df,
+            candidate_panels_by_candidate=combined_candidate_panels,
+            benchmark_context_by_lookback=benchmark_context_by_lookback,
+            horizon=int(horizon),
+            top_quantile=top_quantile,
+            bottom_quantile=bottom_quantile,
+        )
+        if not signal_performance_by_benchmark_context_df.empty:
+            signal_performance_by_benchmark_context_frames.append(signal_performance_by_benchmark_context_df)
         regime_aware_weights_df, regime_selection_report_df = build_regime_aware_signal_weights(
             dynamic_weights_df,
             daily_metrics_by_candidate=combined_daily_metrics,
@@ -836,6 +879,48 @@ def run_alpha_research(
                 "dates_evaluated",
                 "mean_spearman_ic",
                 "mean_long_short_spread",
+            ]
+        )
+    )
+    signal_performance_by_sub_universe_df = (
+        pd.concat(signal_performance_by_sub_universe_frames, ignore_index=True)
+        if signal_performance_by_sub_universe_frames
+        else pd.DataFrame(
+            columns=[
+                "candidate_id",
+                "signal_family",
+                "lookback",
+                "horizon",
+                "sub_universe_id",
+                "dates_evaluated",
+                "sample_size",
+                "coverage_ratio",
+                "mean_spearman_ic",
+                "mean_long_short_spread",
+                "context_source",
+                "context_status",
+            ]
+        )
+    )
+    signal_performance_by_benchmark_context_df = (
+        pd.concat(signal_performance_by_benchmark_context_frames, ignore_index=True)
+        if signal_performance_by_benchmark_context_frames
+        else pd.DataFrame(
+            columns=[
+                "candidate_id",
+                "signal_family",
+                "lookback",
+                "horizon",
+                "benchmark_context_label",
+                "dates_evaluated",
+                "sample_size",
+                "coverage_ratio",
+                "mean_spearman_ic",
+                "mean_long_short_spread",
+                "mean_relative_return",
+                "mean_market_return",
+                "context_source",
+                "context_status",
             ]
         )
     )
@@ -1021,6 +1106,10 @@ def run_alpha_research(
     regime_labels_by_date_path_parquet = output_dir / "regime_labels_by_date.parquet"
     signal_performance_by_regime_path_csv = output_dir / "signal_performance_by_regime.csv"
     signal_performance_by_regime_path_parquet = output_dir / "signal_performance_by_regime.parquet"
+    signal_performance_by_sub_universe_path_csv = output_dir / "signal_performance_by_sub_universe.csv"
+    signal_performance_by_sub_universe_path_parquet = output_dir / "signal_performance_by_sub_universe.parquet"
+    signal_performance_by_benchmark_context_path_csv = output_dir / "signal_performance_by_benchmark_context.csv"
+    signal_performance_by_benchmark_context_path_parquet = output_dir / "signal_performance_by_benchmark_context.parquet"
     regime_aware_signal_weights_path_csv = output_dir / "regime_aware_signal_weights.csv"
     regime_aware_signal_weights_path_parquet = output_dir / "regime_aware_signal_weights.parquet"
     regime_selection_report_path_csv = output_dir / "regime_selection_report.csv"
@@ -1062,6 +1151,8 @@ def run_alpha_research(
     signal_lifecycle_report_df.to_csv(signal_lifecycle_report_path_csv, index=False)
     regime_labels_df.to_csv(regime_labels_by_date_path_csv, index=False)
     signal_performance_by_regime_df.to_csv(signal_performance_by_regime_path_csv, index=False)
+    signal_performance_by_sub_universe_df.to_csv(signal_performance_by_sub_universe_path_csv, index=False)
+    signal_performance_by_benchmark_context_df.to_csv(signal_performance_by_benchmark_context_path_csv, index=False)
     regime_aware_signal_weights_df.to_csv(regime_aware_signal_weights_path_csv, index=False)
     regime_selection_report_df.to_csv(regime_selection_report_path_csv, index=False)
     composite_portfolio_returns_df.to_csv(portfolio_returns_path_csv, index=False)
@@ -1088,6 +1179,8 @@ def run_alpha_research(
     signal_lifecycle_report_df.to_parquet(signal_lifecycle_report_path_parquet, index=False)
     regime_labels_df.to_parquet(regime_labels_by_date_path_parquet, index=False)
     signal_performance_by_regime_df.to_parquet(signal_performance_by_regime_path_parquet, index=False)
+    signal_performance_by_sub_universe_df.to_parquet(signal_performance_by_sub_universe_path_parquet, index=False)
+    signal_performance_by_benchmark_context_df.to_parquet(signal_performance_by_benchmark_context_path_parquet, index=False)
     regime_aware_signal_weights_df.to_parquet(regime_aware_signal_weights_path_parquet, index=False)
     regime_selection_report_df.to_parquet(regime_selection_report_path_parquet, index=False)
     composite_portfolio_returns_df.to_parquet(portfolio_returns_path_parquet, index=False)
@@ -1169,6 +1262,8 @@ def run_alpha_research(
         "signal_lifecycle_report_path": str(signal_lifecycle_report_path_csv),
         "regime_labels_by_date_path": str(regime_labels_by_date_path_csv),
         "signal_performance_by_regime_path": str(signal_performance_by_regime_path_csv),
+        "signal_performance_by_sub_universe_path": str(signal_performance_by_sub_universe_path_csv),
+        "signal_performance_by_benchmark_context_path": str(signal_performance_by_benchmark_context_path_csv),
         "regime_aware_signal_weights_path": str(regime_aware_signal_weights_path_csv),
         "regime_selection_report_path": str(regime_selection_report_path_csv),
         "composite_diagnostics_path": str(composite_diagnostics_path),
