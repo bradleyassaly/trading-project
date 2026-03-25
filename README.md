@@ -13,30 +13,30 @@ Production-oriented local trading workflow for:
 
 The repository is now organized around one supported workflow:
 
-`data ingest -> data features -> research run -> walkforward -> decision memo -> deploy preset -> paper scheduled -> live dry-run`
+`data refresh-research-inputs -> research alpha -> research promote -> strategy-portfolio build -> paper run -> live dry-run`
 
 The primary validated operational example is:
 
 - `xsec_nasdaq100_momentum_v1_research`
 - `xsec_nasdaq100_momentum_v1_deploy`
 
-Those presets represent the current supported Nasdaq-100 cross-sectional momentum path. They are the clearest example of how the platform is meant to be run in production.
+Those presets still represent the clearest single-strategy Nasdaq-100 momentum example, but the canonical hardening target is now the config-driven research-input refresh through promoted-strategy portfolio flow.
 
 ## Supported Vs Experimental
 
 ### Supported
 
 - grouped CLI centered on `data`, `research`, `portfolio`, `paper`, `live`, `dashboard`, and `ops`
-- config-first research runs, walk-forward runs, paper runs, and live dry-runs
-- preset-driven research and deploy handoff
-- registry-backed deployment config generation
+- config-driven research-input refresh plus standard `data/features` + `data/metadata` prep
+- alpha research with explicit context slicing and conditional promotion support
+- promoted-strategy to strategy-portfolio handoff
+- config-first paper runs and live dry-runs
 - scheduled paper trading artifacts
 - broker-safe live dry-run artifacts
-- local dashboard over the artifact tree
+- local dashboard over the artifact tree with DB-backed normalized reads when available
 
 ### Experimental / Legacy
 
-- `research alpha`
 - `research loop`
 - `research multi-universe`
 - `research multi-universe-report`
@@ -180,85 +180,61 @@ Current deferred items:
 
 ## Canonical Workflow
 
-### 1. Data ingest
+### 1. Refresh research inputs
 
 ```bash
-trading-cli data ingest --universe nasdaq100 --start 2015-01-01
+trading-cli data refresh-research-inputs --config configs/research_input_refresh.yaml
 ```
 
-### 2. Feature generation
+This refreshes the canonical research inputs together:
+
+- `data/features/<SYMBOL>.parquet`
+- `data/metadata/sub_universe_snapshot.csv`
+- `data/metadata/universe_enrichment.csv`
+- `data/metadata/research_metadata_sidecar_summary.json`
+- `data/metadata/research_input_refresh_summary.json`
+
+### 2. Run alpha research
 
 ```bash
-trading-cli data features --universe nasdaq100
+trading-cli research alpha --symbols AAPL MSFT NVDA --feature-dir data/features --output-dir artifacts/alpha_research/run_a
 ```
 
-### 3. Research run
+Key outputs include:
 
-Preset-driven:
+- `research_run.json`
+- `signal_performance_by_regime.csv`
+- `signal_performance_by_sub_universe.csv`
+- `signal_performance_by_benchmark_context.csv`
+- `context_features/<SYMBOL>.parquet`
+
+### 3. Promote condition-aware strategies
 
 ```bash
-trading-cli research run --preset xsec_nasdaq100_momentum_v1_research --output-dir artifacts/research/xsec_nasdaq100_v1
+trading-cli research promote --artifacts-root artifacts/alpha_research --output-dir artifacts/promoted_strategies --policy-config configs/promotion_experiment.yaml
 ```
 
-Config-driven:
+The canonical `research promote` path now refreshes the research registry and promotion-candidate artifacts automatically into `artifacts/alpha_research/research_registry` by default before generating promoted strategy presets/configs.
+
+### 4. Build the strategy portfolio
 
 ```bash
-trading-cli research run --config configs/workflows/research_xsec_nasdaq100.yaml
+trading-cli strategy-portfolio build --promoted-dir artifacts/promoted_strategies --output-dir artifacts/strategy_portfolio
 ```
 
-### 4. Walk-forward validation
-
-```bash
-trading-cli research walkforward --preset xsec_nasdaq100_momentum_v1_research --output artifacts/walkforward/xsec_nasdaq100_v1.csv
-```
-
-Or:
-
-```bash
-trading-cli research walkforward --config configs/workflows/walkforward_xsec_nasdaq100.yaml
-```
-
-### 5. Decision memo
-
-```bash
-trading-cli research memo --preset xsec_nasdaq100_momentum_v1_research --deploy-preset xsec_nasdaq100_momentum_v1_deploy --output-dir artifacts/decision_memos
-```
-
-### 6. Deploy preset / build deploy config
-
-For the validated single-preset path, the deploy preset is the handoff:
-
-- `xsec_nasdaq100_momentum_v1_deploy`
-
-For registry-backed portfolio deployment:
-
-```bash
-trading-cli ops registry build-deploy-config --registry artifacts/strategy_registry.json --output-path artifacts/generated_registry_multi_strategy.json
-```
-
-### 7. Scheduled paper run
-
-```bash
-trading-cli paper schedule --preset xsec_nasdaq100_momentum_v1_deploy --state-path artifacts/paper/nasdaq100_xsec_state.json --output-dir artifacts/paper/nasdaq100_xsec
-```
-
-Or:
+### 5. Run paper trading
 
 ```bash
 trading-cli paper run --config configs/workflows/paper_xsec_nasdaq100.yaml
 ```
 
-### 8. Live dry-run
-
-```bash
-trading-cli live schedule --preset xsec_nasdaq100_momentum_v1_deploy --broker mock --output-dir artifacts/live_dry_run/nasdaq100_xsec
-```
-
-Or:
+### 6. Run the live dry-run preview
 
 ```bash
 trading-cli live dry-run --config configs/workflows/live_xsec_nasdaq100.yaml
 ```
+
+Secondary research commands such as `research run`, `research walkforward`, and `research memo` still exist for direct strategy research and validation, but they are no longer the primary end-to-end path documented here.
 
 ## Main CLI Layout
 
@@ -283,20 +259,20 @@ trading-cli live dry-run --config configs/workflows/live_xsec_nasdaq100.yaml
 
 Main supported path:
 
+- `research alpha`
+- `research promote`
+- `research leaderboard`
+- `research compare-runs`
+
+Experimental / advanced:
+
 - `research run`
 - `research walkforward`
 - `research memo`
 - `research registry build`
-- `research leaderboard`
-- `research compare-runs`
 - `research promotion-candidates`
-- `research promote`
-
-Experimental / advanced:
-
 - `research sweep`
 - `research validate-signal`
-- `research alpha`
 - `research loop`
 - `research multi-universe`
 - `research multi-universe-report`
@@ -1429,11 +1405,9 @@ The intended rerun path is:
 
 1. create the tiny deterministic feature fixture under `artifacts/diagnostics/promotion_viability/features`
 2. run `research alpha`
-3. run `research registry build`
-4. run `strategy-validation build --policy-config configs/strategy_validation_experiment.yaml`
-5. run `research promotion-candidates`
-6. run `research promote --policy-config configs/promotion_experiment.yaml`
-7. run `ops orchestrate run --config configs/orchestration_signal_promotion_test.yaml`
+3. run `strategy-validation build --policy-config configs/strategy_validation_experiment.yaml`
+4. run `research promote --policy-config configs/promotion_experiment.yaml`
+5. run `ops orchestrate run --config configs/orchestration_signal_promotion_test.yaml`
 
 This diagnostic is explicitly for viability testing. It keeps the main production-style configs intact and records the funnel counts, bottleneck assessment, exact commands used, and the before-versus-after outcome of the manifest normalization fix.
 
@@ -1617,7 +1591,7 @@ Promotion policy fields for conditional variants:
 Current limitations:
 
 - regime is the strongest built-in condition source today because the alpha-research path already emits regime performance artifacts
-- sub-universe and benchmark-relative conditional promotion are supported when those slice artifacts exist, but the broad research runners do not yet emit every slice type automatically
+- sub-universe and benchmark-relative conditional promotion now have first-class alpha-runner artifacts, but explicit upstream label coverage still depends on the maintained feature and metadata refresh path
 - this phase carries activation metadata forward; it does not yet fully gate live or paper trading on those conditions
 
 For repeated lightweight frequency checks, run:
@@ -1959,9 +1933,9 @@ Automated alpha generation is the next major step. The practical roadmap is:
 
 1. make alpha candidate generation config-first and schedule-safe
 2. standardize candidate, validation, and promotion artifacts around the same summary schema
-3. connect alpha generation outputs directly into `research registry build` and `research promote`
-4. add explicit champion/challenger routing into paper and live dry-run workflows
-5. tighten approval policies so generated candidates can graduate with auditable constraints
+3. add explicit champion/challenger routing into paper and live dry-run workflows
+4. tighten approval policies so generated candidates can graduate with auditable constraints
+5. add broader multi-strategy canonical-flow smoke coverage around promoted-strategy portfolio bundles
 
 ## Development
 

@@ -142,8 +142,6 @@ def test_grouped_research_promote_command_parses() -> None:
             "promote",
             "--artifacts-root",
             "artifacts",
-            "--registry-dir",
-            "artifacts/research_registry",
             "--output-dir",
             "configs/generated_strategies",
             "--policy-config",
@@ -158,7 +156,7 @@ def test_grouped_research_promote_command_parses() -> None:
     )
 
     assert args.research_command == "promote"
-    assert args.registry_dir == "artifacts/research_registry"
+    assert args.registry_dir is None
     assert args.output_dir == "configs/generated_strategies"
     assert args.policy_config == "configs/promotion.yaml"
     assert args.validation == "artifacts/research_registry"

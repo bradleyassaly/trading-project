@@ -149,6 +149,8 @@ def test_promotion_artifact_generation_and_policy_filtering(tmp_path: Path) -> N
 
     assert result["selected_count"] == 1
     promoted_index = json.loads((output_dir / "promoted_strategies.json").read_text(encoding="utf-8"))
+    assert promoted_index["registry_dir"] == str(registry_dir)
+    assert promoted_index["promotion_candidates_path"] == str(registry_dir / "promotion_candidates.json")
     row = promoted_index["strategies"][0]
     assert row["source_run_id"] == "run_a"
     assert Path(row["generated_preset_path"]).exists()
@@ -276,13 +278,13 @@ def test_generated_configs_are_valid_for_pipeline_and_paper(monkeypatch: pytest.
 
 
 def test_research_promote_cli_writes_outputs(tmp_path: Path, capsys) -> None:
-    registry_dir = _seed_registry(tmp_path)
+    _seed_registry(tmp_path)
     output_dir = tmp_path / "generated_strategies"
 
     cmd_research_promote(
         Namespace(
             artifacts_root=str(tmp_path),
-            registry_dir=str(registry_dir),
+            registry_dir=None,
             output_dir=str(output_dir),
             policy_config=None,
             validation=None,
@@ -295,5 +297,44 @@ def test_research_promote_cli_writes_outputs(tmp_path: Path, capsys) -> None:
     )
 
     captured = capsys.readouterr().out
+    assert "Research registry:" in captured
+    assert "Promotion candidates:" in captured
     assert "Selected promotions: 1" in captured
     assert (output_dir / "promoted_strategies.json").exists()
+
+
+def test_canonical_promotion_output_feeds_strategy_portfolio_build(tmp_path: Path) -> None:
+    _seed_registry(tmp_path)
+    promoted_dir = tmp_path / "generated_strategies"
+    strategy_portfolio_dir = tmp_path / "strategy_portfolio"
+
+    cmd_research_promote(
+        Namespace(
+            artifacts_root=str(tmp_path),
+            registry_dir=None,
+            output_dir=str(promoted_dir),
+            policy_config=None,
+            validation=None,
+            top_n=2,
+            allow_overwrite=False,
+            dry_run=False,
+            inactive=False,
+            override_validation=False,
+        )
+    )
+
+    from trading_platform.cli.commands.strategy_portfolio_build import cmd_strategy_portfolio_build
+    from trading_platform.portfolio.strategy_portfolio import load_strategy_portfolio
+
+    cmd_strategy_portfolio_build(
+        Namespace(
+            promoted_dir=str(promoted_dir),
+            policy_config=None,
+            lifecycle=None,
+            output_dir=str(strategy_portfolio_dir),
+        )
+    )
+
+    payload = load_strategy_portfolio(strategy_portfolio_dir)
+    assert payload["summary"]["total_selected_strategies"] >= 1
+    assert payload["selected_strategies"][0]["preset_name"].startswith("generated_")

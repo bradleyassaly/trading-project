@@ -542,6 +542,10 @@ def apply_research_promotions(
         index_payload = {
             "schema_version": 1,
             "generated_at": _now_utc(),
+            "artifacts_root": str(artifacts_root_path),
+            "registry_dir": str(registry_dir_path),
+            "promotion_candidates_path": str(registry_dir_path / "promotion_candidates.json"),
+            "validation_path": str(validation_path) if validation_path is not None else None,
             "policy": asdict(policy),
             "strategies": sorted(retained + promoted_rows, key=lambda row: str(row.get("preset_name"))),
         }

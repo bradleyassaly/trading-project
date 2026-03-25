@@ -73,5 +73,7 @@ def cmd_alpha_research(args) -> None:
     print(f"Composite portfolio returns: {result['portfolio_returns_path']}")
     print(f"Ensemble member summary: {result['ensemble_member_summary_path']}")
     print(f"Implementability report: {result['implementability_report_path']}")
+    print(f"Sub-universe slicing: {result['signal_performance_by_sub_universe_path']}")
+    print(f"Benchmark-context slicing: {result['signal_performance_by_benchmark_context_path']}")
     print(f"Research manifest: {result['research_manifest_path']}")
     print(f"Experiment registry: {registry_paths['experiment_registry_path']}")

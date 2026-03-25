@@ -727,6 +727,28 @@ def build_promotion_candidates(
     }
 
 
+def refresh_research_registry_bundle(
+    *,
+    artifacts_root: str | Path,
+    output_dir: str | Path,
+    rules: ResearchPromotionRules | None = None,
+) -> dict[str, Any]:
+    registry_result = build_research_registry(
+        artifacts_root=artifacts_root,
+        output_dir=output_dir,
+    )
+    candidate_result = build_promotion_candidates(
+        artifacts_root=artifacts_root,
+        output_dir=output_dir,
+        rules=rules,
+    )
+    return {
+        **registry_result,
+        **candidate_result,
+        "output_dir": str(Path(output_dir)),
+    }
+
+
 def compare_research_runs(
     *,
     artifacts_root: str | Path,

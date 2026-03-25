@@ -575,7 +575,7 @@ def build_parser() -> argparse.ArgumentParser:
     data_features.set_defaults(func=cmd_features)
     data_refresh_inputs = data_subparsers.add_parser(
         "refresh-research-inputs",
-        help="Refresh research-ready features plus metadata sidecars in one deterministic step.",
+        help="Canonical step 1: refresh research-ready features plus metadata sidecars in one deterministic step.",
     )
     add_shared_symbol_args(data_refresh_inputs)
     add_feature_arguments(data_refresh_inputs)
@@ -601,7 +601,7 @@ def build_parser() -> argparse.ArgumentParser:
     data_universe_export.add_argument("--output", type=str, default="artifacts/universes/universes.json", help="Path where the universe definitions JSON should be written.")
     data_universe_export.set_defaults(func=cmd_export_universes)
 
-    research_parser = subparsers.add_parser("research", help="Canonical research workflow plus clearly labeled experimental workflows")
+    research_parser = subparsers.add_parser("research", help="Canonical research and promotion workflow plus clearly labeled secondary workflows")
     research_subparsers = research_parser.add_subparsers(dest="research_command", required=True)
     research_run = research_subparsers.add_parser("run", help="Run backtests directly or from a config file")
     add_shared_symbol_args(research_run)
@@ -679,7 +679,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_strategy_arguments(research_pipeline)
     research_pipeline.add_argument("--start", type=str, default="2010-01-01", help="Start date in YYYY-MM-DD format (default: 2010-01-01)")
     research_pipeline.set_defaults(func=cmd_pipeline)
-    research_alpha = research_subparsers.add_parser("alpha", help="Experimental: run cross-sectional alpha research")
+    research_alpha = research_subparsers.add_parser("alpha", help="Canonical step 2: run cross-sectional alpha research on refreshed inputs")
     _add_alpha_research_arguments(research_alpha)
     research_alpha.set_defaults(func=cmd_alpha_research)
     research_loop = research_subparsers.add_parser("loop", help="Experimental: run the automated alpha research loop")
@@ -725,13 +725,13 @@ def build_parser() -> argparse.ArgumentParser:
     research_compare_runs.add_argument("--run-id-b", type=str, required=True, help="Candidate run_id.")
     research_compare_runs.add_argument("--output-dir", type=str, required=True, help="Directory where comparison artifacts will be written.")
     research_compare_runs.set_defaults(func=cmd_research_compare_runs)
-    research_promotion_candidates = research_subparsers.add_parser("promotion-candidates", help="Evaluate research manifests for lightweight promotion readiness")
+    research_promotion_candidates = research_subparsers.add_parser("promotion-candidates", help="Inspect promotion readiness from research manifests without generating strategies")
     research_promotion_candidates.add_argument("--artifacts-root", type=str, default="artifacts", help="Root artifact directory to scan for research manifests.")
     research_promotion_candidates.add_argument("--output-dir", type=str, required=True, help="Directory where promotion-candidate artifacts will be written.")
     research_promotion_candidates.set_defaults(func=cmd_research_promotion_candidates)
-    research_promote = research_subparsers.add_parser("promote", help="Convert promotion-ready research runs into generated paper-trading presets and configs")
+    research_promote = research_subparsers.add_parser("promote", help="Canonical step 3: refresh promotion inputs and generate promoted strategy presets/configs")
     research_promote.add_argument("--artifacts-root", type=str, default="artifacts", help="Root artifact directory to scan for research manifests.")
-    research_promote.add_argument("--registry-dir", type=str, required=True, help="Directory containing promotion_candidates.json and related research registry artifacts.")
+    research_promote.add_argument("--registry-dir", type=str, default=None, help="Optional directory where refreshed research registry and promotion-candidate artifacts will be written. Defaults to <artifacts-root>/research_registry.")
     research_promote.add_argument("--output-dir", type=str, required=True, help="Directory where generated strategy presets and config bundles will be written.")
     research_promote.add_argument("--policy-config", type=str, default=None, help="Optional promotion policy JSON/YAML file.")
     research_promote.add_argument("--validation", type=str, default=None, help="Optional strategy_validation.json path or directory used to gate promotion.")
@@ -771,7 +771,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     paper_parser = subparsers.add_parser("paper", help="Paper trading workflows")
     paper_subparsers = paper_parser.add_subparsers(dest="paper_command", required=True)
-    paper_run = paper_subparsers.add_parser("run", help="Run one paper-trading cycle and write state/artifacts")
+    paper_run = paper_subparsers.add_parser("run", help="Canonical step 5: run one paper-trading cycle and write state/artifacts")
     _add_paper_run_arguments(paper_run)
     paper_run.add_argument("--config", type=str, default=None, help="Optional YAML or JSON config file for canonical paper runs.")
     paper_run.set_defaults(func=cmd_paper_run)
@@ -824,7 +824,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     live_parser = subparsers.add_parser("live", help="Broker preview, validation, and guarded execution commands")
     live_subparsers = live_parser.add_subparsers(dest="live_command", required=True)
-    live_dry_run = live_subparsers.add_parser("dry-run", help="Compute live broker rebalance orders without sending them")
+    live_dry_run = live_subparsers.add_parser("dry-run", help="Canonical step 6: compute live broker rebalance orders without sending them")
     _add_live_base_arguments(live_dry_run)
     add_preset_argument(live_dry_run, help_text="Optional versioned preset for validated live dry-run defaults. Explicit CLI flags still override preset values.")
     add_xsec_live_arguments(live_dry_run)
@@ -1208,7 +1208,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     strategy_portfolio_parser = subparsers.add_parser("strategy-portfolio", help="Select and weight promoted strategies into a portfolio bundle")
     strategy_portfolio_subparsers = strategy_portfolio_parser.add_subparsers(dest="strategy_portfolio_command", required=True)
-    strategy_portfolio_build = strategy_portfolio_subparsers.add_parser("build", help="Build a strategy portfolio from promoted strategies and a selection policy")
+    strategy_portfolio_build = strategy_portfolio_subparsers.add_parser("build", help="Canonical step 4: build a strategy portfolio from promoted strategies and a selection policy")
     strategy_portfolio_build.add_argument("--promoted-dir", type=str, required=True, help="Directory containing promoted_strategies.json.")
     strategy_portfolio_build.add_argument("--policy-config", type=str, default=None, help="Optional strategy portfolio policy JSON/YAML file.")
     strategy_portfolio_build.add_argument("--lifecycle", type=str, default=None, help="Optional strategy_lifecycle.json path or directory used to exclude demoted strategies.")

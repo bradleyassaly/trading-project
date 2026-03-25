@@ -5,6 +5,7 @@ from pathlib import Path
 from trading_platform.config.loader import load_promotion_policy_config
 from trading_platform.db.services import DatabaseLineageService
 from trading_platform.research.promotion_pipeline import PromotionPolicyConfig, apply_research_promotions
+from trading_platform.research.registry import refresh_research_registry_bundle
 
 
 def cmd_research_promote(args) -> None:
@@ -14,9 +15,14 @@ def cmd_research_promote(args) -> None:
         if getattr(args, "policy_config", None)
         else PromotionPolicyConfig()
     )
+    registry_dir = Path(getattr(args, "registry_dir", None) or (Path(args.artifacts_root) / "research_registry"))
+    registry_bundle = refresh_research_registry_bundle(
+        artifacts_root=Path(args.artifacts_root),
+        output_dir=registry_dir,
+    )
     result = apply_research_promotions(
         artifacts_root=Path(args.artifacts_root),
-        registry_dir=Path(args.registry_dir),
+        registry_dir=registry_dir,
         output_dir=Path(args.output_dir),
         policy=policy,
         top_n=getattr(args, "top_n", None),
@@ -26,6 +32,8 @@ def cmd_research_promote(args) -> None:
         validation_path=Path(args.validation) if getattr(args, "validation", None) else None,
         override_validation=bool(getattr(args, "override_validation", False)),
     )
+    print(f"Research registry: {registry_bundle['registry_json_path']}")
+    print(f"Promotion candidates: {registry_bundle['promotion_candidates_json_path']}")
     print(f"Selected promotions: {result['selected_count']}")
     print(f"Dry run: {result['dry_run']}")
     print(f"Promoted index: {result['promoted_index_path']}")
