@@ -3,9 +3,11 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
+import time
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
@@ -29,6 +31,10 @@ FMP_BASE_URL = "https://financialmodelingprep.com/stable"
 FMP_SOURCE = "vendor:fmp"
 FMP_STATEMENT_LIMIT = 16
 FMP_TIMEOUT_SECONDS = 30
+DEFAULT_FMP_CACHE_TTL_HOURS = 24.0
+DEFAULT_FMP_REQUEST_DELAY_SECONDS = 0.5
+DEFAULT_FMP_MAX_RETRIES = 4
+DEFAULT_FMP_MAX_BACKOFF_SECONDS = 30.0
 
 FMP_STATEMENT_FIELD_MAP: dict[str, tuple[str, ...]] = {
     "revenue": ("revenue",),
@@ -52,6 +58,10 @@ FMP_STATEMENT_FIELD_MAP: dict[str, tuple[str, ...]] = {
         "shareOutstanding",
     ),
 }
+
+
+def _now_utc_iso() -> str:
+    return datetime.now(UTC).isoformat()
 
 
 def _empty_result(provider_name: str, **diagnostics: Any) -> ProviderFetchResult:
@@ -191,12 +201,127 @@ class FMPClient:
         api_key: str,
         base_url: str = FMP_BASE_URL,
         timeout_seconds: int = FMP_TIMEOUT_SECONDS,
+        cache_enabled: bool = True,
+        cache_root: Path | None = None,
+        cache_ttl_hours: float = DEFAULT_FMP_CACHE_TTL_HOURS,
+        force_refresh: bool = False,
+        request_delay_seconds: float = DEFAULT_FMP_REQUEST_DELAY_SECONDS,
+        max_retries: int = DEFAULT_FMP_MAX_RETRIES,
+        max_backoff_seconds: float = DEFAULT_FMP_MAX_BACKOFF_SECONDS,
+        max_requests_per_run: int | None = None,
+        sleep_fn: Any = None,
+        monotonic_fn: Any = None,
     ) -> None:
         self.api_key = api_key
         self.base_url = base_url.rstrip("/")
         self.timeout_seconds = timeout_seconds
+        self.cache_enabled = cache_enabled
+        self.cache_root = Path(cache_root) if cache_root is not None else None
+        self.cache_ttl_hours = float(cache_ttl_hours)
+        self.force_refresh = force_refresh
+        self.request_delay_seconds = max(float(request_delay_seconds), 0.0)
+        self.max_retries = max(int(max_retries), 0)
+        self.max_backoff_seconds = max(float(max_backoff_seconds), 0.0)
+        self.max_requests_per_run = max_requests_per_run
+        self.sleep_fn = sleep_fn or time.sleep
+        self.monotonic_fn = monotonic_fn or time.monotonic
+        self._last_request_started_at: float | None = None
+        self.cache_hits = 0
+        self.cache_misses = 0
+        self.retry_count = 0
+        self.rate_limit_error_count = 0
+        self.requests_made = 0
 
-    def _request_json(self, endpoint: str, params: dict[str, Any]) -> list[dict[str, Any]]:
+    def _cache_file_path(self, *segments: str) -> Path | None:
+        if not self.cache_enabled or self.cache_root is None:
+            return None
+        cleaned_segments = [segment.strip("/\\") for segment in segments if str(segment).strip()]
+        if not cleaned_segments:
+            return None
+        return self.cache_root.joinpath(*cleaned_segments).with_suffix(".json")
+
+    def _is_cache_fresh(self, cache_path: Path | None) -> bool:
+        if cache_path is None or not cache_path.exists() or self.force_refresh:
+            return False
+        ttl_seconds = max(self.cache_ttl_hours, 0.0) * 3600.0
+        if ttl_seconds == 0.0:
+            return False
+        age_seconds = max(time.time() - cache_path.stat().st_mtime, 0.0)
+        return age_seconds <= ttl_seconds
+
+    def _read_cached_payload(self, cache_path: Path) -> list[dict[str, Any]]:
+        payload = json.loads(cache_path.read_text(encoding="utf-8"))
+        if isinstance(payload, dict) and isinstance(payload.get("payload"), list):
+            return [row for row in payload["payload"] if isinstance(row, dict)]
+        if isinstance(payload, list):
+            return [row for row in payload if isinstance(row, dict)]
+        return []
+
+    def _write_cached_payload(
+        self,
+        *,
+        cache_path: Path | None,
+        endpoint: str,
+        symbol: str,
+        params: dict[str, Any],
+        payload: list[dict[str, Any]],
+    ) -> None:
+        if cache_path is None:
+            return
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        cache_path.write_text(
+            json.dumps(
+                {
+                    "cached_at": _now_utc_iso(),
+                    "endpoint": endpoint,
+                    "symbol": symbol,
+                    "params": params,
+                    "payload": payload,
+                },
+                indent=2,
+                default=str,
+            ),
+            encoding="utf-8",
+        )
+
+    def _throttle(self) -> None:
+        if self.request_delay_seconds <= 0.0:
+            return
+        now = self.monotonic_fn()
+        if self._last_request_started_at is None:
+            self._last_request_started_at = now
+            return
+        elapsed = now - self._last_request_started_at
+        remaining = self.request_delay_seconds - elapsed
+        if remaining > 0.0:
+            self.sleep_fn(remaining)
+        self._last_request_started_at = self.monotonic_fn()
+
+    def _retry_delay_seconds(self, attempt_number: int) -> float:
+        backoff = min((2 ** max(attempt_number - 1, 0)), self.max_backoff_seconds)
+        deterministic_jitter = min(0.137 * attempt_number, 0.5)
+        return min(backoff + deterministic_jitter, self.max_backoff_seconds)
+
+    def _is_retryable_exception(self, exc: Exception) -> bool:
+        if isinstance(exc, HTTPError):
+            return exc.code in {429, 500, 502, 503, 504}
+        return isinstance(exc, (TimeoutError, URLError))
+
+    def _request_json(
+        self,
+        endpoint: str,
+        params: dict[str, Any],
+        *,
+        symbol: str,
+        cache_segments: tuple[str, ...],
+    ) -> list[dict[str, Any]]:
+        cache_path = self._cache_file_path(*cache_segments, symbol.upper())
+        if self._is_cache_fresh(cache_path):
+            self.cache_hits += 1
+            return self._read_cached_payload(cache_path)
+        self.cache_misses += 1
+        if self.max_requests_per_run is not None and self.requests_made >= self.max_requests_per_run:
+            raise RuntimeError(f"FMP request budget exhausted before fetching {endpoint} for {symbol}.")
         query_params = {
             key: value
             for key, value in {**params, "apikey": self.api_key}.items()
@@ -204,26 +329,79 @@ class FMPClient:
         }
         url = f"{self.base_url}/{endpoint.lstrip('/')}?{urlencode(query_params)}"
         request = Request(url, headers={"User-Agent": "trading-platform/1.0"})
-        with urlopen(request, timeout=self.timeout_seconds) as response:
-            payload = json.loads(response.read().decode("utf-8"))
-        if isinstance(payload, list):
-            return [row for row in payload if isinstance(row, dict)]
-        if isinstance(payload, dict):
-            if isinstance(payload.get("data"), list):
-                return [row for row in payload["data"] if isinstance(row, dict)]
-            return [payload]
-        return []
+        last_error: Exception | None = None
+        for attempt_number in range(1, self.max_retries + 2):
+            try:
+                self._throttle()
+                self.requests_made += 1
+                with urlopen(request, timeout=self.timeout_seconds) as response:
+                    payload = json.loads(response.read().decode("utf-8"))
+                if isinstance(payload, list):
+                    rows = [row for row in payload if isinstance(row, dict)]
+                elif isinstance(payload, dict):
+                    if isinstance(payload.get("data"), list):
+                        rows = [row for row in payload["data"] if isinstance(row, dict)]
+                    else:
+                        rows = [payload]
+                else:
+                    rows = []
+                self._write_cached_payload(
+                    cache_path=cache_path,
+                    endpoint=endpoint,
+                    symbol=symbol,
+                    params=params,
+                    payload=rows,
+                )
+                return rows
+            except Exception as exc:  # noqa: BLE001
+                last_error = exc
+                if isinstance(exc, HTTPError) and exc.code == 429:
+                    self.rate_limit_error_count += 1
+                if attempt_number > self.max_retries or not self._is_retryable_exception(exc):
+                    break
+                self.retry_count += 1
+                self.sleep_fn(self._retry_delay_seconds(attempt_number))
+        raise RuntimeError(f"FMP request failed for {symbol} endpoint={endpoint}: {last_error}") from last_error
+
+    def diagnostics_summary(self) -> dict[str, Any]:
+        return {
+            "cache_hits": self.cache_hits,
+            "cache_misses": self.cache_misses,
+            "retry_count": self.retry_count,
+            "rate_limit_error_count": self.rate_limit_error_count,
+            "requests_made": self.requests_made,
+        }
 
     def fetch_company_profile(self, symbol: str) -> dict[str, Any] | None:
-        rows = self._request_json("profile", {"symbol": symbol})
+        rows = self._request_json(
+            "profile",
+            {"symbol": symbol},
+            symbol=symbol,
+            cache_segments=("profile",),
+        )
         return rows[0] if rows else None
 
     def fetch_statements(self, symbol: str, *, period: str) -> dict[str, list[dict[str, Any]]]:
         params = {"symbol": symbol, "period": period, "limit": FMP_STATEMENT_LIMIT}
         return {
-            "income": self._request_json("income-statement", params),
-            "balance": self._request_json("balance-sheet-statement", params),
-            "cash": self._request_json("cash-flow-statement", params),
+            "income": self._request_json(
+                "income-statement",
+                params,
+                symbol=symbol,
+                cache_segments=("income-statement", period),
+            ),
+            "balance": self._request_json(
+                "balance-sheet-statement",
+                params,
+                symbol=symbol,
+                cache_segments=("balance-sheet-statement", period),
+            ),
+            "cash": self._request_json(
+                "cash-flow-statement",
+                params,
+                symbol=symbol,
+                cache_segments=("cash-flow-statement", period),
+            ),
         }
 
 
@@ -235,9 +413,25 @@ class VendorFundamentalsProvider(FundamentalsProvider):
         *,
         file_path: str | Path | None = None,
         api_key: str | None = None,
+        cache_enabled: bool = True,
+        cache_root: str | Path | None = None,
+        cache_ttl_hours: float = DEFAULT_FMP_CACHE_TTL_HOURS,
+        force_refresh: bool = False,
+        request_delay_seconds: float = DEFAULT_FMP_REQUEST_DELAY_SECONDS,
+        max_retries: int = DEFAULT_FMP_MAX_RETRIES,
+        max_symbols_per_run: int | None = None,
+        max_requests_per_run: int | None = None,
     ) -> None:
         self.file_path = Path(file_path) if file_path else None
         self.api_key = api_key or os.getenv("FMP_API_KEY")
+        self.cache_enabled = cache_enabled
+        self.cache_root = Path(cache_root) if cache_root else None
+        self.cache_ttl_hours = cache_ttl_hours
+        self.force_refresh = force_refresh
+        self.request_delay_seconds = request_delay_seconds
+        self.max_retries = max_retries
+        self.max_symbols_per_run = max_symbols_per_run
+        self.max_requests_per_run = max_requests_per_run
 
     def is_configured(self) -> bool:
         return bool((self.file_path and self.file_path.exists()) or self.api_key)
@@ -311,6 +505,13 @@ class VendorFundamentalsProvider(FundamentalsProvider):
                 "status": "ok",
                 "mode": "file",
                 "file_path": str(self.file_path),
+                "cache_hits": 0,
+                "cache_misses": 0,
+                "symbols_fetched": sorted(set(normalized_symbols)),
+                "symbols_skipped_from_cache": [],
+                "retry_count": 0,
+                "rate_limit_error_count": 0,
+                "symbols_failed": [],
             },
         )
 
@@ -452,15 +653,36 @@ class VendorFundamentalsProvider(FundamentalsProvider):
                 message="Vendor fundamentals provider requires --vendor-api-key, --fundamentals-vendor-api-key, or FMP_API_KEY when no vendor file path is provided.",
             )
 
-        client = FMPClient(api_key=self.api_key)
+        cache_root = self.cache_root
+        client = FMPClient(
+            api_key=self.api_key,
+            cache_enabled=self.cache_enabled,
+            cache_root=cache_root,
+            cache_ttl_hours=self.cache_ttl_hours,
+            force_refresh=self.force_refresh,
+            request_delay_seconds=self.request_delay_seconds,
+            max_retries=self.max_retries,
+            max_requests_per_run=self.max_requests_per_run,
+        )
         company_rows: list[dict[str, Any]] = []
         filing_rows: list[dict[str, Any]] = []
         value_rows: list[dict[str, Any]] = []
         missing_symbols: list[str] = []
         symbol_errors: list[dict[str, str]] = []
+        symbols_fetched: list[str] = []
+        symbols_skipped_from_cache: list[str] = []
+        skipped_due_limit: list[str] = []
         available_date_method_counts: dict[str, int] = {}
 
-        for symbol in _normalize_symbol_list(symbols):
+        normalized_symbols = _normalize_symbol_list(symbols)
+        if self.max_symbols_per_run is not None:
+            fetch_symbols = normalized_symbols[: self.max_symbols_per_run]
+            skipped_due_limit = normalized_symbols[self.max_symbols_per_run :]
+        else:
+            fetch_symbols = normalized_symbols
+
+        for symbol in fetch_symbols:
+            requests_before = client.requests_made
             try:
                 profile = client.fetch_company_profile(symbol)
                 statements_by_period = {
@@ -476,6 +698,10 @@ class VendorFundamentalsProvider(FundamentalsProvider):
                     }
                 )
                 continue
+            if client.requests_made == requests_before:
+                symbols_skipped_from_cache.append(symbol)
+            else:
+                symbols_fetched.append(symbol)
 
             has_statement_coverage = any(
                 bool(rows)
@@ -512,6 +738,12 @@ class VendorFundamentalsProvider(FundamentalsProvider):
             ).reset_index(drop=True)
             filing_df = values_df[list(FUNDAMENTAL_FILING_COLUMNS)].drop_duplicates().reset_index(drop=True)
 
+        status = "ok"
+        if symbol_errors and not value_rows:
+            status = "error"
+        elif symbol_errors:
+            status = "partial_success"
+
         return ProviderFetchResult(
             company_master_df=company_df,
             filing_metadata_df=filing_df,
@@ -519,15 +751,34 @@ class VendorFundamentalsProvider(FundamentalsProvider):
             diagnostics={
                 "provider": self.provider_name,
                 "configured": True,
-                "status": "ok" if not symbol_errors else "partial_success",
+                "status": status,
                 "mode": "fmp",
                 "symbols_requested": len(symbols),
+                "symbols_attempted": len(fetch_symbols),
                 "company_count": len(company_rows),
                 "filing_count": int(len(filing_df)),
                 "value_count": int(len(values_df)),
                 "missing_symbols": sorted(set(missing_symbols)),
+                "symbols_fetched": sorted(set(symbols_fetched)),
+                "symbols_skipped_from_cache": sorted(set(symbols_skipped_from_cache)),
+                "symbols_failed": sorted({row["symbol"] for row in symbol_errors}),
+                "skipped_due_limit": skipped_due_limit,
                 "symbol_errors": symbol_errors,
                 "available_date_method_counts": available_date_method_counts,
+                "cache_enabled": self.cache_enabled,
+                "cache_root": str(cache_root) if cache_root is not None else None,
+                "cache_ttl_hours": self.cache_ttl_hours,
+                "force_refresh": self.force_refresh,
+                "request_delay_seconds": self.request_delay_seconds,
+                "max_retries": self.max_retries,
+                "max_symbols_per_run": self.max_symbols_per_run,
+                "max_requests_per_run": self.max_requests_per_run,
+                "message": (
+                    f"FMP fetch failed for {len(symbol_errors)} symbol(s) after retries were exhausted."
+                    if status == "error"
+                    else None
+                ),
+                **client.diagnostics_summary(),
             },
         )
 

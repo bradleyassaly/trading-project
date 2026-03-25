@@ -6,6 +6,7 @@ from pathlib import Path
 import pandas as pd
 
 from trading_platform.cli.commands.alpha_research import cmd_alpha_research
+from trading_platform.cli.commands.refresh_research_inputs import cmd_refresh_research_inputs
 from trading_platform.cli.commands.research import cmd_research
 from trading_platform.cli.commands.sweep import cmd_sweep
 from trading_platform.cli.common import prepare_research_frame
@@ -498,6 +499,79 @@ def test_cmd_alpha_research_passes_fundamental_feature_settings(monkeypatch, tmp
     assert captured["signal_family"] == "fundamental_value"
     assert captured["fundamentals_enabled"] is True
     assert Path(str(captured["fundamentals_daily_features_path"])) == Path("data/fundamentals/daily_fundamental_features.parquet")
+
+
+def test_cmd_refresh_research_inputs_passes_fmp_cache_controls(monkeypatch, tmp_path: Path) -> None:
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        "trading_platform.cli.commands.refresh_research_inputs.resolve_symbols",
+        lambda args: ["AAPL"],
+    )
+    monkeypatch.setattr(
+        "trading_platform.cli.commands.refresh_research_inputs.refresh_research_inputs",
+        lambda request: captured.update(request.to_dict()) or type(
+            "RefreshResult",
+            (),
+            {
+                "feature_symbols_built": ["AAPL"],
+                "feature_symbols_requested": ["AAPL"],
+                "status": "success",
+                "feature_dir": tmp_path / "features",
+                "metadata_dir": tmp_path / "metadata",
+                "feature_failures": [],
+                "paths": {},
+            },
+        )(),
+    )
+    monkeypatch.setattr(
+        "trading_platform.cli.commands.refresh_research_inputs.load_and_apply_workflow_config",
+        lambda args, loader: None,
+    )
+
+    args = argparse.Namespace(
+        config=None,
+        symbols=["AAPL"],
+        universe=None,
+        feature_groups=None,
+        sub_universe_id=None,
+        reference_data_root=None,
+        universe_membership_path=None,
+        taxonomy_snapshot_path=None,
+        benchmark_mapping_path=None,
+        market_regime_path=None,
+        group_map_path=None,
+        benchmark=None,
+        feature_dir="data/features",
+        metadata_dir="data/metadata",
+        normalized_dir="data/normalized",
+        failure_policy="partial_success",
+        fundamentals_enabled=True,
+        fundamentals_artifact_root="data/fundamentals",
+        fundamentals_providers=["vendor"],
+        fundamentals_sec_companyfacts_root=None,
+        fundamentals_sec_submissions_root=None,
+        fundamentals_vendor_file_path=None,
+        fundamentals_vendor_api_key="test-key",
+        fundamentals_vendor_cache_enabled=True,
+        fundamentals_vendor_cache_root="data/fundamentals/raw_fmp",
+        fundamentals_vendor_cache_ttl_hours=24.0,
+        fundamentals_vendor_force_refresh=False,
+        fundamentals_vendor_request_delay_seconds=0.5,
+        fundamentals_vendor_max_retries=4,
+        fundamentals_vendor_max_symbols_per_run=10,
+        fundamentals_vendor_max_requests_per_run=70,
+    )
+
+    cmd_refresh_research_inputs(args)
+
+    assert captured["fundamentals_vendor_cache_enabled"] is True
+    assert captured["fundamentals_vendor_cache_root"] == "data/fundamentals/raw_fmp"
+    assert captured["fundamentals_vendor_cache_ttl_hours"] == 24.0
+    assert captured["fundamentals_vendor_request_delay_seconds"] == 0.5
+    assert captured["fundamentals_vendor_max_retries"] == 4
+    assert captured["fundamentals_vendor_max_symbols_per_run"] == 10
+    assert captured["fundamentals_vendor_max_requests_per_run"] == 70
 
 
 def test_cmd_research_reports_effective_range_rows_and_feature_path(monkeypatch, capsys, tmp_path: Path) -> None:

@@ -32,10 +32,19 @@ class FundamentalsIngestionRequest:
     sec_submissions_root: str | None = None
     vendor_file_path: str | None = None
     vendor_api_key: str | None = None
+    vendor_cache_enabled: bool = True
+    vendor_cache_root: Path | None = None
+    vendor_cache_ttl_hours: float = 24.0
+    vendor_force_refresh: bool = False
+    vendor_request_delay_seconds: float = 0.5
+    vendor_max_retries: int = 4
+    vendor_max_symbols_per_run: int | None = None
+    vendor_max_requests_per_run: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
         payload["artifact_root"] = str(self.artifact_root)
+        payload["vendor_cache_root"] = str(self.vendor_cache_root) if self.vendor_cache_root else None
         return payload
 
 
@@ -117,6 +126,14 @@ def _provider_instances(request: FundamentalsIngestionRequest) -> list[Fundament
         "vendor": VendorFundamentalsProvider(
             file_path=request.vendor_file_path,
             api_key=request.vendor_api_key,
+            cache_enabled=request.vendor_cache_enabled,
+            cache_root=request.vendor_cache_root or (request.artifact_root / "raw_fmp"),
+            cache_ttl_hours=request.vendor_cache_ttl_hours,
+            force_refresh=request.vendor_force_refresh,
+            request_delay_seconds=request.vendor_request_delay_seconds,
+            max_retries=request.vendor_max_retries,
+            max_symbols_per_run=request.vendor_max_symbols_per_run,
+            max_requests_per_run=request.vendor_max_requests_per_run,
         ),
     }
     return [registry[name] for name in request.providers if name in registry]
@@ -277,6 +294,27 @@ def ingest_fundamentals(request: FundamentalsIngestionRequest) -> dict[str, str]
     if values_df.empty and provider_errors:
         raise RuntimeError("; ".join(str(error) for error in provider_errors if error))
 
+    aggregate_symbols_fetched = sorted(
+        {
+            str(symbol)
+            for diagnostic in provider_diagnostics
+            for symbol in diagnostic.get("symbols_fetched", []) or []
+        }
+    )
+    aggregate_symbols_skipped_from_cache = sorted(
+        {
+            str(symbol)
+            for diagnostic in provider_diagnostics
+            for symbol in diagnostic.get("symbols_skipped_from_cache", []) or []
+        }
+    )
+    aggregate_symbols_failed = sorted(
+        {
+            str(symbol)
+            for diagnostic in provider_diagnostics
+            for symbol in diagnostic.get("symbols_failed", []) or []
+        }
+    )
     company_df.to_parquet(company_path, index=False)
     filing_df.to_parquet(filing_path, index=False)
     values_df.to_parquet(values_path, index=False)
@@ -298,6 +336,13 @@ def ingest_fundamentals(request: FundamentalsIngestionRequest) -> dict[str, str]
                 "symbols_requested": len(request.symbols),
                 "symbols_with_values": int(values_df["symbol"].nunique()) if not values_df.empty else 0,
                 "symbols_with_metric_coverage": sorted(values_df["symbol"].dropna().astype(str).str.upper().unique().tolist()) if not values_df.empty else [],
+                "cache_hits": int(sum(int(diagnostic.get("cache_hits", 0) or 0) for diagnostic in provider_diagnostics)),
+                "cache_misses": int(sum(int(diagnostic.get("cache_misses", 0) or 0) for diagnostic in provider_diagnostics)),
+                "symbols_fetched": aggregate_symbols_fetched,
+                "symbols_skipped_from_cache": aggregate_symbols_skipped_from_cache,
+                "retry_count": int(sum(int(diagnostic.get("retry_count", 0) or 0) for diagnostic in provider_diagnostics)),
+                "rate_limit_error_count": int(sum(int(diagnostic.get("rate_limit_error_count", 0) or 0) for diagnostic in provider_diagnostics)),
+                "symbols_failed": aggregate_symbols_failed,
                 "warnings": [
                     diagnostic.get("message")
                     for diagnostic in provider_diagnostics

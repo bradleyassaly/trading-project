@@ -34,6 +34,16 @@ fundamentals:
   vendor_api_key: null
   # Optional artifact-backed fallback for offline/vendor-normalized snapshots.
   vendor_file_path: null
+  vendor_cache_enabled: true
+  vendor_cache_root: data/fundamentals/raw_fmp
+  vendor_cache_ttl_hours: 24
+  vendor_force_refresh: false
+  vendor_request_delay_seconds: 0.5
+  vendor_max_retries: 4
+  # Start small when validating quota behavior, then raise this later.
+  vendor_max_symbols_per_run: 25
+  # Optional safety cap for raw endpoint requests across the run.
+  vendor_max_requests_per_run: 175
   # Enable SEC alongside vendor only when local EDGAR artifacts are available.
   sec_companyfacts_root: null
   sec_submissions_root: null

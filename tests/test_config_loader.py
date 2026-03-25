@@ -181,6 +181,14 @@ fundamentals:
   sec_companyfacts_root: data/sec/companyfacts
   sec_submissions_root: data/sec/submissions
   vendor_file_path: data/vendor/fundamentals.parquet
+  vendor_cache_enabled: true
+  vendor_cache_root: data/fundamentals/raw_fmp
+  vendor_cache_ttl_hours: 48
+  vendor_force_refresh: false
+  vendor_request_delay_seconds: 1.5
+  vendor_max_retries: 6
+  vendor_max_symbols_per_run: 25
+  vendor_max_requests_per_run: 100
 """.strip(),
         encoding="utf-8",
     )
@@ -193,6 +201,14 @@ fundamentals:
     assert config.fundamentals_sec_companyfacts_root == "data/sec/companyfacts"
     assert config.fundamentals_sec_submissions_root == "data/sec/submissions"
     assert config.fundamentals_vendor_file_path == "data/vendor/fundamentals.parquet"
+    assert config.fundamentals_vendor_cache_enabled is True
+    assert config.fundamentals_vendor_cache_root == "data/fundamentals/raw_fmp"
+    assert config.fundamentals_vendor_cache_ttl_hours == 48
+    assert config.fundamentals_vendor_force_refresh is False
+    assert config.fundamentals_vendor_request_delay_seconds == 1.5
+    assert config.fundamentals_vendor_max_retries == 6
+    assert config.fundamentals_vendor_max_symbols_per_run == 25
+    assert config.fundamentals_vendor_max_requests_per_run == 100
 
 
 def test_load_canonical_bundle_experiment_workflow_config(tmp_path) -> None:

@@ -25,6 +25,7 @@ The next information-quality expansion on that path is point-in-time-safe fundam
 
 - canonical fundamentals ingest and normalization stays artifact-first
 - the `vendor` path now supports real Financial Modeling Prep ingestion with `FMP_API_KEY`
+- the FMP path is now quota-aware through raw-response caching, request throttling, retry/backoff, and incremental symbol fetching
 - filing availability dates control when fundamental features become visible
 - alpha research can opt into daily aligned fundamentals without breaking technical-only runs
 
@@ -229,6 +230,25 @@ trading-cli data refresh-research-inputs --config configs/research_input_refresh
 export FMP_API_KEY="YOUR_KEY"
 trading-cli data refresh-research-inputs --config configs/research_input_refresh.yaml
 ```
+
+Quota-aware FMP controls now live in the same refresh config:
+
+- `fundamentals.vendor_cache_enabled`
+- `fundamentals.vendor_cache_root`
+- `fundamentals.vendor_cache_ttl_hours`
+- `fundamentals.vendor_force_refresh`
+- `fundamentals.vendor_request_delay_seconds`
+- `fundamentals.vendor_max_retries`
+- `fundamentals.vendor_max_symbols_per_run`
+- `fundamentals.vendor_max_requests_per_run`
+
+Recommended low-risk first run after a rate-limit incident:
+
+- keep `vendor_cache_enabled: true`
+- keep `vendor_force_refresh: false`
+- start with `vendor_max_symbols_per_run: 25`
+- keep a non-zero `vendor_request_delay_seconds` such as `0.5`
+- rerun the same command tomorrow so fresh-cache hits dominate repeated symbols
 
 ### 2. Run alpha research
 
@@ -471,6 +491,14 @@ Provider architecture:
 - `sec` is the authoritative raw-source path using local EDGAR-style JSON payloads
 - `vendor` is the normalized structured-provider path and now supports live Financial Modeling Prep ingestion plus artifact-backed JSON, CSV, or parquet fallback
 - providers are pluggable and preserve source provenance in the canonical artifacts
+
+FMP quota hardening:
+
+- successful raw responses are cached under `data/fundamentals/raw_fmp/` by endpoint and symbol
+- repeated runs prefer fresh cache entries before making network calls
+- stale or missing cache entries are refetched with deterministic exponential backoff for `429` and other transient failures
+- provider diagnostics now report cache hits, cache misses, fetched symbols, skipped cached symbols, retries, and rate-limit counts
+- `vendor_force_refresh: true` bypasses fresh cache entries when you intentionally want a full refetch
 
 Point-in-time rules for the FMP-backed vendor path:
 

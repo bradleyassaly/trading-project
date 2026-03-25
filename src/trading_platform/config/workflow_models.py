@@ -276,6 +276,14 @@ class ResearchInputRefreshWorkflowConfig:
     fundamentals_sec_submissions_root: str | None = None
     fundamentals_vendor_file_path: str | None = None
     fundamentals_vendor_api_key: str | None = None
+    fundamentals_vendor_cache_enabled: bool = True
+    fundamentals_vendor_cache_root: str | None = None
+    fundamentals_vendor_cache_ttl_hours: float = 24.0
+    fundamentals_vendor_force_refresh: bool = False
+    fundamentals_vendor_request_delay_seconds: float = 0.5
+    fundamentals_vendor_max_retries: int = 4
+    fundamentals_vendor_max_symbols_per_run: int | None = None
+    fundamentals_vendor_max_requests_per_run: int | None = None
 
     def __post_init__(self) -> None:
         selected = sum(bool(value) for value in (self.symbols, self.universe))
@@ -283,6 +291,16 @@ class ResearchInputRefreshWorkflowConfig:
             raise ValueError("exactly one of symbols or universe must be provided")
         if self.failure_policy not in {"partial_success", "fail"}:
             raise ValueError("failure_policy must be one of: partial_success, fail")
+        if self.fundamentals_vendor_cache_ttl_hours < 0:
+            raise ValueError("fundamentals_vendor_cache_ttl_hours must be >= 0")
+        if self.fundamentals_vendor_request_delay_seconds < 0:
+            raise ValueError("fundamentals_vendor_request_delay_seconds must be >= 0")
+        if self.fundamentals_vendor_max_retries < 0:
+            raise ValueError("fundamentals_vendor_max_retries must be >= 0")
+        if self.fundamentals_vendor_max_symbols_per_run is not None and self.fundamentals_vendor_max_symbols_per_run <= 0:
+            raise ValueError("fundamentals_vendor_max_symbols_per_run must be > 0 when provided")
+        if self.fundamentals_vendor_max_requests_per_run is not None and self.fundamentals_vendor_max_requests_per_run <= 0:
+            raise ValueError("fundamentals_vendor_max_requests_per_run must be > 0 when provided")
 
     def to_cli_defaults(self) -> dict[str, Any]:
         return asdict(self)

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from typing import Any
+from urllib.error import HTTPError
 
 import pandas as pd
 import pytest
@@ -345,6 +346,142 @@ def test_vendor_provider_supports_partial_symbol_coverage(monkeypatch: pytest.Mo
     assert result.diagnostics["status"] == "ok"
     assert result.diagnostics["missing_symbols"] == ["MSFT"]
     assert sorted(result.fundamental_values_df["symbol"].unique().tolist()) == ["AAPL"]
+
+
+def test_vendor_provider_uses_fresh_cache_and_skips_network_fetch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    payloads = _fmp_payloads_for_symbol("AAPL")
+    request_count = {"count": 0}
+
+    def _counting_urlopen(request, timeout=30):  # noqa: ANN001
+        request_count["count"] += 1
+        full_url = request.full_url
+        for expected_fragment, payload in payloads.items():
+            if expected_fragment in full_url:
+                return _FakeHTTPResponse(payload)
+        raise AssertionError(f"Unexpected FMP URL requested during test: {full_url}")
+
+    monkeypatch.setattr(vendor_module, "urlopen", _counting_urlopen)
+
+    cache_root = tmp_path / "raw_fmp"
+    first = VendorFundamentalsProvider(
+        api_key="test-key",
+        cache_enabled=True,
+        cache_root=cache_root,
+        request_delay_seconds=0.0,
+    ).fetch(symbols=["AAPL"])
+
+    assert first.diagnostics["cache_misses"] > 0
+    assert first.diagnostics["symbols_fetched"] == ["AAPL"]
+    assert request_count["count"] > 0
+
+    request_count["count"] = 0
+    second = VendorFundamentalsProvider(
+        api_key="test-key",
+        cache_enabled=True,
+        cache_root=cache_root,
+        request_delay_seconds=0.0,
+    ).fetch(symbols=["AAPL"])
+
+    assert second.diagnostics["cache_hits"] > 0
+    assert second.diagnostics["symbols_skipped_from_cache"] == ["AAPL"]
+    assert request_count["count"] == 0
+
+
+def test_vendor_provider_retries_http_429_then_succeeds(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    payloads = _fmp_payloads_for_symbol("AAPL")
+    call_counts: dict[str, int] = {}
+    sleep_calls: list[float] = []
+
+    def _retrying_urlopen(request, timeout=30):  # noqa: ANN001
+        full_url = request.full_url
+        for expected_fragment, payload in payloads.items():
+            if expected_fragment in full_url:
+                call_counts[expected_fragment] = call_counts.get(expected_fragment, 0) + 1
+                if expected_fragment == "profile?symbol=AAPL" and call_counts[expected_fragment] == 1:
+                    raise HTTPError(full_url, 429, "Too Many Requests", hdrs=None, fp=None)
+                return _FakeHTTPResponse(payload)
+        raise AssertionError(f"Unexpected FMP URL requested during test: {full_url}")
+
+    monkeypatch.setattr(vendor_module, "urlopen", _retrying_urlopen)
+    monkeypatch.setattr(vendor_module.time, "sleep", lambda seconds: sleep_calls.append(seconds))
+
+    result = VendorFundamentalsProvider(
+        api_key="test-key",
+        cache_enabled=False,
+        request_delay_seconds=0.0,
+        max_retries=2,
+    ).fetch(symbols=["AAPL"])
+
+    assert result.diagnostics["status"] == "ok"
+    assert result.diagnostics["retry_count"] == 1
+    assert result.diagnostics["rate_limit_error_count"] == 1
+    assert sleep_calls
+    assert not result.fundamental_values_df.empty
+
+
+def test_ingest_fundamentals_raises_when_fmp_retries_exhausted(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def _always_rate_limited(request, timeout=30):  # noqa: ANN001
+        raise HTTPError(request.full_url, 429, "Too Many Requests", hdrs=None, fp=None)
+
+    monkeypatch.setattr(vendor_module, "urlopen", _always_rate_limited)
+    monkeypatch.setattr(vendor_module.time, "sleep", lambda seconds: None)
+
+    with pytest.raises(RuntimeError, match="retries were exhausted"):
+        ingest_fundamentals(
+            FundamentalsIngestionRequest(
+                symbols=["AAPL"],
+                artifact_root=tmp_path / "fundamentals",
+                providers=("vendor",),
+                vendor_api_key="test-key",
+                vendor_cache_enabled=False,
+                vendor_request_delay_seconds=0.0,
+                vendor_max_retries=1,
+            )
+        )
+
+
+def test_ingest_fundamentals_summary_reports_cache_and_retry_diagnostics(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    artifact_root = tmp_path / "fundamentals"
+    calendar_dir = tmp_path / "features"
+    calendar_dir.mkdir()
+    pd.DataFrame(
+        {
+            "timestamp": pd.date_range("2024-02-10", periods=30, freq="D"),
+            "symbol": ["AAPL"] * 30,
+            "close": [20.0] * 30,
+        }
+    ).to_parquet(calendar_dir / "AAPL.parquet", index=False)
+
+    payloads = _fmp_payloads_for_symbol("AAPL")
+    _install_fmp_urlopen(monkeypatch, payloads)
+    ingest_result = ingest_fundamentals(
+        FundamentalsIngestionRequest(
+            symbols=["AAPL"],
+            artifact_root=artifact_root,
+            providers=("vendor",),
+            vendor_api_key="test-key",
+            vendor_cache_enabled=True,
+            vendor_cache_root=artifact_root / "raw_fmp",
+            vendor_request_delay_seconds=0.0,
+            vendor_max_symbols_per_run=1,
+        )
+    )
+    build_daily_fundamental_features(
+        FundamentalFeatureBuildRequest(
+            artifact_root=artifact_root,
+            calendar_dir=calendar_dir,
+            symbols=["AAPL"],
+        )
+    )
+    summary = json.loads(Path(ingest_result["fundamental_summary_path"]).read_text(encoding="utf-8"))
+
+    assert summary["cache_hits"] == 0
+    assert summary["cache_misses"] > 0
+    assert summary["retry_count"] == 0
+    assert summary["rate_limit_error_count"] == 0
+    assert summary["symbols_fetched"] == ["AAPL"]
+    assert summary["symbols_skipped_from_cache"] == []
+    assert summary["symbols_failed"] == []
 
 
 def test_build_daily_fundamental_features_respects_available_date_and_forward_fill(tmp_path: Path) -> None:

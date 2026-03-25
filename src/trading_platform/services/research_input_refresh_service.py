@@ -59,6 +59,14 @@ class ResearchInputRefreshRequest:
     fundamentals_sec_submissions_root: str | None = None
     fundamentals_vendor_file_path: str | None = None
     fundamentals_vendor_api_key: str | None = None
+    fundamentals_vendor_cache_enabled: bool = True
+    fundamentals_vendor_cache_root: str | None = None
+    fundamentals_vendor_cache_ttl_hours: float = 24.0
+    fundamentals_vendor_force_refresh: bool = False
+    fundamentals_vendor_request_delay_seconds: float = 0.5
+    fundamentals_vendor_max_retries: int = 4
+    fundamentals_vendor_max_symbols_per_run: int | None = None
+    fundamentals_vendor_max_requests_per_run: int | None = None
 
     def __post_init__(self) -> None:
         if not self.symbols:
@@ -225,6 +233,14 @@ def refresh_research_inputs(
                 sec_submissions_root=resolved_request.fundamentals_sec_submissions_root,
                 vendor_file_path=resolved_request.fundamentals_vendor_file_path,
                 vendor_api_key=resolved_request.fundamentals_vendor_api_key,
+                vendor_cache_enabled=resolved_request.fundamentals_vendor_cache_enabled,
+                vendor_cache_root=Path(resolved_request.fundamentals_vendor_cache_root) if resolved_request.fundamentals_vendor_cache_root else None,
+                vendor_cache_ttl_hours=resolved_request.fundamentals_vendor_cache_ttl_hours,
+                vendor_force_refresh=resolved_request.fundamentals_vendor_force_refresh,
+                vendor_request_delay_seconds=resolved_request.fundamentals_vendor_request_delay_seconds,
+                vendor_max_retries=resolved_request.fundamentals_vendor_max_retries,
+                vendor_max_symbols_per_run=resolved_request.fundamentals_vendor_max_symbols_per_run,
+                vendor_max_requests_per_run=resolved_request.fundamentals_vendor_max_requests_per_run,
             )
         )
         feature_paths = build_daily_fundamental_features(

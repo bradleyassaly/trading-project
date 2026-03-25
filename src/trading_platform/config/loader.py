@@ -237,6 +237,14 @@ def load_research_input_refresh_workflow_config(path: str | Path) -> ResearchInp
     _set_if_missing(payload, "fundamentals_sec_submissions_root", fundamentals_section, "sec_submissions_root")
     _set_if_missing(payload, "fundamentals_vendor_file_path", fundamentals_section, "vendor_file_path")
     _set_if_missing(payload, "fundamentals_vendor_api_key", fundamentals_section, "vendor_api_key")
+    _set_if_missing(payload, "fundamentals_vendor_cache_enabled", fundamentals_section, "vendor_cache_enabled")
+    _set_if_missing(payload, "fundamentals_vendor_cache_root", fundamentals_section, "vendor_cache_root")
+    _set_if_missing(payload, "fundamentals_vendor_cache_ttl_hours", fundamentals_section, "vendor_cache_ttl_hours")
+    _set_if_missing(payload, "fundamentals_vendor_force_refresh", fundamentals_section, "vendor_force_refresh")
+    _set_if_missing(payload, "fundamentals_vendor_request_delay_seconds", fundamentals_section, "vendor_request_delay_seconds")
+    _set_if_missing(payload, "fundamentals_vendor_max_retries", fundamentals_section, "vendor_max_retries")
+    _set_if_missing(payload, "fundamentals_vendor_max_symbols_per_run", fundamentals_section, "vendor_max_symbols_per_run")
+    _set_if_missing(payload, "fundamentals_vendor_max_requests_per_run", fundamentals_section, "vendor_max_requests_per_run")
 
     return ResearchInputRefreshWorkflowConfig(**payload)
 

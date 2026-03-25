@@ -40,6 +40,14 @@ def cmd_refresh_research_inputs(args) -> None:
         fundamentals_sec_submissions_root=getattr(args, "fundamentals_sec_submissions_root", None),
         fundamentals_vendor_file_path=getattr(args, "fundamentals_vendor_file_path", None),
         fundamentals_vendor_api_key=getattr(args, "fundamentals_vendor_api_key", None),
+        fundamentals_vendor_cache_enabled=bool(getattr(args, "fundamentals_vendor_cache_enabled", True)),
+        fundamentals_vendor_cache_root=getattr(args, "fundamentals_vendor_cache_root", None),
+        fundamentals_vendor_cache_ttl_hours=getattr(args, "fundamentals_vendor_cache_ttl_hours", 24.0),
+        fundamentals_vendor_force_refresh=bool(getattr(args, "fundamentals_vendor_force_refresh", False)),
+        fundamentals_vendor_request_delay_seconds=getattr(args, "fundamentals_vendor_request_delay_seconds", 0.5),
+        fundamentals_vendor_max_retries=getattr(args, "fundamentals_vendor_max_retries", 4),
+        fundamentals_vendor_max_symbols_per_run=getattr(args, "fundamentals_vendor_max_symbols_per_run", None),
+        fundamentals_vendor_max_requests_per_run=getattr(args, "fundamentals_vendor_max_requests_per_run", None),
     )
     result = refresh_research_inputs(
         request=request,

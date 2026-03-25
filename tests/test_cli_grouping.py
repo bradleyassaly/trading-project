@@ -261,12 +261,29 @@ def test_grouped_data_refresh_research_inputs_command_parses_fundamentals_args()
             "vendor",
             "--fundamentals-artifact-root",
             "data/fundamentals",
+            "--fundamentals-vendor-cache-root",
+            "data/fundamentals/raw_fmp",
+            "--fundamentals-vendor-cache-ttl-hours",
+            "48",
+            "--fundamentals-vendor-force-refresh",
+            "--fundamentals-vendor-request-delay-seconds",
+            "1.5",
+            "--fundamentals-vendor-max-retries",
+            "6",
+            "--fundamentals-vendor-max-symbols-per-run",
+            "25",
         ]
     )
 
     assert args.fundamentals_enabled is True
     assert args.fundamentals_providers == ["sec", "vendor"]
     assert args.fundamentals_artifact_root == "data/fundamentals"
+    assert args.fundamentals_vendor_cache_root == "data/fundamentals/raw_fmp"
+    assert args.fundamentals_vendor_cache_ttl_hours == 48.0
+    assert args.fundamentals_vendor_force_refresh is True
+    assert args.fundamentals_vendor_request_delay_seconds == 1.5
+    assert args.fundamentals_vendor_max_retries == 6
+    assert args.fundamentals_vendor_max_symbols_per_run == 25
 
 
 def test_grouped_data_refresh_research_inputs_command_parses_config() -> None:
@@ -296,8 +313,12 @@ def test_grouped_data_fundamentals_commands_parse() -> None:
             "AAPL",
             "--providers",
             "vendor",
-            "--vendor-file-path",
-            "data/vendor/fundamentals.parquet",
+            "--fundamentals-vendor-api-key",
+            "test-key",
+            "--vendor-cache-root",
+            "data/fundamentals/raw_fmp",
+            "--vendor-max-symbols-per-run",
+            "10",
         ]
     )
     features_args = parser.parse_args(
@@ -317,6 +338,9 @@ def test_grouped_data_fundamentals_commands_parse() -> None:
     assert ingest_args.data_command == "fundamentals"
     assert ingest_args.fundamentals_command == "ingest"
     assert ingest_args.providers == ["vendor"]
+    assert ingest_args.vendor_api_key == "test-key"
+    assert ingest_args.vendor_cache_root == "data/fundamentals/raw_fmp"
+    assert ingest_args.vendor_max_symbols_per_run == 10
     assert features_args.fundamentals_command == "features"
     assert features_args.calendar_dir == "data/features"
 
