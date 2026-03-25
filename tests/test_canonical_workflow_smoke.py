@@ -144,6 +144,41 @@ tracking:
     return config_path
 
 
+def _write_promotion_policy_config(
+    *,
+    config_path: Path,
+) -> Path:
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(
+        """
+schema_version: 1
+metric_name: portfolio_sharpe
+min_metric_threshold: 0.1
+min_folds_tested: 1
+min_promoted_signals: 1
+require_validation_pass: false
+allow_weak_validation: true
+max_strategies_total: 2
+max_strategies_per_group: 1
+group_by: signal_family
+default_status: inactive
+enable_conditional_variants: true
+allowed_condition_types:
+  - regime
+  - sub_universe
+  - benchmark_context
+min_condition_sample_size: 1
+min_condition_improvement: 0.0
+compare_condition_to_unconditional: true
+notes: canonical smoke promotion policy
+tags:
+  - canonical_smoke
+""".strip(),
+        encoding="utf-8",
+    )
+    return config_path
+
+
 def _write_bundle_experiment_config(
     *,
     bundle: dict[str, Path],
@@ -335,12 +370,15 @@ failure_policy: fail
     assert Path(artifact_paths["research_context_coverage_path"]).exists()
 
     promoted_dir = tmp_path / "artifacts" / "promoted_strategies"
+    promotion_config_path = _write_promotion_policy_config(
+        config_path=tmp_path / "promotion_policy.yaml",
+    )
     cmd_research_promote(
         SimpleNamespace(
             artifacts_root=str(tmp_path / "artifacts" / "alpha_research"),
             registry_dir=None,
             output_dir=str(promoted_dir),
-            policy_config=None,
+            policy_config=str(promotion_config_path),
             validation=None,
             top_n=1,
             allow_overwrite=False,
@@ -503,12 +541,15 @@ failure_policy: fail
     alpha_result = json.loads((alpha_output_dir / "research_run.json").read_text(encoding="utf-8"))
 
     promoted_dir = tmp_path / "artifacts" / "promoted_strategies"
+    promotion_config_path = _write_promotion_policy_config(
+        config_path=tmp_path / "promotion_policy.yaml",
+    )
     cmd_research_promote(
         SimpleNamespace(
             artifacts_root=str(tmp_path / "artifacts" / "alpha_research"),
             registry_dir=None,
             output_dir=str(promoted_dir),
-            policy_config=None,
+            policy_config=str(promotion_config_path),
             validation=None,
             top_n=1,
             allow_overwrite=False,
