@@ -1091,6 +1091,7 @@ Current limitations:
 The alpha research path now includes a small set of additional equity-only signal families built from the same local price and volume inputs:
 
 - `volatility_adjusted_momentum`
+- `volatility_adjusted_reversal`
 - `short_horizon_mean_reversion`
 - `momentum_acceleration`
 - `cross_sectional_relative_strength`
@@ -1098,6 +1099,9 @@ The alpha research path now includes a small set of additional equity-only signa
 - `breakout_continuation`
 - `benchmark_relative_rotation`
 - `regime_conditioned_momentum`
+- `volatility_dispersion_selection`
+- `sector_relative_momentum`
+- `liquidity_flow_tilt`
 - `volume_shock_momentum`
 
 These stay additive and experimental:
@@ -1130,10 +1134,14 @@ Use it to compare which families actually produce:
 Current guidance:
 
 - keep `momentum` as the default baseline unless a family comparison run shows a clear win
+- use `short_horizon_mean_reversion` or `volatility_adjusted_reversal` when you want explicit reversal families instead of adding more trend variants
 - use `cross_sectional_momentum` as a direct relative-strength alias when you want clearer family naming in portfolio outputs
 - use `breakout_continuation` when you want an explicit trend-continuation family instead of pure medium-horizon momentum
 - use `benchmark_relative_rotation` when you want benchmark-relative leadership to compete directly in promotion and portfolio construction
 - use `regime_conditioned_momentum` when you want a simple family that should interact naturally with conditional promotion and risk-on/risk-off context
+- use `volatility_dispersion_selection` when you want leadership filtered by volatility and dispersion state rather than raw momentum alone
+- use `sector_relative_momentum` when you want within-group leadership to compete against broad market-relative families
+- use `liquidity_flow_tilt` when you want volume and dollar-flow confirmation to compete with price-led families
 - treat the new families as equity-only experimental paths for controlled follow-up testing
 
 ## Strategy Portfolio Weighting Modes

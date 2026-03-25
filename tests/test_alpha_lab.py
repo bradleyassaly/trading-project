@@ -366,6 +366,72 @@ def test_build_signal_regime_conditioned_momentum_suppresses_risk_off_periods() 
     assert signal.iloc[3] == pytest.approx((103.0 / 104.0 - 1.0) * 1.1)
 
 
+def test_build_signal_volatility_dispersion_selection_prefers_low_vol_relative_strength() -> None:
+    df = pd.DataFrame(
+        {
+            "close": [100.0, 101.0, 102.0, 104.0, 105.0, 107.0],
+            "relative_return_1": [None, 0.02, 0.01, 0.03, 0.025, 0.03],
+            "realized_vol_20": [0.20, 0.20, 0.40, 0.35, 0.15, 0.10],
+            "dispersion_regime": [
+                "low_dispersion",
+                "low_dispersion",
+                "high_dispersion",
+                "high_dispersion",
+                "low_dispersion",
+                "high_dispersion",
+            ],
+        }
+    )
+
+    signal = build_signal(df, signal_family="volatility_dispersion_selection", lookback=2)
+
+    assert signal.notna().sum() > 0
+    assert signal.iloc[5] > signal.iloc[2]
+
+
+def test_build_signal_sector_relative_momentum_uses_sector_baseline_when_available() -> None:
+    df = pd.DataFrame(
+        {
+            "close": [100.0, 102.0, 104.0, 106.0],
+            "sector_return_1": [None, 0.01, 0.03, 0.01],
+        }
+    )
+
+    signal = build_signal(df, signal_family="sector_relative_momentum", lookback=1)
+
+    assert pd.isna(signal.iloc[0])
+    assert signal.iloc[1] == pytest.approx((102.0 / 100.0 - 1.0) - 0.01)
+    assert signal.iloc[2] == pytest.approx((104.0 / 102.0 - 1.0) - 0.03)
+
+
+def test_build_signal_liquidity_flow_tilt_uses_volume_and_dollar_flow_confirmation() -> None:
+    df = pd.DataFrame(
+        {
+            "close": [100.0, 101.0, 102.0, 104.0],
+            "relative_return_1": [None, 0.01, 0.02, 0.03],
+            "volume_ratio_20": [1.0, 0.8, 1.5, 2.0],
+            "dollar_volume": [100.0, 110.0, 180.0, 240.0],
+            "avg_dollar_volume_20": [100.0, 100.0, 120.0, 150.0],
+        }
+    )
+
+    signal = build_signal(df, signal_family="liquidity_flow_tilt", lookback=1)
+
+    assert signal.iloc[0] == pytest.approx(0.0)
+    assert signal.iloc[3] > signal.iloc[1]
+    assert signal.iloc[3] > signal.iloc[2]
+
+
+def test_build_signal_volatility_adjusted_reversal_is_inverse_of_vol_adjusted_momentum_direction() -> None:
+    df = pd.DataFrame({"close": [100.0, 103.0, 101.0, 99.0, 98.0]})
+
+    reversal = build_signal(df, signal_family="volatility_adjusted_reversal", lookback=2)
+    momentum = build_signal(df, signal_family="vol_adjusted_momentum", lookback=2)
+
+    assert reversal.notna().sum() > 0
+    assert reversal.iloc[4] == pytest.approx(-momentum.iloc[4])
+
+
 def test_build_signal_volume_shock_momentum_scales_momentum_by_volume_ratio() -> None:
     df = pd.DataFrame(
         {

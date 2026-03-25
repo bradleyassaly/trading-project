@@ -9,6 +9,7 @@ SUPPORTED_SIGNAL_FAMILIES = (
     "short_term_reversal",
     "vol_adjusted_momentum",
     "volatility_adjusted_momentum",
+    "volatility_adjusted_reversal",
     "equity_context_momentum",
     "short_horizon_mean_reversion",
     "momentum_acceleration",
@@ -17,6 +18,9 @@ SUPPORTED_SIGNAL_FAMILIES = (
     "breakout_continuation",
     "benchmark_relative_rotation",
     "regime_conditioned_momentum",
+    "volatility_dispersion_selection",
+    "sector_relative_momentum",
+    "liquidity_flow_tilt",
     "volume_shock_momentum",
 )
 
@@ -44,6 +48,16 @@ def _relative_strength_signal(
     return raw_momentum
 
 
+def _baseline_series(
+    df: pd.DataFrame,
+    candidates: tuple[str, ...],
+) -> pd.Series | None:
+    for column in candidates:
+        if column in df.columns:
+            return pd.to_numeric(df[column], errors="coerce")
+    return None
+
+
 def build_signal(
     df: pd.DataFrame,
     *,
@@ -64,6 +78,12 @@ def build_signal(
         vol = returns.rolling(lookback).std()
         raw_momentum = close.pct_change(lookback)
         return raw_momentum / vol.replace(0.0, np.nan)
+
+    if signal_family == "volatility_adjusted_reversal":
+        returns = close.pct_change()
+        vol = returns.rolling(lookback).std()
+        raw_reversal = -close.pct_change(lookback)
+        return raw_reversal / vol.replace(0.0, np.nan)
 
     if signal_family == "short_horizon_mean_reversion":
         returns = close.pct_change()
@@ -111,6 +131,58 @@ def build_signal(
         ).fillna(0.0)
         risk_multiplier = np.where(market_return >= 0.0, 1.0, 0.25)
         return raw_momentum * risk_multiplier * (1.0 + breadth.clip(lower=-0.5, upper=0.5))
+
+    if signal_family == "volatility_dispersion_selection":
+        relative_signal = _relative_strength_signal(df, lookback=lookback, close=close).fillna(0.0)
+        realized_vol = pd.to_numeric(
+            df.get("realized_vol_20", df.get(f"realized_vol_{lookback}", close.pct_change().rolling(lookback).std())),
+            errors="coerce",
+        )
+        vol_penalty = _rolling_zscore(realized_vol, max(lookback, 5)).fillna(0.0)
+        regime_multiplier = pd.Series(1.0, index=df.index, dtype=float)
+        if "dispersion_regime" in df.columns:
+            dispersion_regime = df["dispersion_regime"].astype(str).str.lower()
+            regime_multiplier = pd.Series(
+                np.where(dispersion_regime.eq("high_dispersion"), 1.25, 0.85),
+                index=df.index,
+                dtype=float,
+            )
+        return (relative_signal - vol_penalty) * regime_multiplier
+
+    if signal_family == "sector_relative_momentum":
+        raw_momentum = close.pct_change(lookback)
+        sector_baseline = _baseline_series(
+            df,
+            (
+                f"sector_mean_return_{lookback}",
+                "sector_mean_return",
+                f"sector_momentum_{lookback}",
+                f"group_momentum_{lookback}",
+                f"industry_momentum_{lookback}",
+                f"sector_return_{lookback}",
+                f"group_return_{lookback}",
+                f"industry_return_{lookback}",
+                f"benchmark_return_{lookback}",
+            ),
+        )
+        if sector_baseline is None:
+            return _relative_strength_signal(df, lookback=lookback, close=close)
+        return raw_momentum - sector_baseline
+
+    if signal_family == "liquidity_flow_tilt":
+        relative_signal = _relative_strength_signal(df, lookback=lookback, close=close).fillna(0.0)
+        volume_ratio = pd.to_numeric(
+            df.get("volume_ratio_20", df.get(f"volume_ratio_{lookback}", pd.Series(1.0, index=df.index))),
+            errors="coerce",
+        ).fillna(1.0)
+        if "avg_dollar_volume_20" in df.columns and "dollar_volume" in df.columns:
+            avg_dollar_volume = pd.to_numeric(df["avg_dollar_volume_20"], errors="coerce")
+            dollar_volume = pd.to_numeric(df["dollar_volume"], errors="coerce")
+            dollar_flow = (dollar_volume / avg_dollar_volume.replace(0.0, np.nan)).fillna(1.0)
+        else:
+            dollar_flow = volume_ratio
+        flow_tilt = 0.5 * volume_ratio.clip(lower=0.5, upper=2.5) + 0.5 * dollar_flow.clip(lower=0.5, upper=2.5)
+        return relative_signal * flow_tilt + 0.25 * (flow_tilt - 1.0)
 
     if signal_family == "volume_shock_momentum":
         raw_momentum = close.pct_change(lookback)

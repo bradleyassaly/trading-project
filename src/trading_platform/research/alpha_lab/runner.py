@@ -193,6 +193,9 @@ def _signal_family_requires_equity_context(signal_family: str) -> bool:
         "cross_sectional_momentum",
         "benchmark_relative_rotation",
         "regime_conditioned_momentum",
+        "sector_relative_momentum",
+        "volatility_dispersion_selection",
+        "liquidity_flow_tilt",
     }
 
 
