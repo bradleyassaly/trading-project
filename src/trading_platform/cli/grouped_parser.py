@@ -193,6 +193,7 @@ _RESEARCH_GROUP_COMMANDS = {
     "compare-runs",
     "promotion-candidates",
     "promote",
+    "db",
     "pipeline",
     "strategies",
 }

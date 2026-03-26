@@ -255,6 +255,13 @@ def test_grouped_research_db_commands_parse() -> None:
     assert list_args.limit == 5
 
 
+def test_rewrite_legacy_cli_args_does_not_rewrite_research_db_command() -> None:
+    rewritten, note = rewrite_legacy_cli_args(["research", "db", "init"])
+
+    assert rewritten == ["research", "db", "init"]
+    assert note is None
+
+
 def test_grouped_data_features_command_parses_for_universe() -> None:
     parser = build_parser()
     args = parser.parse_args(["data", "features", "--universe", "nasdaq100"])
