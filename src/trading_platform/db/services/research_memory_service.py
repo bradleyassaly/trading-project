@@ -228,6 +228,9 @@ class ResearchMemoryService:
                     "ranking_value": _safe_float(row.get("ranking_value")),
                     "validation_status": _safe_text(row.get("validation_status")),
                     "promotion_variant": _safe_text(row.get("promotion_variant")),
+                    "condition_id": _safe_text(row.get("condition_id")),
+                    "condition_type": _safe_text(row.get("condition_type")),
+                    "rationale": _safe_text(row.get("rationale")),
                     "promotion_timestamp_text": _safe_text(row.get("promotion_timestamp")),
                     "generated_preset_path": _safe_text(row.get("generated_preset_path")),
                     "generated_registry_path": _safe_text(row.get("generated_registry_path")),
@@ -354,6 +357,9 @@ class ResearchMemoryService:
                 "ranking_value": row.ranking_value,
                 "status": row.status,
                 "promotion_variant": row.promotion_variant,
+                "condition_id": row.condition_id,
+                "condition_type": row.condition_type,
+                "rationale": row.rationale,
             }
             for row, run_key in rows
         ]

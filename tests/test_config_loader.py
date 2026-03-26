@@ -885,6 +885,8 @@ def test_load_promotion_policy_config_with_conditional_fields(tmp_path) -> None:
         """
 metric_name: portfolio_sharpe
 min_metric_threshold: 0.75
+bootstrap_mode: true
+allow_first_promotion_without_history: true
 enable_conditional_variants: true
 emit_conditional_variants_alongside_baseline: true
 conditional_variant_allowance: 2
@@ -901,6 +903,8 @@ compare_condition_to_unconditional: true
 
     config = load_promotion_policy_config(path)
 
+    assert config.bootstrap_mode is True
+    assert config.allow_first_promotion_without_history is True
     assert config.enable_conditional_variants is True
     assert config.emit_conditional_variants_alongside_baseline is True
     assert config.conditional_variant_allowance == 2

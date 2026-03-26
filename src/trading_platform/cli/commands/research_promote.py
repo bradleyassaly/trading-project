@@ -94,8 +94,14 @@ def cmd_research_promote(args) -> None:
             strategy_definition_id=strategy_definition_id,
             source_research_run_id=db_service.find_research_run_id(str(row.get("source_run_id") or "")),
             decision=str(row.get("status") or "promoted"),
-            reason=str(row.get("reason") or ""),
-            metrics_json={"ranking_metric": row.get("ranking_metric"), "ranking_value": row.get("ranking_value")},
+            reason=str(row.get("rationale") or row.get("reason") or ""),
+            metrics_json={
+                "ranking_metric": row.get("ranking_metric"),
+                "ranking_value": row.get("ranking_value"),
+                "promotion_variant": row.get("promotion_variant"),
+                "condition_id": row.get("condition_id"),
+                "condition_type": row.get("condition_type"),
+            },
         )
         promoted_strategy_id = db_service.record_promoted_strategy(
             strategy_definition_id=strategy_definition_id,

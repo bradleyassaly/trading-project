@@ -212,7 +212,10 @@ def test_cmd_research_promote_persists_promotions(monkeypatch, tmp_path: Path) -
                     "validation_status": "passed",
                     "promotion_timestamp": "2026-03-26T00:00:00+00:00",
                     "status": "inactive",
-                    "promotion_variant": "unconditional",
+                    "promotion_variant": "conditional",
+                    "condition_id": "regime::risk_on",
+                    "condition_type": "regime",
+                    "rationale": "conditional regime edge",
                     "generated_preset_path": str(tmp_path / "preset.json"),
                     "generated_registry_path": str(tmp_path / "registry.json"),
                     "generated_pipeline_config_path": str(tmp_path / "pipeline.yaml"),
@@ -247,10 +250,19 @@ def test_cmd_research_promote_persists_promotions(monkeypatch, tmp_path: Path) -
     assert session_factory is not None
     with session_factory() as session:
         assert session.execute(text("select count(*) from promoted_strategies")).scalar() >= 1
-        row = session.execute(text("select preset_name, signal_family from promoted_strategies where preset_name is not null")).first()
+        row = session.execute(
+            text(
+                "select preset_name, signal_family, promotion_variant, condition_id, condition_type, rationale "
+                "from promoted_strategies where preset_name is not null"
+            )
+        ).first()
         assert row is not None
         assert row.preset_name == "generated_momentum_run_current_paper"
         assert row.signal_family == "momentum"
+        assert row.promotion_variant == "conditional"
+        assert row.condition_id == "regime::risk_on"
+        assert row.condition_type == "regime"
+        assert row.rationale == "conditional regime edge"
 
 
 def test_research_memory_family_summary_query_runs(tmp_path: Path) -> None:
@@ -301,3 +313,55 @@ def test_research_memory_family_summary_query_runs(tmp_path: Path) -> None:
     rows = service.family_summary()
     assert rows
     assert rows[0]["signal_family"] == "fundamental_value"
+
+
+def test_research_memory_persists_conditional_promotion_fields(tmp_path: Path) -> None:
+    service = build_research_memory_service(
+        enable_database_metadata=True,
+        database_url=_sqlite_url(tmp_path),
+    )
+    assert service.init_schema(schema_name=None) is True
+    lineage = DatabaseLineageService.from_config(enable_database_metadata=True, database_url=_sqlite_url(tmp_path))
+    run_id = lineage.create_research_run(run_key="run_conditional", run_type="alpha_research", config_payload={"x": 1})
+    strategy_definition_id = lineage.upsert_strategy_definition(
+        name="generated_conditional_paper",
+        version="v1",
+        config_payload={"preset_name": "generated_conditional_paper"},
+    )
+
+    service.persist_promotions(
+        run_id=run_id,
+        promoted_rows=[
+            {
+                "strategy_definition_id": strategy_definition_id,
+                "candidate_id": "multi_family|20|5",
+                "preset_name": "generated_conditional_paper",
+                "signal_family": "multi_family",
+                "strategy_name": "composite_alpha",
+                "ranking_metric": "mean_spearman_ic",
+                "ranking_value": 0.11,
+                "promotion_variant": "conditional",
+                "condition_id": "benchmark_context::risk_off_outperform_broad",
+                "condition_type": "benchmark_context",
+                "rationale": "conditional benchmark edge",
+                "status": "inactive",
+            }
+        ],
+    )
+
+    settings = resolve_database_settings(enable_database_metadata=True, database_url=_sqlite_url(tmp_path))
+    session_factory = create_session_factory(settings)
+    assert session_factory is not None
+    with session_factory() as session:
+        row = session.execute(
+            text(
+                "select candidate_id, promotion_variant, condition_id, condition_type, rationale "
+                "from promoted_strategies where preset_name = 'generated_conditional_paper'"
+            )
+        ).first()
+        assert row is not None
+        assert row.candidate_id == "multi_family|20|5"
+        assert row.promotion_variant == "conditional"
+        assert row.condition_id == "benchmark_context::risk_off_outperform_broad"
+        assert row.condition_type == "benchmark_context"
+        assert row.rationale == "conditional benchmark edge"

@@ -463,6 +463,11 @@ trading-cli research promote --artifacts-root artifacts/alpha_research --output-
 
 `research promote` now defaults to run-local promotion scope so stale historical runs do not contaminate the current promotion decision. By default it resolves the latest run under `--artifacts-root`, refreshes that run's local registry bundle, and promotes only from that isolated candidate set.
 
+The promotion stage is now bootstrap-safe and same-run-refresh-safe:
+
+- `bootstrap_mode: true` plus `allow_first_promotion_without_history: true` allows a valid fresh run to promote even when there is no prior promotion history
+- rerunning `research promote` for the same source run refreshes that run's promoted rows in place instead of silently selecting zero because the output directory already contains earlier artifacts
+
 Promote only the current run explicitly:
 
 ```bash
@@ -2064,18 +2069,31 @@ Condition-aware manifest metadata:
 Condition-aware promotion behavior:
 
 - `research promote` still supports broad unconditional promotion exactly as before
-- when the promotion policy enables conditional variants, the promotion pipeline can emit a conditional preset variant instead of the unconditional baseline for that research run
+- bootstrap safety is explicit through:
+  - `bootstrap_mode`
+  - `allow_first_promotion_without_history`
+- `min_promoted_signals` is evaluated against the candidate's own research signal composition, not against already-promoted registry history
+- when the promotion policy enables conditional variants, the promotion pipeline can emit:
+  - baseline only
+  - conditional only
+  - baseline plus a bounded number of conditional siblings
 - promoted rows now record:
   - `promotion_variant`
   - `condition_id`
   - `condition_type`
   - `conditional_promotion_summary`
   - `activation_conditions`
+  - `rationale`
+  - `warnings`
+  - `ranking_metric`
+  - `ranking_value`
 
-Those activation conditions are also carried into the generated preset payload and the promoted-strategy index so later paper/live portfolio logic can explain why a strategy is active or inactive under a given context.
+Those activation conditions are also carried into the generated preset payload and the promoted-strategy index so later paper/live portfolio logic can explain why a strategy is active or inactive under a given context. When conditional variants are emitted, the promotion output also writes `promoted_condition_summary.csv` for a compact audit trail.
 
 Promotion policy fields for conditional variants:
 
+- `bootstrap_mode`
+- `allow_first_promotion_without_history`
 - `enable_conditional_variants`
 - `emit_conditional_variants_alongside_baseline`
 - `conditional_variant_allowance`
@@ -2086,6 +2104,22 @@ Promotion policy fields for conditional variants:
 - `compare_condition_to_unconditional`
 - `max_strategies_per_family`
 - `min_families_if_available`
+
+Practical tuning guidance:
+
+- increase `min_condition_sample_size` when condition coverage is sparse or unstable
+- increase `min_condition_improvement` when you only want conditionals that materially beat the unconditional baseline
+- keep `compare_condition_to_unconditional: true` unless you explicitly want standalone conditional ranking without a baseline improvement check
+
+Example commands:
+
+```bash
+trading-cli research promote --artifacts-root artifacts/alpha_research --output-dir artifacts/promoted/run_current --policy-config configs/promotion.yaml
+```
+
+```bash
+trading-cli research promote --artifacts-root artifacts/alpha_research --run-dir artifacts/alpha_research/<run_id> --registry-scope run_local --output-dir artifacts/promoted/run_current --policy-config configs/promotion.yaml --database-enabled --database-url postgresql+psycopg://postgres:postgres@localhost:5432/trading_platform --database-schema research
+```
 
 Strategy-portfolio diversity and concentration controls:
 

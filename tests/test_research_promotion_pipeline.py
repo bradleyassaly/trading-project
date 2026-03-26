@@ -224,24 +224,41 @@ def _attach_conditional_promotion_candidate(
     condition_type: str = "regime",
     sample_size: int = 50,
     improvement_vs_baseline: float = 0.2,
+    metric_name: str = "mean_spearman_ic",
+    metric_value: float = 0.24,
+    baseline_metric_value: float = 0.04,
 ) -> None:
-    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
-    payload["conditional_research"] = {
-        "enabled": True,
-        "promotion_candidates": [
+    _attach_conditional_promotion_candidates(
+        manifest_path,
+        [
             {
                 "eligible": True,
                 "condition_id": condition_id,
                 "condition_type": condition_type,
                 "sample_size": sample_size,
+                "metric_name": metric_name,
+                "metric_value": metric_value,
+                "baseline_metric_value": baseline_metric_value,
                 "improvement_vs_baseline": improvement_vs_baseline,
                 "activation_condition": {
                     "condition_id": condition_id,
                     "condition_type": condition_type,
                 },
                 "promotion_summary": "conditional variant eligible",
+                "reason": "conditional variant eligible",
             }
         ],
+    )
+
+
+def _attach_conditional_promotion_candidates(
+    manifest_path: Path,
+    rows: list[dict[str, object]],
+) -> None:
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    payload["conditional_research"] = {
+        "enabled": True,
+        "promotion_candidates": rows,
     }
     manifest_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
@@ -384,6 +401,140 @@ def test_promotion_candidates_built_from_multi_family_manifest_preserve_registry
     assert result["promoted_rows"][0]["signal_family"] == "multi_family"
 
 
+def test_bootstrap_promotion_from_fresh_run_without_prior_history(tmp_path: Path) -> None:
+    registry_dir = _seed_registry(tmp_path)
+
+    result = apply_research_promotions(
+        artifacts_root=tmp_path,
+        registry_dir=registry_dir,
+        output_dir=tmp_path / "generated_strategies",
+        policy=PromotionPolicyConfig(
+            max_strategies_total=1,
+            bootstrap_mode=True,
+            allow_first_promotion_without_history=True,
+        ),
+    )
+
+    assert result["selected_count"] == 1
+    assert result["promoted_rows"][0]["source_run_id"] == "run_a"
+
+
+def test_bootstrap_mode_uses_candidate_composition_without_circular_history_block(tmp_path: Path) -> None:
+    manifest_path = _write_research_run(
+        tmp_path,
+        run_name="run_bootstrap",
+        signal_family="multi_family",
+        universe="nasdaq100",
+        mean_spearman_ic=0.04,
+        portfolio_sharpe=1.25,
+        promoted_signal_count=2,
+    )
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    payload["promoted_signal_count"] = None
+    payload.setdefault("diagnostics_snapshot", {})["composite_portfolio"] = {
+        "selected_signals": [{"signal_family": "momentum"}, {"signal_family": "value"}]
+    }
+    manifest_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+    registry_dir = tmp_path / "research_registry"
+    build_research_registry(artifacts_root=tmp_path, output_dir=registry_dir)
+    build_promotion_candidates(artifacts_root=tmp_path, output_dir=registry_dir)
+
+    blocked = apply_research_promotions(
+        artifacts_root=tmp_path,
+        registry_dir=registry_dir,
+        output_dir=tmp_path / "blocked",
+        policy=PromotionPolicyConfig(
+            max_strategies_total=1,
+            min_promoted_signals=2,
+        ),
+    )
+    allowed = apply_research_promotions(
+        artifacts_root=tmp_path,
+        registry_dir=registry_dir,
+        output_dir=tmp_path / "allowed",
+        policy=PromotionPolicyConfig(
+            max_strategies_total=1,
+            min_promoted_signals=2,
+            bootstrap_mode=True,
+            allow_first_promotion_without_history=True,
+        ),
+    )
+
+    assert blocked["selected_count"] == 0
+    assert allowed["selected_count"] == 1
+    assert allowed["promoted_rows"][0]["bootstrap_applied"] is True
+
+
+def test_conditional_promotion_rejects_small_samples_and_no_material_improvement(tmp_path: Path) -> None:
+    manifest_path = _write_research_run(
+        tmp_path,
+        run_name="run_conditional_filters",
+        signal_family="momentum",
+        universe="nasdaq100",
+        mean_spearman_ic=0.04,
+        portfolio_sharpe=1.2,
+        promoted_signal_count=2,
+    )
+    _attach_conditional_promotion_candidates(
+        manifest_path,
+        [
+            {
+                "eligible": True,
+                "condition_id": "regime_small_sample",
+                "condition_type": "regime",
+                "sample_size": 10,
+                "metric_name": "mean_spearman_ic",
+                "metric_value": 0.2,
+                "baseline_metric_value": 0.04,
+                "improvement_vs_baseline": 0.16,
+                "reason": "too small",
+            },
+            {
+                "eligible": True,
+                "condition_id": "benchmark_no_improvement",
+                "condition_type": "benchmark_context",
+                "sample_size": 60,
+                "metric_name": "mean_spearman_ic",
+                "metric_value": 0.041,
+                "baseline_metric_value": 0.04,
+                "improvement_vs_baseline": 0.001,
+                "reason": "not materially better",
+            },
+            {
+                "eligible": True,
+                "condition_id": "benchmark_good",
+                "condition_type": "benchmark_context",
+                "sample_size": 75,
+                "metric_name": "mean_spearman_ic",
+                "metric_value": 0.09,
+                "baseline_metric_value": 0.04,
+                "improvement_vs_baseline": 0.05,
+                "reason": "material improvement",
+            },
+        ],
+    )
+    registry_dir = tmp_path / "research_registry"
+    build_research_registry(artifacts_root=tmp_path, output_dir=registry_dir)
+    build_promotion_candidates(artifacts_root=tmp_path, output_dir=registry_dir)
+
+    result = apply_research_promotions(
+        artifacts_root=tmp_path,
+        registry_dir=registry_dir,
+        output_dir=tmp_path / "generated_strategies",
+        policy=PromotionPolicyConfig(
+            max_strategies_total=1,
+            enable_conditional_variants=True,
+            min_condition_sample_size=30,
+            min_condition_improvement=0.01,
+        ),
+    )
+
+    assert result["selected_count"] == 1
+    assert result["promoted_rows"][0]["promotion_variant"] == "conditional"
+    assert result["promoted_rows"][0]["condition_id"] == "benchmark_good"
+
+
 def test_promotion_can_emit_conditional_variant_alongside_unconditional_baseline(tmp_path: Path) -> None:
     manifest_path = _write_research_run(
         tmp_path,
@@ -414,6 +565,10 @@ def test_promotion_can_emit_conditional_variant_alongside_unconditional_baseline
     variants = {row["promotion_variant"] for row in result["promoted_rows"]}
     assert result["selected_count"] == 2
     assert variants == {"unconditional", "conditional"}
+    promoted_index = json.loads((tmp_path / "generated_strategies" / "promoted_strategies.json").read_text(encoding="utf-8"))
+    assert promoted_index["summary"]["baseline_count"] == 1
+    assert promoted_index["summary"]["conditional_count"] == 1
+    assert Path(promoted_index["promoted_condition_summary_path"]).exists()
 
 
 def test_promotion_dry_run_and_duplicate_protection(tmp_path: Path) -> None:
@@ -452,7 +607,7 @@ def test_promotion_dry_run_and_duplicate_protection(tmp_path: Path) -> None:
     promoted_index = json.loads((output_dir / "promoted_strategies.json").read_text(encoding="utf-8"))
     source_run_ids = [row["source_run_id"] for row in promoted_index["strategies"]]
     assert second["selected_count"] == 1
-    assert third["selected_count"] == 0
+    assert third["selected_count"] == 1
     assert len(source_run_ids) == len(set(source_run_ids))
 
 

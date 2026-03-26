@@ -3,13 +3,28 @@ metric_name: portfolio_sharpe
 min_metric_threshold: 0.5
 min_folds_tested: 3
 min_promoted_signals: 1
+bootstrap_mode: true
+allow_first_promotion_without_history: true
 max_strategies_total: 3
 max_strategies_per_group: 1
+max_strategies_per_family: 2
+min_families_if_available: 0
 group_by: signal_family
 require_eligible_candidates: true
 default_status: inactive
 pipeline_monitoring_config_path: configs/monitoring.yaml
 pipeline_execution_config_path: configs/execution.yaml
+enable_conditional_variants: true
+emit_conditional_variants_alongside_baseline: true
+conditional_variant_allowance: 2
+conditional_variant_score_bonus: 0.05
+allowed_condition_types:
+  - regime
+  - benchmark_context
+  - sub_universe
+min_condition_sample_size: 30
+min_condition_improvement: 0.01
+compare_condition_to_unconditional: true
 notes: Promote only high-confidence research candidates into paper-trading-ready generated presets.
 tags:
   - promotion
