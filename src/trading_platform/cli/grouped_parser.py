@@ -97,6 +97,7 @@ from trading_platform.cli.commands.run_sweep import cmd_run_sweep
 from trading_platform.cli.commands.run_walk_forward import cmd_run_walk_forward
 from trading_platform.cli.commands.sweep import cmd_sweep
 from trading_platform.cli.commands.strategy_portfolio_build import cmd_strategy_portfolio_build
+from trading_platform.cli.commands.strategy_portfolio_activate import cmd_strategy_portfolio_activate
 from trading_platform.cli.commands.strategy_portfolio_experiment_bundle import (
     cmd_strategy_portfolio_experiment_bundle,
 )
@@ -1354,6 +1355,31 @@ def build_parser() -> argparse.ArgumentParser:
     strategy_portfolio_show = strategy_portfolio_subparsers.add_parser("show", help="Print a concise summary of a strategy portfolio artifact")
     strategy_portfolio_show.add_argument("--portfolio", type=str, required=True, help="Path to strategy_portfolio.json or its parent directory.")
     strategy_portfolio_show.set_defaults(func=cmd_strategy_portfolio_show)
+    strategy_portfolio_activate = strategy_portfolio_subparsers.add_parser("activate", help="Evaluate runtime activation conditions for a strategy portfolio")
+    strategy_portfolio_activate.add_argument("--portfolio", type=str, required=True, help="Path to strategy_portfolio.json or its parent directory.")
+    strategy_portfolio_activate.add_argument("--output-dir", type=str, required=True, help="Directory where activated portfolio artifacts will be written.")
+    strategy_portfolio_activate.add_argument("--market-regime", type=str, default=None, help="Optional market_regime.json path or directory.")
+    strategy_portfolio_activate.add_argument("--regime-labels", type=str, default=None, help="Optional regime_labels_by_date.csv path or directory.")
+    strategy_portfolio_activate.add_argument("--metadata-dir", type=str, default=None, help="Optional metadata directory containing universe_enrichment.csv and sub_universe_snapshot.csv.")
+    strategy_portfolio_activate.add_argument(
+        "--activation-context-sources",
+        nargs="+",
+        default=None,
+        help="Optional activation context sources to evaluate. Supported: regime benchmark_context sub_universe.",
+    )
+    strategy_portfolio_activate.add_argument(
+        "--include-inactive-conditionals-in-output",
+        action="store_true",
+        default=True,
+        help="Include inactive conditional rows in the activated output artifact.",
+    )
+    strategy_portfolio_activate.add_argument(
+        "--exclude-inactive-conditionals-in-output",
+        dest="include_inactive_conditionals_in_output",
+        action="store_false",
+        help="Exclude inactive conditional rows from the activated output artifact.",
+    )
+    strategy_portfolio_activate.set_defaults(func=cmd_strategy_portfolio_activate)
     strategy_portfolio_export = strategy_portfolio_subparsers.add_parser("export-run-config", help="Export a runnable multi-strategy and pipeline config bundle from a strategy portfolio")
     strategy_portfolio_export.add_argument("--portfolio", type=str, required=True, help="Path to strategy_portfolio.json or its parent directory.")
     strategy_portfolio_export.add_argument("--output-dir", type=str, required=True, help="Directory where runnable config artifacts will be written.")

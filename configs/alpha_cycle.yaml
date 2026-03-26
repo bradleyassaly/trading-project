@@ -11,6 +11,7 @@ configs:
   refresh_config: configs/research_input_refresh.yaml
   research_config: configs/alpha_research.yaml
   promotion_policy_config: configs/promotion.yaml
+  # Conditional runtime activation is controlled by the referenced strategy portfolio policy.
   strategy_portfolio_policy_config: configs/strategy_portfolio.yaml
 
 paths:

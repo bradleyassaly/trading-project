@@ -43,6 +43,7 @@ def _write_cycle_fixture(
     promotion_metric_threshold: float = 0.1,
     best_effort_mode: bool = False,
     database_url: str | None = None,
+    evaluate_conditional_activation: bool = False,
 ) -> Path:
     normalized_dir = tmp_path / "data" / "normalized"
     feature_dir = tmp_path / "data" / "features"
@@ -124,7 +125,7 @@ default_status: inactive
 
     strategy_portfolio_config_path = tmp_path / "strategy_portfolio.yaml"
     strategy_portfolio_config_path.write_text(
-        """
+        f"""
 schema_version: 1
 max_strategies: 2
 max_strategies_per_signal_family: 1
@@ -135,6 +136,9 @@ weighting_mode: equal
 require_active_only: false
 require_promotion_eligible_only: true
 deduplicate_source_runs: true
+evaluate_conditional_activation: {"true" if evaluate_conditional_activation else "false"}
+activation_context_sources: [regime, benchmark_context]
+include_inactive_conditionals_in_output: true
 diversification_dimension: signal_family
 fallback_equal_weight_mode: true
 warn_on_same_family_overlap: true
@@ -334,3 +338,107 @@ def test_alpha_cycle_db_tracking_and_conditional_summary(monkeypatch, tmp_path: 
         assert session.execute(text("select count(*) from research_runs")).scalar() >= 1
         assert session.execute(text("select count(*) from promoted_strategies")).scalar() == 2
         assert session.execute(text("select count(*) from portfolio_runs")).scalar() >= 1
+
+
+def test_alpha_cycle_summary_includes_activation_counts(monkeypatch, tmp_path: Path) -> None:
+    cycle_config_path = _write_cycle_fixture(tmp_path, evaluate_conditional_activation=True)
+
+    def fake_apply_research_promotions(**kwargs):
+        output_dir = Path(kwargs["output_dir"])
+        output_dir.mkdir(parents=True, exist_ok=True)
+        rows = [
+            {
+                "preset_name": "generated_base",
+                "source_run_id": "research",
+                "signal_family": "momentum",
+                "strategy_name": "composite_alpha",
+                "universe": "nasdaq100",
+                "ranking_metric": "portfolio_sharpe",
+                "ranking_value": 1.2,
+                "promotion_timestamp": "2026-03-26T00:00:00+00:00",
+                "status": "inactive",
+                "promotion_variant": "unconditional",
+                "activation_conditions": [],
+                "generated_preset_path": str(output_dir / "generated_base.json"),
+                "generated_registry_path": str(output_dir / "generated_base_registry.json"),
+                "generated_pipeline_config_path": str(output_dir / "generated_base_pipeline.yaml"),
+            },
+            {
+                "preset_name": "generated_conditional",
+                "source_run_id": "research",
+                "signal_family": "momentum",
+                "strategy_name": "composite_alpha",
+                "universe": "nasdaq100",
+                "ranking_metric": "mean_spearman_ic",
+                "ranking_value": 0.12,
+                "promotion_timestamp": "2026-03-26T00:00:01+00:00",
+                "status": "inactive",
+                "promotion_variant": "conditional",
+                "condition_id": "regime::risk_on",
+                "condition_type": "regime",
+                "activation_conditions": [{"condition_id": "regime::risk_on", "condition_type": "regime"}],
+                "generated_preset_path": str(output_dir / "generated_conditional.json"),
+                "generated_registry_path": str(output_dir / "generated_conditional_registry.json"),
+                "generated_pipeline_config_path": str(output_dir / "generated_conditional_pipeline.yaml"),
+            },
+        ]
+        (output_dir / "promoted_strategies.json").write_text(
+            json.dumps({"strategies": rows, "summary": {"selected_count": 2}}, indent=2),
+            encoding="utf-8",
+        )
+        for row in rows:
+            Path(row["generated_preset_path"]).write_text("{}", encoding="utf-8")
+            Path(row["generated_registry_path"]).write_text("{}", encoding="utf-8")
+            Path(row["generated_pipeline_config_path"]).write_text("{}", encoding="utf-8")
+        return {
+            "selected_count": 2,
+            "promoted_rows": rows,
+            "promoted_index_path": str(output_dir / "promoted_strategies.json"),
+        }
+
+    def fake_activate_strategy_portfolio(**kwargs):
+        output_dir = Path(kwargs["output_dir"])
+        output_dir.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "summary": {
+                "activated_unconditional_count": 1,
+                "activated_conditional_count": 1,
+                "inactive_conditional_count": 0,
+            },
+            "active_strategies": [
+                {"preset_name": "generated_base", "promotion_variant": "unconditional"},
+                {
+                    "preset_name": "generated_conditional",
+                    "promotion_variant": "conditional",
+                    "condition_id": "regime::risk_on",
+                },
+            ],
+            "strategies": [
+                {"preset_name": "generated_base", "is_active": True},
+                {"preset_name": "generated_conditional", "is_active": True},
+            ],
+            "shadow_strategies": [],
+        }
+        (output_dir / "activated_strategy_portfolio.json").write_text(
+            json.dumps(payload, indent=2),
+            encoding="utf-8",
+        )
+        (output_dir / "activated_strategy_portfolio.csv").write_text("preset_name,is_active\n", encoding="utf-8")
+        return {
+            "activated_strategy_portfolio_json_path": str(output_dir / "activated_strategy_portfolio.json"),
+            "activated_strategy_portfolio_csv_path": str(output_dir / "activated_strategy_portfolio.csv"),
+            "active_count": 2,
+            "activated_conditional_count": 1,
+            "inactive_conditional_count": 0,
+        }
+
+    monkeypatch.setattr("trading_platform.orchestration.alpha_cycle.apply_research_promotions", fake_apply_research_promotions)
+    monkeypatch.setattr("trading_platform.orchestration.alpha_cycle.activate_strategy_portfolio", fake_activate_strategy_portfolio)
+
+    result = run_alpha_cycle(load_alpha_cycle_workflow_config(cycle_config_path))
+    summary_payload = json.loads(Path(result.summary_json_path).read_text(encoding="utf-8"))
+
+    assert summary_payload["activated_unconditional_count"] == 1
+    assert summary_payload["activated_conditional_count"] == 1
+    assert summary_payload["inactive_conditional_count"] == 0
+    assert Path(summary_payload["key_artifacts"]["activated_strategy_portfolio_json_path"]).exists()

@@ -27,6 +27,11 @@ from trading_platform.portfolio.strategy_portfolio import (
     export_strategy_portfolio_run_config,
     load_strategy_portfolio,
 )
+from trading_platform.portfolio.conditional_activation import (
+    ConditionalActivationConfig,
+    activate_strategy_portfolio,
+    load_activated_strategy_portfolio,
+)
 from trading_platform.research.alpha_lab.runner import run_alpha_research
 from trading_platform.research.promotion_pipeline import apply_research_promotions
 from trading_platform.research.registry import refresh_research_registry_bundle
@@ -238,6 +243,29 @@ def _summarize_portfolio(portfolio_dir: Path) -> dict[str, Any]:
     }
 
 
+def _summarize_activated_portfolio(activated_dir: Path | None) -> dict[str, Any]:
+    if activated_dir is None:
+        return {
+            "activated_unconditional_count": 0,
+            "activated_conditional_count": 0,
+            "inactive_conditional_count": 0,
+        }
+    try:
+        payload = load_activated_strategy_portfolio(activated_dir)
+    except FileNotFoundError:
+        return {
+            "activated_unconditional_count": 0,
+            "activated_conditional_count": 0,
+            "inactive_conditional_count": 0,
+        }
+    summary = dict(payload.get("summary") or {})
+    return {
+        "activated_unconditional_count": int(summary.get("activated_unconditional_count") or 0),
+        "activated_conditional_count": int(summary.get("activated_conditional_count") or 0),
+        "inactive_conditional_count": int(summary.get("inactive_conditional_count") or 0),
+    }
+
+
 def _portfolio_run_notes(payload: dict[str, Any]) -> str:
     summary = payload.get("summary", {})
     return (
@@ -269,6 +297,7 @@ def _write_summary_artifacts(
     key_artifacts: dict[str, str],
     promotion_summary: dict[str, Any],
     portfolio_summary: dict[str, Any],
+    activated_summary: dict[str, Any],
     top_metrics: dict[str, Any],
 ) -> tuple[Path, Path, str]:
     failed_count = sum(1 for record in stage_records if record.status == "failed")
@@ -298,6 +327,9 @@ def _write_summary_artifacts(
         "promoted_family_names": promotion_summary.get("promoted_family_names", []),
         "selected_portfolio_strategy_count": portfolio_summary.get("selected_portfolio_strategy_count", 0),
         "selected_conditional_portfolio_count": portfolio_summary.get("selected_conditional_portfolio_count", 0),
+        "activated_unconditional_count": activated_summary.get("activated_unconditional_count", 0),
+        "activated_conditional_count": activated_summary.get("activated_conditional_count", 0),
+        "inactive_conditional_count": activated_summary.get("inactive_conditional_count", 0),
         "selected_portfolio_weights": portfolio_summary.get("selected_portfolio_weights", {}),
         "top_metrics": top_metrics,
         "warnings": warnings,
@@ -332,6 +364,9 @@ def _write_summary_artifacts(
         f"- promoted_family_names: `{', '.join(promotion_summary.get('promoted_family_names', [])) or 'none'}`",
         f"- selected_portfolio_strategy_count: `{portfolio_summary.get('selected_portfolio_strategy_count', 0)}`",
         f"- selected_conditional_portfolio_count: `{portfolio_summary.get('selected_conditional_portfolio_count', 0)}`",
+        f"- activated_unconditional_count: `{activated_summary.get('activated_unconditional_count', 0)}`",
+        f"- activated_conditional_count: `{activated_summary.get('activated_conditional_count', 0)}`",
+        f"- inactive_conditional_count: `{activated_summary.get('inactive_conditional_count', 0)}`",
         "",
         "## Stages",
         "",
@@ -414,6 +449,7 @@ def run_alpha_cycle(config: AlphaCycleWorkflowConfig) -> AlphaCycleResult:
     promotion_result: dict[str, Any] | None = None
     portfolio_result: dict[str, Any] | None = None
     export_result: dict[str, Any] | None = None
+    activated_portfolio_dir: Path | None = None
     research_run_db_id = None
 
     def run_stage(stage_name: str, enabled: bool, action) -> None:
@@ -604,7 +640,7 @@ def run_alpha_cycle(config: AlphaCycleWorkflowConfig) -> AlphaCycleResult:
         run_stage("promotion", config.stages.promotion, do_promotion)
 
         def do_portfolio(record: AlphaCycleStageRecord) -> dict[str, Any]:
-            nonlocal portfolio_result
+            nonlocal portfolio_result, activated_portfolio_dir
             promotion_summary = _summarize_promotions(promoted_dir)
             if promotion_summary["promoted_strategy_count"] == 0:
                 record.status = "skipped"
@@ -618,6 +654,22 @@ def run_alpha_cycle(config: AlphaCycleWorkflowConfig) -> AlphaCycleResult:
                 policy=policy,
                 lifecycle_path=Path(config.lifecycle_path) if config.lifecycle_path else None,
             )
+            if policy.evaluate_conditional_activation:
+                activated_portfolio_dir = portfolio_dir / "activated"
+                activation_result = activate_strategy_portfolio(
+                    portfolio_path=portfolio_dir,
+                    output_dir=activated_portfolio_dir,
+                    config=ConditionalActivationConfig(
+                        evaluate_conditional_activation=True,
+                        activation_context_sources=list(policy.activation_context_sources),
+                        include_inactive_conditionals_in_output=policy.include_inactive_conditionals_in_output,
+                    ),
+                    market_regime_path=(refresh_config.market_regime_path if refresh_config is not None else None),
+                    regime_labels_path=research_output_dir,
+                    metadata_dir=(str(refresh_result.metadata_dir) if refresh_result is not None else None),
+                )
+            else:
+                activation_result = {}
             portfolio_run_id = db_lineage.create_portfolio_run(
                 run_key=f"{run_dir_name}_strategy_portfolio",
                 mode="strategy_portfolio",
@@ -640,9 +692,15 @@ def run_alpha_cycle(config: AlphaCycleWorkflowConfig) -> AlphaCycleResult:
                     "strategy_portfolio_condition_summary_path": str(
                         portfolio_result.get("strategy_portfolio_condition_summary_path", "")
                     ),
+                    "activated_strategy_portfolio_json_path": str(
+                        activation_result.get("activated_strategy_portfolio_json_path", "")
+                    ),
+                    "activated_strategy_portfolio_csv_path": str(
+                        activation_result.get("activated_strategy_portfolio_csv_path", "")
+                    ),
                 }
             )
-            return portfolio_result
+            return {**portfolio_result, **activation_result}
 
         run_stage("portfolio", config.stages.portfolio, do_portfolio)
 
@@ -660,8 +718,19 @@ def run_alpha_cycle(config: AlphaCycleWorkflowConfig) -> AlphaCycleResult:
                 record.warnings.append("empty_strategy_portfolio")
                 warnings.append("Export stage skipped because the strategy portfolio selected zero strategies.")
                 return {}
+            export_source: Path = portfolio_dir
+            if activated_portfolio_dir is not None:
+                activated_json_path = activated_portfolio_dir / "activated_strategy_portfolio.json"
+                if activated_json_path.exists():
+                    active_rows = list(load_activated_strategy_portfolio(activated_portfolio_dir).get("active_strategies", []))
+                    if not active_rows:
+                        record.status = "skipped"
+                        record.warnings.append("no_active_activated_strategies")
+                        warnings.append("Export stage skipped because the activated strategy portfolio had zero active strategies.")
+                        return {}
+                    export_source = activated_portfolio_dir
             export_result = export_strategy_portfolio_run_config(
-                strategy_portfolio_path=portfolio_dir,
+                strategy_portfolio_path=export_source,
                 output_dir=export_dir,
             )
             key_artifacts.update({key: str(value) for key, value in export_result.items()})
@@ -679,6 +748,7 @@ def run_alpha_cycle(config: AlphaCycleWorkflowConfig) -> AlphaCycleResult:
 
     promotion_summary = _summarize_promotions(promoted_dir)
     portfolio_summary = _summarize_portfolio(portfolio_dir)
+    activated_summary = _summarize_activated_portfolio(activated_portfolio_dir)
     top_metrics = _top_metrics_from_research(research_result or {})
     ended_at = _now_utc()
     duration_seconds = time.monotonic() - started_clock
@@ -694,6 +764,7 @@ def run_alpha_cycle(config: AlphaCycleWorkflowConfig) -> AlphaCycleResult:
         key_artifacts=key_artifacts,
         promotion_summary=promotion_summary,
         portfolio_summary=portfolio_summary,
+        activated_summary=activated_summary,
         top_metrics=top_metrics,
     )
     report_record.status = "succeeded"

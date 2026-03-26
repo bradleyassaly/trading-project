@@ -53,6 +53,9 @@ class StrategyPortfolioPolicyConfig:
     require_baseline_for_conditional: bool = False
     conditional_weight_multiplier: float = 1.0
     conditional_selection_mode: str = "include"
+    evaluate_conditional_activation: bool = False
+    activation_context_sources: list[str] = field(default_factory=lambda: ["regime", "benchmark_context"])
+    include_inactive_conditionals_in_output: bool = True
     allow_conditional_variant_siblings: bool = False
     conditional_variant_score_bonus: float = 0.0
     diversification_dimension: str = "signal_family"
@@ -100,6 +103,9 @@ class StrategyPortfolioPolicyConfig:
             raise ValueError("diversification_dimension must be one of: none, signal_family, universe")
         if self.conditional_selection_mode not in {"include", "separate_bucket", "shadow_only"}:
             raise ValueError("conditional_selection_mode must be one of: include, separate_bucket, shadow_only")
+        allowed_sources = {"regime", "benchmark_context", "sub_universe"}
+        if any(str(source) not in allowed_sources for source in self.activation_context_sources):
+            raise ValueError("activation_context_sources must be drawn from: regime, benchmark_context, sub_universe")
 
 
 def _now_utc() -> str:
@@ -803,14 +809,31 @@ def export_strategy_portfolio_run_config(
     strategy_portfolio_path: str | Path,
     output_dir: str | Path,
 ) -> dict[str, Any]:
-    portfolio_payload = load_strategy_portfolio(strategy_portfolio_path)
-    selected = list(portfolio_payload.get("selected_strategies", []))
+    input_path = Path(strategy_portfolio_path)
+    if input_path.is_dir():
+        activated_candidates = [
+            input_path / "activated_strategy_portfolio.json",
+            input_path / "activated" / "activated_strategy_portfolio.json",
+        ]
+        payload_path = next(
+            (candidate for candidate in activated_candidates if candidate.exists()),
+            input_path / "strategy_portfolio.json",
+        )
+    else:
+        payload_path = input_path
+    portfolio_payload = _safe_read_json(payload_path)
+    selected: list[dict[str, Any]]
+    if portfolio_payload.get("active_strategies") is not None:
+        selected = list(portfolio_payload.get("active_strategies", []))
+    else:
+        portfolio_payload = load_strategy_portfolio(strategy_portfolio_path)
+        selected = list(portfolio_payload.get("selected_strategies", []))
     if not selected:
         raise ValueError("Strategy portfolio contains no selected strategies")
     return export_multi_strategy_run_config_bundle(
         selected_rows=selected,
         output_dir=output_dir,
         bundle_name="strategy_portfolio",
-        source_artifact_path=strategy_portfolio_path,
+        source_artifact_path=str(payload_path),
         notes="Generated from strategy_portfolio.json",
     )

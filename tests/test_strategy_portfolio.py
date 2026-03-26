@@ -5,6 +5,7 @@ from argparse import Namespace
 from pathlib import Path
 
 from trading_platform.cli.commands.strategy_portfolio_build import cmd_strategy_portfolio_build
+from trading_platform.cli.commands.strategy_portfolio_activate import cmd_strategy_portfolio_activate
 from trading_platform.cli.commands.strategy_portfolio_export_run_config import (
     cmd_strategy_portfolio_export_run_config,
 )
@@ -132,6 +133,61 @@ def test_strategy_portfolio_weighting_and_export_run_config(tmp_path: Path) -> N
     assert len(multi_strategy.sleeves) == 2
     assert pipeline.multi_strategy_input_path is not None
     assert pipeline.stages.paper_trading is True
+
+
+def test_strategy_portfolio_export_prefers_activated_active_rows(tmp_path: Path) -> None:
+    portfolio_dir = tmp_path / "strategy_portfolio"
+    activated_dir = portfolio_dir / "activated"
+    portfolio_dir.mkdir(parents=True, exist_ok=True)
+    activated_dir.mkdir(parents=True, exist_ok=True)
+    (portfolio_dir / "strategy_portfolio.json").write_text(
+        json.dumps(
+            {
+                "selected_strategies": [
+                    {
+                        "preset_name": "generated_base",
+                        "target_capital_fraction": 0.5,
+                        "universe": "nasdaq100",
+                        "promotion_variant": "unconditional",
+                    },
+                    {
+                        "preset_name": "generated_conditional",
+                        "target_capital_fraction": 0.5,
+                        "universe": "nasdaq100",
+                        "promotion_variant": "conditional",
+                        "condition_id": "regime::risk_on",
+                    },
+                ]
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    (activated_dir / "activated_strategy_portfolio.json").write_text(
+        json.dumps(
+            {
+                "active_strategies": [
+                    {
+                        "preset_name": "generated_base",
+                        "target_capital_fraction": 1.0,
+                        "universe": "nasdaq100",
+                        "promotion_variant": "unconditional",
+                        "activation_state": "active",
+                    }
+                ]
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    export = export_strategy_portfolio_run_config(
+        strategy_portfolio_path=portfolio_dir,
+        output_dir=tmp_path / "run_bundle",
+    )
+
+    bundle_payload = json.loads(Path(export["run_bundle_path"]).read_text(encoding="utf-8"))
+    assert bundle_payload["selected_preset_names"] == ["generated_base"]
 
 
 def test_strategy_portfolio_metric_weighted_concentrates_more_than_capped_metric_weighted(tmp_path: Path) -> None:
@@ -481,3 +537,72 @@ def test_strategy_portfolio_cli_commands_write_outputs(tmp_path: Path, capsys) -
     assert "Strategy portfolio JSON" in captured
     assert "Selected strategies:" in captured
     assert "Multi-strategy config:" in captured
+
+
+def test_strategy_portfolio_activate_cli_command_writes_outputs(tmp_path: Path, capsys) -> None:
+    portfolio_dir = tmp_path / "portfolio"
+    activated_dir = tmp_path / "activated"
+    regime_dir = tmp_path / "regime"
+    metadata_dir = tmp_path / "metadata"
+    portfolio_dir.mkdir(parents=True, exist_ok=True)
+    regime_dir.mkdir(parents=True, exist_ok=True)
+    metadata_dir.mkdir(parents=True, exist_ok=True)
+
+    (portfolio_dir / "strategy_portfolio.json").write_text(
+        json.dumps(
+            {
+                "policy": {
+                    "evaluate_conditional_activation": True,
+                    "activation_context_sources": ["regime"],
+                    "include_inactive_conditionals_in_output": True,
+                },
+                "selected_strategies": [
+                    {
+                        "preset_name": "generated_base",
+                        "promotion_variant": "unconditional",
+                        "activation_conditions": [],
+                        "activation_state": "always_on",
+                    },
+                    {
+                        "preset_name": "generated_regime",
+                        "promotion_variant": "conditional",
+                        "condition_id": "regime::high_vol|uptrend|low_dispersion",
+                        "condition_type": "regime",
+                        "activation_conditions": [
+                            {"condition_id": "regime::high_vol|uptrend|low_dispersion", "condition_type": "regime"}
+                        ],
+                        "activation_state": "inactive_until_condition_match",
+                    },
+                ],
+                "shadow_strategies": [],
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    (regime_dir / "regime_labels_by_date.csv").write_text(
+        "timestamp,regime_key,volatility_regime,trend_regime,dispersion_regime\n"
+        "2026-03-26,high_vol|uptrend|low_dispersion,high_vol,uptrend,low_dispersion\n",
+        encoding="utf-8",
+    )
+    (metadata_dir / "universe_enrichment.csv").write_text(
+        "symbol,benchmark_context_label,relative_strength_20\nAAPL,risk_on_outperform_broad,0.03\n",
+        encoding="utf-8",
+    )
+
+    cmd_strategy_portfolio_activate(
+        Namespace(
+            portfolio=str(portfolio_dir),
+            output_dir=str(activated_dir),
+            market_regime=None,
+            regime_labels=str(regime_dir),
+            metadata_dir=str(metadata_dir),
+            activation_context_sources=["regime"],
+            include_inactive_conditionals_in_output=True,
+        )
+    )
+
+    captured = capsys.readouterr().out
+    assert "Active strategies:" in captured
+    assert "Activated portfolio JSON:" in captured
+    assert (activated_dir / "activated_strategy_portfolio.json").exists()

@@ -953,6 +953,9 @@ max_conditional_strategies_per_family: 1
 require_baseline_for_conditional: true
 conditional_weight_multiplier: 0.8
 conditional_selection_mode: separate_bucket
+evaluate_conditional_activation: true
+activation_context_sources: [regime, benchmark_context]
+include_inactive_conditionals_in_output: false
 diversification_dimension: signal_family
 fallback_equal_weight_mode: true
 warn_on_same_family_overlap: true
@@ -975,6 +978,9 @@ warn_on_same_family_overlap: true
     assert config.require_baseline_for_conditional is True
     assert config.conditional_weight_multiplier == 0.8
     assert config.conditional_selection_mode == "separate_bucket"
+    assert config.evaluate_conditional_activation is True
+    assert config.activation_context_sources == ["regime", "benchmark_context"]
+    assert config.include_inactive_conditionals_in_output is False
 
 
 def test_load_strategy_portfolio_policy_config_accepts_new_weighting_modes(tmp_path) -> None:

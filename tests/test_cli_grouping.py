@@ -2041,6 +2041,34 @@ def test_grouped_ops_pipeline_alpha_cycle_command_parses() -> None:
     assert args.config == "configs/alpha_cycle.yaml"
 
 
+def test_grouped_strategy_portfolio_activate_command_parses() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "strategy-portfolio",
+            "activate",
+            "--portfolio",
+            "artifacts/strategy_portfolio/run_current/strategy_portfolio.json",
+            "--output-dir",
+            "artifacts/strategy_portfolio/run_current/activated",
+            "--regime-labels",
+            "artifacts/alpha_research/run_current",
+            "--metadata-dir",
+            "data/metadata",
+            "--activation-context-sources",
+            "regime",
+            "benchmark_context",
+            "--exclude-inactive-conditionals-in-output",
+        ]
+    )
+
+    assert args.command_family == "strategy-portfolio"
+    assert args.strategy_portfolio_command == "activate"
+    assert args.portfolio.endswith("strategy_portfolio.json")
+    assert args.activation_context_sources == ["regime", "benchmark_context"]
+    assert args.include_inactive_conditionals_in_output is False
+
+
 def test_grouped_monitor_run_health_command_parses() -> None:
     parser = build_parser()
     args = parser.parse_args(

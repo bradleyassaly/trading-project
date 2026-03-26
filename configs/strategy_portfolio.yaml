@@ -22,6 +22,11 @@ max_conditional_strategies_per_family: 2
 require_baseline_for_conditional: true
 conditional_weight_multiplier: 0.75
 conditional_selection_mode: separate_bucket
+evaluate_conditional_activation: true
+activation_context_sources:
+  - regime
+  - benchmark_context
+include_inactive_conditionals_in_output: true
 allow_conditional_variant_siblings: true
 conditional_variant_score_bonus: 0.05
 diversification_dimension: signal_family

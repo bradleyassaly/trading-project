@@ -498,6 +498,27 @@ Conditional promoted strategies are now first-class portfolio inputs. `strategy_
 - `ranking_metric`
 - `ranking_value`
 
+Runtime activation is now a separate bounded step:
+
+```bash
+trading-cli strategy-portfolio activate \
+  --portfolio artifacts/strategy_portfolio/run_current/strategy_portfolio.json \
+  --output-dir artifacts/strategy_portfolio/run_current/activated
+```
+
+That command evaluates current context from existing regime and metadata artifacts and writes:
+
+- `activated_strategy_portfolio.json`
+- `activated_strategy_portfolio.csv`
+
+Each activated row keeps promotion provenance and adds:
+
+- `is_active`
+- `activation_state`
+- `activation_reason`
+- `matched_conditions`
+- `unmatched_conditions`
+
 The portfolio policy can now control conditional handling through:
 
 - `include_conditional_strategies`
@@ -517,6 +538,7 @@ The portfolio policy can now control conditional handling through:
   conditional strategies are emitted into portfolio artifacts for monitoring but are not allocated capital
 
 When conditional rows are present, portfolio build also writes `strategy_portfolio_condition_summary.csv`.
+If an `activated/activated_strategy_portfolio.json` artifact exists, `strategy-portfolio export-run-config` and alpha-cycle export prefer its `active_strategies` payload so downstream paper/live dry-run style workflows can consume only active rows without changing unconditional workflows.
 
 Optional first-pass policy experiments can now start from the same hardened exported bundle instead of rebuilding the full upstream path:
 
@@ -630,6 +652,9 @@ Those summaries include:
 - promoted conditional count
 - selected portfolio strategy count and weights when available
 - selected conditional portfolio count
+- activated unconditional count
+- activated conditional count
+- inactive conditional count
 - top research metrics when available
 - warnings and errors
 
