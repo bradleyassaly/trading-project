@@ -1,10 +1,10 @@
 baseline:
-  bundle_dir: artifacts/strategy_portfolio_bundle
-  promoted_dir: artifacts/promoted_strategies
+  bundle_dir: artifacts/strategy_portfolio/run_5/run_bundle
+  promoted_dir: artifacts/promoted/run_5
   artifacts_root: artifacts/alpha_research
 
 paths:
-  output_dir: artifacts/portfolio_experiments/canonical_bundle
+  output_dir: artifacts/strategy_portfolio/experiment_run_5
 
 baseline_variant_name: baseline
 policy_inputs:

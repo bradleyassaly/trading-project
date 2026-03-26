@@ -1,0 +1,3002 @@
+[
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "AAPL",
+    "as_of": "2026-03-20",
+    "inclusion_status": "included",
+    "membership_source": "static_universe_definition",
+    "membership_resolution_status": "static_fallback",
+    "membership_confidence": 0.5,
+    "inclusion_reason": "base_universe_member",
+    "exclusion_reason": null,
+    "stage_name": "final_eligibility",
+    "filter_failures": [],
+    "filter_passes": [
+      "point_in_time_membership"
+    ],
+    "group_label": null,
+    "sector": null,
+    "industry": null,
+    "benchmark_id": "SPY",
+    "benchmark_symbol": "SPY",
+    "regime_label": null,
+    "metadata": {
+      "latest_price": 247.99000549316406,
+      "feature_history_bars": 1562,
+      "avg_dollar_volume_20": 10765774025.648724,
+      "volatility_20": 0.012465241705149462
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "ABNB",
+    "as_of": "2026-03-20",
+    "inclusion_status": "included",
+    "membership_source": "static_universe_definition",
+    "membership_resolution_status": "static_fallback",
+    "membership_confidence": 0.5,
+    "inclusion_reason": "base_universe_member",
+    "exclusion_reason": null,
+    "stage_name": "final_eligibility",
+    "filter_failures": [],
+    "filter_passes": [
+      "point_in_time_membership"
+    ],
+    "group_label": null,
+    "sector": null,
+    "industry": null,
+    "benchmark_id": "SPY",
+    "benchmark_symbol": "SPY",
+    "regime_label": null,
+    "metadata": {
+      "latest_price": 128.52000427246094,
+      "feature_history_bars": 1324,
+      "avg_dollar_volume_20": 592788492.1544762,
+      "volatility_20": 0.023028266328683492
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "ADBE",
+    "as_of": "2026-03-20",
+    "inclusion_status": "included",
+    "membership_source": "static_universe_definition",
+    "membership_resolution_status": "static_fallback",
+    "membership_confidence": 0.5,
+    "inclusion_reason": "base_universe_member",
+    "exclusion_reason": null,
+    "stage_name": "final_eligibility",
+    "filter_failures": [],
+    "filter_passes": [
+      "point_in_time_membership"
+    ],
+    "group_label": null,
+    "sector": null,
+    "industry": null,
+    "benchmark_id": "SPY",
+    "benchmark_symbol": "SPY",
+    "regime_label": null,
+    "metadata": {
+      "latest_price": 248.14999389648438,
+      "feature_history_bars": 1562,
+      "avg_dollar_volume_20": 1776123888.0859878,
+      "volatility_20": 0.026619045396056074
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "ADI",
+    "as_of": "2026-03-20",
+    "inclusion_status": "included",
+    "membership_source": "static_universe_definition",
+    "membership_resolution_status": "static_fallback",
+    "membership_confidence": 0.5,
+    "inclusion_reason": "base_universe_member",
+    "exclusion_reason": null,
+    "stage_name": "final_eligibility",
+    "filter_failures": [],
+    "filter_passes": [
+      "point_in_time_membership"
+    ],
+    "group_label": null,
+    "sector": null,
+    "industry": null,
+    "benchmark_id": "SPY",
+    "benchmark_symbol": "SPY",
+    "regime_label": null,
+    "metadata": {
+      "latest_price": 309.42999267578125,
+      "feature_history_bars": 1562,
+      "avg_dollar_volume_20": 1396447070.3125274,
+      "volatility_20": 0.017897428566284478
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "ADP",
+    "as_of": "2026-03-20",
+    "inclusion_status": "included",
+    "membership_source": "static_universe_definition",
+    "membership_resolution_status": "static_fallback",
+    "membership_confidence": 0.5,
+    "inclusion_reason": "base_universe_member",
+    "exclusion_reason": null,
+    "stage_name": "final_eligibility",
+    "filter_failures": [],
+    "filter_passes": [
+      "point_in_time_membership"
+    ],
+    "group_label": null,
+    "sector": null,
+    "industry": null,
+    "benchmark_id": "SPY",
+    "benchmark_symbol": "SPY",
+    "regime_label": null,
+    "metadata": {
+      "latest_price": 208.69000244140625,
+      "feature_history_bars": 1562,
+      "avg_dollar_volume_20": 1000730187.762558,
+      "volatility_20": 0.01907377369268934
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "ADSK",
+    "as_of": "2026-03-20",
+    "inclusion_status": "included",
+    "membership_source": "static_universe_definition",
+    "membership_resolution_status": "static_fallback",
+    "membership_confidence": 0.5,
+    "inclusion_reason": "base_universe_member",
+    "exclusion_reason": null,
+    "stage_name": "final_eligibility",
+    "filter_failures": [],
+    "filter_passes": [
+      "point_in_time_membership"
+    ],
+    "group_label": null,
+    "sector": null,
+    "industry": null,
+    "benchmark_id": "SPY",
+    "benchmark_symbol": "SPY",
+    "regime_label": null,
+    "metadata": {
+      "latest_price": 247.99000549316406,
+      "feature_history_bars": 1562,
+      "avg_dollar_volume_20": 574480209.9611893,
+      "volatility_20": 0.02091074649813018
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "AEP",
+    "as_of": "2026-03-20",
+    "inclusion_status": "included",
+    "membership_source": "static_universe_definition",
+    "membership_resolution_status": "static_fallback",
+    "membership_confidence": 0.5,
+    "inclusion_reason": "base_universe_member",
+    "exclusion_reason": null,
+    "stage_name": "final_eligibility",
+    "filter_failures": [],
+    "filter_passes": [
+      "point_in_time_membership"
+    ],
+    "group_label": null,
+    "sector": null,
+    "industry": null,
+    "benchmark_id": "SPY",
+    "benchmark_symbol": "SPY",
+    "regime_label": null,
+    "metadata": {
+      "latest_price": 125.66000366210938,
+      "feature_history_bars": 1562,
+      "avg_dollar_volume_20": 518540952.65345156,
+      "volatility_20": 0.011148552028816589
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "ALNY",
+    "as_of": "2026-03-20",
+    "inclusion_status": "included",
+    "membership_source": "static_universe_definition",
+    "membership_resolution_status": "static_fallback",
+    "membership_confidence": 0.5,
+    "inclusion_reason": "base_universe_member",
+    "exclusion_reason": null,
+    "stage_name": "final_eligibility",
+    "filter_failures": [],
+    "filter_passes": [
+      "point_in_time_membership"
+    ],
+    "group_label": null,
+    "sector": null,
+    "industry": null,
+    "benchmark_id": "SPY",
+    "benchmark_symbol": "SPY",
+    "regime_label": null,
+    "metadata": {
+      "latest_price": 312.1700134277344,
+      "feature_history_bars": 1562,
+      "avg_dollar_volume_20": 355721330.5125763,
+      "volatility_20": 0.014117811204930284
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "AMAT",
+    "as_of": "2026-03-20",
+    "inclusion_status": "included",
+    "membership_source": "static_universe_definition",
+    "membership_resolution_status": "static_fallback",
+    "membership_confidence": 0.5,
+    "inclusion_reason": "base_universe_member",
+    "exclusion_reason": null,
+    "stage_name": "final_eligibility",
+    "filter_failures": [],
+    "filter_passes": [
+      "point_in_time_membership"
+    ],
+    "group_label": null,
+    "sector": null,
+    "industry": null,
+    "benchmark_id": "SPY",
+    "benchmark_symbol": "SPY",
+    "regime_label": null,
+    "metadata": {
+      "latest_price": 357.05999755859375,
+      "feature_history_bars": 1562,
+      "avg_dollar_volume_20": 2529231081.8079925,
+      "volatility_20": 0.030261591648000775
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "AMD",
+    "as_of": "2026-03-20",
+    "inclusion_status": "included",
+    "membership_source": "static_universe_definition",
+    "membership_resolution_status": "static_fallback",
+    "membership_confidence": 0.5,
+    "inclusion_reason": "base_universe_member",
+    "exclusion_reason": null,
+    "stage_name": "final_eligibility",
+    "filter_failures": [],
+    "filter_passes": [
+      "point_in_time_membership"
+    ],
+    "group_label": null,
+    "sector": null,
+    "industry": null,
+    "benchmark_id": "SPY",
+    "benchmark_symbol": "SPY",
+    "regime_label": null,
+    "metadata": {
+      "latest_price": 201.3300018310547,
+      "feature_history_bars": 1562,
+      "avg_dollar_volume_20": 7030045306.235214,
+      "volatility_20": 0.03340934685368211
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "AMGN",
+    "as_of": "2026-03-20",
+    "inclusion_status": "included",
+    "membership_source": "static_universe_definition",
+    "membership_resolution_status": "static_fallback",
+    "membership_confidence": 0.5,
+    "inclusion_reason": "base_universe_member",
+    "exclusion_reason": null,
+    "stage_name": "final_eligibility",
+    "filter_failures": [],
+    "filter_passes": [
+      "point_in_time_membership"
+    ],
+    "group_label": null,
+    "sector": null,
+    "industry": null,
+    "benchmark_id": "SPY",
+    "benchmark_symbol": "SPY",
+    "regime_label": null,
+    "metadata": {
+      "latest_price": 347.79998779296875,
+      "feature_history_bars": 1562,
+      "avg_dollar_volume_20": 1038745774.3807678,
+      "volatility_20": 0.014804165460541804
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "AMZN",
+    "as_of": "2026-03-20",
+    "inclusion_status": "included",
+    "membership_source": "static_universe_definition",
+    "membership_resolution_status": "static_fallback",
+    "membership_confidence": 0.5,
+    "inclusion_reason": "base_universe_member",
+    "exclusion_reason": null,
+    "stage_name": "final_eligibility",
+    "filter_failures": [],
+    "filter_passes": [
+      "point_in_time_membership"
+    ],
+    "group_label": null,
+    "sector": null,
+    "industry": null,
+    "benchmark_id": "SPY",
+    "benchmark_symbol": "SPY",
+    "regime_label": null,
+    "metadata": {
+      "latest_price": 205.3699951171875,
+      "feature_history_bars": 1562,
+      "avg_dollar_volume_20": 9690723038.309408,
+      "volatility_20": 0.016441901833845682
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "APP",
+    "as_of": "2026-03-20",
+    "inclusion_status": "included",
+    "membership_source": "static_universe_definition",
+    "membership_resolution_status": "static_fallback",
+    "membership_confidence": 0.5,
+    "inclusion_reason": "base_universe_member",
+    "exclusion_reason": null,
+    "stage_name": "final_eligibility",
+    "filter_failures": [],
+    "filter_passes": [
+      "point_in_time_membership"
+    ],
+    "group_label": null,
+    "sector": null,
+    "industry": null,
+    "benchmark_id": "SPY",
+    "benchmark_symbol": "SPY",
+    "regime_label": null,
+    "metadata": {
+      "latest_price": 442.3900146484375,
+      "feature_history_bars": 1239,
+      "avg_dollar_volume_20": 2434852556.0841613,
+      "volatility_20": 0.04572864175316186
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "ARM",
+    "as_of": "2026-03-20",
+    "inclusion_status": "included",
+    "membership_source": "static_universe_definition",
+    "membership_resolution_status": "static_fallback",
+    "membership_confidence": 0.5,
+    "inclusion_reason": "base_universe_member",
+    "exclusion_reason": null,
+    "stage_name": "final_eligibility",
+    "filter_failures": [],
+    "filter_passes": [
+      "point_in_time_membership"
+    ],
+    "group_label": null,
+    "sector": null,
+    "industry": null,
+    "benchmark_id": "SPY",
+    "benchmark_symbol": "SPY",
+    "regime_label": null,
+    "metadata": {
+      "latest_price": 132.35000610351562,
+      "feature_history_bars": 631,
+      "avg_dollar_volume_20": 533667436.28754425,
+      "volatility_20": 0.028305716169248738
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "ASML",
+    "as_of": "2026-03-20",
+    "inclusion_status": "included",
+    "membership_source": "static_universe_definition",
+    "membership_resolution_status": "static_fallback",
+    "membership_confidence": 0.5,
+    "inclusion_reason": "base_universe_member",
+    "exclusion_reason": null,
+    "stage_name": "final_eligibility",
+    "filter_failures": [],
+    "filter_passes": [
+      "point_in_time_membership"
+    ],
+    "group_label": null,
+    "sector": null,
+    "industry": null,
+    "benchmark_id": "SPY",
+    "benchmark_symbol": "SPY",
+    "regime_label": null,
+    "metadata": {
+      "latest_price": 1317.25,
+      "feature_history_bars": 1562,
+      "avg_dollar_volume_20": 2226760208.525342,
+      "volatility_20": 0.026930954897291262
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "AVGO",
+    "as_of": "2026-03-20",
+    "inclusion_status": "included",
+    "membership_source": "static_universe_definition",
+    "membership_resolution_status": "static_fallback",
+    "membership_confidence": 0.5,
+    "inclusion_reason": "base_universe_member",
+    "exclusion_reason": null,
+    "stage_name": "final_eligibility",
+    "filter_failures": [],
+    "filter_passes": [
+      "point_in_time_membership"
+    ],
+    "group_label": null,
+    "sector": null,
+    "industry": null,
+    "benchmark_id": "SPY",
+    "benchmark_symbol": "SPY",
+    "regime_label": null,
+    "metadata": {
+      "latest_price": 310.510009765625,
+      "feature_history_bars": 1562,
+      "avg_dollar_volume_20": 9729103316.899103,
+      "volatility_20": 0.02232605780769145
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "AXON",
+    "as_of": "2026-03-20",
+    "inclusion_status": "included",
+    "membership_source": "static_universe_definition",
+    "membership_resolution_status": "static_fallback",
+    "membership_confidence": 0.5,
+    "inclusion_reason": "base_universe_member",
+    "exclusion_reason": null,
+    "stage_name": "final_eligibility",
+    "filter_failures": [],
+    "filter_passes": [
+      "point_in_time_membership"
+    ],
+    "group_label": null,
+    "sector": null,
+    "industry": null,
+    "benchmark_id": "SPY",
+    "benchmark_symbol": "SPY",
+    "regime_label": null,
+    "metadata": {
+      "latest_price": 496.2699890136719,
+      "feature_history_bars": 1562,
+      "avg_dollar_volume_20": 586335888.6952591,
+      "volatility_20": 0.04797712152328433
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "AZN",
+    "as_of": "2026-03-20",
+    "inclusion_status": "included",
+    "membership_source": "static_universe_definition",
+    "membership_resolution_status": "static_fallback",
+    "membership_confidence": 0.5,
+    "inclusion_reason": "base_universe_member",
+    "exclusion_reason": null,
+    "stage_name": "final_eligibility",
+    "filter_failures": [],
+    "filter_passes": [
+      "point_in_time_membership"
+    ],
+    "group_label": null,
+    "sector": null,
+    "industry": null,
+    "benchmark_id": "SPY",
+    "benchmark_symbol": "SPY",
+    "regime_label": null,
+    "metadata": {
+      "latest_price": 183.60000610351562,
+      "feature_history_bars": 1562,
+      "avg_dollar_volume_20": 367538642.05166626,
+      "volatility_20": 0.011921138220204656
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "BKNG",
+    "as_of": "2026-03-20",
+    "inclusion_status": "included",
+    "membership_source": "static_universe_definition",
+    "membership_resolution_status": "static_fallback",
+    "membership_confidence": 0.5,
+    "inclusion_reason": "base_universe_member",
+    "exclusion_reason": null,
+    "stage_name": "final_eligibility",
+    "filter_failures": [],
+    "filter_passes": [
+      "point_in_time_membership"
+    ],
+    "group_label": null,
+    "sector": null,
+    "industry": null,
+    "benchmark_id": "SPY",
+    "benchmark_symbol": "SPY",
+    "regime_label": null,
+    "metadata": {
+      "latest_price": 4324.0400390625,
+      "feature_history_bars": 1562,
+      "avg_dollar_volume_20": 2077992898.068164,
+      "volatility_20": 0.029685403862633228
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "CCEP",
+    "as_of": "2026-03-20",
+    "inclusion_status": "included",
+    "membership_source": "static_universe_definition",
+    "membership_resolution_status": "static_fallback",
+    "membership_confidence": 0.5,
+    "inclusion_reason": "base_universe_member",
+    "exclusion_reason": null,
+    "stage_name": "final_eligibility",
+    "filter_failures": [],
+    "filter_passes": [
+      "point_in_time_membership"
+    ],
+    "group_label": null,
+    "sector": null,
+    "industry": null,
+    "benchmark_id": "SPY",
+    "benchmark_symbol": "SPY",
+    "regime_label": null,
+    "metadata": {
+      "latest_price": 91.62000274658203,
+      "feature_history_bars": 1562,
+      "avg_dollar_volume_20": 190824160.8794735,
+      "volatility_20": 0.016699114160606723
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "CDNS",
+    "as_of": "2026-03-20",
+    "inclusion_status": "included",
+    "membership_source": "static_universe_definition",
+    "membership_resolution_status": "static_fallback",
+    "membership_confidence": 0.5,
+    "inclusion_reason": "base_universe_member",
+    "exclusion_reason": null,
+    "stage_name": "final_eligibility",
+    "filter_failures": [],
+    "filter_passes": [
+      "point_in_time_membership"
+    ],
+    "group_label": null,
+    "sector": null,
+    "industry": null,
+    "benchmark_id": "SPY",
+    "benchmark_symbol": "SPY",
+    "regime_label": null,
+    "metadata": {
+      "latest_price": 283.8999938964844,
+      "feature_history_bars": 1562,
+      "avg_dollar_volume_20": 744880235.9540482,
+      "volatility_20": 0.02068734488239142
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "CEG",
+    "as_of": "2026-03-20",
+    "inclusion_status": "included",
+    "membership_source": "static_universe_definition",
+    "membership_resolution_status": "static_fallback",
+    "membership_confidence": 0.5,
+    "inclusion_reason": "base_universe_member",
+    "exclusion_reason": null,
+    "stage_name": "final_eligibility",
+    "filter_failures": [],
+    "filter_passes": [
+      "point_in_time_membership"
+    ],
+    "group_label": null,
+    "sector": null,
+    "industry": null,
+    "benchmark_id": "SPY",
+    "benchmark_symbol": "SPY",
+    "regime_label": null,
+    "metadata": {
+      "latest_price": 281.989990234375,
+      "feature_history_bars": 1046,
+      "avg_dollar_volume_20": 1041722338.9874328,
+      "volatility_20": 0.03535913976775801
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "CHTR",
+    "as_of": "2026-03-20",
+    "inclusion_status": "included",
+    "membership_source": "static_universe_definition",
+    "membership_resolution_status": "static_fallback",
+    "membership_confidence": 0.5,
+    "inclusion_reason": "base_universe_member",
+    "exclusion_reason": null,
+    "stage_name": "final_eligibility",
+    "filter_failures": [],
+    "filter_passes": [
+      "point_in_time_membership"
+    ],
+    "group_label": null,
+    "sector": null,
+    "industry": null,
+    "benchmark_id": "SPY",
+    "benchmark_symbol": "SPY",
+    "regime_label": null,
+    "metadata": {
+      "latest_price": 213.00999450683594,
+      "feature_history_bars": 1562,
+      "avg_dollar_volume_20": 335196555.5130371,
+      "volatility_20": 0.023591467989574438
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "CMCSA",
+    "as_of": "2026-03-20",
+    "inclusion_status": "included",
+    "membership_source": "static_universe_definition",
+    "membership_resolution_status": "static_fallback",
+    "membership_confidence": 0.5,
+    "inclusion_reason": "base_universe_member",
+    "exclusion_reason": null,
+    "stage_name": "final_eligibility",
+    "filter_failures": [],
+    "filter_passes": [
+      "point_in_time_membership"
+    ],
+    "group_label": null,
+    "sector": null,
+    "industry": null,
+    "benchmark_id": "SPY",
+    "benchmark_symbol": "SPY",
+    "regime_label": null,
+    "metadata": {
+      "latest_price": 29.020000457763672,
+      "feature_history_bars": 1562,
+      "avg_dollar_volume_20": 1139094017.645605,
+      "volatility_20": 0.017499931247133657
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "COST",
+    "as_of": "2026-03-20",
+    "inclusion_status": "included",
+    "membership_source": "static_universe_definition",
+    "membership_resolution_status": "static_fallback",
+    "membership_confidence": 0.5,
+    "inclusion_reason": "base_universe_member",
+    "exclusion_reason": null,
+    "stage_name": "final_eligibility",
+    "filter_failures": [],
+    "filter_passes": [
+      "point_in_time_membership"
+    ],
+    "group_label": null,
+    "sector": null,
+    "industry": null,
+    "benchmark_id": "SPY",
+    "benchmark_symbol": "SPY",
+    "regime_label": null,
+    "metadata": {
+      "latest_price": 972.3300170898438,
+      "feature_history_bars": 1562,
+      "avg_dollar_volume_20": 1886021439.3171844,
+      "volatility_20": 0.010967626807766768
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "CPRT",
+    "as_of": "2026-03-20",
+    "inclusion_status": "included",
+    "membership_source": "static_universe_definition",
+    "membership_resolution_status": "static_fallback",
+    "membership_confidence": 0.5,
+    "inclusion_reason": "base_universe_member",
+    "exclusion_reason": null,
+    "stage_name": "final_eligibility",
+    "filter_failures": [],
+    "filter_passes": [
+      "point_in_time_membership"
+    ],
+    "group_label": null,
+    "sector": null,
+    "industry": null,
+    "benchmark_id": "SPY",
+    "benchmark_symbol": "SPY",
+    "regime_label": null,
+    "metadata": {
+      "latest_price": 32.86000061035156,
+      "feature_history_bars": 1562,
+      "avg_dollar_volume_20": 367295515.1063034,
+      "volatility_20": 0.019859186527576848
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "CRWD",
+    "as_of": "2026-03-20",
+    "inclusion_status": "included",
+    "membership_source": "static_universe_definition",
+    "membership_resolution_status": "static_fallback",
+    "membership_confidence": 0.5,
+    "inclusion_reason": "base_universe_member",
+    "exclusion_reason": null,
+    "stage_name": "final_eligibility",
+    "filter_failures": [],
+    "filter_passes": [
+      "point_in_time_membership"
+    ],
+    "group_label": null,
+    "sector": null,
+    "industry": null,
+    "benchmark_id": "SPY",
+    "benchmark_symbol": "SPY",
+    "regime_label": null,
+    "metadata": {
+      "latest_price": 409.0,
+      "feature_history_bars": 1562,
+      "avg_dollar_volume_20": 2055771454.2584655,
+      "volatility_20": 0.034640365508256464
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "CSCO",
+    "as_of": "2026-03-20",
+    "inclusion_status": "included",
+    "membership_source": "static_universe_definition",
+    "membership_resolution_status": "static_fallback",
+    "membership_confidence": 0.5,
+    "inclusion_reason": "base_universe_member",
+    "exclusion_reason": null,
+    "stage_name": "final_eligibility",
+    "filter_failures": [],
+    "filter_passes": [
+      "point_in_time_membership"
+    ],
+    "group_label": null,
+    "sector": null,
+    "industry": null,
+    "benchmark_id": "SPY",
+    "benchmark_symbol": "SPY",
+    "regime_label": null,
+    "metadata": {
+      "latest_price": 77.6500015258789,
+      "feature_history_bars": 1562,
+      "avg_dollar_volume_20": 1906640101.271022,
+      "volatility_20": 0.014528240987677252
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "CSGP",
+    "as_of": "2026-03-20",
+    "inclusion_status": "included",
+    "membership_source": "static_universe_definition",
+    "membership_resolution_status": "static_fallback",
+    "membership_confidence": 0.5,
+    "inclusion_reason": "base_universe_member",
+    "exclusion_reason": null,
+    "stage_name": "final_eligibility",
+    "filter_failures": [],
+    "filter_passes": [
+      "point_in_time_membership"
+    ],
+    "group_label": null,
+    "sector": null,
+    "industry": null,
+    "benchmark_id": "SPY",
+    "benchmark_symbol": "SPY",
+    "regime_label": null,
+    "metadata": {
+      "latest_price": 42.900001525878906,
+      "feature_history_bars": 1562,
+      "avg_dollar_volume_20": 298345668.2468689,
+      "volatility_20": 0.02924889774925444
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "CSX",
+    "as_of": "2026-03-20",
+    "inclusion_status": "included",
+    "membership_source": "static_universe_definition",
+    "membership_resolution_status": "static_fallback",
+    "membership_confidence": 0.5,
+    "inclusion_reason": "base_universe_member",
+    "exclusion_reason": null,
+    "stage_name": "final_eligibility",
+    "filter_failures": [],
+    "filter_passes": [
+      "point_in_time_membership"
+    ],
+    "group_label": null,
+    "sector": null,
+    "industry": null,
+    "benchmark_id": "SPY",
+    "benchmark_symbol": "SPY",
+    "regime_label": null,
+    "metadata": {
+      "latest_price": 38.16999816894531,
+      "feature_history_bars": 1562,
+      "avg_dollar_volume_20": 523870519.0610054,
+      "volatility_20": 0.016166325719048285
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "CTAS",
+    "as_of": "2026-03-20",
+    "inclusion_status": "included",
+    "membership_source": "static_universe_definition",
+    "membership_resolution_status": "static_fallback",
+    "membership_confidence": 0.5,
+    "inclusion_reason": "base_universe_member",
+    "exclusion_reason": null,
+    "stage_name": "final_eligibility",
+    "filter_failures": [],
+    "filter_passes": [
+      "point_in_time_membership"
+    ],
+    "group_label": null,
+    "sector": null,
+    "industry": null,
+    "benchmark_id": "SPY",
+    "benchmark_symbol": "SPY",
+    "regime_label": null,
+    "metadata": {
+      "latest_price": 179.33999633789062,
+      "feature_history_bars": 1562,
+      "avg_dollar_volume_20": 470873503.6363815,
+      "volatility_20": 0.014140082921753975
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "CTSH",
+    "as_of": "2026-03-20",
+    "inclusion_status": "included",
+    "membership_source": "static_universe_definition",
+    "membership_resolution_status": "static_fallback",
+    "membership_confidence": 0.5,
+    "inclusion_reason": "base_universe_member",
+    "exclusion_reason": null,
+    "stage_name": "final_eligibility",
+    "filter_failures": [],
+    "filter_passes": [
+      "point_in_time_membership"
+    ],
+    "group_label": null,
+    "sector": null,
+    "industry": null,
+    "benchmark_id": "SPY",
+    "benchmark_symbol": "SPY",
+    "regime_label": null,
+    "metadata": {
+      "latest_price": 62.06999969482422,
+      "feature_history_bars": 1562,
+      "avg_dollar_volume_20": 486866749.6481541,
+      "volatility_20": 0.023084008486778156
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "DASH",
+    "as_of": "2026-03-20",
+    "inclusion_status": "included",
+    "membership_source": "static_universe_definition",
+    "membership_resolution_status": "static_fallback",
+    "membership_confidence": 0.5,
+    "inclusion_reason": "base_universe_member",
+    "exclusion_reason": null,
+    "stage_name": "final_eligibility",
+    "filter_failures": [],
+    "filter_passes": [
+      "point_in_time_membership"
+    ],
+    "group_label": null,
+    "sector": null,
+    "industry": null,
+    "benchmark_id": "SPY",
+    "benchmark_symbol": "SPY",
+    "regime_label": null,
+    "metadata": {
+      "latest_price": 156.63999938964844,
+      "feature_history_bars": 1325,
+      "avg_dollar_volume_20": 768365974.0465965,
+      "volatility_20": 0.03029784889673411
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "DDOG",
+    "as_of": "2026-03-20",
+    "inclusion_status": "included",
+    "membership_source": "static_universe_definition",
+    "membership_resolution_status": "static_fallback",
+    "membership_confidence": 0.5,
+    "inclusion_reason": "base_universe_member",
+    "exclusion_reason": null,
+    "stage_name": "final_eligibility",
+    "filter_failures": [],
+    "filter_passes": [
+      "point_in_time_membership"
+    ],
+    "group_label": null,
+    "sector": null,
+    "industry": null,
+    "benchmark_id": "SPY",
+    "benchmark_symbol": "SPY",
+    "regime_label": null,
+    "metadata": {
+      "latest_price": 125.08000183105469,
+      "feature_history_bars": 1562,
+      "avg_dollar_volume_20": 637436060.8932861,
+      "volatility_20": 0.040188549800648135
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "DXCM",
+    "as_of": "2026-03-20",
+    "inclusion_status": "included",
+    "membership_source": "static_universe_definition",
+    "membership_resolution_status": "static_fallback",
+    "membership_confidence": 0.5,
+    "inclusion_reason": "base_universe_member",
+    "exclusion_reason": null,
+    "stage_name": "final_eligibility",
+    "filter_failures": [],
+    "filter_passes": [
+      "point_in_time_membership"
+    ],
+    "group_label": null,
+    "sector": null,
+    "industry": null,
+    "benchmark_id": "SPY",
+    "benchmark_symbol": "SPY",
+    "regime_label": null,
+    "metadata": {
+      "latest_price": 66.94999694824219,
+      "feature_history_bars": 1562,
+      "avg_dollar_volume_20": 291519310.48620224,
+      "volatility_20": 0.015957669053070157
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "EA",
+    "as_of": "2026-03-20",
+    "inclusion_status": "included",
+    "membership_source": "static_universe_definition",
+    "membership_resolution_status": "static_fallback",
+    "membership_confidence": 0.5,
+    "inclusion_reason": "base_universe_member",
+    "exclusion_reason": null,
+    "stage_name": "final_eligibility",
+    "filter_failures": [],
+    "filter_passes": [
+      "point_in_time_membership"
+    ],
+    "group_label": null,
+    "sector": null,
+    "industry": null,
+    "benchmark_id": "SPY",
+    "benchmark_symbol": "SPY",
+    "regime_label": null,
+    "metadata": {
+      "latest_price": 200.50999450683594,
+      "feature_history_bars": 1562,
+      "avg_dollar_volume_20": 489677413.7617279,
+      "volatility_20": 0.004409977531988928
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "EXC",
+    "as_of": "2026-03-20",
+    "inclusion_status": "included",
+    "membership_source": "static_universe_definition",
+    "membership_resolution_status": "static_fallback",
+    "membership_confidence": 0.5,
+    "inclusion_reason": "base_universe_member",
+    "exclusion_reason": null,
+    "stage_name": "final_eligibility",
+    "filter_failures": [],
+    "filter_passes": [
+      "point_in_time_membership"
+    ],
+    "group_label": null,
+    "sector": null,
+    "industry": null,
+    "benchmark_id": "SPY",
+    "benchmark_symbol": "SPY",
+    "regime_label": null,
+    "metadata": {
+      "latest_price": 46.439998626708984,
+      "feature_history_bars": 1562,
+      "avg_dollar_volume_20": 484312443.70621145,
+      "volatility_20": 0.012156490353335466
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "FAST",
+    "as_of": "2026-03-20",
+    "inclusion_status": "included",
+    "membership_source": "static_universe_definition",
+    "membership_resolution_status": "static_fallback",
+    "membership_confidence": 0.5,
+    "inclusion_reason": "base_universe_member",
+    "exclusion_reason": null,
+    "stage_name": "final_eligibility",
+    "filter_failures": [],
+    "filter_passes": [
+      "point_in_time_membership"
+    ],
+    "group_label": null,
+    "sector": null,
+    "industry": null,
+    "benchmark_id": "SPY",
+    "benchmark_symbol": "SPY",
+    "regime_label": null,
+    "metadata": {
+      "latest_price": 43.7599983215332,
+      "feature_history_bars": 1562,
+      "avg_dollar_volume_20": 383398772.8669561,
+      "volatility_20": 0.014415652915207643
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "FER",
+    "as_of": "2026-03-20",
+    "inclusion_status": "included",
+    "membership_source": "static_universe_definition",
+    "membership_resolution_status": "static_fallback",
+    "membership_confidence": 0.5,
+    "inclusion_reason": "base_universe_member",
+    "exclusion_reason": null,
+    "stage_name": "final_eligibility",
+    "filter_failures": [],
+    "filter_passes": [
+      "point_in_time_membership"
+    ],
+    "group_label": null,
+    "sector": null,
+    "industry": null,
+    "benchmark_id": "SPY",
+    "benchmark_symbol": "SPY",
+    "regime_label": null,
+    "metadata": {
+      "latest_price": 61.63999938964844,
+      "feature_history_bars": 1562,
+      "avg_dollar_volume_20": 91794660.91873626,
+      "volatility_20": 0.018199815138717098
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "FTNT",
+    "as_of": "2026-03-20",
+    "inclusion_status": "included",
+    "membership_source": "static_universe_definition",
+    "membership_resolution_status": "static_fallback",
+    "membership_confidence": 0.5,
+    "inclusion_reason": "base_universe_member",
+    "exclusion_reason": null,
+    "stage_name": "final_eligibility",
+    "filter_failures": [],
+    "filter_passes": [
+      "point_in_time_membership"
+    ],
+    "group_label": null,
+    "sector": null,
+    "industry": null,
+    "benchmark_id": "SPY",
+    "benchmark_symbol": "SPY",
+    "regime_label": null,
+    "metadata": {
+      "latest_price": 81.4000015258789,
+      "feature_history_bars": 1562,
+      "avg_dollar_volume_20": 524365712.2434872,
+      "volatility_20": 0.018829577515528335
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "GEHC",
+    "as_of": "2026-03-20",
+    "inclusion_status": "included",
+    "membership_source": "static_universe_definition",
+    "membership_resolution_status": "static_fallback",
+    "membership_confidence": 0.5,
+    "inclusion_reason": "base_universe_member",
+    "exclusion_reason": null,
+    "stage_name": "final_eligibility",
+    "filter_failures": [],
+    "filter_passes": [
+      "point_in_time_membership"
+    ],
+    "group_label": null,
+    "sector": null,
+    "industry": null,
+    "benchmark_id": "SPY",
+    "benchmark_symbol": "SPY",
+    "regime_label": null,
+    "metadata": {
+      "latest_price": 69.6500015258789,
+      "feature_history_bars": 817,
+      "avg_dollar_volume_20": 259837915.53484344,
+      "volatility_20": 0.019526535467628784
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "GILD",
+    "as_of": "2026-03-20",
+    "inclusion_status": "included",
+    "membership_source": "static_universe_definition",
+    "membership_resolution_status": "static_fallback",
+    "membership_confidence": 0.5,
+    "inclusion_reason": "base_universe_member",
+    "exclusion_reason": null,
+    "stage_name": "final_eligibility",
+    "filter_failures": [],
+    "filter_passes": [
+      "point_in_time_membership"
+    ],
+    "group_label": null,
+    "sector": null,
+    "industry": null,
+    "benchmark_id": "SPY",
+    "benchmark_symbol": "SPY",
+    "regime_label": null,
+    "metadata": {
+      "latest_price": 137.2100067138672,
+      "feature_history_bars": 1562,
+      "avg_dollar_volume_20": 995858660.3004265,
+      "volatility_20": 0.015137362761494511
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "GOOG",
+    "as_of": "2026-03-20",
+    "inclusion_status": "included",
+    "membership_source": "static_universe_definition",
+    "membership_resolution_status": "static_fallback",
+    "membership_confidence": 0.5,
+    "inclusion_reason": "base_universe_member",
+    "exclusion_reason": null,
+    "stage_name": "final_eligibility",
+    "filter_failures": [],
+    "filter_passes": [
+      "point_in_time_membership"
+    ],
+    "group_label": null,
+    "sector": null,
+    "industry": null,
+    "benchmark_id": "SPY",
+    "benchmark_symbol": "SPY",
+    "regime_label": null,
+    "metadata": {
+      "latest_price": 298.7900085449219,
+      "feature_history_bars": 1562,
+      "avg_dollar_volume_20": 5863259812.666171,
+      "volatility_20": 0.01239289085654833
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "GOOGL",
+    "as_of": "2026-03-20",
+    "inclusion_status": "included",
+    "membership_source": "static_universe_definition",
+    "membership_resolution_status": "static_fallback",
+    "membership_confidence": 0.5,
+    "inclusion_reason": "base_universe_member",
+    "exclusion_reason": null,
+    "stage_name": "final_eligibility",
+    "filter_failures": [],
+    "filter_passes": [
+      "point_in_time_membership"
+    ],
+    "group_label": null,
+    "sector": null,
+    "industry": null,
+    "benchmark_id": "SPY",
+    "benchmark_symbol": "SPY",
+    "regime_label": null,
+    "metadata": {
+      "latest_price": 301.0,
+      "feature_history_bars": 1562,
+      "avg_dollar_volume_20": 9025326343.291803,
+      "volatility_20": 0.012316693604233108
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "HON",
+    "as_of": "2026-03-20",
+    "inclusion_status": "included",
+    "membership_source": "static_universe_definition",
+    "membership_resolution_status": "static_fallback",
+    "membership_confidence": 0.5,
+    "inclusion_reason": "base_universe_member",
+    "exclusion_reason": null,
+    "stage_name": "final_eligibility",
+    "filter_failures": [],
+    "filter_passes": [
+      "point_in_time_membership"
+    ],
+    "group_label": null,
+    "sector": null,
+    "industry": null,
+    "benchmark_id": "SPY",
+    "benchmark_symbol": "SPY",
+    "regime_label": null,
+    "metadata": {
+      "latest_price": 221.5,
+      "feature_history_bars": 1562,
+      "avg_dollar_volume_20": 943166877.3198395,
+      "volatility_20": 0.013835537375439832
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "IDXX",
+    "as_of": "2026-03-20",
+    "inclusion_status": "included",
+    "membership_source": "static_universe_definition",
+    "membership_resolution_status": "static_fallback",
+    "membership_confidence": 0.5,
+    "inclusion_reason": "base_universe_member",
+    "exclusion_reason": null,
+    "stage_name": "final_eligibility",
+    "filter_failures": [],
+    "filter_passes": [
+      "point_in_time_membership"
+    ],
+    "group_label": null,
+    "sector": null,
+    "industry": null,
+    "benchmark_id": "SPY",
+    "benchmark_symbol": "SPY",
+    "regime_label": null,
+    "metadata": {
+      "latest_price": 577.260009765625,
+      "feature_history_bars": 1562,
+      "avg_dollar_volume_20": 339982794.92902833,
+      "volatility_20": 0.02155168013595699
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "INSM",
+    "as_of": "2026-03-20",
+    "inclusion_status": "included",
+    "membership_source": "static_universe_definition",
+    "membership_resolution_status": "static_fallback",
+    "membership_confidence": 0.5,
+    "inclusion_reason": "base_universe_member",
+    "exclusion_reason": null,
+    "stage_name": "final_eligibility",
+    "filter_failures": [],
+    "filter_passes": [
+      "point_in_time_membership"
+    ],
+    "group_label": null,
+    "sector": null,
+    "industry": null,
+    "benchmark_id": "SPY",
+    "benchmark_symbol": "SPY",
+    "regime_label": null,
+    "metadata": {
+      "latest_price": 136.0,
+      "feature_history_bars": 1562,
+      "avg_dollar_volume_20": 319052160.1475037,
+      "volatility_20": 0.025349213283476398
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "INTC",
+    "as_of": "2026-03-20",
+    "inclusion_status": "included",
+    "membership_source": "static_universe_definition",
+    "membership_resolution_status": "static_fallback",
+    "membership_confidence": 0.5,
+    "inclusion_reason": "base_universe_member",
+    "exclusion_reason": null,
+    "stage_name": "final_eligibility",
+    "filter_failures": [],
+    "filter_passes": [
+      "point_in_time_membership"
+    ],
+    "group_label": null,
+    "sector": null,
+    "industry": null,
+    "benchmark_id": "SPY",
+    "benchmark_symbol": "SPY",
+    "regime_label": null,
+    "metadata": {
+      "latest_price": 43.869998931884766,
+      "feature_history_bars": 1562,
+      "avg_dollar_volume_20": 3813484840.367621,
+      "volatility_20": 0.036044215420966134
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "INTU",
+    "as_of": "2026-03-20",
+    "inclusion_status": "included",
+    "membership_source": "static_universe_definition",
+    "membership_resolution_status": "static_fallback",
+    "membership_confidence": 0.5,
+    "inclusion_reason": "base_universe_member",
+    "exclusion_reason": null,
+    "stage_name": "final_eligibility",
+    "filter_failures": [],
+    "filter_passes": [
+      "point_in_time_membership"
+    ],
+    "group_label": null,
+    "sector": null,
+    "industry": null,
+    "benchmark_id": "SPY",
+    "benchmark_symbol": "SPY",
+    "regime_label": null,
+    "metadata": {
+      "latest_price": 455.55999755859375,
+      "feature_history_bars": 1562,
+      "avg_dollar_volume_20": 2071487291.8753204,
+      "volatility_20": 0.03132424940367994
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "ISRG",
+    "as_of": "2026-03-20",
+    "inclusion_status": "included",
+    "membership_source": "static_universe_definition",
+    "membership_resolution_status": "static_fallback",
+    "membership_confidence": 0.5,
+    "inclusion_reason": "base_universe_member",
+    "exclusion_reason": null,
+    "stage_name": "final_eligibility",
+    "filter_failures": [],
+    "filter_passes": [
+      "point_in_time_membership"
+    ],
+    "group_label": null,
+    "sector": null,
+    "industry": null,
+    "benchmark_id": "SPY",
+    "benchmark_symbol": "SPY",
+    "regime_label": null,
+    "metadata": {
+      "latest_price": 477.9700012207031,
+      "feature_history_bars": 1562,
+      "avg_dollar_volume_20": 820251709.831044,
+      "volatility_20": 0.01382952191737733
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "KDP",
+    "as_of": "2026-03-20",
+    "inclusion_status": "included",
+    "membership_source": "static_universe_definition",
+    "membership_resolution_status": "static_fallback",
+    "membership_confidence": 0.5,
+    "inclusion_reason": "base_universe_member",
+    "exclusion_reason": null,
+    "stage_name": "final_eligibility",
+    "filter_failures": [],
+    "filter_passes": [
+      "point_in_time_membership"
+    ],
+    "group_label": null,
+    "sector": null,
+    "industry": null,
+    "benchmark_id": "SPY",
+    "benchmark_symbol": "SPY",
+    "regime_label": null,
+    "metadata": {
+      "latest_price": 26.59000015258789,
+      "feature_history_bars": 1562,
+      "avg_dollar_volume_20": 326208312.8571041,
+      "volatility_20": 0.017156729004204275
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "KHC",
+    "as_of": "2026-03-20",
+    "inclusion_status": "included",
+    "membership_source": "static_universe_definition",
+    "membership_resolution_status": "static_fallback",
+    "membership_confidence": 0.5,
+    "inclusion_reason": "base_universe_member",
+    "exclusion_reason": null,
+    "stage_name": "final_eligibility",
+    "filter_failures": [],
+    "filter_passes": [
+      "point_in_time_membership"
+    ],
+    "group_label": null,
+    "sector": null,
+    "industry": null,
+    "benchmark_id": "SPY",
+    "benchmark_symbol": "SPY",
+    "regime_label": null,
+    "metadata": {
+      "latest_price": 21.56999969482422,
+      "feature_history_bars": 1562,
+      "avg_dollar_volume_20": 395419294.196627,
+      "volatility_20": 0.01487838994476676
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "KLAC",
+    "as_of": "2026-03-20",
+    "inclusion_status": "included",
+    "membership_source": "static_universe_definition",
+    "membership_resolution_status": "static_fallback",
+    "membership_confidence": 0.5,
+    "inclusion_reason": "base_universe_member",
+    "exclusion_reason": null,
+    "stage_name": "final_eligibility",
+    "filter_failures": [],
+    "filter_passes": [
+      "point_in_time_membership"
+    ],
+    "group_label": null,
+    "sector": null,
+    "industry": null,
+    "benchmark_id": "SPY",
+    "benchmark_symbol": "SPY",
+    "regime_label": null,
+    "metadata": {
+      "latest_price": 1498.6700439453125,
+      "feature_history_bars": 1562,
+      "avg_dollar_volume_20": 1536699471.5962524,
+      "volatility_20": 0.029395895946572048
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "LIN",
+    "as_of": "2026-03-20",
+    "inclusion_status": "included",
+    "membership_source": "static_universe_definition",
+    "membership_resolution_status": "static_fallback",
+    "membership_confidence": 0.5,
+    "inclusion_reason": "base_universe_member",
+    "exclusion_reason": null,
+    "stage_name": "final_eligibility",
+    "filter_failures": [],
+    "filter_passes": [
+      "point_in_time_membership"
+    ],
+    "group_label": null,
+    "sector": null,
+    "industry": null,
+    "benchmark_id": "SPY",
+    "benchmark_symbol": "SPY",
+    "regime_label": null,
+    "metadata": {
+      "latest_price": 488.1499938964844,
+      "feature_history_bars": 1562,
+      "avg_dollar_volume_20": 1426913892.0802078,
+      "volatility_20": 0.01113505479058899
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "LRCX",
+    "as_of": "2026-03-20",
+    "inclusion_status": "included",
+    "membership_source": "static_universe_definition",
+    "membership_resolution_status": "static_fallback",
+    "membership_confidence": 0.5,
+    "inclusion_reason": "base_universe_member",
+    "exclusion_reason": null,
+    "stage_name": "final_eligibility",
+    "filter_failures": [],
+    "filter_passes": [
+      "point_in_time_membership"
+    ],
+    "group_label": null,
+    "sector": null,
+    "industry": null,
+    "benchmark_id": "SPY",
+    "benchmark_symbol": "SPY",
+    "regime_label": null,
+    "metadata": {
+      "latest_price": 228.36000061035156,
+      "feature_history_bars": 1562,
+      "avg_dollar_volume_20": 2532723129.6207047,
+      "volatility_20": 0.03484317104539511
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "MAR",
+    "as_of": "2026-03-20",
+    "inclusion_status": "included",
+    "membership_source": "static_universe_definition",
+    "membership_resolution_status": "static_fallback",
+    "membership_confidence": 0.5,
+    "inclusion_reason": "base_universe_member",
+    "exclusion_reason": null,
+    "stage_name": "final_eligibility",
+    "filter_failures": [],
+    "filter_passes": [
+      "point_in_time_membership"
+    ],
+    "group_label": null,
+    "sector": null,
+    "industry": null,
+    "benchmark_id": "SPY",
+    "benchmark_symbol": "SPY",
+    "regime_label": null,
+    "metadata": {
+      "latest_price": 319.760009765625,
+      "feature_history_bars": 1562,
+      "avg_dollar_volume_20": 546339309.4379822,
+      "volatility_20": 0.01698473305293425
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "MCHP",
+    "as_of": "2026-03-20",
+    "inclusion_status": "included",
+    "membership_source": "static_universe_definition",
+    "membership_resolution_status": "static_fallback",
+    "membership_confidence": 0.5,
+    "inclusion_reason": "base_universe_member",
+    "exclusion_reason": null,
+    "stage_name": "final_eligibility",
+    "filter_failures": [],
+    "filter_passes": [
+      "point_in_time_membership"
+    ],
+    "group_label": null,
+    "sector": null,
+    "industry": null,
+    "benchmark_id": "SPY",
+    "benchmark_symbol": "SPY",
+    "regime_label": null,
+    "metadata": {
+      "latest_price": 62.970001220703125,
+      "feature_history_bars": 1562,
+      "avg_dollar_volume_20": 600871123.3031394,
+      "volatility_20": 0.018928221892877663
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "MDLZ",
+    "as_of": "2026-03-20",
+    "inclusion_status": "included",
+    "membership_source": "static_universe_definition",
+    "membership_resolution_status": "static_fallback",
+    "membership_confidence": 0.5,
+    "inclusion_reason": "base_universe_member",
+    "exclusion_reason": null,
+    "stage_name": "final_eligibility",
+    "filter_failures": [],
+    "filter_passes": [
+      "point_in_time_membership"
+    ],
+    "group_label": null,
+    "sector": null,
+    "industry": null,
+    "benchmark_id": "SPY",
+    "benchmark_symbol": "SPY",
+    "regime_label": null,
+    "metadata": {
+      "latest_price": 56.209999084472656,
+      "feature_history_bars": 1562,
+      "avg_dollar_volume_20": 609125730.7465798,
+      "volatility_20": 0.0190303263390539
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "MELI",
+    "as_of": "2026-03-20",
+    "inclusion_status": "included",
+    "membership_source": "static_universe_definition",
+    "membership_resolution_status": "static_fallback",
+    "membership_confidence": 0.5,
+    "inclusion_reason": "base_universe_member",
+    "exclusion_reason": null,
+    "stage_name": "final_eligibility",
+    "filter_failures": [],
+    "filter_passes": [
+      "point_in_time_membership"
+    ],
+    "group_label": null,
+    "sector": null,
+    "industry": null,
+    "benchmark_id": "SPY",
+    "benchmark_symbol": "SPY",
+    "regime_label": null,
+    "metadata": {
+      "latest_price": 1635.760009765625,
+      "feature_history_bars": 1562,
+      "avg_dollar_volume_20": 1281431360.8184083,
+      "volatility_20": 0.030185717109175544
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "META",
+    "as_of": "2026-03-20",
+    "inclusion_status": "included",
+    "membership_source": "static_universe_definition",
+    "membership_resolution_status": "static_fallback",
+    "membership_confidence": 0.5,
+    "inclusion_reason": "base_universe_member",
+    "exclusion_reason": null,
+    "stage_name": "final_eligibility",
+    "filter_failures": [],
+    "filter_passes": [
+      "point_in_time_membership"
+    ],
+    "group_label": null,
+    "sector": null,
+    "industry": null,
+    "benchmark_id": "SPY",
+    "benchmark_symbol": "SPY",
+    "regime_label": null,
+    "metadata": {
+      "latest_price": 593.6599731445312,
+      "feature_history_bars": 1562,
+      "avg_dollar_volume_20": 7928870596.319122,
+      "volatility_20": 0.01699891965881878
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "MNST",
+    "as_of": "2026-03-20",
+    "inclusion_status": "included",
+    "membership_source": "static_universe_definition",
+    "membership_resolution_status": "static_fallback",
+    "membership_confidence": 0.5,
+    "inclusion_reason": "base_universe_member",
+    "exclusion_reason": null,
+    "stage_name": "final_eligibility",
+    "filter_failures": [],
+    "filter_passes": [
+      "point_in_time_membership"
+    ],
+    "group_label": null,
+    "sector": null,
+    "industry": null,
+    "benchmark_id": "SPY",
+    "benchmark_symbol": "SPY",
+    "regime_label": null,
+    "metadata": {
+      "latest_price": 73.69000244140625,
+      "feature_history_bars": 1562,
+      "avg_dollar_volume_20": 539709114.2347549,
+      "volatility_20": 0.01773110633515009
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "MPWR",
+    "as_of": "2026-03-20",
+    "inclusion_status": "included",
+    "membership_source": "static_universe_definition",
+    "membership_resolution_status": "static_fallback",
+    "membership_confidence": 0.5,
+    "inclusion_reason": "base_universe_member",
+    "exclusion_reason": null,
+    "stage_name": "final_eligibility",
+    "filter_failures": [],
+    "filter_passes": [
+      "point_in_time_membership"
+    ],
+    "group_label": null,
+    "sector": null,
+    "industry": null,
+    "benchmark_id": "SPY",
+    "benchmark_symbol": "SPY",
+    "regime_label": null,
+    "metadata": {
+      "latest_price": 1068.8499755859375,
+      "feature_history_bars": 1562,
+      "avg_dollar_volume_20": 631628878.9516662,
+      "volatility_20": 0.027068963358094326
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "MRVL",
+    "as_of": "2026-03-20",
+    "inclusion_status": "included",
+    "membership_source": "static_universe_definition",
+    "membership_resolution_status": "static_fallback",
+    "membership_confidence": 0.5,
+    "inclusion_reason": "base_universe_member",
+    "exclusion_reason": null,
+    "stage_name": "final_eligibility",
+    "filter_failures": [],
+    "filter_passes": [
+      "point_in_time_membership"
+    ],
+    "group_label": null,
+    "sector": null,
+    "industry": null,
+    "benchmark_id": "SPY",
+    "benchmark_symbol": "SPY",
+    "regime_label": null,
+    "metadata": {
+      "latest_price": 87.91000366210938,
+      "feature_history_bars": 1562,
+      "avg_dollar_volume_20": 1886419080.1482162,
+      "volatility_20": 0.047772843602742705
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "MSFT",
+    "as_of": "2026-03-20",
+    "inclusion_status": "included",
+    "membership_source": "static_universe_definition",
+    "membership_resolution_status": "static_fallback",
+    "membership_confidence": 0.5,
+    "inclusion_reason": "base_universe_member",
+    "exclusion_reason": null,
+    "stage_name": "final_eligibility",
+    "filter_failures": [],
+    "filter_passes": [
+      "point_in_time_membership"
+    ],
+    "group_label": null,
+    "sector": null,
+    "industry": null,
+    "benchmark_id": "SPY",
+    "benchmark_symbol": "SPY",
+    "regime_label": null,
+    "metadata": {
+      "latest_price": 381.8699951171875,
+      "feature_history_bars": 1562,
+      "avg_dollar_volume_20": 13531296307.978643,
+      "volatility_20": 0.014789413991309232
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "MSTR",
+    "as_of": "2026-03-20",
+    "inclusion_status": "included",
+    "membership_source": "static_universe_definition",
+    "membership_resolution_status": "static_fallback",
+    "membership_confidence": 0.5,
+    "inclusion_reason": "base_universe_member",
+    "exclusion_reason": null,
+    "stage_name": "final_eligibility",
+    "filter_failures": [],
+    "filter_passes": [
+      "point_in_time_membership"
+    ],
+    "group_label": null,
+    "sector": null,
+    "industry": null,
+    "benchmark_id": "SPY",
+    "benchmark_symbol": "SPY",
+    "regime_label": null,
+    "metadata": {
+      "latest_price": 135.66000366210938,
+      "feature_history_bars": 1562,
+      "avg_dollar_volume_20": 2872052227.3622527,
+      "volatility_20": 0.04605210144949691
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "MU",
+    "as_of": "2026-03-20",
+    "inclusion_status": "included",
+    "membership_source": "static_universe_definition",
+    "membership_resolution_status": "static_fallback",
+    "membership_confidence": 0.5,
+    "inclusion_reason": "base_universe_member",
+    "exclusion_reason": null,
+    "stage_name": "final_eligibility",
+    "filter_failures": [],
+    "filter_passes": [
+      "point_in_time_membership"
+    ],
+    "group_label": null,
+    "sector": null,
+    "industry": null,
+    "benchmark_id": "SPY",
+    "benchmark_symbol": "SPY",
+    "regime_label": null,
+    "metadata": {
+      "latest_price": 422.8999938964844,
+      "feature_history_bars": 1562,
+      "avg_dollar_volume_20": 16179474014.57735,
+      "volatility_20": 0.04019802143089038
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "NFLX",
+    "as_of": "2026-03-20",
+    "inclusion_status": "included",
+    "membership_source": "static_universe_definition",
+    "membership_resolution_status": "static_fallback",
+    "membership_confidence": 0.5,
+    "inclusion_reason": "base_universe_member",
+    "exclusion_reason": null,
+    "stage_name": "final_eligibility",
+    "filter_failures": [],
+    "filter_passes": [
+      "point_in_time_membership"
+    ],
+    "group_label": null,
+    "sector": null,
+    "industry": null,
+    "benchmark_id": "SPY",
+    "benchmark_symbol": "SPY",
+    "regime_label": null,
+    "metadata": {
+      "latest_price": 91.81999969482422,
+      "feature_history_bars": 1562,
+      "avg_dollar_volume_20": 5087106120.46834,
+      "volatility_20": 0.03581519265107401
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "NVDA",
+    "as_of": "2026-03-20",
+    "inclusion_status": "included",
+    "membership_source": "static_universe_definition",
+    "membership_resolution_status": "static_fallback",
+    "membership_confidence": 0.5,
+    "inclusion_reason": "base_universe_member",
+    "exclusion_reason": null,
+    "stage_name": "final_eligibility",
+    "filter_failures": [],
+    "filter_passes": [
+      "point_in_time_membership"
+    ],
+    "group_label": null,
+    "sector": null,
+    "industry": null,
+    "benchmark_id": "SPY",
+    "benchmark_symbol": "SPY",
+    "regime_label": null,
+    "metadata": {
+      "latest_price": 172.6999969482422,
+      "feature_history_bars": 1562,
+      "avg_dollar_volume_20": 36423706075.2109,
+      "volatility_20": 0.02222055008167696
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "NXPI",
+    "as_of": "2026-03-20",
+    "inclusion_status": "included",
+    "membership_source": "static_universe_definition",
+    "membership_resolution_status": "static_fallback",
+    "membership_confidence": 0.5,
+    "inclusion_reason": "base_universe_member",
+    "exclusion_reason": null,
+    "stage_name": "final_eligibility",
+    "filter_failures": [],
+    "filter_passes": [
+      "point_in_time_membership"
+    ],
+    "group_label": null,
+    "sector": null,
+    "industry": null,
+    "benchmark_id": "SPY",
+    "benchmark_symbol": "SPY",
+    "regime_label": null,
+    "metadata": {
+      "latest_price": 191.3699951171875,
+      "feature_history_bars": 1562,
+      "avg_dollar_volume_20": 544370922.9061127,
+      "volatility_20": 0.01770151272992956
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "ODFL",
+    "as_of": "2026-03-20",
+    "inclusion_status": "included",
+    "membership_source": "static_universe_definition",
+    "membership_resolution_status": "static_fallback",
+    "membership_confidence": 0.5,
+    "inclusion_reason": "base_universe_member",
+    "exclusion_reason": null,
+    "stage_name": "final_eligibility",
+    "filter_failures": [],
+    "filter_passes": [
+      "point_in_time_membership"
+    ],
+    "group_label": null,
+    "sector": null,
+    "industry": null,
+    "benchmark_id": "SPY",
+    "benchmark_symbol": "SPY",
+    "regime_label": null,
+    "metadata": {
+      "latest_price": 183.9199981689453,
+      "feature_history_bars": 1562,
+      "avg_dollar_volume_20": 436728416.1862404,
+      "volatility_20": 0.031322126037150406
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "ORLY",
+    "as_of": "2026-03-20",
+    "inclusion_status": "included",
+    "membership_source": "static_universe_definition",
+    "membership_resolution_status": "static_fallback",
+    "membership_confidence": 0.5,
+    "inclusion_reason": "base_universe_member",
+    "exclusion_reason": null,
+    "stage_name": "final_eligibility",
+    "filter_failures": [],
+    "filter_passes": [
+      "point_in_time_membership"
+    ],
+    "group_label": null,
+    "sector": null,
+    "industry": null,
+    "benchmark_id": "SPY",
+    "benchmark_symbol": "SPY",
+    "regime_label": null,
+    "metadata": {
+      "latest_price": 87.30000305175781,
+      "feature_history_bars": 1562,
+      "avg_dollar_volume_20": 564795360.8682976,
+      "volatility_20": 0.013198274071472338
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "PANW",
+    "as_of": "2026-03-20",
+    "inclusion_status": "included",
+    "membership_source": "static_universe_definition",
+    "membership_resolution_status": "static_fallback",
+    "membership_confidence": 0.5,
+    "inclusion_reason": "base_universe_member",
+    "exclusion_reason": null,
+    "stage_name": "final_eligibility",
+    "filter_failures": [],
+    "filter_passes": [
+      "point_in_time_membership"
+    ],
+    "group_label": null,
+    "sector": null,
+    "industry": null,
+    "benchmark_id": "SPY",
+    "benchmark_symbol": "SPY",
+    "regime_label": null,
+    "metadata": {
+      "latest_price": 162.9499969482422,
+      "feature_history_bars": 1562,
+      "avg_dollar_volume_20": 1531301323.1485245,
+      "volatility_20": 0.019135430463301017
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "PAYX",
+    "as_of": "2026-03-20",
+    "inclusion_status": "included",
+    "membership_source": "static_universe_definition",
+    "membership_resolution_status": "static_fallback",
+    "membership_confidence": 0.5,
+    "inclusion_reason": "base_universe_member",
+    "exclusion_reason": null,
+    "stage_name": "final_eligibility",
+    "filter_failures": [],
+    "filter_passes": [
+      "point_in_time_membership"
+    ],
+    "group_label": null,
+    "sector": null,
+    "industry": null,
+    "benchmark_id": "SPY",
+    "benchmark_symbol": "SPY",
+    "regime_label": null,
+    "metadata": {
+      "latest_price": 92.55000305175781,
+      "feature_history_bars": 1562,
+      "avg_dollar_volume_20": 407771771.6089653,
+      "volatility_20": 0.021277051191211743
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "PCAR",
+    "as_of": "2026-03-20",
+    "inclusion_status": "included",
+    "membership_source": "static_universe_definition",
+    "membership_resolution_status": "static_fallback",
+    "membership_confidence": 0.5,
+    "inclusion_reason": "base_universe_member",
+    "exclusion_reason": null,
+    "stage_name": "final_eligibility",
+    "filter_failures": [],
+    "filter_passes": [
+      "point_in_time_membership"
+    ],
+    "group_label": null,
+    "sector": null,
+    "industry": null,
+    "benchmark_id": "SPY",
+    "benchmark_symbol": "SPY",
+    "regime_label": null,
+    "metadata": {
+      "latest_price": 111.26000213623047,
+      "feature_history_bars": 1562,
+      "avg_dollar_volume_20": 376593835.5536793,
+      "volatility_20": 0.012950190515752845
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "PDD",
+    "as_of": "2026-03-20",
+    "inclusion_status": "included",
+    "membership_source": "static_universe_definition",
+    "membership_resolution_status": "static_fallback",
+    "membership_confidence": 0.5,
+    "inclusion_reason": "base_universe_member",
+    "exclusion_reason": null,
+    "stage_name": "final_eligibility",
+    "filter_failures": [],
+    "filter_passes": [
+      "point_in_time_membership"
+    ],
+    "group_label": null,
+    "sector": null,
+    "industry": null,
+    "benchmark_id": "SPY",
+    "benchmark_symbol": "SPY",
+    "regime_label": null,
+    "metadata": {
+      "latest_price": 96.19000244140625,
+      "feature_history_bars": 1562,
+      "avg_dollar_volume_20": 634851986.6062561,
+      "volatility_20": 0.015295784090288362
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "PEP",
+    "as_of": "2026-03-20",
+    "inclusion_status": "included",
+    "membership_source": "static_universe_definition",
+    "membership_resolution_status": "static_fallback",
+    "membership_confidence": 0.5,
+    "inclusion_reason": "base_universe_member",
+    "exclusion_reason": null,
+    "stage_name": "final_eligibility",
+    "filter_failures": [],
+    "filter_passes": [
+      "point_in_time_membership"
+    ],
+    "group_label": null,
+    "sector": null,
+    "industry": null,
+    "benchmark_id": "SPY",
+    "benchmark_symbol": "SPY",
+    "regime_label": null,
+    "metadata": {
+      "latest_price": 150.0399932861328,
+      "feature_history_bars": 1562,
+      "avg_dollar_volume_20": 1077415593.749771,
+      "volatility_20": 0.011064522652816077
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "PLTR",
+    "as_of": "2026-03-20",
+    "inclusion_status": "included",
+    "membership_source": "static_universe_definition",
+    "membership_resolution_status": "static_fallback",
+    "membership_confidence": 0.5,
+    "inclusion_reason": "base_universe_member",
+    "exclusion_reason": null,
+    "stage_name": "final_eligibility",
+    "filter_failures": [],
+    "filter_passes": [
+      "point_in_time_membership"
+    ],
+    "group_label": null,
+    "sector": null,
+    "industry": null,
+    "benchmark_id": "SPY",
+    "benchmark_symbol": "SPY",
+    "regime_label": null,
+    "metadata": {
+      "latest_price": 150.67999267578125,
+      "feature_history_bars": 1374,
+      "avg_dollar_volume_20": 7313192626.467786,
+      "volatility_20": 0.024885078589349033
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "PYPL",
+    "as_of": "2026-03-20",
+    "inclusion_status": "included",
+    "membership_source": "static_universe_definition",
+    "membership_resolution_status": "static_fallback",
+    "membership_confidence": 0.5,
+    "inclusion_reason": "base_universe_member",
+    "exclusion_reason": null,
+    "stage_name": "final_eligibility",
+    "filter_failures": [],
+    "filter_passes": [
+      "point_in_time_membership"
+    ],
+    "group_label": null,
+    "sector": null,
+    "industry": null,
+    "benchmark_id": "SPY",
+    "benchmark_symbol": "SPY",
+    "regime_label": null,
+    "metadata": {
+      "latest_price": 44.0099983215332,
+      "feature_history_bars": 1562,
+      "avg_dollar_volume_20": 1193589482.132563,
+      "volatility_20": 0.026381695032688553
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "QCOM",
+    "as_of": "2026-03-20",
+    "inclusion_status": "included",
+    "membership_source": "static_universe_definition",
+    "membership_resolution_status": "static_fallback",
+    "membership_confidence": 0.5,
+    "inclusion_reason": "base_universe_member",
+    "exclusion_reason": null,
+    "stage_name": "final_eligibility",
+    "filter_failures": [],
+    "filter_passes": [
+      "point_in_time_membership"
+    ],
+    "group_label": null,
+    "sector": null,
+    "industry": null,
+    "benchmark_id": "SPY",
+    "benchmark_symbol": "SPY",
+    "regime_label": null,
+    "metadata": {
+      "latest_price": 129.89999389648438,
+      "feature_history_bars": 1562,
+      "avg_dollar_volume_20": 1754044700.0083191,
+      "volatility_20": 0.014745222839122689
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "REGN",
+    "as_of": "2026-03-20",
+    "inclusion_status": "included",
+    "membership_source": "static_universe_definition",
+    "membership_resolution_status": "static_fallback",
+    "membership_confidence": 0.5,
+    "inclusion_reason": "base_universe_member",
+    "exclusion_reason": null,
+    "stage_name": "final_eligibility",
+    "filter_failures": [],
+    "filter_passes": [
+      "point_in_time_membership"
+    ],
+    "group_label": null,
+    "sector": null,
+    "industry": null,
+    "benchmark_id": "SPY",
+    "benchmark_symbol": "SPY",
+    "regime_label": null,
+    "metadata": {
+      "latest_price": 732.8699951171875,
+      "feature_history_bars": 1562,
+      "avg_dollar_volume_20": 488920609.98886716,
+      "volatility_20": 0.018327343677876144
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "ROP",
+    "as_of": "2026-03-20",
+    "inclusion_status": "included",
+    "membership_source": "static_universe_definition",
+    "membership_resolution_status": "static_fallback",
+    "membership_confidence": 0.5,
+    "inclusion_reason": "base_universe_member",
+    "exclusion_reason": null,
+    "stage_name": "final_eligibility",
+    "filter_failures": [],
+    "filter_passes": [
+      "point_in_time_membership"
+    ],
+    "group_label": null,
+    "sector": null,
+    "industry": null,
+    "benchmark_id": "SPY",
+    "benchmark_symbol": "SPY",
+    "regime_label": null,
+    "metadata": {
+      "latest_price": 353.67999267578125,
+      "feature_history_bars": 1562,
+      "avg_dollar_volume_20": 533721563.16099244,
+      "volatility_20": 0.011681569246703319
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "ROST",
+    "as_of": "2026-03-20",
+    "inclusion_status": "included",
+    "membership_source": "static_universe_definition",
+    "membership_resolution_status": "static_fallback",
+    "membership_confidence": 0.5,
+    "inclusion_reason": "base_universe_member",
+    "exclusion_reason": null,
+    "stage_name": "final_eligibility",
+    "filter_failures": [],
+    "filter_passes": [
+      "point_in_time_membership"
+    ],
+    "group_label": null,
+    "sector": null,
+    "industry": null,
+    "benchmark_id": "SPY",
+    "benchmark_symbol": "SPY",
+    "regime_label": null,
+    "metadata": {
+      "latest_price": 211.19000244140625,
+      "feature_history_bars": 1562,
+      "avg_dollar_volume_20": 624602474.5063171,
+      "volatility_20": 0.020759925027460956
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "SBUX",
+    "as_of": "2026-03-20",
+    "inclusion_status": "included",
+    "membership_source": "static_universe_definition",
+    "membership_resolution_status": "static_fallback",
+    "membership_confidence": 0.5,
+    "inclusion_reason": "base_universe_member",
+    "exclusion_reason": null,
+    "stage_name": "final_eligibility",
+    "filter_failures": [],
+    "filter_passes": [
+      "point_in_time_membership"
+    ],
+    "group_label": null,
+    "sector": null,
+    "industry": null,
+    "benchmark_id": "SPY",
+    "benchmark_symbol": "SPY",
+    "regime_label": null,
+    "metadata": {
+      "latest_price": 92.55000305175781,
+      "feature_history_bars": 1562,
+      "avg_dollar_volume_20": 811084726.8687721,
+      "volatility_20": 0.01895524045404488
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "SHOP",
+    "as_of": "2026-03-20",
+    "inclusion_status": "included",
+    "membership_source": "static_universe_definition",
+    "membership_resolution_status": "static_fallback",
+    "membership_confidence": 0.5,
+    "inclusion_reason": "base_universe_member",
+    "exclusion_reason": null,
+    "stage_name": "final_eligibility",
+    "filter_failures": [],
+    "filter_passes": [
+      "point_in_time_membership"
+    ],
+    "group_label": null,
+    "sector": null,
+    "industry": null,
+    "benchmark_id": "SPY",
+    "benchmark_symbol": "SPY",
+    "regime_label": null,
+    "metadata": {
+      "latest_price": 116.77999877929688,
+      "feature_history_bars": 1562,
+      "avg_dollar_volume_20": 1181550779.8832397,
+      "volatility_20": 0.03463479932442962
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "SNPS",
+    "as_of": "2026-03-20",
+    "inclusion_status": "included",
+    "membership_source": "static_universe_definition",
+    "membership_resolution_status": "static_fallback",
+    "membership_confidence": 0.5,
+    "inclusion_reason": "base_universe_member",
+    "exclusion_reason": null,
+    "stage_name": "final_eligibility",
+    "filter_failures": [],
+    "filter_passes": [
+      "point_in_time_membership"
+    ],
+    "group_label": null,
+    "sector": null,
+    "industry": null,
+    "benchmark_id": "SPY",
+    "benchmark_symbol": "SPY",
+    "regime_label": null,
+    "metadata": {
+      "latest_price": 420.32000732421875,
+      "feature_history_bars": 1562,
+      "avg_dollar_volume_20": 1002081605.4573944,
+      "volatility_20": 0.024939177525691174
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "STX",
+    "as_of": "2026-03-20",
+    "inclusion_status": "included",
+    "membership_source": "static_universe_definition",
+    "membership_resolution_status": "static_fallback",
+    "membership_confidence": 0.5,
+    "inclusion_reason": "base_universe_member",
+    "exclusion_reason": null,
+    "stage_name": "final_eligibility",
+    "filter_failures": [],
+    "filter_passes": [
+      "point_in_time_membership"
+    ],
+    "group_label": null,
+    "sector": null,
+    "industry": null,
+    "benchmark_id": "SPY",
+    "benchmark_symbol": "SPY",
+    "regime_label": null,
+    "metadata": {
+      "latest_price": 411.2300109863281,
+      "feature_history_bars": 1562,
+      "avg_dollar_volume_20": 1406220877.2470627,
+      "volatility_20": 0.043558473406577494
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "TEAM",
+    "as_of": "2026-03-20",
+    "inclusion_status": "included",
+    "membership_source": "static_universe_definition",
+    "membership_resolution_status": "static_fallback",
+    "membership_confidence": 0.5,
+    "inclusion_reason": "base_universe_member",
+    "exclusion_reason": null,
+    "stage_name": "final_eligibility",
+    "filter_failures": [],
+    "filter_passes": [
+      "point_in_time_membership"
+    ],
+    "group_label": null,
+    "sector": null,
+    "industry": null,
+    "benchmark_id": "SPY",
+    "benchmark_symbol": "SPY",
+    "regime_label": null,
+    "metadata": {
+      "latest_price": 73.7300033569336,
+      "feature_history_bars": 1562,
+      "avg_dollar_volume_20": 533219952.7599228,
+      "volatility_20": 0.04347062279649078
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "TMUS",
+    "as_of": "2026-03-20",
+    "inclusion_status": "included",
+    "membership_source": "static_universe_definition",
+    "membership_resolution_status": "static_fallback",
+    "membership_confidence": 0.5,
+    "inclusion_reason": "base_universe_member",
+    "exclusion_reason": null,
+    "stage_name": "final_eligibility",
+    "filter_failures": [],
+    "filter_passes": [
+      "point_in_time_membership"
+    ],
+    "group_label": null,
+    "sector": null,
+    "industry": null,
+    "benchmark_id": "SPY",
+    "benchmark_symbol": "SPY",
+    "regime_label": null,
+    "metadata": {
+      "latest_price": 208.47000122070312,
+      "feature_history_bars": 1562,
+      "avg_dollar_volume_20": 1185034939.5552444,
+      "volatility_20": 0.014719389434720362
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "TRI",
+    "as_of": "2026-03-20",
+    "inclusion_status": "included",
+    "membership_source": "static_universe_definition",
+    "membership_resolution_status": "static_fallback",
+    "membership_confidence": 0.5,
+    "inclusion_reason": "base_universe_member",
+    "exclusion_reason": null,
+    "stage_name": "final_eligibility",
+    "filter_failures": [],
+    "filter_passes": [
+      "point_in_time_membership"
+    ],
+    "group_label": null,
+    "sector": null,
+    "industry": null,
+    "benchmark_id": "SPY",
+    "benchmark_symbol": "SPY",
+    "regime_label": null,
+    "metadata": {
+      "latest_price": 93.44000244140625,
+      "feature_history_bars": 1562,
+      "avg_dollar_volume_20": 356651253.4589249,
+      "volatility_20": 0.044337047006982974
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "TSLA",
+    "as_of": "2026-03-20",
+    "inclusion_status": "included",
+    "membership_source": "static_universe_definition",
+    "membership_resolution_status": "static_fallback",
+    "membership_confidence": 0.5,
+    "inclusion_reason": "base_universe_member",
+    "exclusion_reason": null,
+    "stage_name": "final_eligibility",
+    "filter_failures": [],
+    "filter_passes": [
+      "point_in_time_membership"
+    ],
+    "group_label": null,
+    "sector": null,
+    "industry": null,
+    "benchmark_id": "SPY",
+    "benchmark_symbol": "SPY",
+    "regime_label": null,
+    "metadata": {
+      "latest_price": 367.9599914550781,
+      "feature_history_bars": 1562,
+      "avg_dollar_volume_20": 23901311584.41372,
+      "volatility_20": 0.020473944640879746
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "TTWO",
+    "as_of": "2026-03-20",
+    "inclusion_status": "included",
+    "membership_source": "static_universe_definition",
+    "membership_resolution_status": "static_fallback",
+    "membership_confidence": 0.5,
+    "inclusion_reason": "base_universe_member",
+    "exclusion_reason": null,
+    "stage_name": "final_eligibility",
+    "filter_failures": [],
+    "filter_passes": [
+      "point_in_time_membership"
+    ],
+    "group_label": null,
+    "sector": null,
+    "industry": null,
+    "benchmark_id": "SPY",
+    "benchmark_symbol": "SPY",
+    "regime_label": null,
+    "metadata": {
+      "latest_price": 200.6300048828125,
+      "feature_history_bars": 1562,
+      "avg_dollar_volume_20": 411305681.3185425,
+      "volatility_20": 0.016674034985245775
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "TXN",
+    "as_of": "2026-03-20",
+    "inclusion_status": "included",
+    "membership_source": "static_universe_definition",
+    "membership_resolution_status": "static_fallback",
+    "membership_confidence": 0.5,
+    "inclusion_reason": "base_universe_member",
+    "exclusion_reason": null,
+    "stage_name": "final_eligibility",
+    "filter_failures": [],
+    "filter_passes": [
+      "point_in_time_membership"
+    ],
+    "group_label": null,
+    "sector": null,
+    "industry": null,
+    "benchmark_id": "SPY",
+    "benchmark_symbol": "SPY",
+    "regime_label": null,
+    "metadata": {
+      "latest_price": 187.19000244140625,
+      "feature_history_bars": 1562,
+      "avg_dollar_volume_20": 1385264645.1057954,
+      "volatility_20": 0.015978118838641198
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "VRSK",
+    "as_of": "2026-03-20",
+    "inclusion_status": "included",
+    "membership_source": "static_universe_definition",
+    "membership_resolution_status": "static_fallback",
+    "membership_confidence": 0.5,
+    "inclusion_reason": "base_universe_member",
+    "exclusion_reason": null,
+    "stage_name": "final_eligibility",
+    "filter_failures": [],
+    "filter_passes": [
+      "point_in_time_membership"
+    ],
+    "group_label": null,
+    "sector": null,
+    "industry": null,
+    "benchmark_id": "SPY",
+    "benchmark_symbol": "SPY",
+    "regime_label": null,
+    "metadata": {
+      "latest_price": 201.75,
+      "feature_history_bars": 1562,
+      "avg_dollar_volume_20": 429181064.6045685,
+      "volatility_20": 0.022063607003450815
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "VRTX",
+    "as_of": "2026-03-20",
+    "inclusion_status": "included",
+    "membership_source": "static_universe_definition",
+    "membership_resolution_status": "static_fallback",
+    "membership_confidence": 0.5,
+    "inclusion_reason": "base_universe_member",
+    "exclusion_reason": null,
+    "stage_name": "final_eligibility",
+    "filter_failures": [],
+    "filter_passes": [
+      "point_in_time_membership"
+    ],
+    "group_label": null,
+    "sector": null,
+    "industry": null,
+    "benchmark_id": "SPY",
+    "benchmark_symbol": "SPY",
+    "regime_label": null,
+    "metadata": {
+      "latest_price": 454.0,
+      "feature_history_bars": 1562,
+      "avg_dollar_volume_20": 685051727.656604,
+      "volatility_20": 0.02574619231455739
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "WBD",
+    "as_of": "2026-03-20",
+    "inclusion_status": "included",
+    "membership_source": "static_universe_definition",
+    "membership_resolution_status": "static_fallback",
+    "membership_confidence": 0.5,
+    "inclusion_reason": "base_universe_member",
+    "exclusion_reason": null,
+    "stage_name": "final_eligibility",
+    "filter_failures": [],
+    "filter_passes": [
+      "point_in_time_membership"
+    ],
+    "group_label": null,
+    "sector": null,
+    "industry": null,
+    "benchmark_id": "SPY",
+    "benchmark_symbol": "SPY",
+    "regime_label": null,
+    "metadata": {
+      "latest_price": 27.420000076293945,
+      "feature_history_bars": 1562,
+      "avg_dollar_volume_20": 827351184.2207763,
+      "volatility_20": 0.009277167251181091
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "WDAY",
+    "as_of": "2026-03-20",
+    "inclusion_status": "included",
+    "membership_source": "static_universe_definition",
+    "membership_resolution_status": "static_fallback",
+    "membership_confidence": 0.5,
+    "inclusion_reason": "base_universe_member",
+    "exclusion_reason": null,
+    "stage_name": "final_eligibility",
+    "filter_failures": [],
+    "filter_passes": [
+      "point_in_time_membership"
+    ],
+    "group_label": null,
+    "sector": null,
+    "industry": null,
+    "benchmark_id": "SPY",
+    "benchmark_symbol": "SPY",
+    "regime_label": null,
+    "metadata": {
+      "latest_price": 135.9600067138672,
+      "feature_history_bars": 1562,
+      "avg_dollar_volume_20": 929772442.8532028,
+      "volatility_20": 0.031091179905948615
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "WDC",
+    "as_of": "2026-03-20",
+    "inclusion_status": "included",
+    "membership_source": "static_universe_definition",
+    "membership_resolution_status": "static_fallback",
+    "membership_confidence": 0.5,
+    "inclusion_reason": "base_universe_member",
+    "exclusion_reason": null,
+    "stage_name": "final_eligibility",
+    "filter_failures": [],
+    "filter_passes": [
+      "point_in_time_membership"
+    ],
+    "group_label": null,
+    "sector": null,
+    "industry": null,
+    "benchmark_id": "SPY",
+    "benchmark_symbol": "SPY",
+    "regime_label": null,
+    "metadata": {
+      "latest_price": 293.1000061035156,
+      "feature_history_bars": 1562,
+      "avg_dollar_volume_20": 2566092284.2565947,
+      "volatility_20": 0.04836009858304428
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "WMT",
+    "as_of": "2026-03-20",
+    "inclusion_status": "included",
+    "membership_source": "static_universe_definition",
+    "membership_resolution_status": "static_fallback",
+    "membership_confidence": 0.5,
+    "inclusion_reason": "base_universe_member",
+    "exclusion_reason": null,
+    "stage_name": "final_eligibility",
+    "filter_failures": [],
+    "filter_passes": [
+      "point_in_time_membership"
+    ],
+    "group_label": null,
+    "sector": null,
+    "industry": null,
+    "benchmark_id": "SPY",
+    "benchmark_symbol": "SPY",
+    "regime_label": null,
+    "metadata": {
+      "latest_price": 119.0199966430664,
+      "feature_history_bars": 1562,
+      "avg_dollar_volume_20": 2736132362.640983,
+      "volatility_20": 0.014873428381195705
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "XEL",
+    "as_of": "2026-03-20",
+    "inclusion_status": "included",
+    "membership_source": "static_universe_definition",
+    "membership_resolution_status": "static_fallback",
+    "membership_confidence": 0.5,
+    "inclusion_reason": "base_universe_member",
+    "exclusion_reason": null,
+    "stage_name": "final_eligibility",
+    "filter_failures": [],
+    "filter_passes": [
+      "point_in_time_membership"
+    ],
+    "group_label": null,
+    "sector": null,
+    "industry": null,
+    "benchmark_id": "SPY",
+    "benchmark_symbol": "SPY",
+    "regime_label": null,
+    "metadata": {
+      "latest_price": 76.7699966430664,
+      "feature_history_bars": 1562,
+      "avg_dollar_volume_20": 378305635.00091285,
+      "volatility_20": 0.010998702196268445
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "ZS",
+    "as_of": "2026-03-20",
+    "inclusion_status": "included",
+    "membership_source": "static_universe_definition",
+    "membership_resolution_status": "static_fallback",
+    "membership_confidence": 0.5,
+    "inclusion_reason": "base_universe_member",
+    "exclusion_reason": null,
+    "stage_name": "final_eligibility",
+    "filter_failures": [],
+    "filter_passes": [
+      "point_in_time_membership"
+    ],
+    "group_label": null,
+    "sector": null,
+    "industry": null,
+    "benchmark_id": "SPY",
+    "benchmark_symbol": "SPY",
+    "regime_label": null,
+    "metadata": {
+      "latest_price": 151.47000122070312,
+      "feature_history_bars": 1562,
+      "avg_dollar_volume_20": 541333259.1699387,
+      "volatility_20": 0.04531613134392436
+    }
+  }
+]

@@ -1,0 +1,2002 @@
+[
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "AAPL",
+    "as_of": "2026-03-20",
+    "stage_name": "membership_resolution",
+    "filter_name": "point_in_time_membership",
+    "filter_type": "point_in_time_membership",
+    "status": "pass",
+    "passed": true,
+    "threshold": null,
+    "observed_value": null,
+    "inclusion_reason": "point_in_time_member",
+    "exclusion_reason": null,
+    "metadata": {
+      "membership_source": "static_universe_definition",
+      "membership_resolution_status": "static_fallback"
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "ABNB",
+    "as_of": "2026-03-20",
+    "stage_name": "membership_resolution",
+    "filter_name": "point_in_time_membership",
+    "filter_type": "point_in_time_membership",
+    "status": "pass",
+    "passed": true,
+    "threshold": null,
+    "observed_value": null,
+    "inclusion_reason": "point_in_time_member",
+    "exclusion_reason": null,
+    "metadata": {
+      "membership_source": "static_universe_definition",
+      "membership_resolution_status": "static_fallback"
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "ADBE",
+    "as_of": "2026-03-20",
+    "stage_name": "membership_resolution",
+    "filter_name": "point_in_time_membership",
+    "filter_type": "point_in_time_membership",
+    "status": "pass",
+    "passed": true,
+    "threshold": null,
+    "observed_value": null,
+    "inclusion_reason": "point_in_time_member",
+    "exclusion_reason": null,
+    "metadata": {
+      "membership_source": "static_universe_definition",
+      "membership_resolution_status": "static_fallback"
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "ADI",
+    "as_of": "2026-03-20",
+    "stage_name": "membership_resolution",
+    "filter_name": "point_in_time_membership",
+    "filter_type": "point_in_time_membership",
+    "status": "pass",
+    "passed": true,
+    "threshold": null,
+    "observed_value": null,
+    "inclusion_reason": "point_in_time_member",
+    "exclusion_reason": null,
+    "metadata": {
+      "membership_source": "static_universe_definition",
+      "membership_resolution_status": "static_fallback"
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "ADP",
+    "as_of": "2026-03-20",
+    "stage_name": "membership_resolution",
+    "filter_name": "point_in_time_membership",
+    "filter_type": "point_in_time_membership",
+    "status": "pass",
+    "passed": true,
+    "threshold": null,
+    "observed_value": null,
+    "inclusion_reason": "point_in_time_member",
+    "exclusion_reason": null,
+    "metadata": {
+      "membership_source": "static_universe_definition",
+      "membership_resolution_status": "static_fallback"
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "ADSK",
+    "as_of": "2026-03-20",
+    "stage_name": "membership_resolution",
+    "filter_name": "point_in_time_membership",
+    "filter_type": "point_in_time_membership",
+    "status": "pass",
+    "passed": true,
+    "threshold": null,
+    "observed_value": null,
+    "inclusion_reason": "point_in_time_member",
+    "exclusion_reason": null,
+    "metadata": {
+      "membership_source": "static_universe_definition",
+      "membership_resolution_status": "static_fallback"
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "AEP",
+    "as_of": "2026-03-20",
+    "stage_name": "membership_resolution",
+    "filter_name": "point_in_time_membership",
+    "filter_type": "point_in_time_membership",
+    "status": "pass",
+    "passed": true,
+    "threshold": null,
+    "observed_value": null,
+    "inclusion_reason": "point_in_time_member",
+    "exclusion_reason": null,
+    "metadata": {
+      "membership_source": "static_universe_definition",
+      "membership_resolution_status": "static_fallback"
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "ALNY",
+    "as_of": "2026-03-20",
+    "stage_name": "membership_resolution",
+    "filter_name": "point_in_time_membership",
+    "filter_type": "point_in_time_membership",
+    "status": "pass",
+    "passed": true,
+    "threshold": null,
+    "observed_value": null,
+    "inclusion_reason": "point_in_time_member",
+    "exclusion_reason": null,
+    "metadata": {
+      "membership_source": "static_universe_definition",
+      "membership_resolution_status": "static_fallback"
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "AMAT",
+    "as_of": "2026-03-20",
+    "stage_name": "membership_resolution",
+    "filter_name": "point_in_time_membership",
+    "filter_type": "point_in_time_membership",
+    "status": "pass",
+    "passed": true,
+    "threshold": null,
+    "observed_value": null,
+    "inclusion_reason": "point_in_time_member",
+    "exclusion_reason": null,
+    "metadata": {
+      "membership_source": "static_universe_definition",
+      "membership_resolution_status": "static_fallback"
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "AMD",
+    "as_of": "2026-03-20",
+    "stage_name": "membership_resolution",
+    "filter_name": "point_in_time_membership",
+    "filter_type": "point_in_time_membership",
+    "status": "pass",
+    "passed": true,
+    "threshold": null,
+    "observed_value": null,
+    "inclusion_reason": "point_in_time_member",
+    "exclusion_reason": null,
+    "metadata": {
+      "membership_source": "static_universe_definition",
+      "membership_resolution_status": "static_fallback"
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "AMGN",
+    "as_of": "2026-03-20",
+    "stage_name": "membership_resolution",
+    "filter_name": "point_in_time_membership",
+    "filter_type": "point_in_time_membership",
+    "status": "pass",
+    "passed": true,
+    "threshold": null,
+    "observed_value": null,
+    "inclusion_reason": "point_in_time_member",
+    "exclusion_reason": null,
+    "metadata": {
+      "membership_source": "static_universe_definition",
+      "membership_resolution_status": "static_fallback"
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "AMZN",
+    "as_of": "2026-03-20",
+    "stage_name": "membership_resolution",
+    "filter_name": "point_in_time_membership",
+    "filter_type": "point_in_time_membership",
+    "status": "pass",
+    "passed": true,
+    "threshold": null,
+    "observed_value": null,
+    "inclusion_reason": "point_in_time_member",
+    "exclusion_reason": null,
+    "metadata": {
+      "membership_source": "static_universe_definition",
+      "membership_resolution_status": "static_fallback"
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "APP",
+    "as_of": "2026-03-20",
+    "stage_name": "membership_resolution",
+    "filter_name": "point_in_time_membership",
+    "filter_type": "point_in_time_membership",
+    "status": "pass",
+    "passed": true,
+    "threshold": null,
+    "observed_value": null,
+    "inclusion_reason": "point_in_time_member",
+    "exclusion_reason": null,
+    "metadata": {
+      "membership_source": "static_universe_definition",
+      "membership_resolution_status": "static_fallback"
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "ARM",
+    "as_of": "2026-03-20",
+    "stage_name": "membership_resolution",
+    "filter_name": "point_in_time_membership",
+    "filter_type": "point_in_time_membership",
+    "status": "pass",
+    "passed": true,
+    "threshold": null,
+    "observed_value": null,
+    "inclusion_reason": "point_in_time_member",
+    "exclusion_reason": null,
+    "metadata": {
+      "membership_source": "static_universe_definition",
+      "membership_resolution_status": "static_fallback"
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "ASML",
+    "as_of": "2026-03-20",
+    "stage_name": "membership_resolution",
+    "filter_name": "point_in_time_membership",
+    "filter_type": "point_in_time_membership",
+    "status": "pass",
+    "passed": true,
+    "threshold": null,
+    "observed_value": null,
+    "inclusion_reason": "point_in_time_member",
+    "exclusion_reason": null,
+    "metadata": {
+      "membership_source": "static_universe_definition",
+      "membership_resolution_status": "static_fallback"
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "AVGO",
+    "as_of": "2026-03-20",
+    "stage_name": "membership_resolution",
+    "filter_name": "point_in_time_membership",
+    "filter_type": "point_in_time_membership",
+    "status": "pass",
+    "passed": true,
+    "threshold": null,
+    "observed_value": null,
+    "inclusion_reason": "point_in_time_member",
+    "exclusion_reason": null,
+    "metadata": {
+      "membership_source": "static_universe_definition",
+      "membership_resolution_status": "static_fallback"
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "AXON",
+    "as_of": "2026-03-20",
+    "stage_name": "membership_resolution",
+    "filter_name": "point_in_time_membership",
+    "filter_type": "point_in_time_membership",
+    "status": "pass",
+    "passed": true,
+    "threshold": null,
+    "observed_value": null,
+    "inclusion_reason": "point_in_time_member",
+    "exclusion_reason": null,
+    "metadata": {
+      "membership_source": "static_universe_definition",
+      "membership_resolution_status": "static_fallback"
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "AZN",
+    "as_of": "2026-03-20",
+    "stage_name": "membership_resolution",
+    "filter_name": "point_in_time_membership",
+    "filter_type": "point_in_time_membership",
+    "status": "pass",
+    "passed": true,
+    "threshold": null,
+    "observed_value": null,
+    "inclusion_reason": "point_in_time_member",
+    "exclusion_reason": null,
+    "metadata": {
+      "membership_source": "static_universe_definition",
+      "membership_resolution_status": "static_fallback"
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "BKNG",
+    "as_of": "2026-03-20",
+    "stage_name": "membership_resolution",
+    "filter_name": "point_in_time_membership",
+    "filter_type": "point_in_time_membership",
+    "status": "pass",
+    "passed": true,
+    "threshold": null,
+    "observed_value": null,
+    "inclusion_reason": "point_in_time_member",
+    "exclusion_reason": null,
+    "metadata": {
+      "membership_source": "static_universe_definition",
+      "membership_resolution_status": "static_fallback"
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "CCEP",
+    "as_of": "2026-03-20",
+    "stage_name": "membership_resolution",
+    "filter_name": "point_in_time_membership",
+    "filter_type": "point_in_time_membership",
+    "status": "pass",
+    "passed": true,
+    "threshold": null,
+    "observed_value": null,
+    "inclusion_reason": "point_in_time_member",
+    "exclusion_reason": null,
+    "metadata": {
+      "membership_source": "static_universe_definition",
+      "membership_resolution_status": "static_fallback"
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "CDNS",
+    "as_of": "2026-03-20",
+    "stage_name": "membership_resolution",
+    "filter_name": "point_in_time_membership",
+    "filter_type": "point_in_time_membership",
+    "status": "pass",
+    "passed": true,
+    "threshold": null,
+    "observed_value": null,
+    "inclusion_reason": "point_in_time_member",
+    "exclusion_reason": null,
+    "metadata": {
+      "membership_source": "static_universe_definition",
+      "membership_resolution_status": "static_fallback"
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "CEG",
+    "as_of": "2026-03-20",
+    "stage_name": "membership_resolution",
+    "filter_name": "point_in_time_membership",
+    "filter_type": "point_in_time_membership",
+    "status": "pass",
+    "passed": true,
+    "threshold": null,
+    "observed_value": null,
+    "inclusion_reason": "point_in_time_member",
+    "exclusion_reason": null,
+    "metadata": {
+      "membership_source": "static_universe_definition",
+      "membership_resolution_status": "static_fallback"
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "CHTR",
+    "as_of": "2026-03-20",
+    "stage_name": "membership_resolution",
+    "filter_name": "point_in_time_membership",
+    "filter_type": "point_in_time_membership",
+    "status": "pass",
+    "passed": true,
+    "threshold": null,
+    "observed_value": null,
+    "inclusion_reason": "point_in_time_member",
+    "exclusion_reason": null,
+    "metadata": {
+      "membership_source": "static_universe_definition",
+      "membership_resolution_status": "static_fallback"
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "CMCSA",
+    "as_of": "2026-03-20",
+    "stage_name": "membership_resolution",
+    "filter_name": "point_in_time_membership",
+    "filter_type": "point_in_time_membership",
+    "status": "pass",
+    "passed": true,
+    "threshold": null,
+    "observed_value": null,
+    "inclusion_reason": "point_in_time_member",
+    "exclusion_reason": null,
+    "metadata": {
+      "membership_source": "static_universe_definition",
+      "membership_resolution_status": "static_fallback"
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "COST",
+    "as_of": "2026-03-20",
+    "stage_name": "membership_resolution",
+    "filter_name": "point_in_time_membership",
+    "filter_type": "point_in_time_membership",
+    "status": "pass",
+    "passed": true,
+    "threshold": null,
+    "observed_value": null,
+    "inclusion_reason": "point_in_time_member",
+    "exclusion_reason": null,
+    "metadata": {
+      "membership_source": "static_universe_definition",
+      "membership_resolution_status": "static_fallback"
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "CPRT",
+    "as_of": "2026-03-20",
+    "stage_name": "membership_resolution",
+    "filter_name": "point_in_time_membership",
+    "filter_type": "point_in_time_membership",
+    "status": "pass",
+    "passed": true,
+    "threshold": null,
+    "observed_value": null,
+    "inclusion_reason": "point_in_time_member",
+    "exclusion_reason": null,
+    "metadata": {
+      "membership_source": "static_universe_definition",
+      "membership_resolution_status": "static_fallback"
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "CRWD",
+    "as_of": "2026-03-20",
+    "stage_name": "membership_resolution",
+    "filter_name": "point_in_time_membership",
+    "filter_type": "point_in_time_membership",
+    "status": "pass",
+    "passed": true,
+    "threshold": null,
+    "observed_value": null,
+    "inclusion_reason": "point_in_time_member",
+    "exclusion_reason": null,
+    "metadata": {
+      "membership_source": "static_universe_definition",
+      "membership_resolution_status": "static_fallback"
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "CSCO",
+    "as_of": "2026-03-20",
+    "stage_name": "membership_resolution",
+    "filter_name": "point_in_time_membership",
+    "filter_type": "point_in_time_membership",
+    "status": "pass",
+    "passed": true,
+    "threshold": null,
+    "observed_value": null,
+    "inclusion_reason": "point_in_time_member",
+    "exclusion_reason": null,
+    "metadata": {
+      "membership_source": "static_universe_definition",
+      "membership_resolution_status": "static_fallback"
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "CSGP",
+    "as_of": "2026-03-20",
+    "stage_name": "membership_resolution",
+    "filter_name": "point_in_time_membership",
+    "filter_type": "point_in_time_membership",
+    "status": "pass",
+    "passed": true,
+    "threshold": null,
+    "observed_value": null,
+    "inclusion_reason": "point_in_time_member",
+    "exclusion_reason": null,
+    "metadata": {
+      "membership_source": "static_universe_definition",
+      "membership_resolution_status": "static_fallback"
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "CSX",
+    "as_of": "2026-03-20",
+    "stage_name": "membership_resolution",
+    "filter_name": "point_in_time_membership",
+    "filter_type": "point_in_time_membership",
+    "status": "pass",
+    "passed": true,
+    "threshold": null,
+    "observed_value": null,
+    "inclusion_reason": "point_in_time_member",
+    "exclusion_reason": null,
+    "metadata": {
+      "membership_source": "static_universe_definition",
+      "membership_resolution_status": "static_fallback"
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "CTAS",
+    "as_of": "2026-03-20",
+    "stage_name": "membership_resolution",
+    "filter_name": "point_in_time_membership",
+    "filter_type": "point_in_time_membership",
+    "status": "pass",
+    "passed": true,
+    "threshold": null,
+    "observed_value": null,
+    "inclusion_reason": "point_in_time_member",
+    "exclusion_reason": null,
+    "metadata": {
+      "membership_source": "static_universe_definition",
+      "membership_resolution_status": "static_fallback"
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "CTSH",
+    "as_of": "2026-03-20",
+    "stage_name": "membership_resolution",
+    "filter_name": "point_in_time_membership",
+    "filter_type": "point_in_time_membership",
+    "status": "pass",
+    "passed": true,
+    "threshold": null,
+    "observed_value": null,
+    "inclusion_reason": "point_in_time_member",
+    "exclusion_reason": null,
+    "metadata": {
+      "membership_source": "static_universe_definition",
+      "membership_resolution_status": "static_fallback"
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "DASH",
+    "as_of": "2026-03-20",
+    "stage_name": "membership_resolution",
+    "filter_name": "point_in_time_membership",
+    "filter_type": "point_in_time_membership",
+    "status": "pass",
+    "passed": true,
+    "threshold": null,
+    "observed_value": null,
+    "inclusion_reason": "point_in_time_member",
+    "exclusion_reason": null,
+    "metadata": {
+      "membership_source": "static_universe_definition",
+      "membership_resolution_status": "static_fallback"
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "DDOG",
+    "as_of": "2026-03-20",
+    "stage_name": "membership_resolution",
+    "filter_name": "point_in_time_membership",
+    "filter_type": "point_in_time_membership",
+    "status": "pass",
+    "passed": true,
+    "threshold": null,
+    "observed_value": null,
+    "inclusion_reason": "point_in_time_member",
+    "exclusion_reason": null,
+    "metadata": {
+      "membership_source": "static_universe_definition",
+      "membership_resolution_status": "static_fallback"
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "DXCM",
+    "as_of": "2026-03-20",
+    "stage_name": "membership_resolution",
+    "filter_name": "point_in_time_membership",
+    "filter_type": "point_in_time_membership",
+    "status": "pass",
+    "passed": true,
+    "threshold": null,
+    "observed_value": null,
+    "inclusion_reason": "point_in_time_member",
+    "exclusion_reason": null,
+    "metadata": {
+      "membership_source": "static_universe_definition",
+      "membership_resolution_status": "static_fallback"
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "EA",
+    "as_of": "2026-03-20",
+    "stage_name": "membership_resolution",
+    "filter_name": "point_in_time_membership",
+    "filter_type": "point_in_time_membership",
+    "status": "pass",
+    "passed": true,
+    "threshold": null,
+    "observed_value": null,
+    "inclusion_reason": "point_in_time_member",
+    "exclusion_reason": null,
+    "metadata": {
+      "membership_source": "static_universe_definition",
+      "membership_resolution_status": "static_fallback"
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "EXC",
+    "as_of": "2026-03-20",
+    "stage_name": "membership_resolution",
+    "filter_name": "point_in_time_membership",
+    "filter_type": "point_in_time_membership",
+    "status": "pass",
+    "passed": true,
+    "threshold": null,
+    "observed_value": null,
+    "inclusion_reason": "point_in_time_member",
+    "exclusion_reason": null,
+    "metadata": {
+      "membership_source": "static_universe_definition",
+      "membership_resolution_status": "static_fallback"
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "FAST",
+    "as_of": "2026-03-20",
+    "stage_name": "membership_resolution",
+    "filter_name": "point_in_time_membership",
+    "filter_type": "point_in_time_membership",
+    "status": "pass",
+    "passed": true,
+    "threshold": null,
+    "observed_value": null,
+    "inclusion_reason": "point_in_time_member",
+    "exclusion_reason": null,
+    "metadata": {
+      "membership_source": "static_universe_definition",
+      "membership_resolution_status": "static_fallback"
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "FER",
+    "as_of": "2026-03-20",
+    "stage_name": "membership_resolution",
+    "filter_name": "point_in_time_membership",
+    "filter_type": "point_in_time_membership",
+    "status": "pass",
+    "passed": true,
+    "threshold": null,
+    "observed_value": null,
+    "inclusion_reason": "point_in_time_member",
+    "exclusion_reason": null,
+    "metadata": {
+      "membership_source": "static_universe_definition",
+      "membership_resolution_status": "static_fallback"
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "FTNT",
+    "as_of": "2026-03-20",
+    "stage_name": "membership_resolution",
+    "filter_name": "point_in_time_membership",
+    "filter_type": "point_in_time_membership",
+    "status": "pass",
+    "passed": true,
+    "threshold": null,
+    "observed_value": null,
+    "inclusion_reason": "point_in_time_member",
+    "exclusion_reason": null,
+    "metadata": {
+      "membership_source": "static_universe_definition",
+      "membership_resolution_status": "static_fallback"
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "GEHC",
+    "as_of": "2026-03-20",
+    "stage_name": "membership_resolution",
+    "filter_name": "point_in_time_membership",
+    "filter_type": "point_in_time_membership",
+    "status": "pass",
+    "passed": true,
+    "threshold": null,
+    "observed_value": null,
+    "inclusion_reason": "point_in_time_member",
+    "exclusion_reason": null,
+    "metadata": {
+      "membership_source": "static_universe_definition",
+      "membership_resolution_status": "static_fallback"
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "GILD",
+    "as_of": "2026-03-20",
+    "stage_name": "membership_resolution",
+    "filter_name": "point_in_time_membership",
+    "filter_type": "point_in_time_membership",
+    "status": "pass",
+    "passed": true,
+    "threshold": null,
+    "observed_value": null,
+    "inclusion_reason": "point_in_time_member",
+    "exclusion_reason": null,
+    "metadata": {
+      "membership_source": "static_universe_definition",
+      "membership_resolution_status": "static_fallback"
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "GOOG",
+    "as_of": "2026-03-20",
+    "stage_name": "membership_resolution",
+    "filter_name": "point_in_time_membership",
+    "filter_type": "point_in_time_membership",
+    "status": "pass",
+    "passed": true,
+    "threshold": null,
+    "observed_value": null,
+    "inclusion_reason": "point_in_time_member",
+    "exclusion_reason": null,
+    "metadata": {
+      "membership_source": "static_universe_definition",
+      "membership_resolution_status": "static_fallback"
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "GOOGL",
+    "as_of": "2026-03-20",
+    "stage_name": "membership_resolution",
+    "filter_name": "point_in_time_membership",
+    "filter_type": "point_in_time_membership",
+    "status": "pass",
+    "passed": true,
+    "threshold": null,
+    "observed_value": null,
+    "inclusion_reason": "point_in_time_member",
+    "exclusion_reason": null,
+    "metadata": {
+      "membership_source": "static_universe_definition",
+      "membership_resolution_status": "static_fallback"
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "HON",
+    "as_of": "2026-03-20",
+    "stage_name": "membership_resolution",
+    "filter_name": "point_in_time_membership",
+    "filter_type": "point_in_time_membership",
+    "status": "pass",
+    "passed": true,
+    "threshold": null,
+    "observed_value": null,
+    "inclusion_reason": "point_in_time_member",
+    "exclusion_reason": null,
+    "metadata": {
+      "membership_source": "static_universe_definition",
+      "membership_resolution_status": "static_fallback"
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "IDXX",
+    "as_of": "2026-03-20",
+    "stage_name": "membership_resolution",
+    "filter_name": "point_in_time_membership",
+    "filter_type": "point_in_time_membership",
+    "status": "pass",
+    "passed": true,
+    "threshold": null,
+    "observed_value": null,
+    "inclusion_reason": "point_in_time_member",
+    "exclusion_reason": null,
+    "metadata": {
+      "membership_source": "static_universe_definition",
+      "membership_resolution_status": "static_fallback"
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "INSM",
+    "as_of": "2026-03-20",
+    "stage_name": "membership_resolution",
+    "filter_name": "point_in_time_membership",
+    "filter_type": "point_in_time_membership",
+    "status": "pass",
+    "passed": true,
+    "threshold": null,
+    "observed_value": null,
+    "inclusion_reason": "point_in_time_member",
+    "exclusion_reason": null,
+    "metadata": {
+      "membership_source": "static_universe_definition",
+      "membership_resolution_status": "static_fallback"
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "INTC",
+    "as_of": "2026-03-20",
+    "stage_name": "membership_resolution",
+    "filter_name": "point_in_time_membership",
+    "filter_type": "point_in_time_membership",
+    "status": "pass",
+    "passed": true,
+    "threshold": null,
+    "observed_value": null,
+    "inclusion_reason": "point_in_time_member",
+    "exclusion_reason": null,
+    "metadata": {
+      "membership_source": "static_universe_definition",
+      "membership_resolution_status": "static_fallback"
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "INTU",
+    "as_of": "2026-03-20",
+    "stage_name": "membership_resolution",
+    "filter_name": "point_in_time_membership",
+    "filter_type": "point_in_time_membership",
+    "status": "pass",
+    "passed": true,
+    "threshold": null,
+    "observed_value": null,
+    "inclusion_reason": "point_in_time_member",
+    "exclusion_reason": null,
+    "metadata": {
+      "membership_source": "static_universe_definition",
+      "membership_resolution_status": "static_fallback"
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "ISRG",
+    "as_of": "2026-03-20",
+    "stage_name": "membership_resolution",
+    "filter_name": "point_in_time_membership",
+    "filter_type": "point_in_time_membership",
+    "status": "pass",
+    "passed": true,
+    "threshold": null,
+    "observed_value": null,
+    "inclusion_reason": "point_in_time_member",
+    "exclusion_reason": null,
+    "metadata": {
+      "membership_source": "static_universe_definition",
+      "membership_resolution_status": "static_fallback"
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "KDP",
+    "as_of": "2026-03-20",
+    "stage_name": "membership_resolution",
+    "filter_name": "point_in_time_membership",
+    "filter_type": "point_in_time_membership",
+    "status": "pass",
+    "passed": true,
+    "threshold": null,
+    "observed_value": null,
+    "inclusion_reason": "point_in_time_member",
+    "exclusion_reason": null,
+    "metadata": {
+      "membership_source": "static_universe_definition",
+      "membership_resolution_status": "static_fallback"
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "KHC",
+    "as_of": "2026-03-20",
+    "stage_name": "membership_resolution",
+    "filter_name": "point_in_time_membership",
+    "filter_type": "point_in_time_membership",
+    "status": "pass",
+    "passed": true,
+    "threshold": null,
+    "observed_value": null,
+    "inclusion_reason": "point_in_time_member",
+    "exclusion_reason": null,
+    "metadata": {
+      "membership_source": "static_universe_definition",
+      "membership_resolution_status": "static_fallback"
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "KLAC",
+    "as_of": "2026-03-20",
+    "stage_name": "membership_resolution",
+    "filter_name": "point_in_time_membership",
+    "filter_type": "point_in_time_membership",
+    "status": "pass",
+    "passed": true,
+    "threshold": null,
+    "observed_value": null,
+    "inclusion_reason": "point_in_time_member",
+    "exclusion_reason": null,
+    "metadata": {
+      "membership_source": "static_universe_definition",
+      "membership_resolution_status": "static_fallback"
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "LIN",
+    "as_of": "2026-03-20",
+    "stage_name": "membership_resolution",
+    "filter_name": "point_in_time_membership",
+    "filter_type": "point_in_time_membership",
+    "status": "pass",
+    "passed": true,
+    "threshold": null,
+    "observed_value": null,
+    "inclusion_reason": "point_in_time_member",
+    "exclusion_reason": null,
+    "metadata": {
+      "membership_source": "static_universe_definition",
+      "membership_resolution_status": "static_fallback"
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "LRCX",
+    "as_of": "2026-03-20",
+    "stage_name": "membership_resolution",
+    "filter_name": "point_in_time_membership",
+    "filter_type": "point_in_time_membership",
+    "status": "pass",
+    "passed": true,
+    "threshold": null,
+    "observed_value": null,
+    "inclusion_reason": "point_in_time_member",
+    "exclusion_reason": null,
+    "metadata": {
+      "membership_source": "static_universe_definition",
+      "membership_resolution_status": "static_fallback"
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "MAR",
+    "as_of": "2026-03-20",
+    "stage_name": "membership_resolution",
+    "filter_name": "point_in_time_membership",
+    "filter_type": "point_in_time_membership",
+    "status": "pass",
+    "passed": true,
+    "threshold": null,
+    "observed_value": null,
+    "inclusion_reason": "point_in_time_member",
+    "exclusion_reason": null,
+    "metadata": {
+      "membership_source": "static_universe_definition",
+      "membership_resolution_status": "static_fallback"
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "MCHP",
+    "as_of": "2026-03-20",
+    "stage_name": "membership_resolution",
+    "filter_name": "point_in_time_membership",
+    "filter_type": "point_in_time_membership",
+    "status": "pass",
+    "passed": true,
+    "threshold": null,
+    "observed_value": null,
+    "inclusion_reason": "point_in_time_member",
+    "exclusion_reason": null,
+    "metadata": {
+      "membership_source": "static_universe_definition",
+      "membership_resolution_status": "static_fallback"
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "MDLZ",
+    "as_of": "2026-03-20",
+    "stage_name": "membership_resolution",
+    "filter_name": "point_in_time_membership",
+    "filter_type": "point_in_time_membership",
+    "status": "pass",
+    "passed": true,
+    "threshold": null,
+    "observed_value": null,
+    "inclusion_reason": "point_in_time_member",
+    "exclusion_reason": null,
+    "metadata": {
+      "membership_source": "static_universe_definition",
+      "membership_resolution_status": "static_fallback"
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "MELI",
+    "as_of": "2026-03-20",
+    "stage_name": "membership_resolution",
+    "filter_name": "point_in_time_membership",
+    "filter_type": "point_in_time_membership",
+    "status": "pass",
+    "passed": true,
+    "threshold": null,
+    "observed_value": null,
+    "inclusion_reason": "point_in_time_member",
+    "exclusion_reason": null,
+    "metadata": {
+      "membership_source": "static_universe_definition",
+      "membership_resolution_status": "static_fallback"
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "META",
+    "as_of": "2026-03-20",
+    "stage_name": "membership_resolution",
+    "filter_name": "point_in_time_membership",
+    "filter_type": "point_in_time_membership",
+    "status": "pass",
+    "passed": true,
+    "threshold": null,
+    "observed_value": null,
+    "inclusion_reason": "point_in_time_member",
+    "exclusion_reason": null,
+    "metadata": {
+      "membership_source": "static_universe_definition",
+      "membership_resolution_status": "static_fallback"
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "MNST",
+    "as_of": "2026-03-20",
+    "stage_name": "membership_resolution",
+    "filter_name": "point_in_time_membership",
+    "filter_type": "point_in_time_membership",
+    "status": "pass",
+    "passed": true,
+    "threshold": null,
+    "observed_value": null,
+    "inclusion_reason": "point_in_time_member",
+    "exclusion_reason": null,
+    "metadata": {
+      "membership_source": "static_universe_definition",
+      "membership_resolution_status": "static_fallback"
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "MPWR",
+    "as_of": "2026-03-20",
+    "stage_name": "membership_resolution",
+    "filter_name": "point_in_time_membership",
+    "filter_type": "point_in_time_membership",
+    "status": "pass",
+    "passed": true,
+    "threshold": null,
+    "observed_value": null,
+    "inclusion_reason": "point_in_time_member",
+    "exclusion_reason": null,
+    "metadata": {
+      "membership_source": "static_universe_definition",
+      "membership_resolution_status": "static_fallback"
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "MRVL",
+    "as_of": "2026-03-20",
+    "stage_name": "membership_resolution",
+    "filter_name": "point_in_time_membership",
+    "filter_type": "point_in_time_membership",
+    "status": "pass",
+    "passed": true,
+    "threshold": null,
+    "observed_value": null,
+    "inclusion_reason": "point_in_time_member",
+    "exclusion_reason": null,
+    "metadata": {
+      "membership_source": "static_universe_definition",
+      "membership_resolution_status": "static_fallback"
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "MSFT",
+    "as_of": "2026-03-20",
+    "stage_name": "membership_resolution",
+    "filter_name": "point_in_time_membership",
+    "filter_type": "point_in_time_membership",
+    "status": "pass",
+    "passed": true,
+    "threshold": null,
+    "observed_value": null,
+    "inclusion_reason": "point_in_time_member",
+    "exclusion_reason": null,
+    "metadata": {
+      "membership_source": "static_universe_definition",
+      "membership_resolution_status": "static_fallback"
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "MSTR",
+    "as_of": "2026-03-20",
+    "stage_name": "membership_resolution",
+    "filter_name": "point_in_time_membership",
+    "filter_type": "point_in_time_membership",
+    "status": "pass",
+    "passed": true,
+    "threshold": null,
+    "observed_value": null,
+    "inclusion_reason": "point_in_time_member",
+    "exclusion_reason": null,
+    "metadata": {
+      "membership_source": "static_universe_definition",
+      "membership_resolution_status": "static_fallback"
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "MU",
+    "as_of": "2026-03-20",
+    "stage_name": "membership_resolution",
+    "filter_name": "point_in_time_membership",
+    "filter_type": "point_in_time_membership",
+    "status": "pass",
+    "passed": true,
+    "threshold": null,
+    "observed_value": null,
+    "inclusion_reason": "point_in_time_member",
+    "exclusion_reason": null,
+    "metadata": {
+      "membership_source": "static_universe_definition",
+      "membership_resolution_status": "static_fallback"
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "NFLX",
+    "as_of": "2026-03-20",
+    "stage_name": "membership_resolution",
+    "filter_name": "point_in_time_membership",
+    "filter_type": "point_in_time_membership",
+    "status": "pass",
+    "passed": true,
+    "threshold": null,
+    "observed_value": null,
+    "inclusion_reason": "point_in_time_member",
+    "exclusion_reason": null,
+    "metadata": {
+      "membership_source": "static_universe_definition",
+      "membership_resolution_status": "static_fallback"
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "NVDA",
+    "as_of": "2026-03-20",
+    "stage_name": "membership_resolution",
+    "filter_name": "point_in_time_membership",
+    "filter_type": "point_in_time_membership",
+    "status": "pass",
+    "passed": true,
+    "threshold": null,
+    "observed_value": null,
+    "inclusion_reason": "point_in_time_member",
+    "exclusion_reason": null,
+    "metadata": {
+      "membership_source": "static_universe_definition",
+      "membership_resolution_status": "static_fallback"
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "NXPI",
+    "as_of": "2026-03-20",
+    "stage_name": "membership_resolution",
+    "filter_name": "point_in_time_membership",
+    "filter_type": "point_in_time_membership",
+    "status": "pass",
+    "passed": true,
+    "threshold": null,
+    "observed_value": null,
+    "inclusion_reason": "point_in_time_member",
+    "exclusion_reason": null,
+    "metadata": {
+      "membership_source": "static_universe_definition",
+      "membership_resolution_status": "static_fallback"
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "ODFL",
+    "as_of": "2026-03-20",
+    "stage_name": "membership_resolution",
+    "filter_name": "point_in_time_membership",
+    "filter_type": "point_in_time_membership",
+    "status": "pass",
+    "passed": true,
+    "threshold": null,
+    "observed_value": null,
+    "inclusion_reason": "point_in_time_member",
+    "exclusion_reason": null,
+    "metadata": {
+      "membership_source": "static_universe_definition",
+      "membership_resolution_status": "static_fallback"
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "ORLY",
+    "as_of": "2026-03-20",
+    "stage_name": "membership_resolution",
+    "filter_name": "point_in_time_membership",
+    "filter_type": "point_in_time_membership",
+    "status": "pass",
+    "passed": true,
+    "threshold": null,
+    "observed_value": null,
+    "inclusion_reason": "point_in_time_member",
+    "exclusion_reason": null,
+    "metadata": {
+      "membership_source": "static_universe_definition",
+      "membership_resolution_status": "static_fallback"
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "PANW",
+    "as_of": "2026-03-20",
+    "stage_name": "membership_resolution",
+    "filter_name": "point_in_time_membership",
+    "filter_type": "point_in_time_membership",
+    "status": "pass",
+    "passed": true,
+    "threshold": null,
+    "observed_value": null,
+    "inclusion_reason": "point_in_time_member",
+    "exclusion_reason": null,
+    "metadata": {
+      "membership_source": "static_universe_definition",
+      "membership_resolution_status": "static_fallback"
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "PAYX",
+    "as_of": "2026-03-20",
+    "stage_name": "membership_resolution",
+    "filter_name": "point_in_time_membership",
+    "filter_type": "point_in_time_membership",
+    "status": "pass",
+    "passed": true,
+    "threshold": null,
+    "observed_value": null,
+    "inclusion_reason": "point_in_time_member",
+    "exclusion_reason": null,
+    "metadata": {
+      "membership_source": "static_universe_definition",
+      "membership_resolution_status": "static_fallback"
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "PCAR",
+    "as_of": "2026-03-20",
+    "stage_name": "membership_resolution",
+    "filter_name": "point_in_time_membership",
+    "filter_type": "point_in_time_membership",
+    "status": "pass",
+    "passed": true,
+    "threshold": null,
+    "observed_value": null,
+    "inclusion_reason": "point_in_time_member",
+    "exclusion_reason": null,
+    "metadata": {
+      "membership_source": "static_universe_definition",
+      "membership_resolution_status": "static_fallback"
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "PDD",
+    "as_of": "2026-03-20",
+    "stage_name": "membership_resolution",
+    "filter_name": "point_in_time_membership",
+    "filter_type": "point_in_time_membership",
+    "status": "pass",
+    "passed": true,
+    "threshold": null,
+    "observed_value": null,
+    "inclusion_reason": "point_in_time_member",
+    "exclusion_reason": null,
+    "metadata": {
+      "membership_source": "static_universe_definition",
+      "membership_resolution_status": "static_fallback"
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "PEP",
+    "as_of": "2026-03-20",
+    "stage_name": "membership_resolution",
+    "filter_name": "point_in_time_membership",
+    "filter_type": "point_in_time_membership",
+    "status": "pass",
+    "passed": true,
+    "threshold": null,
+    "observed_value": null,
+    "inclusion_reason": "point_in_time_member",
+    "exclusion_reason": null,
+    "metadata": {
+      "membership_source": "static_universe_definition",
+      "membership_resolution_status": "static_fallback"
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "PLTR",
+    "as_of": "2026-03-20",
+    "stage_name": "membership_resolution",
+    "filter_name": "point_in_time_membership",
+    "filter_type": "point_in_time_membership",
+    "status": "pass",
+    "passed": true,
+    "threshold": null,
+    "observed_value": null,
+    "inclusion_reason": "point_in_time_member",
+    "exclusion_reason": null,
+    "metadata": {
+      "membership_source": "static_universe_definition",
+      "membership_resolution_status": "static_fallback"
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "PYPL",
+    "as_of": "2026-03-20",
+    "stage_name": "membership_resolution",
+    "filter_name": "point_in_time_membership",
+    "filter_type": "point_in_time_membership",
+    "status": "pass",
+    "passed": true,
+    "threshold": null,
+    "observed_value": null,
+    "inclusion_reason": "point_in_time_member",
+    "exclusion_reason": null,
+    "metadata": {
+      "membership_source": "static_universe_definition",
+      "membership_resolution_status": "static_fallback"
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "QCOM",
+    "as_of": "2026-03-20",
+    "stage_name": "membership_resolution",
+    "filter_name": "point_in_time_membership",
+    "filter_type": "point_in_time_membership",
+    "status": "pass",
+    "passed": true,
+    "threshold": null,
+    "observed_value": null,
+    "inclusion_reason": "point_in_time_member",
+    "exclusion_reason": null,
+    "metadata": {
+      "membership_source": "static_universe_definition",
+      "membership_resolution_status": "static_fallback"
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "REGN",
+    "as_of": "2026-03-20",
+    "stage_name": "membership_resolution",
+    "filter_name": "point_in_time_membership",
+    "filter_type": "point_in_time_membership",
+    "status": "pass",
+    "passed": true,
+    "threshold": null,
+    "observed_value": null,
+    "inclusion_reason": "point_in_time_member",
+    "exclusion_reason": null,
+    "metadata": {
+      "membership_source": "static_universe_definition",
+      "membership_resolution_status": "static_fallback"
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "ROP",
+    "as_of": "2026-03-20",
+    "stage_name": "membership_resolution",
+    "filter_name": "point_in_time_membership",
+    "filter_type": "point_in_time_membership",
+    "status": "pass",
+    "passed": true,
+    "threshold": null,
+    "observed_value": null,
+    "inclusion_reason": "point_in_time_member",
+    "exclusion_reason": null,
+    "metadata": {
+      "membership_source": "static_universe_definition",
+      "membership_resolution_status": "static_fallback"
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "ROST",
+    "as_of": "2026-03-20",
+    "stage_name": "membership_resolution",
+    "filter_name": "point_in_time_membership",
+    "filter_type": "point_in_time_membership",
+    "status": "pass",
+    "passed": true,
+    "threshold": null,
+    "observed_value": null,
+    "inclusion_reason": "point_in_time_member",
+    "exclusion_reason": null,
+    "metadata": {
+      "membership_source": "static_universe_definition",
+      "membership_resolution_status": "static_fallback"
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "SBUX",
+    "as_of": "2026-03-20",
+    "stage_name": "membership_resolution",
+    "filter_name": "point_in_time_membership",
+    "filter_type": "point_in_time_membership",
+    "status": "pass",
+    "passed": true,
+    "threshold": null,
+    "observed_value": null,
+    "inclusion_reason": "point_in_time_member",
+    "exclusion_reason": null,
+    "metadata": {
+      "membership_source": "static_universe_definition",
+      "membership_resolution_status": "static_fallback"
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "SHOP",
+    "as_of": "2026-03-20",
+    "stage_name": "membership_resolution",
+    "filter_name": "point_in_time_membership",
+    "filter_type": "point_in_time_membership",
+    "status": "pass",
+    "passed": true,
+    "threshold": null,
+    "observed_value": null,
+    "inclusion_reason": "point_in_time_member",
+    "exclusion_reason": null,
+    "metadata": {
+      "membership_source": "static_universe_definition",
+      "membership_resolution_status": "static_fallback"
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "SNPS",
+    "as_of": "2026-03-20",
+    "stage_name": "membership_resolution",
+    "filter_name": "point_in_time_membership",
+    "filter_type": "point_in_time_membership",
+    "status": "pass",
+    "passed": true,
+    "threshold": null,
+    "observed_value": null,
+    "inclusion_reason": "point_in_time_member",
+    "exclusion_reason": null,
+    "metadata": {
+      "membership_source": "static_universe_definition",
+      "membership_resolution_status": "static_fallback"
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "STX",
+    "as_of": "2026-03-20",
+    "stage_name": "membership_resolution",
+    "filter_name": "point_in_time_membership",
+    "filter_type": "point_in_time_membership",
+    "status": "pass",
+    "passed": true,
+    "threshold": null,
+    "observed_value": null,
+    "inclusion_reason": "point_in_time_member",
+    "exclusion_reason": null,
+    "metadata": {
+      "membership_source": "static_universe_definition",
+      "membership_resolution_status": "static_fallback"
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "TEAM",
+    "as_of": "2026-03-20",
+    "stage_name": "membership_resolution",
+    "filter_name": "point_in_time_membership",
+    "filter_type": "point_in_time_membership",
+    "status": "pass",
+    "passed": true,
+    "threshold": null,
+    "observed_value": null,
+    "inclusion_reason": "point_in_time_member",
+    "exclusion_reason": null,
+    "metadata": {
+      "membership_source": "static_universe_definition",
+      "membership_resolution_status": "static_fallback"
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "TMUS",
+    "as_of": "2026-03-20",
+    "stage_name": "membership_resolution",
+    "filter_name": "point_in_time_membership",
+    "filter_type": "point_in_time_membership",
+    "status": "pass",
+    "passed": true,
+    "threshold": null,
+    "observed_value": null,
+    "inclusion_reason": "point_in_time_member",
+    "exclusion_reason": null,
+    "metadata": {
+      "membership_source": "static_universe_definition",
+      "membership_resolution_status": "static_fallback"
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "TRI",
+    "as_of": "2026-03-20",
+    "stage_name": "membership_resolution",
+    "filter_name": "point_in_time_membership",
+    "filter_type": "point_in_time_membership",
+    "status": "pass",
+    "passed": true,
+    "threshold": null,
+    "observed_value": null,
+    "inclusion_reason": "point_in_time_member",
+    "exclusion_reason": null,
+    "metadata": {
+      "membership_source": "static_universe_definition",
+      "membership_resolution_status": "static_fallback"
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "TSLA",
+    "as_of": "2026-03-20",
+    "stage_name": "membership_resolution",
+    "filter_name": "point_in_time_membership",
+    "filter_type": "point_in_time_membership",
+    "status": "pass",
+    "passed": true,
+    "threshold": null,
+    "observed_value": null,
+    "inclusion_reason": "point_in_time_member",
+    "exclusion_reason": null,
+    "metadata": {
+      "membership_source": "static_universe_definition",
+      "membership_resolution_status": "static_fallback"
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "TTWO",
+    "as_of": "2026-03-20",
+    "stage_name": "membership_resolution",
+    "filter_name": "point_in_time_membership",
+    "filter_type": "point_in_time_membership",
+    "status": "pass",
+    "passed": true,
+    "threshold": null,
+    "observed_value": null,
+    "inclusion_reason": "point_in_time_member",
+    "exclusion_reason": null,
+    "metadata": {
+      "membership_source": "static_universe_definition",
+      "membership_resolution_status": "static_fallback"
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "TXN",
+    "as_of": "2026-03-20",
+    "stage_name": "membership_resolution",
+    "filter_name": "point_in_time_membership",
+    "filter_type": "point_in_time_membership",
+    "status": "pass",
+    "passed": true,
+    "threshold": null,
+    "observed_value": null,
+    "inclusion_reason": "point_in_time_member",
+    "exclusion_reason": null,
+    "metadata": {
+      "membership_source": "static_universe_definition",
+      "membership_resolution_status": "static_fallback"
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "VRSK",
+    "as_of": "2026-03-20",
+    "stage_name": "membership_resolution",
+    "filter_name": "point_in_time_membership",
+    "filter_type": "point_in_time_membership",
+    "status": "pass",
+    "passed": true,
+    "threshold": null,
+    "observed_value": null,
+    "inclusion_reason": "point_in_time_member",
+    "exclusion_reason": null,
+    "metadata": {
+      "membership_source": "static_universe_definition",
+      "membership_resolution_status": "static_fallback"
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "VRTX",
+    "as_of": "2026-03-20",
+    "stage_name": "membership_resolution",
+    "filter_name": "point_in_time_membership",
+    "filter_type": "point_in_time_membership",
+    "status": "pass",
+    "passed": true,
+    "threshold": null,
+    "observed_value": null,
+    "inclusion_reason": "point_in_time_member",
+    "exclusion_reason": null,
+    "metadata": {
+      "membership_source": "static_universe_definition",
+      "membership_resolution_status": "static_fallback"
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "WBD",
+    "as_of": "2026-03-20",
+    "stage_name": "membership_resolution",
+    "filter_name": "point_in_time_membership",
+    "filter_type": "point_in_time_membership",
+    "status": "pass",
+    "passed": true,
+    "threshold": null,
+    "observed_value": null,
+    "inclusion_reason": "point_in_time_member",
+    "exclusion_reason": null,
+    "metadata": {
+      "membership_source": "static_universe_definition",
+      "membership_resolution_status": "static_fallback"
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "WDAY",
+    "as_of": "2026-03-20",
+    "stage_name": "membership_resolution",
+    "filter_name": "point_in_time_membership",
+    "filter_type": "point_in_time_membership",
+    "status": "pass",
+    "passed": true,
+    "threshold": null,
+    "observed_value": null,
+    "inclusion_reason": "point_in_time_member",
+    "exclusion_reason": null,
+    "metadata": {
+      "membership_source": "static_universe_definition",
+      "membership_resolution_status": "static_fallback"
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "WDC",
+    "as_of": "2026-03-20",
+    "stage_name": "membership_resolution",
+    "filter_name": "point_in_time_membership",
+    "filter_type": "point_in_time_membership",
+    "status": "pass",
+    "passed": true,
+    "threshold": null,
+    "observed_value": null,
+    "inclusion_reason": "point_in_time_member",
+    "exclusion_reason": null,
+    "metadata": {
+      "membership_source": "static_universe_definition",
+      "membership_resolution_status": "static_fallback"
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "WMT",
+    "as_of": "2026-03-20",
+    "stage_name": "membership_resolution",
+    "filter_name": "point_in_time_membership",
+    "filter_type": "point_in_time_membership",
+    "status": "pass",
+    "passed": true,
+    "threshold": null,
+    "observed_value": null,
+    "inclusion_reason": "point_in_time_member",
+    "exclusion_reason": null,
+    "metadata": {
+      "membership_source": "static_universe_definition",
+      "membership_resolution_status": "static_fallback"
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "XEL",
+    "as_of": "2026-03-20",
+    "stage_name": "membership_resolution",
+    "filter_name": "point_in_time_membership",
+    "filter_type": "point_in_time_membership",
+    "status": "pass",
+    "passed": true,
+    "threshold": null,
+    "observed_value": null,
+    "inclusion_reason": "point_in_time_member",
+    "exclusion_reason": null,
+    "metadata": {
+      "membership_source": "static_universe_definition",
+      "membership_resolution_status": "static_fallback"
+    }
+  },
+  {
+    "universe_id": "liquid_trend_candidates",
+    "base_universe_id": "nasdaq100",
+    "sub_universe_id": "liquid_trend_candidates",
+    "symbol": "ZS",
+    "as_of": "2026-03-20",
+    "stage_name": "membership_resolution",
+    "filter_name": "point_in_time_membership",
+    "filter_type": "point_in_time_membership",
+    "status": "pass",
+    "passed": true,
+    "threshold": null,
+    "observed_value": null,
+    "inclusion_reason": "point_in_time_member",
+    "exclusion_reason": null,
+    "metadata": {
+      "membership_source": "static_universe_definition",
+      "membership_resolution_status": "static_fallback"
+    }
+  }
+]
