@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -17,6 +18,8 @@ from trading_platform.data.fundamentals.service import (
     FundamentalFeatureBuildRequest,
     FundamentalsIngestionRequest,
     FundamentalsSnapshotBuildRequest,
+    _align_symbol_daily_features,
+    _normalize_datetime_key,
     build_sec_fundamentals_snapshot,
     build_daily_fundamental_features,
     ingest_fundamentals,
@@ -916,6 +919,241 @@ def test_build_daily_fundamental_features_respects_available_date_and_forward_fi
     assert second_available["net_income_growth_yoy"] == 1.4
     assert first_available["days_since_available"] == 0
     assert second_available["days_since_available"] == 0
+
+
+def test_normalize_datetime_key_handles_mixed_precision_and_timezones() -> None:
+    values = pd.Series(
+        [
+            np.datetime64("2024-02-15T00:00:00.000", "ms"),
+            pd.Timestamp("2024-02-16T00:00:00.123456"),
+            "2024-02-17T00:00:00Z",
+            pd.Timestamp("2024-02-18T00:00:00", tz="UTC"),
+        ]
+    )
+
+    normalized = _normalize_datetime_key(values)
+
+    assert str(normalized.dtype) == "datetime64[ns]"
+    assert normalized.iloc[0] == pd.Timestamp("2024-02-15 00:00:00")
+    assert normalized.iloc[1] == pd.Timestamp("2024-02-16 00:00:00.123456")
+    assert normalized.iloc[2] == pd.Timestamp("2024-02-17 00:00:00")
+    assert normalized.iloc[3] == pd.Timestamp("2024-02-18 00:00:00")
+
+
+def test_align_symbol_daily_features_normalizes_merge_asof_keys_before_alignment() -> None:
+    calendar_df = pd.DataFrame(
+        {
+            "timestamp": np.array(
+                [
+                    np.datetime64("2024-02-14T00:00:00.000", "ms"),
+                    np.datetime64("2024-02-15T00:00:00.000", "ms"),
+                    np.datetime64("2024-02-16T00:00:00.000", "ms"),
+                ],
+                dtype="datetime64[ms]",
+            ),
+            "symbol": ["AAPL"] * 3,
+            "close": [20.0, 20.0, 20.0],
+        }
+    )
+    values_df = pd.DataFrame(
+        [
+            {
+                "symbol": "AAPL",
+                "cik": "0000320193",
+                "fiscal_year": 2023,
+                "fiscal_period": "FY",
+                "period_type": "annual",
+                "period_end_date": np.datetime64("2023-12-31T00:00:00.000000", "us"),
+                "filing_date": np.datetime64("2024-02-15T00:00:00.000000", "us"),
+                "available_date": pd.Timestamp("2024-02-15T00:00:00Z"),
+                "form_type": "10-K",
+                "accession_number": "accn-2023",
+                "source": "sec",
+                "metric_name": "revenue",
+                "metric_value": 100.0,
+            },
+            {
+                "symbol": "AAPL",
+                "cik": "0000320193",
+                "fiscal_year": 2023,
+                "fiscal_period": "FY",
+                "period_type": "annual",
+                "period_end_date": np.datetime64("2023-12-31T00:00:00.000000", "us"),
+                "filing_date": np.datetime64("2024-02-15T00:00:00.000000", "us"),
+                "available_date": pd.Timestamp("2024-02-15T00:00:00Z"),
+                "form_type": "10-K",
+                "accession_number": "accn-2023",
+                "source": "sec",
+                "metric_name": "gross_profit",
+                "metric_value": 40.0,
+            },
+            {
+                "symbol": "AAPL",
+                "cik": "0000320193",
+                "fiscal_year": 2023,
+                "fiscal_period": "FY",
+                "period_type": "annual",
+                "period_end_date": np.datetime64("2023-12-31T00:00:00.000000", "us"),
+                "filing_date": np.datetime64("2024-02-15T00:00:00.000000", "us"),
+                "available_date": pd.Timestamp("2024-02-15T00:00:00Z"),
+                "form_type": "10-K",
+                "accession_number": "accn-2023",
+                "source": "sec",
+                "metric_name": "operating_income",
+                "metric_value": 20.0,
+            },
+            {
+                "symbol": "AAPL",
+                "cik": "0000320193",
+                "fiscal_year": 2023,
+                "fiscal_period": "FY",
+                "period_type": "annual",
+                "period_end_date": np.datetime64("2023-12-31T00:00:00.000000", "us"),
+                "filing_date": np.datetime64("2024-02-15T00:00:00.000000", "us"),
+                "available_date": pd.Timestamp("2024-02-15T00:00:00Z"),
+                "form_type": "10-K",
+                "accession_number": "accn-2023",
+                "source": "sec",
+                "metric_name": "net_income",
+                "metric_value": 10.0,
+            },
+            {
+                "symbol": "AAPL",
+                "cik": "0000320193",
+                "fiscal_year": 2023,
+                "fiscal_period": "FY",
+                "period_type": "annual",
+                "period_end_date": np.datetime64("2023-12-31T00:00:00.000000", "us"),
+                "filing_date": np.datetime64("2024-02-15T00:00:00.000000", "us"),
+                "available_date": pd.Timestamp("2024-02-15T00:00:00Z"),
+                "form_type": "10-K",
+                "accession_number": "accn-2023",
+                "source": "sec",
+                "metric_name": "total_assets",
+                "metric_value": 200.0,
+            },
+            {
+                "symbol": "AAPL",
+                "cik": "0000320193",
+                "fiscal_year": 2023,
+                "fiscal_period": "FY",
+                "period_type": "annual",
+                "period_end_date": np.datetime64("2023-12-31T00:00:00.000000", "us"),
+                "filing_date": np.datetime64("2024-02-15T00:00:00.000000", "us"),
+                "available_date": pd.Timestamp("2024-02-15T00:00:00Z"),
+                "form_type": "10-K",
+                "accession_number": "accn-2023",
+                "source": "sec",
+                "metric_name": "shareholders_equity",
+                "metric_value": 120.0,
+            },
+            {
+                "symbol": "AAPL",
+                "cik": "0000320193",
+                "fiscal_year": 2023,
+                "fiscal_period": "FY",
+                "period_type": "annual",
+                "period_end_date": np.datetime64("2023-12-31T00:00:00.000000", "us"),
+                "filing_date": np.datetime64("2024-02-15T00:00:00.000000", "us"),
+                "available_date": pd.Timestamp("2024-02-15T00:00:00Z"),
+                "form_type": "10-K",
+                "accession_number": "accn-2023",
+                "source": "sec",
+                "metric_name": "current_assets",
+                "metric_value": 90.0,
+            },
+            {
+                "symbol": "AAPL",
+                "cik": "0000320193",
+                "fiscal_year": 2023,
+                "fiscal_period": "FY",
+                "period_type": "annual",
+                "period_end_date": np.datetime64("2023-12-31T00:00:00.000000", "us"),
+                "filing_date": np.datetime64("2024-02-15T00:00:00.000000", "us"),
+                "available_date": pd.Timestamp("2024-02-15T00:00:00Z"),
+                "form_type": "10-K",
+                "accession_number": "accn-2023",
+                "source": "sec",
+                "metric_name": "current_liabilities",
+                "metric_value": 30.0,
+            },
+            {
+                "symbol": "AAPL",
+                "cik": "0000320193",
+                "fiscal_year": 2023,
+                "fiscal_period": "FY",
+                "period_type": "annual",
+                "period_end_date": np.datetime64("2023-12-31T00:00:00.000000", "us"),
+                "filing_date": np.datetime64("2024-02-15T00:00:00.000000", "us"),
+                "available_date": pd.Timestamp("2024-02-15T00:00:00Z"),
+                "form_type": "10-K",
+                "accession_number": "accn-2023",
+                "source": "sec",
+                "metric_name": "long_term_debt",
+                "metric_value": 20.0,
+            },
+            {
+                "symbol": "AAPL",
+                "cik": "0000320193",
+                "fiscal_year": 2023,
+                "fiscal_period": "FY",
+                "period_type": "annual",
+                "period_end_date": np.datetime64("2023-12-31T00:00:00.000000", "us"),
+                "filing_date": np.datetime64("2024-02-15T00:00:00.000000", "us"),
+                "available_date": pd.Timestamp("2024-02-15T00:00:00Z"),
+                "form_type": "10-K",
+                "accession_number": "accn-2023",
+                "source": "sec",
+                "metric_name": "operating_cash_flow",
+                "metric_value": 14.0,
+            },
+            {
+                "symbol": "AAPL",
+                "cik": "0000320193",
+                "fiscal_year": 2023,
+                "fiscal_period": "FY",
+                "period_type": "annual",
+                "period_end_date": np.datetime64("2023-12-31T00:00:00.000000", "us"),
+                "filing_date": np.datetime64("2024-02-15T00:00:00.000000", "us"),
+                "available_date": pd.Timestamp("2024-02-15T00:00:00Z"),
+                "form_type": "10-K",
+                "accession_number": "accn-2023",
+                "source": "sec",
+                "metric_name": "capital_expenditures",
+                "metric_value": 4.0,
+            },
+            {
+                "symbol": "AAPL",
+                "cik": "0000320193",
+                "fiscal_year": 2023,
+                "fiscal_period": "FY",
+                "period_type": "annual",
+                "period_end_date": np.datetime64("2023-12-31T00:00:00.000000", "us"),
+                "filing_date": np.datetime64("2024-02-15T00:00:00.000000", "us"),
+                "available_date": pd.Timestamp("2024-02-15T00:00:00Z"),
+                "form_type": "10-K",
+                "accession_number": "accn-2023",
+                "source": "sec",
+                "metric_name": "shares_outstanding",
+                "metric_value": 10.0,
+            },
+        ]
+    )
+    company_master_df = pd.DataFrame({"symbol": ["AAPL"], "sector": ["Technology"], "industry": ["Hardware"]})
+
+    aligned = _align_symbol_daily_features(
+        symbol="AAPL",
+        calendar_df=calendar_df,
+        values_df=values_df,
+        company_master_df=company_master_df,
+    )
+
+    assert str(aligned["timestamp"].dtype) == "datetime64[ns]"
+    assert str(aligned["available_date"].dtype) == "datetime64[ns]"
+    before_available = aligned.loc[aligned["timestamp"] == pd.Timestamp("2024-02-14")].iloc[0]
+    on_available = aligned.loc[aligned["timestamp"] == pd.Timestamp("2024-02-15")].iloc[0]
+    assert pd.isna(before_available["sales_to_price"])
+    assert on_available["sales_to_price"] == 100.0 / 200.0
 
 
 def test_build_daily_fundamental_features_adds_cross_sectional_rank_pct_and_zscore(tmp_path: Path) -> None:

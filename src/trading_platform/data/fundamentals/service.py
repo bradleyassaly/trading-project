@@ -157,6 +157,13 @@ def _apply_cross_sectional_fundamental_transforms(daily_features_df: pd.DataFram
     return transformed
 
 
+def _normalize_datetime_key(values: pd.Series | Any) -> pd.Series:
+    normalized = pd.to_datetime(values, errors="coerce", utc=True)
+    if isinstance(normalized, pd.DatetimeIndex):
+        normalized = pd.Series(normalized, index=getattr(values, "index", None))
+    return normalized.dt.tz_localize(None).astype("datetime64[ns]")
+
+
 def _provider_instances(request: FundamentalsIngestionRequest) -> list[FundamentalsProvider]:
     registry: dict[str, FundamentalsProvider] = {
         "sec": SECFundamentalsProvider(
@@ -432,11 +439,13 @@ def _align_symbol_daily_features(
     symbol_values = values_df.loc[values_df["symbol"].astype(str).eq(symbol)].copy()
     if symbol_values.empty:
         base = calendar_df[["timestamp", "symbol", "close"]].copy()
+        base["timestamp"] = _normalize_datetime_key(base["timestamp"])
         for column in DAILY_FUNDAMENTAL_FEATURE_COLUMNS:
             base[column] = pd.Series(dtype="float64")
         return base
 
     symbol_values["metric_value"] = pd.to_numeric(symbol_values["metric_value"], errors="coerce")
+    symbol_values["available_date"] = _normalize_datetime_key(symbol_values["available_date"])
     symbol_values = symbol_values.sort_values(["available_date", "metric_name"]).copy()
     symbol_values = (
         symbol_values.pivot_table(
@@ -457,9 +466,12 @@ def _align_symbol_daily_features(
     symbol_values["previous_year_net_income"] = symbol_values.groupby("fiscal_period")["net_income"].shift(1)
 
     calendar = calendar_df[["timestamp", "symbol", "close"]].sort_values("timestamp").copy()
+    calendar["timestamp"] = _normalize_datetime_key(calendar["timestamp"])
+    calendar = calendar.sort_values("timestamp").reset_index(drop=True)
+    symbol_values = symbol_values.sort_values("available_date").reset_index(drop=True)
     merged = pd.merge_asof(
         calendar,
-        symbol_values.sort_values("available_date"),
+        symbol_values,
         left_on="timestamp",
         right_on="available_date",
         by="symbol",
@@ -515,7 +527,7 @@ def build_daily_fundamental_features(request: FundamentalFeatureBuildRequest) ->
             values_df = _coalesce_fundamental_values([values_df])
         for column in ("period_end_date", "filing_date", "available_date"):
             if column in values_df.columns:
-                values_df[column] = pd.to_datetime(values_df[column], errors="coerce")
+                values_df[column] = _normalize_datetime_key(values_df[column])
     if values_df.empty or request.calendar_dir is None:
         daily_features_df = pd.DataFrame(columns=["timestamp", "symbol", *DAILY_FUNDAMENTAL_FEATURE_COLUMNS])
     else:
