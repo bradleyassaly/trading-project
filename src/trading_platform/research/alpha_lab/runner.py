@@ -63,9 +63,11 @@ from trading_platform.research.alpha_lab.promotion import (
     apply_promotion_rules,
 )
 from trading_platform.research.alpha_lab.signals import (
+    HYBRID_SIGNAL_FAMILIES,
     build_candidate_grid,
     build_candidate_name,
     build_signal,
+    hybrid_formula_description,
 )
 
 
@@ -443,7 +445,85 @@ def _signal_family_requires_equity_context(signal_family: str) -> bool:
         "sector_relative_momentum",
         "volatility_dispersion_selection",
         "liquidity_flow_tilt",
+        "fundamental_momentum",
+        "fundamental_quality_momentum",
+        "fundamental_value_momentum",
+        "fundamental_quality_value_momentum",
     }
+
+
+def _build_hybrid_component_summary(candidate_specs: list) -> pd.DataFrame:
+    columns = [
+        "candidate_id",
+        "candidate_name",
+        "signal_family",
+        "signal_variant",
+        "lookback",
+        "horizon",
+        "fundamental_component",
+        "technical_component",
+        "secondary_technical_component",
+        "uses_sector_neutral_component",
+        "formula",
+    ]
+    rows: list[dict[str, object]] = []
+    for spec in candidate_specs:
+        if spec.signal_family not in HYBRID_SIGNAL_FAMILIES:
+            continue
+        if spec.signal_family == "fundamental_momentum":
+            rows.append(
+                {
+                    "candidate_id": candidate_id(spec.signal_family, spec.lookback, spec.horizon, spec.signal_variant),
+                    "candidate_name": build_candidate_name(
+                        spec.signal_family,
+                        signal_variant=spec.signal_variant,
+                        lookback=spec.lookback,
+                        horizon=spec.horizon,
+                    ),
+                    "signal_family": spec.signal_family,
+                    "signal_variant": spec.signal_variant,
+                    "lookback": spec.lookback,
+                    "horizon": spec.horizon,
+                    "fundamental_component": str(spec.variant_params.get("fundamental_component", "fundamental_quality_value_score_rank_pct")),
+                    "technical_component": "momentum_rank_pct",
+                    "secondary_technical_component": "context_confirmation" if float(spec.variant_params.get("context_weight", 0.0)) else None,
+                    "uses_sector_neutral_component": float(spec.variant_params.get("sector_neutral_weight", 0.0)) > 0.0,
+                    "formula": hybrid_formula_description(spec.signal_family, spec.variant_params),
+                }
+            )
+            continue
+        secondary_component = None
+        if spec.signal_family == "fundamental_quality_value_momentum":
+            secondary_component = "trend_quality_rank_pct"
+        rows.append(
+            {
+                "candidate_id": candidate_id(spec.signal_family, spec.lookback, spec.horizon, spec.signal_variant),
+                "candidate_name": build_candidate_name(
+                    spec.signal_family,
+                    signal_variant=spec.signal_variant,
+                    lookback=spec.lookback,
+                    horizon=spec.horizon,
+                ),
+                "signal_family": spec.signal_family,
+                "signal_variant": spec.signal_variant,
+                "lookback": spec.lookback,
+                "horizon": spec.horizon,
+                "fundamental_component": {
+                    "fundamental_quality_momentum": "fundamental_quality_score_rank_pct",
+                    "fundamental_value_momentum": "fundamental_value_score_rank_pct",
+                    "fundamental_quality_value_momentum": "fundamental_quality_value_score_rank_pct",
+                }[spec.signal_family],
+                "technical_component": {
+                    "fundamental_quality_momentum": "momentum_rank_pct",
+                    "fundamental_value_momentum": "relative_strength_rank_pct",
+                    "fundamental_quality_value_momentum": "momentum_rank_pct",
+                }[spec.signal_family],
+                "secondary_technical_component": secondary_component,
+                "uses_sector_neutral_component": float(spec.variant_params.get("sector_neutral_weight", 0.0)) > 0.0,
+                "formula": hybrid_formula_description(spec.signal_family, spec.variant_params),
+            }
+        )
+    return pd.DataFrame(rows, columns=columns)
 
 
 def _safe_series_corr(left: pd.Series, right: pd.Series) -> float:
@@ -1458,6 +1538,8 @@ def run_alpha_research(
     signal_family_summary_path_parquet = output_dir / "signal_family_summary.parquet"
     fundamental_feature_ic_summary_path_csv = output_dir / "fundamental_feature_ic_summary.csv"
     fundamental_feature_ic_summary_path_parquet = output_dir / "fundamental_feature_ic_summary.parquet"
+    hybrid_component_summary_path_csv = output_dir / "hybrid_component_summary.csv"
+    hybrid_component_summary_path_parquet = output_dir / "hybrid_component_summary.parquet"
     redundancy_report_path_csv = output_dir / "redundancy_report.csv"
     redundancy_report_path_parquet = output_dir / "redundancy_report.parquet"
     redundancy_path_csv = output_dir / "redundancy_diagnostics.csv"
@@ -1512,6 +1594,7 @@ def run_alpha_research(
     capacity_scenarios_path_csv = output_dir / "capacity_scenarios.csv"
     capacity_scenarios_path_parquet = output_dir / "capacity_scenarios.parquet"
     diagnostics_path = output_dir / "signal_diagnostics.json"
+    hybrid_component_summary_df = _build_hybrid_component_summary(candidate_specs)
 
     detailed_df.to_csv(detailed_path_csv, index=False)
     leaderboard_df.to_csv(leaderboard_path_csv, index=False)
@@ -1520,6 +1603,7 @@ def run_alpha_research(
     promoted_signals_df.to_csv(promotion_candidates_path_csv, index=False)
     signal_family_summary_df.to_csv(signal_family_summary_path_csv, index=False)
     fundamental_feature_ic_summary_df.to_csv(fundamental_feature_ic_summary_path_csv, index=False)
+    hybrid_component_summary_df.to_csv(hybrid_component_summary_path_csv, index=False)
     redundancy_df.to_csv(redundancy_report_path_csv, index=False)
     redundancy_df.to_csv(redundancy_path_csv, index=False)
     composite_scores_df.to_csv(composite_scores_path_csv, index=False)
@@ -1550,6 +1634,7 @@ def run_alpha_research(
     promoted_signals_df.to_parquet(promoted_signals_path_parquet, index=False)
     signal_family_summary_df.to_parquet(signal_family_summary_path_parquet, index=False)
     fundamental_feature_ic_summary_df.to_parquet(fundamental_feature_ic_summary_path_parquet, index=False)
+    hybrid_component_summary_df.to_parquet(hybrid_component_summary_path_parquet, index=False)
     redundancy_df.to_parquet(redundancy_report_path_parquet, index=False)
     redundancy_df.to_parquet(redundancy_path_parquet, index=False)
     composite_scores_df.to_parquet(composite_scores_path_parquet, index=False)
@@ -1638,6 +1723,7 @@ def run_alpha_research(
             "daily_features_path": str(fundamentals_daily_features_path) if fundamentals_daily_features_path is not None else None,
             **fundamentals_summary,
         },
+        "hybrid_signal_families": sorted(family for family in normalized_signal_families if family in HYBRID_SIGNAL_FAMILIES),
         "research_context": context_coverage_summary,
         "signal_family_summary": signal_family_summary_df.to_dict(orient="records"),
         "ensemble": {
@@ -1659,6 +1745,7 @@ def run_alpha_research(
         "promoted_signals_path": str(promoted_signals_path_csv),
         "signal_family_summary_path": str(signal_family_summary_path_csv),
         "fundamental_feature_ic_summary_path": str(fundamental_feature_ic_summary_path_csv),
+        "hybrid_component_summary_path": str(hybrid_component_summary_path_csv),
         "redundancy_report_path": str(redundancy_report_path_csv),
         "redundancy_path": str(redundancy_path_csv),
         "composite_scores_path": str(composite_scores_path_csv),

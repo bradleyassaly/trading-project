@@ -28,6 +28,10 @@ SUPPORTED_SIGNAL_FAMILIES = (
     "fundamental_quality",
     "fundamental_growth",
     "fundamental_quality_value",
+    "fundamental_momentum",
+    "fundamental_quality_momentum",
+    "fundamental_value_momentum",
+    "fundamental_quality_value_momentum",
 )
 
 CANDIDATE_GRID_PRESETS = ("standard", "broad_v1")
@@ -43,6 +47,14 @@ class SignalCandidateSpec:
     variant_params: dict[str, float | str | bool]
 
 
+HYBRID_SIGNAL_FAMILIES = {
+    "fundamental_momentum",
+    "fundamental_quality_momentum",
+    "fundamental_value_momentum",
+    "fundamental_quality_value_momentum",
+}
+
+
 def build_candidate_name(
     signal_family: str,
     *,
@@ -53,6 +65,35 @@ def build_candidate_name(
     if str(signal_variant or "base") == "base":
         return f"{signal_family}_lb{int(lookback)}_hz{int(horizon)}"
     return f"{signal_family}_{signal_variant}_lb{int(lookback)}_hz{int(horizon)}"
+
+
+def hybrid_formula_description(signal_family: str, params: dict[str, float | str | bool]) -> str | None:
+    if signal_family == "fundamental_momentum":
+        return (
+            f"{float(params.get('fundamental_weight', 0.5)):.2f}*fundamental_component + "
+            f"{float(params.get('momentum_weight', 0.5)):.2f}*momentum_rank_pct + "
+            f"{float(params.get('sector_neutral_weight', 0.0)):.2f}*sector_neutral_component"
+        )
+    if signal_family == "fundamental_quality_momentum":
+        return (
+            f"{float(params.get('quality_weight', 0.6)):.2f}*fundamental_quality_score_rank_pct + "
+            f"{float(params.get('momentum_weight', 0.4)):.2f}*momentum_rank_pct + "
+            f"{float(params.get('sector_neutral_weight', 0.0)):.2f}*sector_neutral_quality_score_rank_pct"
+        )
+    if signal_family == "fundamental_value_momentum":
+        return (
+            f"{float(params.get('value_weight', 0.6)):.2f}*fundamental_value_score_rank_pct + "
+            f"{float(params.get('relative_strength_weight', 0.4)):.2f}*relative_strength_rank_pct + "
+            f"{float(params.get('sector_neutral_weight', 0.0)):.2f}*sector_neutral_value_score_rank_pct"
+        )
+    if signal_family == "fundamental_quality_value_momentum":
+        return (
+            f"{float(params.get('quality_value_weight', 0.5)):.2f}*fundamental_quality_value_score_rank_pct + "
+            f"{float(params.get('momentum_weight', 0.3)):.2f}*momentum_rank_pct + "
+            f"{float(params.get('trend_quality_weight', 0.2)):.2f}*trend_quality_rank_pct + "
+            f"{float(params.get('sector_neutral_weight', 0.0)):.2f}*sector_neutral_quality_value_score_rank_pct"
+        )
+    return None
 
 
 def _variant_templates_for_family(
@@ -176,6 +217,42 @@ def _variant_templates_for_family(
             ("quality_tilt", {"value_weight": 0.8, "quality_weight": 1.3}),
             ("balanced_compounder", {"value_weight": 1.0, "quality_weight": 1.0}),
             ("sector_neutral_blend", {"sector_neutral_weight": 1.2}),
+        ]
+
+    if signal_family == "fundamental_momentum":
+        return [
+            ("base", {"fundamental_weight": 0.5, "momentum_weight": 0.5}),
+            ("balanced", {"fundamental_weight": 0.5, "momentum_weight": 0.5}),
+            ("momentum_tilt", {"fundamental_weight": 0.4, "momentum_weight": 0.6}),
+            ("quality_tilt", {"fundamental_weight": 0.6, "momentum_weight": 0.4, "fundamental_component": "quality"}),
+            ("sector_neutral_blend", {"fundamental_weight": 0.5, "momentum_weight": 0.35, "sector_neutral_weight": 0.15}),
+        ]
+
+    if signal_family == "fundamental_quality_momentum":
+        return [
+            ("base", {"quality_weight": 0.6, "momentum_weight": 0.4}),
+            ("balanced", {"quality_weight": 0.6, "momentum_weight": 0.4}),
+            ("quality_tilt", {"quality_weight": 0.7, "momentum_weight": 0.3}),
+            ("momentum_tilt", {"quality_weight": 0.45, "momentum_weight": 0.55}),
+            ("sector_neutral_blend", {"quality_weight": 0.55, "momentum_weight": 0.3, "sector_neutral_weight": 0.15}),
+        ]
+
+    if signal_family == "fundamental_value_momentum":
+        return [
+            ("base", {"value_weight": 0.6, "relative_strength_weight": 0.4}),
+            ("balanced", {"value_weight": 0.6, "relative_strength_weight": 0.4}),
+            ("value_tilt", {"value_weight": 0.7, "relative_strength_weight": 0.3}),
+            ("momentum_tilt", {"value_weight": 0.45, "relative_strength_weight": 0.55}),
+            ("sector_neutral_blend", {"value_weight": 0.5, "relative_strength_weight": 0.35, "sector_neutral_weight": 0.15}),
+        ]
+
+    if signal_family == "fundamental_quality_value_momentum":
+        return [
+            ("base", {"quality_value_weight": 0.5, "momentum_weight": 0.3, "trend_quality_weight": 0.2}),
+            ("balanced", {"quality_value_weight": 0.5, "momentum_weight": 0.3, "trend_quality_weight": 0.2}),
+            ("quality_tilt", {"quality_value_weight": 0.6, "momentum_weight": 0.25, "trend_quality_weight": 0.15}),
+            ("momentum_tilt", {"quality_value_weight": 0.4, "momentum_weight": 0.4, "trend_quality_weight": 0.2}),
+            ("sector_neutral_blend", {"quality_value_weight": 0.45, "momentum_weight": 0.25, "trend_quality_weight": 0.15, "sector_neutral_weight": 0.15}),
         ]
 
     return base_templates
@@ -340,31 +417,51 @@ def _fundamental_recency_weight(df: pd.DataFrame, *, lookback: int) -> pd.Series
     return np.exp(-pd.to_numeric(filing_age_days, errors="coerce").clip(lower=0.0) / max(float(lookback), 1.0))
 
 
+def _fundamental_feature(
+    df: pd.DataFrame,
+    base_column: str,
+    *,
+    default: float = 0.0,
+) -> pd.Series:
+    return _feature(
+        df,
+        f"{base_column}_rank_pct",
+        f"{base_column}_zscore",
+        base_column,
+        default=default,
+    ).fillna(default)
+
+
 def _fundamental_signal(df: pd.DataFrame, *, signal_family: str, lookback: int, params: dict[str, float | str | bool]) -> pd.Series:
-    value_score = _feature(df, "fundamental_value_score", default=0.0).fillna(0.0)
-    quality_score = _feature(df, "fundamental_quality_score", default=0.0).fillna(0.0)
-    growth_score = _feature(df, "fundamental_growth_score", default=0.0).fillna(0.0)
-    quality_value_score = _feature(df, "fundamental_quality_value_score", default=0.0).fillna(0.0)
+    value_score = _fundamental_feature(df, "fundamental_value_score", default=0.0)
+    quality_score = _fundamental_feature(df, "fundamental_quality_score", default=0.0)
+    growth_score = _fundamental_feature(df, "fundamental_growth_score", default=0.0)
+    quality_value_score = _fundamental_feature(df, "fundamental_quality_value_score", default=0.0)
     recency_weight = _fundamental_recency_weight(df, lookback=lookback)
 
     if signal_family == "fundamental_value":
         sector_neutral_weight = float(params.get("sector_neutral_weight", 0.0))
-        sector_neutral_score = _feature(df, "sector_neutral_value_score", default=value_score).fillna(0.0)
+        sector_neutral_score = _fundamental_feature(df, "sector_neutral_value_score", default=0.0)
         signal = (
-            float(params.get("earnings_yield_weight", 1.0)) * _feature(df, "earnings_yield", default=0.0).fillna(0.0)
-            + float(params.get("book_to_market_weight", 1.0)) * _feature(df, "book_to_market", default=0.0).fillna(0.0)
-            + float(params.get("sales_to_price_weight", 1.0)) * _feature(df, "sales_to_price", default=0.0).fillna(0.0)
-            + float(params.get("free_cash_flow_yield_weight", 1.0)) * _feature(df, "free_cash_flow_yield", default=0.0).fillna(0.0)
+            float(params.get("earnings_yield_weight", 1.0)) * _fundamental_feature(df, "earnings_yield", default=0.0)
+            + float(params.get("book_to_market_weight", 1.0)) * _fundamental_feature(df, "book_to_market", default=0.0)
+            + float(params.get("sales_to_price_weight", 1.0)) * _fundamental_feature(df, "sales_to_price", default=0.0)
+            + float(params.get("free_cash_flow_yield_weight", 1.0)) * _fundamental_feature(df, "free_cash_flow_yield", default=0.0)
             + sector_neutral_weight * sector_neutral_score
         ) / max(4.0 + sector_neutral_weight, 1.0)
         return signal.fillna(value_score) * recency_weight
 
     if signal_family == "fundamental_quality":
         sector_neutral_weight = float(params.get("sector_neutral_weight", 0.0))
-        sector_neutral_score = _feature(df, "sector_neutral_quality_score", default=quality_score).fillna(0.0)
-        profitability = _feature(df, "roe", default=0.0).fillna(0.0) + _feature(df, "roa", default=0.0).fillna(0.0) + _feature(df, "gross_margin", default=0.0).fillna(0.0) + _feature(df, "operating_margin", default=0.0).fillna(0.0)
-        balance_sheet = _feature(df, "current_ratio", default=0.0).fillna(0.0) - _feature(df, "debt_to_equity", default=0.0).fillna(0.0)
-        cash_flow_quality = _feature(df, "free_cash_flow_yield", default=0.0).fillna(0.0) - _feature(df, "accruals_proxy", default=0.0).fillna(0.0)
+        sector_neutral_score = _fundamental_feature(df, "sector_neutral_quality_score", default=0.0)
+        profitability = (
+            _fundamental_feature(df, "roe", default=0.0)
+            + _fundamental_feature(df, "roa", default=0.0)
+            + _fundamental_feature(df, "gross_margin", default=0.0)
+            + _fundamental_feature(df, "operating_margin", default=0.0)
+        )
+        balance_sheet = _fundamental_feature(df, "current_ratio", default=0.0) - _fundamental_feature(df, "debt_to_equity", default=0.0)
+        cash_flow_quality = _fundamental_feature(df, "free_cash_flow_yield", default=0.0) - _fundamental_feature(df, "accruals_proxy", default=0.0)
         signal = (
             float(params.get("profitability_weight", 1.0)) * profitability / 4.0
             + float(params.get("balance_sheet_weight", 1.0)) * balance_sheet / 2.0
@@ -375,17 +472,17 @@ def _fundamental_signal(df: pd.DataFrame, *, signal_family: str, lookback: int, 
 
     if signal_family == "fundamental_growth":
         sector_neutral_weight = float(params.get("sector_neutral_weight", 0.0))
-        sector_neutral_score = _feature(df, "sector_neutral_growth_score", default=growth_score).fillna(0.0)
+        sector_neutral_score = _fundamental_feature(df, "sector_neutral_growth_score", default=0.0)
         signal = (
-            float(params.get("revenue_growth_weight", 1.0)) * _feature(df, "revenue_growth_yoy", default=0.0).fillna(0.0)
-            + float(params.get("net_income_growth_weight", 1.0)) * _feature(df, "net_income_growth_yoy", default=0.0).fillna(0.0)
+            float(params.get("revenue_growth_weight", 1.0)) * _fundamental_feature(df, "revenue_growth_yoy", default=0.0)
+            + float(params.get("net_income_growth_weight", 1.0)) * _fundamental_feature(df, "net_income_growth_yoy", default=0.0)
             + sector_neutral_weight * sector_neutral_score
         ) / max(2.0 + sector_neutral_weight, 1.0)
         return signal.fillna(growth_score) * recency_weight
 
     if signal_family == "fundamental_quality_value":
         sector_neutral_weight = float(params.get("sector_neutral_weight", 0.0))
-        sector_neutral_score = _feature(df, "sector_neutral_quality_value_score", default=quality_value_score).fillna(0.0)
+        sector_neutral_score = _fundamental_feature(df, "sector_neutral_quality_value_score", default=0.0)
         signal = (
             float(params.get("value_weight", 1.0)) * value_score
             + float(params.get("quality_weight", 1.0)) * quality_score
@@ -394,6 +491,117 @@ def _fundamental_signal(df: pd.DataFrame, *, signal_family: str, lookback: int, 
         return signal.fillna(quality_value_score) * recency_weight
 
     raise ValueError(f"Unsupported signal family: {signal_family}")
+
+
+def _hybrid_fundamental_component(
+    df: pd.DataFrame,
+    *,
+    signal_family: str,
+    params: dict[str, float | str | bool],
+) -> pd.Series:
+    if signal_family == "fundamental_momentum":
+        component_name = str(params.get("fundamental_component", "quality_value")).strip().lower()
+        if component_name == "quality":
+            return _fundamental_feature(df, "fundamental_quality_score", default=0.0)
+        if component_name == "value":
+            return _fundamental_feature(df, "fundamental_value_score", default=0.0)
+        return _fundamental_feature(df, "fundamental_quality_value_score", default=0.0)
+    if signal_family == "fundamental_quality_momentum":
+        return _fundamental_feature(df, "fundamental_quality_score", default=0.0)
+    if signal_family == "fundamental_value_momentum":
+        return _fundamental_feature(df, "fundamental_value_score", default=0.0)
+    if signal_family == "fundamental_quality_value_momentum":
+        return _fundamental_feature(df, "fundamental_quality_value_score", default=0.0)
+    raise ValueError(f"Unsupported hybrid signal family: {signal_family}")
+
+
+def _hybrid_sector_neutral_component(
+    df: pd.DataFrame,
+    *,
+    signal_family: str,
+) -> pd.Series:
+    if signal_family == "fundamental_momentum":
+        return _fundamental_feature(df, "sector_neutral_quality_value_score", default=0.0)
+    if signal_family == "fundamental_quality_momentum":
+        return _fundamental_feature(df, "sector_neutral_quality_score", default=0.0)
+    if signal_family == "fundamental_value_momentum":
+        return _fundamental_feature(df, "sector_neutral_value_score", default=0.0)
+    if signal_family == "fundamental_quality_value_momentum":
+        return _fundamental_feature(df, "sector_neutral_quality_value_score", default=0.0)
+    raise ValueError(f"Unsupported hybrid signal family: {signal_family}")
+
+
+def _hybrid_signal(
+    df: pd.DataFrame,
+    *,
+    signal_family: str,
+    lookback: int,
+    params: dict[str, float | str | bool],
+    close: pd.Series,
+) -> pd.Series:
+    recency_weight = _fundamental_recency_weight(df, lookback=lookback)
+    fundamental_component = _hybrid_fundamental_component(df, signal_family=signal_family, params=params)
+    sector_neutral_component = _hybrid_sector_neutral_component(df, signal_family=signal_family)
+    raw_momentum = close.pct_change(lookback).fillna(0.0)
+    momentum_rank = _feature(
+        df,
+        f"cross_sectional_return_rank_{lookback}",
+        f"cross_sectional_relative_rank_{lookback}",
+        f"relative_return_{lookback}",
+        default=raw_momentum,
+    ).fillna(0.0)
+    relative_strength_rank = _feature(
+        df,
+        f"cross_sectional_relative_rank_{lookback}",
+        f"cross_sectional_return_rank_{lookback}",
+        f"relative_return_{lookback}",
+        default=_relative_strength_signal(df, lookback=lookback, close=close),
+    ).fillna(0.0)
+    trend_quality_rank = (
+        0.6 * _feature(df, f"trend_persistence_{lookback}", default=0.0).fillna(0.0)
+        + 0.4 * _feature(df, f"trend_slope_{lookback}", default=raw_momentum).fillna(0.0)
+    )
+    low_vol_preference = _feature(
+        df,
+        f"cross_sectional_vol_rank_{lookback}",
+        default=0.0,
+    ).fillna(0.0) * -1.0
+    context_confirmation = _context_confirmation(df, lookback=lookback).fillna(0.0)
+
+    if signal_family == "fundamental_momentum":
+        signal = (
+            float(params.get("fundamental_weight", 0.5)) * fundamental_component
+            + float(params.get("momentum_weight", 0.5)) * momentum_rank
+            + float(params.get("sector_neutral_weight", 0.0)) * sector_neutral_component
+            + float(params.get("context_weight", 0.0)) * context_confirmation
+            + float(params.get("low_vol_weight", 0.0)) * low_vol_preference
+        )
+    elif signal_family == "fundamental_quality_momentum":
+        signal = (
+            float(params.get("quality_weight", 0.6)) * fundamental_component
+            + float(params.get("momentum_weight", 0.4)) * momentum_rank
+            + float(params.get("sector_neutral_weight", 0.0)) * sector_neutral_component
+            + float(params.get("context_weight", 0.0)) * context_confirmation
+        )
+    elif signal_family == "fundamental_value_momentum":
+        signal = (
+            float(params.get("value_weight", 0.6)) * fundamental_component
+            + float(params.get("relative_strength_weight", 0.4)) * relative_strength_rank
+            + float(params.get("sector_neutral_weight", 0.0)) * sector_neutral_component
+            + float(params.get("context_weight", 0.0)) * context_confirmation
+        )
+    elif signal_family == "fundamental_quality_value_momentum":
+        signal = (
+            float(params.get("quality_value_weight", 0.5)) * fundamental_component
+            + float(params.get("momentum_weight", 0.3)) * momentum_rank
+            + float(params.get("trend_quality_weight", 0.2)) * trend_quality_rank
+            + float(params.get("sector_neutral_weight", 0.0)) * sector_neutral_component
+            + float(params.get("context_weight", 0.0)) * context_confirmation
+        )
+    else:
+        raise ValueError(f"Unsupported hybrid signal family: {signal_family}")
+
+    return signal * recency_weight
 
 
 def _legacy_signal(
@@ -860,6 +1068,13 @@ def build_signal(
     params = variant_params or {}
     if signal_family in {"fundamental_value", "fundamental_quality", "fundamental_growth", "fundamental_quality_value"}:
         return _fundamental_signal(df, signal_family=signal_family, lookback=lookback, params=params)
+    if signal_family in {
+        "fundamental_momentum",
+        "fundamental_quality_momentum",
+        "fundamental_value_momentum",
+        "fundamental_quality_value_momentum",
+    }:
+        return _hybrid_signal(df, signal_family=signal_family, lookback=lookback, params=params, close=close)
     composition = _resolve_signal_composition(
         signal_composition_preset=signal_composition_preset,
         enable_context_confirmations=enable_context_confirmations,

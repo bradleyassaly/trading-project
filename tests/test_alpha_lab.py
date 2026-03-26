@@ -561,6 +561,29 @@ def test_build_signal_volume_shock_momentum_scales_momentum_by_volume_ratio() ->
     assert signal.iloc[2] == pytest.approx((102.0 / 101.0 - 1.0) * 2.0)
 
 
+def test_build_signal_fundamental_quality_value_momentum_prefers_transformed_columns() -> None:
+    df = pd.DataFrame(
+        {
+            "close": [100.0, 102.0, 105.0, 107.0],
+            "days_since_available": [0, 0, 0, 0],
+            "fundamental_quality_value_score": [-5.0, -5.0, -5.0, -5.0],
+            "fundamental_quality_value_score_rank_pct": [0.0, 0.0, 0.8, 0.9],
+            "cross_sectional_return_rank_2": [0.0, 0.0, 0.4, 0.5],
+            "trend_persistence_2": [0.0, 0.0, 0.6, 0.8],
+            "trend_slope_2": [0.0, 0.0, 0.2, 0.4],
+        }
+    )
+
+    signal = build_signal(df, signal_family="fundamental_quality_value_momentum", lookback=2)
+
+    expected_row_two = 0.5 * 0.8 + 0.3 * 0.4 + 0.2 * (0.6 * 0.6 + 0.4 * 0.2)
+    expected_row_three = 0.5 * 0.9 + 0.3 * 0.5 + 0.2 * (0.6 * 0.8 + 0.4 * 0.4)
+
+    assert signal.iloc[2] == pytest.approx(expected_row_two)
+    assert signal.iloc[3] == pytest.approx(expected_row_three)
+    assert signal.iloc[2] > -1.0
+
+
 def test_evaluate_signal_returns_expected_ic_on_perfect_rank_order() -> None:
     signal = pd.Series([1.0, 2.0, 3.0, 4.0, 5.0])
     forward_return = pd.Series([10.0, 20.0, 30.0, 40.0, 50.0])
@@ -1651,6 +1674,85 @@ def test_run_alpha_research_supports_multiple_signal_families_in_one_run(tmp_pat
     assert diagnostics["signal_families"] == ["momentum", "fundamental_value"]
     assert diagnostics["generated_candidate_count_by_family"]["momentum"] > 0
     assert diagnostics["generated_candidate_count_by_family"]["fundamental_value"] > 0
+
+
+def test_run_alpha_research_supports_hybrid_family_and_writes_component_summary(tmp_path: Path) -> None:
+    feature_dir = tmp_path / "features"
+    output_dir = tmp_path / "alpha_outputs"
+    fundamentals_path = tmp_path / "daily_fundamental_features.parquet"
+    feature_dir.mkdir(parents=True, exist_ok=True)
+
+    timestamps = pd.date_range("2024-01-01", periods=120, freq="D")
+    for symbol, drift in {"AAPL": 0.004, "MSFT": 0.002, "NVDA": 0.006}.items():
+        closes = [100.0]
+        for _ in range(len(timestamps) - 1):
+            closes.append(closes[-1] * (1.0 + drift))
+        pd.DataFrame(
+            {
+                "timestamp": timestamps,
+                "symbol": [symbol] * len(timestamps),
+                "close": closes,
+                "volume": [1_000_000 + idx * 5_000 for idx in range(len(timestamps))],
+            }
+        ).to_parquet(feature_dir / f"{symbol}.parquet", index=False)
+
+    fundamentals_frames: list[pd.DataFrame] = []
+    for symbol, qv_rank, sector_rank in (
+        ("AAPL", 0.6, 0.2),
+        ("MSFT", 0.3, -0.1),
+        ("NVDA", 0.9, 0.4),
+    ):
+        fundamentals_frames.append(
+            pd.DataFrame(
+                {
+                    "timestamp": timestamps,
+                    "symbol": [symbol] * len(timestamps),
+                    "sector": ["Technology"] * len(timestamps),
+                    "industry": ["Software"] * len(timestamps),
+                    "fundamental_quality_value_score": [qv_rank] * len(timestamps),
+                    "fundamental_quality_value_score_rank_pct": [qv_rank] * len(timestamps),
+                    "fundamental_quality_value_score_zscore": [qv_rank - 0.5] * len(timestamps),
+                    "sector_neutral_quality_value_score": [sector_rank] * len(timestamps),
+                    "sector_neutral_quality_value_score_rank_pct": [qv_rank] * len(timestamps),
+                    "sector_neutral_quality_value_score_zscore": [sector_rank] * len(timestamps),
+                    "days_since_available": list(range(len(timestamps))),
+                }
+            )
+        )
+    pd.concat(fundamentals_frames, ignore_index=True).to_parquet(fundamentals_path, index=False)
+
+    result = run_alpha_research(
+        symbols=["AAPL", "MSFT", "NVDA"],
+        universe=None,
+        feature_dir=feature_dir,
+        signal_family="fundamental_quality_value_momentum",
+        lookbacks=[5],
+        horizons=[1],
+        min_rows=30,
+        top_quantile=0.34,
+        bottom_quantile=0.34,
+        output_dir=output_dir,
+        train_size=40,
+        test_size=20,
+        step_size=20,
+        fundamentals_enabled=True,
+        fundamentals_daily_features_path=fundamentals_path,
+        candidate_grid_preset="broad_v1",
+        equity_context_enabled=True,
+        equity_context_include_volume=True,
+    )
+
+    leaderboard_df = pd.read_csv(result["leaderboard_path"])
+    hybrid_component_summary_df = pd.read_csv(result["hybrid_component_summary_path"])
+    diagnostics = json.loads(Path(result["signal_diagnostics_path"]).read_text(encoding="utf-8"))
+
+    assert not leaderboard_df.empty
+    assert set(leaderboard_df["signal_family"]) == {"fundamental_quality_value_momentum"}
+    assert {"candidate_id", "candidate_name", "signal_variant", "variant_parameters_json"} <= set(leaderboard_df.columns)
+    assert not hybrid_component_summary_df.empty
+    assert set(hybrid_component_summary_df["signal_family"]) == {"fundamental_quality_value_momentum"}
+    assert "trend_quality_rank_pct" in set(hybrid_component_summary_df["secondary_technical_component"].dropna())
+    assert diagnostics["hybrid_signal_families"] == ["fundamental_quality_value_momentum"]
 
 
 def test_run_alpha_research_broad_candidate_grid_emits_variant_identity(tmp_path: Path) -> None:

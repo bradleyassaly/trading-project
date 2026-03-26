@@ -191,7 +191,7 @@ selection:
   symbols:
     - AAPL
 signals:
-  family: sector_relative_momentum
+  family: fundamental_quality_value_momentum
   candidate_grid_preset: broad_v1
   signal_composition_preset: composite_v1
   max_variants_per_family: 3
@@ -287,7 +287,7 @@ tracking:
 
     cmd_alpha_research(args)
 
-    assert captured["signal_family"] == "sector_relative_momentum"
+    assert captured["signal_family"] == "fundamental_quality_value_momentum"
     assert captured["candidate_grid_preset"] == "broad_v1"
     assert captured["signal_composition_preset"] == "composite_v1"
     assert captured["max_variants_per_family"] == 3

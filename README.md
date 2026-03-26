@@ -328,7 +328,7 @@ Alpha research also supports structured candidate-depth expansion inside a singl
 Alpha research can also evaluate multiple families inside one run:
 
 - `signals.family: momentum`
-- `signals.families: [momentum, fundamental_value, fundamental_quality]`
+- `signals.families: [momentum, fundamental_value, fundamental_quality_value_momentum]`
 
 If both are present, `families` is treated as the authoritative list and `family` remains a backward-compatible single-family alias for older configs and CLI usage.
 
@@ -351,6 +351,7 @@ When `signals.families` is used, one run now emits a single combined candidate u
 - `research_registry.csv`
 - `promotion_candidates.csv`
 - `signal_family_summary.csv`
+- `hybrid_component_summary.csv` when hybrid families are enabled
 
 All candidate rows still preserve `signal_family` so downstream grouping and diversification logic can operate on the merged run output.
 
@@ -365,6 +366,10 @@ When enabled, the runner merges `daily_fundamental_features.parquet` by `symbol`
 - `fundamental_quality`
 - `fundamental_growth`
 - `fundamental_quality_value`
+- `fundamental_momentum`
+- `fundamental_quality_momentum`
+- `fundamental_value_momentum`
+- `fundamental_quality_value_momentum`
 
 Those families remain transparent and auditable. They are built from stable daily features such as:
 
@@ -372,6 +377,14 @@ Those families remain transparent and auditable. They are built from stable dail
 - quality: `roe`, `roa`, `gross_margin`, `operating_margin`, `current_ratio`, `debt_to_equity`, `accruals_proxy`
 - growth: `revenue_growth_yoy`, `net_income_growth_yoy`
 - sector-neutral variants of the composite value, quality, growth, and quality-value scores when sector labels exist
+- hybrid blends combine transformed fundamental composites with medium-term momentum, relative-strength, and trend-quality context using small fixed linear formulas rather than opaque optimization
+
+Initial hybrid formulas:
+
+- `fundamental_momentum`: `0.5 * fundamental_quality_value_score_rank_pct + 0.5 * momentum_rank_pct`
+- `fundamental_quality_momentum`: `0.6 * fundamental_quality_score_rank_pct + 0.4 * momentum_rank_pct`
+- `fundamental_value_momentum`: `0.6 * fundamental_value_score_rank_pct + 0.4 * relative_strength_rank_pct`
+- `fundamental_quality_value_momentum`: `0.5 * fundamental_quality_value_score_rank_pct + 0.3 * momentum_rank_pct + 0.2 * trend_quality_rank_pct`
 
 Point-in-time safety rules for fundamentals:
 
