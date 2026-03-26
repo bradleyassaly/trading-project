@@ -9,12 +9,15 @@ import pandas as pd
 import pytest
 
 from trading_platform.data.fundamentals.models import CANONICAL_FUNDAMENTAL_METRICS
+from trading_platform.data.fundamentals.providers import sec as sec_module
 from trading_platform.data.fundamentals.providers.sec import SECFundamentalsProvider
 from trading_platform.data.fundamentals.providers import vendor as vendor_module
 from trading_platform.data.fundamentals.providers.vendor import VendorFundamentalsProvider
 from trading_platform.data.fundamentals.service import (
     FundamentalFeatureBuildRequest,
     FundamentalsIngestionRequest,
+    FundamentalsSnapshotBuildRequest,
+    build_sec_fundamentals_snapshot,
     build_daily_fundamental_features,
     ingest_fundamentals,
 )
@@ -44,6 +47,19 @@ def _install_fmp_urlopen(monkeypatch: pytest.MonkeyPatch, payloads: dict[str, An
         raise AssertionError(f"Unexpected FMP URL requested during test: {full_url}")
 
     monkeypatch.setattr(vendor_module, "urlopen", _fake_urlopen)
+
+
+def _install_sec_urlopen(monkeypatch: pytest.MonkeyPatch, payloads: dict[str, Any], *, counter: dict[str, int] | None = None) -> None:
+    def _fake_urlopen(request, timeout=30):  # noqa: ANN001
+        full_url = request.full_url
+        if counter is not None:
+            counter["count"] = counter.get("count", 0) + 1
+        for expected_fragment, payload in payloads.items():
+            if expected_fragment in full_url:
+                return _FakeHTTPResponse(payload)
+        raise AssertionError(f"Unexpected SEC URL requested during test: {full_url}")
+
+    monkeypatch.setattr(sec_module, "urlopen", _fake_urlopen)
 
 
 def _fmp_payloads_for_symbol(symbol: str) -> dict[str, Any]:
@@ -147,6 +163,143 @@ def _fmp_payloads_for_symbol(symbol: str) -> dict[str, Any]:
         f"income-statement?symbol={symbol}&period=quarter": [],
         f"balance-sheet-statement?symbol={symbol}&period=quarter": [],
         f"cash-flow-statement?symbol={symbol}&period=quarter": [],
+    }
+
+
+def _sec_payloads_for_symbol(symbol: str, cik: str = "320193") -> dict[str, Any]:
+    normalized_cik = str(cik).zfill(10)
+    accession = "0000320193-24-000001"
+    return {
+        "company_tickers.json": {
+            "0": {
+                "cik_str": int(cik),
+                "ticker": symbol.upper(),
+                "title": f"{symbol.upper()} Inc.",
+            }
+        },
+        f"submissions/CIK{normalized_cik}.json": {
+            "cik": cik,
+            "name": f"{symbol.upper()} Inc.",
+            "tickers": [symbol.upper()],
+            "exchanges": ["NASDAQ"],
+            "sicDescription": "Electronic Computers",
+            "filings": {
+                "recent": {
+                    "accessionNumber": [accession],
+                    "form": ["10-K"],
+                    "filingDate": ["2024-11-01"],
+                    "acceptanceDateTime": ["2024-11-01T18:05:00.000Z"],
+                    "reportDate": ["2024-09-28"],
+                }
+            },
+        },
+        f"companyfacts/CIK{normalized_cik}.json": {
+            "cik": int(cik),
+            "facts": {
+                "us-gaap": {
+                    "Revenues": {
+                        "units": {
+                            "USD": [
+                                {"val": 100.0, "fy": 2024, "fp": "FY", "end": "2024-09-28", "filed": "2024-11-01", "form": "10-K", "accn": accession}
+                            ]
+                        }
+                    },
+                    "GrossProfit": {
+                        "units": {
+                            "USD": [
+                                {"val": 45.0, "fy": 2024, "fp": "FY", "end": "2024-09-28", "filed": "2024-11-01", "form": "10-K", "accn": accession}
+                            ]
+                        }
+                    },
+                    "OperatingIncomeLoss": {
+                        "units": {
+                            "USD": [
+                                {"val": 22.0, "fy": 2024, "fp": "FY", "end": "2024-09-28", "filed": "2024-11-01", "form": "10-K", "accn": accession}
+                            ]
+                        }
+                    },
+                    "NetIncomeLoss": {
+                        "units": {
+                            "USD": [
+                                {"val": 15.0, "fy": 2024, "fp": "FY", "end": "2024-09-28", "filed": "2024-11-01", "form": "10-K", "accn": accession}
+                            ]
+                        }
+                    },
+                    "Assets": {
+                        "units": {
+                            "USD": [
+                                {"val": 210.0, "fy": 2024, "fp": "FY", "end": "2024-09-28", "filed": "2024-11-01", "form": "10-K", "accn": accession}
+                            ]
+                        }
+                    },
+                    "Liabilities": {
+                        "units": {
+                            "USD": [
+                                {"val": 90.0, "fy": 2024, "fp": "FY", "end": "2024-09-28", "filed": "2024-11-01", "form": "10-K", "accn": accession}
+                            ]
+                        }
+                    },
+                    "StockholdersEquity": {
+                        "units": {
+                            "USD": [
+                                {"val": 120.0, "fy": 2024, "fp": "FY", "end": "2024-09-28", "filed": "2024-11-01", "form": "10-K", "accn": accession}
+                            ]
+                        }
+                    },
+                    "CashAndCashEquivalentsAtCarryingValue": {
+                        "units": {
+                            "USD": [
+                                {"val": 30.0, "fy": 2024, "fp": "FY", "end": "2024-09-28", "filed": "2024-11-01", "form": "10-K", "accn": accession}
+                            ]
+                        }
+                    },
+                    "AssetsCurrent": {
+                        "units": {
+                            "USD": [
+                                {"val": 85.0, "fy": 2024, "fp": "FY", "end": "2024-09-28", "filed": "2024-11-01", "form": "10-K", "accn": accession}
+                            ]
+                        }
+                    },
+                    "LiabilitiesCurrent": {
+                        "units": {
+                            "USD": [
+                                {"val": 35.0, "fy": 2024, "fp": "FY", "end": "2024-09-28", "filed": "2024-11-01", "form": "10-K", "accn": accession}
+                            ]
+                        }
+                    },
+                    "LongTermDebt": {
+                        "units": {
+                            "USD": [
+                                {"val": 25.0, "fy": 2024, "fp": "FY", "end": "2024-09-28", "filed": "2024-11-01", "form": "10-K", "accn": accession}
+                            ]
+                        }
+                    },
+                    "NetCashProvidedByUsedInOperatingActivities": {
+                        "units": {
+                            "USD": [
+                                {"val": 20.0, "fy": 2024, "fp": "FY", "end": "2024-09-28", "filed": "2024-11-01", "form": "10-K", "accn": accession}
+                            ]
+                        }
+                    },
+                    "PaymentsToAcquirePropertyPlantAndEquipment": {
+                        "units": {
+                            "USD": [
+                                {"val": 5.0, "fy": 2024, "fp": "FY", "end": "2024-09-28", "filed": "2024-11-01", "form": "10-K", "accn": accession}
+                            ]
+                        }
+                    },
+                },
+                "dei": {
+                    "EntityCommonStockSharesOutstanding": {
+                        "units": {
+                            "shares": [
+                                {"val": 10.0, "fy": 2024, "fp": "FY", "end": "2024-09-28", "filed": "2024-11-01", "form": "10-K", "accn": accession}
+                            ]
+                        }
+                    }
+                },
+            },
+        },
     }
 
 
@@ -292,6 +445,184 @@ def test_sec_provider_normalizes_companyfacts_into_canonical_rows(tmp_path: Path
     assert net_income_rows.iloc[0]["metric_value"] == 22.0
     assert result.filing_metadata_df.loc[0, "available_date"] == "2024-11-01"
 
+
+def test_sec_snapshot_build_fetches_caches_and_normalizes_from_mocked_sec_responses(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact_root = tmp_path / "fundamentals"
+    calendar_dir = tmp_path / "features"
+    calendar_dir.mkdir()
+    pd.DataFrame(
+        {
+            "timestamp": pd.date_range("2024-10-28", periods=10, freq="D"),
+            "symbol": ["AAPL"] * 10,
+            "close": [20.0] * 10,
+        }
+    ).to_parquet(calendar_dir / "AAPL.parquet", index=False)
+
+    _install_sec_urlopen(monkeypatch, _sec_payloads_for_symbol("AAPL"))
+    result = build_sec_fundamentals_snapshot(
+        FundamentalsSnapshotBuildRequest(
+            symbols=["AAPL"],
+            artifact_root=artifact_root,
+            calendar_dir=calendar_dir,
+        )
+    )
+
+    values_df = pd.read_parquet(result["fundamental_values_path"])
+    coverage_df = pd.read_csv(result["fundamental_feature_coverage_path"])
+    summary = json.loads(Path(result["fundamental_summary_path"]).read_text(encoding="utf-8"))
+
+    assert not values_df.empty
+    assert {"metric_name", "metric_value"}.issubset(values_df.columns)
+    assert "revenue" in set(values_df["metric_name"])
+    assert summary["symbols_resolved_to_cik"] == ["AAPL"]
+    assert summary["symbols_fetched"] == ["AAPL"]
+    assert summary["metrics_by_name"]["revenue"] >= 1
+    assert coverage_df.loc[coverage_df["feature_name"] == "earnings_yield", "non_null_rows"].iloc[0] > 0
+    assert Path(result["raw_sec_cache_root"]).joinpath("submissions", "CIK0000320193.json").exists()
+    assert Path(result["raw_sec_cache_root"]).joinpath("companyfacts", "CIK0000320193.json").exists()
+    assert Path(result["sec_symbol_cik_map_path"]).exists()
+
+
+def test_sec_snapshot_build_offline_rebuild_uses_cached_raw_files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    artifact_root = tmp_path / "fundamentals"
+    cache_root = artifact_root / "raw_sec"
+    submissions_root = cache_root / "submissions"
+    companyfacts_root = cache_root / "companyfacts"
+    submissions_root.mkdir(parents=True)
+    companyfacts_root.mkdir(parents=True)
+    symbol_map_path = artifact_root / "sec_symbol_cik_map.parquet"
+    pd.DataFrame(
+        [{"symbol": "AAPL", "cik": "0000320193", "company_name": "AAPL Inc.", "source": "sec:ticker_map"}]
+    ).to_parquet(symbol_map_path, index=False)
+    payloads = _sec_payloads_for_symbol("AAPL")
+    Path(submissions_root / "CIK0000320193.json").write_text(
+        json.dumps(payloads["submissions/CIK0000320193.json"], indent=2),
+        encoding="utf-8",
+    )
+    Path(companyfacts_root / "CIK0000320193.json").write_text(
+        json.dumps(payloads["companyfacts/CIK0000320193.json"], indent=2),
+        encoding="utf-8",
+    )
+    calendar_dir = tmp_path / "features"
+    calendar_dir.mkdir()
+    pd.DataFrame(
+        {
+            "timestamp": pd.date_range("2024-10-28", periods=10, freq="D"),
+            "symbol": ["AAPL"] * 10,
+            "close": [20.0] * 10,
+        }
+    ).to_parquet(calendar_dir / "AAPL.parquet", index=False)
+
+    monkeypatch.setattr(sec_module, "urlopen", lambda request, timeout=30: (_ for _ in ()).throw(AssertionError("network not allowed")))
+    result = build_sec_fundamentals_snapshot(
+        FundamentalsSnapshotBuildRequest(
+            symbols=["AAPL"],
+            artifact_root=artifact_root,
+            raw_sec_cache_root=cache_root,
+            symbol_cik_map_path=symbol_map_path,
+            calendar_dir=calendar_dir,
+            offline=True,
+        )
+    )
+    values_df = pd.read_parquet(result["fundamental_values_path"])
+    daily_df = pd.read_parquet(result["daily_fundamental_features_path"])
+
+    assert not values_df.empty
+    assert not daily_df.empty
+    assert daily_df["earnings_yield"].notna().any()
+
+
+def test_sec_provider_retries_http_429_and_reports_rate_limit_diagnostics(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    payloads = _sec_payloads_for_symbol("AAPL")
+    call_counts: dict[str, int] = {}
+    sleep_calls: list[float] = []
+
+    def _retrying_urlopen(request, timeout=30):  # noqa: ANN001
+        full_url = request.full_url
+        for expected_fragment, payload in payloads.items():
+            if expected_fragment in full_url:
+                call_counts[expected_fragment] = call_counts.get(expected_fragment, 0) + 1
+                if expected_fragment == "company_tickers.json" and call_counts[expected_fragment] == 1:
+                    raise HTTPError(full_url, 429, "Too Many Requests", hdrs=None, fp=None)
+                return _FakeHTTPResponse(payload)
+        raise AssertionError(f"Unexpected SEC URL requested during test: {full_url}")
+
+    monkeypatch.setattr(sec_module, "urlopen", _retrying_urlopen)
+    monkeypatch.setattr(sec_module.time, "sleep", lambda seconds: sleep_calls.append(seconds))
+
+    provider = SECFundamentalsProvider(
+        cache_root=tmp_path / "raw_sec",
+        symbol_cik_map_path=tmp_path / "sec_symbol_cik_map.parquet",
+        request_delay_seconds=0.0,
+        max_retries=2,
+    )
+    result = provider.fetch(symbols=["AAPL"])
+
+    assert result.diagnostics["status"] == "ok"
+    assert result.diagnostics["retry_count"] == 1
+    assert result.diagnostics["rate_limit_error_count"] == 1
+    assert sleep_calls
+    assert not result.fundamental_values_df.empty
+
+
+def test_sec_provider_reuses_fresh_cached_raw_files_without_network(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    payloads = _sec_payloads_for_symbol("AAPL")
+    counter = {"count": 0}
+    _install_sec_urlopen(monkeypatch, payloads, counter=counter)
+
+    provider = SECFundamentalsProvider(
+        cache_root=tmp_path / "raw_sec",
+        symbol_cik_map_path=tmp_path / "sec_symbol_cik_map.parquet",
+        request_delay_seconds=0.0,
+    )
+    first = provider.fetch(symbols=["AAPL"])
+    assert counter["count"] > 0
+    assert first.diagnostics["cache_misses"] > 0
+
+    counter["count"] = 0
+    monkeypatch.setattr(sec_module, "urlopen", lambda request, timeout=30: (_ for _ in ()).throw(AssertionError("network not expected")))
+    second = SECFundamentalsProvider(
+        cache_root=tmp_path / "raw_sec",
+        symbol_cik_map_path=tmp_path / "sec_symbol_cik_map.parquet",
+        request_delay_seconds=0.0,
+    ).fetch(symbols=["AAPL"])
+
+    assert counter["count"] == 0
+    assert second.diagnostics["cache_hits"] > 0
+    assert second.diagnostics["symbols_skipped_from_cache"] == ["AAPL"]
+    assert not second.fundamental_values_df.empty
+
+
+def test_sec_snapshot_build_respects_max_symbols_per_run_incrementally(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact_root = tmp_path / "fundamentals"
+    payloads = {}
+    payloads.update(_sec_payloads_for_symbol("AAPL", "320193"))
+    msft_payloads = _sec_payloads_for_symbol("MSFT", "789019")
+    payloads.update(msft_payloads)
+    payloads["company_tickers.json"] = {
+        "0": {"cik_str": 320193, "ticker": "AAPL", "title": "Apple Inc."},
+        "1": {"cik_str": 789019, "ticker": "MSFT", "title": "Microsoft Corp."},
+    }
+    _install_sec_urlopen(monkeypatch, payloads)
+
+    result = build_sec_fundamentals_snapshot(
+        FundamentalsSnapshotBuildRequest(
+            symbols=["AAPL", "MSFT"],
+            artifact_root=artifact_root,
+            build_daily_features=False,
+            max_symbols_per_run=1,
+        )
+    )
+    summary = json.loads(Path(result["fundamental_summary_path"]).read_text(encoding="utf-8"))
+
+    assert summary["provider_diagnostics"][0]["skipped_due_limit"] == ["MSFT"]
+    assert summary["symbols_fetched"] == ["AAPL"]
 
 def test_vendor_provider_fetches_and_normalizes_fmp_responses(monkeypatch: pytest.MonkeyPatch) -> None:
     payloads = _fmp_payloads_for_symbol("AAPL")

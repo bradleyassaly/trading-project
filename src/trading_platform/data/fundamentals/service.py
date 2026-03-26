@@ -30,6 +30,17 @@ class FundamentalsIngestionRequest:
     providers: tuple[str, ...] = ("sec", "vendor")
     sec_companyfacts_root: str | None = None
     sec_submissions_root: str | None = None
+    sec_symbol_cik_map_path: Path | None = None
+    sec_cache_enabled: bool = True
+    sec_cache_root: Path | None = None
+    sec_cache_ttl_days: float = 30.0
+    sec_force_refresh: bool = False
+    sec_request_delay_seconds: float = 0.2
+    sec_max_retries: int = 4
+    sec_max_symbols_per_run: int | None = None
+    sec_max_requests_per_run: int | None = None
+    sec_user_agent: str | None = None
+    sec_offline: bool = False
     vendor_file_path: str | None = None
     vendor_api_key: str | None = None
     vendor_cache_enabled: bool = True
@@ -44,6 +55,8 @@ class FundamentalsIngestionRequest:
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
         payload["artifact_root"] = str(self.artifact_root)
+        payload["sec_symbol_cik_map_path"] = str(self.sec_symbol_cik_map_path) if self.sec_symbol_cik_map_path else None
+        payload["sec_cache_root"] = str(self.sec_cache_root) if self.sec_cache_root else None
         payload["vendor_cache_root"] = str(self.vendor_cache_root) if self.vendor_cache_root else None
         return payload
 
@@ -59,6 +72,33 @@ class FundamentalFeatureBuildRequest:
         payload = asdict(self)
         payload["artifact_root"] = str(self.artifact_root)
         payload["daily_features_path"] = str(self.daily_features_path) if self.daily_features_path else None
+        payload["calendar_dir"] = str(self.calendar_dir) if self.calendar_dir else None
+        return payload
+
+
+@dataclass(frozen=True)
+class FundamentalsSnapshotBuildRequest:
+    symbols: list[str]
+    artifact_root: Path = FUNDAMENTALS_DIR
+    raw_sec_cache_root: Path | None = None
+    symbol_cik_map_path: Path | None = None
+    sec_user_agent: str | None = None
+    sec_request_delay_seconds: float = 0.2
+    sec_max_retries: int = 4
+    cache_enabled: bool = True
+    cache_ttl_days: float = 30.0
+    force_refresh: bool = False
+    max_symbols_per_run: int | None = None
+    max_requests_per_run: int | None = None
+    build_daily_features: bool = True
+    calendar_dir: Path | None = None
+    offline: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        payload = asdict(self)
+        payload["artifact_root"] = str(self.artifact_root)
+        payload["raw_sec_cache_root"] = str(self.raw_sec_cache_root) if self.raw_sec_cache_root else None
+        payload["symbol_cik_map_path"] = str(self.symbol_cik_map_path) if self.symbol_cik_map_path else None
         payload["calendar_dir"] = str(self.calendar_dir) if self.calendar_dir else None
         return payload
 
@@ -122,6 +162,17 @@ def _provider_instances(request: FundamentalsIngestionRequest) -> list[Fundament
         "sec": SECFundamentalsProvider(
             companyfacts_root=request.sec_companyfacts_root,
             submissions_root=request.sec_submissions_root,
+            symbol_cik_map_path=request.sec_symbol_cik_map_path,
+            cache_enabled=request.sec_cache_enabled,
+            cache_root=request.sec_cache_root or (request.artifact_root / "raw_sec"),
+            cache_ttl_days=request.sec_cache_ttl_days,
+            force_refresh=request.sec_force_refresh,
+            request_delay_seconds=request.sec_request_delay_seconds,
+            max_retries=request.sec_max_retries,
+            max_symbols_per_run=request.sec_max_symbols_per_run,
+            max_requests_per_run=request.sec_max_requests_per_run,
+            user_agent=request.sec_user_agent,
+            offline=request.sec_offline,
         ),
         "vendor": VendorFundamentalsProvider(
             file_path=request.vendor_file_path,
@@ -315,6 +366,13 @@ def ingest_fundamentals(request: FundamentalsIngestionRequest) -> dict[str, str]
             for symbol in diagnostic.get("symbols_failed", []) or []
         }
     )
+    aggregate_symbols_resolved_to_cik = sorted(
+        {
+            str(symbol)
+            for diagnostic in provider_diagnostics
+            for symbol in diagnostic.get("symbols_resolved_to_cik", []) or []
+        }
+    )
     company_df.to_parquet(company_path, index=False)
     filing_df.to_parquet(filing_path, index=False)
     values_df.to_parquet(values_path, index=False)
@@ -334,6 +392,7 @@ def ingest_fundamentals(request: FundamentalsIngestionRequest) -> dict[str, str]
                 if not values_df.empty
                 else {},
                 "symbols_requested": len(request.symbols),
+                "symbols_resolved_to_cik": aggregate_symbols_resolved_to_cik,
                 "symbols_with_values": int(values_df["symbol"].nunique()) if not values_df.empty else 0,
                 "symbols_with_metric_coverage": sorted(values_df["symbol"].dropna().astype(str).str.upper().unique().tolist()) if not values_df.empty else [],
                 "cache_hits": int(sum(int(diagnostic.get("cache_hits", 0) or 0) for diagnostic in provider_diagnostics)),
@@ -559,5 +618,65 @@ def build_daily_fundamental_features(request: FundamentalFeatureBuildRequest) ->
         "daily_fundamental_features_path": str(daily_features_path),
         "fundamental_feature_coverage_path": str(coverage_path),
         "fundamental_lag_audit_path": str(lag_audit_path),
+        "fundamental_summary_path": str(summary_path),
+    }
+
+
+def build_sec_fundamentals_snapshot(request: FundamentalsSnapshotBuildRequest) -> dict[str, str]:
+    artifact_root = request.artifact_root
+    artifact_root.mkdir(parents=True, exist_ok=True)
+    raw_sec_cache_root = request.raw_sec_cache_root or (artifact_root / "raw_sec")
+    raw_sec_cache_root.mkdir(parents=True, exist_ok=True)
+    symbol_cik_map_path = request.symbol_cik_map_path or (artifact_root / "sec_symbol_cik_map.parquet")
+
+    ingestion_result = ingest_fundamentals(
+        FundamentalsIngestionRequest(
+            symbols=list(request.symbols),
+            artifact_root=artifact_root,
+            providers=("sec",),
+            sec_companyfacts_root=str(raw_sec_cache_root / "companyfacts"),
+            sec_submissions_root=str(raw_sec_cache_root / "submissions"),
+            sec_symbol_cik_map_path=symbol_cik_map_path,
+            sec_cache_enabled=request.cache_enabled,
+            sec_cache_root=raw_sec_cache_root,
+            sec_cache_ttl_days=request.cache_ttl_days,
+            sec_force_refresh=request.force_refresh,
+            sec_request_delay_seconds=request.sec_request_delay_seconds,
+            sec_max_retries=request.sec_max_retries,
+            sec_max_symbols_per_run=request.max_symbols_per_run,
+            sec_max_requests_per_run=request.max_requests_per_run,
+            sec_user_agent=request.sec_user_agent,
+            sec_offline=request.offline,
+        )
+    )
+
+    feature_result: dict[str, str] = {}
+    if request.build_daily_features and request.calendar_dir is not None:
+        feature_result = build_daily_fundamental_features(
+            FundamentalFeatureBuildRequest(
+                artifact_root=artifact_root,
+                calendar_dir=request.calendar_dir,
+                symbols=list(request.symbols),
+            )
+        )
+
+    summary_path = artifact_root / "fundamental_summary.json"
+    summary_payload: dict[str, Any] = {}
+    if summary_path.exists():
+        summary_payload = json.loads(summary_path.read_text(encoding="utf-8"))
+    summary_payload["sec_snapshot_build"] = {
+        "request": request.to_dict(),
+        "raw_sec_cache_root": str(raw_sec_cache_root),
+        "symbol_cik_map_path": str(symbol_cik_map_path),
+        "offline": request.offline,
+        "build_daily_features": request.build_daily_features,
+    }
+    summary_path.write_text(json.dumps(summary_payload, indent=2, default=str), encoding="utf-8")
+
+    return {
+        **ingestion_result,
+        **feature_result,
+        "raw_sec_cache_root": str(raw_sec_cache_root),
+        "sec_symbol_cik_map_path": str(symbol_cik_map_path),
         "fundamental_summary_path": str(summary_path),
     }

@@ -307,6 +307,44 @@ class ResearchInputRefreshWorkflowConfig:
 
 
 @dataclass(frozen=True)
+class FundamentalsSnapshotWorkflowConfig:
+    symbols: list[str] | None = None
+    universe: str | None = None
+    artifact_root: str = "data/fundamentals"
+    raw_sec_cache_root: str | None = None
+    symbol_cik_map_path: str | None = None
+    sec_user_agent: str | None = None
+    sec_request_delay_seconds: float = 0.2
+    sec_max_retries: int = 4
+    cache_enabled: bool = True
+    cache_ttl_days: float = 30.0
+    force_refresh: bool = False
+    max_symbols_per_run: int | None = None
+    max_requests_per_run: int | None = None
+    build_daily_features: bool = True
+    calendar_dir: str | None = "data/features"
+    offline: bool = False
+
+    def __post_init__(self) -> None:
+        selected = sum(bool(value) for value in (self.symbols, self.universe))
+        if selected != 1:
+            raise ValueError("exactly one of symbols or universe must be provided")
+        if self.sec_request_delay_seconds < 0:
+            raise ValueError("sec_request_delay_seconds must be >= 0")
+        if self.sec_max_retries < 0:
+            raise ValueError("sec_max_retries must be >= 0")
+        if self.cache_ttl_days < 0:
+            raise ValueError("cache_ttl_days must be >= 0")
+        if self.max_symbols_per_run is not None and self.max_symbols_per_run <= 0:
+            raise ValueError("max_symbols_per_run must be > 0 when provided")
+        if self.max_requests_per_run is not None and self.max_requests_per_run <= 0:
+            raise ValueError("max_requests_per_run must be > 0 when provided")
+
+    def to_cli_defaults(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
 class AlphaResearchWorkflowConfig:
     symbols: list[str] | None = None
     universe: str | None = None

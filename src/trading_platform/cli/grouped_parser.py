@@ -32,6 +32,7 @@ from trading_platform.cli.commands.export_universes import cmd_export_universes
 from trading_platform.cli.commands.features import cmd_features
 from trading_platform.cli.commands.fundamentals_features import cmd_fundamentals_features
 from trading_platform.cli.commands.fundamentals_ingest import cmd_fundamentals_ingest
+from trading_platform.cli.commands.fundamentals_snapshot_build import cmd_fundamentals_snapshot_build
 from trading_platform.cli.commands.refresh_research_inputs import cmd_refresh_research_inputs
 from trading_platform.cli.commands.ingest import cmd_ingest
 from trading_platform.cli.commands.list_strategies import cmd_list_strategies
@@ -646,6 +647,24 @@ def build_parser() -> argparse.ArgumentParser:
     data_fundamentals_ingest.add_argument("--vendor-max-symbols-per-run", type=int, default=None, help="Optional cap on symbols fetched from FMP in one run.")
     data_fundamentals_ingest.add_argument("--vendor-max-requests-per-run", type=int, default=None, help="Optional cap on raw FMP requests in one run.")
     data_fundamentals_ingest.set_defaults(func=cmd_fundamentals_ingest)
+    data_fundamentals_snapshot = data_fundamentals_subparsers.add_parser("snapshot-build", help="Fetch/cache SEC raw fundamentals locally and rebuild canonical artifacts")
+    add_shared_symbol_args(data_fundamentals_snapshot)
+    data_fundamentals_snapshot.add_argument("--config", type=str, default=None, help="Optional SEC fundamentals snapshot workflow config.")
+    data_fundamentals_snapshot.add_argument("--artifact-root", type=str, default="data/fundamentals", help="Directory where canonical fundamentals artifacts are written.")
+    data_fundamentals_snapshot.add_argument("--raw-sec-cache-root", type=str, default=None, help="Raw SEC cache root containing submissions/ and companyfacts/. Defaults under the artifact root.")
+    data_fundamentals_snapshot.add_argument("--symbol-cik-map-path", type=str, default=None, help="Optional symbol-to-CIK lookup artifact path.")
+    data_fundamentals_snapshot.add_argument("--sec-user-agent", type=str, default=None, help="SEC User-Agent header for network fetches.")
+    data_fundamentals_snapshot.add_argument("--sec-request-delay-seconds", type=float, default=0.2, help="Throttle delay between SEC requests.")
+    data_fundamentals_snapshot.add_argument("--sec-max-retries", type=int, default=4, help="Maximum SEC retry attempts for transient failures.")
+    data_fundamentals_snapshot.add_argument("--cache-enabled", action=argparse.BooleanOptionalAction, default=True, help="Enable or disable SEC raw cache reuse.")
+    data_fundamentals_snapshot.add_argument("--cache-ttl-days", type=float, default=30.0, help="Freshness TTL for cached SEC raw responses.")
+    data_fundamentals_snapshot.add_argument("--force-refresh", action="store_true", help="Refetch stale/fresh SEC raw files instead of reusing cache.")
+    data_fundamentals_snapshot.add_argument("--max-symbols-per-run", type=int, default=None, help="Optional cap on symbols fetched in one SEC snapshot run.")
+    data_fundamentals_snapshot.add_argument("--max-requests-per-run", type=int, default=None, help="Optional cap on raw SEC requests in one SEC snapshot run.")
+    data_fundamentals_snapshot.add_argument("--build-daily-features", action=argparse.BooleanOptionalAction, default=True, help="Build daily aligned fundamental features after canonical normalization.")
+    data_fundamentals_snapshot.add_argument("--calendar-dir", type=str, default="data/features", help="Directory containing per-symbol research calendar parquet files used for daily alignment.")
+    data_fundamentals_snapshot.add_argument("--offline", action="store_true", help="Rebuild canonical artifacts strictly from cached SEC raw files with no network calls.")
+    data_fundamentals_snapshot.set_defaults(func=cmd_fundamentals_snapshot_build)
     data_fundamentals_features = data_fundamentals_subparsers.add_parser("features", help="Build point-in-time-safe daily fundamental features aligned to a research calendar")
     add_shared_symbol_args(data_fundamentals_features)
     data_fundamentals_features.add_argument("--artifact-root", type=str, default="data/fundamentals", help="Directory containing canonical fundamentals artifacts.")

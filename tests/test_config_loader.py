@@ -13,6 +13,7 @@ from trading_platform.config.loader import (
     load_dashboard_config,
     load_experiment_spec_config,
     load_execution_config,
+    load_fundamentals_snapshot_workflow_config,
     load_monitoring_config,
     load_notification_config,
     load_paper_run_workflow_config,
@@ -209,6 +210,51 @@ fundamentals:
     assert config.fundamentals_vendor_max_retries == 6
     assert config.fundamentals_vendor_max_symbols_per_run == 25
     assert config.fundamentals_vendor_max_requests_per_run == 100
+
+
+def test_load_fundamentals_snapshot_workflow_config(tmp_path) -> None:
+    path = tmp_path / "fundamentals_snapshot.yaml"
+    path.write_text(
+        """
+selection:
+  universe: nasdaq100
+paths:
+  artifact_root: data/fundamentals
+  raw_sec_cache_root: data/fundamentals/raw_sec
+  symbol_cik_map_path: data/fundamentals/sec_symbol_cik_map.parquet
+sec:
+  sec_user_agent: trading-platform-test@example.com
+  sec_request_delay_seconds: 0.25
+  sec_max_retries: 5
+cache:
+  enabled: true
+  cache_ttl_days: 14
+  force_refresh: false
+  offline: false
+build:
+  max_symbols_per_run: 50
+  max_requests_per_run: 300
+  build_daily_features: true
+  calendar_dir: data/features
+""".strip(),
+        encoding="utf-8",
+    )
+
+    config = load_fundamentals_snapshot_workflow_config(path)
+
+    assert config.universe == "nasdaq100"
+    assert config.artifact_root == "data/fundamentals"
+    assert config.raw_sec_cache_root == "data/fundamentals/raw_sec"
+    assert config.symbol_cik_map_path == "data/fundamentals/sec_symbol_cik_map.parquet"
+    assert config.sec_user_agent == "trading-platform-test@example.com"
+    assert config.sec_request_delay_seconds == 0.25
+    assert config.sec_max_retries == 5
+    assert config.cache_enabled is True
+    assert config.cache_ttl_days == 14
+    assert config.max_symbols_per_run == 50
+    assert config.max_requests_per_run == 300
+    assert config.build_daily_features is True
+    assert config.calendar_dir == "data/features"
 
 
 def test_load_canonical_bundle_experiment_workflow_config(tmp_path) -> None:

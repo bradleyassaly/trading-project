@@ -7,7 +7,7 @@ stages:
   report: true
 
 configs:
-  # The refresh config can now run vendor-only fundamentals via FMP_API_KEY.
+  # The refresh config can reuse a local SEC snapshot so repeated cycle runs do not refetch fundamentals.
   refresh_config: configs/research_input_refresh.yaml
   research_config: configs/alpha_research.yaml
   promotion_policy_config: configs/promotion.yaml

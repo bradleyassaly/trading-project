@@ -1,0 +1,25 @@
+selection:
+  universe: nasdaq100
+
+paths:
+  artifact_root: data/fundamentals
+  raw_sec_cache_root: data/fundamentals/raw_sec
+  symbol_cik_map_path: data/fundamentals/sec_symbol_cik_map.parquet
+
+sec:
+  # SEC requests should declare a descriptive User-Agent.
+  sec_user_agent: trading-platform/1.0 (local SEC snapshot)
+  sec_request_delay_seconds: 0.2
+  sec_max_retries: 4
+
+cache:
+  enabled: true
+  cache_ttl_days: 30
+  force_refresh: false
+  offline: false
+
+build:
+  max_symbols_per_run: 25
+  max_requests_per_run: 250
+  build_daily_features: true
+  calendar_dir: data/features

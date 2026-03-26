@@ -345,6 +345,28 @@ def test_grouped_data_fundamentals_commands_parse() -> None:
     assert features_args.calendar_dir == "data/features"
 
 
+def test_grouped_data_fundamentals_snapshot_build_command_parses() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "data",
+            "fundamentals",
+            "snapshot-build",
+            "--config",
+            "configs/fundamentals_snapshot.yaml",
+            "--offline",
+            "--max-symbols-per-run",
+            "25",
+        ]
+    )
+
+    assert args.data_command == "fundamentals"
+    assert args.fundamentals_command == "snapshot-build"
+    assert args.config == "configs/fundamentals_snapshot.yaml"
+    assert args.offline is True
+    assert args.max_symbols_per_run == 25
+
+
 def test_legacy_features_build_rewrites_to_data_features() -> None:
     argv, note = rewrite_legacy_cli_args(["features", "build", "--universe", "nasdaq100"])
 

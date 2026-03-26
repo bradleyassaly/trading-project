@@ -21,6 +21,7 @@ from trading_platform.config.workflow_models import (
     CanonicalBundleExperimentMatrixWorkflowConfig,
     CanonicalBundleExperimentVariantConfig,
     CanonicalBundleExperimentWorkflowConfig,
+    FundamentalsSnapshotWorkflowConfig,
     LiveDryRunWorkflowConfig,
     PaperRunWorkflowConfig,
     ResearchInputRefreshWorkflowConfig,
@@ -247,6 +248,40 @@ def load_research_input_refresh_workflow_config(path: str | Path) -> ResearchInp
     _set_if_missing(payload, "fundamentals_vendor_max_requests_per_run", fundamentals_section, "vendor_max_requests_per_run")
 
     return ResearchInputRefreshWorkflowConfig(**payload)
+
+
+def load_fundamentals_snapshot_workflow_config(path: str | Path) -> FundamentalsSnapshotWorkflowConfig:
+    data = _read_config_file(Path(path))
+    payload = dict(data)
+    selection_section = _pop_dict_section(payload, "selection")
+    paths_section = _pop_dict_section(payload, "paths")
+    sec_section = _pop_dict_section(payload, "sec")
+    cache_section = _pop_dict_section(payload, "cache")
+    build_section = _pop_dict_section(payload, "build")
+
+    if "symbols" not in payload and isinstance(selection_section.get("symbols"), list):
+        payload["symbols"] = selection_section["symbols"]
+    _set_if_missing(payload, "universe", selection_section)
+
+    _set_if_missing(payload, "artifact_root", paths_section)
+    _set_if_missing(payload, "raw_sec_cache_root", paths_section)
+    _set_if_missing(payload, "symbol_cik_map_path", paths_section)
+
+    _set_if_missing(payload, "sec_user_agent", sec_section)
+    _set_if_missing(payload, "sec_request_delay_seconds", sec_section)
+    _set_if_missing(payload, "sec_max_retries", sec_section)
+
+    _set_if_missing(payload, "cache_enabled", cache_section, "enabled")
+    _set_if_missing(payload, "cache_ttl_days", cache_section)
+    _set_if_missing(payload, "force_refresh", cache_section)
+    _set_if_missing(payload, "offline", cache_section)
+
+    _set_if_missing(payload, "max_symbols_per_run", build_section)
+    _set_if_missing(payload, "max_requests_per_run", build_section)
+    _set_if_missing(payload, "build_daily_features", build_section)
+    _set_if_missing(payload, "calendar_dir", build_section)
+
+    return FundamentalsSnapshotWorkflowConfig(**payload)
 
 
 def load_alpha_research_workflow_config(path: str | Path) -> AlphaResearchWorkflowConfig:

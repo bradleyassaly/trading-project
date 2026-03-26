@@ -28,11 +28,13 @@ fundamentals:
   enabled: true
   artifact_root: data/fundamentals
   providers:
-    - vendor
+    - sec
   daily_features_path: data/fundamentals/daily_fundamental_features.parquet
-  # Prefer FMP_API_KEY in the shell or pass --fundamentals-vendor-api-key.
+  # Recommended primary path: build or refresh the SEC local snapshot first, then reuse it here.
+  sec_companyfacts_root: data/fundamentals/raw_sec/companyfacts
+  sec_submissions_root: data/fundamentals/raw_sec/submissions
+  # Optional supplemental vendor path. Keep disabled unless you intentionally want to augment SEC coverage.
   vendor_api_key: null
-  # Optional artifact-backed fallback for offline/vendor-normalized snapshots.
   vendor_file_path: null
   vendor_cache_enabled: true
   vendor_cache_root: data/fundamentals/raw_fmp
@@ -40,10 +42,5 @@ fundamentals:
   vendor_force_refresh: false
   vendor_request_delay_seconds: 0.5
   vendor_max_retries: 4
-  # Start small when validating quota behavior, then raise this later.
   vendor_max_symbols_per_run: 25
-  # Optional safety cap for raw endpoint requests across the run.
   vendor_max_requests_per_run: 175
-  # Enable SEC alongside vendor only when local EDGAR artifacts are available.
-  sec_companyfacts_root: null
-  sec_submissions_root: null

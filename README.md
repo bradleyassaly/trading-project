@@ -24,8 +24,9 @@ trading-cli pipeline alpha-cycle --config configs/alpha_cycle.yaml
 The next information-quality expansion on that path is point-in-time-safe fundamentals:
 
 - canonical fundamentals ingest and normalization stays artifact-first
-- the `vendor` path now supports real Financial Modeling Prep ingestion with `FMP_API_KEY`
-- the FMP path is now quota-aware through raw-response caching, request throttling, retry/backoff, and incremental symbol fetching
+- SEC local snapshot mode is now the recommended primary path for repeated research refreshes
+- the SEC path caches submissions and company-facts JSON locally, supports incremental refresh, and can rebuild normalized artifacts offline
+- the `vendor` path remains optional for supplemental Financial Modeling Prep ingestion with `FMP_API_KEY`
 - filing availability dates control when fundamental features become visible
 - alpha research can opt into daily aligned fundamentals without breaking technical-only runs
 
@@ -219,6 +220,33 @@ Optional fundamentals refresh can run in the same canonical step by enabling the
 - `data/fundamentals/fundamental_lag_audit.csv`
 - `data/fundamentals/fundamental_summary.json`
 
+Recommended primary flow for repeated research work:
+
+```bash
+trading-cli data fundamentals snapshot-build --config configs/fundamentals_snapshot.yaml
+trading-cli data refresh-research-inputs --config configs/research_input_refresh.yaml
+```
+
+The snapshot build fills and reuses:
+
+- `data/fundamentals/raw_sec/submissions/CIK##########.json`
+- `data/fundamentals/raw_sec/companyfacts/CIK##########.json`
+- `data/fundamentals/sec_symbol_cik_map.parquet`
+
+Then `data refresh-research-inputs` can reuse the local SEC snapshot without refetching raw fundamentals.
+
+Offline rebuild from cache only:
+
+```bash
+trading-cli data fundamentals snapshot-build --config configs/fundamentals_snapshot.yaml --offline
+```
+
+SEC fair-access requirements:
+
+- use a real descriptive `sec_user_agent`
+- keep request pacing within SEC guidance; the default snapshot config stays conservative
+- prefer incremental refreshes and cache reuse over repeated full refetches
+
 For the vendor-backed path, export your FMP key in the shell instead of writing it into tracked config files:
 
 ```powershell
@@ -241,6 +269,24 @@ Quota-aware FMP controls now live in the same refresh config:
 - `fundamentals.vendor_max_retries`
 - `fundamentals.vendor_max_symbols_per_run`
 - `fundamentals.vendor_max_requests_per_run`
+
+SEC snapshot config controls:
+
+- `selection.symbols` or `selection.universe`
+- `paths.artifact_root`
+- `paths.raw_sec_cache_root`
+- `paths.symbol_cik_map_path`
+- `sec.sec_user_agent`
+- `sec.sec_request_delay_seconds`
+- `sec.sec_max_retries`
+- `cache.enabled`
+- `cache.cache_ttl_days`
+- `cache.force_refresh`
+- `cache.offline`
+- `build.max_symbols_per_run`
+- `build.max_requests_per_run`
+- `build.build_daily_features`
+- `build.calendar_dir`
 
 Recommended low-risk first run after a rate-limit incident:
 
@@ -471,6 +517,24 @@ Mode behavior:
 Run fundamentals as a standalone artifact-first path when you want to refresh or inspect it separately from the broader canonical refresh:
 
 ```bash
+trading-cli data fundamentals snapshot-build --config configs/fundamentals_snapshot.yaml
+```
+
+Incremental SEC refresh for only stale or missing symbols:
+
+```bash
+trading-cli data fundamentals snapshot-build --config configs/fundamentals_snapshot.yaml --max-symbols-per-run 25
+```
+
+Offline rebuild from cached SEC raw payloads only:
+
+```bash
+trading-cli data fundamentals snapshot-build --config configs/fundamentals_snapshot.yaml --offline
+```
+
+Optional direct vendor flow:
+
+```bash
 $env:FMP_API_KEY="YOUR_KEY"
 trading-cli data fundamentals ingest --symbols AAPL MSFT NVDA --providers vendor --artifact-root data/fundamentals
 trading-cli data fundamentals features --symbols AAPL MSFT NVDA --artifact-root data/fundamentals --calendar-dir data/features
@@ -488,9 +552,17 @@ Or keep the canonical one-command flow and enable fundamentals inside `data refr
 
 Provider architecture:
 
-- `sec` is the authoritative raw-source path using local EDGAR-style JSON payloads
+- `sec` is the authoritative raw-source path and the recommended local snapshot workflow
 - `vendor` is the normalized structured-provider path and now supports live Financial Modeling Prep ingestion plus artifact-backed JSON, CSV, or parquet fallback
 - providers are pluggable and preserve source provenance in the canonical artifacts
+
+SEC snapshot behavior:
+
+- raw SEC payloads are cached under `data/fundamentals/raw_sec/`
+- symbol-to-CIK resolution is persisted in `data/fundamentals/sec_symbol_cik_map.parquet`
+- incremental runs fetch only missing or stale symbols unless `--force-refresh` is used
+- `--offline` rebuilds canonical parquet artifacts and daily aligned features strictly from the local SEC raw cache
+- `fundamental_summary.json` reports symbol resolution, cache hits and misses, fetch and reuse counts, retry counts, HTTP diagnostics, filing counts, and metric-row counts
 
 FMP quota hardening:
 
