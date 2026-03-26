@@ -47,6 +47,12 @@ def cmd_live_dry_run_multi_strategy(args) -> None:
         "selected_symbols": ",".join(sorted(set(row["symbol"] for row in allocation_result.sleeve_rows))),
         "target_selected_symbols": ",".join(sorted(allocation_result.combined_target_weights)),
         "target_selected_count": len(allocation_result.combined_target_weights),
+        "requested_active_strategy_count": allocation_result.summary.get("requested_active_strategy_count"),
+        "requested_symbol_count": allocation_result.summary.get("requested_symbol_count"),
+        "usable_symbol_count": allocation_result.summary.get("usable_symbol_count"),
+        "skipped_symbol_count": allocation_result.summary.get("skipped_symbol_count"),
+        "zero_target_reason": allocation_result.summary.get("zero_target_reason"),
+        "latest_price_source_summary": allocation_result.summary.get("latest_price_source_summary", {}),
         "realized_holdings_count": len(allocation_result.combined_target_weights),
         "realized_holdings_minus_top_n": 0,
         "average_gross_exposure": allocation_result.summary["gross_exposure_after_constraints"],
@@ -96,6 +102,8 @@ def cmd_live_dry_run_multi_strategy(args) -> None:
     print(f"Adjusted proposed orders: {summary_payload['adjusted_order_count']}")
     print(f"Gross exposure: {allocation_result.summary['gross_exposure_after_constraints']:.6f}")
     print(f"Active strategies: {handoff.summary.get('active_strategy_count', 0)}")
+    if allocation_result.summary.get("zero_target_reason"):
+        print(f"Zero target reason: {allocation_result.summary['zero_target_reason']}")
     if "execution_summary" in summary_payload:
         print(f"Executable orders: {summary_payload['execution_summary'].get('executable_order_count', 0)}")
         print(f"Rejected orders: {summary_payload['execution_summary'].get('rejected_order_count', 0)}")

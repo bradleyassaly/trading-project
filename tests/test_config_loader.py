@@ -707,6 +707,9 @@ stages:
     assert config.use_activated_portfolio_for_paper is True
     assert config.fail_if_no_active_strategies is False
     assert config.include_inactive_conditionals_in_reports is True
+    assert config.fail_if_no_usable_symbols is False
+    assert config.fail_if_zero_targets_after_validation is False
+    assert config.allow_latest_close_fallback is True
     assert config.stages.promotion_evaluation is True
     assert config.stages.reporting is True
 
@@ -1303,6 +1306,8 @@ def test_example_configs_load_from_repo() -> None:
     assert governance_campaign_medium_config.repeat_count == 5
     assert research_input_refresh_config.universe == "nasdaq100"
     assert research_input_refresh_config.sub_universe_id == "liquid_trend_candidates"
+    assert pipeline_config.allow_latest_close_fallback is True
+    assert minimal_demo_config.fail_if_no_usable_symbols is False
     assert orchestration_experiment_base.feature_flags["adaptive"] is True
     assert orchestration_experiment_fast.research_artifacts_root == "artifacts/promotion_fixture"
     assert orchestration_experiment_fast.output_root_dir == "artifacts/orchestration_runs_fast"

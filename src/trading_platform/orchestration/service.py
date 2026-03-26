@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from time import perf_counter
@@ -116,6 +116,12 @@ def _build_multi_strategy_target_diagnostics(allocation_result) -> dict[str, Any
         "rebalance_timestamp": allocation_result.as_of,
         "selected_symbols": ",".join(sorted(set(row["symbol"] for row in allocation_result.sleeve_rows))),
         "target_selected_symbols": ",".join(sorted(allocation_result.combined_target_weights)),
+        "requested_active_strategy_count": allocation_result.summary.get("requested_active_strategy_count"),
+        "requested_symbol_count": allocation_result.summary.get("requested_symbol_count"),
+        "usable_symbol_count": allocation_result.summary.get("usable_symbol_count"),
+        "skipped_symbol_count": allocation_result.summary.get("skipped_symbol_count"),
+        "zero_target_reason": allocation_result.summary.get("zero_target_reason"),
+        "latest_price_source_summary": allocation_result.summary.get("latest_price_source_summary", {}),
         "realized_holdings_count": len(allocation_result.combined_target_weights),
         "realized_holdings_minus_top_n": 0,
         "average_gross_exposure": allocation_result.summary["gross_exposure_after_constraints"],
@@ -140,6 +146,25 @@ def _build_multi_strategy_target_diagnostics(allocation_result) -> dict[str, Any
         "summary": {"mean_turnover": allocation_result.summary["turnover_estimate"]},
         "multi_strategy_allocation": allocation_result.summary,
     }
+
+
+def _apply_execution_validation_policy(portfolio_config, config: PipelineRunConfig):
+    if hasattr(portfolio_config, "__dataclass_fields__"):
+        return replace(
+            portfolio_config,
+            fail_if_no_usable_symbols=config.fail_if_no_usable_symbols,
+            fail_if_zero_targets_after_validation=config.fail_if_zero_targets_after_validation,
+            allow_latest_close_fallback=config.allow_latest_close_fallback,
+            min_usable_symbol_fraction=config.min_usable_symbol_fraction,
+        )
+    for name, value in {
+        "fail_if_no_usable_symbols": config.fail_if_no_usable_symbols,
+        "fail_if_zero_targets_after_validation": config.fail_if_zero_targets_after_validation,
+        "allow_latest_close_fallback": config.allow_latest_close_fallback,
+        "min_usable_symbol_fraction": config.min_usable_symbol_fraction,
+    }.items():
+        setattr(portfolio_config, name, value)
+    return portfolio_config
 
 
 def _render_run_summary_markdown(result: PipelineRunResult) -> str:
@@ -471,6 +496,7 @@ def _run_portfolio_allocation_stage(config: PipelineRunConfig, run_dir: Path, co
             "active_strategy_count": 0,
             "skip_reason": "no_active_strategies",
         }
+    portfolio_config = _apply_execution_validation_policy(portfolio_config, config)
     allocation_result = allocate_multi_strategy_portfolio(portfolio_config)
     artifact_paths = write_multi_strategy_artifacts(
         allocation_result,
@@ -510,6 +536,7 @@ def _run_paper_stage(config: PipelineRunConfig, run_dir: Path, context: dict[str
             "paper_active_strategy_summary_path": str(handoff_summary_path),
             "paper_summary": {"skip_reason": "no_active_strategies", **handoff.summary},
         }
+    portfolio_config = _apply_execution_validation_policy(portfolio_config, config)
     allocation_result = context.get("allocation_result") or allocate_multi_strategy_portfolio(portfolio_config)
     allocation_paths = context.get("allocation_paths") or write_multi_strategy_artifacts(
         allocation_result,
@@ -533,7 +560,13 @@ def _run_paper_stage(config: PipelineRunConfig, run_dir: Path, context: dict[str
         latest_effective_weights=allocation_result.combined_target_weights,
         target_diagnostics=_build_multi_strategy_target_diagnostics(allocation_result)
         | {"strategy_execution_handoff": handoff.summary},
-        skipped_symbols=[],
+        skipped_symbols=sorted(
+            {
+                str(row["symbol"])
+                for row in getattr(allocation_result, "execution_symbol_coverage_rows", [])
+                if str(row.get("skip_reason") or "")
+            }
+        ),
         extra_diagnostics={
             "multi_strategy_allocation": allocation_result.summary,
             "strategy_execution_handoff": handoff.summary,
@@ -589,6 +622,7 @@ def _run_live_stage(config: PipelineRunConfig, run_dir: Path, context: dict[str,
             "live_active_strategy_summary_path": str(handoff_summary_path),
             "live_summary": {"skip_reason": "no_active_strategies", **handoff.summary},
         }
+    portfolio_config = _apply_execution_validation_policy(portfolio_config, config)
     allocation_result = context.get("allocation_result") or allocate_multi_strategy_portfolio(portfolio_config)
     allocation_paths = context.get("allocation_paths") or write_multi_strategy_artifacts(
         allocation_result,

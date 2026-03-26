@@ -10,7 +10,7 @@ import pandas as pd
 from trading_platform.cli.presets import CliPreset, resolve_cli_preset
 from trading_platform.config.models import MultiStrategyPortfolioConfig, MultiStrategySleeveConfig
 from trading_platform.metadata.groups import build_group_series
-from trading_platform.paper.models import PaperTradingConfig
+from trading_platform.paper.models import PaperExecutionPriceSnapshot, PaperTradingConfig
 from trading_platform.services.target_construction_service import build_target_construction_result
 from trading_platform.universes.registry import get_universe_symbols
 
@@ -38,6 +38,7 @@ class SleeveTargetBundle:
     effective_target_weights: dict[str, float]
     diagnostics: dict[str, Any]
     skipped_symbols: list[str]
+    price_snapshots: list[PaperExecutionPriceSnapshot]
 
 
 @dataclass(frozen=True)
@@ -53,6 +54,7 @@ class MultiStrategyAllocationResult:
     sleeve_attribution_rows: list[dict[str, Any]]
     portfolio_diagnostics_rows: list[dict[str, Any]]
     overlap_matrix_rows: list[dict[str, Any]]
+    execution_symbol_coverage_rows: list[dict[str, Any]]
     summary: dict[str, Any]
 
 
@@ -157,6 +159,7 @@ def load_strategy_sleeves(
                 effective_target_weights=target_result.effective_target_weights,
                 diagnostics=target_result.target_diagnostics | target_result.extra_diagnostics,
                 skipped_symbols=target_result.skipped_symbols,
+                price_snapshots=target_result.price_snapshots,
             )
         )
     if not bundles:
@@ -297,6 +300,84 @@ def _constraint_summary(weights: dict[str, float]) -> dict[str, float]:
     }
 
 
+def _positive_float(value: Any) -> float | None:
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    if numeric <= 0:
+        return None
+    return numeric
+
+
+def _resolve_execution_price(
+    *,
+    symbol: str,
+    bundle: SleeveTargetBundle,
+    allow_latest_close_fallback: bool,
+) -> tuple[float | None, str | None, bool, str | None]:
+    preferred_price = _positive_float(bundle.latest_prices.get(symbol))
+    if preferred_price is not None:
+        return (
+            preferred_price,
+            str(bundle.diagnostics.get("latest_price_source") or bundle.diagnostics.get("latest_data_source") or "latest_prices"),
+            False,
+            None,
+        )
+
+    if not allow_latest_close_fallback:
+        return None, None, False, "missing_latest_price"
+
+    snapshot = next((item for item in bundle.price_snapshots if item.symbol == symbol), None)
+    if snapshot is None:
+        return None, None, False, "missing_market_data"
+
+    fallback_price = _positive_float(snapshot.final_price_used)
+    if fallback_price is None:
+        fallback_price = _positive_float(snapshot.latest_price)
+    if fallback_price is None:
+        fallback_price = _positive_float(snapshot.historical_price)
+    if fallback_price is None:
+        return None, None, False, "invalid_or_zero_price"
+
+    return (
+        fallback_price,
+        str(snapshot.price_source_used or snapshot.latest_data_source or "latest_close_fallback"),
+        True,
+        None,
+    )
+
+
+def _zero_target_reason(
+    *,
+    active_strategy_count: int,
+    requested_symbol_count: int,
+    pre_validation_target_symbol_count: int,
+    usable_symbol_count: int,
+    combined_target_count: int,
+    missing_market_data_count: int,
+    missing_latest_price_count: int,
+    invalid_price_count: int,
+) -> str | None:
+    if active_strategy_count <= 0:
+        return "no_active_strategies"
+    if requested_symbol_count <= 0:
+        return "no_active_symbols"
+    if pre_validation_target_symbol_count <= 0:
+        return "no_targets_generated"
+    if usable_symbol_count <= 0:
+        if missing_market_data_count > 0:
+            return "missing_market_data"
+        if missing_latest_price_count > 0:
+            return "missing_latest_price"
+        if invalid_price_count > 0:
+            return "invalid_or_zero_price"
+        return "no_usable_symbols"
+    if combined_target_count <= 0:
+        return "all_target_weights_resolved_below_threshold"
+    return None
+
+
 def allocate_multi_strategy_portfolio(
     portfolio_config: MultiStrategyPortfolioConfig,
     *,
@@ -308,14 +389,74 @@ def allocate_multi_strategy_portfolio(
     sleeve_rows: list[dict[str, Any]] = []
     latest_prices: dict[str, float] = {}
     symbol_contributions: dict[str, dict[str, float]] = {}
+    execution_symbol_coverage_rows: list[dict[str, Any]] = []
+    requested_symbols: set[str] = set()
+    pre_validation_target_symbols: set[str] = set()
+    usable_symbols: set[str] = set()
+    skipped_execution_symbols: set[str] = set()
+    latest_price_source_counts: dict[str, int] = {}
 
     for bundle in sleeve_bundles:
         sleeve_name = bundle.sleeve.sleeve_name
         capital_weight = normalized_weights[sleeve_name]
+        bundle_requested_symbols = {
+            str(symbol)
+            for symbol in (
+                getattr(bundle.paper_config, "symbols", None)
+                or list(bundle.effective_target_weights)
+                or list(bundle.scheduled_target_weights)
+            )
+        }
+        requested_symbols.update(bundle_requested_symbols)
+        bundle_target_symbols = set(bundle.effective_target_weights) | set(bundle.scheduled_target_weights)
+        pre_validation_target_symbols.update(bundle_target_symbols)
+
+        for symbol in sorted(bundle_target_symbols):
+            raw_target_weight = float(bundle.effective_target_weights.get(symbol, 0.0) or 0.0)
+            scheduled_target_weight = float(bundle.scheduled_target_weights.get(symbol, 0.0) or 0.0)
+            execution_price, price_source, fallback_used, skip_reason = _resolve_execution_price(
+                symbol=symbol,
+                bundle=bundle,
+                allow_latest_close_fallback=portfolio_config.allow_latest_close_fallback,
+            )
+            has_usable_market_data = execution_price is not None
+            if has_usable_market_data:
+                usable_symbols.add(symbol)
+                latest_prices.setdefault(symbol, float(execution_price))
+                latest_price_source_counts[price_source or "unknown"] = latest_price_source_counts.get(price_source or "unknown", 0) + 1
+            else:
+                skipped_execution_symbols.add(symbol)
+            execution_symbol_coverage_rows.append(
+                {
+                    "sleeve_name": sleeve_name,
+                    "preset_name": bundle.sleeve.preset_name,
+                    "symbol": symbol,
+                    "requested_by_strategy": symbol in bundle_requested_symbols,
+                    "has_target_weight": abs(raw_target_weight) > 0.0 or abs(scheduled_target_weight) > 0.0,
+                    "scheduled_target_weight": scheduled_target_weight,
+                    "effective_target_weight": raw_target_weight,
+                    "latest_price": execution_price,
+                    "latest_price_source": price_source or "",
+                    "latest_price_fallback_used": fallback_used,
+                    "has_usable_market_data": has_usable_market_data,
+                    "skip_reason": skip_reason or "",
+                    "survived_target_generation": has_usable_market_data and abs(raw_target_weight) > 0.0,
+                    "as_of": bundle.as_of,
+                }
+            )
+
         for symbol, target_weight in sorted(bundle.effective_target_weights.items()):
+            execution_price, _price_source, _fallback_used, skip_reason = _resolve_execution_price(
+                symbol=symbol,
+                bundle=bundle,
+                allow_latest_close_fallback=portfolio_config.allow_latest_close_fallback,
+            )
+            if execution_price is None:
+                skipped_execution_symbols.add(symbol)
+                continue
             scaled_weight = float(target_weight) * capital_weight
             symbol_contributions.setdefault(symbol, {})[sleeve_name] = scaled_weight
-            latest_prices.setdefault(symbol, bundle.latest_prices.get(symbol, 0.0))
+            latest_prices.setdefault(symbol, execution_price)
             sleeve_rows.append(
                 {
                     "sleeve_name": sleeve_name,
@@ -338,6 +479,7 @@ def allocate_multi_strategy_portfolio(
                     "tags": "|".join(bundle.sleeve.tags),
                     "notes": bundle.sleeve.notes or "",
                     "as_of": bundle.as_of,
+                    "execution_skip_reason": skip_reason or "",
                 }
             )
 
@@ -410,6 +552,47 @@ def allocate_multi_strategy_portfolio(
         if abs(weight) > 1e-12
     }
     after_summary = _constraint_summary(constrained_weights)
+    missing_market_data_count = sum(
+        1 for row in execution_symbol_coverage_rows if row["skip_reason"] == "missing_market_data"
+    )
+    missing_latest_price_count = sum(
+        1 for row in execution_symbol_coverage_rows if row["skip_reason"] == "missing_latest_price"
+    )
+    invalid_price_count = sum(
+        1 for row in execution_symbol_coverage_rows if row["skip_reason"] == "invalid_or_zero_price"
+    )
+    usable_symbol_count = len(usable_symbols)
+    requested_symbol_count = len(requested_symbols)
+    skipped_symbol_count = len(skipped_execution_symbols)
+    target_symbol_count = len(pre_validation_target_symbols)
+    usable_symbol_fraction = (
+        float(usable_symbol_count) / float(target_symbol_count)
+        if target_symbol_count > 0
+        else 0.0
+    )
+    zero_target_reason = _zero_target_reason(
+        active_strategy_count=len(sleeve_bundles),
+        requested_symbol_count=requested_symbol_count,
+        pre_validation_target_symbol_count=target_symbol_count,
+        usable_symbol_count=usable_symbol_count,
+        combined_target_count=len(constrained_weights),
+        missing_market_data_count=missing_market_data_count,
+        missing_latest_price_count=missing_latest_price_count,
+        invalid_price_count=invalid_price_count,
+    )
+
+    if portfolio_config.fail_if_no_usable_symbols and usable_symbol_count <= 0:
+        raise ValueError("No usable symbols were available for multi-strategy execution")
+    if (
+        portfolio_config.min_usable_symbol_fraction is not None
+        and target_symbol_count > 0
+        and usable_symbol_fraction < float(portfolio_config.min_usable_symbol_fraction)
+    ):
+        raise ValueError(
+            f"Usable symbol fraction {usable_symbol_fraction:.4f} is below configured minimum {portfolio_config.min_usable_symbol_fraction:.4f}"
+        )
+    if portfolio_config.fail_if_zero_targets_after_validation and len(constrained_weights) <= 0:
+        raise ValueError(f"Zero targets remained after execution validation: {zero_target_reason or 'unspecified'}")
 
     previous = previous_weights or {}
     turnover_estimate = float(
@@ -520,6 +703,15 @@ def allocate_multi_strategy_portfolio(
         {"metric": "effective_number_of_positions", "value": effective_positions},
         {"metric": "raw_enabled_capital_weight_sum", "value": raw_weight_sum},
         {"metric": "cash_reserve_pct", "value": portfolio_config.cash_reserve_pct},
+        {"metric": "requested_active_strategy_count", "value": float(len(sleeve_bundles))},
+        {"metric": "requested_symbol_count", "value": float(requested_symbol_count)},
+        {"metric": "pre_validation_target_symbol_count", "value": float(target_symbol_count)},
+        {"metric": "usable_symbol_count", "value": float(usable_symbol_count)},
+        {"metric": "skipped_symbol_count", "value": float(skipped_symbol_count)},
+        {"metric": "usable_symbol_fraction", "value": usable_symbol_fraction},
+        {"metric": "missing_market_data_symbol_count", "value": float(missing_market_data_count)},
+        {"metric": "missing_latest_price_symbol_count", "value": float(missing_latest_price_count)},
+        {"metric": "invalid_zero_price_symbol_count", "value": float(invalid_price_count)},
     ]
 
     as_of = max(bundle.as_of for bundle in sleeve_bundles)
@@ -544,6 +736,17 @@ def allocate_multi_strategy_portfolio(
         "inactive_conditional_count": int(portfolio_config.inactive_conditional_count or 0),
         "source_portfolio_path": portfolio_config.source_portfolio_path,
         "source_activated_portfolio_path": portfolio_config.source_activated_portfolio_path,
+        "requested_active_strategy_count": len(sleeve_bundles),
+        "requested_symbol_count": requested_symbol_count,
+        "pre_validation_target_symbol_count": target_symbol_count,
+        "usable_symbol_count": usable_symbol_count,
+        "skipped_symbol_count": skipped_symbol_count,
+        "usable_symbol_fraction": usable_symbol_fraction,
+        "missing_market_data_symbol_count": missing_market_data_count,
+        "missing_latest_price_symbol_count": missing_latest_price_count,
+        "invalid_zero_price_symbol_count": invalid_price_count,
+        "zero_target_reason": zero_target_reason,
+        "latest_price_source_summary": latest_price_source_counts,
         "overlap_concentration": overlap_concentration,
         "effective_number_of_sleeves": effective_sleeves,
         "effective_number_of_positions": effective_positions,
@@ -563,6 +766,7 @@ def allocate_multi_strategy_portfolio(
         sleeve_attribution_rows=sleeve_attribution_rows,
         portfolio_diagnostics_rows=portfolio_diagnostics_rows,
         overlap_matrix_rows=overlap_matrix_rows,
+        execution_symbol_coverage_rows=execution_symbol_coverage_rows,
         summary=summary,
     )
 
@@ -580,6 +784,10 @@ def _render_summary_markdown(result: MultiStrategyAllocationResult) -> str:
         f"- Turnover estimate: `{result.summary['turnover_estimate']:.6f}`",
         f"- Effective sleeves: `{result.summary['effective_number_of_sleeves']:.6f}`",
         f"- Effective positions: `{result.summary['effective_number_of_positions']:.6f}`",
+        f"- Requested symbols: `{result.summary.get('requested_symbol_count', 0)}`",
+        f"- Usable symbols: `{result.summary.get('usable_symbol_count', 0)}`",
+        f"- Skipped symbols: `{result.summary.get('skipped_symbol_count', 0)}`",
+        f"- Zero target reason: `{result.summary.get('zero_target_reason')}`",
         "",
         "## Sleeve Contributions",
     ]
@@ -611,6 +819,8 @@ def write_multi_strategy_artifacts(
     sleeve_attr_path = output_path / "sleeve_attribution.csv"
     diagnostics_path = output_path / "portfolio_diagnostics.csv"
     overlap_matrix_path = output_path / "overlap_matrix.csv"
+    execution_coverage_path = output_path / "execution_symbol_coverage.csv"
+    execution_summary_path = output_path / "execution_data_availability_summary.json"
 
     pd.DataFrame(
         result.combined_rows,
@@ -638,6 +848,7 @@ def write_multi_strategy_artifacts(
             "portfolio_bucket",
             "tags",
             "notes",
+            "execution_skip_reason",
             "as_of",
         ],
     ).to_csv(sleeve_path, index=False)
@@ -645,6 +856,25 @@ def write_multi_strategy_artifacts(
     pd.DataFrame(result.sleeve_attribution_rows).to_csv(sleeve_attr_path, index=False)
     pd.DataFrame(result.portfolio_diagnostics_rows).to_csv(diagnostics_path, index=False)
     pd.DataFrame(result.overlap_matrix_rows).to_csv(overlap_matrix_path, index=False)
+    pd.DataFrame(
+        result.execution_symbol_coverage_rows,
+        columns=[
+            "sleeve_name",
+            "preset_name",
+            "symbol",
+            "requested_by_strategy",
+            "has_target_weight",
+            "scheduled_target_weight",
+            "effective_target_weight",
+            "latest_price",
+            "latest_price_source",
+            "latest_price_fallback_used",
+            "has_usable_market_data",
+            "skip_reason",
+            "survived_target_generation",
+            "as_of",
+        ],
+    ).to_csv(execution_coverage_path, index=False)
 
     summary_json_path.write_text(
         json.dumps(
@@ -652,6 +882,27 @@ def write_multi_strategy_artifacts(
                 "summary": result.summary,
                 "as_of": result.as_of,
                 "normalized_capital_weights": result.summary["normalized_capital_weights"],
+            },
+            indent=2,
+            default=str,
+        ),
+        encoding="utf-8",
+    )
+    execution_summary_path.write_text(
+        json.dumps(
+            {
+                "as_of": result.as_of,
+                "requested_active_strategy_count": result.summary.get("requested_active_strategy_count"),
+                "requested_symbol_count": result.summary.get("requested_symbol_count"),
+                "pre_validation_target_symbol_count": result.summary.get("pre_validation_target_symbol_count"),
+                "usable_symbol_count": result.summary.get("usable_symbol_count"),
+                "skipped_symbol_count": result.summary.get("skipped_symbol_count"),
+                "usable_symbol_fraction": result.summary.get("usable_symbol_fraction"),
+                "missing_market_data_symbol_count": result.summary.get("missing_market_data_symbol_count"),
+                "missing_latest_price_symbol_count": result.summary.get("missing_latest_price_symbol_count"),
+                "invalid_zero_price_symbol_count": result.summary.get("invalid_zero_price_symbol_count"),
+                "zero_target_reason": result.summary.get("zero_target_reason"),
+                "latest_price_source_summary": result.summary.get("latest_price_source_summary", {}),
             },
             indent=2,
             default=str,
@@ -669,4 +920,6 @@ def write_multi_strategy_artifacts(
         "sleeve_attribution_path": sleeve_attr_path,
         "portfolio_diagnostics_path": diagnostics_path,
         "overlap_matrix_path": overlap_matrix_path,
+        "execution_symbol_coverage_path": execution_coverage_path,
+        "execution_data_availability_summary_path": execution_summary_path,
     }

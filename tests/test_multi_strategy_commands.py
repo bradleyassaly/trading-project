@@ -21,6 +21,7 @@ def _allocation_result():
             {"symbol": "AAPL", "sleeve_name": "core"},
             {"symbol": "MSFT", "sleeve_name": "satellite"},
         ],
+        execution_symbol_coverage_rows=[],
         sleeve_bundles=[],
         summary={
             "enabled_sleeve_count": 2,
@@ -30,6 +31,12 @@ def _allocation_result():
             "turnover_estimate": 0.1,
             "turnover_cap_binding": False,
             "symbols_removed_or_clipped": [],
+            "requested_active_strategy_count": 2,
+            "requested_symbol_count": 2,
+            "usable_symbol_count": 2,
+            "skipped_symbol_count": 0,
+            "zero_target_reason": None,
+            "latest_price_source_summary": {"yfinance": 2},
         },
     )
 

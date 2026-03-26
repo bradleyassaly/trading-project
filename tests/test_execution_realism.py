@@ -281,7 +281,15 @@ def test_write_paper_trading_artifacts_includes_active_strategy_counts(tmp_path:
                 "active_unconditional_count": 0,
                 "active_conditional_count": 1,
                 "inactive_conditional_count": 2,
-            }
+            },
+            "target_construction": {
+                "requested_active_strategy_count": 1,
+                "requested_symbol_count": 3,
+                "usable_symbol_count": 1,
+                "skipped_symbol_count": 2,
+                "zero_target_reason": "",
+                "latest_price_source_summary": {"yfinance": 1},
+            },
         },
     )
 
@@ -291,6 +299,7 @@ def test_write_paper_trading_artifacts_includes_active_strategy_counts(tmp_path:
     assert summary["activation_applied"] is True
     assert summary["active_strategy_count"] == 1
     assert summary["active_conditional_count"] == 1
+    assert summary["usable_symbol_count"] == 1
 
 
 def test_write_live_dry_run_artifacts_includes_execution_outputs(tmp_path: Path) -> None:
@@ -406,6 +415,12 @@ def test_write_live_dry_run_artifacts_includes_active_strategy_counts(tmp_path: 
         target_diagnostics={
             "target_selected_symbols": "AAPL",
             "target_selected_count": 1,
+            "requested_active_strategy_count": 1,
+            "requested_symbol_count": 2,
+            "usable_symbol_count": 1,
+            "skipped_symbol_count": 1,
+            "zero_target_reason": "",
+            "latest_price_source_summary": {"yfinance": 1},
             "strategy_execution_handoff": {
                 "activation_applied": True,
                 "source_portfolio_path": "artifacts/strategy_portfolio/run_current/activated/activated_strategy_portfolio.json",
@@ -443,3 +458,4 @@ def test_write_live_dry_run_artifacts_includes_active_strategy_counts(tmp_path: 
     assert summary_payload["activation_applied"] is True
     assert summary_payload["active_strategy_count"] == 1
     assert summary_payload["inactive_conditional_count"] == 1
+    assert summary_payload["usable_symbol_count"] == 1

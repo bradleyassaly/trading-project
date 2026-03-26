@@ -214,6 +214,10 @@ def test_multi_strategy_loader_accepts_activation_aware_fields(tmp_path: Path) -
                 "use_activated_portfolio_for_paper": True,
                 "fail_if_no_active_strategies": False,
                 "include_inactive_conditionals_in_reports": True,
+                "fail_if_no_usable_symbols": False,
+                "fail_if_zero_targets_after_validation": False,
+                "allow_latest_close_fallback": True,
+                "min_usable_symbol_fraction": 0.5,
                 "active_strategy_count": 1,
                 "active_unconditional_count": 0,
                 "active_conditional_count": 1,
@@ -228,4 +232,6 @@ def test_multi_strategy_loader_accepts_activation_aware_fields(tmp_path: Path) -
 
     assert config.activation_applied is True
     assert config.active_conditional_count == 1
+    assert config.allow_latest_close_fallback is True
+    assert config.min_usable_symbol_fraction == 0.5
     assert config.sleeves[0].condition_id == "regime::risk_on"

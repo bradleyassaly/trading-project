@@ -11,7 +11,7 @@ from trading_platform.config.models import (
     MultiStrategyPortfolioConfig,
     MultiStrategySleeveConfig,
 )
-from trading_platform.paper.models import PaperSignalSnapshot
+from trading_platform.paper.models import PaperExecutionPriceSnapshot, PaperSignalSnapshot
 from trading_platform.portfolio.multi_strategy import (
     allocate_multi_strategy_portfolio,
     write_multi_strategy_artifacts,
@@ -25,12 +25,14 @@ def _target_result(
     weights: dict[str, float],
     prices: dict[str, float] | None = None,
     diagnostics: dict | None = None,
+    scheduled_weights: dict[str, float] | None = None,
+    price_snapshots: list[PaperExecutionPriceSnapshot] | None = None,
 ) -> TargetConstructionResult:
     return TargetConstructionResult(
         as_of=as_of,
-        scheduled_target_weights=weights,
+        scheduled_target_weights=scheduled_weights or weights,
         effective_target_weights=weights,
-        latest_prices=prices or {symbol: 100.0 for symbol in weights},
+        latest_prices=prices if prices is not None else {symbol: 100.0 for symbol in weights},
         latest_scores={symbol: 1.0 for symbol in weights},
         target_diagnostics=diagnostics or {},
         skipped_symbols=[],
@@ -40,6 +42,7 @@ def _target_result(
             closes=pd.DataFrame(),
             skipped_symbols=[],
         ),
+        price_snapshots=price_snapshots or [],
     )
 
 
@@ -265,3 +268,130 @@ def test_write_multi_strategy_artifacts_is_deterministic(monkeypatch, tmp_path: 
     assert Path(first_paths["allocation_summary_json_path"]).read_text(encoding="utf-8") == Path(
         second_paths["allocation_summary_json_path"]
     ).read_text(encoding="utf-8")
+
+
+def test_allocate_multi_strategy_records_execution_symbol_coverage(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "trading_platform.portfolio.multi_strategy.build_target_construction_result",
+        lambda config: _target_result(
+            as_of="2025-01-04",
+            weights={"AAPL": 1.0, "MSFT": 1.0},
+            prices={"AAPL": 101.0},
+            price_snapshots=[
+                PaperExecutionPriceSnapshot(
+                    symbol="AAPL",
+                    decision_timestamp="2025-01-04",
+                    historical_price=101.0,
+                    latest_price=101.0,
+                    final_price_used=101.0,
+                    price_source_used="yfinance",
+                    fallback_used=False,
+                    latest_bar_timestamp="2025-01-04T00:00:00Z",
+                    latest_bar_age_seconds=0.0,
+                    latest_data_stale=False,
+                    latest_data_source="yfinance",
+                )
+            ],
+        ),
+    )
+    monkeypatch.setattr(
+        "trading_platform.portfolio.multi_strategy._paper_config_from_preset",
+        lambda preset_name: type("DummyConfig", (), {"preset_name": preset_name, "symbols": ["AAPL", "MSFT"]})(),
+    )
+    config = MultiStrategyPortfolioConfig(
+        sleeves=[MultiStrategySleeveConfig("core", "preset", 1.0)],
+        max_position_weight=1.0,
+        max_symbol_concentration=1.0,
+    )
+
+    result = allocate_multi_strategy_portfolio(config)
+
+    assert result.combined_target_weights == {"AAPL": pytest.approx(1.0)}
+    assert result.summary["usable_symbol_count"] == 1
+    assert result.summary["skipped_symbol_count"] == 1
+    coverage = pd.DataFrame(result.execution_symbol_coverage_rows)
+    assert set(coverage["symbol"]) == {"AAPL", "MSFT"}
+    assert coverage.loc[coverage["symbol"] == "MSFT", "skip_reason"].iloc[0] == "missing_market_data"
+
+
+def test_allocate_multi_strategy_uses_latest_close_fallback_when_allowed(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "trading_platform.portfolio.multi_strategy.build_target_construction_result",
+        lambda config: _target_result(
+            as_of="2025-01-04",
+            weights={"AAPL": 1.0},
+            prices={},
+            price_snapshots=[
+                PaperExecutionPriceSnapshot(
+                    symbol="AAPL",
+                    decision_timestamp="2025-01-04",
+                    historical_price=99.0,
+                    latest_price=None,
+                    final_price_used=99.0,
+                    price_source_used="yfinance",
+                    fallback_used=True,
+                    latest_bar_timestamp="2025-01-04T00:00:00Z",
+                    latest_bar_age_seconds=0.0,
+                    latest_data_stale=False,
+                    latest_data_source="yfinance",
+                )
+            ],
+        ),
+    )
+    monkeypatch.setattr(
+        "trading_platform.portfolio.multi_strategy._paper_config_from_preset",
+        lambda preset_name: type("DummyConfig", (), {"preset_name": preset_name, "symbols": ["AAPL"]})(),
+    )
+    config = MultiStrategyPortfolioConfig(
+        sleeves=[MultiStrategySleeveConfig("core", "preset", 1.0)],
+        allow_latest_close_fallback=True,
+        max_position_weight=1.0,
+        max_symbol_concentration=1.0,
+    )
+
+    result = allocate_multi_strategy_portfolio(config)
+
+    assert result.latest_prices["AAPL"] == pytest.approx(99.0)
+    assert result.summary["latest_price_source_summary"] == {"yfinance": 1}
+
+
+def test_allocate_multi_strategy_reports_zero_target_reason_without_fallback(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "trading_platform.portfolio.multi_strategy.build_target_construction_result",
+        lambda config: _target_result(
+            as_of="2025-01-04",
+            weights={"AAPL": 1.0},
+            prices={},
+            price_snapshots=[
+                PaperExecutionPriceSnapshot(
+                    symbol="AAPL",
+                    decision_timestamp="2025-01-04",
+                    historical_price=99.0,
+                    latest_price=None,
+                    final_price_used=99.0,
+                    price_source_used="yfinance",
+                    fallback_used=True,
+                    latest_bar_timestamp="2025-01-04T00:00:00Z",
+                    latest_bar_age_seconds=0.0,
+                    latest_data_stale=False,
+                    latest_data_source="yfinance",
+                )
+            ],
+        ),
+    )
+    monkeypatch.setattr(
+        "trading_platform.portfolio.multi_strategy._paper_config_from_preset",
+        lambda preset_name: type("DummyConfig", (), {"preset_name": preset_name, "symbols": ["AAPL"]})(),
+    )
+    config = MultiStrategyPortfolioConfig(
+        sleeves=[MultiStrategySleeveConfig("core", "preset", 1.0)],
+        allow_latest_close_fallback=False,
+        max_position_weight=1.0,
+        max_symbol_concentration=1.0,
+    )
+
+    result = allocate_multi_strategy_portfolio(config)
+
+    assert result.combined_target_weights == {}
+    assert result.summary["usable_symbol_count"] == 0
+    assert result.summary["zero_target_reason"] == "missing_latest_price"

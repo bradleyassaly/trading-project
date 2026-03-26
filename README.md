@@ -529,6 +529,8 @@ When an activated portfolio is used, only `is_active=true` rows are handed to ex
 
 - `paper_active_strategy_summary.json`
 - `live_active_strategy_summary.json`
+- `execution_symbol_coverage.csv`
+- `execution_data_availability_summary.json`
 
 The portfolio policy can now control conditional handling through:
 
@@ -680,12 +682,17 @@ Activation-aware paper/live handoff behavior:
 - `use_activated_portfolio_for_paper`
 - `fail_if_no_active_strategies`
 - `include_inactive_conditionals_in_reports`
+- `fail_if_no_usable_symbols`
+- `fail_if_zero_targets_after_validation`
+- `allow_latest_close_fallback`
+- `min_usable_symbol_fraction`
 
 The default behavior is safe:
 
 - if an activated portfolio is present, only active rows are handed to paper/live dry-run
 - if no activated portfolio is present, existing unconditional multi-strategy workflows continue unchanged
 - if zero active strategies remain, the handoff writes a summary artifact and skips unless explicit failure is requested
+- if active strategies produce zero execution-ready targets, paper/live summaries record `usable_symbol_count`, `skipped_symbol_count`, `latest_price_source_summary`, and `zero_target_reason`
 
 Mode behavior:
 

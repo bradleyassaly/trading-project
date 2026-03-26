@@ -384,6 +384,16 @@ def _build_health_checks(
     selected_count = int(target_diagnostics.get("target_selected_count") or len(target_weights))
     selection_status = "pass" if selected_count > 0 else "warn"
     checks.append(_health_check(name="selected_set", status=selection_status, message=f"target_selected_count={selected_count}", config=config, timestamp=as_of))
+    if not selected_count and target_diagnostics.get("zero_target_reason"):
+        checks.append(
+            _health_check(
+                name="zero_target_reason",
+                status="fail",
+                message=f"zero_target_reason={target_diagnostics.get('zero_target_reason')}",
+                config=config,
+                timestamp=as_of,
+            )
+        )
 
     realized_holdings = target_diagnostics.get("realized_holdings_count")
     top_n = int(config.top_n or 0)
@@ -684,6 +694,12 @@ def _write_markdown_summary(payload: dict[str, Any], health_checks: list[dict[st
         f"- Active unconditional count: `{payload.get('active_unconditional_count', 0)}`",
         f"- Active conditional count: `{payload.get('active_conditional_count', 0)}`",
         f"- Inactive conditional count: `{payload.get('inactive_conditional_count', 0)}`",
+        f"- Requested active strategy count: `{payload.get('requested_active_strategy_count', 0)}`",
+        f"- Requested symbol count: `{payload.get('requested_symbol_count', 0)}`",
+        f"- Usable symbol count: `{payload.get('usable_symbol_count', 0)}`",
+        f"- Skipped symbol count: `{payload.get('skipped_symbol_count', 0)}`",
+        f"- Zero target reason: `{payload.get('zero_target_reason')}`",
+        f"- Latest price source summary: `{payload.get('latest_price_source_summary')}`",
         f"- Adjusted proposed orders: `{payload['adjusted_order_count']}`",
         f"- Selected names: `{','.join(payload.get('selected_names', []))}`",
         f"- Target names: `{','.join(payload.get('target_names', []))}`",
@@ -789,6 +805,12 @@ def write_live_dry_run_artifacts(
         "sector_cap_excluded_count": target_diagnostics.get("sector_cap_excluded_count"),
         "turnover_cap_binding_count": target_diagnostics.get("turnover_cap_binding_count"),
         "turnover_buffer_blocked_replacements": target_diagnostics.get("turnover_buffer_blocked_replacements"),
+        "requested_active_strategy_count": target_diagnostics.get("requested_active_strategy_count"),
+        "requested_symbol_count": target_diagnostics.get("requested_symbol_count"),
+        "usable_symbol_count": target_diagnostics.get("usable_symbol_count"),
+        "skipped_symbol_count": target_diagnostics.get("skipped_symbol_count"),
+        "zero_target_reason": target_diagnostics.get("zero_target_reason"),
+        "latest_price_source_summary": target_diagnostics.get("latest_price_source_summary", {}),
         "semantic_warning": target_diagnostics.get("semantic_warning"),
         "adjusted_order_count": len(result.adjusted_orders),
         "raw_order_count": len(result.reconciliation.orders),
@@ -829,6 +851,10 @@ def write_live_dry_run_artifacts(
             "adjusted_order_count": len(result.adjusted_orders),
             "raw_order_count": len(result.reconciliation.orders),
             "open_order_count": len(result.open_orders),
+            "requested_active_strategy_count": int(target_diagnostics.get("requested_active_strategy_count", 0) or 0),
+            "requested_symbol_count": int(target_diagnostics.get("requested_symbol_count", 0) or 0),
+            "usable_symbol_count": int(target_diagnostics.get("usable_symbol_count", len(result.latest_prices)) or 0),
+            "skipped_symbol_count": int(target_diagnostics.get("skipped_symbol_count", 0) or 0),
         },
         key_metrics={
             "equity": float(result.account.equity),

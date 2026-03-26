@@ -68,6 +68,10 @@ class PipelineRunConfig:
     use_activated_portfolio_for_paper: bool = True
     fail_if_no_active_strategies: bool = False
     include_inactive_conditionals_in_reports: bool = True
+    fail_if_no_usable_symbols: bool = False
+    fail_if_zero_targets_after_validation: bool = False
+    allow_latest_close_fallback: bool = True
+    min_usable_symbol_fraction: float | None = None
     paper_state_path: str | None = None
     live_broker: str = "mock"
     output_root_dir: str = "artifacts/orchestration"

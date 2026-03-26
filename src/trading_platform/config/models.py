@@ -440,6 +440,10 @@ class MultiStrategyPortfolioConfig:
     use_activated_portfolio_for_paper: bool = True
     fail_if_no_active_strategies: bool = False
     include_inactive_conditionals_in_reports: bool = True
+    fail_if_no_usable_symbols: bool = False
+    fail_if_zero_targets_after_validation: bool = False
+    allow_latest_close_fallback: bool = True
+    min_usable_symbol_fraction: float | None = None
     active_strategy_count: int = 0
     active_unconditional_count: int = 0
     active_conditional_count: int = 0
@@ -462,6 +466,8 @@ class MultiStrategyPortfolioConfig:
             raise ValueError("turnover_cap must be >= 0")
         if not 0.0 <= self.cash_reserve_pct < 1.0:
             raise ValueError("cash_reserve_pct must be in [0, 1)")
+        if self.min_usable_symbol_fraction is not None and not 0.0 <= self.min_usable_symbol_fraction <= 1.0:
+            raise ValueError("min_usable_symbol_fraction must be in [0, 1]")
 
     @property
     def enabled_sleeves(self) -> list[MultiStrategySleeveConfig]:

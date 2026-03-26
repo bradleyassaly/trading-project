@@ -71,6 +71,12 @@ def _summary_markdown(summary: dict[str, Any], health_checks: list[dict[str, Any
         f"- Active unconditional count: `{summary.get('active_unconditional_count', 0)}`",
         f"- Active conditional count: `{summary.get('active_conditional_count', 0)}`",
         f"- Inactive conditional count: `{summary.get('inactive_conditional_count', 0)}`",
+        f"- Requested active strategy count: `{summary.get('requested_active_strategy_count', 0)}`",
+        f"- Requested symbol count: `{summary.get('requested_symbol_count', 0)}`",
+        f"- Usable symbol count: `{summary.get('usable_symbol_count', 0)}`",
+        f"- Skipped symbol count: `{summary.get('skipped_symbol_count', 0)}`",
+        f"- Zero target reason: `{summary.get('zero_target_reason')}`",
+        f"- Latest price source summary: `{summary.get('latest_price_source_summary')}`",
         f"- Source portfolio path: `{summary.get('source_portfolio_path')}`",
         f"- Turnover estimate: `{summary['turnover_estimate']}`",
         f"- Requested order count: `{summary.get('requested_order_count', 0)}`",
@@ -164,6 +170,8 @@ def _health_checks(
         "pass" if target_selected > 0 else "fail",
         f"target_selected_count={target_selected}",
     )
+    if not target_selected and summary_row.get("zero_target_reason"):
+        add("zero_target_reason", "fail", f"zero_target_reason={summary_row['zero_target_reason']}")
     if 0.0 < gross_exposure <= 1.05:
         add("gross_exposure", "pass", f"gross_exposure={gross_exposure:.4f}")
     elif gross_exposure == 0.0:
@@ -282,6 +290,11 @@ def persist_paper_run_outputs(
         "active_unconditional_count": int(handoff.get("active_unconditional_count", 0) or 0),
         "active_conditional_count": int(handoff.get("active_conditional_count", 0) or 0),
         "inactive_conditional_count": int(handoff.get("inactive_conditional_count", 0) or 0),
+        "requested_active_strategy_count": int(target_diag.get("requested_active_strategy_count", handoff.get("active_strategy_count", 0)) or 0),
+        "requested_symbol_count": int(target_diag.get("requested_symbol_count", 0) or 0),
+        "usable_symbol_count": int(target_diag.get("usable_symbol_count", len(result.latest_prices)) or 0),
+        "zero_target_reason": str(target_diag.get("zero_target_reason", "") or ""),
+        "latest_price_source_summary": json.dumps(target_diag.get("latest_price_source_summary", {}), sort_keys=True),
         "source_portfolio_path": str(handoff.get("source_portfolio_path") or ""),
         "activation_applied": bool(handoff.get("activation_applied", False)),
     }
@@ -424,6 +437,10 @@ def persist_paper_run_outputs(
             "active_unconditional_count": summary_row["active_unconditional_count"],
             "active_conditional_count": summary_row["active_conditional_count"],
             "inactive_conditional_count": summary_row["inactive_conditional_count"],
+            "requested_active_strategy_count": summary_row["requested_active_strategy_count"],
+            "requested_symbol_count": summary_row["requested_symbol_count"],
+            "usable_symbol_count": summary_row["usable_symbol_count"],
+            "skipped_symbol_count": summary_row["skipped_symbol_count"],
             "requested_order_count": summary_row["requested_order_count"],
             "executable_order_count": summary_row["executable_order_count"],
             "rejected_order_count": summary_row["rejected_order_count"],
