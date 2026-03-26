@@ -55,6 +55,11 @@ from trading_platform.portfolio.multi_strategy import (
     allocate_multi_strategy_portfolio,
     write_multi_strategy_artifacts,
 )
+from trading_platform.portfolio.strategy_execution_handoff import (
+    StrategyExecutionHandoffConfig,
+    resolve_strategy_execution_handoff,
+    write_strategy_execution_handoff_summary,
+)
 from trading_platform.research.experiment_tracking import (
     build_paper_experiment_record,
     register_experiment,
@@ -442,29 +447,74 @@ def _run_multi_strategy_config_stage(config: PipelineRunConfig, run_dir: Path, c
 
 
 def _run_portfolio_allocation_stage(config: PipelineRunConfig, run_dir: Path, context: dict[str, Any]) -> dict[str, Any]:
-    portfolio_config = load_multi_strategy_portfolio_config(context["multi_strategy_config_path"])
+    output_dir = run_dir / "portfolio_allocation"
+    handoff = resolve_strategy_execution_handoff(
+        context["multi_strategy_config_path"],
+        config=StrategyExecutionHandoffConfig(
+            use_activated_portfolio_for_paper=config.use_activated_portfolio_for_paper,
+            fail_if_no_active_strategies=config.fail_if_no_active_strategies,
+            include_inactive_conditionals_in_reports=config.include_inactive_conditionals_in_reports,
+        ),
+    )
+    handoff_summary_path = write_strategy_execution_handoff_summary(
+        handoff=handoff,
+        output_dir=output_dir,
+        artifact_name="execution_active_strategy_summary.json",
+    )
+    portfolio_config = handoff.portfolio_config
+    if portfolio_config is None:
+        if config.fail_if_no_active_strategies:
+            raise StageExecutionError("No active strategies available for portfolio allocation")
+        return {
+            "execution_active_strategy_summary_path": str(handoff_summary_path),
+            "enabled_sleeve_count": 0,
+            "active_strategy_count": 0,
+            "skip_reason": "no_active_strategies",
+        }
     allocation_result = allocate_multi_strategy_portfolio(portfolio_config)
     artifact_paths = write_multi_strategy_artifacts(
         allocation_result,
-        run_dir / "portfolio_allocation",
+        output_dir,
     )
     context["allocation_result"] = allocation_result
     context["allocation_paths"] = artifact_paths
     return {
         **{name: str(path) for name, path in artifact_paths.items()},
         "enabled_sleeve_count": allocation_result.summary["enabled_sleeve_count"],
+        "execution_active_strategy_summary_path": str(handoff_summary_path),
+        "active_strategy_count": handoff.summary.get("active_strategy_count", allocation_result.summary["enabled_sleeve_count"]),
     }
 
 
 def _run_paper_stage(config: PipelineRunConfig, run_dir: Path, context: dict[str, Any]) -> dict[str, Any]:
-    portfolio_config = load_multi_strategy_portfolio_config(context["multi_strategy_config_path"])
+    handoff = resolve_strategy_execution_handoff(
+        context["multi_strategy_config_path"],
+        config=StrategyExecutionHandoffConfig(
+            use_activated_portfolio_for_paper=config.use_activated_portfolio_for_paper,
+            fail_if_no_active_strategies=config.fail_if_no_active_strategies,
+            include_inactive_conditionals_in_reports=config.include_inactive_conditionals_in_reports,
+        ),
+    )
+    paper_output_dir = run_dir / "paper_trading"
+    paper_output_dir.mkdir(parents=True, exist_ok=True)
+    handoff_summary_path = write_strategy_execution_handoff_summary(
+        handoff=handoff,
+        output_dir=paper_output_dir,
+        artifact_name="paper_active_strategy_summary.json",
+    )
+    portfolio_config = handoff.portfolio_config
+    if portfolio_config is None:
+        if config.fail_if_no_active_strategies:
+            raise StageExecutionError("No active strategies available for paper trading")
+        return {
+            "paper_active_strategy_summary_path": str(handoff_summary_path),
+            "paper_summary": {"skip_reason": "no_active_strategies", **handoff.summary},
+        }
     allocation_result = context.get("allocation_result") or allocate_multi_strategy_portfolio(portfolio_config)
     allocation_paths = context.get("allocation_paths") or write_multi_strategy_artifacts(
         allocation_result,
         run_dir / "portfolio_allocation",
     )
-    paper_output_dir = run_dir / "paper_trading"
-    paper_output_dir.mkdir(parents=True, exist_ok=True)
     execution_config = load_execution_config(config.execution_config_path) if config.execution_config_path else None
     paper_config = _build_multi_strategy_paper_config(
         allocation_result,
@@ -481,9 +531,13 @@ def _run_paper_stage(config: PipelineRunConfig, run_dir: Path, context: dict[str
         latest_scores={},
         latest_scheduled_weights=allocation_result.combined_target_weights,
         latest_effective_weights=allocation_result.combined_target_weights,
-        target_diagnostics=_build_multi_strategy_target_diagnostics(allocation_result),
+        target_diagnostics=_build_multi_strategy_target_diagnostics(allocation_result)
+        | {"strategy_execution_handoff": handoff.summary},
         skipped_symbols=[],
-        extra_diagnostics={"multi_strategy_allocation": allocation_result.summary},
+        extra_diagnostics={
+            "multi_strategy_allocation": allocation_result.summary,
+            "strategy_execution_handoff": handoff.summary,
+        },
         execution_config=execution_config,
         auto_apply_fills=False,
     )
@@ -504,6 +558,7 @@ def _run_paper_stage(config: PipelineRunConfig, run_dir: Path, context: dict[str
         **{name: str(path) for name, path in allocation_paths.items()},
         **{name: str(path) for name, path in paper_paths.items()},
         **{name: str(path) for name, path in persistence_paths.items()},
+        "paper_active_strategy_summary_path": str(handoff_summary_path),
         "experiment_registry_path": registry_paths["experiment_registry_path"],
         "paper_summary": latest_summary,
         "health_check_count": len(health_checks),
@@ -511,14 +566,38 @@ def _run_paper_stage(config: PipelineRunConfig, run_dir: Path, context: dict[str
 
 
 def _run_live_stage(config: PipelineRunConfig, run_dir: Path, context: dict[str, Any]) -> dict[str, Any]:
-    portfolio_config = load_multi_strategy_portfolio_config(context["multi_strategy_config_path"])
+    live_output_dir = run_dir / "live_dry_run"
+    live_output_dir.mkdir(parents=True, exist_ok=True)
+    handoff = resolve_strategy_execution_handoff(
+        context["multi_strategy_config_path"],
+        config=StrategyExecutionHandoffConfig(
+            use_activated_portfolio_for_paper=config.use_activated_portfolio_for_paper,
+            fail_if_no_active_strategies=config.fail_if_no_active_strategies,
+            include_inactive_conditionals_in_reports=config.include_inactive_conditionals_in_reports,
+        ),
+    )
+    handoff_summary_path = write_strategy_execution_handoff_summary(
+        handoff=handoff,
+        output_dir=live_output_dir,
+        artifact_name="live_active_strategy_summary.json",
+    )
+    portfolio_config = handoff.portfolio_config
+    if portfolio_config is None:
+        if config.fail_if_no_active_strategies:
+            raise StageExecutionError("No active strategies available for live dry-run")
+        return {
+            "live_active_strategy_summary_path": str(handoff_summary_path),
+            "live_summary": {"skip_reason": "no_active_strategies", **handoff.summary},
+        }
     allocation_result = context.get("allocation_result") or allocate_multi_strategy_portfolio(portfolio_config)
     allocation_paths = context.get("allocation_paths") or write_multi_strategy_artifacts(
         allocation_result,
         run_dir / "portfolio_allocation",
     )
     execution_config = load_execution_config(config.execution_config_path) if config.execution_config_path else None
-    target_diagnostics = _build_multi_strategy_target_diagnostics(allocation_result)
+    target_diagnostics = _build_multi_strategy_target_diagnostics(allocation_result) | {
+        "strategy_execution_handoff": handoff.summary,
+    }
     preview_config = LivePreviewConfig(
         symbols=sorted(allocation_result.combined_target_weights),
         preset_name="multi_strategy",
@@ -526,7 +605,7 @@ def _run_live_stage(config: PipelineRunConfig, run_dir: Path, context: dict[str,
         strategy="multi_strategy",
         reserve_cash_pct=portfolio_config.cash_reserve_pct,
         broker=config.live_broker,
-        output_dir=run_dir / "live_dry_run",
+        output_dir=live_output_dir,
     )
     result = run_live_dry_run_preview_for_targets(
         config=preview_config,
@@ -544,6 +623,7 @@ def _run_live_stage(config: PipelineRunConfig, run_dir: Path, context: dict[str,
     return {
         **{name: str(path) for name, path in allocation_paths.items()},
         **{name: str(path) for name, path in live_paths.items()},
+        "live_active_strategy_summary_path": str(handoff_summary_path),
         "live_summary": summary_payload,
     }
 

@@ -375,6 +375,13 @@ class MultiStrategySleeveConfig:
     min_capital_weight: float | None = None
     max_capital_weight: float | None = None
     rebalance_priority: int | None = None
+    promotion_variant: str | None = None
+    condition_id: str | None = None
+    condition_type: str | None = None
+    activation_state: str | None = None
+    is_active: bool | None = None
+    activation_reason: str | None = None
+    portfolio_bucket: str | None = None
     notes: str | None = None
     tags: list[str] = field(default_factory=list)
 
@@ -427,6 +434,16 @@ class MultiStrategyPortfolioConfig:
     cash_reserve_pct: float = 0.0
     group_map_path: str | None = None
     rebalance_timestamp: str | None = None
+    source_portfolio_path: str | None = None
+    source_activated_portfolio_path: str | None = None
+    activation_applied: bool = False
+    use_activated_portfolio_for_paper: bool = True
+    fail_if_no_active_strategies: bool = False
+    include_inactive_conditionals_in_reports: bool = True
+    active_strategy_count: int = 0
+    active_unconditional_count: int = 0
+    active_conditional_count: int = 0
+    inactive_conditional_count: int = 0
     notes: str | None = None
     tags: list[str] = field(default_factory=list)
 

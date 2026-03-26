@@ -264,6 +264,35 @@ def test_write_paper_trading_artifacts_includes_execution_outputs(tmp_path: Path
     assert paths["requested_orders_path"].exists()
 
 
+def test_write_paper_trading_artifacts_includes_active_strategy_counts(tmp_path: Path) -> None:
+    result = PaperTradingRunResult(
+        as_of="2025-01-04",
+        state=PaperPortfolioState(cash=100_000.0),
+        latest_prices={"AAPL": 100.0},
+        latest_scores={},
+        latest_target_weights={"AAPL": 1.0},
+        scheduled_target_weights={"AAPL": 1.0},
+        orders=[],
+        diagnostics={
+            "strategy_execution_handoff": {
+                "activation_applied": True,
+                "source_portfolio_path": "artifacts/strategy_portfolio/run_current/activated/activated_strategy_portfolio.json",
+                "active_strategy_count": 1,
+                "active_unconditional_count": 0,
+                "active_conditional_count": 1,
+                "inactive_conditional_count": 2,
+            }
+        },
+    )
+
+    paths = write_paper_trading_artifacts(result=result, output_dir=tmp_path)
+
+    summary = json.loads(paths["summary_path"].read_text(encoding="utf-8"))
+    assert summary["activation_applied"] is True
+    assert summary["active_strategy_count"] == 1
+    assert summary["active_conditional_count"] == 1
+
+
 def test_write_live_dry_run_artifacts_includes_execution_outputs(tmp_path: Path) -> None:
     execution_result = ExecutionSimulationResult(
         requested_orders=[_request()],
@@ -362,3 +391,55 @@ def test_write_live_dry_run_artifacts_includes_execution_outputs(tmp_path: Path)
     assert paths["live_execution_preview_summary_json_path"].exists()
     summary_payload = json.loads((tmp_path / "live_execution_preview_summary.json").read_text(encoding="utf-8"))
     assert summary_payload["execution_summary"]["expected_total_cost"] == 2.25
+
+
+def test_write_live_dry_run_artifacts_includes_active_strategy_counts(tmp_path: Path) -> None:
+    result = LivePreviewResult(
+        run_id="multi_strategy|2025-01-04",
+        as_of="2025-01-04",
+        config=LivePreviewConfig(symbols=["AAPL"], strategy="multi_strategy", output_dir=tmp_path),
+        account=BrokerAccount(account_id="acct-1", cash=100_000.0, equity=100_000.0, buying_power=100_000.0),
+        positions={},
+        open_orders=[],
+        latest_prices={"AAPL": 100.0},
+        target_weights={"AAPL": 1.0},
+        target_diagnostics={
+            "target_selected_symbols": "AAPL",
+            "target_selected_count": 1,
+            "strategy_execution_handoff": {
+                "activation_applied": True,
+                "source_portfolio_path": "artifacts/strategy_portfolio/run_current/activated/activated_strategy_portfolio.json",
+                "active_strategy_count": 1,
+                "active_unconditional_count": 1,
+                "active_conditional_count": 0,
+                "inactive_conditional_count": 1,
+            },
+        },
+        reconciliation=ReconciliationResult(
+            orders=[],
+            target_quantities={"AAPL": 10},
+            current_quantities={},
+            diagnostics={"investable_equity": 100_000.0, "target_weight_sum": 1.0, "order_count": 0},
+        ),
+        adjusted_orders=[],
+        order_adjustment_diagnostics={},
+        execution_result=None,
+        reconciliation_rows=[],
+        health_checks=[
+            LivePreviewHealthCheck(
+                check_name="output_ready",
+                status="pass",
+                message="ok",
+                timestamp="2025-01-04",
+                preset=None,
+                strategy="multi_strategy",
+                universe=None,
+            )
+        ],
+    )
+
+    write_live_dry_run_artifacts(result)
+    summary_payload = json.loads((tmp_path / "live_execution_preview_summary.json").read_text(encoding="utf-8"))
+    assert summary_payload["activation_applied"] is True
+    assert summary_payload["active_strategy_count"] == 1
+    assert summary_payload["inactive_conditional_count"] == 1

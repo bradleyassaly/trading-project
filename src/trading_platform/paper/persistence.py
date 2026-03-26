@@ -66,6 +66,12 @@ def _summary_markdown(summary: dict[str, Any], health_checks: list[dict[str, Any
         f"- Realized holdings minus top_n: `{summary['realized_holdings_minus_top_n']}`",
         f"- Selected names: `{summary['selected_names']}`",
         f"- Target names: `{summary['target_names']}`",
+        f"- Activation applied: `{summary.get('activation_applied')}`",
+        f"- Active strategy count: `{summary.get('active_strategy_count', 0)}`",
+        f"- Active unconditional count: `{summary.get('active_unconditional_count', 0)}`",
+        f"- Active conditional count: `{summary.get('active_conditional_count', 0)}`",
+        f"- Inactive conditional count: `{summary.get('inactive_conditional_count', 0)}`",
+        f"- Source portfolio path: `{summary.get('source_portfolio_path')}`",
         f"- Turnover estimate: `{summary['turnover_estimate']}`",
         f"- Requested order count: `{summary.get('requested_order_count', 0)}`",
         f"- Executable order count: `{summary.get('executable_order_count', 0)}`",
@@ -217,6 +223,7 @@ def persist_paper_run_outputs(
     selected_names = str(target_diag.get("selected_symbols", "") or "").strip()
     target_names = str(target_diag.get("target_selected_symbols", "") or "").strip()
     summary_stats = dict(target_diag.get("summary", {}))
+    handoff = dict(target_diag.get("strategy_execution_handoff", {}))
     execution_diag = dict(result.diagnostics.get("execution", {}))
     execution_summary = dict(execution_diag.get("execution_summary", {}))
     paper_execution_diag = dict(result.diagnostics.get("paper_execution", {}))
@@ -271,6 +278,12 @@ def persist_paper_run_outputs(
         "executable_order_count": int(execution_summary.get("executable_order_count", 0) or len(result.orders)),
         "turnover_before_execution_constraints": float(execution_summary.get("turnover_before_constraints", 0.0) or 0.0),
         "turnover_after_execution_constraints": float(execution_summary.get("turnover_after_constraints", 0.0) or 0.0),
+        "active_strategy_count": int(handoff.get("active_strategy_count", 0) or 0),
+        "active_unconditional_count": int(handoff.get("active_unconditional_count", 0) or 0),
+        "active_conditional_count": int(handoff.get("active_conditional_count", 0) or 0),
+        "inactive_conditional_count": int(handoff.get("inactive_conditional_count", 0) or 0),
+        "source_portfolio_path": str(handoff.get("source_portfolio_path") or ""),
+        "activation_applied": bool(handoff.get("activation_applied", False)),
     }
 
     health_checks = _health_checks(
@@ -407,6 +420,10 @@ def persist_paper_run_outputs(
         key_counts={
             "realized_holdings_count": summary_row["realized_holdings_count"],
             "target_selected_count": summary_row["target_selected_count"],
+            "active_strategy_count": summary_row["active_strategy_count"],
+            "active_unconditional_count": summary_row["active_unconditional_count"],
+            "active_conditional_count": summary_row["active_conditional_count"],
+            "inactive_conditional_count": summary_row["inactive_conditional_count"],
             "requested_order_count": summary_row["requested_order_count"],
             "executable_order_count": summary_row["executable_order_count"],
             "rejected_order_count": summary_row["rejected_order_count"],

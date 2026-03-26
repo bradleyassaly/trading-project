@@ -519,6 +519,17 @@ Each activated row keeps promotion provenance and adds:
 - `matched_conditions`
 - `unmatched_conditions`
 
+Paper and live dry-run multi-strategy commands can now take any of these as `--config`:
+
+- a generated `multi_strategy.json`
+- a `*_run_bundle.json`
+- an `activated_strategy_portfolio.json`
+
+When an activated portfolio is used, only `is_active=true` rows are handed to execution. The handoff writes compact audit artifacts such as:
+
+- `paper_active_strategy_summary.json`
+- `live_active_strategy_summary.json`
+
 The portfolio policy can now control conditional handling through:
 
 - `include_conditional_strategies`
@@ -663,6 +674,18 @@ If DB tracking is enabled in the cycle config, alpha-cycle now propagates tracki
 - research runs/candidates/metrics
 - promoted unconditional and conditional strategies
 - a bounded portfolio run summary with selected-count and conditional-count notes
+
+Activation-aware paper/live handoff behavior:
+
+- `use_activated_portfolio_for_paper`
+- `fail_if_no_active_strategies`
+- `include_inactive_conditionals_in_reports`
+
+The default behavior is safe:
+
+- if an activated portfolio is present, only active rows are handed to paper/live dry-run
+- if no activated portfolio is present, existing unconditional multi-strategy workflows continue unchanged
+- if zero active strategies remain, the handoff writes a summary artifact and skips unless explicit failure is requested
 
 Mode behavior:
 

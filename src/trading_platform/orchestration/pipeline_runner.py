@@ -22,6 +22,11 @@ from trading_platform.portfolio.multi_strategy import (
     allocate_multi_strategy_portfolio,
     write_multi_strategy_artifacts,
 )
+from trading_platform.portfolio.strategy_execution_handoff import (
+    StrategyExecutionHandoffConfig,
+    resolve_strategy_execution_handoff,
+    write_strategy_execution_handoff_summary,
+)
 from trading_platform.portfolio.adaptive_allocation import (
     build_adaptive_allocation,
     export_adaptive_allocation_run_config,
@@ -609,19 +614,29 @@ def _stage_allocation(config: AutomatedOrchestrationConfig, run_dir: Path, conte
     config_path = context.get("multi_strategy_config_path")
     if not config_path:
         raise OrchestrationStageError("allocation stage requires exported multi-strategy config")
-    from trading_platform.config.loader import load_multi_strategy_portfolio_config
-
-    portfolio_config = load_multi_strategy_portfolio_config(config_path)
+    handoff = resolve_strategy_execution_handoff(
+        config_path,
+        config=StrategyExecutionHandoffConfig(),
+    )
+    output_dir = _ensure_stage_output_dir(run_dir, config.allocation_output_dir, "allocation")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    handoff_summary_path = write_strategy_execution_handoff_summary(
+        handoff=handoff,
+        output_dir=output_dir,
+        artifact_name="execution_active_strategy_summary.json",
+    )
+    portfolio_config = handoff.portfolio_config
+    if portfolio_config is None:
+        raise OrchestrationStageError("allocation produced zero active strategies")
     allocation_result = allocate_multi_strategy_portfolio(portfolio_config)
     if not allocation_result.combined_target_weights:
         raise OrchestrationStageError("allocation produced an empty combined portfolio")
-    output_dir = _ensure_stage_output_dir(run_dir, config.allocation_output_dir, "allocation")
-    output_dir.mkdir(parents=True, exist_ok=True)
     artifact_paths = write_multi_strategy_artifacts(allocation_result, output_dir)
     context["allocation_result"] = allocation_result
     context["allocation_dir"] = str(output_dir)
     return {
         **{name: str(path) for name, path in artifact_paths.items()},
+        "execution_active_strategy_summary_path": str(handoff_summary_path),
         "allocation_position_count": len(allocation_result.combined_target_weights),
         "gross_exposure": allocation_result.summary["gross_exposure_after_constraints"],
     }
@@ -636,11 +651,20 @@ def _stage_paper(config: AutomatedOrchestrationConfig, run_dir: Path, context: d
     allocation_result = context.get("allocation_result")
     if allocation_result is None:
         raise OrchestrationStageError("paper stage requires allocation results")
-    from trading_platform.config.loader import load_multi_strategy_portfolio_config
-
-    portfolio_config = load_multi_strategy_portfolio_config(context["multi_strategy_config_path"])
+    handoff = resolve_strategy_execution_handoff(
+        context["multi_strategy_config_path"],
+        config=StrategyExecutionHandoffConfig(),
+    )
     output_dir = _ensure_stage_output_dir(run_dir, config.paper_output_dir, "paper")
     output_dir.mkdir(parents=True, exist_ok=True)
+    handoff_summary_path = write_strategy_execution_handoff_summary(
+        handoff=handoff,
+        output_dir=output_dir,
+        artifact_name="paper_active_strategy_summary.json",
+    )
+    portfolio_config = handoff.portfolio_config
+    if portfolio_config is None:
+        raise OrchestrationStageError("paper stage requires at least one active strategy")
     from trading_platform.config.loader import load_execution_config
 
     execution_config = load_execution_config(config.execution_config_path) if config.execution_config_path else None
@@ -656,9 +680,13 @@ def _stage_paper(config: AutomatedOrchestrationConfig, run_dir: Path, context: d
         latest_scores={},
         latest_scheduled_weights=allocation_result.combined_target_weights,
         latest_effective_weights=allocation_result.combined_target_weights,
-        target_diagnostics=_build_multi_strategy_target_diagnostics(allocation_result),
+        target_diagnostics=_build_multi_strategy_target_diagnostics(allocation_result)
+        | {"strategy_execution_handoff": handoff.summary},
         skipped_symbols=[],
-        extra_diagnostics={"multi_strategy_allocation": allocation_result.summary},
+        extra_diagnostics={
+            "multi_strategy_allocation": allocation_result.summary,
+            "strategy_execution_handoff": handoff.summary,
+        },
         execution_config=execution_config,
         auto_apply_fills=False,
     )
@@ -676,6 +704,7 @@ def _stage_paper(config: AutomatedOrchestrationConfig, run_dir: Path, context: d
     return {
         **{name: str(path) for name, path in paper_paths.items()},
         **{name: str(path) for name, path in persistence_paths.items()},
+        "paper_active_strategy_summary_path": str(handoff_summary_path),
         "experiment_registry_path": registry_paths["experiment_registry_path"],
         "paper_order_count": len(result.orders),
         "paper_equity": latest_summary.get("current_equity", latest_summary.get("equity")),

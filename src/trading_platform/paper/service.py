@@ -687,6 +687,15 @@ def write_paper_trading_artifacts(
         "diagnostics": result.diagnostics,
         "price_snapshots": [asdict(snapshot) for snapshot in result.price_snapshots],
     }
+    handoff = dict(result.diagnostics.get("strategy_execution_handoff", {}))
+    if handoff:
+        summary_payload["strategy_execution_handoff"] = handoff
+        summary_payload["active_strategy_count"] = int(handoff.get("active_strategy_count", 0) or 0)
+        summary_payload["active_unconditional_count"] = int(handoff.get("active_unconditional_count", 0) or 0)
+        summary_payload["active_conditional_count"] = int(handoff.get("active_conditional_count", 0) or 0)
+        summary_payload["inactive_conditional_count"] = int(handoff.get("inactive_conditional_count", 0) or 0)
+        summary_payload["source_portfolio_path"] = handoff.get("source_portfolio_path")
+        summary_payload["activation_applied"] = bool(handoff.get("activation_applied", False))
     summary_path.write_text(json.dumps(summary_payload, indent=2), encoding="utf-8")
 
     paths = {

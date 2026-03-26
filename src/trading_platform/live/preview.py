@@ -679,6 +679,11 @@ def _write_markdown_summary(payload: dict[str, Any], health_checks: list[dict[st
         f"- Broker: `{payload['broker']}`",
         f"- Equity: `{payload['equity']:.2f}`",
         f"- Cash: `{payload['cash']:.2f}`",
+        f"- Activation applied: `{payload.get('activation_applied')}`",
+        f"- Active strategy count: `{payload.get('active_strategy_count', 0)}`",
+        f"- Active unconditional count: `{payload.get('active_unconditional_count', 0)}`",
+        f"- Active conditional count: `{payload.get('active_conditional_count', 0)}`",
+        f"- Inactive conditional count: `{payload.get('inactive_conditional_count', 0)}`",
         f"- Adjusted proposed orders: `{payload['adjusted_order_count']}`",
         f"- Selected names: `{','.join(payload.get('selected_names', []))}`",
         f"- Target names: `{','.join(payload.get('target_names', []))}`",
@@ -792,6 +797,15 @@ def write_live_dry_run_artifacts(
         "reconciliation_diagnostics": result.reconciliation.diagnostics,
         "order_adjustment_diagnostics": result.order_adjustment_diagnostics,
     }
+    handoff = dict(target_diagnostics.get("strategy_execution_handoff", {}))
+    if handoff:
+        summary_payload["strategy_execution_handoff"] = handoff
+        summary_payload["active_strategy_count"] = int(handoff.get("active_strategy_count", 0) or 0)
+        summary_payload["active_unconditional_count"] = int(handoff.get("active_unconditional_count", 0) or 0)
+        summary_payload["active_conditional_count"] = int(handoff.get("active_conditional_count", 0) or 0)
+        summary_payload["inactive_conditional_count"] = int(handoff.get("inactive_conditional_count", 0) or 0)
+        summary_payload["source_portfolio_path"] = handoff.get("source_portfolio_path")
+        summary_payload["activation_applied"] = bool(handoff.get("activation_applied", False))
     if result.execution_result is not None:
         summary_payload["execution_summary"] = result.execution_result.summary.to_dict()
     output_check = _health_check(

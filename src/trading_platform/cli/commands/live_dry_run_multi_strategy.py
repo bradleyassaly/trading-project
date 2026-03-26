@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from trading_platform.config.loader import load_execution_config, load_multi_strategy_portfolio_config
+from trading_platform.config.loader import load_execution_config
 from trading_platform.live.preview import (
     LivePreviewConfig,
     run_live_dry_run_preview_for_targets,
@@ -13,10 +13,30 @@ from trading_platform.portfolio.multi_strategy import (
     allocate_multi_strategy_portfolio,
     write_multi_strategy_artifacts,
 )
+from trading_platform.portfolio.strategy_execution_handoff import (
+    StrategyExecutionHandoffConfig,
+    resolve_strategy_execution_handoff,
+    write_strategy_execution_handoff_summary,
+)
 
 
 def cmd_live_dry_run_multi_strategy(args) -> None:
-    portfolio_config = load_multi_strategy_portfolio_config(args.config)
+    handoff = resolve_strategy_execution_handoff(
+        args.config,
+        config=StrategyExecutionHandoffConfig(),
+    )
+    handoff_summary_path = write_strategy_execution_handoff_summary(
+        handoff=handoff,
+        output_dir=Path(args.output_dir),
+        artifact_name="live_active_strategy_summary.json",
+    )
+    if handoff.portfolio_config is None:
+        if handoff.summary.get("fail_if_no_active_strategies"):
+            raise ValueError(f"No active strategies available for live dry-run: {args.config}")
+        print("No active strategies available for live dry-run.")
+        print(f"Handoff summary: {handoff_summary_path}")
+        return
+    portfolio_config = handoff.portfolio_config
     execution_config = load_execution_config(args.execution_config) if getattr(args, "execution_config", None) else None
     allocation_result = allocate_multi_strategy_portfolio(portfolio_config)
     allocation_paths = write_multi_strategy_artifacts(allocation_result, Path(args.output_dir))
@@ -48,6 +68,7 @@ def cmd_live_dry_run_multi_strategy(args) -> None:
         if allocation_result.summary["symbols_removed_or_clipped"]
         else "",
         "multi_strategy_allocation": allocation_result.summary,
+        "strategy_execution_handoff": handoff.summary,
     }
     preview_config = LivePreviewConfig(
         symbols=sorted(allocation_result.combined_target_weights),
@@ -74,6 +95,7 @@ def cmd_live_dry_run_multi_strategy(args) -> None:
     print(f"Enabled sleeves: {allocation_result.summary['enabled_sleeve_count']}")
     print(f"Adjusted proposed orders: {summary_payload['adjusted_order_count']}")
     print(f"Gross exposure: {allocation_result.summary['gross_exposure_after_constraints']:.6f}")
+    print(f"Active strategies: {handoff.summary.get('active_strategy_count', 0)}")
     if "execution_summary" in summary_payload:
         print(f"Executable orders: {summary_payload['execution_summary'].get('executable_order_count', 0)}")
         print(f"Rejected orders: {summary_payload['execution_summary'].get('rejected_order_count', 0)}")
@@ -82,3 +104,4 @@ def cmd_live_dry_run_multi_strategy(args) -> None:
     combined_paths = {**allocation_paths, **live_paths}
     for name, path in sorted(combined_paths.items()):
         print(f"  {name}: {path}")
+    print(f"  live_active_strategy_summary_path: {handoff_summary_path}")

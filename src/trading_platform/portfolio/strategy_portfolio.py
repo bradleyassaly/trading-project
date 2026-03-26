@@ -698,6 +698,7 @@ def export_multi_strategy_run_config_bundle(
     bundle_name: str,
     source_artifact_path: str | Path,
     notes: str,
+    source_payload: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
@@ -716,6 +717,13 @@ def export_multi_strategy_run_config_bundle(
             )
             or None,
             enabled=bool(row.get("enabled", True)),
+            promotion_variant=str(row.get("promotion_variant") or "") or None,
+            condition_id=str(row.get("condition_id") or "") or None,
+            condition_type=str(row.get("condition_type") or "") or None,
+            activation_state=str(row.get("activation_state") or "") or None,
+            is_active=bool(row.get("is_active")) if row.get("is_active") is not None else None,
+            activation_reason=str(row.get("activation_reason") or "") or None,
+            portfolio_bucket=str(row.get("portfolio_bucket") or "") or None,
             notes=" | ".join(
                 part
                 for part in [
@@ -740,8 +748,37 @@ def export_multi_strategy_run_config_bundle(
         )
         for row in selected_rows
     ]
+    source_summary = dict((source_payload or {}).get("summary") or {})
+    active_strategy_count = int(source_summary.get("active_row_count", len(selected_rows)) or len(selected_rows))
+    active_unconditional_count = int(
+        source_summary.get(
+            "activated_unconditional_count",
+            sum(1 for row in selected_rows if str(row.get("promotion_variant") or "unconditional") != "conditional"),
+        )
+        or 0
+    )
+    active_conditional_count = int(
+        source_summary.get(
+            "activated_conditional_count",
+            sum(1 for row in selected_rows if str(row.get("promotion_variant") or "") == "conditional"),
+        )
+        or 0
+    )
+    inactive_conditional_count = int(source_summary.get("inactive_conditional_count", 0) or 0)
+    activation_applied = bool((source_payload or {}).get("active_strategies") is not None)
     multi_strategy_config = MultiStrategyPortfolioConfig(
         sleeves=sleeves,
+        source_portfolio_path=str((source_payload or {}).get("source_portfolio_path") or Path(source_artifact_path)),
+        source_activated_portfolio_path=(
+            str(Path(source_artifact_path))
+            if activation_applied
+            else None
+        ),
+        activation_applied=activation_applied,
+        active_strategy_count=active_strategy_count,
+        active_unconditional_count=active_unconditional_count,
+        active_conditional_count=active_conditional_count,
+        inactive_conditional_count=inactive_conditional_count,
         notes=notes,
         tags=[bundle_name],
     )
@@ -781,6 +818,11 @@ def export_multi_strategy_run_config_bundle(
     bundle_payload = {
         "generated_at": _now_utc(),
         "source_artifact_path": str(Path(source_artifact_path)),
+        "activation_applied": activation_applied,
+        "active_strategy_count": active_strategy_count,
+        "active_unconditional_count": active_unconditional_count,
+        "active_conditional_count": active_conditional_count,
+        "inactive_conditional_count": inactive_conditional_count,
         "multi_strategy_config_path": str(multi_strategy_path),
         "pipeline_config_path": str(pipeline_path),
         "selected_preset_names": [row["preset_name"] for row in selected_rows],
@@ -835,5 +877,6 @@ def export_strategy_portfolio_run_config(
         output_dir=output_dir,
         bundle_name="strategy_portfolio",
         source_artifact_path=str(payload_path),
+        source_payload=portfolio_payload,
         notes="Generated from strategy_portfolio.json",
     )

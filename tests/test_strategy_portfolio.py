@@ -188,6 +188,8 @@ def test_strategy_portfolio_export_prefers_activated_active_rows(tmp_path: Path)
 
     bundle_payload = json.loads(Path(export["run_bundle_path"]).read_text(encoding="utf-8"))
     assert bundle_payload["selected_preset_names"] == ["generated_base"]
+    assert bundle_payload["activation_applied"] is True
+    assert bundle_payload["source_artifact_path"].endswith("activated_strategy_portfolio.json")
 
 
 def test_strategy_portfolio_metric_weighted_concentrates_more_than_capped_metric_weighted(tmp_path: Path) -> None:

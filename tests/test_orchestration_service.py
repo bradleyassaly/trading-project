@@ -14,6 +14,7 @@ from trading_platform.orchestration.models import (
     PipelineRunConfig,
 )
 from trading_platform.orchestration.service import run_orchestration_pipeline
+from trading_platform.portfolio.strategy_execution_handoff import StrategyExecutionHandoff
 
 
 def _pipeline_config(tmp_path: Path, **overrides) -> PipelineRunConfig:
@@ -201,8 +202,18 @@ def test_pipeline_run_happy_path_full_pipeline(monkeypatch, tmp_path: Path) -> N
         )[1],
     )
     monkeypatch.setattr(
-        "trading_platform.orchestration.service.load_multi_strategy_portfolio_config",
-        lambda path: type("PortfolioCfg", (), {"cash_reserve_pct": 0.0})(),
+        "trading_platform.orchestration.service.resolve_strategy_execution_handoff",
+        lambda path, config=None: StrategyExecutionHandoff(
+            source_kind="multi_strategy_config",
+            source_path=str(path),
+            portfolio_config=type("PortfolioCfg", (), {"cash_reserve_pct": 0.0})(),
+            summary={"active_strategy_count": 1},
+            warnings=[],
+        ),
+    )
+    monkeypatch.setattr(
+        "trading_platform.orchestration.service.write_strategy_execution_handoff_summary",
+        lambda **kwargs: Path(kwargs["output_dir"]) / kwargs["artifact_name"],
     )
     allocation_result = type(
         "AllocationResult",

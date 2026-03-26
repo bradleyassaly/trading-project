@@ -65,6 +65,9 @@ class PipelineRunConfig:
     execution_config_path: str | None = None
     multi_strategy_output_path: str | None = None
     multi_strategy_input_path: str | None = None
+    use_activated_portfolio_for_paper: bool = True
+    fail_if_no_active_strategies: bool = False
+    include_inactive_conditionals_in_reports: bool = True
     paper_state_path: str | None = None
     live_broker: str = "mock"
     output_root_dir: str = "artifacts/orchestration"

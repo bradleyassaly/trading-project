@@ -688,6 +688,9 @@ output_root_dir: artifacts/orchestration
 registry_path: artifacts/registry.json
 governance_config_path: configs/governance.yaml
 multi_strategy_output_path: artifacts/generated_multi_strategy.yaml
+use_activated_portfolio_for_paper: true
+fail_if_no_active_strategies: false
+include_inactive_conditionals_in_reports: true
 paper_state_path: artifacts/paper_state.json
 stages:
   promotion_evaluation: true
@@ -701,6 +704,9 @@ stages:
 
     assert config.run_name == "daily_governance"
     assert config.schedule_type == "daily"
+    assert config.use_activated_portfolio_for_paper is True
+    assert config.fail_if_no_active_strategies is False
+    assert config.include_inactive_conditionals_in_reports is True
     assert config.stages.promotion_evaluation is True
     assert config.stages.reporting is True
 

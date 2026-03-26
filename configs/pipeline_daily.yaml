@@ -8,6 +8,9 @@ monitoring_config_path: configs/monitoring.yaml
 notification_config_path: configs/notifications.yaml
 execution_config_path: configs/execution.yaml
 multi_strategy_output_path: artifacts/generated_registry_multi_strategy.json
+use_activated_portfolio_for_paper: true
+fail_if_no_active_strategies: false
+include_inactive_conditionals_in_reports: true
 paper_state_path: artifacts/paper/multi_strategy_state.json
 output_root_dir: artifacts/orchestration
 fail_fast: false
