@@ -700,9 +700,15 @@ def write_paper_trading_artifacts(
     for key in (
         "requested_active_strategy_count",
         "requested_symbol_count",
+        "pre_validation_target_symbol_count",
+        "post_validation_target_symbol_count",
         "usable_symbol_count",
         "skipped_symbol_count",
+        "target_drop_stage",
         "zero_target_reason",
+        "target_drop_reason",
+        "generated_preset_path",
+        "signal_artifact_path",
         "latest_price_source_summary",
     ):
         if key in target_diag:

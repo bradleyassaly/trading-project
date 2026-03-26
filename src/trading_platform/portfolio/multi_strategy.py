@@ -39,6 +39,7 @@ class SleeveTargetBundle:
     diagnostics: dict[str, Any]
     skipped_symbols: list[str]
     price_snapshots: list[PaperExecutionPriceSnapshot]
+    signal_snapshot: Any | None
 
 
 @dataclass(frozen=True)
@@ -55,6 +56,8 @@ class MultiStrategyAllocationResult:
     portfolio_diagnostics_rows: list[dict[str, Any]]
     overlap_matrix_rows: list[dict[str, Any]]
     execution_symbol_coverage_rows: list[dict[str, Any]]
+    target_generation_stage_rows: list[dict[str, Any]]
+    sleeve_target_diagnostics_rows: list[dict[str, Any]]
     summary: dict[str, Any]
 
 
@@ -160,6 +163,7 @@ def load_strategy_sleeves(
                 diagnostics=target_result.target_diagnostics | target_result.extra_diagnostics,
                 skipped_symbols=target_result.skipped_symbols,
                 price_snapshots=target_result.price_snapshots,
+                signal_snapshot=target_result.signal_snapshot,
             )
         )
     if not bundles:
@@ -376,6 +380,131 @@ def _zero_target_reason(
     if combined_target_count <= 0:
         return "all_target_weights_resolved_below_threshold"
     return None
+
+
+def _derive_target_drop(bundle: SleeveTargetBundle) -> tuple[str | None, str | None]:
+    target_diag = dict(bundle.diagnostics.get("target_construction", {}))
+    raw_reason = str(target_diag.get("reason") or bundle.diagnostics.get("reason") or "").strip()
+    score_symbol_count = int(bundle.signal_snapshot.scores.shape[1]) if getattr(bundle.signal_snapshot, "scores", None) is not None and not bundle.signal_snapshot.scores.empty else 0
+    selected_signal_count = len(bundle.diagnostics.get("selected_signals", []) or [])
+    latest_component_score_count = len(bundle.diagnostics.get("latest_component_scores", []) or [])
+    latest_composite_score_count = len(bundle.diagnostics.get("latest_composite_scores", []) or [])
+    liquidity_exclusion_count = len(bundle.diagnostics.get("liquidity_exclusions", []) or [])
+    pre_validation_target_count = len(set(bundle.scheduled_target_weights) | set(bundle.effective_target_weights))
+
+    if raw_reason == "no_approved_signals":
+        return "signal_snapshot", "missing_signal_snapshot"
+    if raw_reason == "no_composite_scores":
+        if selected_signal_count > 0 and latest_component_score_count == 0:
+            return "signal_scoring", "empty_signal_scores"
+        if score_symbol_count == 0 or latest_composite_score_count == 0:
+            return "signal_scoring", "empty_signal_scores"
+        return "signal_scoring", "no_targets_generated"
+    if raw_reason == "no_eligible_names":
+        if liquidity_exclusion_count > 0:
+            return "liquidity_filter", "all_symbols_failed_liquidity_filter"
+        return "rank_selection", "all_symbols_failed_rank_selection"
+    if pre_validation_target_count <= 0:
+        if score_symbol_count <= 0:
+            return "signal_scoring", "empty_signal_scores"
+        return "rank_selection", "all_symbols_failed_rank_selection"
+    return None, None
+
+
+def _build_sleeve_target_diagnostics(
+    *,
+    bundle: SleeveTargetBundle,
+    post_validation_target_symbol_count: int,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    score_symbol_count = int(bundle.signal_snapshot.scores.shape[1]) if getattr(bundle.signal_snapshot, "scores", None) is not None and not bundle.signal_snapshot.scores.empty else 0
+    requested_symbol_count = len(getattr(bundle.paper_config, "symbols", []) or [])
+    loaded_signal_symbol_count = max(score_symbol_count, len(bundle.latest_scores))
+    selected_signal_count = len(bundle.diagnostics.get("selected_signals", []) or [])
+    latest_component_score_count = len(bundle.diagnostics.get("latest_component_scores", []) or [])
+    latest_composite_score_count = len(bundle.diagnostics.get("latest_composite_scores", []) or [])
+    pre_validation_target_symbol_count = len(set(bundle.scheduled_target_weights) | set(bundle.effective_target_weights))
+    rank_selection_count = int(
+        bundle.diagnostics.get("target_construction", {}).get("selection_count")
+        or bundle.diagnostics.get("target_construction", {}).get("target_selected_count")
+        or pre_validation_target_symbol_count
+    )
+    liquidity_rows = list(bundle.diagnostics.get("liquidity_exclusions", []) or [])
+    liquidity_exclusion_count = len({str(row.get("symbol")) for row in liquidity_rows if row.get("symbol")})
+    liquidity_survivor_count = pre_validation_target_symbol_count
+    target_drop_stage, target_drop_reason = _derive_target_drop(bundle)
+    generated_preset_path = str(bundle.sleeve.preset_path or "")
+    signal_artifact_path = str(
+        getattr(bundle.paper_config, "approved_model_state_path", None)
+        or getattr(bundle.paper_config, "composite_artifact_dir", None)
+        or ""
+    )
+
+    diagnostics_row = {
+        "sleeve_name": bundle.sleeve.sleeve_name,
+        "preset_name": bundle.sleeve.preset_name,
+        "generated_preset_path": generated_preset_path,
+        "signal_source": getattr(bundle.paper_config, "signal_source", ""),
+        "strategy": getattr(bundle.paper_config, "strategy", ""),
+        "signal_artifact_path": signal_artifact_path,
+        "requested_symbol_count": requested_symbol_count,
+        "loaded_signal_symbol_count": loaded_signal_symbol_count,
+        "selected_signal_count": selected_signal_count,
+        "latest_component_score_count": latest_component_score_count,
+        "latest_composite_score_count": latest_composite_score_count,
+        "liquidity_exclusion_count": liquidity_exclusion_count,
+        "rank_selection_count": rank_selection_count,
+        "pre_validation_target_symbol_count": pre_validation_target_symbol_count,
+        "post_validation_target_symbol_count": post_validation_target_symbol_count,
+        "target_drop_stage": target_drop_stage or "",
+        "target_drop_reason": target_drop_reason or "",
+        "raw_target_reason": str(bundle.diagnostics.get("target_construction", {}).get("reason") or bundle.diagnostics.get("reason") or ""),
+        "as_of": bundle.as_of,
+    }
+    stage_rows = [
+        {
+            "sleeve_name": bundle.sleeve.sleeve_name,
+            "preset_name": bundle.sleeve.preset_name,
+            "stage_name": "symbols_requested",
+            "count": requested_symbol_count,
+            "reason": "",
+        },
+        {
+            "sleeve_name": bundle.sleeve.sleeve_name,
+            "preset_name": bundle.sleeve.preset_name,
+            "stage_name": "signals_loaded",
+            "count": loaded_signal_symbol_count,
+            "reason": "",
+        },
+        {
+            "sleeve_name": bundle.sleeve.sleeve_name,
+            "preset_name": bundle.sleeve.preset_name,
+            "stage_name": "rank_selection",
+            "count": rank_selection_count,
+            "reason": "",
+        },
+        {
+            "sleeve_name": bundle.sleeve.sleeve_name,
+            "preset_name": bundle.sleeve.preset_name,
+            "stage_name": "liquidity_survivors",
+            "count": liquidity_survivor_count,
+            "reason": "",
+        },
+        {
+            "sleeve_name": bundle.sleeve.sleeve_name,
+            "preset_name": bundle.sleeve.preset_name,
+            "stage_name": "pre_validation_targets",
+            "count": pre_validation_target_symbol_count,
+            "reason": "",
+        },
+        {
+            "sleeve_name": bundle.sleeve.sleeve_name,
+            "preset_name": bundle.sleeve.preset_name,
+            "stage_name": "post_validation_targets",
+            "count": post_validation_target_symbol_count,
+            "reason": target_drop_reason or "",
+        },
+    ]
+    return diagnostics_row, stage_rows
 
 
 def allocate_multi_strategy_portfolio(
@@ -690,6 +819,27 @@ def allocate_multi_strategy_portfolio(
             if row["sleeve_count"] > 1
         )
     )
+    sleeve_target_diagnostics_rows: list[dict[str, Any]] = []
+    target_generation_stage_rows: list[dict[str, Any]] = []
+    post_validation_counts_by_sleeve: dict[str, int] = {}
+    for row in sleeve_rows:
+        post_validation_counts_by_sleeve[row["sleeve_name"]] = post_validation_counts_by_sleeve.get(row["sleeve_name"], 0) + 1
+    for bundle in sleeve_bundles:
+        sleeve_diag, stage_rows = _build_sleeve_target_diagnostics(
+            bundle=bundle,
+            post_validation_target_symbol_count=post_validation_counts_by_sleeve.get(bundle.sleeve.sleeve_name, 0),
+        )
+        sleeve_target_diagnostics_rows.append(sleeve_diag)
+        target_generation_stage_rows.extend(stage_rows)
+
+    primary_drop = next(
+        (
+            row
+            for row in sleeve_target_diagnostics_rows
+            if row.get("target_drop_reason")
+        ),
+        {},
+    )
 
     portfolio_diagnostics_rows = [
         {"metric": "gross_exposure_before_constraints", "value": before_summary["gross_exposure"]},
@@ -747,6 +897,10 @@ def allocate_multi_strategy_portfolio(
         "invalid_zero_price_symbol_count": invalid_price_count,
         "zero_target_reason": zero_target_reason,
         "latest_price_source_summary": latest_price_source_counts,
+        "target_drop_stage": primary_drop.get("target_drop_stage"),
+        "target_drop_reason": primary_drop.get("target_drop_reason"),
+        "generated_preset_path": primary_drop.get("generated_preset_path"),
+        "signal_artifact_path": primary_drop.get("signal_artifact_path"),
         "overlap_concentration": overlap_concentration,
         "effective_number_of_sleeves": effective_sleeves,
         "effective_number_of_positions": effective_positions,
@@ -767,6 +921,8 @@ def allocate_multi_strategy_portfolio(
         portfolio_diagnostics_rows=portfolio_diagnostics_rows,
         overlap_matrix_rows=overlap_matrix_rows,
         execution_symbol_coverage_rows=execution_symbol_coverage_rows,
+        target_generation_stage_rows=target_generation_stage_rows,
+        sleeve_target_diagnostics_rows=sleeve_target_diagnostics_rows,
         summary=summary,
     )
 
@@ -787,6 +943,7 @@ def _render_summary_markdown(result: MultiStrategyAllocationResult) -> str:
         f"- Requested symbols: `{result.summary.get('requested_symbol_count', 0)}`",
         f"- Usable symbols: `{result.summary.get('usable_symbol_count', 0)}`",
         f"- Skipped symbols: `{result.summary.get('skipped_symbol_count', 0)}`",
+        f"- Target drop stage: `{result.summary.get('target_drop_stage')}`",
         f"- Zero target reason: `{result.summary.get('zero_target_reason')}`",
         "",
         "## Sleeve Contributions",
@@ -821,6 +978,9 @@ def write_multi_strategy_artifacts(
     overlap_matrix_path = output_path / "overlap_matrix.csv"
     execution_coverage_path = output_path / "execution_symbol_coverage.csv"
     execution_summary_path = output_path / "execution_data_availability_summary.json"
+    target_generation_summary_path = output_path / "target_generation_summary.json"
+    target_generation_stage_counts_path = output_path / "target_generation_stage_counts.csv"
+    sleeve_target_diagnostics_path = output_path / "sleeve_target_diagnostics.csv"
 
     pd.DataFrame(
         result.combined_rows,
@@ -875,6 +1035,34 @@ def write_multi_strategy_artifacts(
             "as_of",
         ],
     ).to_csv(execution_coverage_path, index=False)
+    pd.DataFrame(
+        result.target_generation_stage_rows,
+        columns=["sleeve_name", "preset_name", "stage_name", "count", "reason"],
+    ).to_csv(target_generation_stage_counts_path, index=False)
+    pd.DataFrame(
+        result.sleeve_target_diagnostics_rows,
+        columns=[
+            "sleeve_name",
+            "preset_name",
+            "generated_preset_path",
+            "signal_source",
+            "strategy",
+            "signal_artifact_path",
+            "requested_symbol_count",
+            "loaded_signal_symbol_count",
+            "selected_signal_count",
+            "latest_component_score_count",
+            "latest_composite_score_count",
+            "liquidity_exclusion_count",
+            "rank_selection_count",
+            "pre_validation_target_symbol_count",
+            "post_validation_target_symbol_count",
+            "target_drop_stage",
+            "target_drop_reason",
+            "raw_target_reason",
+            "as_of",
+        ],
+    ).to_csv(sleeve_target_diagnostics_path, index=False)
 
     summary_json_path.write_text(
         json.dumps(
@@ -909,6 +1097,25 @@ def write_multi_strategy_artifacts(
         ),
         encoding="utf-8",
     )
+    target_generation_summary_path.write_text(
+        json.dumps(
+            {
+                "as_of": result.as_of,
+                "requested_active_strategy_count": result.summary.get("requested_active_strategy_count"),
+                "enabled_sleeve_count": result.summary.get("enabled_sleeve_count"),
+                "pre_validation_target_symbol_count": result.summary.get("pre_validation_target_symbol_count"),
+                "post_validation_target_symbol_count": len(result.combined_target_weights),
+                "target_drop_stage": result.summary.get("target_drop_stage"),
+                "target_drop_reason": result.summary.get("target_drop_reason"),
+                "generated_preset_path": result.summary.get("generated_preset_path"),
+                "signal_artifact_path": result.summary.get("signal_artifact_path"),
+                "sleeves": result.sleeve_target_diagnostics_rows,
+            },
+            indent=2,
+            default=str,
+        ),
+        encoding="utf-8",
+    )
     summary_md_path.write_text(_render_summary_markdown(result), encoding="utf-8")
 
     return {
@@ -922,4 +1129,7 @@ def write_multi_strategy_artifacts(
         "overlap_matrix_path": overlap_matrix_path,
         "execution_symbol_coverage_path": execution_coverage_path,
         "execution_data_availability_summary_path": execution_summary_path,
+        "target_generation_summary_path": target_generation_summary_path,
+        "target_generation_stage_counts_path": target_generation_stage_counts_path,
+        "sleeve_target_diagnostics_path": sleeve_target_diagnostics_path,
     }

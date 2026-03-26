@@ -531,6 +531,9 @@ When an activated portfolio is used, only `is_active=true` rows are handed to ex
 - `live_active_strategy_summary.json`
 - `execution_symbol_coverage.csv`
 - `execution_data_availability_summary.json`
+- `target_generation_summary.json`
+- `target_generation_stage_counts.csv`
+- `sleeve_target_diagnostics.csv`
 
 The portfolio policy can now control conditional handling through:
 

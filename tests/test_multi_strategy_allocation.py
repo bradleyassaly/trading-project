@@ -27,6 +27,8 @@ def _target_result(
     diagnostics: dict | None = None,
     scheduled_weights: dict[str, float] | None = None,
     price_snapshots: list[PaperExecutionPriceSnapshot] | None = None,
+    extra_diagnostics: dict | None = None,
+    signal_snapshot: PaperSignalSnapshot | None = None,
 ) -> TargetConstructionResult:
     return TargetConstructionResult(
         as_of=as_of,
@@ -36,12 +38,13 @@ def _target_result(
         latest_scores={symbol: 1.0 for symbol in weights},
         target_diagnostics=diagnostics or {},
         skipped_symbols=[],
-        signal_snapshot=PaperSignalSnapshot(
+        signal_snapshot=signal_snapshot or PaperSignalSnapshot(
             asset_returns=pd.DataFrame(),
             scores=pd.DataFrame(),
             closes=pd.DataFrame(),
             skipped_symbols=[],
         ),
+        extra_diagnostics=extra_diagnostics or {},
         price_snapshots=price_snapshots or [],
     )
 
@@ -395,3 +398,89 @@ def test_allocate_multi_strategy_reports_zero_target_reason_without_fallback(mon
     assert result.combined_target_weights == {}
     assert result.summary["usable_symbol_count"] == 0
     assert result.summary["zero_target_reason"] == "missing_latest_price"
+
+
+def test_allocate_multi_strategy_maps_empty_signal_scores_to_target_drop_reason(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(
+        "trading_platform.portfolio.multi_strategy.build_target_construction_result",
+        lambda config: _target_result(
+            as_of="2025-01-04",
+            weights={},
+            prices={"AAPL": 100.0},
+            diagnostics={"target_construction": {"reason": "no_composite_scores"}},
+            extra_diagnostics={
+                "selected_signals": [
+                    {"signal_family": "fundamental_momentum", "lookback": 5, "horizon": 20}
+                ],
+                "latest_component_scores": [],
+                "latest_composite_scores": [],
+            },
+            signal_snapshot=PaperSignalSnapshot(
+                asset_returns=pd.DataFrame(),
+                scores=pd.DataFrame(),
+                closes=pd.DataFrame({"AAPL": [100.0]}, index=pd.to_datetime(["2025-01-04"])),
+                skipped_symbols=[],
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        "trading_platform.portfolio.multi_strategy._paper_config_from_preset",
+        lambda preset_name, preset_path=None: type(
+            "DummyConfig",
+            (),
+            {
+                "preset_name": preset_name,
+                "symbols": ["AAPL"],
+                "signal_source": "composite",
+                "strategy": "sma_cross",
+                "composite_artifact_dir": "artifacts/alpha_research/run_configured",
+                "approved_model_state_path": None,
+            },
+        )(),
+    )
+    config = MultiStrategyPortfolioConfig(
+        sleeves=[MultiStrategySleeveConfig("core", "preset", 1.0, preset_path=str(tmp_path / "generated.json"))],
+    )
+
+    result = allocate_multi_strategy_portfolio(config)
+    paths = write_multi_strategy_artifacts(result, tmp_path / "alloc")
+
+    assert result.summary["target_drop_stage"] == "signal_scoring"
+    assert result.summary["target_drop_reason"] == "empty_signal_scores"
+    summary_payload = json.loads(Path(paths["target_generation_summary_path"]).read_text(encoding="utf-8"))
+    assert summary_payload["target_drop_reason"] == "empty_signal_scores"
+
+
+def test_allocate_multi_strategy_maps_liquidity_filter_drop_reason(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "trading_platform.portfolio.multi_strategy.build_target_construction_result",
+        lambda config: _target_result(
+            as_of="2025-01-04",
+            weights={},
+            diagnostics={"target_construction": {"reason": "no_eligible_names"}},
+            extra_diagnostics={
+                "liquidity_exclusions": [
+                    {"symbol": "AAPL"},
+                    {"symbol": "MSFT"},
+                ]
+            },
+            signal_snapshot=PaperSignalSnapshot(
+                asset_returns=pd.DataFrame(),
+                scores=pd.DataFrame({"AAPL": [1.0], "MSFT": [0.5]}, index=pd.to_datetime(["2025-01-04"])),
+                closes=pd.DataFrame({"AAPL": [100.0], "MSFT": [200.0]}, index=pd.to_datetime(["2025-01-04"])),
+                skipped_symbols=[],
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        "trading_platform.portfolio.multi_strategy._paper_config_from_preset",
+        lambda preset_name: type("DummyConfig", (), {"preset_name": preset_name, "symbols": ["AAPL", "MSFT"]})(),
+    )
+    config = MultiStrategyPortfolioConfig(
+        sleeves=[MultiStrategySleeveConfig("core", "preset", 1.0)],
+    )
+
+    result = allocate_multi_strategy_portfolio(config)
+
+    assert result.summary["target_drop_stage"] == "liquidity_filter"
+    assert result.summary["target_drop_reason"] == "all_symbols_failed_liquidity_filter"
