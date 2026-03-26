@@ -21,6 +21,10 @@ class ResearchRun(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     config_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
     config_hash: Mapped[str | None] = mapped_column(String(128), index=True)
     git_commit: Mapped[str | None] = mapped_column(String(64), index=True)
+    artifacts_root: Mapped[str | None] = mapped_column(Text)
+    output_dir: Mapped[str | None] = mapped_column(Text)
+    universe: Mapped[str | None] = mapped_column(String(255), index=True)
+    config_path: Mapped[str | None] = mapped_column(Text)
     notes: Mapped[str | None] = mapped_column(Text)
 
 

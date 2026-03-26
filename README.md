@@ -98,6 +98,7 @@ Keep these in files:
 Store these in PostgreSQL when DB metadata is enabled:
 
 - research runs and portfolio runs
+- alpha research candidate definitions, candidate metrics, and promotion outcomes
 - artifact registry metadata and lineage links
 - strategy definitions and promotion decisions
 - candidate evaluations, portfolio decisions, and signal contributions
@@ -183,6 +184,7 @@ This phase intentionally stores metadata and references, not heavyweight researc
 Current phase-1 workflow coverage:
 
 - `research run`: creates a `ResearchRun`, records the strategy definition, and registers emitted research artifacts
+- `research alpha`: can additionally persist run-scoped alpha research metadata into `research_runs`, `signal_candidates`, `signal_metrics`, and enriched `promoted_strategies` rows
 - `research promote`: records promotion decisions and promoted-strategy state when promotions are selected
 - `paper run`: creates a `PortfolioRun`, records candidate/trade decision metadata, order/fill metadata, position snapshots, and emitted paper artifacts
 - `live dry-run`: creates a `PortfolioRun`, records decision metadata, preview order lifecycle metadata, broker position snapshots, and emitted live-preview artifacts
@@ -193,6 +195,59 @@ Current deferred items:
 - a dedicated execution-run table beyond the current portfolio-run linkage
 - deep normalization of every universe-enrichment field into first-class relational tables
 - automatic Postgres provisioning or vendor-specific ingestion pipelines
+
+## Research Memory
+
+The alpha research and promotion flow can now write a bounded research-memory layer into PostgreSQL without changing the artifact outputs.
+
+Artifacts remain the source of truth for raw run payloads. The database stores queryable metadata and result summaries across runs:
+
+- `research_runs`
+- `signal_candidates`
+- `signal_metrics`
+- `promoted_strategies`
+
+Example config section for `configs/alpha_research.yaml`:
+
+```yaml
+tracking:
+  tracker_dir: artifacts/experiment_tracking
+  database_enabled: true
+  database_url: postgresql+psycopg://postgres:postgres@localhost:5432/trading_platform
+  database_schema: research
+  write_candidates: true
+  write_metrics: true
+  write_promotions: true
+```
+
+Initialize the schema:
+
+```bash
+trading-cli research db init --database-enabled --database-url postgresql+psycopg://postgres:postgres@localhost:5432/trading_platform --database-schema research
+```
+
+Run alpha research with DB writes enabled:
+
+```bash
+trading-cli research alpha --config configs/alpha_research.yaml
+```
+
+Promote as usual. Run-local promotion is still the default; DB writes are additive:
+
+```bash
+trading-cli research promote --artifacts-root artifacts/alpha_research --output-dir artifacts/promoted/run_current --policy-config configs/promotion.yaml --database-enabled --database-url postgresql+psycopg://postgres:postgres@localhost:5432/trading_platform --database-schema research
+```
+
+Lightweight query helpers:
+
+```bash
+trading-cli research db list-runs --database-enabled --database-url postgresql+psycopg://postgres:postgres@localhost:5432/trading_platform --limit 20
+trading-cli research db top-candidates --database-enabled --database-url postgresql+psycopg://postgres:postgres@localhost:5432/trading_platform --metric mean_spearman_ic --limit 20
+trading-cli research db family-summary --database-enabled --database-url postgresql+psycopg://postgres:postgres@localhost:5432/trading_platform
+trading-cli research db promotions --database-enabled --database-url postgresql+psycopg://postgres:postgres@localhost:5432/trading_platform --limit 20
+```
+
+If DB tracking is disabled, the existing CSV/JSON/Parquet workflow continues unchanged.
 
 ## Canonical Workflow
 

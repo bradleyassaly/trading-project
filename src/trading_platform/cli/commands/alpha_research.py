@@ -3,9 +3,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+import pandas as pd
+
 from trading_platform.cli.config_support import load_and_apply_workflow_config
 from trading_platform.cli.common import resolve_symbols
 from trading_platform.config.loader import load_alpha_research_workflow_config
+from trading_platform.db.services import DatabaseLineageService, build_research_memory_service
 from trading_platform.research.experiment_tracking import (
     build_alpha_experiment_record,
     register_experiment,
@@ -15,6 +18,7 @@ from trading_platform.research.alpha_lab.runner import run_alpha_research
 
 @dataclass(frozen=True)
 class AlphaResearchRequest:
+    config_path: Path | None
     symbols: list[str]
     feature_dir: Path
     output_dir: Path
@@ -68,6 +72,12 @@ class AlphaResearchRequest:
     ensemble_minimum_member_observations: int
     ensemble_minimum_member_metric: float | None
     experiment_tracker_dir: Path
+    enable_database_metadata: bool
+    database_url: str | None
+    database_schema: str | None
+    tracking_write_candidates: bool
+    tracking_write_metrics: bool
+    tracking_write_promotions: bool
 
 
 def _build_alpha_research_request(args) -> AlphaResearchRequest:
@@ -77,6 +87,7 @@ def _build_alpha_research_request(args) -> AlphaResearchRequest:
     fundamentals_enabled = bool(getattr(args, "fundamentals_enabled", False))
     fundamentals_daily_features_arg = getattr(args, "fundamentals_daily_features_path", None)
     return AlphaResearchRequest(
+        config_path=Path(args.config) if getattr(args, "config", None) else None,
         symbols=resolve_symbols(args),
         feature_dir=Path(args.feature_dir),
         output_dir=output_dir,
@@ -134,71 +145,116 @@ def _build_alpha_research_request(args) -> AlphaResearchRequest:
         ensemble_minimum_member_observations=getattr(args, "ensemble_minimum_member_observations", 0),
         ensemble_minimum_member_metric=getattr(args, "ensemble_minimum_member_metric", None),
         experiment_tracker_dir=tracker_dir,
+        enable_database_metadata=bool(getattr(args, "enable_database_metadata", False)),
+        database_url=getattr(args, "database_url", None),
+        database_schema=getattr(args, "database_schema", None),
+        tracking_write_candidates=bool(getattr(args, "tracking_write_candidates", True)),
+        tracking_write_metrics=bool(getattr(args, "tracking_write_metrics", True)),
+        tracking_write_promotions=bool(getattr(args, "tracking_write_promotions", True)),
     )
 
 
 def cmd_alpha_research(args) -> None:
-    load_and_apply_workflow_config(
+    loaded_config = load_and_apply_workflow_config(
         args,
         loader=load_alpha_research_workflow_config,
     )
     request = _build_alpha_research_request(args)
-    result = run_alpha_research(
-        symbols=request.symbols,
-        universe=None,
-        feature_dir=request.feature_dir,
-        signal_family=request.signal_family,
-        signal_families=request.signal_families,
-        lookbacks=request.lookbacks,
-        horizons=request.horizons,
-        min_rows=request.min_rows,
-        top_quantile=request.top_quantile,
-        bottom_quantile=request.bottom_quantile,
-        candidate_grid_preset=request.candidate_grid_preset,
-        signal_composition_preset=request.signal_composition_preset,
-        max_variants_per_family=request.max_variants_per_family,
-        output_dir=request.output_dir,
-        train_size=request.train_size,
-        test_size=request.test_size,
-        step_size=request.step_size,
-        min_train_size=request.min_train_size,
-        portfolio_top_n=request.portfolio_top_n,
-        portfolio_long_quantile=request.portfolio_long_quantile,
-        portfolio_short_quantile=request.portfolio_short_quantile,
-        commission=request.commission,
-        min_price=request.min_price,
-        min_volume=request.min_volume,
-        min_avg_dollar_volume=request.min_avg_dollar_volume,
-        max_adv_participation=request.max_adv_participation,
-        max_position_pct_of_adv=request.max_position_pct_of_adv,
-        max_notional_per_name=request.max_notional_per_name,
-        slippage_bps_per_turnover=request.slippage_bps_per_turnover,
-        slippage_bps_per_adv=request.slippage_bps_per_adv,
-        dynamic_recent_quality_window=request.dynamic_recent_quality_window,
-        dynamic_min_history=request.dynamic_min_history,
-        dynamic_downweight_mean_rank_ic=request.dynamic_downweight_mean_rank_ic,
-        dynamic_deactivate_mean_rank_ic=request.dynamic_deactivate_mean_rank_ic,
-        regime_aware_enabled=request.regime_aware_enabled,
-        regime_min_history=request.regime_min_history,
-        regime_underweight_mean_rank_ic=request.regime_underweight_mean_rank_ic,
-        regime_exclude_mean_rank_ic=request.regime_exclude_mean_rank_ic,
-        equity_context_enabled=request.equity_context_enabled,
-        equity_context_include_volume=request.equity_context_include_volume,
-        fundamentals_enabled=request.fundamentals_enabled,
-        fundamentals_daily_features_path=request.fundamentals_daily_features_path,
-        enable_context_confirmations=request.enable_context_confirmations,
-        enable_relative_features=request.enable_relative_features,
-        enable_flow_confirmations=request.enable_flow_confirmations,
-        ensemble_enabled=request.ensemble_enabled,
-        ensemble_mode=request.ensemble_mode,
-        ensemble_weight_method=request.ensemble_weight_method,
-        ensemble_normalize_scores=request.ensemble_normalize_scores,
-        ensemble_max_members=request.ensemble_max_members,
-        ensemble_require_promoted_only=True,
-        ensemble_max_members_per_family=request.ensemble_max_members_per_family,
-        ensemble_minimum_member_observations=request.ensemble_minimum_member_observations,
-        ensemble_minimum_member_metric=request.ensemble_minimum_member_metric,
+    db_service = DatabaseLineageService.from_config(
+        enable_database_metadata=request.enable_database_metadata,
+        database_url=request.database_url,
+        database_schema=request.database_schema,
     )
+    research_memory = build_research_memory_service(
+        enable_database_metadata=request.enable_database_metadata,
+        database_url=request.database_url,
+        database_schema=request.database_schema,
+        write_candidates=request.tracking_write_candidates,
+        write_metrics=request.tracking_write_metrics,
+        write_promotions=request.tracking_write_promotions,
+    )
+    research_memory.init_schema(schema_name=request.database_schema)
+    run_key = request.output_dir.name
+    research_run_id = db_service.create_research_run(
+        run_key=run_key,
+        run_type="alpha_research",
+        config_payload=loaded_config or vars(args),
+        notes=f"signal_families={','.join(request.signal_families)}",
+    )
+    research_memory.attach_run_metadata(
+        run_id=research_run_id,
+        artifacts_root=str(request.output_dir.parent),
+        output_dir=str(request.output_dir),
+        universe=getattr(args, "universe", None),
+        config_path=str(request.config_path) if request.config_path is not None else None,
+    )
+    try:
+        result = run_alpha_research(
+            symbols=request.symbols,
+            universe=None,
+            feature_dir=request.feature_dir,
+            signal_family=request.signal_family,
+            signal_families=request.signal_families,
+            lookbacks=request.lookbacks,
+            horizons=request.horizons,
+            min_rows=request.min_rows,
+            top_quantile=request.top_quantile,
+            bottom_quantile=request.bottom_quantile,
+            candidate_grid_preset=request.candidate_grid_preset,
+            signal_composition_preset=request.signal_composition_preset,
+            max_variants_per_family=request.max_variants_per_family,
+            output_dir=request.output_dir,
+            train_size=request.train_size,
+            test_size=request.test_size,
+            step_size=request.step_size,
+            min_train_size=request.min_train_size,
+            portfolio_top_n=request.portfolio_top_n,
+            portfolio_long_quantile=request.portfolio_long_quantile,
+            portfolio_short_quantile=request.portfolio_short_quantile,
+            commission=request.commission,
+            min_price=request.min_price,
+            min_volume=request.min_volume,
+            min_avg_dollar_volume=request.min_avg_dollar_volume,
+            max_adv_participation=request.max_adv_participation,
+            max_position_pct_of_adv=request.max_position_pct_of_adv,
+            max_notional_per_name=request.max_notional_per_name,
+            slippage_bps_per_turnover=request.slippage_bps_per_turnover,
+            slippage_bps_per_adv=request.slippage_bps_per_adv,
+            dynamic_recent_quality_window=request.dynamic_recent_quality_window,
+            dynamic_min_history=request.dynamic_min_history,
+            dynamic_downweight_mean_rank_ic=request.dynamic_downweight_mean_rank_ic,
+            dynamic_deactivate_mean_rank_ic=request.dynamic_deactivate_mean_rank_ic,
+            regime_aware_enabled=request.regime_aware_enabled,
+            regime_min_history=request.regime_min_history,
+            regime_underweight_mean_rank_ic=request.regime_underweight_mean_rank_ic,
+            regime_exclude_mean_rank_ic=request.regime_exclude_mean_rank_ic,
+            equity_context_enabled=request.equity_context_enabled,
+            equity_context_include_volume=request.equity_context_include_volume,
+            fundamentals_enabled=request.fundamentals_enabled,
+            fundamentals_daily_features_path=request.fundamentals_daily_features_path,
+            enable_context_confirmations=request.enable_context_confirmations,
+            enable_relative_features=request.enable_relative_features,
+            enable_flow_confirmations=request.enable_flow_confirmations,
+            ensemble_enabled=request.ensemble_enabled,
+            ensemble_mode=request.ensemble_mode,
+            ensemble_weight_method=request.ensemble_weight_method,
+            ensemble_normalize_scores=request.ensemble_normalize_scores,
+            ensemble_max_members=request.ensemble_max_members,
+            ensemble_require_promoted_only=True,
+            ensemble_max_members_per_family=request.ensemble_max_members_per_family,
+            ensemble_minimum_member_observations=request.ensemble_minimum_member_observations,
+            ensemble_minimum_member_metric=request.ensemble_minimum_member_metric,
+        )
+        leaderboard_path = Path(result["leaderboard_path"])
+        if leaderboard_path.exists():
+            research_memory.persist_alpha_research_outputs(
+                run_id=research_run_id,
+                leaderboard_df=pd.read_csv(leaderboard_path),
+            )
+        db_service.complete_research_run(research_run_id, notes=f"output_dir={request.output_dir}")
+    except Exception as exc:
+        db_service.fail_research_run(research_run_id, notes=str(exc))
+        raise
     registry_paths = register_experiment(
         build_alpha_experiment_record(request.output_dir),
         tracker_dir=request.experiment_tracker_dir,

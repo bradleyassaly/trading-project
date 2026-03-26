@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from trading_platform.config.loader import load_promotion_policy_config
-from trading_platform.db.services import DatabaseLineageService
+from trading_platform.db.services import DatabaseLineageService, build_research_memory_service
 from trading_platform.research.promotion_pipeline import PromotionPolicyConfig, apply_research_promotions
 from trading_platform.research.registry import (
     refresh_research_registry_bundle,
@@ -41,7 +41,18 @@ def _resolve_promotion_registry_scope(args) -> tuple[Path, Path, dict[str, objec
 
 
 def cmd_research_promote(args) -> None:
-    db_service = DatabaseLineageService.from_config()
+    db_service = DatabaseLineageService.from_config(
+        enable_database_metadata=getattr(args, "enable_database_metadata", None),
+        database_url=getattr(args, "database_url", None),
+        database_schema=getattr(args, "database_schema", None),
+    )
+    research_memory = build_research_memory_service(
+        enable_database_metadata=getattr(args, "enable_database_metadata", None),
+        database_url=getattr(args, "database_url", None),
+        database_schema=getattr(args, "database_schema", None),
+        write_promotions=bool(getattr(args, "tracking_write_promotions", True)),
+    )
+    research_memory.init_schema(schema_name=getattr(args, "database_schema", None))
     policy = (
         load_promotion_policy_config(args.policy_config)
         if getattr(args, "policy_config", None)
@@ -70,6 +81,7 @@ def cmd_research_promote(args) -> None:
     print(f"Selected promotions: {result['selected_count']}")
     print(f"Dry run: {result['dry_run']}")
     print(f"Promoted index: {result['promoted_index_path']}")
+    enriched_promoted_rows: list[dict[str, object]] = []
     for row in result["promoted_rows"]:
         strategy_definition_id = db_service.upsert_strategy_definition(
             name=str(row["preset_name"]),
@@ -85,12 +97,24 @@ def cmd_research_promote(args) -> None:
             reason=str(row.get("reason") or ""),
             metrics_json={"ranking_metric": row.get("ranking_metric"), "ranking_value": row.get("ranking_value")},
         )
-        db_service.record_promoted_strategy(
+        promoted_strategy_id = db_service.record_promoted_strategy(
             strategy_definition_id=strategy_definition_id,
             promotion_decision_id=promotion_decision_id,
             status=str(row.get("status") or "inactive"),
+        )
+        enriched_promoted_rows.append(
+            {
+                **row,
+                "strategy_definition_id": strategy_definition_id,
+                "promoted_strategy_id": promoted_strategy_id,
+                "candidate_id": row.get("candidate_id"),
+            }
         )
         print(
             f"- {row['preset_name']}: source_run_id={row['source_run_id']} "
             f"status={row['status']} metric={row['ranking_metric']}={row['ranking_value']}"
         )
+    source_run_id = None
+    if len({str(row.get("source_run_id") or "") for row in result["promoted_rows"]}) == 1 and result["promoted_rows"]:
+        source_run_id = db_service.find_research_run_id(str(result["promoted_rows"][0].get("source_run_id") or ""))
+    research_memory.persist_promotions(run_id=source_run_id, promoted_rows=enriched_promoted_rows)

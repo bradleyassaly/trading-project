@@ -41,6 +41,29 @@ def test_grouped_research_alpha_command_parses() -> None:
     assert args.max_variants_per_family == 4
 
 
+def test_grouped_research_alpha_command_parses_database_tracking_args() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "research",
+            "alpha",
+            "--symbols",
+            "AAPL",
+            "--database-enabled",
+            "--database-url",
+            "sqlite:///research.db",
+            "--database-schema",
+            "research",
+            "--tracking-skip-candidates",
+        ]
+    )
+
+    assert args.enable_database_metadata is True
+    assert args.database_url == "sqlite:///research.db"
+    assert args.database_schema == "research"
+    assert args.tracking_write_candidates is False
+
+
 def test_grouped_research_alpha_command_parses_signal_families() -> None:
     parser = build_parser()
     args = parser.parse_args(
@@ -214,6 +237,22 @@ def test_grouped_research_promote_command_parses() -> None:
     assert args.top_n == 2
     assert args.dry_run is True
     assert args.override_validation is True
+
+
+def test_grouped_research_db_commands_parse() -> None:
+    parser = build_parser()
+    init_args = parser.parse_args(
+        ["research", "db", "init", "--database-enabled", "--database-url", "sqlite:///research.db"]
+    )
+    list_args = parser.parse_args(
+        ["research", "db", "list-runs", "--database-enabled", "--database-url", "sqlite:///research.db", "--limit", "5"]
+    )
+
+    assert init_args.research_command == "db"
+    assert init_args.research_db_command == "init"
+    assert init_args.enable_database_metadata is True
+    assert list_args.research_db_command == "list-runs"
+    assert list_args.limit == 5
 
 
 def test_grouped_data_features_command_parses_for_universe() -> None:

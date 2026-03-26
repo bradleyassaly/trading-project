@@ -400,6 +400,12 @@ class AlphaResearchWorkflowConfig:
     regime_underweight_mean_rank_ic: float = 0.01
     regime_exclude_mean_rank_ic: float = -0.01
     experiment_tracker_dir: str | None = None
+    enable_database_metadata: bool = False
+    database_url: str | None = None
+    database_schema: str | None = None
+    tracking_write_candidates: bool = True
+    tracking_write_metrics: bool = True
+    tracking_write_promotions: bool = True
 
     def __post_init__(self) -> None:
         selected = sum(bool(value) for value in (self.symbols, self.universe))

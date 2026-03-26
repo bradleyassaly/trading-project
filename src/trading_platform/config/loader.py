@@ -364,6 +364,12 @@ def load_alpha_research_workflow_config(path: str | Path) -> AlphaResearchWorkfl
     _set_if_missing(payload, "ensemble_minimum_member_metric", ensemble_section, "minimum_member_metric")
 
     _set_if_missing(payload, "experiment_tracker_dir", tracking_section, "tracker_dir")
+    _set_if_missing(payload, "enable_database_metadata", tracking_section, "database_enabled")
+    _set_if_missing(payload, "database_url", tracking_section)
+    _set_if_missing(payload, "database_schema", tracking_section)
+    _set_if_missing(payload, "tracking_write_candidates", tracking_section, "write_candidates")
+    _set_if_missing(payload, "tracking_write_metrics", tracking_section, "write_metrics")
+    _set_if_missing(payload, "tracking_write_promotions", tracking_section, "write_promotions")
 
     return AlphaResearchWorkflowConfig(**payload)
 

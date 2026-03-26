@@ -71,6 +71,13 @@ from trading_platform.cli.commands.portfolio_allocate_multi_strategy import cmd_
 from trading_platform.cli.commands.portfolio_topn import cmd_portfolio_topn
 from trading_platform.cli.commands.research import cmd_research
 from trading_platform.cli.commands.research_compare_runs import cmd_research_compare_runs
+from trading_platform.cli.commands.research_db import (
+    cmd_research_db_family_summary,
+    cmd_research_db_init,
+    cmd_research_db_list_runs,
+    cmd_research_db_promotions,
+    cmd_research_db_top_candidates,
+)
 from trading_platform.cli.commands.research_leaderboard import cmd_research_leaderboard
 from trading_platform.cli.commands.research_monitor import cmd_research_monitor
 from trading_platform.cli.commands.research_promote import cmd_research_promote
@@ -272,6 +279,24 @@ def add_experiment_tracker_argument(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def add_database_tracking_arguments(
+    parser: argparse.ArgumentParser,
+    *,
+    include_write_toggles: bool = False,
+) -> None:
+    parser.add_argument("--database-enabled", dest="enable_database_metadata", action="store_true", default=None, help="Enable optional database-backed research metadata persistence for this command.")
+    parser.add_argument("--database-disabled", dest="enable_database_metadata", action="store_false", help="Disable database-backed research metadata persistence for this command.")
+    parser.add_argument("--database-url", type=str, default=None, help="Optional SQLAlchemy database URL override for research metadata tracking.")
+    parser.add_argument("--database-schema", type=str, default=None, help="Optional database schema override for research metadata tracking.")
+    if include_write_toggles:
+        parser.add_argument("--tracking-write-candidates", dest="tracking_write_candidates", action="store_true", default=True, help="Persist signal candidate definitions to the research database.")
+        parser.add_argument("--tracking-skip-candidates", dest="tracking_write_candidates", action="store_false", help="Skip candidate-definition writes even when database tracking is enabled.")
+        parser.add_argument("--tracking-write-metrics", dest="tracking_write_metrics", action="store_true", default=True, help="Persist candidate metric summaries to the research database.")
+        parser.add_argument("--tracking-skip-metrics", dest="tracking_write_metrics", action="store_false", help="Skip metric writes even when database tracking is enabled.")
+        parser.add_argument("--tracking-write-promotions", dest="tracking_write_promotions", action="store_true", default=True, help="Persist promotion outputs to the research database.")
+        parser.add_argument("--tracking-skip-promotions", dest="tracking_write_promotions", action="store_false", help="Skip promotion writes even when database tracking is enabled.")
+
+
 def add_live_control_arguments(parser: argparse.ArgumentParser) -> None:
     add_composite_paper_arguments(parser)
     parser.add_argument("--kill-switch", action="store_true", help="Abort before submission regardless of target portfolio state.")
@@ -393,6 +418,7 @@ def _add_validate_signal_arguments(parser: argparse.ArgumentParser) -> None:
 
 def _add_alpha_research_arguments(parser: argparse.ArgumentParser) -> None:
     add_experiment_tracker_argument(parser)
+    add_database_tracking_arguments(parser, include_write_toggles=True)
     parser.add_argument("--config", type=str, default=None, help="Optional YAML or JSON alpha research workflow config file.")
     parser.add_argument("--symbols", nargs="+", default=None, help="Symbols to include in the alpha research run.")
     parser.add_argument("--universe", type=str, default=None, help="Named universe to evaluate instead of passing --symbols.")
@@ -821,7 +847,30 @@ def build_parser() -> argparse.ArgumentParser:
     research_promote.add_argument("--dry-run", action="store_true", help="Evaluate and print promotions without writing artifacts.")
     research_promote.add_argument("--inactive", action="store_true", help="Write promoted strategies with inactive status regardless of policy default.")
     research_promote.add_argument("--override-validation", action="store_true", help="Allow promotion even when validation does not pass.")
+    add_database_tracking_arguments(research_promote, include_write_toggles=True)
     research_promote.set_defaults(func=cmd_research_promote)
+    research_db = research_subparsers.add_parser("db", help="Initialize and query the optional research metadata database.")
+    add_database_tracking_arguments(research_db, include_write_toggles=True)
+    research_db_subparsers = research_db.add_subparsers(dest="research_db_command", required=True)
+    research_db_init = research_db_subparsers.add_parser("init", help="Create the research metadata schema and tables if they do not exist.")
+    add_database_tracking_arguments(research_db_init, include_write_toggles=True)
+    research_db_init.set_defaults(func=cmd_research_db_init)
+    research_db_list_runs = research_db_subparsers.add_parser("list-runs", help="List recent research runs stored in the metadata database.")
+    add_database_tracking_arguments(research_db_list_runs, include_write_toggles=True)
+    research_db_list_runs.add_argument("--limit", type=int, default=20, help="Maximum number of runs to list.")
+    research_db_list_runs.set_defaults(func=cmd_research_db_list_runs)
+    research_db_top_candidates = research_db_subparsers.add_parser("top-candidates", help="Show the highest-ranked candidates across stored research runs.")
+    add_database_tracking_arguments(research_db_top_candidates, include_write_toggles=True)
+    research_db_top_candidates.add_argument("--metric", type=str, default="mean_spearman_ic", choices=["mean_pearson_ic", "mean_spearman_ic", "mean_hit_rate", "mean_long_short_spread", "mean_quantile_spread"], help="Metric column used for cross-run candidate ranking.")
+    research_db_top_candidates.add_argument("--limit", type=int, default=20, help="Maximum number of candidates to list.")
+    research_db_top_candidates.set_defaults(func=cmd_research_db_top_candidates)
+    research_db_family_summary = research_db_subparsers.add_parser("family-summary", help="Summarize cross-run metrics and promotions by signal family.")
+    add_database_tracking_arguments(research_db_family_summary, include_write_toggles=True)
+    research_db_family_summary.set_defaults(func=cmd_research_db_family_summary)
+    research_db_promotions = research_db_subparsers.add_parser("promotions", help="List recently persisted promoted strategies.")
+    add_database_tracking_arguments(research_db_promotions, include_write_toggles=True)
+    research_db_promotions.add_argument("--limit", type=int, default=20, help="Maximum number of promotion rows to list.")
+    research_db_promotions.set_defaults(func=cmd_research_db_promotions)
     research_strategies = research_subparsers.add_parser("strategies", help="Show available legacy strategies")
     research_strategies.set_defaults(func=cmd_list_strategies)
 

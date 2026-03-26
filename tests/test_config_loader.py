@@ -349,6 +349,12 @@ ensemble:
   max_members: 4
 tracking:
   tracker_dir: artifacts/experiment_tracking
+  database_enabled: true
+  database_url: postgresql+psycopg://localhost/trading
+  database_schema: research
+  write_candidates: false
+  write_metrics: true
+  write_promotions: false
 """.strip(),
         encoding="utf-8",
     )
@@ -370,6 +376,12 @@ tracking:
     assert config.portfolio_top_n == 8
     assert config.enable_ensemble is True
     assert config.ensemble_mode == "family_weighted"
+    assert config.enable_database_metadata is True
+    assert config.database_url == "postgresql+psycopg://localhost/trading"
+    assert config.database_schema == "research"
+    assert config.tracking_write_candidates is False
+    assert config.tracking_write_metrics is True
+    assert config.tracking_write_promotions is False
 
 
 def test_load_alpha_research_workflow_config_with_fundamentals(tmp_path) -> None:
