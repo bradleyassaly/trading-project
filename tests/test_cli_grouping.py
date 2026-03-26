@@ -2054,6 +2054,29 @@ def test_grouped_monitor_latest_command_parses() -> None:
     assert args.pipeline_root == "artifacts/orchestration"
 
 
+def test_grouped_research_promote_run_local_command_parses() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "research",
+            "promote",
+            "--artifacts-root",
+            "artifacts/alpha_research",
+            "--run-dir",
+            "artifacts/alpha_research/run_20260325",
+            "--registry-scope",
+            "run_local",
+            "--output-dir",
+            "artifacts/promoted_strategies",
+        ]
+    )
+
+    assert args.command_family == "research"
+    assert args.research_command == "promote"
+    assert args.run_dir == "artifacts/alpha_research/run_20260325"
+    assert args.registry_scope == "run_local"
+
+
 def test_grouped_monitor_notify_command_parses() -> None:
     parser = build_parser()
     args = parser.parse_args(

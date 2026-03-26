@@ -1671,6 +1671,8 @@ def test_run_alpha_research_supports_multiple_signal_families_in_one_run(tmp_pat
     assert set(signal_family_summary_df["signal_family"]) == {"fundamental_value", "momentum"}
     assert set(research_registry_df["signal_family"]) == {"momentum", "fundamental_value"}
     assert set(promotion_candidates_df.columns) >= {"candidate_id", "signal_family", "promotion_status"}
+    assert (output_dir / "research_registry" / "research_registry.json").exists()
+    assert (output_dir / "research_registry" / "promotion_candidates.json").exists()
     assert diagnostics["signal_families"] == ["momentum", "fundamental_value"]
     assert diagnostics["generated_candidate_count_by_family"]["momentum"] > 0
     assert diagnostics["generated_candidate_count_by_family"]["fundamental_value"] > 0

@@ -939,6 +939,9 @@ failure_policy: fail
     cmd_research_promote(
         SimpleNamespace(
             artifacts_root=str(alpha_artifacts_root),
+            run_dir=None,
+            registry_scope="global",
+            use_global_registry=False,
             registry_dir=None,
             output_dir=str(promoted_dir),
             policy_config=str(promotion_config_path),

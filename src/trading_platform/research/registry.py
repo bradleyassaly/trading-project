@@ -543,6 +543,13 @@ def discover_research_run_manifests(artifacts_root: str | Path) -> list[Path]:
     return manifests
 
 
+def resolve_latest_research_run_dir(artifacts_root: str | Path) -> Path | None:
+    manifests = discover_research_run_manifests(artifacts_root)
+    if not manifests:
+        return None
+    return manifests[0].parent
+
+
 def load_research_manifests(artifacts_root: str | Path) -> list[dict[str, Any]]:
     manifests: list[dict[str, Any]] = []
     for path in discover_research_run_manifests(artifacts_root):
@@ -764,6 +771,21 @@ def refresh_research_registry_bundle(
         **candidate_result,
         "output_dir": str(Path(output_dir)),
     }
+
+
+def refresh_run_local_registry_bundle(
+    *,
+    run_dir: str | Path,
+    output_dir: str | Path | None = None,
+    rules: ResearchPromotionRules | None = None,
+) -> dict[str, Any]:
+    run_path = Path(run_dir)
+    resolved_output_dir = Path(output_dir) if output_dir is not None else (run_path / "research_registry")
+    return refresh_research_registry_bundle(
+        artifacts_root=run_path,
+        output_dir=resolved_output_dir,
+        rules=rules,
+    )
 
 
 def compare_research_runs(

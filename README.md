@@ -353,6 +353,13 @@ When `signals.families` is used, one run now emits a single combined candidate u
 - `signal_family_summary.csv`
 - `hybrid_component_summary.csv` when hybrid families are enabled
 
+Each alpha research run now also writes a run-local registry bundle under its own output directory:
+
+- `artifacts/alpha_research/<run_id>/research_registry/research_registry.json`
+- `artifacts/alpha_research/<run_id>/research_registry/research_registry.csv`
+- `artifacts/alpha_research/<run_id>/research_registry/promotion_candidates.json`
+- `artifacts/alpha_research/<run_id>/research_registry/promotion_candidates.csv`
+
 All candidate rows still preserve `signal_family` so downstream grouping and diversification logic can operate on the merged run output.
 
 Alpha research can now also opt into point-in-time daily fundamentals:
@@ -399,7 +406,19 @@ Point-in-time safety rules for fundamentals:
 trading-cli research promote --artifacts-root artifacts/alpha_research --output-dir artifacts/promoted_strategies --policy-config configs/promotion_experiment.yaml
 ```
 
-The canonical `research promote` path now refreshes the research registry and promotion-candidate artifacts automatically into `artifacts/alpha_research/research_registry` by default before generating promoted strategy presets/configs.
+`research promote` now defaults to run-local promotion scope so stale historical runs do not contaminate the current promotion decision. By default it resolves the latest run under `--artifacts-root`, refreshes that run's local registry bundle, and promotes only from that isolated candidate set.
+
+Promote only the current run explicitly:
+
+```bash
+trading-cli research promote --artifacts-root artifacts/alpha_research --run-dir artifacts/alpha_research/<run_id> --registry-scope run_local --output-dir artifacts/promoted_strategies --policy-config configs/promotion_experiment.yaml
+```
+
+Use the shared global registry only when you explicitly want cross-run aggregation:
+
+```bash
+trading-cli research promote --artifacts-root artifacts/alpha_research --registry-scope global --output-dir artifacts/promoted_strategies --policy-config configs/promotion_experiment.yaml
+```
 
 ### 4. Build the strategy portfolio
 

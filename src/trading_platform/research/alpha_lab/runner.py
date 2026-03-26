@@ -8,7 +8,10 @@ import numpy as np
 import pandas as pd
 from trading_platform.research.alpha_lab.data_loading import load_symbol_feature_data
 
-from trading_platform.research.registry import write_research_run_manifest
+from trading_platform.research.registry import (
+    refresh_run_local_registry_bundle,
+    write_research_run_manifest,
+)
 from trading_platform.research.alpha_lab.composite import (
     DEFAULT_COMPOSITE_CONFIG,
     build_composite_scores,
@@ -1797,6 +1800,10 @@ def run_alpha_research(
         artifact_paths=result_paths,
     )
     result_paths["research_manifest_path"] = str(manifest_path)
+    run_local_registry_bundle = refresh_run_local_registry_bundle(run_dir=output_dir)
+    result_paths["run_local_registry_dir"] = str(output_dir / "research_registry")
+    result_paths["run_local_research_registry_path"] = str(run_local_registry_bundle["registry_json_path"])
+    result_paths["run_local_promotion_candidates_path"] = str(run_local_registry_bundle["promotion_candidates_json_path"])
 
     research_registry_path_json.write_text(
         json.dumps(

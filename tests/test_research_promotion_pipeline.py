@@ -137,6 +137,86 @@ def _seed_registry(tmp_path: Path) -> Path:
     return registry_dir
 
 
+def _write_stale_global_registry(root: Path, *, stale_run_id: str = "run_stale") -> Path:
+    registry_dir = root / "research_registry"
+    registry_dir.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "generated_at": "2026-03-25T00:00:00+00:00",
+        "summary": {"run_count": 1, "signal_families": ["synthetic"]},
+        "runs": [
+            {
+                "run_id": stale_run_id,
+                "timestamp": "2024-01-01T00:00:00+00:00",
+                "signal_family": "synthetic",
+                "promotion_recommendation": {"recommendation": "promotion_candidate", "eligible": True, "reasons": []},
+                "top_metrics": {"mean_spearman_ic": 0.99, "portfolio_sharpe": 9.99, "implementability_return_drag": 0.0},
+                "promoted_signal_count": 5,
+                "folds_tested": 6,
+                "candidate_count": 10,
+                "artifact_dir": str(root / stale_run_id),
+            }
+        ],
+    }
+    (registry_dir / "research_registry.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    pd.DataFrame(
+        [
+            {
+                "run_id": stale_run_id,
+                "timestamp": "2024-01-01T00:00:00+00:00",
+                "signal_family": "synthetic",
+                "promotion_recommendation": "promotion_candidate",
+                "mean_spearman_ic": 0.99,
+                "portfolio_sharpe": 9.99,
+                "eligible": True,
+            }
+        ]
+    ).to_csv(registry_dir / "research_registry.csv", index=False)
+    (registry_dir / "promotion_candidates.json").write_text(
+        json.dumps(
+            {
+                "generated_at": "2026-03-25T00:00:00+00:00",
+                "rows": [
+                    {
+                        "run_id": stale_run_id,
+                        "timestamp": "2024-01-01T00:00:00+00:00",
+                        "signal_family": "synthetic",
+                        "eligible": True,
+                        "promotion_recommendation": "promotion_candidate",
+                        "reason_count": 0,
+                        "reasons": "",
+                        "mean_spearman_ic": 0.99,
+                        "portfolio_sharpe": 9.99,
+                        "promoted_signal_count": 5,
+                        "folds_tested": 6,
+                        "candidate_count": 10,
+                    }
+                ],
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    pd.DataFrame(
+        [
+            {
+                "run_id": stale_run_id,
+                "timestamp": "2024-01-01T00:00:00+00:00",
+                "signal_family": "synthetic",
+                "eligible": True,
+                "promotion_recommendation": "promotion_candidate",
+                "reason_count": 0,
+                "reasons": "",
+                "mean_spearman_ic": 0.99,
+                "portfolio_sharpe": 9.99,
+                "promoted_signal_count": 5,
+                "folds_tested": 6,
+                "candidate_count": 10,
+            }
+        ]
+    ).to_csv(registry_dir / "promotion_candidates.csv", index=False)
+    return registry_dir
+
+
 def _attach_conditional_promotion_candidate(
     manifest_path: Path,
     *,
@@ -479,6 +559,95 @@ def test_research_promote_cli_writes_outputs(tmp_path: Path, capsys) -> None:
     assert "Promotion candidates:" in captured
     assert "Selected promotions: 1" in captured
     assert (output_dir / "promoted_strategies.json").exists()
+
+
+def test_research_promote_cli_defaults_to_run_local_registry(tmp_path: Path) -> None:
+    manifest_path = _write_research_run(
+        tmp_path,
+        run_name="run_current",
+        signal_family="momentum",
+        universe="nasdaq100",
+        mean_spearman_ic=0.05,
+        portfolio_sharpe=1.3,
+        promoted_signal_count=2,
+    )
+    _write_stale_global_registry(tmp_path)
+    output_dir = tmp_path / "generated_strategies"
+
+    cmd_research_promote(
+        Namespace(
+            artifacts_root=str(tmp_path),
+            run_dir=str(manifest_path.parent),
+            registry_scope="run_local",
+            use_global_registry=False,
+            registry_dir=None,
+            output_dir=str(output_dir),
+            policy_config=None,
+            validation=None,
+            top_n=1,
+            allow_overwrite=False,
+            dry_run=False,
+            inactive=True,
+            override_validation=False,
+        )
+    )
+
+    promoted_index = json.loads((output_dir / "promoted_strategies.json").read_text(encoding="utf-8"))
+    assert promoted_index["strategies"][0]["source_run_id"] == "run_current"
+    assert promoted_index["registry_dir"] == str(manifest_path.parent / "research_registry")
+
+
+def test_research_promote_cli_global_scope_uses_shared_registry(tmp_path: Path) -> None:
+    _seed_registry(tmp_path)
+    output_dir = tmp_path / "generated_strategies"
+
+    cmd_research_promote(
+        Namespace(
+            artifacts_root=str(tmp_path),
+            run_dir=None,
+            registry_scope="global",
+            use_global_registry=False,
+            registry_dir=None,
+            output_dir=str(output_dir),
+            policy_config=None,
+            validation=None,
+            top_n=1,
+            allow_overwrite=False,
+            dry_run=False,
+            inactive=True,
+            override_validation=False,
+        )
+    )
+
+    promoted_index = json.loads((output_dir / "promoted_strategies.json").read_text(encoding="utf-8"))
+    assert promoted_index["registry_dir"] == str(tmp_path / "research_registry")
+    assert promoted_index["strategies"][0]["source_run_id"] == "run_a"
+
+
+def test_research_promote_cli_explicit_global_registry_dir_preserves_legacy_behavior(tmp_path: Path) -> None:
+    registry_dir = _seed_registry(tmp_path)
+    output_dir = tmp_path / "generated_strategies"
+
+    cmd_research_promote(
+        Namespace(
+            artifacts_root=str(tmp_path),
+            run_dir=None,
+            registry_scope="global",
+            use_global_registry=False,
+            registry_dir=str(registry_dir),
+            output_dir=str(output_dir),
+            policy_config=None,
+            validation=None,
+            top_n=1,
+            allow_overwrite=False,
+            dry_run=False,
+            inactive=True,
+            override_validation=False,
+        )
+    )
+
+    promoted_index = json.loads((output_dir / "promoted_strategies.json").read_text(encoding="utf-8"))
+    assert promoted_index["registry_dir"] == str(registry_dir)
 
 
 def test_canonical_promotion_output_feeds_strategy_portfolio_build(tmp_path: Path) -> None:
