@@ -384,6 +384,7 @@ def load_alpha_cycle_workflow_config(path: str | Path) -> AlphaCycleWorkflowConf
     mode_section = _pop_dict_section(payload, "mode")
     promotion_section = _pop_dict_section(payload, "promotion")
     portfolio_section = _pop_dict_section(payload, "portfolio")
+    tracking_section = _pop_dict_section(payload, "tracking")
 
     _set_if_missing(payload, "refresh_config", configs_section)
     _set_if_missing(payload, "research_config", configs_section)
@@ -410,6 +411,12 @@ def load_alpha_cycle_workflow_config(path: str | Path) -> AlphaCycleWorkflowConf
     _set_if_missing(payload, "override_validation", promotion_section)
 
     _set_if_missing(payload, "lifecycle_path", portfolio_section, "lifecycle")
+    _set_if_missing(payload, "enable_database_metadata", tracking_section, "database_enabled")
+    _set_if_missing(payload, "database_url", tracking_section)
+    _set_if_missing(payload, "database_schema", tracking_section)
+    _set_if_missing(payload, "tracking_write_candidates", tracking_section, "write_candidates")
+    _set_if_missing(payload, "tracking_write_metrics", tracking_section, "write_metrics")
+    _set_if_missing(payload, "tracking_write_promotions", tracking_section, "write_promotions")
     payload["stages"] = AlphaCycleStageToggles(**stages_section)
     return AlphaCycleWorkflowConfig(**payload)
 

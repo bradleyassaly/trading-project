@@ -468,6 +468,12 @@ class AlphaCycleWorkflowConfig:
     inactive: bool = False
     override_validation: bool = False
     lifecycle_path: str | None = None
+    enable_database_metadata: bool = False
+    database_url: str | None = None
+    database_schema: str | None = None
+    tracking_write_candidates: bool = True
+    tracking_write_metrics: bool = True
+    tracking_write_promotions: bool = True
     stages: AlphaCycleStageToggles = field(default_factory=AlphaCycleStageToggles)
 
     def __post_init__(self) -> None:

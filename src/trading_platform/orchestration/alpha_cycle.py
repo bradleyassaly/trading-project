@@ -7,6 +7,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import pandas as pd
+
 from trading_platform.cli.common import UNIVERSES
 from trading_platform.config.loader import (
     load_alpha_research_workflow_config,
@@ -19,6 +21,7 @@ from trading_platform.config.workflow_models import (
     AlphaResearchWorkflowConfig,
     ResearchInputRefreshWorkflowConfig,
 )
+from trading_platform.db.services import DatabaseLineageService, build_research_memory_service
 from trading_platform.portfolio.strategy_portfolio import (
     build_strategy_portfolio,
     export_strategy_portfolio_run_config,
@@ -202,10 +205,14 @@ def _summarize_promotions(promoted_dir: Path) -> dict[str, Any]:
     payload = json.loads(index_path.read_text(encoding="utf-8"))
     strategies = list(payload.get("strategies", []))
     families = sorted({str(row.get("signal_family") or "") for row in strategies if str(row.get("signal_family") or "").strip()})
+    unconditional_count = sum(1 for row in strategies if str(row.get("promotion_variant") or "unconditional") != "conditional")
+    conditional_count = sum(1 for row in strategies if str(row.get("promotion_variant") or "") == "conditional")
     return {
         "promoted_strategy_count": len(strategies),
         "promoted_family_count": len(families),
         "promoted_family_names": families,
+        "promoted_unconditional_count": unconditional_count,
+        "promoted_conditional_count": conditional_count,
     }
 
 
@@ -220,12 +227,25 @@ def _summarize_portfolio(portfolio_dir: Path) -> dict[str, Any]:
     selected_rows = list(payload.get("selected_strategies", []))
     return {
         "selected_portfolio_strategy_count": len(selected_rows),
+        "selected_conditional_portfolio_count": sum(
+            1 for row in selected_rows if str(row.get("promotion_variant") or "") == "conditional"
+        ),
         "selected_portfolio_weights": {
             str(row.get("preset_name")): float(row.get("allocation_weight") or 0.0)
             for row in selected_rows
         },
         "portfolio_summary": payload.get("summary", {}),
     }
+
+
+def _portfolio_run_notes(payload: dict[str, Any]) -> str:
+    summary = payload.get("summary", {})
+    return (
+        "selected_count="
+        f"{int(summary.get('total_selected_strategies') or 0)}"
+        f"; selected_conditional_count={int(summary.get('selected_conditional_variant_count') or 0)}"
+        f"; shadow_conditional_count={int(summary.get('shadow_conditional_variant_count') or 0)}"
+    )
 
 
 def _top_metrics_from_research(research_result: dict[str, Any]) -> dict[str, Any]:
@@ -272,9 +292,12 @@ def _write_summary_artifacts(
         "stage_records": [record.to_dict() for record in stage_records],
         "key_artifacts": key_artifacts,
         "promoted_strategy_count": promotion_summary.get("promoted_strategy_count", 0),
+        "promoted_unconditional_count": promotion_summary.get("promoted_unconditional_count", 0),
+        "promoted_conditional_count": promotion_summary.get("promoted_conditional_count", 0),
         "promoted_family_count": promotion_summary.get("promoted_family_count", 0),
         "promoted_family_names": promotion_summary.get("promoted_family_names", []),
         "selected_portfolio_strategy_count": portfolio_summary.get("selected_portfolio_strategy_count", 0),
+        "selected_conditional_portfolio_count": portfolio_summary.get("selected_conditional_portfolio_count", 0),
         "selected_portfolio_weights": portfolio_summary.get("selected_portfolio_weights", {}),
         "top_metrics": top_metrics,
         "warnings": warnings,
@@ -284,6 +307,8 @@ def _write_summary_artifacts(
             "research_config": config.research_config,
             "promotion_policy_config": config.promotion_policy_config,
             "strategy_portfolio_policy_config": config.strategy_portfolio_policy_config,
+            "database_enabled": config.enable_database_metadata,
+            "database_schema": config.database_schema,
         },
     }
 
@@ -301,9 +326,12 @@ def _write_summary_artifacts(
         f"- ended_at: `{ended_at}`",
         f"- duration_seconds: `{duration_seconds:.3f}`",
         f"- promoted_strategy_count: `{promotion_summary.get('promoted_strategy_count', 0)}`",
+        f"- promoted_unconditional_count: `{promotion_summary.get('promoted_unconditional_count', 0)}`",
+        f"- promoted_conditional_count: `{promotion_summary.get('promoted_conditional_count', 0)}`",
         f"- promoted_family_count: `{promotion_summary.get('promoted_family_count', 0)}`",
         f"- promoted_family_names: `{', '.join(promotion_summary.get('promoted_family_names', [])) or 'none'}`",
         f"- selected_portfolio_strategy_count: `{portfolio_summary.get('selected_portfolio_strategy_count', 0)}`",
+        f"- selected_conditional_portfolio_count: `{portfolio_summary.get('selected_conditional_portfolio_count', 0)}`",
         "",
         "## Stages",
         "",
@@ -366,12 +394,27 @@ def run_alpha_cycle(config: AlphaCycleWorkflowConfig) -> AlphaCycleResult:
     errors: list[str] = []
     key_artifacts: dict[str, str] = {}
     stage_records: list[AlphaCycleStageRecord] = []
+    db_lineage = DatabaseLineageService.from_config(
+        enable_database_metadata=config.enable_database_metadata,
+        database_url=config.database_url,
+        database_schema=config.database_schema,
+    )
+    research_memory = build_research_memory_service(
+        enable_database_metadata=config.enable_database_metadata,
+        database_url=config.database_url,
+        database_schema=config.database_schema,
+        write_candidates=config.tracking_write_candidates,
+        write_metrics=config.tracking_write_metrics,
+        write_promotions=config.tracking_write_promotions,
+    )
+    research_memory.init_schema(schema_name=config.database_schema)
 
     refresh_result: Any | None = None
     research_result: dict[str, Any] | None = None
     promotion_result: dict[str, Any] | None = None
     portfolio_result: dict[str, Any] | None = None
     export_result: dict[str, Any] | None = None
+    research_run_db_id = None
 
     def run_stage(stage_name: str, enabled: bool, action) -> None:
         nonlocal refresh_result, research_result, promotion_result, portfolio_result, export_result
@@ -426,27 +469,60 @@ def run_alpha_cycle(config: AlphaCycleWorkflowConfig) -> AlphaCycleResult:
         run_stage("refresh", config.stages.refresh, do_refresh)
 
         def do_research(record: AlphaCycleStageRecord) -> dict[str, Any]:
-            nonlocal research_result
+            nonlocal research_result, research_run_db_id
             if research_config is None:
                 raise ValueError("research_config is required for research stage")
             feature_dir = Path(research_config.feature_dir)
             if refresh_result is not None:
                 feature_dir = refresh_result.feature_dir
             research_output_dir.mkdir(parents=True, exist_ok=True)
-            research_result = run_alpha_research(
-                **_research_kwargs(
-                    research_config,
-                    feature_dir=feature_dir,
-                    output_dir=research_output_dir,
+            research_run_key = research_output_dir.name
+            research_run_db_id = db_lineage.create_research_run(
+                run_key=research_run_key,
+                run_type="alpha_research",
+                config_payload={
+                    **_research_kwargs(
+                        research_config,
+                        feature_dir=feature_dir,
+                        output_dir=research_output_dir,
+                    ),
+                    "feature_dir": str(feature_dir),
+                    "output_dir": str(research_output_dir),
+                },
+                notes="alpha_cycle research stage",
+            )
+            try:
+                research_result = run_alpha_research(
+                    **_research_kwargs(
+                        research_config,
+                        feature_dir=feature_dir,
+                        output_dir=research_output_dir,
+                    )
                 )
-            )
-            key_artifacts.update(
-                {
-                    "research_manifest_path": str(research_result.get("research_manifest_path", "")),
-                    "research_leaderboard_path": str(research_result.get("leaderboard_path", "")),
-                    "promoted_signals_path": str(research_result.get("promoted_signals_path", "")),
-                }
-            )
+                key_artifacts.update(
+                    {
+                        "research_manifest_path": str(research_result.get("research_manifest_path", "")),
+                        "research_leaderboard_path": str(research_result.get("leaderboard_path", "")),
+                        "promoted_signals_path": str(research_result.get("promoted_signals_path", "")),
+                    }
+                )
+                leaderboard_path = research_result.get("leaderboard_path")
+                if leaderboard_path and Path(leaderboard_path).exists():
+                    research_memory.persist_alpha_research_outputs(
+                        run_id=research_run_db_id,
+                        leaderboard_df=pd.read_csv(leaderboard_path),
+                    )
+                research_memory.attach_run_metadata(
+                    run_id=research_run_db_id,
+                    artifacts_root=str(research_output_dir.parent),
+                    output_dir=str(research_output_dir),
+                    universe=research_config.universe,
+                    config_path=config.research_config,
+                )
+                db_lineage.complete_research_run(research_run_db_id, notes="alpha_cycle research stage completed")
+            except Exception:
+                db_lineage.fail_research_run(research_run_db_id, notes="alpha_cycle research stage failed")
+                raise
             return research_result
 
         run_stage("research", config.stages.research, do_research)
@@ -474,6 +550,44 @@ def run_alpha_cycle(config: AlphaCycleWorkflowConfig) -> AlphaCycleResult:
             if int(promotion_result.get("selected_count") or 0) == 0:
                 record.warnings.append("zero_promotions")
                 warnings.append("Promotion produced zero strategies; portfolio and export stages may be skipped.")
+            enriched_promoted_rows: list[dict[str, Any]] = []
+            for row in promotion_result.get("promoted_rows", []):
+                strategy_definition_id = db_lineage.upsert_strategy_definition(
+                    name=str(row["preset_name"]),
+                    version=str(row.get("promotion_timestamp") or row.get("source_run_id") or "v1"),
+                    config_payload=row,
+                    code_hash=None,
+                    is_active=row.get("status") == "active",
+                )
+                promotion_decision_id = db_lineage.record_promotion_decision(
+                    strategy_definition_id=strategy_definition_id,
+                    source_research_run_id=db_lineage.find_research_run_id(str(row.get("source_run_id") or "")),
+                    decision=str(row.get("status") or "promoted"),
+                    reason=str(row.get("rationale") or ""),
+                    metrics_json={
+                        "ranking_metric": row.get("ranking_metric"),
+                        "ranking_value": row.get("ranking_value"),
+                        "promotion_variant": row.get("promotion_variant"),
+                        "condition_id": row.get("condition_id"),
+                        "condition_type": row.get("condition_type"),
+                    },
+                )
+                promoted_strategy_id = db_lineage.record_promoted_strategy(
+                    strategy_definition_id=strategy_definition_id,
+                    promotion_decision_id=promotion_decision_id,
+                    status=str(row.get("status") or "inactive"),
+                )
+                enriched_promoted_rows.append(
+                    {
+                        **row,
+                        "strategy_definition_id": strategy_definition_id,
+                        "promoted_strategy_id": promoted_strategy_id,
+                    }
+                )
+            research_memory.persist_promotions(
+                run_id=db_lineage.find_research_run_id(research_output_dir.name),
+                promoted_rows=enriched_promoted_rows,
+            )
             key_artifacts.update(
                 {
                     "research_registry_path": str(registry_bundle.get("registry_json_path", "")),
@@ -504,10 +618,28 @@ def run_alpha_cycle(config: AlphaCycleWorkflowConfig) -> AlphaCycleResult:
                 policy=policy,
                 lifecycle_path=Path(config.lifecycle_path) if config.lifecycle_path else None,
             )
+            portfolio_run_id = db_lineage.create_portfolio_run(
+                run_key=f"{run_dir_name}_strategy_portfolio",
+                mode="strategy_portfolio",
+                config_payload={
+                    "policy": asdict(policy),
+                    "summary": load_strategy_portfolio(portfolio_dir).get("summary", {}),
+                    "promoted_dir": str(promoted_dir),
+                    "portfolio_dir": str(portfolio_dir),
+                },
+                notes="alpha_cycle portfolio stage",
+            )
+            db_lineage.complete_portfolio_run(
+                portfolio_run_id,
+                notes=_portfolio_run_notes(load_strategy_portfolio(portfolio_dir)),
+            )
             key_artifacts.update(
                 {
                     "strategy_portfolio_json_path": str(portfolio_result.get("strategy_portfolio_json_path", "")),
                     "strategy_portfolio_csv_path": str(portfolio_result.get("strategy_portfolio_csv_path", "")),
+                    "strategy_portfolio_condition_summary_path": str(
+                        portfolio_result.get("strategy_portfolio_condition_summary_path", "")
+                    ),
                 }
             )
             return portfolio_result

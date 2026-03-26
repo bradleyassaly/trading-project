@@ -463,6 +463,13 @@ promotion:
   allow_overwrite: true
 portfolio:
   lifecycle: artifacts/governance/strategy_lifecycle.json
+tracking:
+  database_enabled: true
+  database_url: postgresql+psycopg://localhost/trading
+  database_schema: research
+  write_candidates: true
+  write_metrics: true
+  write_promotions: false
 """.strip(),
         encoding="utf-8",
     )
@@ -482,6 +489,10 @@ portfolio:
     assert config.promotion_top_n == 3
     assert config.allow_overwrite is True
     assert config.lifecycle_path == "artifacts/governance/strategy_lifecycle.json"
+    assert config.enable_database_metadata is True
+    assert config.database_url == "postgresql+psycopg://localhost/trading"
+    assert config.database_schema == "research"
+    assert config.tracking_write_promotions is False
 
 
 def test_load_walkforward_workflow_config_from_yaml(tmp_path) -> None:
@@ -936,6 +947,12 @@ require_promotion_eligible_only: true
 deduplicate_source_runs: true
 allow_conditional_variant_siblings: true
 conditional_variant_score_bonus: 0.05
+include_conditional_strategies: true
+max_conditional_strategies_total: 2
+max_conditional_strategies_per_family: 1
+require_baseline_for_conditional: true
+conditional_weight_multiplier: 0.8
+conditional_selection_mode: separate_bucket
 diversification_dimension: signal_family
 fallback_equal_weight_mode: true
 warn_on_same_family_overlap: true
@@ -952,6 +969,12 @@ warn_on_same_family_overlap: true
     assert config.weighting_smoothing_power == 0.8
     assert config.allow_conditional_variant_siblings is True
     assert config.conditional_variant_score_bonus == 0.05
+    assert config.include_conditional_strategies is True
+    assert config.max_conditional_strategies_total == 2
+    assert config.max_conditional_strategies_per_family == 1
+    assert config.require_baseline_for_conditional is True
+    assert config.conditional_weight_multiplier == 0.8
+    assert config.conditional_selection_mode == "separate_bucket"
 
 
 def test_load_strategy_portfolio_policy_config_accepts_new_weighting_modes(tmp_path) -> None:

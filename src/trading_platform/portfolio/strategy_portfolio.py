@@ -47,6 +47,12 @@ class StrategyPortfolioPolicyConfig:
     require_active_only: bool = False
     require_promotion_eligible_only: bool = True
     deduplicate_source_runs: bool = True
+    include_conditional_strategies: bool = True
+    max_conditional_strategies_total: int | None = None
+    max_conditional_strategies_per_family: int | None = None
+    require_baseline_for_conditional: bool = False
+    conditional_weight_multiplier: float = 1.0
+    conditional_selection_mode: str = "include"
     allow_conditional_variant_siblings: bool = False
     conditional_variant_score_bonus: float = 0.0
     diversification_dimension: str = "signal_family"
@@ -65,6 +71,10 @@ class StrategyPortfolioPolicyConfig:
             raise ValueError("max_strategies_per_signal_family must be > 0 when provided")
         if self.max_strategies_per_universe is not None and self.max_strategies_per_universe <= 0:
             raise ValueError("max_strategies_per_universe must be > 0 when provided")
+        if self.max_conditional_strategies_total is not None and self.max_conditional_strategies_total <= 0:
+            raise ValueError("max_conditional_strategies_total must be > 0 when provided")
+        if self.max_conditional_strategies_per_family is not None and self.max_conditional_strategies_per_family <= 0:
+            raise ValueError("max_conditional_strategies_per_family must be > 0 when provided")
         if self.min_families_if_available < 0:
             raise ValueError("min_families_if_available must be >= 0")
         if self.max_weight_per_strategy <= 0:
@@ -82,10 +92,14 @@ class StrategyPortfolioPolicyConfig:
             )
         if self.metric_weight_cap_multiple <= 0:
             raise ValueError("metric_weight_cap_multiple must be > 0")
+        if self.conditional_weight_multiplier < 0:
+            raise ValueError("conditional_weight_multiplier must be >= 0")
         if self.weighting_smoothing_power <= 0:
             raise ValueError("weighting_smoothing_power must be > 0")
         if self.diversification_dimension not in {"none", "signal_family", "universe"}:
             raise ValueError("diversification_dimension must be one of: none, signal_family, universe")
+        if self.conditional_selection_mode not in {"include", "separate_bucket", "shadow_only"}:
+            raise ValueError("conditional_selection_mode must be one of: include, separate_bucket, shadow_only")
 
 
 def _now_utc() -> str:
@@ -158,6 +172,18 @@ def _is_conditional_variant(row: dict[str, Any]) -> bool:
     )
 
 
+def _activation_state_for_row(
+    row: dict[str, Any],
+    *,
+    conditional_selection_mode: str,
+) -> str:
+    if not _is_conditional_variant(row):
+        return "always_on"
+    if conditional_selection_mode == "shadow_only":
+        return "shadow_only"
+    return "inactive_until_condition_match"
+
+
 def _rank_candidates(
     rows: list[dict[str, Any]],
     metric_name: str,
@@ -210,10 +236,13 @@ def _build_base_weights(rows: list[dict[str, Any]], policy: StrategyPortfolioPol
             str(row["preset_name"]): float(count - index)
             for index, row in enumerate(ranked)
         }
-    raw = {
-        str(row["preset_name"]): max(_row_metric_value(row, policy.selection_metric) or 0.0, 0.0)
-        for row in rows
-    }
+    raw = {}
+    for row in rows:
+        name = str(row["preset_name"])
+        value = max(_row_metric_value(row, policy.selection_metric) or 0.0, 0.0)
+        if _is_conditional_variant(row):
+            value *= policy.conditional_weight_multiplier
+        raw[name] = value
     if policy.weighting_smoothing_power != 1.0:
         raw = {
             name: value ** policy.weighting_smoothing_power if value > 0 else value
@@ -330,9 +359,17 @@ def build_strategy_portfolio(
 
     selected_input: list[dict[str, Any]] = []
     excluded_rows: list[dict[str, Any]] = []
+    shadow_rows: list[dict[str, Any]] = []
     seen_run_keys: set[tuple[str, str]] = set()
     family_counts: dict[str, int] = {}
     universe_counts: dict[str, int] = {}
+    conditional_family_counts: dict[str, int] = {}
+    selected_conditional_count = 0
+    baseline_runs_available = {
+        str(row.get("source_run_id") or "")
+        for row in promoted_rows
+        if not _is_conditional_variant(row) and str(row.get("source_run_id") or "").strip()
+    }
 
     ranked_rows = _rank_candidates(
         promoted_rows,
@@ -359,6 +396,16 @@ def build_strategy_portfolio(
         preset_name = str(row.get("preset_name") or "")
         if not preset_name:
             return False, None
+        if _is_conditional_variant(row):
+            if not policy.include_conditional_strategies:
+                return False, "conditional_disabled"
+            if policy.conditional_selection_mode == "shadow_only":
+                return False, "shadow_only_conditional"
+            if (
+                policy.require_baseline_for_conditional
+                and str(row.get("source_run_id") or "") not in baseline_runs_available
+            ):
+                return False, "missing_baseline_for_conditional"
         passes, reason = _passes_filters(row, policy)
         if not passes:
             return False, reason
@@ -384,11 +431,24 @@ def build_strategy_portfolio(
             and universe_counts.get(universe, 0) >= policy.max_strategies_per_universe
         ):
             return False, "universe_cap"
+        if _is_conditional_variant(row):
+            if (
+                policy.max_conditional_strategies_total is not None
+                and selected_conditional_count >= policy.max_conditional_strategies_total
+            ):
+                return False, "conditional_strategy_cap"
+            if (
+                policy.max_conditional_strategies_per_family is not None
+                and signal_family
+                and conditional_family_counts.get(signal_family, 0) >= policy.max_conditional_strategies_per_family
+            ):
+                return False, "conditional_family_cap"
         if policy.max_strategies is not None and len(selected_input) >= policy.max_strategies:
             return False, "max_strategies_reached"
         return True, None
 
     def add_selected_row(row: dict[str, Any]) -> None:
+        nonlocal selected_conditional_count
         preset_name = str(row.get("preset_name") or "")
         source_run_id = str(row.get("source_run_id") or "")
         lifecycle_row = lifecycle_lookup.get(preset_name) or lifecycle_lookup.get(source_run_id)
@@ -402,9 +462,31 @@ def build_strategy_portfolio(
         signal_family = row_family(row)
         if signal_family:
             family_counts[signal_family] = family_counts.get(signal_family, 0) + 1
+            if _is_conditional_variant(row):
+                conditional_family_counts[signal_family] = conditional_family_counts.get(signal_family, 0) + 1
         universe = row_universe(row)
         if universe:
             universe_counts[universe] = universe_counts.get(universe, 0) + 1
+        if _is_conditional_variant(row):
+            selected_conditional_count += 1
+
+    def build_shadow_row(row: dict[str, Any], reason: str) -> dict[str, Any]:
+        return {
+            "preset_name": str(row.get("preset_name") or ""),
+            "source_run_id": row.get("source_run_id"),
+            "signal_family": row.get("signal_family"),
+            "universe": row.get("universe"),
+            "promotion_variant": row.get("promotion_variant"),
+            "condition_id": row.get("condition_id"),
+            "condition_type": row.get("condition_type"),
+            "activation_conditions": row.get("activation_conditions", []),
+            "activation_state": "shadow_only",
+            "portfolio_bucket": "shadow",
+            "rationale": row.get("rationale"),
+            "ranking_metric": row.get("ranking_metric"),
+            "ranking_value": row.get("ranking_value"),
+            "shadow_reason": reason,
+        }
 
     distinct_families_available = {row_family(row) for row in ranked_rows if row_family(row)}
     target_min_families = min(
@@ -423,7 +505,10 @@ def build_strategy_portfolio(
             passes, reason = can_select_row(row)
             if not passes:
                 if reason:
-                    excluded_rows.append({"preset_name": str(row.get("preset_name") or ""), "reason": reason})
+                    if reason == "shadow_only_conditional":
+                        shadow_rows.append(build_shadow_row(row, reason))
+                    else:
+                        excluded_rows.append({"preset_name": str(row.get("preset_name") or ""), "reason": reason})
                 continue
             add_selected_row(row)
             chosen_families.add(family)
@@ -438,7 +523,10 @@ def build_strategy_portfolio(
         passes, reason = can_select_row(row)
         if not passes:
             if reason:
-                excluded_rows.append({"preset_name": preset_name, "reason": reason})
+                if reason == "shadow_only_conditional":
+                    shadow_rows.append(build_shadow_row(row, reason))
+                else:
+                    excluded_rows.append({"preset_name": preset_name, "reason": reason})
             continue
         add_selected_row(row)
         selected_names.add(preset_name)
@@ -457,6 +545,7 @@ def build_strategy_portfolio(
     selected_rows: list[dict[str, Any]] = []
     for rank, row in enumerate(selected_input, start=1):
         preset_name = str(row["preset_name"])
+        is_conditional = _is_conditional_variant(row)
         selected_rows.append(
             {
                 "preset_name": preset_name,
@@ -471,12 +560,24 @@ def build_strategy_portfolio(
                 "selection_rank": rank,
                 "selection_metric": policy.selection_metric,
                 "selection_metric_value": _row_metric_value(row, policy.selection_metric),
+                "ranking_metric": row.get("ranking_metric"),
+                "ranking_value": row.get("ranking_value"),
                 "reason_selected": "selected_by_policy",
                 "warnings": "|".join(row.get("warnings", [])),
                 "promotion_variant": row.get("promotion_variant"),
                 "condition_id": row.get("condition_id"),
                 "condition_type": row.get("condition_type"),
                 "activation_conditions": row.get("activation_conditions", []),
+                "activation_state": _activation_state_for_row(
+                    row,
+                    conditional_selection_mode=policy.conditional_selection_mode,
+                ),
+                "portfolio_bucket": (
+                    "conditional"
+                    if is_conditional and policy.conditional_selection_mode == "separate_bucket"
+                    else "primary"
+                ),
+                "rationale": row.get("rationale"),
                 "generated_preset_path": row.get("generated_preset_path"),
                 "generated_registry_path": row.get("generated_registry_path"),
                 "generated_pipeline_config_path": row.get("generated_pipeline_config_path"),
@@ -488,6 +589,7 @@ def build_strategy_portfolio(
     family_effective_count = _effective_count(list(family_weight_summary.values()))
     effective_strategy_count = _effective_count([row["allocation_weight"] for row in selected_rows])
     conditional_selected_count = sum(1 for row in selected_rows if _is_conditional_variant(row))
+    shadow_conditional_count = len(shadow_rows)
     preset_path_ready_count = sum(
         1 for row in selected_rows if row.get("generated_preset_path") and Path(str(row["generated_preset_path"])).suffix
     )
@@ -511,11 +613,13 @@ def build_strategy_portfolio(
             "effective_strategy_count": effective_strategy_count,
             "effective_family_count": family_effective_count,
             "selected_conditional_variant_count": conditional_selected_count,
+            "shadow_conditional_variant_count": shadow_conditional_count,
             "preset_path_ready_count": preset_path_ready_count,
             "pipeline_path_ready_count": pipeline_path_ready_count,
             "warning_count": len(warnings),
         },
         "selected_strategies": selected_rows,
+        "shadow_strategies": shadow_rows,
         "excluded_candidates": excluded_rows,
         "warnings": warnings,
     }
@@ -523,9 +627,49 @@ def build_strategy_portfolio(
     json_path = _write_payload(output_path / "strategy_portfolio.json", payload)
     csv_path = output_path / "strategy_portfolio.csv"
     pd.DataFrame(selected_rows).to_csv(csv_path, index=False)
+    condition_summary_rows = [
+        {
+            "preset_name": row.get("preset_name"),
+            "source_run_id": row.get("source_run_id"),
+            "signal_family": row.get("signal_family"),
+            "promotion_variant": row.get("promotion_variant"),
+            "condition_id": row.get("condition_id"),
+            "condition_type": row.get("condition_type"),
+            "activation_state": row.get("activation_state"),
+            "portfolio_bucket": row.get("portfolio_bucket"),
+            "selection_metric_value": row.get("selection_metric_value"),
+            "ranking_metric": row.get("ranking_metric"),
+            "ranking_value": row.get("ranking_value"),
+            "rationale": row.get("rationale"),
+        }
+        for row in selected_rows
+        if _is_conditional_variant(row)
+    ] + [
+        {
+            "preset_name": row.get("preset_name"),
+            "source_run_id": row.get("source_run_id"),
+            "signal_family": row.get("signal_family"),
+            "promotion_variant": row.get("promotion_variant"),
+            "condition_id": row.get("condition_id"),
+            "condition_type": row.get("condition_type"),
+            "activation_state": row.get("activation_state"),
+            "portfolio_bucket": row.get("portfolio_bucket"),
+            "selection_metric_value": None,
+            "ranking_metric": row.get("ranking_metric"),
+            "ranking_value": row.get("ranking_value"),
+            "rationale": row.get("rationale"),
+        }
+        for row in shadow_rows
+    ]
+    condition_summary_path = output_path / "strategy_portfolio_condition_summary.csv"
+    if condition_summary_rows:
+        pd.DataFrame(condition_summary_rows).to_csv(condition_summary_path, index=False)
+    elif condition_summary_path.exists():
+        condition_summary_path.unlink()
     return {
         "strategy_portfolio_json_path": str(json_path),
         "strategy_portfolio_csv_path": str(csv_path),
+        "strategy_portfolio_condition_summary_path": str(condition_summary_path),
         "selected_count": len(selected_rows),
         "warning_count": len(warnings),
     }
@@ -566,12 +710,23 @@ def export_multi_strategy_run_config_bundle(
             )
             or None,
             enabled=bool(row.get("enabled", True)),
-            notes=str(row.get("reason_selected", row.get("reason_for_adjustment", "")) or ""),
+            notes=" | ".join(
+                part
+                for part in [
+                    str(row.get("reason_selected", row.get("reason_for_adjustment", "")) or ""),
+                    str(row.get("promotion_variant") or ""),
+                    str(row.get("condition_id") or ""),
+                    str(row.get("activation_state") or ""),
+                ]
+                if part
+            ),
             tags=[
                 tag
                 for tag in [
                     str(row.get("signal_family") or ""),
                     str(row.get("universe") or ""),
+                    str(row.get("promotion_variant") or ""),
+                    str(row.get("condition_type") or ""),
                     *(str(tag) for tag in row.get("regime_compatibility", [])),
                 ]
                 if tag
@@ -623,6 +778,17 @@ def export_multi_strategy_run_config_bundle(
         "multi_strategy_config_path": str(multi_strategy_path),
         "pipeline_config_path": str(pipeline_path),
         "selected_preset_names": [row["preset_name"] for row in selected_rows],
+        "selected_strategy_variants": [
+            {
+                "preset_name": row.get("preset_name"),
+                "promotion_variant": row.get("promotion_variant"),
+                "condition_id": row.get("condition_id"),
+                "condition_type": row.get("condition_type"),
+                "activation_state": row.get("activation_state"),
+                "portfolio_bucket": row.get("portfolio_bucket"),
+            }
+            for row in selected_rows
+        ],
     }
     bundle_path = _write_payload(output_path / f"{bundle_name}_run_bundle.json", bundle_payload)
     return {

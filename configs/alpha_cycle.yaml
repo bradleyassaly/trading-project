@@ -31,3 +31,11 @@ promotion:
 
 portfolio:
   lifecycle: null
+
+tracking:
+  database_enabled: false
+  database_url:
+  database_schema:
+  write_candidates: true
+  write_metrics: true
+  write_promotions: true

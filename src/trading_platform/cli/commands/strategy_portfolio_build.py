@@ -25,3 +25,4 @@ def cmd_strategy_portfolio_build(args) -> None:
     print(f"Warnings: {result['warning_count']}")
     print(f"Strategy portfolio JSON: {result['strategy_portfolio_json_path']}")
     print(f"Strategy portfolio CSV: {result['strategy_portfolio_csv_path']}")
+    print(f"Condition summary CSV: {result['strategy_portfolio_condition_summary_path']}")

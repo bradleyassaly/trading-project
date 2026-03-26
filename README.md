@@ -486,6 +486,38 @@ trading-cli research promote --artifacts-root artifacts/alpha_research --registr
 trading-cli strategy-portfolio build --promoted-dir artifacts/promoted_strategies --output-dir artifacts/strategy_portfolio
 ```
 
+Conditional promoted strategies are now first-class portfolio inputs. `strategy_portfolio.json` preserves:
+
+- `promotion_variant`
+- `condition_id`
+- `condition_type`
+- `activation_conditions`
+- `activation_state`
+- `portfolio_bucket`
+- `rationale`
+- `ranking_metric`
+- `ranking_value`
+
+The portfolio policy can now control conditional handling through:
+
+- `include_conditional_strategies`
+- `max_conditional_strategies_total`
+- `max_conditional_strategies_per_family`
+- `require_baseline_for_conditional`
+- `conditional_weight_multiplier`
+- `conditional_selection_mode`
+
+`conditional_selection_mode` supports:
+
+- `include`
+  conditional strategies compete directly with unconditional strategies
+- `separate_bucket`
+  conditional strategies are still selected, but are marked with `portfolio_bucket=conditional`
+- `shadow_only`
+  conditional strategies are emitted into portfolio artifacts for monitoring but are not allocated capital
+
+When conditional rows are present, portfolio build also writes `strategy_portfolio_condition_summary.csv`.
+
 Optional first-pass policy experiments can now start from the same hardened exported bundle instead of rebuilding the full upstream path:
 
 ```bash
@@ -594,9 +626,18 @@ Those summaries include:
 - stage status and duration
 - key artifact paths
 - promoted strategy count and promoted family names
+- promoted unconditional count
+- promoted conditional count
 - selected portfolio strategy count and weights when available
+- selected conditional portfolio count
 - top research metrics when available
 - warnings and errors
+
+If DB tracking is enabled in the cycle config, alpha-cycle now propagates tracking settings through research, promotion, and the portfolio summary stage. The cycle writes the same artifact outputs as before, and additionally records:
+
+- research runs/candidates/metrics
+- promoted unconditional and conditional strategies
+- a bounded portfolio run summary with selected-count and conditional-count notes
 
 Mode behavior:
 

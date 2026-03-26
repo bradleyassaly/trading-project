@@ -33,6 +33,7 @@ def _write_promoted_strategies(root: Path) -> Path:
                 "status": "active",
                 "ranking_metric": "portfolio_sharpe",
                 "ranking_value": 1.2,
+                "rationale": "baseline promotion",
                 "promotion_timestamp": "2026-03-22T00:00:00+00:00",
                 "generated_preset_path": str(root / "generated_momentum_a.json"),
                 "generated_registry_path": str(root / "generated_momentum_a_registry.json"),
@@ -46,6 +47,7 @@ def _write_promoted_strategies(root: Path) -> Path:
                 "status": "inactive",
                 "ranking_metric": "portfolio_sharpe",
                 "ranking_value": 1.1,
+                "rationale": "secondary baseline promotion",
                 "promotion_timestamp": "2026-03-21T00:00:00+00:00",
                 "generated_preset_path": str(root / "generated_momentum_b.json"),
                 "generated_registry_path": str(root / "generated_momentum_b_registry.json"),
@@ -59,6 +61,7 @@ def _write_promoted_strategies(root: Path) -> Path:
                 "status": "active",
                 "ranking_metric": "portfolio_sharpe",
                 "ranking_value": 0.9,
+                "rationale": "value promotion",
                 "promotion_timestamp": "2026-03-20T00:00:00+00:00",
                 "generated_preset_path": str(root / "generated_value_a.json"),
                 "generated_registry_path": str(root / "generated_value_a_registry.json"),
@@ -72,6 +75,7 @@ def _write_promoted_strategies(root: Path) -> Path:
                 "status": "active",
                 "ranking_metric": "portfolio_sharpe",
                 "ranking_value": 0.7,
+                "rationale": "reversal promotion",
                 "promotion_timestamp": "2026-03-19T00:00:00+00:00",
                 "generated_preset_path": str(root / "generated_reversal_dup.json"),
                 "generated_registry_path": str(root / "generated_reversal_dup_registry.json"),
@@ -252,6 +256,9 @@ def test_strategy_portfolio_can_keep_conditional_sibling_for_same_run_when_enabl
                 "ranking_value": 1.15,
                 "promotion_variant": "conditional",
                 "condition_id": "regime_risk_on",
+                "condition_type": "regime",
+                "activation_conditions": [{"condition_id": "regime_risk_on", "condition_type": "regime"}],
+                "rationale": "regime edge",
                 "promotion_timestamp": "2026-03-22T00:00:01+00:00",
                 "generated_preset_path": str(promoted_dir / "generated_momentum_conditional.json"),
                 "generated_registry_path": str(promoted_dir / "generated_momentum_conditional_registry.json"),
@@ -275,6 +282,113 @@ def test_strategy_portfolio_can_keep_conditional_sibling_for_same_run_when_enabl
 
     assert len(portfolio_payload["selected_strategies"]) == 2
     assert portfolio_payload["summary"]["selected_conditional_variant_count"] == 1
+
+
+def test_strategy_portfolio_can_disable_conditional_strategies(tmp_path: Path) -> None:
+    promoted_dir = tmp_path / "promoted"
+    promoted_dir.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "strategies": [
+            {
+                "preset_name": "generated_base",
+                "source_run_id": "run-a",
+                "signal_family": "momentum",
+                "universe": "nasdaq100",
+                "status": "active",
+                "ranking_metric": "portfolio_sharpe",
+                "ranking_value": 1.2,
+                "promotion_variant": "unconditional",
+                "promotion_timestamp": "2026-03-22T00:00:00+00:00",
+                "generated_preset_path": str(promoted_dir / "generated_base.json"),
+            },
+            {
+                "preset_name": "generated_conditional",
+                "source_run_id": "run-b",
+                "signal_family": "momentum",
+                "universe": "nasdaq100",
+                "status": "active",
+                "ranking_metric": "mean_spearman_ic",
+                "ranking_value": 0.15,
+                "promotion_variant": "conditional",
+                "condition_id": "regime::risk_on",
+                "condition_type": "regime",
+                "activation_conditions": [{"condition_id": "regime::risk_on", "condition_type": "regime"}],
+                "rationale": "conditional edge",
+                "promotion_timestamp": "2026-03-22T00:00:01+00:00",
+                "generated_preset_path": str(promoted_dir / "generated_conditional.json"),
+            },
+        ]
+    }
+    (promoted_dir / "promoted_strategies.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+    build_strategy_portfolio(
+        promoted_dir=promoted_dir,
+        output_dir=tmp_path / "portfolio",
+        policy=StrategyPortfolioPolicyConfig(
+            max_strategies=2,
+            include_conditional_strategies=False,
+        ),
+    )
+    portfolio_payload = load_strategy_portfolio(tmp_path / "portfolio")
+
+    assert len(portfolio_payload["selected_strategies"]) == 1
+    assert portfolio_payload["selected_strategies"][0]["promotion_variant"] == "unconditional"
+    assert any(row["reason"] == "conditional_disabled" for row in portfolio_payload["excluded_candidates"])
+
+
+def test_strategy_portfolio_preserves_conditional_activation_metadata_and_shadow_mode(tmp_path: Path) -> None:
+    promoted_dir = tmp_path / "promoted"
+    promoted_dir.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "strategies": [
+            {
+                "preset_name": "generated_base",
+                "source_run_id": "run-a",
+                "signal_family": "momentum",
+                "universe": "nasdaq100",
+                "status": "active",
+                "ranking_metric": "portfolio_sharpe",
+                "ranking_value": 1.2,
+                "promotion_variant": "unconditional",
+                "promotion_timestamp": "2026-03-22T00:00:00+00:00",
+                "generated_preset_path": str(promoted_dir / "generated_base.json"),
+            },
+            {
+                "preset_name": "generated_conditional",
+                "source_run_id": "run-a",
+                "signal_family": "momentum",
+                "universe": "nasdaq100",
+                "status": "active",
+                "ranking_metric": "mean_spearman_ic",
+                "ranking_value": 0.15,
+                "promotion_variant": "conditional",
+                "condition_id": "regime::risk_on",
+                "condition_type": "regime",
+                "activation_conditions": [{"condition_id": "regime::risk_on", "condition_type": "regime"}],
+                "rationale": "conditional edge",
+                "promotion_timestamp": "2026-03-22T00:00:01+00:00",
+                "generated_preset_path": str(promoted_dir / "generated_conditional.json"),
+            },
+        ]
+    }
+    (promoted_dir / "promoted_strategies.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+    build_strategy_portfolio(
+        promoted_dir=promoted_dir,
+        output_dir=tmp_path / "portfolio",
+        policy=StrategyPortfolioPolicyConfig(
+            max_strategies=2,
+            allow_conditional_variant_siblings=True,
+            conditional_selection_mode="shadow_only",
+        ),
+    )
+    portfolio_payload = load_strategy_portfolio(tmp_path / "portfolio")
+
+    assert len(portfolio_payload["selected_strategies"]) == 1
+    assert portfolio_payload["summary"]["shadow_conditional_variant_count"] == 1
+    assert portfolio_payload["shadow_strategies"][0]["activation_state"] == "shadow_only"
+    assert portfolio_payload["shadow_strategies"][0]["activation_conditions"]
+    assert Path(tmp_path / "portfolio" / "strategy_portfolio_condition_summary.csv").exists()
 
 
 def test_strategy_portfolio_weight_smoothing_reduces_concentration(tmp_path: Path) -> None:
