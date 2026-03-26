@@ -1156,6 +1156,91 @@ def test_align_symbol_daily_features_normalizes_merge_asof_keys_before_alignment
     assert on_available["sales_to_price"] == 100.0 / 200.0
 
 
+def test_build_daily_fundamental_features_tolerates_missing_metric_columns(tmp_path: Path) -> None:
+    artifact_root = tmp_path / "fundamentals"
+    calendar_dir = tmp_path / "features"
+    artifact_root.mkdir()
+    calendar_dir.mkdir()
+
+    pd.DataFrame([{"symbol": "AAPL", "sector": "Technology", "industry": "Hardware"}]).to_parquet(
+        artifact_root / "company_master.parquet",
+        index=False,
+    )
+    pd.DataFrame(
+        [
+            {
+                "symbol": "AAPL",
+                "cik": "0000320193",
+                "fiscal_year": 2023,
+                "fiscal_period": "FY",
+                "period_type": "annual",
+                "period_end_date": "2023-12-31",
+                "filing_date": "2024-02-15",
+                "available_date": "2024-02-15",
+                "form_type": "10-K",
+                "accession_number": "accn-2023",
+                "source": "sec",
+                "metric_name": "revenue",
+                "metric_value": 100.0,
+            },
+            {
+                "symbol": "AAPL",
+                "cik": "0000320193",
+                "fiscal_year": 2023,
+                "fiscal_period": "FY",
+                "period_type": "annual",
+                "period_end_date": "2023-12-31",
+                "filing_date": "2024-02-15",
+                "available_date": "2024-02-15",
+                "form_type": "10-K",
+                "accession_number": "accn-2023",
+                "source": "sec",
+                "metric_name": "net_income",
+                "metric_value": 10.0,
+            },
+            {
+                "symbol": "AAPL",
+                "cik": "0000320193",
+                "fiscal_year": 2023,
+                "fiscal_period": "FY",
+                "period_type": "annual",
+                "period_end_date": "2023-12-31",
+                "filing_date": "2024-02-15",
+                "available_date": "2024-02-15",
+                "form_type": "10-K",
+                "accession_number": "accn-2023",
+                "source": "sec",
+                "metric_name": "shares_outstanding",
+                "metric_value": 10.0,
+            },
+        ]
+    ).to_parquet(artifact_root / "fundamental_values.parquet", index=False)
+    pd.DataFrame(
+        {
+            "timestamp": pd.date_range("2024-02-15", periods=3, freq="D"),
+            "symbol": ["AAPL"] * 3,
+            "close": [20.0] * 3,
+        }
+    ).to_parquet(calendar_dir / "AAPL.parquet", index=False)
+
+    result = build_daily_fundamental_features(
+        FundamentalFeatureBuildRequest(
+            artifact_root=artifact_root,
+            calendar_dir=calendar_dir,
+            symbols=["AAPL"],
+        )
+    )
+    daily_df = pd.read_parquet(result["daily_fundamental_features_path"])
+
+    assert not daily_df.empty
+    assert daily_df["earnings_yield"].notna().any()
+    assert daily_df["gross_margin"].isna().all()
+    assert daily_df["operating_margin"].isna().all()
+    assert daily_df["roe"].isna().all()
+    assert daily_df["roa"].isna().all()
+    assert daily_df["book_to_market"].isna().all()
+
+
 def test_build_daily_fundamental_features_adds_cross_sectional_rank_pct_and_zscore(tmp_path: Path) -> None:
     artifact_root = tmp_path / "fundamentals"
     calendar_dir = tmp_path / "features"

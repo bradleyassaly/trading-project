@@ -103,9 +103,16 @@ class FundamentalsSnapshotBuildRequest:
         return payload
 
 
-def _safe_ratio(numerator: pd.Series, denominator: pd.Series) -> pd.Series:
-    denominator = pd.to_numeric(denominator, errors="coerce").replace(0.0, np.nan)
-    return pd.to_numeric(numerator, errors="coerce") / denominator
+def _series_or_nan(frame: pd.DataFrame, column_name: str) -> pd.Series:
+    if column_name not in frame.columns:
+        return pd.Series(np.nan, index=frame.index, dtype=float)
+    return pd.to_numeric(frame.get(column_name), errors="coerce")
+
+
+def _safe_ratio(frame: pd.DataFrame, numerator_col: str, denominator_col: str) -> pd.Series:
+    numerator = _series_or_nan(frame, numerator_col)
+    denominator = _series_or_nan(frame, denominator_col).replace(0.0, np.nan)
+    return numerator / denominator
 
 
 def _winsorize_series(series: pd.Series, *, lower_quantile: float = 0.05, upper_quantile: float = 0.95) -> pd.Series:
@@ -459,11 +466,11 @@ def _align_symbol_daily_features(
     symbol_values.columns.name = None
     if "free_cash_flow" not in symbol_values.columns:
         symbol_values["free_cash_flow"] = (
-            pd.to_numeric(symbol_values.get("operating_cash_flow"), errors="coerce")
-            - pd.to_numeric(symbol_values.get("capital_expenditures"), errors="coerce")
+            _series_or_nan(symbol_values, "operating_cash_flow")
+            - _series_or_nan(symbol_values, "capital_expenditures")
         )
-    symbol_values["previous_year_revenue"] = symbol_values.groupby("fiscal_period")["revenue"].shift(1)
-    symbol_values["previous_year_net_income"] = symbol_values.groupby("fiscal_period")["net_income"].shift(1)
+    symbol_values["previous_year_revenue"] = _series_or_nan(symbol_values, "revenue").groupby(symbol_values["fiscal_period"]).shift(1)
+    symbol_values["previous_year_net_income"] = _series_or_nan(symbol_values, "net_income").groupby(symbol_values["fiscal_period"]).shift(1)
 
     calendar = calendar_df[["timestamp", "symbol", "close"]].sort_values("timestamp").copy()
     calendar["timestamp"] = _normalize_datetime_key(calendar["timestamp"])
@@ -478,29 +485,23 @@ def _align_symbol_daily_features(
         direction="backward",
     )
     merged["days_since_available"] = (merged["timestamp"] - merged["available_date"]).dt.days
-    market_cap = pd.to_numeric(merged["close"], errors="coerce") * pd.to_numeric(merged["shares_outstanding"], errors="coerce")
-    merged["earnings_yield"] = _safe_ratio(merged["net_income"], market_cap)
-    merged["book_to_market"] = _safe_ratio(merged["shareholders_equity"], market_cap)
-    merged["sales_to_price"] = _safe_ratio(merged["revenue"], market_cap)
-    merged["roe"] = _safe_ratio(merged["net_income"], merged["shareholders_equity"])
-    merged["roa"] = _safe_ratio(merged["net_income"], merged["total_assets"])
-    merged["gross_margin"] = _safe_ratio(merged["gross_profit"], merged["revenue"])
-    merged["operating_margin"] = _safe_ratio(merged["operating_income"], merged["revenue"])
-    merged["revenue_growth_yoy"] = _safe_ratio(
-        pd.to_numeric(merged["revenue"], errors="coerce") - pd.to_numeric(merged["previous_year_revenue"], errors="coerce"),
-        merged["previous_year_revenue"],
-    )
-    merged["net_income_growth_yoy"] = _safe_ratio(
-        pd.to_numeric(merged["net_income"], errors="coerce") - pd.to_numeric(merged["previous_year_net_income"], errors="coerce"),
-        merged["previous_year_net_income"],
-    )
-    merged["debt_to_equity"] = _safe_ratio(merged["long_term_debt"], merged["shareholders_equity"])
-    merged["current_ratio"] = _safe_ratio(merged["current_assets"], merged["current_liabilities"])
-    merged["free_cash_flow_yield"] = _safe_ratio(merged["free_cash_flow"], market_cap)
-    merged["accruals_proxy"] = _safe_ratio(
-        pd.to_numeric(merged["net_income"], errors="coerce") - pd.to_numeric(merged["operating_cash_flow"], errors="coerce"),
-        merged["total_assets"],
-    )
+    merged["market_cap"] = pd.to_numeric(merged["close"], errors="coerce") * _series_or_nan(merged, "shares_outstanding")
+    merged["earnings_yield"] = _safe_ratio(merged, "net_income", "market_cap")
+    merged["book_to_market"] = _safe_ratio(merged, "shareholders_equity", "market_cap")
+    merged["sales_to_price"] = _safe_ratio(merged, "revenue", "market_cap")
+    merged["roe"] = _safe_ratio(merged, "net_income", "shareholders_equity")
+    merged["roa"] = _safe_ratio(merged, "net_income", "total_assets")
+    merged["gross_margin"] = _safe_ratio(merged, "gross_profit", "revenue")
+    merged["operating_margin"] = _safe_ratio(merged, "operating_income", "revenue")
+    merged["revenue_growth_delta"] = _series_or_nan(merged, "revenue") - _series_or_nan(merged, "previous_year_revenue")
+    merged["revenue_growth_yoy"] = _safe_ratio(merged, "revenue_growth_delta", "previous_year_revenue")
+    merged["net_income_growth_delta"] = _series_or_nan(merged, "net_income") - _series_or_nan(merged, "previous_year_net_income")
+    merged["net_income_growth_yoy"] = _safe_ratio(merged, "net_income_growth_delta", "previous_year_net_income")
+    merged["debt_to_equity"] = _safe_ratio(merged, "long_term_debt", "shareholders_equity")
+    merged["current_ratio"] = _safe_ratio(merged, "current_assets", "current_liabilities")
+    merged["free_cash_flow_yield"] = _safe_ratio(merged, "free_cash_flow", "market_cap")
+    merged["accruals_numerator"] = _series_or_nan(merged, "net_income") - _series_or_nan(merged, "operating_cash_flow")
+    merged["accruals_proxy"] = _safe_ratio(merged, "accruals_numerator", "total_assets")
     merged["fundamental_value_score"] = merged[["earnings_yield", "book_to_market", "sales_to_price", "free_cash_flow_yield"]].mean(axis=1, skipna=True)
     negative_quality_terms = -merged[["debt_to_equity", "accruals_proxy"]].apply(pd.to_numeric, errors="coerce")
     merged["fundamental_quality_score"] = pd.concat(
