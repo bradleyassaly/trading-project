@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from sqlalchemy import Float, ForeignKey, Integer, JSON, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, Float, ForeignKey, Integer, JSON, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from trading_platform.db.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
@@ -43,5 +43,8 @@ class SignalMetric(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     total_obs: Mapped[int | None] = mapped_column(Integer)
     rejection_reason: Mapped[str | None] = mapped_column(Text)
     promotion_status: Mapped[str | None] = mapped_column(String(64), index=True)
+    runtime_computability_pass: Mapped[bool | None] = mapped_column(Boolean)
+    runtime_computability_reason: Mapped[str | None] = mapped_column(String(255))
+    runtime_computable_symbol_count: Mapped[int | None] = mapped_column(Integer)
 
     research_run = relationship("ResearchRun")

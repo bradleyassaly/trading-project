@@ -65,8 +65,9 @@ def select_low_redundancy_signals(
     if promoted.empty:
         return promoted, []
 
+    ranking_metric = "runtime_adjusted_mean_spearman_ic" if "runtime_adjusted_mean_spearman_ic" in promoted.columns else "mean_spearman_ic"
     promoted = promoted.sort_values(
-        ["mean_spearman_ic", "mean_long_short_spread"],
+        [ranking_metric, "mean_long_short_spread"],
         ascending=[False, False],
     ).reset_index(drop=True)
     if "candidate_id" not in promoted.columns:

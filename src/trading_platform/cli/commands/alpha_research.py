@@ -71,6 +71,11 @@ class AlphaResearchRequest:
     ensemble_max_members_per_family: int | None
     ensemble_minimum_member_observations: int
     ensemble_minimum_member_metric: float | None
+    require_runtime_computability_for_approval: bool
+    min_runtime_computable_symbols_for_approval: int
+    allow_research_only_noncomputable_candidates: bool
+    runtime_computability_penalty_on_ranking: float
+    runtime_computability_check_mode: str
     experiment_tracker_dir: Path
     enable_database_metadata: bool
     database_url: str | None
@@ -144,6 +149,11 @@ def _build_alpha_research_request(args) -> AlphaResearchRequest:
         ensemble_max_members_per_family=getattr(args, "ensemble_max_members_per_family", None),
         ensemble_minimum_member_observations=getattr(args, "ensemble_minimum_member_observations", 0),
         ensemble_minimum_member_metric=getattr(args, "ensemble_minimum_member_metric", None),
+        require_runtime_computability_for_approval=bool(getattr(args, "require_runtime_computability_for_approval", False)),
+        min_runtime_computable_symbols_for_approval=int(getattr(args, "min_runtime_computable_symbols_for_approval", 5) or 5),
+        allow_research_only_noncomputable_candidates=bool(getattr(args, "allow_research_only_noncomputable_candidates", True)),
+        runtime_computability_penalty_on_ranking=float(getattr(args, "runtime_computability_penalty_on_ranking", 0.02) or 0.02),
+        runtime_computability_check_mode=str(getattr(args, "runtime_computability_check_mode", "strict") or "strict"),
         experiment_tracker_dir=tracker_dir,
         enable_database_metadata=bool(getattr(args, "enable_database_metadata", False)),
         database_url=getattr(args, "database_url", None),
@@ -244,6 +254,11 @@ def cmd_alpha_research(args) -> None:
             ensemble_max_members_per_family=request.ensemble_max_members_per_family,
             ensemble_minimum_member_observations=request.ensemble_minimum_member_observations,
             ensemble_minimum_member_metric=request.ensemble_minimum_member_metric,
+            require_runtime_computability_for_approval=request.require_runtime_computability_for_approval,
+            min_runtime_computable_symbols_for_approval=request.min_runtime_computable_symbols_for_approval,
+            allow_research_only_noncomputable_candidates=request.allow_research_only_noncomputable_candidates,
+            runtime_computability_penalty_on_ranking=request.runtime_computability_penalty_on_ranking,
+            runtime_computability_check_mode=request.runtime_computability_check_mode,
         )
         leaderboard_path = Path(result["leaderboard_path"])
         if leaderboard_path.exists():

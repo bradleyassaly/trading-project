@@ -295,6 +295,7 @@ def load_alpha_research_workflow_config(path: str | Path) -> AlphaResearchWorkfl
     dynamic_section = _pop_dict_section(payload, "dynamic")
     regime_section = _pop_dict_section(payload, "regime")
     ensemble_section = _pop_dict_section(payload, "ensemble")
+    runtime_section = _pop_dict_section(payload, "runtime")
     tracking_section = _pop_dict_section(payload, "tracking")
 
     if "symbols" not in payload and isinstance(selection_section.get("symbols"), list):
@@ -362,6 +363,11 @@ def load_alpha_research_workflow_config(path: str | Path) -> AlphaResearchWorkfl
     _set_if_missing(payload, "ensemble_max_members_per_family", ensemble_section, "max_members_per_family")
     _set_if_missing(payload, "ensemble_minimum_member_observations", ensemble_section, "minimum_member_observations")
     _set_if_missing(payload, "ensemble_minimum_member_metric", ensemble_section, "minimum_member_metric")
+    _set_if_missing(payload, "require_runtime_computability_for_approval", runtime_section)
+    _set_if_missing(payload, "min_runtime_computable_symbols_for_approval", runtime_section)
+    _set_if_missing(payload, "allow_research_only_noncomputable_candidates", runtime_section)
+    _set_if_missing(payload, "runtime_computability_penalty_on_ranking", runtime_section)
+    _set_if_missing(payload, "runtime_computability_check_mode", runtime_section)
 
     _set_if_missing(payload, "experiment_tracker_dir", tracking_section, "tracker_dir")
     _set_if_missing(payload, "enable_database_metadata", tracking_section, "database_enabled")

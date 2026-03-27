@@ -188,6 +188,9 @@ class ResearchMemoryService:
                 "total_obs": _safe_int(row.get("total_obs")),
                 "rejection_reason": _safe_text(row.get("rejection_reason")),
                 "promotion_status": _safe_text(row.get("promotion_status")),
+                "runtime_computability_pass": bool(row.get("runtime_computability_pass")) if row.get("runtime_computability_pass") is not None else None,
+                "runtime_computability_reason": _safe_text(row.get("runtime_computability_reason")),
+                "runtime_computable_symbol_count": _safe_int(row.get("runtime_computable_symbol_count")),
             }
             if existing is None:
                 session.add(SignalMetric(**payload))

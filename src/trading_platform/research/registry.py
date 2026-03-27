@@ -42,6 +42,9 @@ REGISTRY_COLUMNS = [
     "implementability_return_drag",
     "promotion_status",
     "promotion_recommendation",
+    "runtime_computability_pass",
+    "runtime_computability_reason",
+    "runtime_computable_symbol_count",
 ]
 
 LEADERBOARD_COLUMNS = [
@@ -73,6 +76,9 @@ PROMOTION_CANDIDATE_COLUMNS = [
     "promoted_signal_count",
     "folds_tested",
     "candidate_count",
+    "runtime_computability_pass",
+    "runtime_computability_reason",
+    "runtime_computable_symbol_count",
 ]
 
 CONDITIONAL_PROMOTION_CANDIDATE_COLUMNS = [
@@ -295,6 +301,9 @@ def _manifest_summary_row(manifest: dict[str, Any]) -> dict[str, Any]:
         "implementability_return_drag": top_metrics.get("implementability_return_drag"),
         "promotion_status": top_metrics.get("promotion_status"),
         "promotion_recommendation": promotion.get("recommendation"),
+        "runtime_computability_pass": top_metrics.get("runtime_computability_pass"),
+        "runtime_computability_reason": top_metrics.get("runtime_computability_reason"),
+        "runtime_computable_symbol_count": top_metrics.get("runtime_computable_symbol_count"),
     }
 
 
@@ -441,13 +450,21 @@ def build_research_run_manifest(
             "implementability_return_drag": _safe_float(top_implementability.get("return_drag")),
             "promotion_status": _clean_optional_text(top_candidate.get("promotion_status")),
             "rejection_reason": _clean_optional_reason(top_candidate.get("rejection_reason")),
+            "runtime_computability_pass": bool(top_candidate.get("runtime_computability_pass")) if top_candidate.get("runtime_computability_pass") is not None else None,
+            "runtime_computability_reason": _clean_optional_text(top_candidate.get("runtime_computability_reason")),
+            "runtime_computable_symbol_count": _safe_int(top_candidate.get("runtime_computable_symbol_count")),
         },
         "top_candidate": {
+            "candidate_id": _clean_optional_text(top_candidate.get("candidate_id")),
             "signal_family": _clean_optional_text(top_candidate.get("signal_family")),
+            "signal_variant": _clean_optional_text(top_candidate.get("signal_variant")),
             "lookback": _safe_int(top_candidate.get("lookback")),
             "horizon": _safe_int(top_candidate.get("horizon")),
             "promotion_status": _clean_optional_text(top_candidate.get("promotion_status")),
             "rejection_reason": _clean_optional_reason(top_candidate.get("rejection_reason")),
+            "runtime_computability_pass": bool(top_candidate.get("runtime_computability_pass")) if top_candidate.get("runtime_computability_pass") is not None else None,
+            "runtime_computability_reason": _clean_optional_text(top_candidate.get("runtime_computability_reason")),
+            "runtime_computable_symbol_count": _safe_int(top_candidate.get("runtime_computable_symbol_count")),
         },
         "diagnostics_snapshot": {
             "evaluation_mode": diagnostics.get("evaluation_mode"),
@@ -696,6 +713,9 @@ def build_promotion_candidates(
                 "promoted_signal_count": manifest.get("promoted_signal_count"),
                 "folds_tested": manifest.get("folds_tested"),
                 "candidate_count": manifest.get("candidate_count"),
+                "runtime_computability_pass": top_metrics.get("runtime_computability_pass"),
+                "runtime_computability_reason": top_metrics.get("runtime_computability_reason"),
+                "runtime_computable_symbol_count": top_metrics.get("runtime_computable_symbol_count"),
             }
         )
         for candidate in manifest.get("conditional_research", {}).get("promotion_candidates", []):

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -78,6 +79,26 @@ def _now_utc() -> str:
     return datetime.now(UTC).isoformat()
 
 
+@dataclass(frozen=True)
+class RuntimeComputabilityConfig:
+    require_runtime_computability_for_approval: bool = False
+    min_runtime_computable_symbols_for_approval: int = 5
+    allow_research_only_noncomputable_candidates: bool = True
+    runtime_computability_penalty_on_ranking: float = 0.02
+    runtime_computability_check_mode: str = "strict"
+
+    def __post_init__(self) -> None:
+        if self.min_runtime_computable_symbols_for_approval < 0:
+            raise ValueError("min_runtime_computable_symbols_for_approval must be >= 0")
+        if self.runtime_computability_penalty_on_ranking < 0:
+            raise ValueError("runtime_computability_penalty_on_ranking must be >= 0")
+        if self.runtime_computability_check_mode not in {"strict", "penalize", "diagnostic_only"}:
+            raise ValueError("runtime_computability_check_mode must be one of: strict, penalize, diagnostic_only")
+
+    def strict_mode_enabled(self) -> bool:
+        return self.require_runtime_computability_for_approval and self.runtime_computability_check_mode == "strict"
+
+
 def _centered_cross_sectional_rank(panel: pd.DataFrame) -> pd.DataFrame:
     return panel.rank(axis=1, pct=True).sub(0.5).mul(2.0)
 
@@ -110,6 +131,180 @@ def _build_signal_family_summary(leaderboard_df: pd.DataFrame) -> pd.DataFrame:
             }
         )
     return pd.DataFrame(rows, columns=columns).sort_values("signal_family").reset_index(drop=True)
+
+
+def _parse_variant_parameters(value: object) -> dict[str, object]:
+    if isinstance(value, dict):
+        return dict(value)
+    if value in (None, "", "{}"):
+        return {}
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return {}
+        return dict(parsed) if isinstance(parsed, dict) else {}
+    return {}
+
+
+def _append_reason(base_reason: object, new_reason: str) -> str:
+    base_text = str(base_reason or "").strip()
+    if not base_text or base_text.lower() == "none":
+        return new_reason
+    existing = {part.strip() for part in base_text.split(";") if part.strip()}
+    if new_reason in existing:
+        return base_text
+    return f"{base_text};{new_reason}"
+
+
+def _build_candidate_runtime_computability(
+    *,
+    leaderboard_df: pd.DataFrame,
+    symbol_data: dict[str, pd.DataFrame],
+    signal_composition_preset: str,
+    enable_context_confirmations: bool | None,
+    enable_relative_features: bool | None,
+    enable_flow_confirmations: bool | None,
+) -> pd.DataFrame:
+    columns = [
+        "candidate_id",
+        "runtime_computability_pass",
+        "runtime_computability_reason",
+        "runtime_computable_symbol_count",
+        "latest_score_non_null_count",
+        "latest_component_score_count",
+        "latest_composite_score_count",
+        "current_feature_snapshot_timestamp",
+    ]
+    if leaderboard_df.empty:
+        return pd.DataFrame(columns=columns)
+
+    latest_snapshot = max(
+        (
+            pd.to_datetime(frame["timestamp"], errors="coerce").max()
+            for frame in symbol_data.values()
+            if not frame.empty and "timestamp" in frame.columns
+        ),
+        default=pd.NaT,
+    )
+    rows: list[dict[str, object]] = []
+    for row in leaderboard_df.to_dict(orient="records"):
+        latest_non_null_count = 0
+        latest_component_count = 0
+        for symbol, feature_df in symbol_data.items():
+            try:
+                signal = build_signal(
+                    feature_df,
+                    signal_family=str(row.get("signal_family") or ""),
+                    lookback=int(row.get("lookback") or 0),
+                    signal_variant=str(row.get("signal_variant") or "base"),
+                    variant_params=_parse_variant_parameters(row.get("variant_parameters_json")),
+                    signal_composition_preset=signal_composition_preset,
+                    enable_context_confirmations=enable_context_confirmations,
+                    enable_relative_features=enable_relative_features,
+                    enable_flow_confirmations=enable_flow_confirmations,
+                )
+            except Exception:
+                continue
+            if signal is None or len(signal) == 0:
+                continue
+            latest_value = signal.iloc[-1]
+            if pd.notna(latest_value):
+                latest_non_null_count += 1
+                latest_component_count += 1
+        runtime_reason = "runtime_scores_available" if latest_non_null_count > 0 else "empty_current_scores"
+        rows.append(
+            {
+                "candidate_id": row.get("candidate_id"),
+                "runtime_computability_pass": latest_non_null_count > 0,
+                "runtime_computability_reason": runtime_reason,
+                "runtime_computable_symbol_count": latest_non_null_count,
+                "latest_score_non_null_count": latest_non_null_count,
+                "latest_component_score_count": latest_component_count,
+                "latest_composite_score_count": pd.NA,
+                "current_feature_snapshot_timestamp": (
+                    str(pd.Timestamp(latest_snapshot).isoformat()) if pd.notna(latest_snapshot) else None
+                ),
+            }
+        )
+    return pd.DataFrame(rows, columns=columns)
+
+
+def _apply_runtime_computability_policy(
+    leaderboard_df: pd.DataFrame,
+    *,
+    runtime_df: pd.DataFrame,
+    config: RuntimeComputabilityConfig,
+) -> pd.DataFrame:
+    if leaderboard_df.empty:
+        result = leaderboard_df.copy()
+        result["runtime_computability_pass"] = pd.Series(dtype="bool")
+        result["runtime_computability_reason"] = pd.Series(dtype="object")
+        result["runtime_computable_symbol_count"] = pd.Series(dtype="float64")
+        result["latest_score_non_null_count"] = pd.Series(dtype="float64")
+        result["latest_component_score_count"] = pd.Series(dtype="float64")
+        result["latest_composite_score_count"] = pd.Series(dtype="float64")
+        result["current_feature_snapshot_timestamp"] = pd.Series(dtype="object")
+        result["runtime_computability_disposition"] = pd.Series(dtype="object")
+        result["blocked_from_approval"] = pd.Series(dtype="bool")
+        result["runtime_adjusted_mean_spearman_ic"] = pd.Series(dtype="float64")
+        return result
+
+    result = leaderboard_df.merge(runtime_df, on="candidate_id", how="left")
+    result["runtime_computability_pass"] = result["runtime_computability_pass"].fillna(False).astype(bool)
+    result["runtime_computability_reason"] = result["runtime_computability_reason"].fillna("runtime_check_unavailable")
+    result["runtime_computable_symbol_count"] = pd.to_numeric(result["runtime_computable_symbol_count"], errors="coerce").fillna(0).astype(int)
+    result["latest_score_non_null_count"] = pd.to_numeric(result["latest_score_non_null_count"], errors="coerce").fillna(0).astype(int)
+    result["latest_component_score_count"] = pd.to_numeric(result["latest_component_score_count"], errors="coerce").fillna(0).astype(int)
+    result["latest_composite_score_count"] = pd.to_numeric(result["latest_composite_score_count"], errors="coerce")
+    result["blocked_from_approval"] = False
+    result["runtime_computability_disposition"] = "approved"
+    result["runtime_adjusted_mean_spearman_ic"] = pd.to_numeric(result["mean_spearman_ic"], errors="coerce")
+
+    failed_mask = (
+        (~result["runtime_computability_pass"])
+        | (result["runtime_computable_symbol_count"] < int(config.min_runtime_computable_symbols_for_approval))
+    )
+    insufficient_mask = failed_mask & result["runtime_computability_pass"]
+    if insufficient_mask.any():
+        result.loc[insufficient_mask, "runtime_computability_pass"] = False
+        result.loc[insufficient_mask, "runtime_computability_reason"] = result.loc[insufficient_mask, "runtime_computable_symbol_count"].map(
+            lambda value: f"runtime_computable_symbols {int(value)} < {config.min_runtime_computable_symbols_for_approval}"
+        )
+
+    if config.runtime_computability_check_mode == "penalize":
+        result.loc[failed_mask, "runtime_adjusted_mean_spearman_ic"] = (
+            pd.to_numeric(result.loc[failed_mask, "mean_spearman_ic"], errors="coerce").fillna(0.0)
+            - float(config.runtime_computability_penalty_on_ranking)
+        )
+        result.loc[failed_mask, "runtime_computability_disposition"] = "penalized"
+    elif config.runtime_computability_check_mode == "diagnostic_only":
+        result.loc[failed_mask, "runtime_computability_disposition"] = "diagnostic_only"
+
+    if config.strict_mode_enabled():
+        reject_reason = (
+            "runtime_incomputable_research_only"
+            if config.allow_research_only_noncomputable_candidates
+            else "runtime_incomputable_blocked"
+        )
+        result.loc[failed_mask, "promotion_status"] = "reject"
+        result.loc[failed_mask, "blocked_from_approval"] = True
+        result.loc[failed_mask, "runtime_computability_disposition"] = (
+            "research_only"
+            if config.allow_research_only_noncomputable_candidates
+            else "blocked"
+        )
+        result.loc[failed_mask, "rejection_reason"] = result.loc[failed_mask, "rejection_reason"].map(
+            lambda value: _append_reason(value, reject_reason)
+        )
+
+    sort_columns = [
+        "runtime_adjusted_mean_spearman_ic",
+        "mean_quantile_spread",
+        "runtime_computable_symbol_count",
+    ]
+    result = result.sort_values(sort_columns, ascending=[False, False, False]).reset_index(drop=True)
+    return result
 
 
 def _load_daily_fundamental_features(
@@ -718,6 +913,11 @@ def run_alpha_research(
     ensemble_max_members_per_family: int | None = None,
     ensemble_minimum_member_observations: int = 0,
     ensemble_minimum_member_metric: float | None = None,
+    require_runtime_computability_for_approval: bool = False,
+    min_runtime_computable_symbols_for_approval: int = 5,
+    allow_research_only_noncomputable_candidates: bool = True,
+    runtime_computability_penalty_on_ranking: float = 0.02,
+    runtime_computability_check_mode: str = "strict",
 ) -> dict[str, str]:
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -728,6 +928,13 @@ def run_alpha_research(
             for value in (signal_families or [signal_family])
             if str(value).strip()
         )
+    )
+    runtime_computability_config = RuntimeComputabilityConfig(
+        require_runtime_computability_for_approval=require_runtime_computability_for_approval,
+        min_runtime_computable_symbols_for_approval=min_runtime_computable_symbols_for_approval,
+        allow_research_only_noncomputable_candidates=allow_research_only_noncomputable_candidates,
+        runtime_computability_penalty_on_ranking=runtime_computability_penalty_on_ranking,
+        runtime_computability_check_mode=runtime_computability_check_mode,
     )
     if not normalized_signal_families:
         raise ValueError("at least one signal family must be provided")
@@ -975,6 +1182,20 @@ def run_alpha_research(
         )
         leaderboard_df = apply_promotion_rules(leaderboard_df)
 
+    runtime_candidate_df = _build_candidate_runtime_computability(
+        leaderboard_df=leaderboard_df,
+        symbol_data=symbol_data,
+        signal_composition_preset=signal_composition_preset,
+        enable_context_confirmations=enable_context_confirmations,
+        enable_relative_features=enable_relative_features,
+        enable_flow_confirmations=enable_flow_confirmations,
+    )
+    leaderboard_df = _apply_runtime_computability_policy(
+        leaderboard_df,
+        runtime_df=runtime_candidate_df,
+        config=runtime_computability_config,
+    )
+
     combined_daily_metrics = {
         key: pd.concat(frames, ignore_index=True).sort_values("timestamp").reset_index(drop=True)
         for key, frames in daily_metrics_by_candidate.items()
@@ -1025,9 +1246,53 @@ def run_alpha_research(
         daily_metrics_by_candidate=combined_daily_metrics,
         score_panel_by_candidate=combined_score_panels,
     )
+    candidate_runtime_computability_df = leaderboard_df[
+        [
+            "candidate_id",
+            "candidate_name",
+            "signal_family",
+            "signal_variant",
+            "lookback",
+            "horizon",
+            "promotion_status",
+            "rejection_reason",
+            "runtime_computability_pass",
+            "runtime_computability_reason",
+            "runtime_computable_symbol_count",
+            "latest_score_non_null_count",
+            "latest_component_score_count",
+            "latest_composite_score_count",
+            "current_feature_snapshot_timestamp",
+            "runtime_computability_disposition",
+            "blocked_from_approval",
+            "runtime_adjusted_mean_spearman_ic",
+        ]
+    ].copy()
     promoted_signals_df = leaderboard_df.loc[
         leaderboard_df["promotion_status"] == "promote"
     ].reset_index(drop=True)
+    preblocked_composite_member_rows = [
+        {
+            "candidate_id": row["candidate_id"],
+            "signal_family": row.get("signal_family"),
+            "signal_variant": row.get("signal_variant"),
+            "lookback": row.get("lookback"),
+            "horizon": row.get("horizon"),
+            "runtime_computability_pass": row.get("runtime_computability_pass"),
+            "runtime_computability_reason": row.get("runtime_computability_reason"),
+            "runtime_computable_symbol_count": row.get("runtime_computable_symbol_count"),
+            "latest_score_non_null_count": row.get("latest_score_non_null_count"),
+            "latest_component_score_count": row.get("latest_component_score_count"),
+            "current_feature_snapshot_timestamp": row.get("current_feature_snapshot_timestamp"),
+            "excluded_from_composite": True,
+            "blocked_from_approval": True,
+            "selected_for_composite": False,
+            "exclusion_reason": "runtime_incomputable",
+        }
+        for _, row in candidate_runtime_computability_df.loc[
+            candidate_runtime_computability_df["blocked_from_approval"]
+        ].iterrows()
+    ]
     signal_family_summary_df = _build_signal_family_summary(leaderboard_df)
     fundamental_feature_ic_summary_df = _build_fundamental_feature_ic_summary(
         symbol_data,
@@ -1151,24 +1416,115 @@ def run_alpha_research(
     signal_performance_by_benchmark_context_frames: list[pd.DataFrame] = []
     regime_aware_weight_frames: list[pd.DataFrame] = []
     regime_selection_report_frames: list[pd.DataFrame] = []
+    composite_member_runtime_validation_rows: list[dict[str, object]] = list(preblocked_composite_member_rows)
     composite_diagnostics: dict[str, object] = {
         "config": DEFAULT_COMPOSITE_CONFIG.to_dict(),
         "signal_lifecycle": lifecycle_config.to_dict(),
         "regime": regime_config.to_dict(),
+        "runtime_computability": asdict(runtime_computability_config),
         "horizons": {},
     }
-    for horizon in sorted(promoted_signals_df["horizon"].unique().tolist()) if not promoted_signals_df.empty else []:
+    composite_horizons = sorted(int(value) for value in promoted_signals_df["horizon"].dropna().unique().tolist()) if not promoted_signals_df.empty else []
+    if runtime_computability_config.strict_mode_enabled() and not candidate_runtime_computability_df.empty:
+        composite_horizons = sorted(
+            {
+                *composite_horizons,
+                *[
+                    int(value)
+                    for value in candidate_runtime_computability_df.loc[
+                        candidate_runtime_computability_df["blocked_from_approval"],
+                        "horizon",
+                    ].dropna().unique().tolist()
+                ],
+            }
+        )
+    for horizon in composite_horizons:
+        horizon_promoted_df = promoted_signals_df.loc[promoted_signals_df["horizon"] == horizon].copy()
+        runtime_excluded_df = candidate_runtime_computability_df.loc[
+            (candidate_runtime_computability_df["horizon"] == horizon)
+            & (candidate_runtime_computability_df["blocked_from_approval"])
+        ].copy()
+        composite_candidate_input_df = horizon_promoted_df.loc[~horizon_promoted_df["blocked_from_approval"]].copy()
+        runtime_excluded_rows = [
+            {
+                "candidate_id": row["candidate_id"],
+                "excluded_with_candidate_id": None,
+                "redundancy_corr": pd.NA,
+                "exclusion_reason": "runtime_incomputable",
+            }
+            for _, row in runtime_excluded_df.iterrows()
+        ] if runtime_computability_config.strict_mode_enabled() else []
+        if not runtime_computability_config.strict_mode_enabled():
+            composite_candidate_input_df = horizon_promoted_df
+
         selected_signals_df, excluded_rows = select_low_redundancy_signals(
-            promoted_signals_df,
+            composite_candidate_input_df,
             redundancy_df,
             horizon=int(horizon),
             redundancy_corr_threshold=DEFAULT_COMPOSITE_CONFIG.redundancy_corr_threshold,
         )
+        excluded_rows = runtime_excluded_rows + [
+            {
+                **row,
+                "exclusion_reason": row.get("exclusion_reason") or "redundancy_filter",
+            }
+            for row in excluded_rows
+        ]
+        excluded_candidate_ids = {
+            str(row.get("candidate_id") or "")
+            for row in excluded_rows
+            if str(row.get("candidate_id") or "").strip()
+        }
+        selected_candidate_ids = {
+            str(candidate_id_value)
+            for candidate_id_value in selected_signals_df.get("candidate_id", pd.Series(dtype="object")).tolist()
+            if str(candidate_id_value).strip()
+        }
+        for _, row in horizon_promoted_df.iterrows():
+            candidate_key = str(row.get("candidate_id") or "")
+            exclusion_reason = "selected_for_composite"
+            if candidate_key in excluded_candidate_ids:
+                exclusion_reason = next(
+                    (
+                        str(item.get("exclusion_reason") or "excluded")
+                        for item in excluded_rows
+                        if str(item.get("candidate_id") or "") == candidate_key
+                    ),
+                    "excluded",
+                )
+            composite_member_runtime_validation_rows.append(
+                {
+                    "candidate_id": candidate_key,
+                    "signal_family": row.get("signal_family"),
+                    "signal_variant": row.get("signal_variant"),
+                    "lookback": row.get("lookback"),
+                    "horizon": row.get("horizon"),
+                    "runtime_computability_pass": row.get("runtime_computability_pass"),
+                    "runtime_computability_reason": row.get("runtime_computability_reason"),
+                    "runtime_computable_symbol_count": row.get("runtime_computable_symbol_count"),
+                    "latest_score_non_null_count": row.get("latest_score_non_null_count"),
+                    "latest_component_score_count": row.get("latest_component_score_count"),
+                    "current_feature_snapshot_timestamp": row.get("current_feature_snapshot_timestamp"),
+                    "excluded_from_composite": candidate_key in excluded_candidate_ids,
+                    "blocked_from_approval": row.get("blocked_from_approval"),
+                    "selected_for_composite": candidate_key in selected_candidate_ids,
+                    "exclusion_reason": exclusion_reason,
+                }
+            )
         composite_diagnostics["horizons"][str(int(horizon))] = {
             "selected_signals": selected_signals_df[
                 ["candidate_id", "signal_family", "signal_variant", "lookback", "horizon"]
             ].to_dict(orient="records"),
             "excluded_signals": excluded_rows,
+            "runtime_excluded_count": int(len(runtime_excluded_rows)),
+            "runtime_selected_count": int(len(selected_signals_df.index)),
+            "approval_blocked_reason": (
+                "all_members_failed_runtime_computability"
+                if runtime_computability_config.strict_mode_enabled()
+                and (not horizon_promoted_df.empty or bool(runtime_excluded_rows))
+                and selected_signals_df.empty
+                else None
+            ),
         }
         dynamic_weights_df, active_signals_df, deactivated_signals_df, lifecycle_report_df = build_dynamic_signal_weights(
             selected_signals_df,
@@ -1539,6 +1895,11 @@ def run_alpha_research(
     promoted_signals_path_parquet = output_dir / "promoted_signals.parquet"
     signal_family_summary_path_csv = output_dir / "signal_family_summary.csv"
     signal_family_summary_path_parquet = output_dir / "signal_family_summary.parquet"
+    candidate_runtime_computability_path_csv = output_dir / "candidate_runtime_computability.csv"
+    candidate_runtime_computability_path_parquet = output_dir / "candidate_runtime_computability.parquet"
+    composite_member_runtime_validation_path_csv = output_dir / "composite_member_runtime_validation.csv"
+    composite_member_runtime_validation_path_parquet = output_dir / "composite_member_runtime_validation.parquet"
+    research_runtime_computability_summary_path_csv = output_dir / "research_runtime_computability_summary.csv"
     fundamental_feature_ic_summary_path_csv = output_dir / "fundamental_feature_ic_summary.csv"
     fundamental_feature_ic_summary_path_parquet = output_dir / "fundamental_feature_ic_summary.parquet"
     hybrid_component_summary_path_csv = output_dir / "hybrid_component_summary.csv"
@@ -1598,6 +1959,43 @@ def run_alpha_research(
     capacity_scenarios_path_parquet = output_dir / "capacity_scenarios.parquet"
     diagnostics_path = output_dir / "signal_diagnostics.json"
     hybrid_component_summary_df = _build_hybrid_component_summary(candidate_specs)
+    composite_member_runtime_validation_df = pd.DataFrame(
+        composite_member_runtime_validation_rows,
+        columns=[
+            "candidate_id",
+            "signal_family",
+            "signal_variant",
+            "lookback",
+            "horizon",
+            "runtime_computability_pass",
+            "runtime_computability_reason",
+            "runtime_computable_symbol_count",
+            "latest_score_non_null_count",
+            "latest_component_score_count",
+            "current_feature_snapshot_timestamp",
+            "excluded_from_composite",
+            "blocked_from_approval",
+            "selected_for_composite",
+            "exclusion_reason",
+        ],
+    )
+    research_runtime_computability_summary_df = pd.DataFrame(
+        [
+            {
+                "runtime_computability_check_mode": runtime_computability_config.runtime_computability_check_mode,
+                "require_runtime_computability_for_approval": runtime_computability_config.require_runtime_computability_for_approval,
+                "min_runtime_computable_symbols_for_approval": runtime_computability_config.min_runtime_computable_symbols_for_approval,
+                "candidate_count": int(len(candidate_runtime_computability_df.index)),
+                "passed_count": int(candidate_runtime_computability_df["runtime_computability_pass"].sum()) if not candidate_runtime_computability_df.empty else 0,
+                "failed_count": int((~candidate_runtime_computability_df["runtime_computability_pass"]).sum()) if not candidate_runtime_computability_df.empty else 0,
+                "blocked_from_approval_count": int(candidate_runtime_computability_df["blocked_from_approval"].sum()) if not candidate_runtime_computability_df.empty else 0,
+                "research_only_count": int((candidate_runtime_computability_df["runtime_computability_disposition"] == "research_only").sum()) if not candidate_runtime_computability_df.empty else 0,
+                "penalized_count": int((candidate_runtime_computability_df["runtime_computability_disposition"] == "penalized").sum()) if not candidate_runtime_computability_df.empty else 0,
+                "promoted_candidate_count": int(len(promoted_signals_df.index)),
+                "composite_member_excluded_count": int(composite_member_runtime_validation_df["excluded_from_composite"].sum()) if not composite_member_runtime_validation_df.empty and "excluded_from_composite" in composite_member_runtime_validation_df.columns else 0,
+            }
+        ]
+    )
 
     detailed_df.to_csv(detailed_path_csv, index=False)
     leaderboard_df.to_csv(leaderboard_path_csv, index=False)
@@ -1605,6 +2003,9 @@ def run_alpha_research(
     promoted_signals_df.to_csv(promoted_signals_path_csv, index=False)
     promoted_signals_df.to_csv(promotion_candidates_path_csv, index=False)
     signal_family_summary_df.to_csv(signal_family_summary_path_csv, index=False)
+    candidate_runtime_computability_df.to_csv(candidate_runtime_computability_path_csv, index=False)
+    composite_member_runtime_validation_df.to_csv(composite_member_runtime_validation_path_csv, index=False)
+    research_runtime_computability_summary_df.to_csv(research_runtime_computability_summary_path_csv, index=False)
     fundamental_feature_ic_summary_df.to_csv(fundamental_feature_ic_summary_path_csv, index=False)
     hybrid_component_summary_df.to_csv(hybrid_component_summary_path_csv, index=False)
     redundancy_df.to_csv(redundancy_report_path_csv, index=False)
@@ -1636,6 +2037,8 @@ def run_alpha_research(
     leaderboard_df.to_parquet(leaderboard_path_parquet, index=False)
     promoted_signals_df.to_parquet(promoted_signals_path_parquet, index=False)
     signal_family_summary_df.to_parquet(signal_family_summary_path_parquet, index=False)
+    candidate_runtime_computability_df.to_parquet(candidate_runtime_computability_path_parquet, index=False)
+    composite_member_runtime_validation_df.to_parquet(composite_member_runtime_validation_path_parquet, index=False)
     fundamental_feature_ic_summary_df.to_parquet(fundamental_feature_ic_summary_path_parquet, index=False)
     hybrid_component_summary_df.to_parquet(hybrid_component_summary_path_parquet, index=False)
     redundancy_df.to_parquet(redundancy_report_path_parquet, index=False)
@@ -1717,6 +2120,7 @@ def run_alpha_research(
         "signal_lifecycle": lifecycle_config.to_dict(),
         "regime": regime_config.to_dict(),
         "composite_portfolio": portfolio_config.to_dict(),
+        "runtime_computability": asdict(runtime_computability_config),
         "equity_context": {
             "enabled": equity_context_enabled,
             "include_volume": equity_context_include_volume,
@@ -1746,6 +2150,9 @@ def run_alpha_research(
         "promotion_candidates_path": str(promotion_candidates_path_csv),
         "fold_results_path": str(detailed_path_csv),
         "promoted_signals_path": str(promoted_signals_path_csv),
+        "candidate_runtime_computability_path": str(candidate_runtime_computability_path_csv),
+        "composite_member_runtime_validation_path": str(composite_member_runtime_validation_path_csv),
+        "research_runtime_computability_summary_path": str(research_runtime_computability_summary_path_csv),
         "signal_family_summary_path": str(signal_family_summary_path_csv),
         "fundamental_feature_ic_summary_path": str(fundamental_feature_ic_summary_path_csv),
         "hybrid_component_summary_path": str(hybrid_component_summary_path_csv),

@@ -58,6 +58,13 @@ ensemble:
   normalize_scores: rank_pct
   max_members: 5
 
+runtime:
+  require_runtime_computability_for_approval: true
+  min_runtime_computable_symbols_for_approval: 5
+  allow_research_only_noncomputable_candidates: false
+  runtime_computability_penalty_on_ranking: 0.05
+  runtime_computability_check_mode: strict
+
 tracking:
   database_enabled: true
   database_url: postgresql+psycopg://postgres:postgres@localhost:5432/trading_platform

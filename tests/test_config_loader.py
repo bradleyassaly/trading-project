@@ -347,6 +347,12 @@ ensemble:
   enabled: true
   mode: family_weighted
   max_members: 4
+runtime:
+  require_runtime_computability_for_approval: true
+  min_runtime_computable_symbols_for_approval: 7
+  allow_research_only_noncomputable_candidates: false
+  runtime_computability_penalty_on_ranking: 0.15
+  runtime_computability_check_mode: penalize
 tracking:
   tracker_dir: artifacts/experiment_tracking
   database_enabled: true
@@ -376,6 +382,11 @@ tracking:
     assert config.portfolio_top_n == 8
     assert config.enable_ensemble is True
     assert config.ensemble_mode == "family_weighted"
+    assert config.require_runtime_computability_for_approval is True
+    assert config.min_runtime_computable_symbols_for_approval == 7
+    assert config.allow_research_only_noncomputable_candidates is False
+    assert config.runtime_computability_penalty_on_ranking == 0.15
+    assert config.runtime_computability_check_mode == "penalize"
     assert config.enable_database_metadata is True
     assert config.database_url == "postgresql+psycopg://localhost/trading"
     assert config.database_schema == "research"

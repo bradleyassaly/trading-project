@@ -372,6 +372,11 @@ class AlphaResearchWorkflowConfig:
     ensemble_max_members_per_family: int | None = None
     ensemble_minimum_member_observations: int = 0
     ensemble_minimum_member_metric: float | None = None
+    require_runtime_computability_for_approval: bool = False
+    min_runtime_computable_symbols_for_approval: int = 5
+    allow_research_only_noncomputable_candidates: bool = True
+    runtime_computability_penalty_on_ranking: float = 0.02
+    runtime_computability_check_mode: str = "strict"
     top_quantile: float = 0.2
     bottom_quantile: float = 0.2
     output_dir: str = "artifacts/alpha_research"
@@ -424,6 +429,12 @@ class AlphaResearchWorkflowConfig:
             )
         if self.max_variants_per_family is not None and self.max_variants_per_family <= 0:
             raise ValueError("max_variants_per_family must be > 0 when provided")
+        if self.min_runtime_computable_symbols_for_approval < 0:
+            raise ValueError("min_runtime_computable_symbols_for_approval must be >= 0")
+        if self.runtime_computability_penalty_on_ranking < 0:
+            raise ValueError("runtime_computability_penalty_on_ranking must be >= 0")
+        if self.runtime_computability_check_mode not in {"strict", "penalize", "diagnostic_only"}:
+            raise ValueError("runtime_computability_check_mode must be one of: strict, penalize, diagnostic_only")
 
     def to_cli_defaults(self) -> dict[str, Any]:
         return asdict(self)

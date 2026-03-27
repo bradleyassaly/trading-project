@@ -76,6 +76,9 @@ def test_cmd_alpha_research_persists_research_memory_rows(monkeypatch, tmp_path:
                 "total_obs": 1000,
                 "rejection_reason": "",
                 "promotion_status": "promote",
+                "runtime_computability_pass": True,
+                "runtime_computability_reason": "runtime_scores_available",
+                "runtime_computable_symbol_count": 12,
             }
         ]
     ).to_csv(leaderboard_path, index=False)
@@ -178,9 +181,19 @@ def test_cmd_alpha_research_persists_research_memory_rows(monkeypatch, tmp_path:
         assert session.execute(text("select count(*) from signal_candidates")).scalar() == 1
         assert session.execute(text("select count(*) from signal_metrics")).scalar() == 1
         run_row = session.execute(text("select output_dir, status from research_runs")).first()
+        metric_row = session.execute(
+            text(
+                "select runtime_computability_pass, runtime_computability_reason, runtime_computable_symbol_count "
+                "from signal_metrics"
+            )
+        ).first()
         assert run_row is not None
+        assert metric_row is not None
         assert str(tmp_path / "alpha_run") in str(run_row.output_dir)
         assert run_row.status == "completed"
+        assert metric_row.runtime_computability_pass in (True, 1)
+        assert metric_row.runtime_computability_reason == "runtime_scores_available"
+        assert metric_row.runtime_computable_symbol_count == 12
 
 
 def test_cmd_research_promote_persists_promotions(monkeypatch, tmp_path: Path) -> None:

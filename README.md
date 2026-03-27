@@ -1542,6 +1542,11 @@ paper:
     weight_method: equal
     normalize_scores: rank_pct
     max_members: 5
+  runtime:
+    require_runtime_computability_for_approval: true
+    min_runtime_computable_symbols_for_approval: 5
+    allow_research_only_noncomputable_candidates: false
+    runtime_computability_check_mode: strict
     require_promoted_only: true
 ```
 
@@ -1565,6 +1570,20 @@ Current limitations:
 - this is an arithmetic ensemble, not a learned meta-model
 - member selection currently relies on existing promoted-candidate metrics
 - ensemble paper trading is wired through the promoted-signal artifact path, not live trading
+
+Research-time runtime computability:
+
+- alpha research can now validate whether a candidate produces any current non-null symbol scores on the latest feature frames before that candidate is allowed into approved promoted-member state
+- `runtime_computability_check_mode` supports:
+  - `strict`
+  - `penalize`
+  - `diagnostic_only`
+- when strict mode is enabled, non-computable candidates are marked `reject` before they enter `promoted_signals.csv` or composite member selection
+- when penalize mode is enabled, candidates remain visible but are down-ranked through `runtime_adjusted_mean_spearman_ic`
+- research now writes:
+  - `candidate_runtime_computability.csv`
+  - `composite_member_runtime_validation.csv`
+  - `research_runtime_computability_summary.csv`
 
 ## Experimental Equity-Only Signal Families
 
