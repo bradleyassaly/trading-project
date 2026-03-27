@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -384,6 +384,7 @@ def _write_summary_artifacts(
     *,
     config: DailyTradingWorkflowConfig,
     run_dir: Path,
+    effective_as_of_date: str | None,
     started_at: str,
     ended_at: str,
     duration_seconds: float,
@@ -412,6 +413,7 @@ def _write_summary_artifacts(
         "run_name": config.run_name,
         "run_id": config.run_id,
         "timestamp": ended_at,
+        "effective_as_of_date": effective_as_of_date,
         "started_at": started_at,
         "ended_at": ended_at,
         "duration_seconds": duration_seconds,
@@ -456,6 +458,9 @@ def _write_summary_artifacts(
         f"- run_id: `{config.run_id}`" if config.run_id else "- run_id: `none`",
         f"- status: `{status}`",
         f"- timestamp: `{ended_at}`",
+        f"- effective_as_of_date: `{effective_as_of_date}`"
+        if effective_as_of_date
+        else "- effective_as_of_date: `live/default`",
         f"- promoted_strategy_count: `{promotion_summary.get('promoted_strategy_count', 0)}`",
         f"- promoted_unconditional_count: `{promotion_summary.get('promoted_unconditional_count', 0)}`",
         f"- promoted_conditional_count: `{promotion_summary.get('promoted_conditional_count', 0)}`",
@@ -557,7 +562,236 @@ def _build_multi_strategy_paper_config(result, reserve_cash_pct: float) -> Paper
     )
 
 
-def run_daily_trading_pipeline(config: DailyTradingWorkflowConfig) -> DailyTradingResult:
+def _apply_replay_testing_overrides(
+    portfolio_config,
+    *,
+    replay_settings: dict[str, Any] | None,
+    output_dir: Path,
+) -> tuple[Any, list[str]]:
+    if not replay_settings:
+        return portfolio_config, []
+
+    override_min_signal = replay_settings.get("override_min_signal_strength")
+    override_max_weight = replay_settings.get("override_max_weight_per_strategy")
+    relax_thresholds = bool(replay_settings.get("relax_thresholds_for_testing", False))
+    if override_min_signal is None and override_max_weight is None and not relax_thresholds:
+        return portfolio_config, []
+
+    override_dir = output_dir / "replay_testing_overrides"
+    override_dir.mkdir(parents=True, exist_ok=True)
+    updated_sleeves = []
+    notes: list[str] = []
+    for sleeve in portfolio_config.sleeves:
+        preset_path = Path(str(sleeve.preset_path)) if sleeve.preset_path else None
+        if preset_path is None or not preset_path.exists():
+            updated_sleeves.append(sleeve)
+            continue
+        payload = json.loads(preset_path.read_text(encoding="utf-8"))
+        params = dict(payload.get("params") or {})
+        changed = False
+        if override_min_signal is not None:
+            params["min_score"] = float(override_min_signal)
+            changed = True
+        elif relax_thresholds and "min_score" in params:
+            params.pop("min_score", None)
+            changed = True
+        if override_max_weight is not None:
+            params["max_weight"] = float(override_max_weight)
+            params["max_position_weight"] = float(override_max_weight)
+            changed = True
+        if relax_thresholds:
+            if float(params.get("turnover_buffer_bps", 0.0) or 0.0) != 0.0:
+                params["turnover_buffer_bps"] = 0.0
+                changed = True
+        if not changed:
+            updated_sleeves.append(sleeve)
+            continue
+        payload["params"] = params
+        override_path = override_dir / f"{sleeve.sleeve_name}.json"
+        override_path.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
+        updated_sleeves.append(replace(sleeve, preset_path=str(override_path)))
+        notes.append(f"{sleeve.sleeve_name}:applied_replay_testing_overrides")
+    return replace(portfolio_config, sleeves=updated_sleeves), notes
+
+
+def _decision_row_action(*, current_position: int | None, target_position: int | None) -> str:
+    current_qty = int(current_position or 0)
+    target_qty = int(target_position or 0)
+    if current_qty == 0 and target_qty > 0:
+        return "buy"
+    if current_qty > 0 and target_qty == 0:
+        return "sell"
+    if current_qty != target_qty:
+        return "rebalance"
+    return "hold"
+
+
+def _decision_row_reason(
+    *,
+    action: str,
+    current_position: int | None,
+    target_position: int | None,
+    current_weight: float | None,
+    target_weight: float | None,
+    explicit_reason: str | None,
+) -> str:
+    if explicit_reason:
+        lowered = explicit_reason.lower()
+        if "limit" in lowered:
+            return "blocked_by_limits"
+        if "validation" in lowered:
+            return "blocked_by_validation"
+        return explicit_reason
+    current_qty = int(current_position or 0)
+    target_qty = int(target_position or 0)
+    if action == "buy" and current_qty == 0 and target_qty > 0:
+        return "enter_new_position"
+    if action == "sell" and current_qty > 0 and target_qty == 0:
+        return "exit_position"
+    if action == "rebalance":
+        return "rebalance_weight_change"
+    if (
+        current_weight is not None
+        and target_weight is not None
+        and abs(float(target_weight) - float(current_weight)) <= 1e-9
+    ):
+        return "hold_within_tolerance"
+    return "hold_within_tolerance"
+
+
+def _build_trade_decision_log_rows(
+    *, as_of: str, signal_source: str, decision_bundle: Any | None
+) -> list[dict[str, Any]]:
+    if decision_bundle is None:
+        return []
+
+    candidate_by_symbol = {row.symbol: row for row in getattr(decision_bundle, "candidate_evaluations", [])}
+    selection_by_symbol = {row.symbol: row for row in getattr(decision_bundle, "selection_decisions", [])}
+    sizing_by_symbol = {row.symbol: row for row in getattr(decision_bundle, "sizing_decisions", [])}
+    trade_by_symbol = {row.symbol: row for row in getattr(decision_bundle, "trade_decisions", [])}
+    execution_by_symbol = {row.symbol: row for row in getattr(decision_bundle, "execution_decisions", [])}
+    symbols = sorted(
+        set(candidate_by_symbol)
+        | set(selection_by_symbol)
+        | set(sizing_by_symbol)
+        | set(trade_by_symbol)
+        | set(execution_by_symbol)
+    )
+    rows: list[dict[str, Any]] = []
+    for symbol in symbols:
+        candidate = candidate_by_symbol.get(symbol)
+        selection = selection_by_symbol.get(symbol)
+        sizing = sizing_by_symbol.get(symbol)
+        trade = trade_by_symbol.get(symbol)
+        execution = execution_by_symbol.get(symbol)
+        current_weight = None
+        if trade is not None:
+            current_weight = (trade.metadata or {}).get("current_weight")
+        if current_weight is None and execution is not None:
+            current_weight = execution.current_weight
+        target_weight = None
+        if trade is not None:
+            target_weight = trade.target_weight_post_constraint
+        if target_weight is None and sizing is not None:
+            target_weight = sizing.target_weight_post_constraint
+        if target_weight is None and execution is not None:
+            target_weight = execution.target_weight
+        current_position = (
+            trade.current_quantity if trade is not None else (sizing.current_quantity if sizing is not None else None)
+        )
+        target_position = (
+            trade.target_quantity if trade is not None else (sizing.target_quantity if sizing is not None else None)
+        )
+        action = _decision_row_action(current_position=current_position, target_position=target_position)
+        explicit_reason = None
+        if execution is not None and execution.order_status == "rejected":
+            explicit_reason = execution.rejection_reason or execution.rationale_summary
+        if explicit_reason is None and trade is not None:
+            explicit_reason = trade.entry_reason_summary or trade.rejection_reason
+        if explicit_reason is None and selection is not None:
+            explicit_reason = selection.rejection_reason or selection.rationale_summary
+        rows.append(
+            {
+                "date": str(pd.Timestamp(as_of).date()),
+                "symbol": symbol,
+                "strategy_id": (
+                    (trade.strategy_id if trade is not None else None)
+                    or (selection.strategy_id if selection is not None else None)
+                    or (candidate.strategy_id if candidate is not None else None)
+                ),
+                "signal_source": signal_source,
+                "signal_score": (
+                    (trade.final_signal_score if trade is not None else None)
+                    if trade is not None and trade.final_signal_score is not None
+                    else (
+                        (selection.final_signal_score if selection is not None else None)
+                        if selection is not None and selection.final_signal_score is not None
+                        else (candidate.final_signal_score if candidate is not None else None)
+                    )
+                ),
+                "rank": (
+                    (selection.rank if selection is not None else None)
+                    if selection is not None and selection.rank is not None
+                    else (candidate.rank if candidate is not None else None)
+                ),
+                "current_weight": current_weight,
+                "target_weight": target_weight,
+                "weight_delta": (
+                    (float(target_weight) - float(current_weight))
+                    if current_weight is not None and target_weight is not None
+                    else None
+                ),
+                "current_position": current_position,
+                "target_position": target_position,
+                "action": action,
+                "action_reason": _decision_row_reason(
+                    action=action,
+                    current_position=current_position,
+                    target_position=target_position,
+                    current_weight=current_weight,
+                    target_weight=target_weight,
+                    explicit_reason=explicit_reason,
+                ),
+            }
+        )
+    return rows
+
+
+def _write_trade_decision_log(*, output_dir: Path, rows: list[dict[str, Any]]) -> dict[str, str]:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    json_path = output_dir / "trade_decision_log.json"
+    csv_path = output_dir / "trade_decision_log.csv"
+    json_path.write_text(json.dumps(rows, indent=2, default=str), encoding="utf-8")
+    pd.DataFrame(
+        rows,
+        columns=[
+            "date",
+            "symbol",
+            "strategy_id",
+            "signal_source",
+            "signal_score",
+            "rank",
+            "current_weight",
+            "target_weight",
+            "weight_delta",
+            "current_position",
+            "target_position",
+            "action",
+            "action_reason",
+        ],
+    ).to_csv(csv_path, index=False)
+    return {
+        "trade_decision_log_json_path": str(json_path),
+        "trade_decision_log_csv_path": str(csv_path),
+    }
+
+
+def run_daily_trading_pipeline(
+    config: DailyTradingWorkflowConfig,
+    *,
+    replay_as_of_date: str | None = None,
+    replay_settings: dict[str, Any] | None = None,
+) -> DailyTradingResult:
     started_at = _now_utc()
     started_clock = time.monotonic()
     run_dir_name = str(config.run_name).strip()
@@ -829,13 +1063,15 @@ def run_daily_trading_pipeline(config: DailyTradingWorkflowConfig) -> DailyTradi
         run_stage("export_bundle", config.stages.export_bundle, do_export_bundle)
 
         def do_paper_run(record: DailyTradingStageRecord) -> dict[str, Any]:
+            empty_trade_log_paths = _write_trade_decision_log(output_dir=run_dir, rows=[])
+            key_artifacts.update(empty_trade_log_paths)
             canonical_input = activated_dir / "activated_strategy_portfolio.json"
             if not canonical_input.exists() or not config.use_activated_portfolio_for_paper:
                 canonical_input = portfolio_dir / "strategy_portfolio.json"
             if not canonical_input.exists():
                 record.status = "skipped"
                 record.warnings.append("missing_portfolio_input")
-                return {}
+                return dict(empty_trade_log_paths)
 
             handoff = resolve_strategy_execution_handoff(
                 canonical_input,
@@ -857,11 +1093,24 @@ def run_daily_trading_pipeline(config: DailyTradingWorkflowConfig) -> DailyTradi
                 record.status = "warning"
                 record.warnings.append("no_active_strategies")
                 warnings.append("paper stage skipped because no active strategies were available")
-                return {"paper_active_strategy_summary_path": str(handoff_summary_path)}
+                return {
+                    "paper_active_strategy_summary_path": str(handoff_summary_path),
+                    **empty_trade_log_paths,
+                }
 
             portfolio_config = handoff.portfolio_config
+            portfolio_config, replay_override_notes = _apply_replay_testing_overrides(
+                portfolio_config,
+                replay_settings=replay_settings,
+                output_dir=paper_output_dir,
+            )
+            if replay_override_notes:
+                record.warnings.extend(replay_override_notes)
             execution_config = load_execution_config(config.execution_config) if config.execution_config else None
-            allocation_result = allocate_multi_strategy_portfolio(portfolio_config)
+            if replay_as_of_date:
+                allocation_result = allocate_multi_strategy_portfolio(portfolio_config, as_of_date=replay_as_of_date)
+            else:
+                allocation_result = allocate_multi_strategy_portfolio(portfolio_config)
             allocation_paths = write_multi_strategy_artifacts(allocation_result, paper_output_dir)
             post_validation_target_count = int(
                 allocation_result.summary.get(
@@ -883,6 +1132,8 @@ def run_daily_trading_pipeline(config: DailyTradingWorkflowConfig) -> DailyTradi
                 allocation_result,
                 reserve_cash_pct=portfolio_config.cash_reserve_pct,
             )
+            if replay_as_of_date:
+                paper_config = replace(paper_config, replay_as_of_date=replay_as_of_date)
             state_store = JsonPaperStateStore(paper_state_path)
             state_file_preexisting = paper_state_path.exists()
             target_diagnostics = {
@@ -959,11 +1210,20 @@ def run_daily_trading_pipeline(config: DailyTradingWorkflowConfig) -> DailyTradi
                 output_dir=paper_output_dir,
                 state_file_preexisting=state_file_preexisting,
             )
+            trade_decision_log_paths = _write_trade_decision_log(
+                output_dir=run_dir,
+                rows=_build_trade_decision_log_rows(
+                    as_of=replay_as_of_date or paper_cycle_result.as_of,
+                    signal_source=str(paper_config.signal_source or "multi_strategy"),
+                    decision_bundle=paper_cycle_result.decision_bundle,
+                ),
+            )
             key_artifacts.update(
                 {
                     **{key: str(value) for key, value in allocation_paths.items()},
                     **{key: str(value) for key, value in paper_paths.items()},
                     **{key: str(value) for key, value in persistence_paths.items()},
+                    **trade_decision_log_paths,
                     "paper_state_path": str(paper_state_path),
                 }
             )
@@ -971,6 +1231,7 @@ def run_daily_trading_pipeline(config: DailyTradingWorkflowConfig) -> DailyTradi
                 "handoff_summary_path": str(handoff_summary_path),
                 "allocation_summary": allocation_result.summary,
                 "paper_summary": latest_summary,
+                **trade_decision_log_paths,
                 **{key: str(value) for key, value in allocation_paths.items()},
                 **{key: str(value) for key, value in paper_paths.items()},
                 **{key: str(value) for key, value in persistence_paths.items()},
@@ -1033,6 +1294,7 @@ def run_daily_trading_pipeline(config: DailyTradingWorkflowConfig) -> DailyTradi
         summary_json_path, summary_md_path, status = _write_summary_artifacts(
             config=config,
             run_dir=run_dir,
+            effective_as_of_date=replay_as_of_date,
             started_at=started_at,
             ended_at=ended_at,
             duration_seconds=duration_seconds,
@@ -1059,6 +1321,7 @@ def run_daily_trading_pipeline(config: DailyTradingWorkflowConfig) -> DailyTradi
     summary_json_path, summary_md_path, status = _write_summary_artifacts(
         config=config,
         run_dir=run_dir,
+        effective_as_of_date=replay_as_of_date,
         started_at=started_at,
         ended_at=ended_at,
         duration_seconds=duration_seconds,

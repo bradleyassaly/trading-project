@@ -759,6 +759,42 @@ The daily markdown summary now also calls out:
 
 When the active portfolio already matches holdings, the daily paper stage can complete as a valid no-op rebalance. In that case the summary still reports the real target and symbol counts, while `executable_order_count` and `fill_count` remain `0` by design rather than indicating a broken run.
 
+For multi-day historical validation before letting paper trading run unattended, use daily replay:
+
+```bash
+trading-cli ops pipeline replay-daily \
+  --config configs/pipeline_daily.yaml \
+  --start-date 2025-01-03 \
+  --end-date 2025-01-31 \
+  --output-dir artifacts/daily_replay/run_current
+```
+
+`ops pipeline replay-daily` reuses the same artifact-first daily trading pipeline, but runs it sequentially across a historical date set instead of a live schedule. Replay carries a persistent paper state forward between days, writes one folder per replay date, and produces replay-level diagnostics so activity and stability can be evaluated before longer paper-trading runs.
+
+Expected replay output structure:
+
+- `artifacts/daily_replay/run_current/2025-01-03/daily_trading_summary.json`
+- `artifacts/daily_replay/run_current/2025-01-03/daily_trading_summary.md`
+- `artifacts/daily_replay/run_current/2025-01-03/trade_decision_log.csv`
+- `artifacts/daily_replay/run_current/2025-01-03/paper/...`
+- `artifacts/daily_replay/run_current/replay_summary.json`
+- `artifacts/daily_replay/run_current/replay_summary.md`
+- `artifacts/daily_replay/run_current/replay_daily_metrics.csv`
+- `artifacts/daily_replay/run_current/replay_trade_log.csv`
+- `artifacts/daily_replay/run_current/replay_strategy_activity.csv`
+
+The per-day `trade_decision_log.csv` makes no-op days interpretable. It records candidate symbols, target and current weights/positions, the final action, and an `action_reason` such as `enter_new_position`, `exit_position`, `rebalance_weight_change`, or `hold_within_tolerance`.
+
+How to read replay results:
+
+- `no_op_day_count`: days where the pipeline ran normally but produced no executable rebalance orders.
+- `trade_day_count`: days with actual fills; compare this with `trading_day_count` to judge activity.
+- `avg_daily_turnover`: a coarse activity proxy; very low turnover across a long replay often means the pipeline is too inert for a useful paper validation.
+- `active_strategy_count`: confirm the replay used more than one strategy over time, not just a single sleeve.
+- `readiness_flags`: quick checks for stability, trade generation, state persistence consistency, multi-strategy activity, and diagnostics completeness.
+
+Replay-only testing knobs live under the nested `daily_replay.replay` config section. These are opt-in and do not change normal daily-trading defaults. They support light activity testing such as relaxing replay thresholds, setting minimum expected trade counts, and overriding minimum signal strength or maximum per-strategy weight during replay validation only.
+
 The portfolio policy can now control conditional handling through:
 
 - `include_conditional_strategies`

@@ -698,6 +698,55 @@ class DailyTradingWorkflowConfig:
 
 
 @dataclass(frozen=True)
+class DailyReplayTuningConfig:
+    relax_thresholds_for_testing: bool = False
+    min_expected_trade_days: int | None = None
+    min_expected_total_trades: int | None = None
+    warn_if_all_days_no_op: bool = True
+    warn_if_turnover_too_low: float | None = None
+    override_max_weight_per_strategy: float | None = None
+    override_min_signal_strength: float | None = None
+
+    def __post_init__(self) -> None:
+        if self.min_expected_trade_days is not None and self.min_expected_trade_days < 0:
+            raise ValueError("min_expected_trade_days must be >= 0 when provided")
+        if self.min_expected_total_trades is not None and self.min_expected_total_trades < 0:
+            raise ValueError("min_expected_total_trades must be >= 0 when provided")
+        if self.warn_if_turnover_too_low is not None and self.warn_if_turnover_too_low < 0:
+            raise ValueError("warn_if_turnover_too_low must be >= 0 when provided")
+        if self.override_max_weight_per_strategy is not None and self.override_max_weight_per_strategy < 0:
+            raise ValueError("override_max_weight_per_strategy must be >= 0 when provided")
+
+
+@dataclass(frozen=True)
+class DailyReplayWorkflowConfig:
+    daily_trading: DailyTradingWorkflowConfig
+    output_dir: str = "artifacts/daily_replay/run_current"
+    start_date: str | None = None
+    end_date: str | None = None
+    dates_file: str | None = None
+    initial_state_path: str | None = None
+    stop_on_error: bool = True
+    continue_on_error: bool = False
+    max_days: int | None = None
+    replay: DailyReplayTuningConfig = field(default_factory=DailyReplayTuningConfig)
+
+    def __post_init__(self) -> None:
+        if not str(self.output_dir or "").strip():
+            raise ValueError("output_dir is required")
+        if self.stop_on_error and self.continue_on_error:
+            raise ValueError("stop_on_error and continue_on_error cannot both be true")
+        if self.max_days is not None and self.max_days < 0:
+            raise ValueError("max_days must be >= 0 when provided")
+
+    def to_cli_defaults(self) -> dict[str, Any]:
+        payload = asdict(self)
+        payload["daily_trading"] = self.daily_trading.to_cli_defaults()
+        payload["replay"] = asdict(self.replay)
+        return payload
+
+
+@dataclass(frozen=True)
 class CanonicalBundleExperimentVariantConfig:
     name: str
     promotion_policy_overrides: dict[str, Any] = field(default_factory=dict)

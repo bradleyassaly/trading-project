@@ -63,6 +63,7 @@ from trading_platform.cli.commands.paper_run_scheduled import cmd_paper_run_sche
 from trading_platform.cli.commands.pipeline import cmd_pipeline
 from trading_platform.cli.commands.pipeline_alpha_cycle import cmd_pipeline_alpha_cycle
 from trading_platform.cli.commands.pipeline_daily_trading import cmd_pipeline_daily_trading
+from trading_platform.cli.commands.pipeline_replay_daily import cmd_pipeline_replay_daily
 from trading_platform.cli.commands.pipeline_run import (
     cmd_pipeline_run,
     cmd_pipeline_run_daily,
@@ -2822,6 +2823,50 @@ def build_parser() -> argparse.ArgumentParser:
         "--config", type=str, required=True, help="Path to the daily-trading JSON/YAML config."
     )
     ops_pipeline_daily_trading.set_defaults(func=cmd_pipeline_daily_trading)
+    ops_pipeline_replay_daily = ops_pipeline_subparsers.add_parser(
+        "replay-daily",
+        help="Run a sequential historical paper-trading replay across trading dates; not a live scheduler",
+    )
+    ops_pipeline_replay_daily.add_argument(
+        "--config", type=str, required=True, help="Path to the daily replay JSON/YAML config."
+    )
+    ops_pipeline_replay_daily.add_argument("--start-date", type=str, default=None, help="Replay start date YYYY-MM-DD.")
+    ops_pipeline_replay_daily.add_argument("--end-date", type=str, default=None, help="Replay end date YYYY-MM-DD.")
+    ops_pipeline_replay_daily.add_argument(
+        "--dates-file",
+        type=str,
+        default=None,
+        help="Optional file containing explicit replay dates, one per line or comma separated.",
+    )
+    ops_pipeline_replay_daily.add_argument(
+        "--initial-state-path",
+        type=str,
+        default=None,
+        help="Optional initial paper state snapshot used to seed the replay state.",
+    )
+    ops_pipeline_replay_daily.add_argument(
+        "--output-dir",
+        type=str,
+        required=True,
+        help="Directory where per-day replay artifacts and replay-level summaries will be written.",
+    )
+    ops_pipeline_replay_daily.add_argument(
+        "--stop-on-error",
+        action="store_true",
+        help="Abort the replay on the first failed replay day.",
+    )
+    ops_pipeline_replay_daily.add_argument(
+        "--continue-on-error",
+        action="store_true",
+        help="Record failed replay days and continue processing later dates.",
+    )
+    ops_pipeline_replay_daily.add_argument(
+        "--max-days",
+        type=int,
+        default=None,
+        help="Optional maximum number of replay dates to process after date resolution.",
+    )
+    ops_pipeline_replay_daily.set_defaults(func=cmd_pipeline_replay_daily)
 
     ops_monitor = ops_subparsers.add_parser("monitor", help="Monitoring, alerting, and dashboard data builders")
     ops_monitor_subparsers = ops_monitor.add_subparsers(dest="ops_monitor_command", required=True)
@@ -3459,6 +3504,48 @@ def build_parser() -> argparse.ArgumentParser:
         "--config", type=str, required=True, help="Path to the daily-trading JSON/YAML config."
     )
     pipeline_daily_trading.set_defaults(func=cmd_pipeline_daily_trading)
+    pipeline_replay_daily = pipeline_subparsers.add_parser(
+        "replay-daily",
+        help="Run a sequential historical paper-trading replay across trading dates; not a live scheduler",
+    )
+    pipeline_replay_daily.add_argument(
+        "--config", type=str, required=True, help="Path to the daily replay JSON/YAML config."
+    )
+    pipeline_replay_daily.add_argument("--start-date", type=str, default=None, help="Replay start date YYYY-MM-DD.")
+    pipeline_replay_daily.add_argument("--end-date", type=str, default=None, help="Replay end date YYYY-MM-DD.")
+    pipeline_replay_daily.add_argument(
+        "--dates-file",
+        type=str,
+        default=None,
+        help="Optional file containing explicit replay dates, one per line or comma separated.",
+    )
+    pipeline_replay_daily.add_argument(
+        "--initial-state-path",
+        type=str,
+        default=None,
+        help="Optional initial paper state snapshot used to seed the replay state.",
+    )
+    pipeline_replay_daily.add_argument(
+        "--output-dir",
+        type=str,
+        required=True,
+        help="Directory where per-day replay artifacts and replay-level summaries will be written.",
+    )
+    pipeline_replay_daily.add_argument(
+        "--stop-on-error", action="store_true", help="Abort the replay on the first failed replay day."
+    )
+    pipeline_replay_daily.add_argument(
+        "--continue-on-error",
+        action="store_true",
+        help="Record failed replay days and continue processing later dates.",
+    )
+    pipeline_replay_daily.add_argument(
+        "--max-days",
+        type=int,
+        default=None,
+        help="Optional maximum number of replay dates to process after date resolution.",
+    )
+    pipeline_replay_daily.set_defaults(func=cmd_pipeline_replay_daily)
 
     execution_parser = subparsers.add_parser("execution", help="Execution realism simulation commands")
     execution_subparsers = execution_parser.add_subparsers(dest="execution_command", required=True)

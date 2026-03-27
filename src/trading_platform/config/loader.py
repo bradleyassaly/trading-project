@@ -4,6 +4,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+import pandas as pd
+
 from trading_platform.broker.models import BrokerConfig
 from trading_platform.config.models import (
     MultiStrategyGroupCap,
@@ -25,6 +27,8 @@ from trading_platform.config.workflow_models import (
     ClassificationBuildWorkflowConfig,
     DailyTradingStageToggles,
     DailyTradingWorkflowConfig,
+    DailyReplayTuningConfig,
+    DailyReplayWorkflowConfig,
     FundamentalsSnapshotWorkflowConfig,
     LiveDryRunWorkflowConfig,
     PaperRunWorkflowConfig,
@@ -539,6 +543,35 @@ def load_daily_trading_workflow_config(path: str | Path) -> DailyTradingWorkflow
     return DailyTradingWorkflowConfig(**payload)
 
 
+def load_daily_replay_workflow_config(path: str | Path) -> DailyReplayWorkflowConfig:
+    data = _read_config_file(Path(path))
+    root_payload = dict(data)
+    payload = dict(root_payload.get("daily_replay") or {})
+    run_section = _pop_dict_section(payload, "run")
+    paths_section = _pop_dict_section(payload, "paths")
+    dates_section = _pop_dict_section(payload, "dates")
+    error_section = _pop_dict_section(payload, "error_handling")
+    tuning_section = _pop_dict_section(payload, "replay")
+
+    _set_if_missing(payload, "output_dir", paths_section)
+    _set_if_missing(payload, "initial_state_path", paths_section)
+    _set_if_missing(payload, "start_date", dates_section)
+    _set_if_missing(payload, "end_date", dates_section)
+    _set_if_missing(payload, "dates_file", dates_section)
+    _set_if_missing(payload, "stop_on_error", error_section)
+    _set_if_missing(payload, "continue_on_error", error_section)
+    _set_if_missing(payload, "max_days", run_section)
+
+    daily_trading = load_daily_trading_workflow_config(path)
+    if payload.get("start_date") is not None:
+        payload["start_date"] = str(pd.Timestamp(payload["start_date"]).date())
+    if payload.get("end_date") is not None:
+        payload["end_date"] = str(pd.Timestamp(payload["end_date"]).date())
+    payload["daily_trading"] = daily_trading
+    payload["replay"] = DailyReplayTuningConfig(**tuning_section)
+    return DailyReplayWorkflowConfig(**payload)
+
+
 def load_canonical_bundle_experiment_workflow_config(path: str | Path) -> CanonicalBundleExperimentWorkflowConfig:
     data = _read_config_file(Path(path))
     payload = dict(data)
@@ -608,6 +641,7 @@ def load_pipeline_run_config(path: str | Path) -> PipelineRunConfig:
     data = _read_config_file(Path(path))
     payload = dict(data)
     payload.pop("daily_trading", None)
+    payload.pop("daily_replay", None)
     payload["stages"] = OrchestrationStageToggles(**payload.get("stages", {}))
     return PipelineRunConfig(**payload)
 

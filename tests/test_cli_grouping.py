@@ -278,6 +278,37 @@ def test_grouped_ops_pipeline_daily_trading_command_parses() -> None:
     assert args.config == "configs/pipeline_daily.yaml"
 
 
+def test_grouped_ops_pipeline_replay_daily_command_parses() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "ops",
+            "pipeline",
+            "replay-daily",
+            "--config",
+            "configs/pipeline_daily.yaml",
+            "--start-date",
+            "2025-01-02",
+            "--end-date",
+            "2025-01-10",
+            "--output-dir",
+            "artifacts/daily_replay/run_current",
+            "--continue-on-error",
+            "--max-days",
+            "5",
+        ]
+    )
+
+    assert args.command_family == "ops"
+    assert args.ops_command == "pipeline"
+    assert args.ops_pipeline_command == "replay-daily"
+    assert args.start_date == "2025-01-02"
+    assert args.end_date == "2025-01-10"
+    assert args.output_dir == "artifacts/daily_replay/run_current"
+    assert args.continue_on_error is True
+    assert args.max_days == 5
+
+
 def test_grouped_research_validate_backtester_command_parses() -> None:
     parser = build_parser()
     args = parser.parse_args(

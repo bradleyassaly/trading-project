@@ -9,6 +9,7 @@ from trading_platform.config.loader import (
     load_backtester_validation_workflow_config,
     load_classification_build_workflow_config,
     load_daily_trading_workflow_config,
+    load_daily_replay_workflow_config,
     load_canonical_bundle_experiment_matrix_workflow_config,
     load_canonical_bundle_experiment_workflow_config,
     load_live_dry_run_workflow_config,
@@ -364,6 +365,50 @@ daily_trading:
     assert config.enable_strategy_diagnostics is True
     assert config.refresh_dashboard_static_data is True
     assert config.dashboard_output_dir == "artifacts/daily_trading/run_current/dashboard"
+
+
+def test_load_daily_replay_workflow_config_from_nested_yaml(tmp_path) -> None:
+    path = tmp_path / "pipeline_daily.yaml"
+    path.write_text(
+        """
+daily_trading:
+  run:
+    run_name: replay_base
+  configs:
+    promotion_policy_config: configs/promotion.yaml
+    strategy_portfolio_policy_config: configs/strategy_portfolio.yaml
+daily_replay:
+  run:
+    max_days: 5
+  paths:
+    output_dir: artifacts/daily_replay/run_current
+    initial_state_path: artifacts/daily_replay/seed_state.json
+  dates:
+    start_date: 2025-01-02
+    end_date: 2025-01-10
+  error_handling:
+    stop_on_error: false
+    continue_on_error: true
+  replay:
+    relax_thresholds_for_testing: true
+    min_expected_trade_days: 2
+    override_min_signal_strength: 0.05
+""".strip(),
+        encoding="utf-8",
+    )
+
+    config = load_daily_replay_workflow_config(path)
+
+    assert config.daily_trading.run_name == "replay_base"
+    assert config.output_dir == "artifacts/daily_replay/run_current"
+    assert config.start_date == "2025-01-02"
+    assert config.end_date == "2025-01-10"
+    assert config.max_days == 5
+    assert config.stop_on_error is False
+    assert config.continue_on_error is True
+    assert config.replay.relax_thresholds_for_testing is True
+    assert config.replay.min_expected_trade_days == 2
+    assert config.replay.override_min_signal_strength == 0.05
 
 
 def test_load_canonical_bundle_experiment_workflow_config(tmp_path) -> None:

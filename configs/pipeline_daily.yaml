@@ -79,3 +79,25 @@ daily_trading:
     write_candidates: true
     write_metrics: true
     write_promotions: true
+
+daily_replay:
+  run:
+    max_days:
+  paths:
+    output_dir: artifacts/daily_replay/run_current
+    initial_state_path:
+  dates:
+    start_date:
+    end_date:
+    dates_file:
+  error_handling:
+    stop_on_error: true
+    continue_on_error: false
+  replay:
+    relax_thresholds_for_testing: false
+    min_expected_trade_days:
+    min_expected_total_trades:
+    warn_if_all_days_no_op: true
+    warn_if_turnover_too_low:
+    override_max_weight_per_strategy:
+    override_min_signal_strength:

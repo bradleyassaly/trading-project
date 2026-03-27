@@ -9,6 +9,12 @@ import pytest
 
 from trading_platform.config.models import MultiStrategyPortfolioConfig, MultiStrategySleeveConfig
 from trading_platform.config.workflow_models import DailyTradingStageToggles, DailyTradingWorkflowConfig
+from trading_platform.decision_journal.models import (
+    CandidateEvaluation,
+    DecisionJournalBundle,
+    SizingDecision,
+    TradeDecisionRecord,
+)
 from trading_platform.orchestration.daily_trading import _summarize_paper_run, run_daily_trading_pipeline
 from trading_platform.paper.models import PaperPortfolioState, PaperTradingRunResult
 from trading_platform.portfolio.strategy_execution_handoff import StrategyExecutionHandoff
@@ -295,6 +301,56 @@ def _install_common_mocks(
             positions={},
             initial_cash_basis=100_000.0,
         )
+        decision_bundle = DecisionJournalBundle(
+            candidate_evaluations=[
+                CandidateEvaluation(
+                    decision_id="cand-1",
+                    timestamp="2026-03-27T16:00:00+00:00",
+                    run_id=None,
+                    cycle_id=None,
+                    symbol="AAPL",
+                    side="long",
+                    strategy_id="generated_base",
+                    universe_id="test",
+                    candidate_status="selected",
+                    final_signal_score=0.9,
+                    rank=1,
+                )
+            ],
+            sizing_decisions=[
+                SizingDecision(
+                    decision_id="size-1",
+                    timestamp="2026-03-27T16:00:00+00:00",
+                    run_id=None,
+                    cycle_id=None,
+                    symbol="AAPL",
+                    strategy_id="generated_base",
+                    side="long",
+                    target_weight_post_constraint=1.0,
+                    target_quantity=1,
+                    current_quantity=0,
+                )
+            ],
+            trade_decisions=[
+                TradeDecisionRecord(
+                    decision_id="trade-1",
+                    timestamp="2026-03-27T16:00:00+00:00",
+                    run_id=None,
+                    cycle_id=None,
+                    symbol="AAPL",
+                    side="long",
+                    strategy_id="generated_base",
+                    universe_id="test",
+                    candidate_status="selected",
+                    entry_reason_summary="enter_new_position",
+                    final_signal_score=0.9,
+                    target_weight_post_constraint=1.0,
+                    target_quantity=1,
+                    current_quantity=0,
+                    metadata={"current_weight": 0.0},
+                )
+            ],
+        )
         return PaperTradingRunResult(
             as_of="2026-03-27T16:00:00+00:00",
             state=state,
@@ -305,6 +361,7 @@ def _install_common_mocks(
             orders=[],
             fills=[],
             diagnostics={},
+            decision_bundle=decision_bundle,
         )
 
     def fake_write_paper(result, output_dir):
@@ -387,6 +444,7 @@ def test_daily_trading_happy_path_writes_summary(monkeypatch: pytest.MonkeyPatch
     assert summary["post_validation_target_symbol_count"] == 1
     assert summary["executable_order_count"] == 1
     assert summary["fill_count"] == 1
+    assert (tmp_path / "daily" / "daily_smoke" / "trade_decision_log.csv").exists()
     assert summary["top_selected_strategies"][0]["strategy_id"] == "generated_base"
     assert summary["strategy_quality_summary"]["strategy_count"] == 2
     assert Path(result.summary_md_path).exists()
