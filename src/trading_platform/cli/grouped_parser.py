@@ -928,6 +928,12 @@ def build_parser() -> argparse.ArgumentParser:
     paper_multi.add_argument("--execution-config", type=str, default=None, help="Optional execution realism JSON/YAML config.")
     paper_multi.add_argument("--state-path", type=str, required=True, help="JSON file used to persist paper portfolio state")
     paper_multi.add_argument("--output-dir", type=str, required=True, help="Directory for paper-run and allocation artifacts")
+    paper_multi.add_argument(
+        "--auto-apply-fills",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Apply simulated fills and persist updated multi-strategy paper positions/cash. Use --no-auto-apply-fills to keep the older order-only behavior.",
+    )
     paper_multi.set_defaults(func=cmd_paper_run_multi_strategy)
     paper_run_scheduled = paper_subparsers.add_parser("run-preset-scheduled", help="Task-Scheduler-friendly wrapper around paper run for versioned presets")
     _add_paper_run_arguments(paper_run_scheduled)

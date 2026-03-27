@@ -31,6 +31,9 @@ def test_write_paper_trading_artifacts_writes_fills_and_equity_curve(tmp_path: P
                 )
             },
             last_targets={"AAPL": 1.0},
+            initial_cash_basis=10_000.0,
+            cumulative_realized_pnl=25.0,
+            cumulative_fees=1.0,
         ),
         latest_prices={"AAPL": 110.0},
         latest_scores={"AAPL": 2.0},
@@ -58,10 +61,37 @@ def test_write_paper_trading_artifacts_writes_fills_and_equity_curve(tmp_path: P
                 notional=1010.0,
                 commission=1.0,
                 slippage_bps=5.0,
+                realized_pnl=25.0,
             )
         ],
         skipped_symbols=[],
-        diagnostics={"ok": True},
+        diagnostics={
+            "ok": True,
+            "accounting": {
+                "auto_apply_fills": True,
+                "fill_application_status": "fills_applied",
+                "starting_cash": 10_000.0,
+                "ending_cash": 9_000.0,
+                "starting_equity": 10_000.0,
+                "ending_equity": 10_100.0,
+                "fill_count": 1,
+                "buy_fill_count": 1,
+                "sell_fill_count": 0,
+                "cumulative_realized_pnl": 25.0,
+                "unrealized_pnl": 100.0,
+                "total_pnl": 100.0,
+            },
+            "target_construction": {
+                "multi_strategy_allocation": {
+                    "sleeve_contribution": {"core": 1.0},
+                    "normalized_capital_weights": {"core": 1.0},
+                }
+            },
+            "strategy_execution_handoff": {
+                "activation_applied": True,
+                "active_strategy_count": 1,
+            },
+        },
         decision_bundle=build_candidate_journal_for_snapshot(
             timestamp="2025-01-04",
             run_id="manual|sma_cross|symbols|2025-01-04",
@@ -80,15 +110,31 @@ def test_write_paper_trading_artifacts_writes_fills_and_equity_curve(tmp_path: P
     assert paths["fills_path"].exists()
     assert paths["equity_snapshot_path"].exists()
     assert paths["candidate_snapshot_csv"].exists()
+    assert paths["portfolio_performance_summary_path"].exists()
+    assert paths["execution_summary_json_path"].exists()
+    assert paths["strategy_contribution_summary_path"].exists()
 
     fills_df = pd.read_csv(paths["fills_path"])
     equity_df = pd.read_csv(paths["equity_snapshot_path"])
+    positions_df = pd.read_csv(paths["positions_path"])
     candidate_df = pd.read_csv(paths["candidate_snapshot_csv"])
 
     assert len(fills_df) == 1
     assert fills_df.iloc[0]["symbol"] == "AAPL"
+    assert float(fills_df.iloc[0]["realized_pnl"]) == 25.0
     assert equity_df.iloc[0]["as_of"] == "2025-01-04"
     assert float(equity_df.iloc[0]["equity"]) == 10100.0
+    assert float(equity_df.iloc[0]["unrealized_pnl"]) == 100.0
+    assert list(positions_df.columns) == [
+        "symbol",
+        "quantity",
+        "avg_price",
+        "last_price",
+        "cost_basis",
+        "market_value",
+        "unrealized_pnl",
+        "portfolio_weight",
+    ]
     assert candidate_df.iloc[0]["symbol"] == "AAPL"
     assert not any(key.startswith("metadata_") for key in paths)
 

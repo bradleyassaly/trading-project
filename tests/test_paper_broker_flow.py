@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pandas as pd
 
@@ -43,22 +44,19 @@ def test_run_paper_trading_cycle_auto_apply_uses_broker(
 
     monkeypatch.setattr(
         paper_service,
-        "load_signal_snapshot",
-        lambda **kwargs: PaperSignalSnapshot(
-            asset_returns=asset_returns,
-            scores=scores,
-            closes=closes,
+        "build_target_construction_result",
+        lambda **kwargs: SimpleNamespace(
+            as_of="2025-01-04",
+            latest_prices={"AAPL": 101.0, "MSFT": 202.0},
+            latest_scores={"AAPL": 2.0, "MSFT": 2.5},
+            scheduled_target_weights={"AAPL": 0.5},
+            effective_target_weights={"AAPL": 0.5},
+            target_diagnostics={"selected_symbols": ["AAPL"]},
             skipped_symbols=[],
-        ),
-    )
-    monkeypatch.setattr(
-        paper_service,
-        "compute_latest_target_weights",
-        lambda **kwargs: (
-            "2025-01-04",
-            {"AAPL": 0.5},
-            {"AAPL": 0.5},
-            {"selected_symbols": ["AAPL"]},
+            extra_diagnostics={},
+            price_snapshots=[],
+            decision_bundle=None,
+            universe_bundle=None,
         ),
     )
     monkeypatch.setattr(
@@ -143,6 +141,9 @@ def test_run_paper_trading_cycle_auto_apply_uses_broker(
     assert result.state.last_targets == {"AAPL": 0.5}
     assert result.diagnostics["risk_checks"]["passed"] is True
     assert result.diagnostics["fill_count"] == 1
+    assert result.diagnostics["accounting"]["fill_application_status"] == "fills_applied"
+    assert result.diagnostics["accounting"]["fill_count"] == 1
+    assert result.diagnostics["accounting"]["ending_cash"] == result.state.cash
 
 
 def test_run_paper_trading_cycle_no_fill_leaves_state_unchanged(
@@ -164,22 +165,19 @@ def test_run_paper_trading_cycle_no_fill_leaves_state_unchanged(
 
     monkeypatch.setattr(
         paper_service,
-        "load_signal_snapshot",
-        lambda **kwargs: PaperSignalSnapshot(
-            asset_returns=asset_returns,
-            scores=scores,
-            closes=closes,
+        "build_target_construction_result",
+        lambda **kwargs: SimpleNamespace(
+            as_of="2025-01-04",
+            latest_prices={"AAPL": 101.0},
+            latest_scores={"AAPL": 2.0},
+            scheduled_target_weights={"AAPL": 1.0},
+            effective_target_weights={"AAPL": 1.0},
+            target_diagnostics={"selected_symbols": ["AAPL"]},
             skipped_symbols=[],
-        ),
-    )
-    monkeypatch.setattr(
-        paper_service,
-        "compute_latest_target_weights",
-        lambda **kwargs: (
-            "2025-01-04",
-            {"AAPL": 1.0},
-            {"AAPL": 1.0},
-            {"selected_symbols": ["AAPL"]},
+            extra_diagnostics={},
+            price_snapshots=[],
+            decision_bundle=None,
+            universe_bundle=None,
         ),
     )
     monkeypatch.setattr(
@@ -254,22 +252,19 @@ def test_run_paper_trading_cycle_raises_on_failed_risk_checks(
 
     monkeypatch.setattr(
         paper_service,
-        "load_signal_snapshot",
-        lambda **kwargs: PaperSignalSnapshot(
-            asset_returns=asset_returns,
-            scores=scores,
-            closes=closes,
+        "build_target_construction_result",
+        lambda **kwargs: SimpleNamespace(
+            as_of="2025-01-04",
+            latest_prices={"AAPL": 101.0},
+            latest_scores={"AAPL": 2.0},
+            scheduled_target_weights={"AAPL": 1.0},
+            effective_target_weights={"AAPL": 1.0},
+            target_diagnostics={"selected_symbols": ["AAPL"]},
             skipped_symbols=[],
-        ),
-    )
-    monkeypatch.setattr(
-        paper_service,
-        "compute_latest_target_weights",
-        lambda **kwargs: (
-            "2025-01-04",
-            {"AAPL": 1.0},
-            {"AAPL": 1.0},
-            {"selected_symbols": ["AAPL"]},
+            extra_diagnostics={},
+            price_snapshots=[],
+            decision_bundle=None,
+            universe_bundle=None,
         ),
     )
     monkeypatch.setattr(

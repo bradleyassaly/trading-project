@@ -91,6 +91,14 @@ class PaperPosition:
     def market_value(self) -> float:
         return float(self.quantity) * float(self.last_price)
 
+    @property
+    def cost_basis(self) -> float:
+        return float(self.quantity) * float(self.avg_price)
+
+    @property
+    def unrealized_pnl(self) -> float:
+        return float(self.market_value - self.cost_basis)
+
 
 @dataclass
 class PaperOrder:
@@ -114,14 +122,30 @@ class PaperPortfolioState:
     cash: float = 0.0
     positions: dict[str, PaperPosition] = field(default_factory=dict)
     last_targets: dict[str, float] = field(default_factory=dict)
+    initial_cash_basis: float = 0.0
+    cumulative_realized_pnl: float = 0.0
+    cumulative_fees: float = 0.0
 
     @property
     def gross_market_value(self) -> float:
         return float(sum(p.market_value for p in self.positions.values()))
 
     @property
+    def cost_basis(self) -> float:
+        return float(sum(p.cost_basis for p in self.positions.values()))
+
+    @property
+    def unrealized_pnl(self) -> float:
+        return float(sum(p.unrealized_pnl for p in self.positions.values()))
+
+    @property
     def equity(self) -> float:
         return float(self.cash + self.gross_market_value)
+
+    @property
+    def total_pnl(self) -> float:
+        baseline = float(self.initial_cash_basis or 0.0)
+        return float(self.equity - baseline)
 
 
 @dataclass

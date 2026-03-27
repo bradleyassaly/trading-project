@@ -64,6 +64,27 @@ def _build_result(*, equity: float = 10_100.0) -> PaperTradingRunResult:
                 "skip_reasons": {},
             },
             "order_generation": {"equity": 10_000.0},
+            "accounting": {
+                "starting_cash": 10_000.0,
+                "ending_cash": 9_150.0,
+                "starting_gross_market_value": 0.0,
+                "ending_gross_market_value": 1_100.0,
+                "starting_equity": 10_000.0,
+                "ending_equity": equity,
+                "realized_pnl_delta": 5.0,
+                "cumulative_realized_pnl": 5.0,
+                "unrealized_pnl": 100.0,
+                "total_pnl": equity - 10_000.0,
+                "total_pnl_delta": equity - 10_000.0,
+                "fees_paid_delta": 1.0,
+                "cumulative_fees": 1.0,
+                "fill_count": 1,
+                "buy_fill_count": 1,
+                "sell_fill_count": 0,
+                "fill_notional": 1_000.0,
+                "auto_apply_fills": True,
+                "fill_application_status": "fills_applied",
+            },
         },
     )
 
@@ -87,6 +108,7 @@ def test_persist_paper_run_outputs_writes_ledgers_and_latest_summaries(tmp_path:
     )
 
     assert (tmp_path / "paper_equity_curve.csv").exists()
+    assert (tmp_path / "portfolio_equity_curve.csv").exists()
     assert (tmp_path / "paper_positions_history.csv").exists()
     assert (tmp_path / "paper_orders_history.csv").exists()
     assert (tmp_path / "paper_run_summary.csv").exists()
@@ -98,6 +120,8 @@ def test_persist_paper_run_outputs_writes_ledgers_and_latest_summaries(tmp_path:
 
     latest_payload = json.loads((tmp_path / "paper_run_summary_latest.json").read_text(encoding="utf-8"))
     assert latest_payload["summary"]["portfolio_construction_mode"] == "transition"
+    assert latest_payload["summary"]["fill_count"] == 1
+    assert latest_payload["summary"]["total_pnl"] == 100.0
     assert "health_checks" in latest_payload
 
 

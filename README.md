@@ -535,6 +535,8 @@ When an activated portfolio is used, only `is_active=true` rows are handed to ex
 - `target_generation_stage_counts.csv`
 - `sleeve_target_diagnostics.csv`
 
+`paper run-multi-strategy` now applies simulated fills by default. Use `--no-auto-apply-fills` to keep the older order-only behavior. When fills are applied, the paper state file is updated with positions, cash, cumulative realized PnL, and cumulative fees.
+
 The portfolio policy can now control conditional handling through:
 
 - `include_conditional_strategies`
@@ -696,6 +698,7 @@ The default behavior is safe:
 - if no activated portfolio is present, existing unconditional multi-strategy workflows continue unchanged
 - if zero active strategies remain, the handoff writes a summary artifact and skips unless explicit failure is requested
 - if active strategies produce zero execution-ready targets, paper/live summaries record `usable_symbol_count`, `skipped_symbol_count`, `latest_price_source_summary`, and `zero_target_reason`
+- multi-strategy paper runs record `fill_application_status`, `fill_count`, `starting_cash`, `ending_cash`, `unrealized_pnl`, `cumulative_realized_pnl`, and `total_pnl` in both JSON summaries and ledger-style CSV artifacts
 
 Mode behavior:
 
@@ -1005,9 +1008,13 @@ The dashboard and downstream tooling should prefer the summary and history files
 - `paper_run_summary_latest.md`
 - `paper_health_checks.csv`
 - `paper_equity_curve.csv`
+- `portfolio_equity_curve.csv`
 - `paper_fills.csv`
 - `paper_positions.csv`
 - `paper_orders.csv`
+- `portfolio_performance_summary.json`
+- `execution_summary.json`
+- `strategy_contribution_summary.json`
 - `universe_membership.json`
 - `universe_membership.csv`
 - `universe_filter_results.json`

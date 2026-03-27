@@ -74,7 +74,7 @@ class JsonPaperStateStore:
             symbol: PaperPosition(**position_payload)
             for symbol, position_payload in payload.get("positions", {}).items()
         }
-        return PaperPortfolioState(
+        state = PaperPortfolioState(
             as_of=payload.get("as_of"),
             cash=float(payload.get("cash", 0.0)),
             positions=positions,
@@ -82,7 +82,13 @@ class JsonPaperStateStore:
                 symbol: float(weight)
                 for symbol, weight in payload.get("last_targets", {}).items()
             },
+            initial_cash_basis=float(payload.get("initial_cash_basis", 0.0) or 0.0),
+            cumulative_realized_pnl=float(payload.get("cumulative_realized_pnl", 0.0) or 0.0),
+            cumulative_fees=float(payload.get("cumulative_fees", 0.0) or 0.0),
         )
+        if state.initial_cash_basis <= 0.0:
+            state.initial_cash_basis = float(state.cash + sum(position.cost_basis for position in positions.values()))
+        return state
 
     def save(self, state: PaperPortfolioState) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -94,6 +100,9 @@ class JsonPaperStateStore:
                 for symbol, position in sorted(state.positions.items())
             },
             "last_targets": state.last_targets,
+            "initial_cash_basis": state.initial_cash_basis,
+            "cumulative_realized_pnl": state.cumulative_realized_pnl,
+            "cumulative_fees": state.cumulative_fees,
         }
         self.path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
@@ -121,7 +130,30 @@ def bootstrap_paper_portfolio_state(
     *,
     initial_cash: float,
 ) -> PaperPortfolioState:
-    return PaperPortfolioState(cash=float(initial_cash))
+    return PaperPortfolioState(
+        cash=float(initial_cash),
+        initial_cash_basis=float(initial_cash),
+    )
+
+
+def _clone_state(state: PaperPortfolioState) -> PaperPortfolioState:
+    return PaperPortfolioState(
+        as_of=state.as_of,
+        cash=float(state.cash),
+        positions={
+            symbol: PaperPosition(
+                symbol=position.symbol,
+                quantity=int(position.quantity),
+                avg_price=float(position.avg_price),
+                last_price=float(position.last_price),
+            )
+            for symbol, position in state.positions.items()
+        },
+        last_targets={symbol: float(weight) for symbol, weight in state.last_targets.items()},
+        initial_cash_basis=float(state.initial_cash_basis),
+        cumulative_realized_pnl=float(state.cumulative_realized_pnl),
+        cumulative_fees=float(state.cumulative_fees),
+    )
 
 
 def load_signal_snapshot(
@@ -333,6 +365,79 @@ def apply_filled_orders(
     return state
 
 
+def _estimate_order_realized_pnl(
+    *,
+    state: PaperPortfolioState,
+    order: PaperOrder,
+    fill_price: float,
+    commission: float,
+) -> float:
+    current = state.positions.get(order.symbol)
+    if current is None:
+        return -float(commission)
+    prior_quantity = int(current.quantity)
+    realized_pnl = -float(commission)
+    if order.side == "SELL" and prior_quantity > 0:
+        closed_quantity = min(prior_quantity, int(order.quantity))
+        realized_pnl += (float(fill_price) - float(current.avg_price)) * float(closed_quantity)
+    elif order.side == "BUY" and prior_quantity < 0:
+        closed_quantity = min(abs(prior_quantity), int(order.quantity))
+        realized_pnl += (float(current.avg_price) - float(fill_price)) * float(closed_quantity)
+    return float(realized_pnl)
+
+
+def _apply_fill_to_state(
+    *,
+    state: PaperPortfolioState,
+    symbol: str,
+    side: str,
+    quantity: int,
+    fill_price: float,
+    commission: float,
+) -> float:
+    signed_qty = int(quantity) if side == "BUY" else -int(quantity)
+    realized_pnl = _estimate_order_realized_pnl(
+        state=state,
+        order=PaperOrder(
+            symbol=symbol,
+            side=side,
+            quantity=int(quantity),
+            reference_price=float(fill_price),
+            target_weight=0.0,
+            current_quantity=int(state.positions.get(symbol).quantity) if symbol in state.positions else 0,
+            target_quantity=0,
+            notional=float(quantity) * float(fill_price),
+            reason="fill_application",
+        ),
+        fill_price=float(fill_price),
+        commission=float(commission),
+    )
+    state.cash += (-signed_qty * float(fill_price)) - float(commission)
+    current = state.positions.get(symbol)
+    prior_quantity = current.quantity if current else 0
+    new_quantity = prior_quantity + signed_qty
+    if new_quantity == 0:
+        state.positions.pop(symbol, None)
+    else:
+        if current is None:
+            avg_price = float(fill_price)
+        elif signed_qty > 0 and prior_quantity >= 0:
+            avg_price = (((current.avg_price * prior_quantity) + (float(fill_price) * signed_qty)) / new_quantity)
+        elif signed_qty < 0 and prior_quantity <= 0:
+            avg_price = (((current.avg_price * abs(prior_quantity)) + (float(fill_price) * abs(signed_qty))) / abs(new_quantity))
+        else:
+            avg_price = float(current.avg_price)
+        state.positions[symbol] = PaperPosition(
+            symbol=symbol,
+            quantity=int(new_quantity),
+            avg_price=float(avg_price),
+            last_price=float(fill_price),
+        )
+    state.cumulative_realized_pnl += float(realized_pnl)
+    state.cumulative_fees += float(commission)
+    return float(realized_pnl)
+
+
 def _apply_execution_orders_to_state(
     *,
     state: PaperPortfolioState,
@@ -341,27 +446,14 @@ def _apply_execution_orders_to_state(
     fills = []
     for order in orders:
         fill_price = float(order.expected_fill_price or order.reference_price)
-        signed_qty = order.quantity if order.side == "BUY" else -order.quantity
-        state.cash += (-signed_qty * fill_price) - float(order.expected_fees)
-
-        current = state.positions.get(order.symbol)
-        prior_quantity = current.quantity if current else 0
-        new_quantity = prior_quantity + signed_qty
-        if new_quantity == 0:
-            state.positions.pop(order.symbol, None)
-        else:
-            if current is None:
-                avg_price = fill_price
-            elif signed_qty > 0 and prior_quantity >= 0:
-                avg_price = (((current.avg_price * prior_quantity) + (fill_price * signed_qty)) / new_quantity)
-            else:
-                avg_price = current.avg_price
-            state.positions[order.symbol] = PaperPosition(
-                symbol=order.symbol,
-                quantity=new_quantity,
-                avg_price=float(avg_price),
-                last_price=fill_price,
-            )
+        realized_pnl = _apply_fill_to_state(
+            state=state,
+            symbol=order.symbol,
+            side=order.side,
+            quantity=order.quantity,
+            fill_price=fill_price,
+            commission=float(order.expected_fees),
+        )
         fills.append(
             BrokerFill(
                 symbol=order.symbol,
@@ -371,8 +463,66 @@ def _apply_execution_orders_to_state(
                 notional=float(order.quantity) * fill_price,
                 commission=float(order.expected_fees),
                 slippage_bps=float(order.expected_slippage_bps),
+                realized_pnl=float(realized_pnl),
             )
         )
+    return state, fills
+
+
+def _apply_execution_orders_with_paper_broker(
+    *,
+    state: PaperPortfolioState,
+    orders: list[PaperOrder],
+) -> tuple[PaperPortfolioState, list[BrokerFill]]:
+    accounting_state = _clone_state(state)
+    broker = PaperBroker(
+        state=state,
+        config=PaperBrokerConfig(
+            commission_per_order=0.0,
+            slippage_bps=0.0,
+        ),
+    )
+    broker_orders = [
+        BrokerOrder(
+            symbol=order.symbol,
+            side=order.side,
+            quantity=int(order.quantity),
+            reference_price=float(order.expected_fill_price or order.reference_price),
+            reason=order.reason,
+        )
+        for order in orders
+    ]
+    broker_fills = broker.submit_orders(broker_orders)
+    fills: list[BrokerFill] = []
+    for order, fill in zip(orders, broker_fills, strict=False):
+        commission = float(order.expected_fees)
+        realized_pnl = _apply_fill_to_state(
+            state=accounting_state,
+            symbol=order.symbol,
+            side=order.side,
+            quantity=order.quantity,
+            fill_price=float(fill.fill_price),
+            commission=commission,
+        )
+        if commission:
+            state.cash -= commission
+        position = state.positions.get(order.symbol)
+        if position is not None:
+            position.last_price = float(fill.fill_price)
+        fills.append(
+            BrokerFill(
+                symbol=fill.symbol,
+                side=fill.side,
+                quantity=int(fill.quantity),
+                fill_price=float(fill.fill_price),
+                notional=float(fill.notional),
+                commission=float(order.expected_fees),
+                slippage_bps=float(order.expected_slippage_bps),
+                realized_pnl=float(realized_pnl),
+            )
+        )
+    state.cumulative_realized_pnl = float(accounting_state.cumulative_realized_pnl)
+    state.cumulative_fees = float(accounting_state.cumulative_fees)
     return state, fills
 
 
@@ -390,6 +540,56 @@ def _apply_paper_slippage(
         "slippage_buy_bps": float(config.slippage_buy_bps),
         "slippage_sell_bps": float(config.slippage_sell_bps),
         "slippage_order_count": len(adjusted),
+    }
+
+
+def _build_accounting_summary(
+    *,
+    starting_state: PaperPortfolioState,
+    ending_state: PaperPortfolioState,
+    fills: list[BrokerFill],
+    auto_apply_fills: bool,
+    latest_effective_weights: dict[str, float],
+) -> dict[str, Any]:
+    buy_fill_count = sum(1 for fill in fills if fill.side == "BUY")
+    sell_fill_count = sum(1 for fill in fills if fill.side == "SELL")
+    fill_notional = sum(float(fill.notional) for fill in fills)
+    fill_application_status = (
+        "fills_applied"
+        if auto_apply_fills and fills
+        else "no_executable_orders"
+        if auto_apply_fills and not latest_effective_weights
+        else "auto_apply_disabled"
+        if not auto_apply_fills
+        else "orders_generated_but_not_filled"
+    )
+    starting_equity = float(starting_state.equity)
+    ending_equity = float(ending_state.equity)
+    realized_delta = float(ending_state.cumulative_realized_pnl - starting_state.cumulative_realized_pnl)
+    fee_delta = float(ending_state.cumulative_fees - starting_state.cumulative_fees)
+    total_pnl_delta = float(ending_equity - starting_equity)
+    return {
+        "auto_apply_fills": bool(auto_apply_fills),
+        "fill_application_status": fill_application_status,
+        "starting_cash": float(starting_state.cash),
+        "ending_cash": float(ending_state.cash),
+        "starting_gross_market_value": float(starting_state.gross_market_value),
+        "ending_gross_market_value": float(ending_state.gross_market_value),
+        "starting_equity": starting_equity,
+        "ending_equity": ending_equity,
+        "fill_count": int(len(fills)),
+        "buy_fill_count": int(buy_fill_count),
+        "sell_fill_count": int(sell_fill_count),
+        "fill_notional": float(fill_notional),
+        "realized_pnl_delta": realized_delta,
+        "cumulative_realized_pnl": float(ending_state.cumulative_realized_pnl),
+        "unrealized_pnl": float(ending_state.unrealized_pnl),
+        "total_pnl": float(ending_state.total_pnl),
+        "total_pnl_delta": total_pnl_delta,
+        "fees_paid_delta": fee_delta,
+        "cumulative_fees": float(ending_state.cumulative_fees),
+        "position_count": int(len(ending_state.positions)),
+        "target_weight_sum": float(sum(latest_effective_weights.values())),
     }
 
 
@@ -416,6 +616,7 @@ def run_paper_trading_cycle_for_targets(
         state = bootstrap_paper_portfolio_state(initial_cash=config.initial_cash)
 
     state = sync_state_prices(state, latest_prices)
+    starting_state = _clone_state(state)
 
     order_result = generate_rebalance_orders(
         state=state,
@@ -465,15 +666,21 @@ def run_paper_trading_cycle_for_targets(
 
     fills = []
     if auto_apply_fills and executable_orders:
-        state, fills = _apply_execution_orders_to_state(
-            state=state,
-            orders=executable_orders,
-        )
+        state, fills = _apply_execution_orders_with_paper_broker(state=state, orders=executable_orders)
         state = sync_state_prices(state, latest_prices)
 
     state.as_of = as_of
+    if state.initial_cash_basis <= 0.0:
+        state.initial_cash_basis = float(starting_state.initial_cash_basis or starting_state.equity or config.initial_cash)
     state.last_targets = latest_effective_weights.copy()
     state_store.save(state)
+    accounting_summary = _build_accounting_summary(
+        starting_state=starting_state,
+        ending_state=state,
+        fills=fills,
+        auto_apply_fills=auto_apply_fills,
+        latest_effective_weights=latest_effective_weights,
+    )
 
     diagnostics = {
         "signal_source": config.signal_source,
@@ -491,6 +698,8 @@ def run_paper_trading_cycle_for_targets(
             "slippage_model": slippage_diagnostics["slippage_model"],
             "slippage_buy_bps": slippage_diagnostics["slippage_buy_bps"],
             "slippage_sell_bps": slippage_diagnostics["slippage_sell_bps"],
+            "auto_apply_fills": bool(auto_apply_fills),
+            "fill_application_status": accounting_summary["fill_application_status"],
             "ensemble_enabled": bool(config.ensemble_enabled and config.signal_source == "ensemble"),
             "ensemble_mode": config.ensemble_mode,
             "ensemble_weight_method": config.ensemble_weight_method,
@@ -500,6 +709,7 @@ def run_paper_trading_cycle_for_targets(
             "latest_bar_age_seconds": target_diagnostics.get("latest_bar_age_seconds"),
             "latest_data_stale": target_diagnostics.get("latest_data_stale"),
         },
+        "accounting": accounting_summary,
     }
     diagnostics.update(extra_diagnostics or {})
 
@@ -591,9 +801,29 @@ def write_paper_trading_artifacts(
     targets_path = output_path / "paper_target_weights.csv"
     execution_price_snapshot_path = output_path / "execution_price_snapshot.csv"
     summary_path = output_path / "paper_summary.json"
+    portfolio_performance_summary_path = output_path / "portfolio_performance_summary.json"
+    execution_summary_path = output_path / "execution_summary.json"
+    strategy_contribution_summary_path = output_path / "strategy_contribution_summary.json"
 
     pd.DataFrame([asdict(order) for order in result.orders]).to_csv(orders_path, index=False)
-    pd.DataFrame([asdict(position) for position in result.state.positions.values()]).to_csv(
+    pd.DataFrame(
+        sorted(
+            [
+            {
+                "symbol": position.symbol,
+                "quantity": int(position.quantity),
+                "avg_price": float(position.avg_price),
+                "last_price": float(position.last_price),
+                "cost_basis": float(position.cost_basis),
+                "market_value": float(position.market_value),
+                "unrealized_pnl": float(position.unrealized_pnl),
+                "portfolio_weight": float(position.market_value / result.state.equity) if result.state.equity > 0 else 0.0,
+            }
+            for position in result.state.positions.values()
+            ],
+            key=lambda row: row["symbol"],
+        )
+    ).to_csv(
         positions_path,
         index=False,
     )
@@ -671,6 +901,10 @@ def write_paper_trading_artifacts(
                 "cash": result.state.cash,
                 "gross_market_value": result.state.gross_market_value,
                 "equity": result.state.equity,
+                "cost_basis": result.state.cost_basis,
+                "unrealized_pnl": result.state.unrealized_pnl,
+                "cumulative_realized_pnl": result.state.cumulative_realized_pnl,
+                "total_pnl": result.state.total_pnl,
                 "position_count": len(result.state.positions),
             }
         ]
@@ -687,6 +921,11 @@ def write_paper_trading_artifacts(
         "diagnostics": result.diagnostics,
         "price_snapshots": [asdict(snapshot) for snapshot in result.price_snapshots],
     }
+    accounting_diag = dict(result.diagnostics.get("accounting", {}))
+    execution_diag = dict(result.diagnostics.get("execution", {}))
+    paper_execution_diag = dict(result.diagnostics.get("paper_execution", {}))
+    if accounting_diag:
+        summary_payload["accounting"] = accounting_diag
     target_diag = dict(result.diagnostics.get("target_construction", {}))
     handoff = dict(result.diagnostics.get("strategy_execution_handoff", {}))
     if handoff:
@@ -714,6 +953,57 @@ def write_paper_trading_artifacts(
         if key in target_diag:
             summary_payload[key] = target_diag[key]
     summary_path.write_text(json.dumps(summary_payload, indent=2), encoding="utf-8")
+    portfolio_performance_summary_path.write_text(
+        json.dumps(
+            {
+                "as_of": result.as_of,
+                "preset_name": result.diagnostics.get("preset_name"),
+                "signal_source": result.diagnostics.get("signal_source"),
+                "accounting": accounting_diag,
+                "price_snapshot_count": len(result.price_snapshots),
+                "position_count": len(result.state.positions),
+            },
+            indent=2,
+            default=str,
+        ),
+        encoding="utf-8",
+    )
+    execution_summary_path.write_text(
+        json.dumps(
+            {
+                "as_of": result.as_of,
+                "requested_order_count": len(result.orders),
+                "fill_count": len(result.fills),
+                "execution": execution_diag,
+                "paper_execution": paper_execution_diag,
+                "accounting": accounting_diag,
+            },
+            indent=2,
+            default=str,
+        ),
+        encoding="utf-8",
+    )
+    strategy_contribution_summary_path.write_text(
+        json.dumps(
+            {
+                "as_of": result.as_of,
+                "sleeve_contribution": (
+                    (target_diag.get("multi_strategy_allocation") or {}).get("sleeve_contribution", {})
+                    if isinstance(target_diag.get("multi_strategy_allocation"), dict)
+                    else {}
+                ),
+                "normalized_capital_weights": (
+                    (target_diag.get("multi_strategy_allocation") or {}).get("normalized_capital_weights", {})
+                    if isinstance(target_diag.get("multi_strategy_allocation"), dict)
+                    else {}
+                ),
+                "activation_summary": handoff,
+            },
+            indent=2,
+            default=str,
+        ),
+        encoding="utf-8",
+    )
 
     paths = {
         "orders_path": orders_path,
@@ -723,6 +1013,9 @@ def write_paper_trading_artifacts(
         "targets_path": targets_path,
         "execution_price_snapshot_path": execution_price_snapshot_path,
         "summary_path": summary_path,
+        "portfolio_performance_summary_path": portfolio_performance_summary_path,
+        "execution_summary_json_path": execution_summary_path,
+        "strategy_contribution_summary_path": strategy_contribution_summary_path,
     }
     execution_payload = result.diagnostics.get("execution", {})
     if execution_payload.get("execution_summary"):

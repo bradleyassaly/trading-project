@@ -69,6 +69,7 @@ def test_cmd_paper_run_multi_strategy_uses_combined_targets(monkeypatch, tmp_pat
     def fake_run(**kwargs):
         captured["effective_weights"] = kwargs["latest_effective_weights"]
         captured["reserve_cash_pct"] = kwargs["config"].reserve_cash_pct
+        captured["auto_apply_fills"] = kwargs["auto_apply_fills"]
         return PaperTradingRunResult(
             as_of="2025-01-04",
             state=PaperPortfolioState(cash=100_000.0),
@@ -115,7 +116,79 @@ def test_cmd_paper_run_multi_strategy_uses_combined_targets(monkeypatch, tmp_pat
 
     assert captured["effective_weights"] == {"AAPL": 0.6, "MSFT": 0.4}
     assert captured["reserve_cash_pct"] == 0.05
+    assert captured["auto_apply_fills"] is True
     assert "Enabled sleeves: 2" in capsys.readouterr().out
+
+
+def test_cmd_paper_run_multi_strategy_honors_no_auto_apply_fills(monkeypatch, tmp_path: Path) -> None:
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        "trading_platform.cli.commands.paper_run_multi_strategy.resolve_strategy_execution_handoff",
+        lambda path, config=None: StrategyExecutionHandoff(
+            source_kind="multi_strategy_config",
+            source_path=str(path),
+            portfolio_config=SimpleNamespace(cash_reserve_pct=0.05),
+            summary={"active_strategy_count": 2},
+            warnings=[],
+        ),
+    )
+    monkeypatch.setattr(
+        "trading_platform.cli.commands.paper_run_multi_strategy.write_strategy_execution_handoff_summary",
+        lambda **kwargs: Path(kwargs["output_dir"]) / kwargs["artifact_name"],
+    )
+    monkeypatch.setattr(
+        "trading_platform.cli.commands.paper_run_multi_strategy.allocate_multi_strategy_portfolio",
+        lambda config: _allocation_result(),
+    )
+    monkeypatch.setattr(
+        "trading_platform.cli.commands.paper_run_multi_strategy.write_multi_strategy_artifacts",
+        lambda result, output_dir: {},
+    )
+    monkeypatch.setattr(
+        "trading_platform.cli.commands.paper_run_multi_strategy.write_paper_trading_artifacts",
+        lambda *, result, output_dir: {},
+    )
+    monkeypatch.setattr(
+        "trading_platform.cli.commands.paper_run_multi_strategy.persist_paper_run_outputs",
+        lambda **kwargs: ({}, [], {}),
+    )
+    monkeypatch.setattr(
+        "trading_platform.cli.commands.paper_run_multi_strategy.register_experiment",
+        lambda record, tracker_dir: {"experiment_registry_path": tracker_dir / "registry.csv"},
+    )
+    monkeypatch.setattr(
+        "trading_platform.cli.commands.paper_run_multi_strategy.build_paper_experiment_record",
+        lambda output_dir: {},
+    )
+
+    def fake_run(**kwargs):
+        captured["auto_apply_fills"] = kwargs["auto_apply_fills"]
+        return PaperTradingRunResult(
+            as_of="2025-01-04",
+            state=PaperPortfolioState(cash=100_000.0),
+            latest_prices={"AAPL": 100.0},
+            latest_scores={},
+            latest_target_weights={"AAPL": 1.0},
+            scheduled_target_weights={"AAPL": 1.0},
+            orders=[],
+            fills=[],
+            diagnostics={},
+        )
+
+    monkeypatch.setattr(
+        "trading_platform.cli.commands.paper_run_multi_strategy.run_paper_trading_cycle_for_targets",
+        fake_run,
+    )
+
+    args = SimpleNamespace(
+        config=str(tmp_path / "portfolio.json"),
+        state_path=str(tmp_path / "paper_state.json"),
+        output_dir=str(tmp_path / "paper"),
+        auto_apply_fills=False,
+    )
+    cmd_paper_run_multi_strategy(args)
+
+    assert captured["auto_apply_fills"] is False
 
 
 def test_cmd_live_dry_run_multi_strategy_uses_combined_targets(monkeypatch, tmp_path: Path, capsys) -> None:

@@ -130,7 +130,7 @@ def cmd_paper_run_multi_strategy(args) -> None:
             "strategy_execution_handoff": handoff.summary,
         },
         execution_config=execution_config,
-        auto_apply_fills=False,
+        auto_apply_fills=bool(getattr(args, "auto_apply_fills", True)),
     )
     paper_paths = write_paper_trading_artifacts(result=result, output_dir=Path(args.output_dir))
     persistence_paths, health_checks, latest_summary = persist_paper_run_outputs(
@@ -148,8 +148,15 @@ def cmd_paper_run_multi_strategy(args) -> None:
     print(f"As of: {result.as_of}")
     print(f"Enabled sleeves: {allocation_result.summary['enabled_sleeve_count']}")
     print(f"Orders: {len(result.orders)}")
+    print(f"Fills: {len(result.fills)}")
     print(f"Cash: {result.state.cash:,.2f}")
     print(f"Equity: {result.state.equity:,.2f}")
+    accounting_summary = result.diagnostics.get("accounting", {})
+    if accounting_summary:
+        print(f"Fill application status: {accounting_summary.get('fill_application_status')}")
+        print(f"Total PnL: {float(accounting_summary.get('total_pnl', 0.0)):.2f}")
+        print(f"Unrealized PnL: {float(accounting_summary.get('unrealized_pnl', 0.0)):.2f}")
+        print(f"Realized PnL: {float(accounting_summary.get('cumulative_realized_pnl', 0.0)):.2f}")
     print(f"Gross exposure: {allocation_result.summary['gross_exposure_after_constraints']:.6f}")
     print(f"Active strategies: {handoff.summary.get('active_strategy_count', 0)}")
     if allocation_result.summary.get("zero_target_reason"):

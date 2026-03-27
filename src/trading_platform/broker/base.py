@@ -30,6 +30,7 @@ class BrokerFill:
     notional: float
     commission: float = 0.0
     slippage_bps: float = 0.0
+    realized_pnl: float = 0.0
 
 
 class Broker(Protocol):
