@@ -135,6 +135,71 @@ def test_two_strategy_blended_attribution_splits_realized_and_unrealized(tmp_pat
     assert [row["realized_pnl"] for row in trade_rows] == [120.0, 80.0]
 
 
+def test_partial_close_preserves_remaining_unrealized_ownership(tmp_path: Path) -> None:
+    state_path = tmp_path / "state.json"
+    provenance = {
+        "AAPL": {
+            "strategy_id": "multi_strategy",
+            "strategy_ownership": {"alpha": 0.6, "beta": 0.4},
+            "strategy_rows": [
+                {"strategy_id": "alpha", "signal_source": "multi_strategy", "signal_family": "momentum"},
+                {"strategy_id": "beta", "signal_source": "multi_strategy", "signal_family": "value"},
+            ],
+            "signal_source": "multi_strategy",
+            "signal_families": ["momentum", "value"],
+        }
+    }
+    _run_cycle(
+        state_path=state_path,
+        as_of="2025-01-02",
+        latest_price=100.0,
+        target_weight=1.0,
+        provenance=provenance,
+    )
+    result = _run_cycle(
+        state_path=state_path,
+        as_of="2025-01-03",
+        latest_price=110.0,
+        target_weight=0.5,
+        provenance=provenance,
+    )
+
+    strategy_rows = {row["strategy_id"]: row for row in result.attribution["strategy_rows"]}
+    trade_rows = result.attribution["trade_rows"]
+    summary = result.attribution["summary"]
+
+    assert trade_rows == [
+        {
+            "trade_id": "paper-trade-1",
+            "date": "2025-01-03",
+            "symbol": "AAPL",
+            "strategy_id": "alpha",
+            "signal_source": "multi_strategy",
+            "signal_family": "momentum",
+            "side": "long",
+            "quantity": 5,
+            "entry_price": 100.0,
+            "exit_price": 110.0,
+            "realized_pnl": 50.0,
+            "holding_period_days": 1,
+            "attribution_method": "target_weight_proportional",
+            "status": "closed",
+            "entry_date": "2025-01-02",
+            "exit_date": "2025-01-03",
+        }
+    ]
+    assert strategy_rows["alpha"]["realized_pnl"] == 50.0
+    assert strategy_rows["beta"]["realized_pnl"] == 0.0
+    assert strategy_rows["alpha"]["unrealized_pnl"] == 10.0
+    assert strategy_rows["beta"]["unrealized_pnl"] == 40.0
+    assert summary["total_realized_pnl"] == 50.0
+    assert summary["total_unrealized_pnl"] == 50.0
+    assert summary["reconciliation"]["strategy_residual"] == 0.0
+    assert summary["reconciliation"]["symbol_residual"] == 0.0
+    assert summary["reconciliation"]["strategy_reconciled"] is True
+    assert summary["reconciliation"]["symbol_reconciled"] is True
+
+
 def test_attribution_artifacts_and_dashboard_payloads(tmp_path: Path) -> None:
     state_path = tmp_path / "state.json"
     provenance = {
@@ -252,7 +317,147 @@ def test_replay_attribution_aggregation(tmp_path: Path) -> None:
     replay = aggregate_replay_attribution(replay_root=tmp_path)
     assert replay["strategy_rows"][0]["strategy_id"] == "alpha"
     assert replay["strategy_rows"][0]["realized_pnl"] == 100.0
+    assert replay["strategy_rows"][0]["unrealized_pnl"] == 0.0
     assert replay["summary"]["top_strategies_by_total_pnl"][0]["strategy_id"] == "alpha"
+
+
+def test_replay_attribution_reconciles_mixed_realized_and_unrealized(tmp_path: Path) -> None:
+    day_one = tmp_path / "2025-01-02" / "paper"
+    day_two = tmp_path / "2025-01-03" / "paper"
+    day_one.mkdir(parents=True, exist_ok=True)
+    day_two.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(
+        [
+            {
+                "date": "2025-01-02",
+                "strategy_id": "alpha",
+                "realized_pnl": 0.0,
+                "unrealized_pnl": 60.0,
+                "total_pnl": 60.0,
+                "turnover": 1_000.0,
+                "trade_count": 1,
+                "closed_trade_count": 0,
+                "winning_trade_count": 0,
+                "strategy_weight": 0.6,
+                "gross_exposure": 660.0,
+                "net_exposure": 660.0,
+                "position_count": 1,
+            },
+            {
+                "date": "2025-01-02",
+                "strategy_id": "beta",
+                "realized_pnl": 0.0,
+                "unrealized_pnl": 40.0,
+                "total_pnl": 40.0,
+                "turnover": 1_000.0,
+                "trade_count": 1,
+                "closed_trade_count": 0,
+                "winning_trade_count": 0,
+                "strategy_weight": 0.4,
+                "gross_exposure": 440.0,
+                "net_exposure": 440.0,
+                "position_count": 1,
+            },
+        ]
+    ).to_csv(day_one / "strategy_pnl_attribution.csv", index=False)
+    pd.DataFrame(
+        [
+            {
+                "date": "2025-01-02",
+                "symbol": "AAPL",
+                "strategy_id": "alpha",
+                "realized_pnl": 0.0,
+                "unrealized_pnl": 60.0,
+                "total_pnl": 60.0,
+                "traded_notional": 0.0,
+                "fill_count": 0,
+                "end_position": 6,
+            },
+            {
+                "date": "2025-01-02",
+                "symbol": "AAPL",
+                "strategy_id": "beta",
+                "realized_pnl": 0.0,
+                "unrealized_pnl": 40.0,
+                "total_pnl": 40.0,
+                "traded_notional": 0.0,
+                "fill_count": 0,
+                "end_position": 4,
+            },
+        ]
+    ).to_csv(day_one / "symbol_pnl_attribution.csv", index=False)
+    pd.DataFrame(
+        [
+            {
+                "date": "2025-01-03",
+                "strategy_id": "alpha",
+                "realized_pnl": 30.0,
+                "unrealized_pnl": 30.0,
+                "total_pnl": 60.0,
+                "turnover": 550.0,
+                "trade_count": 1,
+                "closed_trade_count": 1,
+                "winning_trade_count": 1,
+                "strategy_weight": 0.6,
+                "gross_exposure": 330.0,
+                "net_exposure": 330.0,
+                "position_count": 1,
+            },
+            {
+                "date": "2025-01-03",
+                "strategy_id": "beta",
+                "realized_pnl": 20.0,
+                "unrealized_pnl": 20.0,
+                "total_pnl": 40.0,
+                "turnover": 550.0,
+                "trade_count": 1,
+                "closed_trade_count": 1,
+                "winning_trade_count": 1,
+                "strategy_weight": 0.4,
+                "gross_exposure": 220.0,
+                "net_exposure": 220.0,
+                "position_count": 1,
+            },
+        ]
+    ).to_csv(day_two / "strategy_pnl_attribution.csv", index=False)
+    pd.DataFrame(
+        [
+            {
+                "date": "2025-01-03",
+                "symbol": "AAPL",
+                "strategy_id": "alpha",
+                "realized_pnl": 30.0,
+                "unrealized_pnl": 30.0,
+                "total_pnl": 60.0,
+                "traded_notional": 330.0,
+                "fill_count": 1,
+                "end_position": 3,
+            },
+            {
+                "date": "2025-01-03",
+                "symbol": "AAPL",
+                "strategy_id": "beta",
+                "realized_pnl": 20.0,
+                "unrealized_pnl": 20.0,
+                "total_pnl": 40.0,
+                "traded_notional": 220.0,
+                "fill_count": 1,
+                "end_position": 2,
+            },
+        ]
+    ).to_csv(day_two / "symbol_pnl_attribution.csv", index=False)
+
+    replay = aggregate_replay_attribution(replay_root=tmp_path)
+    reconciliation = replay["summary"]["reconciliation"]
+
+    assert reconciliation["portfolio_realized_pnl"] == 50.0
+    assert reconciliation["portfolio_unrealized_pnl"] == 50.0
+    assert reconciliation["strategy_total_pnl"] == 100.0
+    assert reconciliation["symbol_total_pnl"] == 100.0
+    assert reconciliation["strategy_residual"] == 0.0
+    assert reconciliation["symbol_residual"] == 0.0
+    assert reconciliation["strategy_reconciled"] is True
+    assert reconciliation["symbol_reconciled"] is True
 
 
 def test_paper_summary_includes_attribution_summary(tmp_path: Path) -> None:

@@ -606,7 +606,12 @@ def aggregate_replay_attribution(
             .reset_index()
         )
         for row in grouped.to_dict(orient="records"):
-            row["total_pnl"] = _safe_float(row.get("realized_pnl")) + _safe_float(row.get("latest_unrealized_pnl"))
+            row["unrealized_pnl"] = _safe_float(row.pop("latest_unrealized_pnl", 0.0))
+            row["gross_exposure"] = _safe_float(row.pop("latest_gross_exposure", 0.0))
+            row["net_exposure"] = _safe_float(row.pop("latest_net_exposure", 0.0))
+            row["position_count"] = int(_safe_float(row.pop("latest_position_count", 0.0)))
+            row["strategy_weight"] = _safe_float(row.pop("avg_strategy_weight", 0.0))
+            row["total_pnl"] = _safe_float(row.get("realized_pnl")) + _safe_float(row.get("unrealized_pnl"))
             row["win_rate"] = (
                 _safe_float(row.get("winning_trade_count")) / _safe_float(row.get("closed_trade_count"))
                 if _safe_float(row.get("closed_trade_count")) > 0.0
@@ -629,15 +634,15 @@ def aggregate_replay_attribution(
             .reset_index()
         )
         for row in grouped.to_dict(orient="records"):
-            row["total_pnl"] = _safe_float(row.get("realized_pnl")) + _safe_float(row.get("latest_unrealized_pnl"))
+            row["unrealized_pnl"] = _safe_float(row.pop("latest_unrealized_pnl", 0.0))
+            row["end_position"] = row.pop("latest_end_position", None)
+            row["total_pnl"] = _safe_float(row.get("realized_pnl")) + _safe_float(row.get("unrealized_pnl"))
             replay_symbol_rows.append(row)
     reconciliation = build_reconciliation_summary(
         strategy_rows=replay_strategy_rows,
         symbol_rows=replay_symbol_rows,
         portfolio_realized_pnl=float(sum(_safe_float(row.get("realized_pnl")) for row in replay_strategy_rows)),
-        portfolio_unrealized_pnl=float(
-            sum(_safe_float(row.get("latest_unrealized_pnl")) for row in replay_strategy_rows)
-        ),
+        portfolio_unrealized_pnl=float(sum(_safe_float(row.get("unrealized_pnl")) for row in replay_strategy_rows)),
     )
     summary = build_attribution_summary(
         strategy_rows=replay_strategy_rows,
