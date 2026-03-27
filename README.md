@@ -757,6 +757,8 @@ The daily markdown summary now also calls out:
 - paper performance snapshot
 - warnings and stage failures when present
 
+When the active portfolio already matches holdings, the daily paper stage can complete as a valid no-op rebalance. In that case the summary still reports the real target and symbol counts, while `executable_order_count` and `fill_count` remain `0` by design rather than indicating a broken run.
+
 The portfolio policy can now control conditional handling through:
 
 - `include_conditional_strategies`
@@ -2043,6 +2045,8 @@ Build static dashboard data:
 ```bash
 trading-cli dashboard build-static-data --artifacts-root artifacts --output-dir artifacts/dashboard_data
 ```
+
+The dashboard static-data bundle now also includes daily trading and strategy-quality payloads such as `daily_trading_latest.json` and `strategy_quality_latest.json`, which are suitable for lightweight UI cards or other read-only consumers.
 
 Key workspace pages:
 

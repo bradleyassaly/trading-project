@@ -1,24 +1,24 @@
 {
-  "base_universe_id": "nasdaq100",
-  "sub_universe_id": "liquid_trend_candidates",
-  "eligible_symbol_count": 100,
-  "enrichment_row_count": 100,
+  "base_universe_id": "custom_symbols",
+  "sub_universe_id": "custom_symbols",
+  "eligible_symbol_count": 3,
+  "enrichment_row_count": 3,
   "reference_data_coverage_summary": {
     "as_of_date": "2026-03-20",
-    "universe_id": "nasdaq100",
+    "universe_id": "custom_symbols",
     "confirmed_membership_count": 0,
-    "fallback_membership_count": 100,
+    "fallback_membership_count": 3,
     "unavailable_membership_count": 0,
     "confirmed_taxonomy_count": 0,
     "fallback_taxonomy_count": 0,
-    "unavailable_taxonomy_count": 100,
-    "confirmed_benchmark_mapping_count": 100,
+    "unavailable_taxonomy_count": 3,
+    "confirmed_benchmark_mapping_count": 0,
     "fallback_benchmark_mapping_count": 0,
-    "unavailable_benchmark_mapping_count": 0,
+    "unavailable_benchmark_mapping_count": 3,
     "source_versions": {},
     "metadata": {
       "manifest_version": null,
-      "reference_data_root": "artifacts/reference_data/v1"
+      "reference_data_root": null
     }
   },
   "generated_files": [
