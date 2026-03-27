@@ -40,6 +40,28 @@ from trading_platform.universe_provenance.service import build_universe_provenan
 logger = logging.getLogger(__name__)
 
 
+def _replay_as_of_timestamp(config: PaperTradingConfig | None) -> pd.Timestamp | None:
+    if config is None or not getattr(config, "replay_as_of_date", None):
+        return None
+    return pd.Timestamp(str(config.replay_as_of_date)).normalize()
+
+
+def _filter_frame_to_replay_as_of(
+    frame: pd.DataFrame,
+    *,
+    config: PaperTradingConfig | None,
+) -> pd.DataFrame:
+    replay_as_of = _replay_as_of_timestamp(config)
+    if replay_as_of is None or frame.empty or "timestamp" not in frame.columns:
+        return frame
+
+    working = frame.copy()
+    working["timestamp"] = pd.to_datetime(working["timestamp"], errors="coerce")
+    working = working.dropna(subset=["timestamp"])
+    filtered = working.loc[working["timestamp"].dt.normalize() <= replay_as_of].copy()
+    return filtered.reset_index(drop=True)
+
+
 @dataclass(frozen=True)
 class TargetConstructionResult:
     as_of: str
@@ -57,6 +79,8 @@ class TargetConstructionResult:
 
 
 def _load_xsec_prepared_frames(
+    *,
+    config: PaperTradingConfig,
     symbols: list[str],
 ) -> tuple[dict[str, dict[str, object]], list[str], dict[str, str]]:
     prepared_frames: dict[str, dict[str, object]] = {}
@@ -65,8 +89,14 @@ def _load_xsec_prepared_frames(
 
     for symbol in symbols:
         try:
+            loaded_frame = _filter_frame_to_replay_as_of(
+                load_feature_frame(symbol),
+                config=config,
+            )
+            if loaded_frame.empty:
+                raise ValueError("no rows available on or before replay_as_of_date")
             prepared_frames[symbol] = {
-                "df": load_feature_frame(symbol),
+                "df": loaded_frame,
                 "path": Path(resolve_feature_frame_path(symbol)),
             }
         except Exception as exc:
@@ -221,6 +251,8 @@ def _apply_latest_market_data(
     )
     if latest_source != "alpaca":
         return historical_frames, latest_source, False
+    if _replay_as_of_timestamp(config) is not None:
+        return historical_frames, _historical_price_source(config), False
 
     window = _latest_fetch_window(historical_frames)
     if window is None:
@@ -263,6 +295,9 @@ def load_signal_snapshot(
     for symbol in symbols:
         try:
             loaded_frame = load_feature_frame(symbol)
+            loaded_frame = _filter_frame_to_replay_as_of(loaded_frame, config=config)
+            if loaded_frame.empty:
+                raise ValueError("no rows available on or before replay_as_of_date")
             feature_frames[symbol] = loaded_frame
             historical_frames[symbol] = loaded_frame.copy()
         except Exception as exc:
@@ -421,7 +456,7 @@ def _compute_latest_xsec_target_weights(
     *,
     config: PaperTradingConfig,
 ) -> tuple[str, dict[str, float], dict[str, float], dict[str, float], dict[str, float], dict[str, Any], list[str], list[PaperExecutionPriceSnapshot]]:
-    prepared_frames, skipped_symbols, skip_reasons = _load_xsec_prepared_frames(config.symbols)
+    prepared_frames, skipped_symbols, skip_reasons = _load_xsec_prepared_frames(config=config, symbols=config.symbols)
     historical_frames = {
         symbol: prepared["df"]
         for symbol, prepared in prepared_frames.items()

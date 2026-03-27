@@ -1488,6 +1488,33 @@ def test_grouped_paper_run_multi_strategy_command_parses_execution_config() -> N
     assert args.execution_config == "configs/execution.json"
 
 
+def test_grouped_paper_replay_multi_strategy_command_parses_dates() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "paper",
+            "replay-multi-strategy",
+            "--config",
+            "configs/multi_strategy.json",
+            "--state-path",
+            "artifacts/paper/state.json",
+            "--output-dir",
+            "artifacts/paper/replay",
+            "--start-date",
+            "2025-01-02",
+            "--end-date",
+            "2025-01-10",
+            "--max-steps",
+            "3",
+        ]
+    )
+
+    assert args.paper_command == "replay-multi-strategy"
+    assert args.start_date == "2025-01-02"
+    assert args.end_date == "2025-01-10"
+    assert args.max_steps == 3
+
+
 def test_grouped_live_dry_run_command_parses_preset_and_output_dir() -> None:
     parser = build_parser()
     args = parser.parse_args(

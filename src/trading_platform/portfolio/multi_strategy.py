@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -141,6 +141,8 @@ def _paper_config_from_preset(preset_name: str, preset_path: str | None = None) 
 
 def load_strategy_sleeves(
     portfolio_config: MultiStrategyPortfolioConfig,
+    *,
+    as_of_date: str | None = None,
 ) -> list[SleeveTargetBundle]:
     bundles: list[SleeveTargetBundle] = []
     for sleeve in portfolio_config.sleeves:
@@ -150,6 +152,8 @@ def load_strategy_sleeves(
             paper_config = _paper_config_from_preset(sleeve.preset_name, sleeve.preset_path)
         else:
             paper_config = _paper_config_from_preset(sleeve.preset_name)
+        if as_of_date:
+            paper_config = replace(paper_config, replay_as_of_date=as_of_date)
         target_result = build_target_construction_result(config=paper_config)
         bundles.append(
             SleeveTargetBundle(
@@ -511,8 +515,9 @@ def allocate_multi_strategy_portfolio(
     portfolio_config: MultiStrategyPortfolioConfig,
     *,
     previous_weights: dict[str, float] | None = None,
+    as_of_date: str | None = None,
 ) -> MultiStrategyAllocationResult:
-    sleeve_bundles = load_strategy_sleeves(portfolio_config)
+    sleeve_bundles = load_strategy_sleeves(portfolio_config, as_of_date=as_of_date)
     raw_weights, normalized_weights, raw_weight_sum = _resolve_capital_weights(sleeve_bundles)
 
     sleeve_rows: list[dict[str, Any]] = []

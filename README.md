@@ -537,6 +537,40 @@ When an activated portfolio is used, only `is_active=true` rows are handed to ex
 
 `paper run-multi-strategy` now applies simulated fills by default. Use `--no-auto-apply-fills` to keep the older order-only behavior. When fills are applied, the paper state file is updated with positions, cash, cumulative realized PnL, and cumulative fees.
 
+For rolling historical validation, use the replay entry point:
+
+```bash
+trading-cli paper replay-multi-strategy \
+  --config artifacts/strategy_portfolio/run_current/activated/activated_strategy_portfolio.json \
+  --state-path artifacts/paper/activated_portfolio_replay_state.json \
+  --output-dir artifacts/paper/activated_portfolio_replay_validation \
+  --start-date 2026-03-18 \
+  --end-date 2026-03-20 \
+  --reset-state
+```
+
+`paper replay-multi-strategy` reuses the single-step multi-strategy target construction and fill-aware paper execution path for each requested as-of date. Each step:
+
+- loads the prior paper state
+- rebuilds targets for the requested date
+- generates rebalance orders versus current holdings
+- simulates fills when `--auto-apply-fills` is enabled
+- updates cash, positions, realized PnL, unrealized PnL, and latest targets
+- appends history artifacts without overwriting prior dates
+
+The replay command writes step-local artifacts under `steps/YYYY-MM-DD/` plus root-level rolling outputs such as:
+
+- `rolling_execution_log.csv`
+- `rolling_target_history.csv`
+- `rolling_order_history.csv`
+- `rolling_fill_history.csv`
+- `rolling_position_history.csv`
+- `rolling_paper_run_summary.csv`
+- `portfolio_daily_returns.csv`
+- `rolling_performance_summary.json`
+
+The replay engine uses requested business dates by default. If a requested date cannot be matched exactly to the target-construction as-of date, that step is skipped and recorded in the replay summary instead of silently using a different day.
+
 The portfolio policy can now control conditional handling through:
 
 - `include_conditional_strategies`
@@ -1015,6 +1049,14 @@ The dashboard and downstream tooling should prefer the summary and history files
 - `portfolio_performance_summary.json`
 - `execution_summary.json`
 - `strategy_contribution_summary.json`
+- `portfolio_daily_returns.csv`
+- `rolling_execution_log.csv`
+- `rolling_target_history.csv`
+- `rolling_order_history.csv`
+- `rolling_fill_history.csv`
+- `rolling_position_history.csv`
+- `rolling_paper_run_summary.csv`
+- `rolling_performance_summary.json`
 - `universe_membership.json`
 - `universe_membership.csv`
 - `universe_filter_results.json`

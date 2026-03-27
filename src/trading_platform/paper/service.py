@@ -216,17 +216,32 @@ def generate_rebalance_orders(
         raise ValueError("Investable equity cannot be negative")
 
     all_symbols = sorted(set(state.positions.keys()) | set(latest_target_weights.keys()))
+    effective_latest_prices = {str(symbol): float(price) for symbol, price in latest_prices.items()}
+    exit_price_fallback_symbols: list[str] = []
+    missing_price_symbols: list[str] = []
+    for symbol in all_symbols:
+        if symbol in effective_latest_prices and float(effective_latest_prices[symbol]) > 0.0:
+            continue
+        position = state.positions.get(symbol)
+        fallback_price = float(position.last_price) if position is not None else 0.0
+        if fallback_price > 0.0:
+            effective_latest_prices[symbol] = fallback_price
+            exit_price_fallback_symbols.append(symbol)
+        else:
+            missing_price_symbols.append(symbol)
     diagnostics: dict[str, Any] = {
         "equity": equity,
         "investable_equity": investable_equity,
         "reserve_cash_pct": reserve_cash_pct,
         "current_cash": state.cash,
+        "exit_price_fallback_symbols": exit_price_fallback_symbols,
+        "missing_price_symbols": missing_price_symbols,
     }
     orders: list[PaperOrder] = []
     execution_requests = build_execution_requests_from_target_weights(
         target_weights=latest_target_weights,
         current_positions=state.positions,
-        latest_prices=latest_prices,
+        latest_prices=effective_latest_prices,
         portfolio_equity=equity,
         reserve_cash_pct=reserve_cash_pct,
         provenance_by_symbol=provenance_by_symbol,

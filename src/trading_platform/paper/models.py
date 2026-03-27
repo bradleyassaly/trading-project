@@ -78,6 +78,7 @@ class PaperTradingConfig:
     benchmark_mapping_path: str | None = None
     market_regime_path: str | None = None
     data_sources: dict[str, Any] = field(default_factory=dict)
+    replay_as_of_date: str | None = None
 
 
 @dataclass

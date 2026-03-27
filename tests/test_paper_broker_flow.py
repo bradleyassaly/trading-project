@@ -317,3 +317,34 @@ def test_run_paper_trading_cycle_raises_on_failed_risk_checks(
         assert "AAPL order notional exceeds max" in str(exc)
     else:
         raise AssertionError("Expected ValueError for failed risk checks")
+
+
+def test_generate_rebalance_orders_uses_position_price_for_exit_when_latest_price_missing() -> None:
+    state = PaperPortfolioState(
+        cash=0.0,
+        positions={
+            "AAPL": PaperPosition(
+                symbol="AAPL",
+                quantity=10,
+                avg_price=100.0,
+                last_price=105.0,
+            )
+        },
+        last_targets={"AAPL": 1.0},
+        initial_cash_basis=1_000.0,
+    )
+
+    result = generate_rebalance_orders(
+        state=state,
+        latest_target_weights={},
+        latest_prices={},
+        min_trade_dollars=1.0,
+    )
+
+    assert len(result.orders) == 1
+    exit_order = result.orders[0]
+    assert exit_order.symbol == "AAPL"
+    assert exit_order.side == "SELL"
+    assert exit_order.quantity == 10
+    assert exit_order.reference_price == 105.0
+    assert result.diagnostics["exit_price_fallback_symbols"] == ["AAPL"]

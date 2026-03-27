@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 from trading_platform.broker.live_models import BrokerAccount
 from trading_platform.cli.commands.live_dry_run_multi_strategy import cmd_live_dry_run_multi_strategy
+from trading_platform.cli.commands.paper_replay_multi_strategy import cmd_paper_replay_multi_strategy
 from trading_platform.cli.commands.paper_run_multi_strategy import cmd_paper_run_multi_strategy
 from trading_platform.live.preview import LivePreviewConfig, LivePreviewResult
 from trading_platform.paper.models import PaperPortfolioState, PaperTradingRunResult
@@ -517,6 +518,56 @@ def test_cmd_paper_run_multi_strategy_accepts_activated_portfolio_input(monkeypa
     cmd_paper_run_multi_strategy(args)
 
     assert captured["handoff"]["active_conditional_count"] == 1
+
+
+def test_cmd_paper_replay_multi_strategy_uses_requested_dates(monkeypatch, tmp_path: Path, capsys) -> None:
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        "trading_platform.cli.commands.paper_replay_multi_strategy.resolve_strategy_execution_handoff",
+        lambda path, config=None: StrategyExecutionHandoff(
+            source_kind="activated_portfolio",
+            source_path=str(path),
+            portfolio_config=SimpleNamespace(cash_reserve_pct=0.0),
+            summary={"active_strategy_count": 1},
+            warnings=[],
+        ),
+    )
+    monkeypatch.setattr(
+        "trading_platform.cli.commands.paper_replay_multi_strategy.write_strategy_execution_handoff_summary",
+        lambda **kwargs: Path(kwargs["output_dir"]) / kwargs["artifact_name"],
+    )
+    monkeypatch.setattr(
+        "trading_platform.cli.commands.paper_replay_multi_strategy.load_execution_config",
+        lambda path: {"loaded": path},
+    )
+    monkeypatch.setattr(
+        "trading_platform.cli.commands.paper_replay_multi_strategy.run_multi_strategy_paper_replay",
+        lambda **kwargs: captured.update(kwargs) or SimpleNamespace(
+            requested_dates=kwargs["requested_dates"],
+            steps=[SimpleNamespace(processed_date="2025-01-02")],
+            skipped_dates=[],
+            artifact_paths={"rolling_performance_summary_path": Path(kwargs["output_dir"]) / "rolling_performance_summary.json"},
+            summary={"final_as_of": "2025-01-02", "final_equity": 101000.0, "cumulative_realized_pnl": 1000.0, "cumulative_fees": 0.0},
+        ),
+    )
+
+    args = SimpleNamespace(
+        config=str(tmp_path / "activated_portfolio.json"),
+        execution_config=str(tmp_path / "execution.json"),
+        state_path=str(tmp_path / "paper_state.json"),
+        output_dir=str(tmp_path / "replay"),
+        start_date="2025-01-02",
+        end_date="2025-01-06",
+        dates=None,
+        max_steps=2,
+        auto_apply_fills=True,
+        reset_state=False,
+    )
+    cmd_paper_replay_multi_strategy(args)
+
+    assert captured["requested_dates"] == ["2025-01-02", "2025-01-03"]
+    assert captured["execution_config"] == {"loaded": str(tmp_path / "execution.json")}
+    assert "Processed dates: 1" in capsys.readouterr().out
 
 
 def test_cmd_live_dry_run_multi_strategy_accepts_run_bundle_input(monkeypatch, tmp_path: Path) -> None:

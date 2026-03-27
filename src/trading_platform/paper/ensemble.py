@@ -8,6 +8,7 @@ import pandas as pd
 from trading_platform.paper.composite import (
     _apply_latest_market_data,
     _ensure_promoted_signal_columns,
+    _filter_feature_history_to_as_of,
     _historical_price_source,
     _latest_price_source,
     _load_feature_history,
@@ -87,7 +88,12 @@ def build_ensemble_paper_snapshot(
     skipped_reasons: dict[str, str] = {}
     for symbol in config.symbols:
         try:
-            loaded_frame = _load_feature_history(symbol)
+            loaded_frame = _filter_feature_history_to_as_of(
+                _load_feature_history(symbol),
+                config=config,
+            )
+            if loaded_frame.empty:
+                raise ValueError("no rows available on or before replay_as_of_date")
             feature_data_by_symbol[symbol] = loaded_frame
             historical_feature_data_by_symbol[symbol] = loaded_frame.copy()
         except Exception as exc:

@@ -124,6 +124,8 @@ def _apply_latest_market_data(
     feature_data_by_symbol: dict[str, pd.DataFrame],
 ) -> tuple[dict[str, pd.DataFrame], bool]:
     latest_source = _latest_price_source(config)
+    if config.replay_as_of_date:
+        return feature_data_by_symbol, False
     if latest_source.lower() != "alpaca" or not feature_data_by_symbol:
         return feature_data_by_symbol, False
 
@@ -188,6 +190,18 @@ def _load_feature_history(symbol: str) -> pd.DataFrame:
     if "symbol" not in feature_df.columns:
         feature_df["symbol"] = symbol
     return feature_df
+
+
+def _filter_feature_history_to_as_of(
+    feature_df: pd.DataFrame,
+    *,
+    config: PaperTradingConfig,
+) -> pd.DataFrame:
+    if not config.replay_as_of_date:
+        return feature_df
+    as_of = pd.Timestamp(str(config.replay_as_of_date)).normalize()
+    filtered = feature_df.loc[feature_df["timestamp"].dt.normalize() <= as_of].copy()
+    return filtered.reset_index(drop=True)
 
 
 def _ensure_promoted_signal_columns(
@@ -390,7 +404,12 @@ def build_composite_paper_snapshot(
     skipped_reasons: dict[str, str] = {}
     for symbol in config.symbols:
         try:
-            loaded_frame = _load_feature_history(symbol)
+            loaded_frame = _filter_feature_history_to_as_of(
+                _load_feature_history(symbol),
+                config=config,
+            )
+            if loaded_frame.empty:
+                raise ValueError("no rows available on or before replay_as_of_date")
             feature_data_by_symbol[symbol] = loaded_frame
             historical_feature_data_by_symbol[symbol] = loaded_frame.copy()
         except Exception as exc:

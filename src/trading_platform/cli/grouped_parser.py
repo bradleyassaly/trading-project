@@ -55,6 +55,7 @@ from trading_platform.cli.commands.monitor_strategy_health import cmd_monitor_st
 from trading_platform.cli.commands.orchestrate_run import cmd_orchestrate_loop, cmd_orchestrate_run
 from trading_platform.cli.commands.orchestrate_show_run import cmd_orchestrate_show_run
 from trading_platform.cli.commands.paper_report import cmd_paper_report
+from trading_platform.cli.commands.paper_replay_multi_strategy import cmd_paper_replay_multi_strategy
 from trading_platform.cli.commands.paper_run import cmd_paper_run
 from trading_platform.cli.commands.paper_run_multi_strategy import cmd_paper_run_multi_strategy
 from trading_platform.cli.commands.paper_run_scheduled import cmd_paper_run_scheduled
@@ -935,6 +936,23 @@ def build_parser() -> argparse.ArgumentParser:
         help="Apply simulated fills and persist updated multi-strategy paper positions/cash. Use --no-auto-apply-fills to keep the older order-only behavior.",
     )
     paper_multi.set_defaults(func=cmd_paper_run_multi_strategy)
+    paper_replay_multi = paper_subparsers.add_parser("replay-multi-strategy", help="Replay multi-strategy paper trading across multiple dates using a persistent paper state")
+    paper_replay_multi.add_argument("--config", type=str, required=True, help="Path to the multi-strategy portfolio YAML/JSON config.")
+    paper_replay_multi.add_argument("--execution-config", type=str, default=None, help="Optional execution realism JSON/YAML config.")
+    paper_replay_multi.add_argument("--state-path", type=str, required=True, help="JSON file used to persist rolling paper portfolio state")
+    paper_replay_multi.add_argument("--output-dir", type=str, required=True, help="Directory for replay artifacts and rolling ledgers")
+    paper_replay_multi.add_argument("--start-date", type=str, default=None, help="Replay start date in YYYY-MM-DD format.")
+    paper_replay_multi.add_argument("--end-date", type=str, default=None, help="Replay end date in YYYY-MM-DD format.")
+    paper_replay_multi.add_argument("--dates", nargs="+", default=None, help="Optional explicit replay date list in YYYY-MM-DD format.")
+    paper_replay_multi.add_argument("--max-steps", type=int, default=None, help="Optional maximum number of replay steps to process.")
+    paper_replay_multi.add_argument("--reset-state", action="store_true", help="Delete the existing replay state file and replay output directory before running.")
+    paper_replay_multi.add_argument(
+        "--auto-apply-fills",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Apply simulated fills and persist updated multi-strategy paper positions/cash during replay. Use --no-auto-apply-fills to keep the older order-only behavior.",
+    )
+    paper_replay_multi.set_defaults(func=cmd_paper_replay_multi_strategy)
     paper_run_scheduled = paper_subparsers.add_parser("run-preset-scheduled", help="Task-Scheduler-friendly wrapper around paper run for versioned presets")
     _add_paper_run_arguments(paper_run_scheduled)
     paper_run_scheduled.add_argument("--config", type=str, default=None, help="Optional YAML or JSON config file for scheduled paper runs.")
