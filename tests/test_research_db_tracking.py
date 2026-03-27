@@ -216,6 +216,9 @@ def test_cmd_research_promote_persists_promotions(monkeypatch, tmp_path: Path) -
                     "condition_id": "regime::risk_on",
                     "condition_type": "regime",
                     "rationale": "conditional regime edge",
+                    "runtime_score_validation_pass": False,
+                    "runtime_score_validation_reason": "empty_signal_scores",
+                    "runtime_computable_symbol_count": 0,
                     "generated_preset_path": str(tmp_path / "preset.json"),
                     "generated_registry_path": str(tmp_path / "registry.json"),
                     "generated_pipeline_config_path": str(tmp_path / "pipeline.yaml"),
@@ -252,7 +255,8 @@ def test_cmd_research_promote_persists_promotions(monkeypatch, tmp_path: Path) -
         assert session.execute(text("select count(*) from promoted_strategies")).scalar() >= 1
         row = session.execute(
             text(
-                "select preset_name, signal_family, promotion_variant, condition_id, condition_type, rationale "
+                "select preset_name, signal_family, promotion_variant, condition_id, condition_type, rationale, "
+                "runtime_score_validation_pass, runtime_score_validation_reason, runtime_computable_symbol_count "
                 "from promoted_strategies where preset_name is not null"
             )
         ).first()
@@ -263,6 +267,9 @@ def test_cmd_research_promote_persists_promotions(monkeypatch, tmp_path: Path) -
         assert row.condition_id == "regime::risk_on"
         assert row.condition_type == "regime"
         assert row.rationale == "conditional regime edge"
+        assert row.runtime_score_validation_pass in (False, 0)
+        assert row.runtime_score_validation_reason == "empty_signal_scores"
+        assert row.runtime_computable_symbol_count == 0
 
 
 def test_research_memory_family_summary_query_runs(tmp_path: Path) -> None:
@@ -344,6 +351,9 @@ def test_research_memory_persists_conditional_promotion_fields(tmp_path: Path) -
                 "condition_id": "benchmark_context::risk_off_outperform_broad",
                 "condition_type": "benchmark_context",
                 "rationale": "conditional benchmark edge",
+                "runtime_score_validation_pass": True,
+                "runtime_score_validation_reason": "runtime_scores_available",
+                "runtime_computable_symbol_count": 12,
                 "status": "inactive",
             }
         ],
@@ -355,7 +365,8 @@ def test_research_memory_persists_conditional_promotion_fields(tmp_path: Path) -
     with session_factory() as session:
         row = session.execute(
             text(
-                "select candidate_id, promotion_variant, condition_id, condition_type, rationale "
+                "select candidate_id, promotion_variant, condition_id, condition_type, rationale, "
+                "runtime_score_validation_pass, runtime_score_validation_reason, runtime_computable_symbol_count "
                 "from promoted_strategies where preset_name = 'generated_conditional_paper'"
             )
         ).first()
@@ -365,3 +376,6 @@ def test_research_memory_persists_conditional_promotion_fields(tmp_path: Path) -
         assert row.condition_id == "benchmark_context::risk_off_outperform_broad"
         assert row.condition_type == "benchmark_context"
         assert row.rationale == "conditional benchmark edge"
+        assert row.runtime_score_validation_pass in (True, 1)
+        assert row.runtime_score_validation_reason == "runtime_scores_available"
+        assert row.runtime_computable_symbol_count == 12

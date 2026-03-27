@@ -26,6 +26,9 @@ allowed_condition_types:
 min_condition_sample_size: 20
 min_condition_improvement: 0.01
 compare_condition_to_unconditional: true
+require_runtime_computable_scores: true
+min_runtime_computable_symbols: 5
+allow_shadow_promotion_on_runtime_failure: true
 notes: Experiment-only promotion policy for fast local-debug campaigns. Intended to increase downstream experiment activity without changing operating defaults.
 tags:
   - experiment_only

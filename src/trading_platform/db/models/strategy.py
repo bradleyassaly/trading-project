@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import DateTime, Float, ForeignKey, JSON, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, JSON, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from trading_platform.db.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
@@ -50,6 +50,9 @@ class PromotedStrategy(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     condition_id: Mapped[str | None] = mapped_column(String(255), index=True)
     condition_type: Mapped[str | None] = mapped_column(String(128), index=True)
     rationale: Mapped[str | None] = mapped_column(Text)
+    runtime_score_validation_pass: Mapped[bool | None] = mapped_column(Boolean)
+    runtime_score_validation_reason: Mapped[str | None] = mapped_column(String(255))
+    runtime_computable_symbol_count: Mapped[int | None] = mapped_column(Integer)
     promotion_timestamp_text: Mapped[str | None] = mapped_column(String(64))
     generated_preset_path: Mapped[str | None] = mapped_column(Text)
     generated_registry_path: Mapped[str | None] = mapped_column(Text)

@@ -2186,8 +2186,16 @@ Condition-aware promotion behavior:
   - `warnings`
   - `ranking_metric`
   - `ranking_value`
+  - `runtime_score_validation_pass`
+  - `runtime_score_validation_reason`
+  - `runtime_computable_symbol_count`
 
-Those activation conditions are also carried into the generated preset payload and the promoted-strategy index so later paper/live portfolio logic can explain why a strategy is active or inactive under a given context. When conditional variants are emitted, the promotion output also writes `promoted_condition_summary.csv` for a compact audit trail.
+Those activation conditions are also carried into the generated preset payload and the promoted-strategy index so later paper/live portfolio logic can explain why a strategy is active or inactive under a given context. Promotion now also performs an optional runtime score-computability check for generated composite presets against the current artifact set. When enabled, that check prevents execution-ready promotion of presets that cannot form any live composite scores and writes:
+
+- `promoted_runtime_validation_summary.csv`
+- `runtime_score_validation.json`
+
+Those artifacts show the selected-signal count, loaded symbol coverage, latest component/composite score counts, and whether a generated preset was promoted, blocked, or emitted as shadow-only.
 
 Promotion policy fields for conditional variants:
 
@@ -2201,6 +2209,9 @@ Promotion policy fields for conditional variants:
 - `min_condition_sample_size`
 - `min_condition_improvement`
 - `compare_condition_to_unconditional`
+- `require_runtime_computable_scores`
+- `min_runtime_computable_symbols`
+- `allow_shadow_promotion_on_runtime_failure`
 - `max_strategies_per_family`
 - `min_families_if_available`
 
@@ -2209,6 +2220,9 @@ Practical tuning guidance:
 - increase `min_condition_sample_size` when condition coverage is sparse or unstable
 - increase `min_condition_improvement` when you only want conditionals that materially beat the unconditional baseline
 - keep `compare_condition_to_unconditional: true` unless you explicitly want standalone conditional ranking without a baseline improvement check
+- set `require_runtime_computable_scores: true` for execution-facing promotion so empty composite presets are blocked before they reach paper/live handoff
+- raise `min_runtime_computable_symbols` when you want stronger live coverage before a generated preset becomes execution-ready
+- use `allow_shadow_promotion_on_runtime_failure: true` only for diagnostic campaigns where you want the preset recorded but explicitly non-executable
 
 Example commands:
 

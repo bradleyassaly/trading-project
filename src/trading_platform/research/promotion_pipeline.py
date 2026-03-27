@@ -16,6 +16,8 @@ from trading_platform.governance.models import (
 )
 from trading_platform.governance.persistence import save_strategy_registry
 from trading_platform.orchestration.models import OrchestrationStageToggles, PipelineRunConfig
+from trading_platform.paper.composite import build_composite_paper_snapshot
+from trading_platform.paper.models import PaperTradingConfig
 from trading_platform.regime.service import infer_strategy_regime_compatibility
 from trading_platform.research.registry import load_research_manifests
 
@@ -57,6 +59,9 @@ class PromotionPolicyConfig:
     min_condition_sample_size: int = 20
     min_condition_improvement: float = 0.0
     compare_condition_to_unconditional: bool = True
+    require_runtime_computable_scores: bool = False
+    min_runtime_computable_symbols: int = 5
+    allow_shadow_promotion_on_runtime_failure: bool = False
     notes: str | None = None
     tags: list[str] = field(default_factory=list)
 
@@ -79,6 +84,8 @@ class PromotionPolicyConfig:
             raise ValueError("conditional_variant_allowance must be >= 0")
         if self.min_condition_sample_size < 0:
             raise ValueError("min_condition_sample_size must be >= 0")
+        if self.min_runtime_computable_symbols < 0:
+            raise ValueError("min_runtime_computable_symbols must be >= 0")
         if self.group_by not in {"signal_family", "universe", "workflow_type"}:
             raise ValueError("group_by must be one of: signal_family, universe, workflow_type")
         if self.default_status not in {"active", "inactive"}:
@@ -400,7 +407,161 @@ def _build_generated_preset_payload(
             "sample_size": conditional_variant.get("sample_size") if conditional_variant else None,
             "artifact_dir": manifest.get("artifact_dir"),
             "approved_model_state_path": approved_model_state,
+            "runtime_score_validation_pass": candidate.get("runtime_score_validation_pass"),
+            "runtime_score_validation_reason": candidate.get("runtime_score_validation_reason"),
+            "loaded_signal_symbol_count": candidate.get("loaded_signal_symbol_count"),
+            "latest_component_score_count": candidate.get("latest_component_score_count"),
+            "latest_composite_score_count": candidate.get("latest_composite_score_count"),
+            "runtime_computable_symbol_count": candidate.get("runtime_computable_symbol_count"),
+            "execution_ready": candidate.get("execution_ready", True),
+            "shadow_only": candidate.get("shadow_only", False),
         },
+    }
+
+
+def _build_runtime_validation_config(
+    *,
+    preset_name: str,
+    manifest: dict[str, Any],
+) -> PaperTradingConfig:
+    artifact_paths = manifest.get("artifact_paths", {})
+    approved_model_state = artifact_paths.get("approved_model_state_deployment_path") or artifact_paths.get("approved_model_state_path")
+    composite_settings = manifest.get("diagnostics_snapshot", {}).get("composite_portfolio", {})
+    horizon = manifest.get("top_candidate", {}).get("horizon") or (
+        (manifest.get("evaluation_periods", {}).get("horizons") or [1])[0]
+    )
+    symbols = [str(symbol) for symbol in _safe_list(manifest.get("symbols_requested")) if str(symbol).strip()]
+    return PaperTradingConfig(
+        symbols=symbols,
+        preset_name=preset_name,
+        universe_name=str(manifest.get("universe") or "") or None,
+        signal_source="composite",
+        strategy="sma_cross",
+        approved_model_state_path=str(approved_model_state) if approved_model_state else None,
+        composite_artifact_dir=str(manifest.get("artifact_dir") or "") or None,
+        composite_horizon=int(horizon) if horizon is not None else 1,
+        composite_weighting_scheme="equal",
+        composite_portfolio_mode="long_only_top_n",
+        rebalance_frequency="daily",
+        min_price=_safe_float(composite_settings.get("min_price")),
+        min_volume=_safe_float(composite_settings.get("min_volume")),
+        min_avg_dollar_volume=_safe_float(composite_settings.get("min_avg_dollar_volume")),
+        max_adv_participation=_safe_float(composite_settings.get("max_adv_participation")) or 0.05,
+        max_position_pct_of_adv=_safe_float(composite_settings.get("max_position_pct_of_adv")) or 0.1,
+        max_notional_per_name=_safe_float(composite_settings.get("max_notional_per_name")),
+    )
+
+
+def _build_runtime_score_validation(
+    *,
+    manifest: dict[str, Any],
+    policy: PromotionPolicyConfig,
+) -> dict[str, Any]:
+    preset_name = _build_generated_preset_name(manifest)
+    artifact_paths = manifest.get("artifact_paths", {})
+    approved_model_state = artifact_paths.get("approved_model_state_deployment_path") or artifact_paths.get("approved_model_state_path")
+    artifact_dir = manifest.get("artifact_dir")
+    approved_model_state_path = Path(str(approved_model_state)) if approved_model_state else None
+    artifact_dir_path = Path(str(artifact_dir)) if artifact_dir else None
+    approved_model_state_exists = bool(approved_model_state_path and approved_model_state_path.exists())
+    artifact_dir_exists = bool(artifact_dir_path and artifact_dir_path.exists())
+    signal_artifact_path = (
+        str(approved_model_state_path)
+        if approved_model_state_path is not None
+        else str(artifact_dir_path) if artifact_dir_path is not None else ""
+    )
+    symbols_requested = [str(symbol) for symbol in _safe_list(manifest.get("symbols_requested")) if str(symbol).strip()]
+    base_result: dict[str, Any] = {
+        "preset_name": preset_name,
+        "source_run_id": manifest.get("run_id"),
+        "signal_family": manifest.get("signal_family"),
+        "signal_artifact_path": signal_artifact_path,
+        "selected_signal_count": 0,
+        "loaded_signal_symbol_count": 0,
+        "latest_component_score_count": 0,
+        "latest_composite_score_count": 0,
+        "runtime_computable_symbol_count": 0,
+        "runtime_score_validation_pass": False,
+        "runtime_score_validation_reason": "runtime_score_validation_unchecked",
+        "approved_model_state_exists": approved_model_state_exists,
+        "artifact_dir_exists": artifact_dir_exists,
+        "symbols_requested_count": len(symbols_requested),
+    }
+    if not symbols_requested:
+        return {
+            **base_result,
+            "runtime_score_validation_reason": "missing_symbols_requested",
+        }
+    if not approved_model_state_exists and not artifact_dir_exists:
+        return {
+            **base_result,
+            "runtime_score_validation_reason": "missing_signal_artifact",
+        }
+    try:
+        snapshot, diagnostics = build_composite_paper_snapshot(
+            config=_build_runtime_validation_config(
+                preset_name=preset_name,
+                manifest=manifest,
+            )
+        )
+    except FileNotFoundError:
+        return {
+            **base_result,
+            "runtime_score_validation_reason": "missing_signal_artifact",
+        }
+    except Exception as exc:
+        return {
+            **base_result,
+            "runtime_score_validation_reason": f"runtime_score_validation_error:{exc.__class__.__name__}",
+            "runtime_score_validation_error": repr(exc),
+        }
+
+    selected_signals = _safe_list(diagnostics.get("selected_signals"))
+    latest_component_scores = _safe_list(diagnostics.get("latest_component_scores"))
+    latest_composite_scores = _safe_list(diagnostics.get("latest_composite_scores"))
+    loaded_signal_symbols = {
+        str(row.get("symbol"))
+        for row in latest_component_scores
+        if str(row.get("symbol") or "").strip()
+    }
+    runtime_symbols = {
+        str(row.get("symbol"))
+        for row in latest_composite_scores
+        if str(row.get("symbol") or "").strip()
+    }
+    runtime_reason = str(diagnostics.get("reason") or "").strip()
+    if not runtime_reason:
+        if not selected_signals:
+            runtime_reason = "no_selected_signals"
+        elif not latest_component_scores:
+            runtime_reason = "empty_component_scores"
+        elif not latest_composite_scores:
+            runtime_reason = "empty_signal_scores"
+        else:
+            runtime_reason = "runtime_scores_available"
+    if runtime_reason == "no_composite_scores":
+        runtime_reason = "empty_signal_scores"
+    if runtime_reason == "no_approved_signals":
+        runtime_reason = "no_selected_signals"
+    validation_pass = bool(runtime_symbols) and len(runtime_symbols) >= policy.min_runtime_computable_symbols
+    if not validation_pass and runtime_reason == "runtime_scores_available":
+        runtime_reason = f"runtime_computable_symbols {len(runtime_symbols)} < {policy.min_runtime_computable_symbols}"
+    if validation_pass:
+        runtime_reason = "runtime_scores_available"
+
+    if not snapshot.scores.empty and runtime_symbols:
+        runtime_computable_symbol_count = int(snapshot.scores.iloc[-1].dropna().shape[0])
+    else:
+        runtime_computable_symbol_count = len(runtime_symbols)
+    return {
+        **base_result,
+        "selected_signal_count": len(selected_signals),
+        "loaded_signal_symbol_count": len(loaded_signal_symbols),
+        "latest_component_score_count": len(latest_component_scores),
+        "latest_composite_score_count": len(latest_composite_scores),
+        "runtime_computable_symbol_count": int(runtime_computable_symbol_count),
+        "runtime_score_validation_pass": validation_pass,
+        "runtime_score_validation_reason": runtime_reason,
     }
 
 
@@ -566,6 +727,8 @@ def apply_research_promotions(
     selected: list[dict[str, Any]] = []
     group_counts: dict[str, int] = {}
     family_counts: dict[str, int] = {}
+    runtime_validation_cache: dict[str, dict[str, Any]] = {}
+    runtime_validation_rows: list[dict[str, Any]] = []
 
     prepared_candidates: list[dict[str, Any]] = []
     for candidate in candidates:
@@ -594,6 +757,13 @@ def apply_research_promotions(
             if validation_status != "pass" and not (policy.allow_weak_validation and validation_status == "weak"):
                 continue
         conditional_variants = _qualifying_conditional_variants(manifest, policy)
+        runtime_validation = runtime_validation_cache.setdefault(
+            run_id,
+            _build_runtime_score_validation(
+                manifest=manifest,
+                policy=policy,
+            ),
+        )
         effective_metric = _manifest_metric_value(manifest, policy) + (
             policy.conditional_variant_score_bonus if conditional_variants else 0.0
         )
@@ -608,12 +778,32 @@ def apply_research_promotions(
                 "group_value": _promotion_group_value(manifest, policy),
                 "family_value": _promotion_family_value(manifest),
                 "bootstrap_active": bootstrap_active,
+                "runtime_validation": runtime_validation,
             }
         )
+        if policy.require_runtime_computable_scores and not policy.allow_shadow_promotion_on_runtime_failure:
+            if not bool(runtime_validation.get("runtime_score_validation_pass")):
+                runtime_validation_rows.append(
+                    {
+                        **runtime_validation,
+                        "preset_name": _build_generated_preset_name(manifest),
+                        "source_run_id": manifest.get("run_id"),
+                        "signal_family": manifest.get("signal_family"),
+                        "promotion_variant": "unconditional",
+                        "condition_id": None,
+                        "condition_type": None,
+                        "validation_pass": False,
+                        "validation_reason": runtime_validation.get("runtime_score_validation_reason"),
+                        "promotion_action": "blocked",
+                        "execution_ready": False,
+                        "shadow_only": False,
+                    }
+                )
 
     sorted_candidates = sorted(
         prepared_candidates,
         key=lambda row: (
+            1 if row["runtime_validation"].get("runtime_score_validation_pass") else 0,
             float(row["effective_metric"]),
             1 if row["conditional_variants"] else 0,
             str(row["candidate"].get("timestamp") or ""),
@@ -621,6 +811,11 @@ def apply_research_promotions(
         ),
         reverse=True,
     )
+    candidate_run_ids_considered = {
+        str(row["manifest"].get("run_id") or "")
+        for row in prepared_candidates
+        if str(row["manifest"].get("run_id") or "").strip()
+    }
 
     total_limit = top_n if top_n is not None else policy.max_strategies_total
     distinct_families_available = {
@@ -640,6 +835,10 @@ def apply_research_promotions(
         run_id = str(prepared["manifest"].get("run_id") or "")
         if run_id in selected_run_ids:
             return False
+        runtime_validation = dict(prepared.get("runtime_validation") or {})
+        if policy.require_runtime_computable_scores and not bool(runtime_validation.get("runtime_score_validation_pass")):
+            if not policy.allow_shadow_promotion_on_runtime_failure:
+                return False
         group_value = str(prepared["group_value"])
         family_value = str(prepared["family_value"])
         if policy.max_strategies_per_group is not None and group_counts.get(group_value, 0) >= policy.max_strategies_per_group:
@@ -696,16 +895,49 @@ def apply_research_promotions(
         validation_row: dict[str, Any] | None,
         conditional_variant: dict[str, Any] | None,
         bootstrap_applied: bool,
+        runtime_validation: dict[str, Any],
     ) -> dict[str, Any] | None:
         preset_name = _build_generated_preset_name(manifest, conditional_variant)
-        status = "inactive" if inactive else policy.default_status
+        runtime_pass = bool(runtime_validation.get("runtime_score_validation_pass"))
+        shadow_only = (
+            policy.require_runtime_computable_scores
+            and not runtime_pass
+            and policy.allow_shadow_promotion_on_runtime_failure
+        )
+        if policy.require_runtime_computable_scores and not runtime_pass and not policy.allow_shadow_promotion_on_runtime_failure:
+            runtime_validation_rows.append(
+                {
+                    **runtime_validation,
+                    "preset_name": preset_name,
+                    "source_run_id": manifest.get("run_id"),
+                    "signal_family": manifest.get("signal_family"),
+                    "promotion_variant": "conditional" if conditional_variant else "unconditional",
+                    "condition_id": conditional_variant.get("condition_id") if conditional_variant else None,
+                    "condition_type": conditional_variant.get("condition_type") if conditional_variant else None,
+                    "validation_pass": False,
+                    "validation_reason": runtime_validation.get("runtime_score_validation_reason"),
+                    "promotion_action": "blocked",
+                    "execution_ready": False,
+                    "shadow_only": False,
+                }
+            )
+            return None
+        status = "inactive" if inactive or shadow_only else policy.default_status
         warnings = _build_warning_list(manifest, policy)
+        if not runtime_pass:
+            warnings.append("runtime_score_validation_failed")
         ranking_metric, ranking_value = _variant_metric_name_and_value(manifest, policy, conditional_variant)
         rationale = _build_variant_rationale(candidate, conditional_variant, bootstrap_applied=bootstrap_applied)
+        candidate_with_runtime = {
+            **candidate,
+            **runtime_validation,
+            "execution_ready": runtime_pass,
+            "shadow_only": shadow_only,
+        }
         preset_payload = _build_generated_preset_payload(
             preset_name=preset_name,
             manifest=manifest,
-            candidate=candidate,
+            candidate=candidate_with_runtime,
             status=status,
             warnings=warnings,
             metric_name=ranking_metric,
@@ -782,11 +1014,37 @@ def apply_research_promotions(
             "bootstrap_applied": bootstrap_applied,
             "rationale": rationale,
             "warnings": warnings,
+            "runtime_score_validation_pass": runtime_validation.get("runtime_score_validation_pass"),
+            "runtime_score_validation_reason": runtime_validation.get("runtime_score_validation_reason"),
+            "selected_signal_count": runtime_validation.get("selected_signal_count"),
+            "loaded_signal_symbol_count": runtime_validation.get("loaded_signal_symbol_count"),
+            "latest_component_score_count": runtime_validation.get("latest_component_score_count"),
+            "latest_composite_score_count": runtime_validation.get("latest_composite_score_count"),
+            "runtime_computable_symbol_count": runtime_validation.get("runtime_computable_symbol_count"),
+            "signal_artifact_path": runtime_validation.get("signal_artifact_path"),
+            "execution_ready": runtime_pass,
+            "shadow_only": shadow_only,
             "generated_preset_path": str(promoted_strategy_path),
             "generated_registry_path": str(registry_path),
             "generated_pipeline_config_path": str(pipeline_config_path),
         }
         promoted_rows.append(promoted_row)
+        runtime_validation_rows.append(
+            {
+                **runtime_validation,
+                "preset_name": preset_name,
+                "source_run_id": manifest.get("run_id"),
+                "signal_family": manifest.get("signal_family"),
+                "promotion_variant": promoted_row.get("promotion_variant"),
+                "condition_id": promoted_row.get("condition_id"),
+                "condition_type": promoted_row.get("condition_type"),
+                "validation_pass": runtime_validation.get("runtime_score_validation_pass"),
+                "validation_reason": runtime_validation.get("runtime_score_validation_reason"),
+                "promotion_action": "shadow_only" if shadow_only else "promoted",
+                "execution_ready": runtime_pass,
+                "shadow_only": shadow_only,
+            }
+        )
         if conditional_variant is not None:
             promoted_condition_rows.append(
                 {
@@ -818,6 +1076,7 @@ def apply_research_promotions(
         validation_row = prepared["validation_row"]
         conditional_variants = list(prepared["conditional_variants"])
         bootstrap_applied = bool(prepared["bootstrap_active"])
+        runtime_validation = dict(prepared["runtime_validation"])
         primary_conditional_variant = conditional_variants[0] if conditional_variants else None
         base_variant = (
             None
@@ -830,6 +1089,7 @@ def apply_research_promotions(
             validation_row=validation_row,
             conditional_variant=base_variant,
             bootstrap_applied=bootstrap_applied,
+            runtime_validation=runtime_validation,
         )
         if not policy.emit_conditional_variants_alongside_baseline:
             continue
@@ -842,21 +1102,64 @@ def apply_research_promotions(
                 validation_row=validation_row,
                 conditional_variant=conditional_variant,
                 bootstrap_applied=bootstrap_applied,
+                runtime_validation=runtime_validation,
             )
             if emitted is not None:
                 conditional_allowance_remaining -= 1
 
     if not dry_run:
+        promoted_runtime_validation_summary_path = output_dir_path / "promoted_runtime_validation_summary.csv"
+        runtime_score_validation_path = output_dir_path / "runtime_score_validation.json"
+        rows_to_replace = [
+            row
+            for row in existing_rows
+            if str(row.get("source_run_id") or "") in candidate_run_ids_considered
+        ]
         retained = [
             row
             for row in existing_rows
-            if row.get("source_run_id") not in {item["source_run_id"] for item in promoted_rows}
+            if str(row.get("source_run_id") or "") not in candidate_run_ids_considered
         ]
+        for row in rows_to_replace:
+            for path_key in ("generated_preset_path", "generated_registry_path", "generated_pipeline_config_path"):
+                raw_path = row.get(path_key)
+                if not raw_path:
+                    continue
+                path = Path(str(raw_path))
+                if path.exists():
+                    path.unlink()
         promoted_condition_summary_path = output_dir_path / "promoted_condition_summary.csv"
         if promoted_condition_rows:
             pd.DataFrame(promoted_condition_rows).to_csv(promoted_condition_summary_path, index=False)
         elif promoted_condition_summary_path.exists():
             promoted_condition_summary_path.unlink()
+        if runtime_validation_rows:
+            pd.DataFrame(runtime_validation_rows).to_csv(promoted_runtime_validation_summary_path, index=False)
+            _write_payload(
+                runtime_score_validation_path,
+                {
+                    "schema_version": 1,
+                    "generated_at": _now_utc(),
+                    "policy": {
+                        "require_runtime_computable_scores": policy.require_runtime_computable_scores,
+                        "min_runtime_computable_symbols": policy.min_runtime_computable_symbols,
+                        "allow_shadow_promotion_on_runtime_failure": policy.allow_shadow_promotion_on_runtime_failure,
+                    },
+                    "summary": {
+                        "rows": len(runtime_validation_rows),
+                        "passed_count": sum(1 for row in runtime_validation_rows if row.get("validation_pass")),
+                        "failed_count": sum(1 for row in runtime_validation_rows if not row.get("validation_pass")),
+                        "blocked_count": sum(1 for row in runtime_validation_rows if row.get("promotion_action") == "blocked"),
+                        "shadow_only_count": sum(1 for row in runtime_validation_rows if row.get("promotion_action") == "shadow_only"),
+                    },
+                    "rows": runtime_validation_rows,
+                },
+            )
+        else:
+            if promoted_runtime_validation_summary_path.exists():
+                promoted_runtime_validation_summary_path.unlink()
+            if runtime_score_validation_path.exists():
+                runtime_score_validation_path.unlink()
         index_payload = {
             "schema_version": 1,
             "generated_at": _now_utc(),
@@ -864,6 +1167,8 @@ def apply_research_promotions(
             "registry_dir": str(registry_dir_path),
             "promotion_candidates_path": str(registry_dir_path / "promotion_candidates.json"),
             "promoted_condition_summary_path": str(promoted_condition_summary_path) if promoted_condition_rows else None,
+            "promoted_runtime_validation_summary_path": str(promoted_runtime_validation_summary_path) if runtime_validation_rows else None,
+            "runtime_score_validation_path": str(runtime_score_validation_path) if runtime_validation_rows else None,
             "validation_path": str(validation_path) if validation_path is not None else None,
             "policy": asdict(policy),
             "summary": {
@@ -871,6 +1176,15 @@ def apply_research_promotions(
                 "baseline_count": sum(1 for row in promoted_rows if row.get("promotion_variant") == "unconditional"),
                 "conditional_count": sum(1 for row in promoted_rows if row.get("promotion_variant") == "conditional"),
                 "bootstrap_count": sum(1 for row in promoted_rows if row.get("bootstrap_applied")),
+                "runtime_validation_failed_count": sum(
+                    1 for row in runtime_validation_rows if not row.get("validation_pass")
+                ),
+                "runtime_validation_blocked_count": sum(
+                    1 for row in runtime_validation_rows if row.get("promotion_action") == "blocked"
+                ),
+                "shadow_only_count": sum(
+                    1 for row in promoted_rows if row.get("shadow_only")
+                ),
             },
             "strategies": sorted(retained + promoted_rows, key=lambda row: str(row.get("preset_name"))),
         }
@@ -881,6 +1195,8 @@ def apply_research_promotions(
         "dry_run": dry_run,
         "promoted_rows": promoted_rows,
         "promoted_condition_summary_path": str(output_dir_path / "promoted_condition_summary.csv"),
+        "promoted_runtime_validation_summary_path": str(output_dir_path / "promoted_runtime_validation_summary.csv"),
+        "runtime_score_validation_path": str(output_dir_path / "runtime_score_validation.json"),
         "generated_paths": generated_paths,
         "promoted_index_path": str(output_dir_path / PROMOTED_STRATEGIES_INDEX_NAME),
     }

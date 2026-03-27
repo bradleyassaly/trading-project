@@ -101,6 +101,9 @@ def cmd_research_promote(args) -> None:
                 "promotion_variant": row.get("promotion_variant"),
                 "condition_id": row.get("condition_id"),
                 "condition_type": row.get("condition_type"),
+                "runtime_score_validation_pass": row.get("runtime_score_validation_pass"),
+                "runtime_score_validation_reason": row.get("runtime_score_validation_reason"),
+                "runtime_computable_symbol_count": row.get("runtime_computable_symbol_count"),
             },
         )
         promoted_strategy_id = db_service.record_promoted_strategy(
@@ -118,7 +121,8 @@ def cmd_research_promote(args) -> None:
         )
         print(
             f"- {row['preset_name']}: source_run_id={row['source_run_id']} "
-            f"status={row['status']} metric={row['ranking_metric']}={row['ranking_value']}"
+            f"status={row['status']} metric={row['ranking_metric']}={row['ranking_value']} "
+            f"runtime={row.get('runtime_score_validation_pass')}"
         )
     source_run_id = None
     if len({str(row.get("source_run_id") or "") for row in result["promoted_rows"]}) == 1 and result["promoted_rows"]:

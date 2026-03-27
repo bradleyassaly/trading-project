@@ -231,6 +231,9 @@ class ResearchMemoryService:
                     "condition_id": _safe_text(row.get("condition_id")),
                     "condition_type": _safe_text(row.get("condition_type")),
                     "rationale": _safe_text(row.get("rationale")),
+                    "runtime_score_validation_pass": bool(row.get("runtime_score_validation_pass")) if row.get("runtime_score_validation_pass") is not None else None,
+                    "runtime_score_validation_reason": _safe_text(row.get("runtime_score_validation_reason")),
+                    "runtime_computable_symbol_count": _safe_int(row.get("runtime_computable_symbol_count")),
                     "promotion_timestamp_text": _safe_text(row.get("promotion_timestamp")),
                     "generated_preset_path": _safe_text(row.get("generated_preset_path")),
                     "generated_registry_path": _safe_text(row.get("generated_registry_path")),
@@ -360,6 +363,9 @@ class ResearchMemoryService:
                 "condition_id": row.condition_id,
                 "condition_type": row.condition_type,
                 "rationale": row.rationale,
+                "runtime_score_validation_pass": row.runtime_score_validation_pass,
+                "runtime_score_validation_reason": row.runtime_score_validation_reason,
+                "runtime_computable_symbol_count": row.runtime_computable_symbol_count,
             }
             for row, run_key in rows
         ]
