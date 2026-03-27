@@ -840,6 +840,14 @@ def allocate_multi_strategy_portfolio(
         ),
         {},
     )
+    primary_metadata = next(
+        (
+            row
+            for row in sleeve_target_diagnostics_rows
+            if row.get("generated_preset_path") or row.get("signal_artifact_path")
+        ),
+        primary_drop,
+    )
 
     portfolio_diagnostics_rows = [
         {"metric": "gross_exposure_before_constraints", "value": before_summary["gross_exposure"]},
@@ -899,8 +907,8 @@ def allocate_multi_strategy_portfolio(
         "latest_price_source_summary": latest_price_source_counts,
         "target_drop_stage": primary_drop.get("target_drop_stage"),
         "target_drop_reason": primary_drop.get("target_drop_reason"),
-        "generated_preset_path": primary_drop.get("generated_preset_path"),
-        "signal_artifact_path": primary_drop.get("signal_artifact_path"),
+        "generated_preset_path": primary_metadata.get("generated_preset_path"),
+        "signal_artifact_path": primary_metadata.get("signal_artifact_path"),
         "overlap_concentration": overlap_concentration,
         "effective_number_of_sleeves": effective_sleeves,
         "effective_number_of_positions": effective_positions,

@@ -484,3 +484,49 @@ def test_allocate_multi_strategy_maps_liquidity_filter_drop_reason(monkeypatch) 
 
     assert result.summary["target_drop_stage"] == "liquidity_filter"
     assert result.summary["target_drop_reason"] == "all_symbols_failed_liquidity_filter"
+
+
+def test_allocate_multi_strategy_summary_preserves_primary_provenance_without_drop(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(
+        "trading_platform.portfolio.multi_strategy.build_target_construction_result",
+        lambda config: _target_result(
+            as_of="2025-01-04",
+            weights={"AAPL": 1.0},
+            diagnostics={"target_construction": {"reason": ""}},
+            extra_diagnostics={},
+            signal_snapshot=PaperSignalSnapshot(
+                asset_returns=pd.DataFrame({"AAPL": [0.0]}, index=pd.to_datetime(["2025-01-04"])),
+                scores=pd.DataFrame({"AAPL": [1.0]}, index=pd.to_datetime(["2025-01-04"])),
+                closes=pd.DataFrame({"AAPL": [100.0]}, index=pd.to_datetime(["2025-01-04"])),
+                skipped_symbols=[],
+            ),
+        ),
+    )
+    generated_preset_path = tmp_path / "generated.json"
+    monkeypatch.setattr(
+        "trading_platform.portfolio.multi_strategy._paper_config_from_preset",
+        lambda preset_name, preset_path=None: type(
+            "DummyConfig",
+            (),
+            {
+                "preset_name": preset_name,
+                "symbols": ["AAPL"],
+                "signal_source": "composite",
+                "strategy": "sma_cross",
+                "composite_artifact_dir": "artifacts/alpha_research/run_configured",
+                "approved_model_state_path": "artifacts/alpha_research/run_configured/approved/approved_model_state.json",
+            },
+        )(),
+    )
+    config = MultiStrategyPortfolioConfig(
+        sleeves=[MultiStrategySleeveConfig("core", "preset", 1.0, preset_path=str(generated_preset_path))],
+    )
+
+    result = allocate_multi_strategy_portfolio(config)
+    paths = write_multi_strategy_artifacts(result, tmp_path / "alloc")
+    summary_payload = json.loads(Path(paths["target_generation_summary_path"]).read_text(encoding="utf-8"))
+
+    assert result.summary["generated_preset_path"].endswith("generated.json")
+    assert result.summary["signal_artifact_path"].endswith("approved_model_state.json")
+    assert summary_payload["generated_preset_path"].endswith("generated.json")
+    assert summary_payload["signal_artifact_path"].endswith("approved_model_state.json")
