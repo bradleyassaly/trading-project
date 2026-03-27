@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import DateTime, JSON, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, Integer, JSON, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from trading_platform.db.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
@@ -25,6 +25,9 @@ class ResearchRun(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     output_dir: Mapped[str | None] = mapped_column(Text)
     universe: Mapped[str | None] = mapped_column(String(255), index=True)
     config_path: Mapped[str | None] = mapped_column(Text)
+    composite_runtime_computability_pass: Mapped[bool | None] = mapped_column(Boolean)
+    composite_runtime_computability_reason: Mapped[str | None] = mapped_column(String(255))
+    composite_runtime_computable_symbol_count: Mapped[int | None] = mapped_column(Integer)
     notes: Mapped[str | None] = mapped_column(Text)
 
 

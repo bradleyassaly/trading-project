@@ -45,6 +45,9 @@ REGISTRY_COLUMNS = [
     "runtime_computability_pass",
     "runtime_computability_reason",
     "runtime_computable_symbol_count",
+    "composite_runtime_computability_pass",
+    "composite_runtime_computability_reason",
+    "composite_runtime_computable_symbol_count",
 ]
 
 LEADERBOARD_COLUMNS = [
@@ -79,6 +82,9 @@ PROMOTION_CANDIDATE_COLUMNS = [
     "runtime_computability_pass",
     "runtime_computability_reason",
     "runtime_computable_symbol_count",
+    "composite_runtime_computability_pass",
+    "composite_runtime_computability_reason",
+    "composite_runtime_computable_symbol_count",
 ]
 
 CONDITIONAL_PROMOTION_CANDIDATE_COLUMNS = [
@@ -304,6 +310,9 @@ def _manifest_summary_row(manifest: dict[str, Any]) -> dict[str, Any]:
         "runtime_computability_pass": top_metrics.get("runtime_computability_pass"),
         "runtime_computability_reason": top_metrics.get("runtime_computability_reason"),
         "runtime_computable_symbol_count": top_metrics.get("runtime_computable_symbol_count"),
+        "composite_runtime_computability_pass": top_metrics.get("composite_runtime_computability_pass"),
+        "composite_runtime_computability_reason": top_metrics.get("composite_runtime_computability_reason"),
+        "composite_runtime_computable_symbol_count": top_metrics.get("composite_runtime_computable_symbol_count"),
     }
 
 
@@ -400,6 +409,7 @@ def build_research_run_manifest(
     promoted_signals_df = _safe_read_csv(normalized_artifacts.get("promoted_signals_path"))
     portfolio_metrics_df = _safe_read_csv(normalized_artifacts.get("portfolio_metrics_path"))
     implementability_report_df = _safe_read_csv(normalized_artifacts.get("implementability_report_path"))
+    composite_runtime_df = _safe_read_csv(normalized_artifacts.get("composite_runtime_computability_path"))
     diagnostics = _safe_read_json(normalized_artifacts.get("signal_diagnostics_path"))
 
     top_candidate = _top_row_by_metric(leaderboard_df, "mean_spearman_ic")
@@ -408,6 +418,18 @@ def build_research_run_manifest(
         or _top_row_by_metric(portfolio_metrics_df, "sharpe")
     )
     top_implementability = _first_row(implementability_report_df)
+    top_candidate_horizon = _safe_int(top_candidate.get("horizon"))
+    if top_candidate_horizon is not None and not composite_runtime_df.empty and "horizon" in composite_runtime_df.columns:
+        matching_composite_df = composite_runtime_df.loc[
+            pd.to_numeric(composite_runtime_df["horizon"], errors="coerce") == int(top_candidate_horizon)
+        ].copy()
+    else:
+        matching_composite_df = pd.DataFrame()
+    top_composite_runtime = (
+        _top_row_by_metric(matching_composite_df, "composite_runtime_computable_symbol_count")
+        or _top_row_by_metric(composite_runtime_df, "composite_runtime_computable_symbol_count")
+        or _first_row(composite_runtime_df)
+    )
 
     manifest_timestamp = timestamp or _now_utc()
     manifest = {
@@ -453,6 +475,9 @@ def build_research_run_manifest(
             "runtime_computability_pass": bool(top_candidate.get("runtime_computability_pass")) if top_candidate.get("runtime_computability_pass") is not None else None,
             "runtime_computability_reason": _clean_optional_text(top_candidate.get("runtime_computability_reason")),
             "runtime_computable_symbol_count": _safe_int(top_candidate.get("runtime_computable_symbol_count")),
+            "composite_runtime_computability_pass": bool(top_composite_runtime.get("composite_runtime_computability_pass")) if top_composite_runtime.get("composite_runtime_computability_pass") is not None else None,
+            "composite_runtime_computability_reason": _clean_optional_text(top_composite_runtime.get("composite_runtime_computability_reason")),
+            "composite_runtime_computable_symbol_count": _safe_int(top_composite_runtime.get("composite_runtime_computable_symbol_count")),
         },
         "top_candidate": {
             "candidate_id": _clean_optional_text(top_candidate.get("candidate_id")),
@@ -472,9 +497,20 @@ def build_research_run_manifest(
             "signal_lifecycle": diagnostics.get("signal_lifecycle", {}),
             "regime": diagnostics.get("regime", {}),
             "composite_portfolio": diagnostics.get("composite_portfolio", {}),
+            "runtime_computability": diagnostics.get("runtime_computability", {}),
+            "composite_runtime_computability": diagnostics.get("composite_runtime_computability", {}),
         },
         "artifact_paths": normalized_artifacts,
     }
+
+    composite_block_reason = _clean_optional_reason(top_composite_runtime.get("composite_approval_block_reason"))
+    if composite_block_reason:
+        joined_reason = ";".join(
+            value
+            for value in [manifest["top_metrics"].get("rejection_reason"), composite_block_reason]
+            if _clean_optional_reason(value)
+        )
+        manifest["top_metrics"]["rejection_reason"] = _clean_optional_reason(joined_reason)
 
     manifest["promotion_recommendation"] = evaluate_manifest_promotion_readiness(
         manifest,
@@ -716,6 +752,9 @@ def build_promotion_candidates(
                 "runtime_computability_pass": top_metrics.get("runtime_computability_pass"),
                 "runtime_computability_reason": top_metrics.get("runtime_computability_reason"),
                 "runtime_computable_symbol_count": top_metrics.get("runtime_computable_symbol_count"),
+                "composite_runtime_computability_pass": top_metrics.get("composite_runtime_computability_pass"),
+                "composite_runtime_computability_reason": top_metrics.get("composite_runtime_computability_reason"),
+                "composite_runtime_computable_symbol_count": top_metrics.get("composite_runtime_computable_symbol_count"),
             }
         )
         for candidate in manifest.get("conditional_research", {}).get("promotion_candidates", []):

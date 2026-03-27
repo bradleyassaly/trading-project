@@ -377,6 +377,11 @@ class AlphaResearchWorkflowConfig:
     allow_research_only_noncomputable_candidates: bool = True
     runtime_computability_penalty_on_ranking: float = 0.02
     runtime_computability_check_mode: str = "strict"
+    require_composite_runtime_computability_for_approval: bool = False
+    min_composite_runtime_computable_symbols_for_approval: int = 5
+    allow_research_only_noncomputable_composites: bool = True
+    composite_runtime_computability_check_mode: str = "strict"
+    composite_runtime_computability_penalty_on_ranking: float = 0.02
     fast_refresh_mode: bool = False
     skip_heavy_diagnostics: bool = True
     reuse_existing_fold_results: bool = True
@@ -441,6 +446,12 @@ class AlphaResearchWorkflowConfig:
             raise ValueError("runtime_computability_penalty_on_ranking must be >= 0")
         if self.runtime_computability_check_mode not in {"strict", "penalize", "diagnostic_only"}:
             raise ValueError("runtime_computability_check_mode must be one of: strict, penalize, diagnostic_only")
+        if self.min_composite_runtime_computable_symbols_for_approval < 0:
+            raise ValueError("min_composite_runtime_computable_symbols_for_approval must be >= 0")
+        if self.composite_runtime_computability_penalty_on_ranking < 0:
+            raise ValueError("composite_runtime_computability_penalty_on_ranking must be >= 0")
+        if self.composite_runtime_computability_check_mode not in {"strict", "penalize", "diagnostic_only"}:
+            raise ValueError("composite_runtime_computability_check_mode must be one of: strict, penalize, diagnostic_only")
         if self.max_families_for_refresh is not None and self.max_families_for_refresh <= 0:
             raise ValueError("max_families_for_refresh must be > 0 when provided")
         if self.max_candidates_for_refresh is not None and self.max_candidates_for_refresh <= 0:

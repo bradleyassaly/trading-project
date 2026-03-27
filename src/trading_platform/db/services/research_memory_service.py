@@ -120,6 +120,7 @@ class ResearchMemoryService:
         *,
         run_id: Any,
         leaderboard_df: pd.DataFrame,
+        composite_runtime_df: pd.DataFrame | None = None,
     ) -> None:
         if not self.enabled or run_id is None or self.session_factory is None:
             return
@@ -128,7 +129,39 @@ class ResearchMemoryService:
         with self.session_factory() as session:
             self._persist_candidates(session=session, run_id=run_id, leaderboard_df=leaderboard_df)
             self._persist_metrics(session=session, run_id=run_id, leaderboard_df=leaderboard_df)
+            self._persist_composite_runtime_summary(session=session, run_id=run_id, composite_runtime_df=composite_runtime_df)
             session.commit()
+
+    def _persist_composite_runtime_summary(
+        self,
+        *,
+        session: Session,
+        run_id: Any,
+        composite_runtime_df: pd.DataFrame | None,
+    ) -> None:
+        if composite_runtime_df is None or composite_runtime_df.empty:
+            return
+        row = session.get(ResearchRun, run_id)
+        if row is None:
+            return
+        selected = composite_runtime_df.copy()
+        if "composite_runtime_computable_symbol_count" in selected.columns:
+            selected["composite_runtime_computable_symbol_count"] = pd.to_numeric(
+                selected["composite_runtime_computable_symbol_count"],
+                errors="coerce",
+            )
+            selected = selected.sort_values(
+                ["composite_runtime_computable_symbol_count", "selected_member_count"],
+                ascending=[False, False],
+            )
+        top = selected.iloc[0].to_dict()
+        row.composite_runtime_computability_pass = (
+            bool(top.get("composite_runtime_computability_pass"))
+            if top.get("composite_runtime_computability_pass") is not None
+            else None
+        )
+        row.composite_runtime_computability_reason = _safe_text(top.get("composite_runtime_computability_reason"))
+        row.composite_runtime_computable_symbol_count = _safe_int(top.get("composite_runtime_computable_symbol_count"))
 
     def _persist_candidates(self, *, session: Session, run_id: Any, leaderboard_df: pd.DataFrame) -> None:
         if not self.write_candidates:

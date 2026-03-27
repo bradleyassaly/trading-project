@@ -46,6 +46,66 @@ class CompositePaperTargetResult:
     price_snapshots: list[PaperExecutionPriceSnapshot]
 
 
+def _parse_variant_parameters(value: object) -> dict[str, object]:
+    if isinstance(value, dict):
+        return dict(value)
+    if value in (None, "", "{}"):
+        return {}
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return {}
+        return dict(parsed) if isinstance(parsed, dict) else {}
+    return {}
+
+
+def _safe_read_json(path: Path | None) -> dict[str, Any]:
+    if path is None or not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+
+
+def _load_daily_fundamental_features(
+    daily_features_path: Path | None,
+    *,
+    symbols: list[str],
+) -> pd.DataFrame:
+    if daily_features_path is None or not daily_features_path.exists():
+        return pd.DataFrame()
+    frame = pd.read_parquet(daily_features_path)
+    if frame.empty:
+        return frame
+    frame["symbol"] = frame["symbol"].astype(str).str.upper()
+    frame["timestamp"] = pd.to_datetime(frame["timestamp"], errors="coerce")
+    symbol_set = {symbol.upper() for symbol in symbols}
+    return frame.loc[frame["symbol"].isin(symbol_set)].copy()
+
+
+def _merge_daily_fundamental_features(
+    feature_data_by_symbol: dict[str, pd.DataFrame],
+    *,
+    daily_features_df: pd.DataFrame,
+) -> dict[str, pd.DataFrame]:
+    if daily_features_df.empty:
+        return feature_data_by_symbol
+    enriched: dict[str, pd.DataFrame] = {}
+    for symbol, feature_df in feature_data_by_symbol.items():
+        symbol_features = daily_features_df.loc[daily_features_df["symbol"] == symbol.upper()].copy()
+        if symbol_features.empty:
+            enriched[symbol] = feature_df
+            continue
+        enriched[symbol] = feature_df.merge(
+            symbol_features.drop(columns=["symbol"], errors="ignore"),
+            on="timestamp",
+            how="left",
+        )
+    return enriched
+
+
 def _historical_price_source(config: PaperTradingConfig) -> str:
     prices = config.data_sources.get("prices", {}) if isinstance(config.data_sources, dict) else {}
     return str(prices.get("historical", "yfinance"))
@@ -177,21 +237,35 @@ def _build_component_panel(
     selected_signals_df: pd.DataFrame,
     *,
     feature_data_by_symbol: dict[str, pd.DataFrame],
-) -> tuple[dict[tuple[str, int, int], pd.DataFrame], list[dict[str, Any]]]:
-    score_panel_by_candidate: dict[tuple[str, int, int], pd.DataFrame] = {}
+    signal_composition_preset: str = "standard",
+    enable_context_confirmations: bool | None = None,
+    enable_relative_features: bool | None = None,
+    enable_flow_confirmations: bool | None = None,
+) -> tuple[dict[str, pd.DataFrame], list[dict[str, Any]]]:
+    score_panel_by_candidate: dict[str, pd.DataFrame] = {}
     component_rows: list[dict[str, Any]] = []
     for _, row in selected_signals_df.iterrows():
-        candidate_key = (
-            str(row["signal_family"]),
-            int(row["lookback"]),
-            int(row["horizon"]),
+        signal_candidate_id = str(
+            row.get("candidate_id")
+            or candidate_id(
+                str(row["signal_family"]),
+                int(row["lookback"]),
+                int(row["horizon"]),
+                str(row.get("signal_variant") or "base"),
+            )
         )
         panel_frames: list[pd.DataFrame] = []
         for symbol, feature_df in feature_data_by_symbol.items():
             signal = build_signal(
                 feature_df,
-                signal_family=candidate_key[0],
-                lookback=candidate_key[1],
+                signal_family=str(row["signal_family"]),
+                lookback=int(row["lookback"]),
+                signal_variant=str(row.get("signal_variant") or "base"),
+                variant_params=_parse_variant_parameters(row.get("variant_parameters_json")),
+                signal_composition_preset=signal_composition_preset,
+                enable_context_confirmations=enable_context_confirmations,
+                enable_relative_features=enable_relative_features,
+                enable_flow_confirmations=enable_flow_confirmations,
             )
             signal_frame = feature_df[["timestamp", "symbol"]].copy()
             signal_frame["signal"] = signal
@@ -204,13 +278,14 @@ def _build_component_panel(
         candidate_panel = pd.concat(panel_frames, ignore_index=True).sort_values(
             ["timestamp", "symbol"]
         ).reset_index(drop=True)
-        score_panel_by_candidate[candidate_key] = candidate_panel
+        score_panel_by_candidate[signal_candidate_id] = candidate_panel
         component_rows.append(
             {
-                "candidate_id": candidate_id(*candidate_key),
-                "signal_family": candidate_key[0],
-                "lookback": candidate_key[1],
-                "horizon": candidate_key[2],
+                "candidate_id": signal_candidate_id,
+                "signal_family": str(row["signal_family"]),
+                "signal_variant": str(row.get("signal_variant") or "base"),
+                "lookback": int(row["lookback"]),
+                "horizon": int(row["horizon"]),
             }
         )
     return score_panel_by_candidate, component_rows
@@ -228,7 +303,7 @@ def _latest_timestamp_from_features(feature_data_by_symbol: dict[str, pd.DataFra
 def _build_latest_component_diagnostics(
     selected_signals_df: pd.DataFrame,
     *,
-    score_panel_by_candidate: dict[tuple[str, int, int], pd.DataFrame],
+    score_panel_by_candidate: dict[str, pd.DataFrame],
     latest_timestamp: pd.Timestamp,
     weighting_scheme: str,
 ) -> list[dict[str, Any]]:
@@ -242,27 +317,32 @@ def _build_latest_component_diagnostics(
     )
     rows: list[dict[str, Any]] = []
     for _, row in weighted_components.iterrows():
-        candidate_key = (
-            str(row["signal_family"]),
-            int(row["lookback"]),
-            int(row["horizon"]),
+        signal_candidate_id = str(
+            row.get("candidate_id")
+            or candidate_id(
+                str(row["signal_family"]),
+                int(row["lookback"]),
+                int(row["horizon"]),
+                str(row.get("signal_variant") or "base"),
+            )
         )
-        score_panel = score_panel_by_candidate.get(candidate_key, pd.DataFrame())
+        score_panel = score_panel_by_candidate.get(signal_candidate_id, pd.DataFrame())
         if score_panel.empty:
             continue
         normalized = normalize_signal_by_date(score_panel)
         latest_slice = normalized.loc[normalized["timestamp"] == latest_timestamp].copy()
         if latest_slice.empty:
             continue
-        latest_slice["candidate_id"] = candidate_id(*candidate_key)
+        latest_slice["candidate_id"] = signal_candidate_id
         latest_slice["component_weight"] = float(row["component_weight"])
         latest_slice["weighted_score"] = (
             pd.to_numeric(latest_slice["normalized_signal"], errors="coerce")
             * float(row["component_weight"])
         )
-        latest_slice["signal_family"] = candidate_key[0]
-        latest_slice["lookback"] = candidate_key[1]
-        latest_slice["horizon"] = candidate_key[2]
+        latest_slice["signal_family"] = str(row["signal_family"])
+        latest_slice["signal_variant"] = str(row.get("signal_variant") or "base")
+        latest_slice["lookback"] = int(row["lookback"])
+        latest_slice["horizon"] = int(row["horizon"])
         rows.extend(latest_slice.to_dict(orient="records"))
     return rows
 
@@ -320,6 +400,31 @@ def build_composite_paper_snapshot(
     if not feature_data_by_symbol:
         raise ValueError(
             f"No valid symbol frames available for composite paper trading. Reasons: {skipped_reasons}"
+        )
+
+    signal_diagnostics = _safe_read_json(
+        Path(str((approved_model_state.get("artifacts") or {}).get("signal_diagnostics_path")))
+        if (approved_model_state.get("artifacts") or {}).get("signal_diagnostics_path")
+        else None
+    )
+    fundamentals_config = signal_diagnostics.get("fundamentals", {}) if isinstance(signal_diagnostics, dict) else {}
+    fundamentals_daily_features_path = (
+        Path(str(fundamentals_config.get("daily_features_path")))
+        if fundamentals_config.get("daily_features_path")
+        else None
+    )
+    if bool(fundamentals_config.get("enabled")):
+        daily_fundamental_features_df = _load_daily_fundamental_features(
+            fundamentals_daily_features_path,
+            symbols=config.symbols,
+        )
+        feature_data_by_symbol = _merge_daily_fundamental_features(
+            feature_data_by_symbol,
+            daily_features_df=daily_fundamental_features_df,
+        )
+        historical_feature_data_by_symbol = _merge_daily_fundamental_features(
+            historical_feature_data_by_symbol,
+            daily_features_df=daily_fundamental_features_df,
         )
 
     feature_data_by_symbol, latest_fallback_used = _apply_latest_market_data(
@@ -385,6 +490,12 @@ def build_composite_paper_snapshot(
         )
 
     composite_inputs = approved_model_state.get("composite_inputs", {})
+    signal_composition = signal_diagnostics.get("signal_composition", {}) if isinstance(signal_diagnostics, dict) else {}
+    signal_composition_preset = str(
+        signal_diagnostics.get("signal_composition_preset")
+        or signal_composition.get("preset")
+        or "standard"
+    )
     selected_signals_records = (
         composite_inputs.get("horizons", {})
         .get(str(int(config.composite_horizon)), {})
@@ -411,6 +522,10 @@ def build_composite_paper_snapshot(
     score_panel_by_candidate, _ = _build_component_panel(
         selected_signals_df,
         feature_data_by_symbol=feature_data_by_symbol,
+        signal_composition_preset=signal_composition_preset,
+        enable_context_confirmations=signal_composition.get("enable_context_confirmations"),
+        enable_relative_features=signal_composition.get("enable_relative_features"),
+        enable_flow_confirmations=signal_composition.get("enable_flow_confirmations"),
     )
     composite_scores_df = build_composite_scores(
         selected_signals_df,

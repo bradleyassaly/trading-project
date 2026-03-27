@@ -353,6 +353,11 @@ runtime:
   allow_research_only_noncomputable_candidates: false
   runtime_computability_penalty_on_ranking: 0.15
   runtime_computability_check_mode: penalize
+  require_composite_runtime_computability_for_approval: true
+  min_composite_runtime_computable_symbols_for_approval: 9
+  allow_research_only_noncomputable_composites: false
+  composite_runtime_computability_check_mode: strict
+  composite_runtime_computability_penalty_on_ranking: 0.2
 refresh:
   fast_refresh_mode: true
   skip_heavy_diagnostics: true
@@ -394,6 +399,11 @@ tracking:
     assert config.allow_research_only_noncomputable_candidates is False
     assert config.runtime_computability_penalty_on_ranking == 0.15
     assert config.runtime_computability_check_mode == "penalize"
+    assert config.require_composite_runtime_computability_for_approval is True
+    assert config.min_composite_runtime_computable_symbols_for_approval == 9
+    assert config.allow_research_only_noncomputable_composites is False
+    assert config.composite_runtime_computability_check_mode == "strict"
+    assert config.composite_runtime_computability_penalty_on_ranking == 0.2
     assert config.fast_refresh_mode is True
     assert config.skip_heavy_diagnostics is True
     assert config.reuse_existing_fold_results is True

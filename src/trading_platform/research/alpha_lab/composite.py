@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import json
 from dataclasses import asdict, dataclass
 
 import pandas as pd
 
 from trading_platform.research.alpha_lab.metrics import evaluate_cross_sectional_signal
+from trading_platform.research.alpha_lab.signals import build_signal
 
 
 @dataclass(frozen=True)
@@ -18,6 +20,43 @@ class CompositeConfig:
 
 
 DEFAULT_COMPOSITE_CONFIG = CompositeConfig()
+
+
+@dataclass(frozen=True)
+class CompositeRuntimeComputabilityConfig:
+    require_composite_runtime_computability_for_approval: bool = False
+    min_composite_runtime_computable_symbols_for_approval: int = 5
+    allow_research_only_noncomputable_composites: bool = True
+    composite_runtime_computability_check_mode: str = "strict"
+    composite_runtime_computability_penalty_on_ranking: float = 0.02
+
+    def __post_init__(self) -> None:
+        if self.min_composite_runtime_computable_symbols_for_approval < 0:
+            raise ValueError("min_composite_runtime_computable_symbols_for_approval must be >= 0")
+        if self.composite_runtime_computability_penalty_on_ranking < 0:
+            raise ValueError("composite_runtime_computability_penalty_on_ranking must be >= 0")
+        if self.composite_runtime_computability_check_mode not in {"strict", "penalize", "diagnostic_only"}:
+            raise ValueError("composite_runtime_computability_check_mode must be one of: strict, penalize, diagnostic_only")
+
+    def strict_mode_enabled(self) -> bool:
+        return (
+            self.require_composite_runtime_computability_for_approval
+            and self.composite_runtime_computability_check_mode == "strict"
+        )
+
+
+def _parse_variant_parameters(value: object) -> dict[str, object]:
+    if isinstance(value, dict):
+        return dict(value)
+    if value in (None, "", "{}"):
+        return {}
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return {}
+        return dict(parsed) if isinstance(parsed, dict) else {}
+    return {}
 
 
 def candidate_id(
@@ -160,6 +199,146 @@ def build_component_weights(
 
     result["component_weight"] = 1.0 / len(result)
     return result
+
+
+def build_runtime_composite_validation(
+    selected_signals_df: pd.DataFrame,
+    *,
+    feature_data_by_symbol: dict[str, pd.DataFrame],
+    weighting_scheme: str = "equal",
+    quality_metric: str = DEFAULT_COMPOSITE_CONFIG.quality_metric,
+    signal_composition_preset: str = "standard",
+    enable_context_confirmations: bool | None = None,
+    enable_relative_features: bool | None = None,
+    enable_flow_confirmations: bool | None = None,
+) -> dict[str, object]:
+    latest_timestamp = max(
+        (
+            pd.to_datetime(frame["timestamp"], errors="coerce").max()
+            for frame in feature_data_by_symbol.values()
+            if not frame.empty and "timestamp" in frame.columns
+        ),
+        default=pd.NaT,
+    )
+    base_result: dict[str, object] = {
+        "selected_member_count": int(len(selected_signals_df.index)),
+        "loaded_member_score_symbol_count": 0,
+        "latest_component_score_count": 0,
+        "latest_composite_score_count": 0,
+        "composite_runtime_computable_symbol_count": 0,
+        "composite_runtime_computability_pass": False,
+        "composite_runtime_computability_reason": "no_selected_signals",
+        "selected_members": selected_signals_df.get("candidate_id", pd.Series(dtype="object")).astype(str).tolist()
+        if not selected_signals_df.empty and "candidate_id" in selected_signals_df.columns
+        else [],
+        "latest_timestamp": str(pd.Timestamp(latest_timestamp).isoformat()) if pd.notna(latest_timestamp) else None,
+    }
+    if selected_signals_df.empty or pd.isna(latest_timestamp):
+        return base_result
+
+    score_panel_by_candidate: dict[str, pd.DataFrame] = {}
+    latest_component_rows: list[pd.DataFrame] = []
+    for _, row in selected_signals_df.iterrows():
+        signal_candidate_id = str(
+            row.get("candidate_id")
+            or candidate_id(
+                str(row["signal_family"]),
+                int(row["lookback"]),
+                int(row["horizon"]),
+                str(row.get("signal_variant") or "base"),
+            )
+        )
+        panel_frames: list[pd.DataFrame] = []
+        for symbol, feature_df in feature_data_by_symbol.items():
+            signal = build_signal(
+                feature_df,
+                signal_family=str(row["signal_family"]),
+                lookback=int(row["lookback"]),
+                signal_variant=str(row.get("signal_variant") or "base"),
+                variant_params=_parse_variant_parameters(row.get("variant_parameters_json")),
+                signal_composition_preset=signal_composition_preset,
+                enable_context_confirmations=enable_context_confirmations,
+                enable_relative_features=enable_relative_features,
+                enable_flow_confirmations=enable_flow_confirmations,
+            )
+            signal_frame = feature_df[["timestamp", "symbol"]].copy()
+            signal_frame["signal"] = signal
+            signal_frame = signal_frame.dropna(subset=["signal"])
+            if signal_frame.empty:
+                continue
+            panel_frames.append(signal_frame)
+        if not panel_frames:
+            continue
+        score_panel = pd.concat(panel_frames, ignore_index=True).sort_values(["timestamp", "symbol"]).reset_index(drop=True)
+        score_panel_by_candidate[signal_candidate_id] = score_panel
+        normalized = normalize_signal_by_date(score_panel)
+        latest_slice = normalized.loc[normalized["timestamp"] == latest_timestamp].copy()
+        if latest_slice.empty:
+            continue
+        latest_slice["candidate_id"] = signal_candidate_id
+        latest_component_rows.append(latest_slice)
+
+    if not latest_component_rows:
+        return {
+            **base_result,
+            "composite_runtime_computability_reason": "empty_component_scores",
+        }
+
+    latest_components_df = pd.concat(latest_component_rows, ignore_index=True)
+    latest_usable_components_df = latest_components_df.dropna(subset=["normalized_signal"]).copy()
+    latest_component_symbols = {
+        str(symbol)
+        for symbol in latest_usable_components_df.get("symbol", pd.Series(dtype="object")).tolist()
+        if str(symbol).strip()
+    }
+    latest_component_candidate_count = int(
+        latest_usable_components_df.get("candidate_id", pd.Series(dtype="object")).astype(str).nunique()
+    ) if not latest_usable_components_df.empty else 0
+    if latest_usable_components_df.empty:
+        return {
+            **base_result,
+            "loaded_member_score_symbol_count": 0,
+            "latest_component_score_count": 0,
+            "latest_composite_score_count": 0,
+            "composite_runtime_computable_symbol_count": 0,
+            "composite_runtime_computability_reason": "empty_component_scores",
+        }
+    composite_scores_df = build_composite_scores(
+        selected_signals_df,
+        score_panel_by_candidate=score_panel_by_candidate,
+        weighting_scheme=weighting_scheme,
+        quality_metric=quality_metric,
+    )
+    latest_composite_df = composite_scores_df.loc[composite_scores_df["timestamp"] == latest_timestamp].copy()
+    latest_composite_symbols = {
+        str(symbol)
+        for symbol in latest_composite_df.get("symbol", pd.Series(dtype="object")).tolist()
+        if str(symbol).strip()
+    }
+    if latest_composite_df.empty:
+        failure_reason = (
+            "empty_component_scores"
+            if not latest_component_symbols or latest_component_candidate_count < int(len(selected_signals_df.index))
+            else "empty_signal_scores"
+        )
+        return {
+            **base_result,
+            "loaded_member_score_symbol_count": int(len(latest_component_symbols)),
+            "latest_component_score_count": int(len(latest_usable_components_df.index)),
+            "latest_composite_score_count": 0,
+            "composite_runtime_computable_symbol_count": 0,
+            "composite_runtime_computability_reason": failure_reason,
+        }
+
+    return {
+        **base_result,
+        "loaded_member_score_symbol_count": int(len(latest_component_symbols)),
+        "latest_component_score_count": int(len(latest_usable_components_df.index)),
+        "latest_composite_score_count": int(len(latest_composite_df.index)),
+        "composite_runtime_computable_symbol_count": int(len(latest_composite_symbols)),
+        "composite_runtime_computability_pass": True,
+        "composite_runtime_computability_reason": "runtime_scores_available",
+    }
 
 
 def build_composite_scores(

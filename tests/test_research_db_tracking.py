@@ -53,6 +53,7 @@ def test_research_db_init_creates_tables_and_disabled_mode_noops(tmp_path: Path,
 
 def test_cmd_alpha_research_persists_research_memory_rows(monkeypatch, tmp_path: Path) -> None:
     leaderboard_path = tmp_path / "leaderboard.csv"
+    composite_runtime_path = tmp_path / "composite_runtime_computability.csv"
     pd.DataFrame(
         [
             {
@@ -82,6 +83,17 @@ def test_cmd_alpha_research_persists_research_memory_rows(monkeypatch, tmp_path:
             }
         ]
     ).to_csv(leaderboard_path, index=False)
+    pd.DataFrame(
+        [
+            {
+                "composite_candidate_id": "run::composite::5",
+                "composite_runtime_computability_pass": False,
+                "composite_runtime_computability_reason": "empty_component_scores",
+                "composite_runtime_computable_symbol_count": 0,
+                "selected_member_count": 2,
+            }
+        ]
+    ).to_csv(composite_runtime_path, index=False)
 
     monkeypatch.setattr("trading_platform.cli.commands.alpha_research.resolve_symbols", lambda args: ["AAPL"])
     monkeypatch.setattr(
@@ -95,6 +107,7 @@ def test_cmd_alpha_research_persists_research_memory_rows(monkeypatch, tmp_path:
             "signal_performance_by_sub_universe_path": str(tmp_path / "signal_performance_by_sub_universe.csv"),
             "signal_performance_by_benchmark_context_path": str(tmp_path / "signal_performance_by_benchmark_context.csv"),
             "research_manifest_path": str(tmp_path / "research_manifest.json"),
+            "composite_runtime_computability_path": str(composite_runtime_path),
         },
     )
     monkeypatch.setattr(
@@ -180,7 +193,7 @@ def test_cmd_alpha_research_persists_research_memory_rows(monkeypatch, tmp_path:
         assert session.execute(text("select count(*) from research_runs")).scalar() == 1
         assert session.execute(text("select count(*) from signal_candidates")).scalar() == 1
         assert session.execute(text("select count(*) from signal_metrics")).scalar() == 1
-        run_row = session.execute(text("select output_dir, status from research_runs")).first()
+        run_row = session.execute(text("select output_dir, status, composite_runtime_computability_pass, composite_runtime_computability_reason, composite_runtime_computable_symbol_count from research_runs")).first()
         metric_row = session.execute(
             text(
                 "select runtime_computability_pass, runtime_computability_reason, runtime_computable_symbol_count "
@@ -191,6 +204,9 @@ def test_cmd_alpha_research_persists_research_memory_rows(monkeypatch, tmp_path:
         assert metric_row is not None
         assert str(tmp_path / "alpha_run") in str(run_row.output_dir)
         assert run_row.status == "completed"
+        assert run_row.composite_runtime_computability_pass in (False, 0)
+        assert run_row.composite_runtime_computability_reason == "empty_component_scores"
+        assert run_row.composite_runtime_computable_symbol_count == 0
         assert metric_row.runtime_computability_pass in (True, 1)
         assert metric_row.runtime_computability_reason == "runtime_scores_available"
         assert metric_row.runtime_computable_symbol_count == 12

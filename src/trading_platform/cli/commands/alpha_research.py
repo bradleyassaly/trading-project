@@ -76,6 +76,11 @@ class AlphaResearchRequest:
     allow_research_only_noncomputable_candidates: bool
     runtime_computability_penalty_on_ranking: float
     runtime_computability_check_mode: str
+    require_composite_runtime_computability_for_approval: bool
+    min_composite_runtime_computable_symbols_for_approval: int
+    allow_research_only_noncomputable_composites: bool
+    composite_runtime_computability_check_mode: str
+    composite_runtime_computability_penalty_on_ranking: float
     fast_refresh_mode: bool
     skip_heavy_diagnostics: bool
     reuse_existing_fold_results: bool
@@ -160,6 +165,11 @@ def _build_alpha_research_request(args) -> AlphaResearchRequest:
         allow_research_only_noncomputable_candidates=bool(getattr(args, "allow_research_only_noncomputable_candidates", True)),
         runtime_computability_penalty_on_ranking=float(getattr(args, "runtime_computability_penalty_on_ranking", 0.02) or 0.02),
         runtime_computability_check_mode=str(getattr(args, "runtime_computability_check_mode", "strict") or "strict"),
+        require_composite_runtime_computability_for_approval=bool(getattr(args, "require_composite_runtime_computability_for_approval", False)),
+        min_composite_runtime_computable_symbols_for_approval=int(getattr(args, "min_composite_runtime_computable_symbols_for_approval", 5) or 5),
+        allow_research_only_noncomputable_composites=bool(getattr(args, "allow_research_only_noncomputable_composites", True)),
+        composite_runtime_computability_check_mode=str(getattr(args, "composite_runtime_computability_check_mode", "strict") or "strict"),
+        composite_runtime_computability_penalty_on_ranking=float(getattr(args, "composite_runtime_computability_penalty_on_ranking", 0.02) or 0.02),
         fast_refresh_mode=bool(getattr(args, "fast_refresh_mode", False)),
         skip_heavy_diagnostics=bool(True if getattr(args, "skip_heavy_diagnostics", None) is None else getattr(args, "skip_heavy_diagnostics")),
         reuse_existing_fold_results=bool(True if getattr(args, "reuse_existing_fold_results", None) is None else getattr(args, "reuse_existing_fold_results")),
@@ -272,6 +282,11 @@ def cmd_alpha_research(args) -> None:
             allow_research_only_noncomputable_candidates=request.allow_research_only_noncomputable_candidates,
             runtime_computability_penalty_on_ranking=request.runtime_computability_penalty_on_ranking,
             runtime_computability_check_mode=request.runtime_computability_check_mode,
+            require_composite_runtime_computability_for_approval=request.require_composite_runtime_computability_for_approval,
+            min_composite_runtime_computable_symbols_for_approval=request.min_composite_runtime_computable_symbols_for_approval,
+            allow_research_only_noncomputable_composites=request.allow_research_only_noncomputable_composites,
+            composite_runtime_computability_check_mode=request.composite_runtime_computability_check_mode,
+            composite_runtime_computability_penalty_on_ranking=request.composite_runtime_computability_penalty_on_ranking,
             fast_refresh_mode=request.fast_refresh_mode,
             skip_heavy_diagnostics=request.skip_heavy_diagnostics,
             reuse_existing_fold_results=request.reuse_existing_fold_results,
@@ -281,9 +296,16 @@ def cmd_alpha_research(args) -> None:
         )
         leaderboard_path = Path(result["leaderboard_path"])
         if leaderboard_path.exists():
+            composite_runtime_path_raw = str(result.get("composite_runtime_computability_path") or "").strip()
+            composite_runtime_path = Path(composite_runtime_path_raw) if composite_runtime_path_raw else None
             research_memory.persist_alpha_research_outputs(
                 run_id=research_run_id,
                 leaderboard_df=pd.read_csv(leaderboard_path),
+                composite_runtime_df=(
+                    pd.read_csv(composite_runtime_path)
+                    if composite_runtime_path is not None and composite_runtime_path.exists()
+                    else None
+                ),
             )
         db_service.complete_research_run(research_run_id, notes=f"output_dir={request.output_dir}")
     except Exception as exc:

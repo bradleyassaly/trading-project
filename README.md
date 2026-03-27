@@ -1574,16 +1574,27 @@ Current limitations:
 Research-time runtime computability:
 
 - alpha research can now validate whether a candidate produces any current non-null symbol scores on the latest feature frames before that candidate is allowed into approved promoted-member state
+- multi-family and composite approved states are also validated as composites, not just as collections of individually valid members
 - `runtime_computability_check_mode` supports:
   - `strict`
   - `penalize`
   - `diagnostic_only`
+- `composite_runtime_computability_check_mode` supports the same:
+  - `strict`
+  - `penalize`
+  - `diagnostic_only`
 - when strict mode is enabled, non-computable candidates are marked `reject` before they enter `promoted_signals.csv` or composite member selection
+- when composite strict mode is enabled, a selected composite is blocked before approval if its current component or composite score matrix is empty on the current artifact set
 - when penalize mode is enabled, candidates remain visible but are down-ranked through `runtime_adjusted_mean_spearman_ic`
+- when composite penalize mode is enabled, the composite remains visible but receives `composite_runtime_adjusted_score` and an auditable diagnostic disposition
 - research now writes:
   - `candidate_runtime_computability.csv`
   - `composite_member_runtime_validation.csv`
   - `research_runtime_computability_summary.csv`
+  - `composite_runtime_computability.csv`
+  - `approved_composite_runtime_validation.csv`
+  - `research_composite_runtime_summary.csv`
+- composite runtime checks are now evaluated against the same approved-model-state inputs later used by promotion and paper execution, including signal variants, variant parameters, and merged daily fundamental features when configured
 - for stale runs that only need approval and registry regeneration, `research alpha` also supports a bounded fast artifact refresh path:
   - enable `refresh.fast_refresh_mode: true` in `configs/alpha_research.yaml`, or pass `--fast-refresh-mode`
   - keep `refresh.reuse_existing_fold_results: true` to rebuild approval artifacts from the existing leaderboard/fold outputs instead of rerunning the full search
@@ -1595,6 +1606,9 @@ Research-time runtime computability:
   - `candidate_runtime_computability.csv`
   - `composite_member_runtime_validation.csv`
   - `research_runtime_computability_summary.csv`
+  - `composite_runtime_computability.csv`
+  - `approved_composite_runtime_validation.csv`
+  - `research_composite_runtime_summary.csv`
 - example fast local refresh:
 
 ```bash

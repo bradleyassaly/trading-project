@@ -8,6 +8,7 @@ import pytest
 
 from trading_platform.research.alpha_lab.labels import add_forward_return_labels
 from trading_platform.research.alpha_lab.composite import (
+    build_runtime_composite_validation,
     build_composite_scores,
     normalize_signal_by_date,
     select_low_redundancy_signals,
@@ -2447,6 +2448,180 @@ def test_run_alpha_research_runtime_computability_artifacts_and_registry_fields(
     assert summary_df.loc[0, "passed_count"] >= 1
     assert "runtime_computability_pass" in registry_payload["runs"][0]["top_metrics"]
     assert "runtime_computability_pass" in promotion_candidates_payload["rows"][0]
+
+
+def test_build_runtime_composite_validation_fails_when_members_are_individually_computable_but_composite_empty(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    feature_dir = tmp_path / "features"
+    feature_dir.mkdir(parents=True, exist_ok=True)
+    timestamps = pd.date_range("2024-01-01", periods=20, freq="D")
+    for symbol in ["AAPL", "MSFT"]:
+        pd.DataFrame(
+            {"timestamp": timestamps, "symbol": [symbol] * len(timestamps), "close": [100.0 + idx for idx in range(len(timestamps))]}
+        ).to_parquet(feature_dir / f"{symbol}.parquet", index=False)
+
+    from trading_platform.research.alpha_lab import composite as composite_module
+    original_build_signal = composite_module.build_signal
+
+    def patched_build_signal(df, **kwargs):
+        signal = original_build_signal(df, **kwargs).copy()
+        symbol = str(df["symbol"].iloc[0])
+        if kwargs.get("lookback") == 1 and symbol != "AAPL":
+            signal.iloc[-1] = float("nan")
+        if kwargs.get("lookback") == 2 and symbol != "MSFT":
+            signal.iloc[-1] = float("nan")
+        return signal
+
+    monkeypatch.setattr(composite_module, "build_signal", patched_build_signal)
+    feature_data_by_symbol = {
+        symbol: pd.read_parquet(feature_dir / f"{symbol}.parquet")
+        for symbol in ["AAPL", "MSFT"]
+    }
+    selected_signals_df = pd.DataFrame(
+        [
+            {"candidate_id": "momentum|1|1", "signal_family": "momentum", "signal_variant": "base", "lookback": 1, "horizon": 1},
+            {"candidate_id": "momentum|2|1", "signal_family": "momentum", "signal_variant": "base", "lookback": 2, "horizon": 1},
+        ]
+    )
+
+    result = build_runtime_composite_validation(
+        selected_signals_df,
+        feature_data_by_symbol=feature_data_by_symbol,
+    )
+
+    assert result["selected_member_count"] == 2
+    assert result["composite_runtime_computability_pass"] is False
+    assert result["composite_runtime_computability_reason"] == "empty_component_scores"
+
+
+def test_run_alpha_research_composite_runtime_strict_blocks_noncomputable_composite(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    feature_dir = tmp_path / "features"
+    output_dir = tmp_path / "alpha_outputs"
+    feature_dir.mkdir(parents=True, exist_ok=True)
+
+    timestamps = pd.date_range("2024-01-01", periods=80, freq="D")
+    for symbol, daily_return in {"AAPL": 0.010, "MSFT": 0.015, "NVDA": 0.020}.items():
+        closes = [100.0]
+        for _ in range(79):
+            closes.append(closes[-1] * (1.0 + daily_return))
+        pd.DataFrame({"timestamp": timestamps, "symbol": [symbol] * len(timestamps), "close": closes}).to_parquet(
+            feature_dir / f"{symbol}.parquet",
+            index=False,
+        )
+
+    from trading_platform.research.alpha_lab import composite as composite_module
+    from trading_platform.research.alpha_lab import runner as runner_module
+    original_build_signal = runner_module.build_signal
+
+    def patched_build_signal(df, **kwargs):
+        signal = original_build_signal(df, **kwargs).copy()
+        symbol = str(df["symbol"].iloc[0])
+        if kwargs.get("lookback") == 1 and symbol != "AAPL":
+            signal.iloc[-1] = float("nan")
+        if kwargs.get("lookback") == 2 and symbol != "MSFT":
+            signal.iloc[-1] = float("nan")
+        return signal
+
+    monkeypatch.setattr(runner_module, "build_signal", patched_build_signal)
+    monkeypatch.setattr(composite_module, "build_signal", patched_build_signal)
+
+    result = run_alpha_research(
+        symbols=["AAPL", "MSFT", "NVDA"],
+        universe=None,
+        feature_dir=feature_dir,
+        signal_family="momentum",
+        lookbacks=[1, 2],
+        horizons=[1],
+        min_rows=20,
+        top_quantile=0.34,
+        bottom_quantile=0.34,
+        output_dir=output_dir,
+        train_size=20,
+        test_size=10,
+        step_size=10,
+        require_runtime_computability_for_approval=True,
+        min_runtime_computable_symbols_for_approval=1,
+        require_composite_runtime_computability_for_approval=True,
+        min_composite_runtime_computable_symbols_for_approval=1,
+        allow_research_only_noncomputable_composites=False,
+        composite_runtime_computability_check_mode="strict",
+    )
+
+    composite_runtime_df = pd.read_csv(result["composite_runtime_computability_path"])
+    run_local_candidates = json.loads((output_dir / "research_registry" / "promotion_candidates.json").read_text(encoding="utf-8"))
+
+    assert composite_runtime_df.loc[0, "composite_blocked_from_approval"]
+    assert composite_runtime_df.loc[0, "composite_runtime_computability_reason"] == "empty_component_scores"
+    assert run_local_candidates["rows"][0]["eligible"] is False
+    assert "composite_runtime_incomputable_blocked" in run_local_candidates["rows"][0]["reasons"]
+
+
+def test_run_alpha_research_composite_runtime_penalize_retains_diagnostic_composite(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    feature_dir = tmp_path / "features"
+    output_dir = tmp_path / "alpha_outputs"
+    feature_dir.mkdir(parents=True, exist_ok=True)
+
+    timestamps = pd.date_range("2024-01-01", periods=80, freq="D")
+    for symbol, daily_return in {"AAPL": 0.010, "MSFT": 0.015, "NVDA": 0.020}.items():
+        closes = [100.0]
+        for _ in range(79):
+            closes.append(closes[-1] * (1.0 + daily_return))
+        pd.DataFrame({"timestamp": timestamps, "symbol": [symbol] * len(timestamps), "close": closes}).to_parquet(
+            feature_dir / f"{symbol}.parquet",
+            index=False,
+        )
+
+    from trading_platform.research.alpha_lab import composite as composite_module
+    from trading_platform.research.alpha_lab import runner as runner_module
+    original_build_signal = runner_module.build_signal
+
+    def patched_build_signal(df, **kwargs):
+        signal = original_build_signal(df, **kwargs).copy()
+        symbol = str(df["symbol"].iloc[0])
+        if kwargs.get("lookback") == 1 and symbol != "AAPL":
+            signal.iloc[-1] = float("nan")
+        if kwargs.get("lookback") == 2 and symbol != "MSFT":
+            signal.iloc[-1] = float("nan")
+        return signal
+
+    monkeypatch.setattr(runner_module, "build_signal", patched_build_signal)
+    monkeypatch.setattr(composite_module, "build_signal", patched_build_signal)
+
+    result = run_alpha_research(
+        symbols=["AAPL", "MSFT", "NVDA"],
+        universe=None,
+        feature_dir=feature_dir,
+        signal_family="momentum",
+        lookbacks=[1, 2],
+        horizons=[1],
+        min_rows=20,
+        top_quantile=0.34,
+        bottom_quantile=0.34,
+        output_dir=output_dir,
+        train_size=20,
+        test_size=10,
+        step_size=10,
+        require_runtime_computability_for_approval=True,
+        min_runtime_computable_symbols_for_approval=1,
+        require_composite_runtime_computability_for_approval=True,
+        min_composite_runtime_computable_symbols_for_approval=1,
+        composite_runtime_computability_check_mode="penalize",
+        composite_runtime_computability_penalty_on_ranking=0.25,
+    )
+
+    composite_runtime_df = pd.read_csv(result["composite_runtime_computability_path"])
+
+    assert composite_runtime_df.loc[0, "composite_blocked_from_approval"] in (False, 0)
+    assert composite_runtime_df.loc[0, "composite_runtime_computability_disposition"] == "penalized"
+    assert composite_runtime_df.loc[0, "composite_runtime_adjusted_score"] == pytest.approx(-0.25)
 
 
 def test_refresh_alpha_research_artifacts_recomputes_approval_state_from_existing_outputs(

@@ -57,6 +57,8 @@ def build_approved_model_state(
         "promoted_signals": promoted_signals_df.to_dict(orient="records"),
         "composite_inputs": composite_inputs,
         "composite_config": composite_diagnostics.get("config", {}),
+        "signal_composition": signal_diagnostics.get("signal_composition", {}),
+        "signal_composition_preset": signal_diagnostics.get("signal_composition_preset"),
         "dynamic_weighting_config": signal_diagnostics.get("signal_lifecycle", {}),
         "regime_aware_config": signal_diagnostics.get("regime", {}),
         "portfolio_construction": portfolio_config,
