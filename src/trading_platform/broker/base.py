@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Any
 from typing import Protocol
 
 
@@ -31,6 +32,10 @@ class BrokerFill:
     commission: float = 0.0
     slippage_bps: float = 0.0
     realized_pnl: float = 0.0
+    trade_id: str | None = None
+    strategy_id: str | None = None
+    signal_source: str | None = None
+    provenance: dict[str, Any] = field(default_factory=dict)
 
 
 class Broker(Protocol):

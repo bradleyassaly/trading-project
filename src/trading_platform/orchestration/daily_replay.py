@@ -11,6 +11,10 @@ import pandas as pd
 from trading_platform.config.workflow_models import DailyReplayWorkflowConfig, DailyTradingWorkflowConfig
 from trading_platform.orchestration.daily_trading import DailyTradingResult, run_daily_trading_pipeline
 from trading_platform.portfolio.strategy_execution_handoff import resolve_strategy_execution_handoff
+from trading_platform.reporting.pnl_attribution import (
+    aggregate_replay_attribution,
+    write_replay_pnl_attribution_artifacts,
+)
 
 
 @dataclass(frozen=True)
@@ -746,6 +750,27 @@ def run_daily_replay(config: DailyReplayWorkflowConfig) -> DailyReplayResult:
         holdings_changed=len(set(position_signatures)) > 1,
         aborted=aborted,
     )
+    replay_attribution = aggregate_replay_attribution(replay_root=replay_root)
+    attribution_summary = dict(replay_attribution.get("summary") or {})
+    if attribution_summary:
+        summary["best_strategy_by_total_pnl"] = next(
+            iter(attribution_summary.get("top_strategies_by_total_pnl", [])),
+            {},
+        )
+        summary["worst_strategy_by_total_pnl"] = next(
+            iter(attribution_summary.get("bottom_strategies_by_total_pnl", [])),
+            {},
+        )
+        summary["best_symbol_by_total_pnl"] = next(
+            iter(attribution_summary.get("top_symbols_by_total_pnl", [])),
+            {},
+        )
+        summary["worst_symbol_by_total_pnl"] = next(
+            iter(attribution_summary.get("bottom_symbols_by_total_pnl", [])),
+            {},
+        )
+        summary["strategy_pnl_concentration"] = attribution_summary.get("strategy_concentration_metrics", {})
+        summary["replay_pnl_attribution_summary"] = attribution_summary
     status = "succeeded"
     failed_day_count = int(summary.get("failed_day_count", 0) or 0)
     if failed_day_count and int(summary.get("successful_day_count", 0) or 0):
@@ -762,6 +787,15 @@ def run_daily_replay(config: DailyReplayWorkflowConfig) -> DailyReplayResult:
         daily_metric_rows=daily_metric_rows,
         trade_log_rows=trade_log_rows,
         strategy_activity_rows=strategy_activity_rows,
+    )
+    artifact_paths.update(
+        {
+            key: str(value)
+            for key, value in write_replay_pnl_attribution_artifacts(
+                replay_root=replay_root,
+                replay_payload=replay_attribution,
+            ).items()
+        }
     )
     return DailyReplayResult(
         output_dir=str(replay_root),

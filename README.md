@@ -784,8 +784,21 @@ Expected replay output structure:
 - `artifacts/daily_replay/run_current/replay_daily_metrics.csv`
 - `artifacts/daily_replay/run_current/replay_trade_log.csv`
 - `artifacts/daily_replay/run_current/replay_strategy_activity.csv`
+- `artifacts/daily_replay/run_current/replay_strategy_pnl.csv`
+- `artifacts/daily_replay/run_current/replay_symbol_pnl.csv`
+- `artifacts/daily_replay/run_current/replay_trade_pnl.csv`
+- `artifacts/daily_replay/run_current/replay_pnl_attribution_summary.json`
 
 The per-day `trade_decision_log.csv` makes no-op days interpretable. It records candidate symbols, target and current weights/positions, the final action, and an `action_reason` such as `enter_new_position`, `exit_position`, `rebalance_weight_change`, or `hold_within_tolerance`.
+
+Paper runs and replay days now also write first-class PnL attribution artifacts:
+
+- `paper/strategy_pnl_attribution.csv`
+- `paper/symbol_pnl_attribution.csv`
+- `paper/trade_pnl_attribution.csv`
+- `paper/pnl_attribution_summary.json`
+
+Attribution uses a documented proportional ownership model. For multi-strategy targets, each symbol's final target weight is decomposed into sleeve strategy ownership shares based on the same-direction contribution of each sleeve to the final blended weight. Realized PnL is then assigned when fills close those strategy-owned lots, and unrealized PnL is assigned from the end-of-day open lots. This is approximate ownership attribution, not exact causal alpha attribution, but it is consistent, auditable, and reconciled back to the paper portfolio total.
 
 Each replay day now also writes `replay_day_input_summary.json`. Check this first when replay looks inert. It records:
 
@@ -806,6 +819,14 @@ How to read replay results:
 - `avg_daily_turnover`: a coarse activity proxy; very low turnover across a long replay often means the pipeline is too inert for a useful paper validation.
 - `active_strategy_count`: confirm the replay used more than one strategy over time, not just a single sleeve.
 - `readiness_flags`: quick checks for stability, trade generation, state persistence consistency, multi-strategy activity, and diagnostics completeness.
+- `replay_strategy_pnl.csv` and `replay_symbol_pnl.csv`: use these to see which sleeves and names are carrying returns versus just generating turnover.
+- `replay_pnl_attribution_summary.json`: start here for best and worst strategies, best and worst symbols, concentration metrics, turnover concentration, and reconciliation residuals.
+
+When reviewing attribution:
+
+- A strategy with high turnover but weak or negative total PnL is a candidate for downweighting or removal.
+- A symbol with strong total PnL but spread across several strategies usually reflects blended sleeve ownership rather than a single strategy monopoly.
+- Reconciliation residuals near zero mean the attribution rows match the paper portfolio PnL within tolerance. Large residuals mean ownership metadata is missing or inconsistent.
 
 Replay-only testing knobs live under the nested `daily_replay.replay` config section. These are opt-in and do not change normal daily-trading defaults. They support light activity testing such as relaxing replay thresholds, setting minimum expected trade counts, and overriding minimum signal strength or maximum per-strategy weight during replay validation only.
 

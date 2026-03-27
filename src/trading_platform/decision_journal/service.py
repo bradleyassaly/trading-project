@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -164,8 +163,15 @@ def build_candidate_journal_for_snapshot(
                 if key not in feature_snapshot:
                     feature_snapshot[key] = value
         checks = [
-            ScreenCheckResult("price_available", "pass" if feature_snapshot["latest_price"] is not None else "fail", feature_snapshot["latest_price"] is not None, value=feature_snapshot["latest_price"]),
-            ScreenCheckResult("score_available", "pass" if score is not None else "fail", score is not None, value=score),
+            ScreenCheckResult(
+                "price_available",
+                "pass" if feature_snapshot["latest_price"] is not None else "fail",
+                feature_snapshot["latest_price"] is not None,
+                value=feature_snapshot["latest_price"],
+            ),
+            ScreenCheckResult(
+                "score_available", "pass" if score is not None else "fail", score is not None, value=score
+            ),
         ]
         if symbol in filtered:
             checks.append(ScreenCheckResult("universe_eligibility", "fail", False, reason=rejection_reason))
@@ -175,7 +181,10 @@ def build_candidate_journal_for_snapshot(
             signal_name=str(strategy_id or "signal"),
             final_score=score,
             raw_components={"score": score, "asset_return": feature_snapshot["asset_return"]},
-            transformed_components={"scheduled_target_weight": scheduled_weights.get(symbol), "effective_target_weight": selected_weights.get(symbol)},
+            transformed_components={
+                "scheduled_target_weight": scheduled_weights.get(symbol),
+                "effective_target_weight": selected_weights.get(symbol),
+            },
             reason_labels=[status],
         )
         decision_id = _decision_id(run_id or cycle_id or timestamp, strategy_id or "strategy", symbol, "candidate")
@@ -198,7 +207,11 @@ def build_candidate_journal_for_snapshot(
             selected_feature_values=feature_snapshot,
             signal_breakdown=signal,
             screening_checks=checks,
-            metadata={**(metadata or {}), "selected_weight": selected_weights.get(symbol), "scheduled_weight": scheduled_weights.get(symbol)},
+            metadata={
+                **(metadata or {}),
+                "selected_weight": selected_weights.get(symbol),
+                "scheduled_weight": scheduled_weights.get(symbol),
+            },
         )
         selection = PortfolioSelectionDecision(
             decision_id=_decision_id(run_id or cycle_id or timestamp, strategy_id or "strategy", symbol, "selection"),
@@ -230,8 +243,13 @@ def build_candidate_journal_for_snapshot(
             side="long" if (selected_weights.get(symbol, 0.0) or 0.0) >= 0 else "short",
             target_weight_pre_constraint=_safe_float(scheduled_weights.get(symbol)),
             target_weight_post_constraint=_safe_float(selected_weights.get(symbol)),
-            sizing_inputs={"scheduled_target_weight": scheduled_weights.get(symbol), "effective_target_weight": selected_weights.get(symbol)},
-            rationale_summary="weight carried through target construction" if symbol in selected_symbols else "no target sizing assigned",
+            sizing_inputs={
+                "scheduled_target_weight": scheduled_weights.get(symbol),
+                "effective_target_weight": selected_weights.get(symbol),
+            },
+            rationale_summary="weight carried through target construction"
+            if symbol in selected_symbols
+            else "no target sizing assigned",
         )
         provenance[symbol] = {
             "decision_id": selection.decision_id,
@@ -244,6 +262,8 @@ def build_candidate_journal_for_snapshot(
             "reason": rejection_reason,
             "base_universe_id": base_universe_id or universe_id,
             "sub_universe_id": sub_universe_id,
+            "signal_source": (metadata or {}).get("signal_source"),
+            "signal_family": (metadata or {}).get("signal_family"),
         }
         bundle = _bundle_append(
             bundle,
@@ -293,7 +313,9 @@ def enrich_bundle_with_orders(
         target_quantity = None
         if matched_order is not None:
             status = "selected" if str(getattr(matched_order, "side", "")).upper() == "BUY" else "exited"
-            reason = getattr(matched_order, "reason", None) or ("rebalance_to_target" if status == "selected" else "rebalance_exit")
+            reason = getattr(matched_order, "reason", None) or (
+                "rebalance_to_target" if status == "selected" else "rebalance_exit"
+            )
             side = "long" if str(getattr(matched_order, "side", "")).upper() == "BUY" else "sell"
             target_quantity = int(getattr(matched_order, "target_quantity", 0) or 0)
         elif current_quantity > 0 and abs(target_weight) <= 1e-12:
@@ -327,7 +349,9 @@ def enrich_bundle_with_orders(
         )
         sizing_updates.append(
             SizingDecision(
-                decision_id=_decision_id(run_id or cycle_id or timestamp, strategy_id or "strategy", symbol, "paper-sizing"),
+                decision_id=_decision_id(
+                    run_id or cycle_id or timestamp, strategy_id or "strategy", symbol, "paper-sizing"
+                ),
                 timestamp=timestamp,
                 run_id=run_id,
                 cycle_id=cycle_id,
@@ -339,7 +363,9 @@ def enrich_bundle_with_orders(
                 target_quantity=target_quantity,
                 current_quantity=current_quantity,
                 portfolio_equity=portfolio_equity,
-                investable_equity=(float(portfolio_equity) * (1.0 - float(reserve_cash_pct or 0.0))) if portfolio_equity is not None else None,
+                investable_equity=(float(portfolio_equity) * (1.0 - float(reserve_cash_pct or 0.0)))
+                if portfolio_equity is not None
+                else None,
                 reserve_cash_pct=reserve_cash_pct,
                 sizing_inputs={"latest_price": latest_prices.get(symbol), "current_weight": current_weight},
                 rationale_summary=reason,
@@ -369,7 +395,10 @@ def enrich_bundle_with_orders(
                 strategy_id=strategy_id,
                 exit_trigger_type="rebalance",
                 exit_reason_summary=reason,
-                supporting_values={"current_quantity": current_quantity, "target_weight_post_constraint": target_weight},
+                supporting_values={
+                    "current_quantity": current_quantity,
+                    "target_weight_post_constraint": target_weight,
+                },
             )
             exit_decisions.append(exit_record)
             lifecycle.append(
@@ -390,7 +419,9 @@ def enrich_bundle_with_orders(
         symbol = str(row.get("symbol") or "")
         execution_decisions.append(
             ExecutionDecisionRecord(
-                decision_id=_decision_id(run_id or cycle_id or timestamp, strategy_id or "strategy", symbol, "execution-request"),
+                decision_id=_decision_id(
+                    run_id or cycle_id or timestamp, strategy_id or "strategy", symbol, "execution-request"
+                ),
                 timestamp=timestamp,
                 run_id=run_id,
                 cycle_id=cycle_id,
@@ -410,7 +441,9 @@ def enrich_bundle_with_orders(
         symbol = str(row.get("symbol") or "")
         execution_decisions.append(
             ExecutionDecisionRecord(
-                decision_id=_decision_id(run_id or cycle_id or timestamp, strategy_id or "strategy", symbol, "execution"),
+                decision_id=_decision_id(
+                    run_id or cycle_id or timestamp, strategy_id or "strategy", symbol, "execution"
+                ),
                 timestamp=timestamp,
                 run_id=run_id,
                 cycle_id=cycle_id,
@@ -433,7 +466,9 @@ def enrich_bundle_with_orders(
         symbol = str(row.get("symbol") or "")
         execution_decisions.append(
             ExecutionDecisionRecord(
-                decision_id=_decision_id(run_id or cycle_id or timestamp, strategy_id or "strategy", symbol, "execution-reject"),
+                decision_id=_decision_id(
+                    run_id or cycle_id or timestamp, strategy_id or "strategy", symbol, "execution-reject"
+                ),
                 timestamp=timestamp,
                 run_id=run_id,
                 cycle_id=cycle_id,
@@ -471,7 +506,9 @@ def enrich_bundle_with_orders(
     )
 
 
-def write_decision_journal_artifacts(*, bundle: DecisionJournalBundle | None, output_dir: str | Path) -> dict[str, Path]:
+def write_decision_journal_artifacts(
+    *, bundle: DecisionJournalBundle | None, output_dir: str | Path
+) -> dict[str, Path]:
     if bundle is None:
         return {}
     output_path = Path(output_dir)

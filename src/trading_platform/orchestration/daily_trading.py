@@ -24,6 +24,7 @@ from trading_platform.config.workflow_models import (
 )
 from trading_platform.dashboard.server import build_dashboard_static_data
 from trading_platform.db.services import DatabaseLineageService, build_research_memory_service
+from trading_platform.decision_journal.models import DecisionJournalBundle
 from trading_platform.paper.models import PaperTradingConfig
 from trading_platform.paper.persistence import persist_paper_run_outputs
 from trading_platform.paper.service import (
@@ -54,6 +55,7 @@ from trading_platform.reporting.paper_account_report import (
     build_paper_account_report,
     write_paper_account_report,
 )
+from trading_platform.reporting.pnl_attribution import build_symbol_strategy_provenance
 from trading_platform.reporting.strategy_quality_report import (
     build_strategy_quality_report,
     write_strategy_quality_report,
@@ -307,6 +309,7 @@ def _summarize_activated_portfolio(activated_dir: Path | None) -> dict[str, Any]
 
 def _summarize_paper_run(paper_output_dir: Path) -> dict[str, Any]:
     summary_path = paper_output_dir / "paper_run_summary_latest.json"
+    attribution_summary_path = paper_output_dir / "pnl_attribution_summary.json"
     if not summary_path.exists():
         return {
             "requested_symbol_count": 0,
@@ -316,9 +319,13 @@ def _summarize_paper_run(paper_output_dir: Path) -> dict[str, Any]:
             "executable_order_count": 0,
             "fill_count": 0,
             "zero_target_reason": "",
+            "attribution_summary": {},
         }
     payload = json.loads(summary_path.read_text(encoding="utf-8"))
     summary_payload = dict(payload.get("summary") or payload)
+    attribution_payload = (
+        json.loads(attribution_summary_path.read_text(encoding="utf-8")) if attribution_summary_path.exists() else {}
+    )
     return {
         "requested_symbol_count": int(summary_payload.get("requested_symbol_count") or 0),
         "usable_symbol_count": int(summary_payload.get("usable_symbol_count") or 0),
@@ -329,6 +336,8 @@ def _summarize_paper_run(paper_output_dir: Path) -> dict[str, Any]:
         "zero_target_reason": str(summary_payload.get("zero_target_reason") or ""),
         "paper_summary_path": str(summary_path),
         "source_portfolio_path": str(summary_payload.get("source_portfolio_path") or ""),
+        "attribution_summary_path": str(attribution_summary_path) if attribution_summary_path.exists() else "",
+        "attribution_summary": attribution_payload,
     }
 
 
@@ -439,6 +448,7 @@ def _write_summary_artifacts(
         "executable_order_count": paper_summary.get("executable_order_count", 0),
         "fill_count": paper_summary.get("fill_count", 0),
         "zero_target_reason": paper_summary.get("zero_target_reason", ""),
+        "pnl_attribution_summary": paper_summary.get("attribution_summary", {}),
         "top_selected_strategies": strategy_report_summary.get("top_selected_strategies", []),
         "portfolio_composition": strategy_report_summary.get("portfolio_composition", []),
         "strategy_quality_summary": strategy_report_summary.get("summary", {}),
@@ -515,6 +525,7 @@ def _write_summary_artifacts(
     else:
         lines.append("- none")
     performance_stats = dict(strategy_report_summary.get("performance_stats") or {})
+    attribution_summary = dict(paper_summary.get("attribution_summary") or {})
     lines.extend(
         [
             "",
@@ -525,12 +536,42 @@ def _write_summary_artifacts(
             f"- max_drawdown: `{performance_stats.get('max_drawdown', 0)}`",
             f"- sharpe_ratio: `{performance_stats.get('sharpe_ratio', 0)}`",
             "",
+            "## Attribution",
+            "",
+            f"- total_realized_pnl: `{attribution_summary.get('total_realized_pnl', 0)}`",
+            f"- total_unrealized_pnl: `{attribution_summary.get('total_unrealized_pnl', 0)}`",
+            f"- total_pnl: `{attribution_summary.get('total_pnl', 0)}`",
+            "",
             "## Stages",
             "",
             "| stage | status | duration_seconds | error |",
             "| --- | --- | ---: | --- |",
         ]
     )
+    top_strategy_pnl = list(attribution_summary.get("top_strategies_by_total_pnl", []))
+    if top_strategy_pnl:
+        lines.insert(
+            -5,
+            f"- top_strategy_contributor: `{top_strategy_pnl[0].get('strategy_id')}` pnl=`{top_strategy_pnl[0].get('total_pnl')}`",
+        )
+    bottom_strategy_pnl = list(attribution_summary.get("bottom_strategies_by_total_pnl", []))
+    if bottom_strategy_pnl:
+        lines.insert(
+            -5,
+            f"- top_strategy_detractor: `{bottom_strategy_pnl[0].get('strategy_id')}` pnl=`{bottom_strategy_pnl[0].get('total_pnl')}`",
+        )
+    top_symbol_pnl = list(attribution_summary.get("top_symbols_by_total_pnl", []))
+    if top_symbol_pnl:
+        lines.insert(
+            -5,
+            f"- top_symbol_contributor: `{top_symbol_pnl[0].get('symbol')}` pnl=`{top_symbol_pnl[0].get('total_pnl')}`",
+        )
+    bottom_symbol_pnl = list(attribution_summary.get("bottom_symbols_by_total_pnl", []))
+    if bottom_symbol_pnl:
+        lines.insert(
+            -5,
+            f"- top_symbol_detractor: `{bottom_symbol_pnl[0].get('symbol')}` pnl=`{bottom_symbol_pnl[0].get('total_pnl')}`",
+        )
     for record in stage_records:
         duration_text = f"{record.duration_seconds:.3f}" if record.duration_seconds is not None else "n/a"
         lines.append(f"| {record.stage_name} | {record.status} | {duration_text} | {record.error_message or ''} |")
@@ -755,6 +796,31 @@ def _build_trade_decision_log_rows(
             }
         )
     return rows
+
+
+def _build_multi_strategy_decision_bundle(allocation_result: Any) -> DecisionJournalBundle:
+    strategy_metadata: dict[str, dict[str, Any]] = {}
+    symbol_contributions: dict[str, dict[str, float]] = {}
+    for bundle in getattr(allocation_result, "sleeve_bundles", []):
+        strategy_id = str(bundle.sleeve.preset_name)
+        strategy_metadata[strategy_id] = {
+            "sleeve_name": bundle.sleeve.sleeve_name,
+            "preset_name": bundle.sleeve.preset_name,
+            "signal_source": getattr(bundle.paper_config, "signal_source", "multi_strategy"),
+            "signal_family": getattr(bundle.sleeve, "signal_family", None),
+        }
+    for row in getattr(allocation_result, "sleeve_rows", []):
+        strategy_id = str(row.get("preset_name") or row.get("sleeve_name") or "")
+        symbol = str(row.get("symbol") or "")
+        if not strategy_id or not symbol:
+            continue
+        symbol_contributions.setdefault(symbol, {})[strategy_id] = float(row.get("scaled_target_weight") or 0.0)
+    provenance_by_symbol = build_symbol_strategy_provenance(
+        final_target_weights=dict(getattr(allocation_result, "combined_target_weights", {}) or {}),
+        symbol_contributions=symbol_contributions,
+        strategy_metadata=strategy_metadata,
+    )
+    return DecisionJournalBundle(provenance_by_symbol=provenance_by_symbol)
 
 
 def _write_trade_decision_log(*, output_dir: Path, rows: list[dict[str, Any]]) -> dict[str, str]:
@@ -1138,6 +1204,7 @@ def run_daily_trading_pipeline(
             )
             if replay_as_of_date:
                 paper_config = replace(paper_config, replay_as_of_date=replay_as_of_date)
+            multi_strategy_decision_bundle = _build_multi_strategy_decision_bundle(allocation_result)
             state_store = JsonPaperStateStore(paper_state_path)
             state_file_preexisting = paper_state_path.exists()
             target_diagnostics = {
@@ -1204,6 +1271,7 @@ def run_daily_trading_pipeline(
                     "multi_strategy_allocation": allocation_result.summary,
                     "strategy_execution_handoff": handoff.summary,
                 },
+                decision_bundle=multi_strategy_decision_bundle,
                 execution_config=execution_config,
                 auto_apply_fills=config.auto_apply_fills,
             )

@@ -278,6 +278,7 @@ def persist_paper_run_outputs(
     execution_summary = dict(execution_diag.get("execution_summary", {}))
     paper_execution_diag = dict(result.diagnostics.get("paper_execution", {}))
     accounting_diag = dict(result.diagnostics.get("accounting", {}))
+    attribution_summary = dict((result.attribution or {}).get("summary", {}))
     timestamp = result.as_of
     rebalance_timestamp = str(target_diag.get("rebalance_timestamp", timestamp))
     gross_exposure = target_diag.get("average_gross_exposure")
@@ -392,6 +393,9 @@ def persist_paper_run_outputs(
         "latest_price_source_summary": json.dumps(target_diag.get("latest_price_source_summary", {}), sort_keys=True),
         "source_portfolio_path": str(handoff.get("source_portfolio_path") or ""),
         "activation_applied": bool(handoff.get("activation_applied", False)),
+        "attribution_total_realized_pnl": float(attribution_summary.get("total_realized_pnl", 0.0) or 0.0),
+        "attribution_total_unrealized_pnl": float(attribution_summary.get("total_unrealized_pnl", 0.0) or 0.0),
+        "attribution_total_pnl": float(attribution_summary.get("total_pnl", 0.0) or 0.0),
     }
 
     health_checks = _health_checks(
@@ -532,7 +536,11 @@ def persist_paper_run_outputs(
 
     latest_json_path = output_path / "paper_run_summary_latest.json"
     latest_md_path = output_path / "paper_run_summary_latest.md"
-    summary_payload = {"summary": summary_row, "health_checks": health_checks}
+    summary_payload = {
+        "summary": summary_row,
+        "health_checks": health_checks,
+        "pnl_attribution_summary": attribution_summary,
+    }
     warnings, errors = warnings_and_errors_from_checks(health_checks)
     summary_payload = add_standard_summary_fields(
         summary_payload,

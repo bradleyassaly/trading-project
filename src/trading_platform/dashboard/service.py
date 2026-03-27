@@ -1325,6 +1325,45 @@ class DashboardDataService:
         payload["generated_at"] = _now_utc()
         return _normalize_portfolio_overview_payload(payload)
 
+    def strategy_pnl_latest_payload(self) -> dict[str, Any]:
+        csv_path = _latest_matching_file(
+            self.artifacts_root, ["strategy_pnl_attribution.csv", "replay_strategy_pnl.csv"]
+        )
+        summary_path = _latest_matching_file(
+            self.artifacts_root, ["pnl_attribution_summary.json", "replay_pnl_attribution_summary.json"]
+        )
+        frame = _safe_read_csv(csv_path)
+        payload = _safe_read_json(summary_path)
+        return {
+            "generated_at": _now_utc(),
+            "summary": payload,
+            "rows": _frame_to_records(frame),
+            "meta": {
+                "csv_path": str(csv_path) if csv_path is not None else None,
+                "summary_path": str(summary_path) if summary_path is not None else None,
+            },
+        }
+
+    def symbol_pnl_latest_payload(self) -> dict[str, Any]:
+        csv_path = _latest_matching_file(self.artifacts_root, ["symbol_pnl_attribution.csv", "replay_symbol_pnl.csv"])
+        frame = _safe_read_csv(csv_path)
+        return {
+            "generated_at": _now_utc(),
+            "rows": _frame_to_records(frame),
+            "meta": {"csv_path": str(csv_path) if csv_path is not None else None},
+        }
+
+    def attribution_latest_payload(self) -> dict[str, Any]:
+        summary_path = _latest_matching_file(
+            self.artifacts_root, ["pnl_attribution_summary.json", "replay_pnl_attribution_summary.json"]
+        )
+        payload = _safe_read_json(summary_path)
+        return {
+            "generated_at": _now_utc(),
+            "summary": payload,
+            "meta": {"summary_path": str(summary_path) if summary_path is not None else None},
+        }
+
     def execution_diagnostics_payload(self) -> dict[str, Any]:
         payload = build_execution_diagnostics_payload(artifacts_root=self.artifacts_root)
         payload["generated_at"] = _now_utc()

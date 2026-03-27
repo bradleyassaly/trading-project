@@ -102,6 +102,22 @@ class PaperPosition:
 
 
 @dataclass
+class PaperTradeLot:
+    trade_id: str
+    symbol: str
+    strategy_id: str
+    signal_source: str | None
+    signal_family: str | None
+    side: str
+    entry_as_of: str
+    entry_price: float
+    quantity: int
+    remaining_quantity: int
+    attribution_method: str = "target_weight_proportional"
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
 class PaperOrder:
     symbol: str
     side: str
@@ -115,6 +131,7 @@ class PaperOrder:
     expected_fill_price: float | None = None
     expected_fees: float = 0.0
     expected_slippage_bps: float = 0.0
+    provenance: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -126,6 +143,8 @@ class PaperPortfolioState:
     initial_cash_basis: float = 0.0
     cumulative_realized_pnl: float = 0.0
     cumulative_fees: float = 0.0
+    open_lots: dict[str, list[PaperTradeLot]] = field(default_factory=dict)
+    next_trade_id: int = 1
 
     @property
     def gross_market_value(self) -> float:
@@ -164,7 +183,6 @@ class PaperExecutionPriceSnapshot:
     latest_data_source: str
 
 
-
 @dataclass
 class PaperTradingRunResult:
     as_of: str
@@ -180,6 +198,8 @@ class PaperTradingRunResult:
     price_snapshots: list[PaperExecutionPriceSnapshot] = field(default_factory=list)
     decision_bundle: DecisionJournalBundle | None = None
     universe_bundle: UniverseBuildBundle | None = None
+    attribution: dict[str, Any] = field(default_factory=dict)
+
 
 @dataclass
 class PaperSignalSnapshot:

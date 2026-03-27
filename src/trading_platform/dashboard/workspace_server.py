@@ -558,7 +558,7 @@ def _timeline(rows: list[dict]) -> str:
 
 
 def _trade_chart(payload: dict, trade: dict) -> str:
-    return f"""<section class="panel"><svg id="trade-chart" class="trade-chart" viewBox="0 0 960 360" preserveAspectRatio="none"></svg><div id="trade-readout" class="readout"><strong>{html.escape(str(trade.get('trade_id') or 'trade'))}</strong><div>Hover markers for price and execution context.</div></div></section><script>
+    return f"""<section class="panel"><svg id="trade-chart" class="trade-chart" viewBox="0 0 960 360" preserveAspectRatio="none"></svg><div id="trade-readout" class="readout"><strong>{html.escape(str(trade.get("trade_id") or "trade"))}</strong><div>Hover markers for price and execution context.</div></div></section><script>
 const tradeChartPayload = {json.dumps(payload)}; const tradeSummary = {json.dumps(trade)};
 function tradeReadout(primary, secondary) {{ document.getElementById("trade-readout").innerHTML = `<strong>${{primary}}</strong><div>${{secondary}}</div>`; }}
 function renderTradeChart() {{
@@ -1785,6 +1785,12 @@ def create_dashboard_app(
             )
         elif path == "/api/portfolio/latest":
             status, headers, body = _json_response(service.portfolio_payload())
+        elif path == "/api/strategy-pnl/latest":
+            status, headers, body = _json_response(service.strategy_pnl_latest_payload())
+        elif path == "/api/symbol-pnl/latest":
+            status, headers, body = _json_response(service.symbol_pnl_latest_payload())
+        elif path == "/api/attribution/latest":
+            status, headers, body = _json_response(service.attribution_latest_payload())
         elif path == "/api/execution/diagnostics":
             status, headers, body = _json_response(service.execution_diagnostics_payload())
         elif path == "/api/execution/latest":
@@ -1926,6 +1932,9 @@ def build_dashboard_static_data(*, artifacts_root: str | Path, output_dir: str |
         "regime_latest.json": service.market_regime_payload(),
         "portfolio_latest.json": service.portfolio_payload(),
         "portfolio_overview.json": service.portfolio_overview_payload(),
+        "strategy_pnl_latest.json": service.strategy_pnl_latest_payload(),
+        "symbol_pnl_latest.json": service.symbol_pnl_latest_payload(),
+        "attribution_latest.json": service.attribution_latest_payload(),
         "execution_latest.json": service.execution_payload(),
         "execution_diagnostics.json": service.execution_diagnostics_payload(),
         "live_latest.json": service.live_payload(),

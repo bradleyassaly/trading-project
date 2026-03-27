@@ -225,6 +225,10 @@ def test_run_daily_replay_writes_day_folders_and_carries_state(monkeypatch: pyte
     assert (tmp_path / "replay" / "replay_daily_metrics.csv").exists()
     assert (tmp_path / "replay" / "replay_trade_log.csv").exists()
     assert (tmp_path / "replay" / "replay_strategy_activity.csv").exists()
+    assert (tmp_path / "replay" / "replay_strategy_pnl.csv").exists()
+    assert (tmp_path / "replay" / "replay_symbol_pnl.csv").exists()
+    assert (tmp_path / "replay" / "replay_trade_pnl.csv").exists()
+    assert (tmp_path / "replay" / "replay_pnl_attribution_summary.json").exists()
 
 
 def test_run_daily_replay_continue_on_error_records_failure(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

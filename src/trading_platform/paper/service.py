@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -40,11 +40,18 @@ from trading_platform.paper.models import (
     PaperPortfolioState,
     PaperPosition,
     PaperSignalSnapshot,
+    PaperTradeLot,
     PaperTradingConfig,
     PaperTradingRunResult,
 )
+from trading_platform.reporting.pnl_attribution import (
+    allocate_integer_quantities,
+    build_daily_attribution,
+    build_attribution_summary,
+    build_reconciliation_summary,
+    write_pnl_attribution_artifacts,
+)
 from trading_platform.settings import METADATA_DIR
-from trading_platform.paper.ledger import append_equity_snapshot, append_fills
 from trading_platform.paper.slippage import apply_order_slippage, validate_slippage_config
 from trading_platform.risk.pre_trade_checks import validate_orders
 from trading_platform.research.xsec_momentum import run_xsec_momentum_topn
@@ -78,13 +85,15 @@ class JsonPaperStateStore:
             as_of=payload.get("as_of"),
             cash=float(payload.get("cash", 0.0)),
             positions=positions,
-            last_targets={
-                symbol: float(weight)
-                for symbol, weight in payload.get("last_targets", {}).items()
-            },
+            last_targets={symbol: float(weight) for symbol, weight in payload.get("last_targets", {}).items()},
             initial_cash_basis=float(payload.get("initial_cash_basis", 0.0) or 0.0),
             cumulative_realized_pnl=float(payload.get("cumulative_realized_pnl", 0.0) or 0.0),
             cumulative_fees=float(payload.get("cumulative_fees", 0.0) or 0.0),
+            open_lots={
+                symbol: [PaperTradeLot(**row) for row in rows]
+                for symbol, rows in dict(payload.get("open_lots", {})).items()
+            },
+            next_trade_id=int(payload.get("next_trade_id", 1) or 1),
         )
         if state.initial_cash_basis <= 0.0:
             state.initial_cash_basis = float(state.cash + sum(position.cost_basis for position in positions.values()))
@@ -95,14 +104,13 @@ class JsonPaperStateStore:
         payload = {
             "as_of": state.as_of,
             "cash": state.cash,
-            "positions": {
-                symbol: asdict(position)
-                for symbol, position in sorted(state.positions.items())
-            },
+            "positions": {symbol: asdict(position) for symbol, position in sorted(state.positions.items())},
             "last_targets": state.last_targets,
             "initial_cash_basis": state.initial_cash_basis,
             "cumulative_realized_pnl": state.cumulative_realized_pnl,
             "cumulative_fees": state.cumulative_fees,
+            "open_lots": {symbol: [asdict(lot) for lot in lots] for symbol, lots in sorted(state.open_lots.items())},
+            "next_trade_id": int(state.next_trade_id),
         }
         self.path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
@@ -118,7 +126,16 @@ def _load_xsec_prepared_frames(
 def _compute_latest_xsec_target_weights(
     *,
     config: PaperTradingConfig,
-) -> tuple[str, dict[str, float], dict[str, float], dict[str, float], dict[str, float], dict[str, Any], list[str], list[PaperExecutionPriceSnapshot]]:
+) -> tuple[
+    str,
+    dict[str, float],
+    dict[str, float],
+    dict[str, float],
+    dict[str, float],
+    dict[str, Any],
+    list[str],
+    list[PaperExecutionPriceSnapshot],
+]:
     target_construction_service.load_feature_frame = load_feature_frame
     target_construction_service.resolve_feature_frame_path = resolve_feature_frame_path
     target_construction_service.run_xsec_momentum_topn = run_xsec_momentum_topn
@@ -153,6 +170,27 @@ def _clone_state(state: PaperPortfolioState) -> PaperPortfolioState:
         initial_cash_basis=float(state.initial_cash_basis),
         cumulative_realized_pnl=float(state.cumulative_realized_pnl),
         cumulative_fees=float(state.cumulative_fees),
+        open_lots={
+            symbol: [
+                PaperTradeLot(
+                    trade_id=str(lot.trade_id),
+                    symbol=lot.symbol,
+                    strategy_id=lot.strategy_id,
+                    signal_source=lot.signal_source,
+                    signal_family=lot.signal_family,
+                    side=lot.side,
+                    entry_as_of=lot.entry_as_of,
+                    entry_price=float(lot.entry_price),
+                    quantity=int(lot.quantity),
+                    remaining_quantity=int(lot.remaining_quantity),
+                    attribution_method=lot.attribution_method,
+                    metadata=dict(lot.metadata),
+                )
+                for lot in lots
+            ]
+            for symbol, lots in state.open_lots.items()
+        },
+        next_trade_id=int(state.next_trade_id),
     )
 
 
@@ -250,7 +288,9 @@ def generate_rebalance_orders(
         notional = float(request.requested_notional)
         if notional < min_trade_dollars:
             continue
-        target_quantity = (int(request.target_shares) // lot_size) * lot_size if lot_size > 0 else int(request.target_shares)
+        target_quantity = (
+            (int(request.target_shares) // lot_size) * lot_size if lot_size > 0 else int(request.target_shares)
+        )
         orders.append(
             PaperOrder(
                 symbol=request.symbol,
@@ -262,18 +302,15 @@ def generate_rebalance_orders(
                 target_quantity=int(target_quantity),
                 notional=notional,
                 reason="rebalance_to_target",
+                provenance=dict(request.provenance or {}),
             )
         )
 
     diagnostics["order_count"] = len(orders)
     diagnostics["symbols_considered"] = len(all_symbols)
     diagnostics["target_weight_sum"] = float(sum(latest_target_weights.values()))
-    diagnostics["estimated_buy_notional"] = float(
-        sum(order.notional for order in orders if order.side == "BUY")
-    )
-    diagnostics["estimated_sell_notional"] = float(
-        sum(order.notional for order in orders if order.side == "SELL")
-    )
+    diagnostics["estimated_buy_notional"] = float(sum(order.notional for order in orders if order.side == "BUY"))
+    diagnostics["estimated_sell_notional"] = float(sum(order.notional for order in orders if order.side == "SELL"))
     return OrderGenerationResult(
         orders=orders,
         target_weights=latest_target_weights,
@@ -320,12 +357,14 @@ def _simulate_execution_for_paper_orders(
                 reference_price=original.reference_price,
                 target_weight=original.target_weight,
                 current_quantity=original.current_quantity,
-                target_quantity=original.current_quantity + (executable.adjusted_shares if original.side == "BUY" else -executable.adjusted_shares),
+                target_quantity=original.current_quantity
+                + (executable.adjusted_shares if original.side == "BUY" else -executable.adjusted_shares),
                 notional=executable.adjusted_notional,
                 reason=executable.clipping_reason or original.reason,
                 expected_fill_price=executable.estimated_fill_price,
                 expected_fees=executable.commission,
                 expected_slippage_bps=executable.slippage_bps,
+                provenance=dict(executable.provenance or original.provenance or {}),
             )
         )
     diagnostics = {
@@ -364,9 +403,7 @@ def apply_filled_orders(
         if current is None:
             avg_price = fill_price
         elif signed_qty > 0 and prior_quantity >= 0:
-            avg_price = (
-                (current.avg_price * prior_quantity) + (fill_price * signed_qty)
-            ) / new_quantity
+            avg_price = ((current.avg_price * prior_quantity) + (fill_price * signed_qty)) / new_quantity
         else:
             avg_price = current.avg_price
 
@@ -378,6 +415,222 @@ def apply_filled_orders(
         )
 
     return state
+
+
+def _normalized_order_ownership(order: PaperOrder) -> dict[str, float]:
+    ownership = dict((order.provenance or {}).get("strategy_ownership") or {})
+    if ownership:
+        total = sum(abs(float(weight)) for weight in ownership.values())
+        if total > 0.0:
+            return {
+                str(strategy_id): float(abs(float(weight)) / total)
+                for strategy_id, weight in ownership.items()
+                if abs(float(weight)) > 0.0
+            }
+    strategy_id = str((order.provenance or {}).get("strategy_id") or "").strip()
+    if strategy_id:
+        return {strategy_id: 1.0}
+    return {}
+
+
+def _lot_signal_source(order: PaperOrder, strategy_id: str) -> str | None:
+    strategy_rows = list((order.provenance or {}).get("strategy_rows") or [])
+    for row in strategy_rows:
+        if str(row.get("strategy_id") or "") == strategy_id:
+            return str(row.get("signal_source") or "multi_strategy")
+    value = (order.provenance or {}).get("signal_source")
+    return str(value) if value else None
+
+
+def _lot_signal_family(order: PaperOrder, strategy_id: str) -> str | None:
+    strategy_rows = list((order.provenance or {}).get("strategy_rows") or [])
+    for row in strategy_rows:
+        if str(row.get("strategy_id") or "") == strategy_id:
+            family = row.get("signal_family")
+            return str(family) if family else None
+    families = list((order.provenance or {}).get("signal_families") or [])
+    return str(families[0]) if len(families) == 1 else None
+
+
+def _next_trade_id(state: PaperPortfolioState) -> str:
+    trade_id = f"paper-trade-{int(state.next_trade_id)}"
+    state.next_trade_id += 1
+    return trade_id
+
+
+def _append_open_lots(
+    *,
+    state: PaperPortfolioState,
+    order: PaperOrder,
+    fill_price: float,
+    quantity: int,
+    as_of: str | None,
+) -> None:
+    ownership = _normalized_order_ownership(order)
+    if quantity <= 0 or not ownership:
+        return
+    allocated = allocate_integer_quantities(quantity, ownership)
+    lots = state.open_lots.setdefault(order.symbol, [])
+    side = "long" if str(order.side).upper() == "BUY" else "short"
+    signed_qty = 1 if side == "long" else -1
+    for strategy_id, lot_qty in allocated.items():
+        lots.append(
+            PaperTradeLot(
+                trade_id=_next_trade_id(state),
+                symbol=order.symbol,
+                strategy_id=strategy_id,
+                signal_source=_lot_signal_source(order, strategy_id),
+                signal_family=_lot_signal_family(order, strategy_id),
+                side=side,
+                entry_as_of=str(as_of or state.as_of or ""),
+                entry_price=float(fill_price),
+                quantity=int(lot_qty * signed_qty),
+                remaining_quantity=int(lot_qty * signed_qty),
+                metadata={
+                    "order_reason": order.reason,
+                    "target_weight": (order.provenance or {}).get("target_weight"),
+                },
+            )
+        )
+
+
+def _close_open_lots(
+    *,
+    state: PaperPortfolioState,
+    order: PaperOrder,
+    fill_price: float,
+    quantity: int,
+    as_of: str | None,
+) -> tuple[float, list[dict[str, Any]], list[dict[str, Any]]]:
+    lots = list(state.open_lots.get(order.symbol, []))
+    if quantity <= 0 or not lots:
+        return 0.0, [], []
+    closing_side = str(order.side).upper()
+    closes_long = closing_side == "SELL"
+    remaining_to_close = int(quantity)
+    realized_total = 0.0
+    trade_rows: list[dict[str, Any]] = []
+    fill_rows: list[dict[str, Any]] = []
+    updated_lots: list[PaperTradeLot] = []
+    for lot in lots:
+        remaining_qty = int(lot.remaining_quantity)
+        if remaining_qty == 0:
+            continue
+        lot_is_long = remaining_qty > 0
+        if remaining_to_close > 0 and ((closes_long and lot_is_long) or ((not closes_long) and (not lot_is_long))):
+            closed_qty = min(abs(remaining_qty), remaining_to_close)
+            remaining_to_close -= closed_qty
+            sign = 1.0 if lot_is_long else -1.0
+            realized_pnl = (float(fill_price) - float(lot.entry_price)) * closed_qty * sign
+            realized_total += realized_pnl
+            exit_ts = pd.Timestamp(as_of).date().isoformat() if as_of else None
+            holding_days = None
+            if lot.entry_as_of and exit_ts:
+                holding_days = int((pd.Timestamp(exit_ts) - pd.Timestamp(lot.entry_as_of)).days)
+            trade_rows.append(
+                {
+                    "trade_id": lot.trade_id,
+                    "date": exit_ts,
+                    "symbol": lot.symbol,
+                    "strategy_id": lot.strategy_id,
+                    "signal_source": lot.signal_source,
+                    "signal_family": lot.signal_family,
+                    "side": lot.side,
+                    "quantity": int(closed_qty),
+                    "entry_price": float(lot.entry_price),
+                    "exit_price": float(fill_price),
+                    "realized_pnl": float(realized_pnl),
+                    "holding_period_days": holding_days,
+                    "attribution_method": lot.attribution_method,
+                    "status": "closed",
+                    "entry_date": lot.entry_as_of,
+                    "exit_date": exit_ts,
+                }
+            )
+            fill_rows.append(
+                {
+                    "date": exit_ts,
+                    "symbol": lot.symbol,
+                    "strategy_id": lot.strategy_id,
+                    "signal_source": lot.signal_source,
+                    "signal_family": lot.signal_family,
+                    "side": closing_side,
+                    "quantity": int(closed_qty),
+                    "fill_price": float(fill_price),
+                    "notional": float(closed_qty * fill_price),
+                    "fill_count": 1,
+                }
+            )
+            new_remaining = abs(remaining_qty) - closed_qty
+            if new_remaining > 0:
+                updated_lots.append(
+                    replace(
+                        lot,
+                        remaining_quantity=int(new_remaining if lot_is_long else -new_remaining),
+                    )
+                )
+            continue
+        updated_lots.append(lot)
+    state.open_lots[order.symbol] = updated_lots
+    return float(realized_total), trade_rows, fill_rows
+
+
+def _apply_fill_to_state_with_attribution(
+    *,
+    state: PaperPortfolioState,
+    order: PaperOrder,
+    fill_price: float,
+    commission: float,
+    as_of: str | None,
+) -> tuple[float, list[dict[str, Any]], list[dict[str, Any]]]:
+    current = state.positions.get(order.symbol)
+    prior_quantity = int(current.quantity) if current is not None else 0
+    signed_qty = int(order.quantity) if order.side == "BUY" else -int(order.quantity)
+    closing_quantity = (
+        min(abs(prior_quantity), abs(signed_qty)) if prior_quantity and (prior_quantity * signed_qty) < 0 else 0
+    )
+    realized_pnl, trade_rows, fill_rows = _close_open_lots(
+        state=state,
+        order=order,
+        fill_price=fill_price,
+        quantity=closing_quantity,
+        as_of=as_of,
+    )
+    state.cash += (-signed_qty * float(fill_price)) - float(commission)
+    new_quantity = prior_quantity + signed_qty
+    if new_quantity == 0:
+        state.positions.pop(order.symbol, None)
+    else:
+        if current is None:
+            avg_price = float(fill_price)
+        elif signed_qty > 0 and prior_quantity >= 0:
+            avg_price = ((current.avg_price * prior_quantity) + (float(fill_price) * signed_qty)) / new_quantity
+        elif signed_qty < 0 and prior_quantity <= 0:
+            avg_price = ((current.avg_price * abs(prior_quantity)) + (float(fill_price) * abs(signed_qty))) / abs(
+                new_quantity
+            )
+        elif abs(signed_qty) > abs(prior_quantity):
+            avg_price = float(fill_price)
+        else:
+            avg_price = float(current.avg_price)
+        state.positions[order.symbol] = PaperPosition(
+            symbol=order.symbol,
+            quantity=int(new_quantity),
+            avg_price=float(avg_price),
+            last_price=float(fill_price),
+        )
+    opening_quantity = max(abs(signed_qty) - closing_quantity, 0)
+    if opening_quantity > 0:
+        _append_open_lots(
+            state=state,
+            order=order,
+            fill_price=fill_price,
+            quantity=opening_quantity,
+            as_of=as_of,
+        )
+    state.cumulative_realized_pnl += float(realized_pnl - commission)
+    state.cumulative_fees += float(commission)
+    return float(realized_pnl - commission), trade_rows, fill_rows
 
 
 def _estimate_order_realized_pnl(
@@ -437,9 +690,11 @@ def _apply_fill_to_state(
         if current is None:
             avg_price = float(fill_price)
         elif signed_qty > 0 and prior_quantity >= 0:
-            avg_price = (((current.avg_price * prior_quantity) + (float(fill_price) * signed_qty)) / new_quantity)
+            avg_price = ((current.avg_price * prior_quantity) + (float(fill_price) * signed_qty)) / new_quantity
         elif signed_qty < 0 and prior_quantity <= 0:
-            avg_price = (((current.avg_price * abs(prior_quantity)) + (float(fill_price) * abs(signed_qty))) / abs(new_quantity))
+            avg_price = ((current.avg_price * abs(prior_quantity)) + (float(fill_price) * abs(signed_qty))) / abs(
+                new_quantity
+            )
         else:
             avg_price = float(current.avg_price)
         state.positions[symbol] = PaperPosition(
@@ -457,18 +712,26 @@ def _apply_execution_orders_to_state(
     *,
     state: PaperPortfolioState,
     orders: list[PaperOrder],
-) -> tuple[PaperPortfolioState, list]:
+    as_of: str | None,
+) -> tuple[PaperPortfolioState, list[BrokerFill], list[dict[str, Any]], list[dict[str, Any]]]:
     fills = []
+    trade_rows: list[dict[str, Any]] = []
+    fill_rows: list[dict[str, Any]] = []
     for order in orders:
         fill_price = float(order.expected_fill_price or order.reference_price)
-        realized_pnl = _apply_fill_to_state(
+        realized_pnl, closed_trade_rows, attributed_fill_rows = _apply_fill_to_state_with_attribution(
             state=state,
-            symbol=order.symbol,
-            side=order.side,
-            quantity=order.quantity,
+            order=order,
             fill_price=fill_price,
             commission=float(order.expected_fees),
+            as_of=as_of,
         )
+        trade_rows.extend(closed_trade_rows)
+        fill_rows.extend(attributed_fill_rows)
+        primary_strategy = None
+        ownership = _normalized_order_ownership(order)
+        if ownership:
+            primary_strategy = max(ownership.items(), key=lambda item: (item[1], item[0]))[0]
         fills.append(
             BrokerFill(
                 symbol=order.symbol,
@@ -479,16 +742,20 @@ def _apply_execution_orders_to_state(
                 commission=float(order.expected_fees),
                 slippage_bps=float(order.expected_slippage_bps),
                 realized_pnl=float(realized_pnl),
+                strategy_id=primary_strategy,
+                signal_source=str((order.provenance or {}).get("signal_source") or "multi_strategy"),
+                provenance=dict(order.provenance or {}),
             )
         )
-    return state, fills
+    return state, fills, trade_rows, fill_rows
 
 
 def _apply_execution_orders_with_paper_broker(
     *,
     state: PaperPortfolioState,
     orders: list[PaperOrder],
-) -> tuple[PaperPortfolioState, list[BrokerFill]]:
+    as_of: str | None,
+) -> tuple[PaperPortfolioState, list[BrokerFill], list[dict[str, Any]], list[dict[str, Any]]]:
     accounting_state = _clone_state(state)
     broker = PaperBroker(
         state=state,
@@ -509,21 +776,28 @@ def _apply_execution_orders_with_paper_broker(
     ]
     broker_fills = broker.submit_orders(broker_orders)
     fills: list[BrokerFill] = []
+    trade_rows: list[dict[str, Any]] = []
+    fill_rows: list[dict[str, Any]] = []
     for order, fill in zip(orders, broker_fills, strict=False):
         commission = float(order.expected_fees)
-        realized_pnl = _apply_fill_to_state(
+        realized_pnl, closed_trade_rows, attributed_fill_rows = _apply_fill_to_state_with_attribution(
             state=accounting_state,
-            symbol=order.symbol,
-            side=order.side,
-            quantity=order.quantity,
+            order=order,
             fill_price=float(fill.fill_price),
             commission=commission,
+            as_of=as_of,
         )
+        trade_rows.extend(closed_trade_rows)
+        fill_rows.extend(attributed_fill_rows)
         if commission:
             state.cash -= commission
         position = state.positions.get(order.symbol)
         if position is not None:
             position.last_price = float(fill.fill_price)
+        primary_strategy = None
+        ownership = _normalized_order_ownership(order)
+        if ownership:
+            primary_strategy = max(ownership.items(), key=lambda item: (item[1], item[0]))[0]
         fills.append(
             BrokerFill(
                 symbol=fill.symbol,
@@ -534,11 +808,16 @@ def _apply_execution_orders_with_paper_broker(
                 commission=float(order.expected_fees),
                 slippage_bps=float(order.expected_slippage_bps),
                 realized_pnl=float(realized_pnl),
+                strategy_id=primary_strategy,
+                signal_source=str((order.provenance or {}).get("signal_source") or "multi_strategy"),
+                provenance=dict(order.provenance or {}),
             )
         )
     state.cumulative_realized_pnl = float(accounting_state.cumulative_realized_pnl)
     state.cumulative_fees = float(accounting_state.cumulative_fees)
-    return state, fills
+    state.open_lots = accounting_state.open_lots
+    state.next_trade_id = accounting_state.next_trade_id
+    return state, fills, trade_rows, fill_rows
 
 
 def _apply_paper_slippage(
@@ -680,13 +959,21 @@ def run_paper_trading_cycle_for_targets(
         raise ValueError(f"Pre-trade checks failed: {risk_result.violations}")
 
     fills = []
+    realized_trade_rows: list[dict[str, Any]] = []
+    attributed_fill_rows: list[dict[str, Any]] = []
     if auto_apply_fills and executable_orders:
-        state, fills = _apply_execution_orders_with_paper_broker(state=state, orders=executable_orders)
+        state, fills, realized_trade_rows, attributed_fill_rows = _apply_execution_orders_with_paper_broker(
+            state=state,
+            orders=executable_orders,
+            as_of=as_of,
+        )
         state = sync_state_prices(state, latest_prices)
 
     state.as_of = as_of
     if state.initial_cash_basis <= 0.0:
-        state.initial_cash_basis = float(starting_state.initial_cash_basis or starting_state.equity or config.initial_cash)
+        state.initial_cash_basis = float(
+            starting_state.initial_cash_basis or starting_state.equity or config.initial_cash
+        )
     state.last_targets = latest_effective_weights.copy()
     state_store.save(state)
     accounting_summary = _build_accounting_summary(
@@ -696,6 +983,26 @@ def run_paper_trading_cycle_for_targets(
         auto_apply_fills=auto_apply_fills,
         latest_effective_weights=latest_effective_weights,
     )
+    attribution_payload = build_daily_attribution(
+        as_of=as_of,
+        state=state,
+        equity=state.equity,
+        realized_trade_rows=realized_trade_rows,
+        fill_rows=attributed_fill_rows,
+    )
+    attribution_reconciliation = build_reconciliation_summary(
+        strategy_rows=attribution_payload.get("strategy_rows", []),
+        symbol_rows=attribution_payload.get("symbol_rows", []),
+        portfolio_realized_pnl=float(accounting_summary.get("realized_pnl_delta", 0.0)),
+        portfolio_unrealized_pnl=float(accounting_summary.get("unrealized_pnl", 0.0)),
+    )
+    attribution_summary = build_attribution_summary(
+        strategy_rows=attribution_payload.get("strategy_rows", []),
+        symbol_rows=attribution_payload.get("symbol_rows", []),
+        trade_rows=attribution_payload.get("trade_rows", []),
+        reconciliation=attribution_reconciliation,
+    )
+    attribution_payload["summary"] = attribution_summary
 
     diagnostics = {
         "signal_source": config.signal_source,
@@ -718,13 +1025,20 @@ def run_paper_trading_cycle_for_targets(
             "ensemble_enabled": bool(config.ensemble_enabled and config.signal_source == "ensemble"),
             "ensemble_mode": config.ensemble_mode,
             "ensemble_weight_method": config.ensemble_weight_method,
-            "latest_data_source": target_diagnostics.get("latest_data_source", target_diagnostics.get("latest_price_source")),
-            "latest_data_fallback_used": bool(target_diagnostics.get("latest_data_fallback_used", target_diagnostics.get("latest_price_fallback_used", False))),
+            "latest_data_source": target_diagnostics.get(
+                "latest_data_source", target_diagnostics.get("latest_price_source")
+            ),
+            "latest_data_fallback_used": bool(
+                target_diagnostics.get(
+                    "latest_data_fallback_used", target_diagnostics.get("latest_price_fallback_used", False)
+                )
+            ),
             "latest_bar_timestamp": target_diagnostics.get("latest_bar_timestamp"),
             "latest_bar_age_seconds": target_diagnostics.get("latest_bar_age_seconds"),
             "latest_data_stale": target_diagnostics.get("latest_data_stale"),
         },
         "accounting": accounting_summary,
+        "pnl_attribution": attribution_payload,
     }
     diagnostics.update(extra_diagnostics or {})
 
@@ -760,6 +1074,7 @@ def run_paper_trading_cycle_for_targets(
         price_snapshots=list(price_snapshots or []),
         decision_bundle=decision_bundle,
         universe_bundle=universe_bundle,
+        attribution=attribution_payload,
     )
 
 
@@ -819,22 +1134,25 @@ def write_paper_trading_artifacts(
     portfolio_performance_summary_path = output_path / "portfolio_performance_summary.json"
     execution_summary_path = output_path / "execution_summary.json"
     strategy_contribution_summary_path = output_path / "strategy_contribution_summary.json"
+    trades_path = output_path / "paper_trades.csv"
 
     pd.DataFrame([asdict(order) for order in result.orders]).to_csv(orders_path, index=False)
     pd.DataFrame(
         sorted(
             [
-            {
-                "symbol": position.symbol,
-                "quantity": int(position.quantity),
-                "avg_price": float(position.avg_price),
-                "last_price": float(position.last_price),
-                "cost_basis": float(position.cost_basis),
-                "market_value": float(position.market_value),
-                "unrealized_pnl": float(position.unrealized_pnl),
-                "portfolio_weight": float(position.market_value / result.state.equity) if result.state.equity > 0 else 0.0,
-            }
-            for position in result.state.positions.values()
+                {
+                    "symbol": position.symbol,
+                    "quantity": int(position.quantity),
+                    "avg_price": float(position.avg_price),
+                    "last_price": float(position.last_price),
+                    "cost_basis": float(position.cost_basis),
+                    "market_value": float(position.market_value),
+                    "unrealized_pnl": float(position.unrealized_pnl),
+                    "portfolio_weight": float(position.market_value / result.state.equity)
+                    if result.state.equity > 0
+                    else 0.0,
+                }
+                for position in result.state.positions.values()
             ],
             key=lambda row: row["symbol"],
         )
@@ -908,6 +1226,48 @@ def write_paper_trading_artifacts(
             for fill in result.fills
         ]
     ).to_csv(fills_path, index=False)
+    open_trade_rows = [
+        {
+            "trade_id": lot.trade_id,
+            "symbol": lot.symbol,
+            "side": lot.side,
+            "qty": abs(int(lot.remaining_quantity)),
+            "entry_ts": lot.entry_as_of,
+            "entry_price": float(lot.entry_price),
+            "exit_ts": None,
+            "exit_price": None,
+            "realized_pnl": 0.0,
+            "status": "open",
+            "strategy_id": lot.strategy_id,
+            "signal_source": lot.signal_source,
+            "signal_family": lot.signal_family,
+            "attribution_method": lot.attribution_method,
+        }
+        for lots in result.state.open_lots.values()
+        for lot in lots
+        if int(lot.remaining_quantity) != 0
+    ]
+    trade_rows = list(result.attribution.get("trade_rows", [])) + open_trade_rows
+    trade_columns = (
+        sorted({key for row in trade_rows for key in row}) if trade_rows else ["trade_id", "symbol", "status"]
+    )
+    if trades_path.exists():
+        try:
+            existing_trades = pd.read_csv(trades_path)
+        except pd.errors.EmptyDataError:
+            existing_trades = pd.DataFrame(columns=trade_columns)
+    else:
+        existing_trades = pd.DataFrame(columns=trade_columns)
+    new_trades = pd.DataFrame(trade_rows, columns=trade_columns)
+    existing_trades = existing_trades.reindex(columns=trade_columns)
+    new_trades = new_trades.reindex(columns=trade_columns)
+    combined_trades = (
+        new_trades.copy() if existing_trades.empty else pd.concat([existing_trades, new_trades], ignore_index=True)
+    )
+    if not combined_trades.empty:
+        combined_trades = combined_trades.drop_duplicates(subset=["trade_id"], keep="last")
+        combined_trades = combined_trades.sort_values(["trade_id"], kind="stable")
+    combined_trades.to_csv(trades_path, index=False)
 
     pd.DataFrame(
         [
@@ -1031,6 +1391,7 @@ def write_paper_trading_artifacts(
         "portfolio_performance_summary_path": portfolio_performance_summary_path,
         "execution_summary_json_path": execution_summary_path,
         "strategy_contribution_summary_path": strategy_contribution_summary_path,
+        "paper_trades_path": trades_path,
     }
     execution_payload = result.diagnostics.get("execution", {})
     if execution_payload.get("execution_summary"):
@@ -1039,13 +1400,16 @@ def write_paper_trading_artifacts(
             executable_orders=[ExecutableOrder(**row) for row in execution_payload.get("executable_orders", [])],
             rejected_orders=[RejectedOrder(**row) for row in execution_payload.get("rejected_orders", [])],
             summary=ExecutionSummary(**execution_payload.get("execution_summary", {})),
-            liquidity_diagnostics=[LiquidityDiagnostic(**row) for row in execution_payload.get("liquidity_constraints_report", [])],
+            liquidity_diagnostics=[
+                LiquidityDiagnostic(**row) for row in execution_payload.get("liquidity_constraints_report", [])
+            ],
             turnover_rows=execution_payload.get("turnover_summary", []),
             symbol_tradeability_rows=execution_payload.get("symbol_tradeability_report", []),
         )
         execution_paths = write_execution_artifacts(simulation_result, output_path)
         paths.update(execution_paths)
     paths.update(write_decision_journal_artifacts(bundle=result.decision_bundle, output_dir=output_path))
+    paths.update(write_pnl_attribution_artifacts(output_dir=output_path, attribution_payload=result.attribution))
     paths.update(
         write_universe_provenance_artifacts(
             bundle=result.universe_bundle,
@@ -1055,4 +1419,3 @@ def write_paper_trading_artifacts(
     )
     paths.update(extra_paths)
     return paths
-
