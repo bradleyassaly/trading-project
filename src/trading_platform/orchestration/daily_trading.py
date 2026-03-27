@@ -1,0 +1,944 @@
+from __future__ import annotations
+
+import json
+import time
+from dataclasses import asdict, dataclass, field
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+
+from trading_platform.cli.common import UNIVERSES
+from trading_platform.config.loader import (
+    load_alpha_research_workflow_config,
+    load_execution_config,
+    load_promotion_policy_config,
+    load_research_input_refresh_workflow_config,
+    load_strategy_portfolio_policy_config,
+)
+from trading_platform.config.workflow_models import (
+    AlphaResearchWorkflowConfig,
+    DailyTradingWorkflowConfig,
+    ResearchInputRefreshWorkflowConfig,
+)
+from trading_platform.db.services import DatabaseLineageService, build_research_memory_service
+from trading_platform.paper.models import PaperTradingConfig
+from trading_platform.paper.persistence import persist_paper_run_outputs
+from trading_platform.paper.service import (
+    JsonPaperStateStore,
+    run_paper_trading_cycle_for_targets,
+    write_paper_trading_artifacts,
+)
+from trading_platform.portfolio.conditional_activation import (
+    ConditionalActivationConfig,
+    activate_strategy_portfolio,
+    load_activated_strategy_portfolio,
+)
+from trading_platform.portfolio.multi_strategy import (
+    allocate_multi_strategy_portfolio,
+    write_multi_strategy_artifacts,
+)
+from trading_platform.portfolio.strategy_execution_handoff import (
+    StrategyExecutionHandoffConfig,
+    resolve_strategy_execution_handoff,
+    write_strategy_execution_handoff_summary,
+)
+from trading_platform.portfolio.strategy_portfolio import (
+    build_strategy_portfolio,
+    export_strategy_portfolio_run_config,
+    load_strategy_portfolio,
+)
+from trading_platform.reporting.paper_account_report import (
+    build_paper_account_report,
+    write_paper_account_report,
+)
+from trading_platform.research.alpha_lab.runner import refresh_alpha_research_artifacts, run_alpha_research
+from trading_platform.research.promotion_pipeline import apply_research_promotions
+from trading_platform.research.registry import refresh_research_registry_bundle
+from trading_platform.services.research_input_refresh_service import (
+    ResearchInputRefreshRequest,
+    refresh_research_inputs,
+)
+
+
+def _now_utc() -> str:
+    return datetime.now(UTC).isoformat()
+
+
+@dataclass
+class DailyTradingStageRecord:
+    stage_name: str
+    status: str = "pending"
+    started_at: str | None = None
+    ended_at: str | None = None
+    duration_seconds: float | None = None
+    outputs: dict[str, Any] = field(default_factory=dict)
+    warnings: list[str] = field(default_factory=list)
+    error_message: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class DailyTradingResult:
+    run_name: str
+    run_id: str | None
+    run_dir: str
+    started_at: str
+    ended_at: str
+    duration_seconds: float
+    status: str
+    stage_records: list[DailyTradingStageRecord]
+    warnings: list[str]
+    errors: list[str]
+    summary_json_path: str
+    summary_md_path: str
+    key_artifacts: dict[str, str]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "run_name": self.run_name,
+            "run_id": self.run_id,
+            "run_dir": self.run_dir,
+            "started_at": self.started_at,
+            "ended_at": self.ended_at,
+            "duration_seconds": self.duration_seconds,
+            "status": self.status,
+            "stage_records": [record.to_dict() for record in self.stage_records],
+            "warnings": list(self.warnings),
+            "errors": list(self.errors),
+            "summary_json_path": self.summary_json_path,
+            "summary_md_path": self.summary_md_path,
+            "key_artifacts": dict(self.key_artifacts),
+        }
+
+
+def _resolve_symbols(*, symbols: list[str] | None, universe: str | None) -> list[str]:
+    if symbols:
+        return list(dict.fromkeys(str(symbol).upper() for symbol in symbols))
+    if universe:
+        if universe not in UNIVERSES:
+            raise ValueError(f"Unknown universe: {universe}")
+        return list(dict.fromkeys(str(symbol).upper() for symbol in UNIVERSES[universe]))
+    raise ValueError("A symbol selection is required")
+
+
+def _build_refresh_request(config: ResearchInputRefreshWorkflowConfig) -> ResearchInputRefreshRequest:
+    return ResearchInputRefreshRequest(
+        symbols=_resolve_symbols(symbols=config.symbols, universe=config.universe),
+        feature_groups=config.feature_groups,
+        universe_name=config.universe,
+        sub_universe_id=config.sub_universe_id,
+        reference_data_root=config.reference_data_root,
+        universe_membership_path=config.universe_membership_path,
+        taxonomy_snapshot_path=config.taxonomy_snapshot_path,
+        benchmark_mapping_path=config.benchmark_mapping_path,
+        market_regime_path=config.market_regime_path,
+        group_map_path=config.group_map_path,
+        benchmark_id=config.benchmark,
+        feature_dir=Path(config.feature_dir),
+        metadata_dir=Path(config.metadata_dir),
+        normalized_dir=Path(config.normalized_dir),
+        failure_policy=config.failure_policy,
+        fundamentals_enabled=config.fundamentals_enabled,
+        fundamentals_artifact_root=(
+            Path(config.fundamentals_artifact_root) if config.fundamentals_artifact_root else None
+        ),
+        fundamentals_providers=list(config.fundamentals_providers or []),
+        fundamentals_sec_companyfacts_root=config.fundamentals_sec_companyfacts_root,
+        fundamentals_sec_submissions_root=config.fundamentals_sec_submissions_root,
+        fundamentals_vendor_file_path=config.fundamentals_vendor_file_path,
+        fundamentals_vendor_api_key=config.fundamentals_vendor_api_key,
+    )
+
+
+def _research_kwargs(
+    config: AlphaResearchWorkflowConfig,
+    *,
+    feature_dir: Path,
+    output_dir: Path,
+) -> dict[str, Any]:
+    return {
+        "symbols": _resolve_symbols(symbols=config.symbols, universe=config.universe),
+        "universe": None,
+        "feature_dir": feature_dir,
+        "signal_family": config.signal_family,
+        "signal_families": list(config.signal_families or [config.signal_family]),
+        "lookbacks": config.lookbacks,
+        "horizons": config.horizons,
+        "min_rows": config.min_rows,
+        "top_quantile": config.top_quantile,
+        "bottom_quantile": config.bottom_quantile,
+        "candidate_grid_preset": config.candidate_grid_preset,
+        "signal_composition_preset": config.signal_composition_preset,
+        "max_variants_per_family": config.max_variants_per_family,
+        "output_dir": output_dir,
+        "train_size": config.train_size,
+        "test_size": config.test_size,
+        "step_size": config.step_size,
+        "min_train_size": config.min_train_size,
+        "portfolio_top_n": config.portfolio_top_n,
+        "portfolio_long_quantile": config.portfolio_long_quantile,
+        "portfolio_short_quantile": config.portfolio_short_quantile,
+        "commission": config.commission,
+        "min_price": config.min_price,
+        "min_volume": config.min_volume,
+        "min_avg_dollar_volume": config.min_avg_dollar_volume,
+        "max_adv_participation": config.max_adv_participation,
+        "max_position_pct_of_adv": config.max_position_pct_of_adv,
+        "max_notional_per_name": config.max_notional_per_name,
+        "slippage_bps_per_turnover": config.slippage_bps_per_turnover,
+        "slippage_bps_per_adv": config.slippage_bps_per_adv,
+        "dynamic_recent_quality_window": config.dynamic_recent_quality_window,
+        "dynamic_min_history": config.dynamic_min_history,
+        "dynamic_downweight_mean_rank_ic": config.dynamic_downweight_mean_rank_ic,
+        "dynamic_deactivate_mean_rank_ic": config.dynamic_deactivate_mean_rank_ic,
+        "regime_aware_enabled": config.regime_aware_enabled,
+        "regime_min_history": config.regime_min_history,
+        "regime_underweight_mean_rank_ic": config.regime_underweight_mean_rank_ic,
+        "regime_exclude_mean_rank_ic": config.regime_exclude_mean_rank_ic,
+        "equity_context_enabled": config.equity_context_enabled,
+        "equity_context_include_volume": config.equity_context_include_volume,
+        "fundamentals_enabled": config.fundamentals_enabled,
+        "fundamentals_daily_features_path": (
+            Path(config.fundamentals_daily_features_path) if config.fundamentals_daily_features_path else None
+        ),
+        "enable_context_confirmations": config.enable_context_confirmations,
+        "enable_relative_features": config.enable_relative_features,
+        "enable_flow_confirmations": config.enable_flow_confirmations,
+        "ensemble_enabled": config.enable_ensemble,
+        "ensemble_mode": config.ensemble_mode,
+        "ensemble_weight_method": config.ensemble_weight_method,
+        "ensemble_normalize_scores": config.ensemble_normalize_scores,
+        "ensemble_max_members": config.ensemble_max_members,
+        "ensemble_require_promoted_only": True,
+        "ensemble_max_members_per_family": config.ensemble_max_members_per_family,
+        "ensemble_minimum_member_observations": config.ensemble_minimum_member_observations,
+        "ensemble_minimum_member_metric": config.ensemble_minimum_member_metric,
+        "require_runtime_computability_for_approval": config.require_runtime_computability_for_approval,
+        "min_runtime_computable_symbols_for_approval": config.min_runtime_computable_symbols_for_approval,
+        "allow_research_only_noncomputable_candidates": config.allow_research_only_noncomputable_candidates,
+        "runtime_computability_penalty_on_ranking": config.runtime_computability_penalty_on_ranking,
+        "runtime_computability_check_mode": config.runtime_computability_check_mode,
+        "require_composite_runtime_computability_for_approval": config.require_composite_runtime_computability_for_approval,
+        "min_composite_runtime_computable_symbols_for_approval": config.min_composite_runtime_computable_symbols_for_approval,
+        "allow_research_only_noncomputable_composites": config.allow_research_only_noncomputable_composites,
+        "composite_runtime_computability_check_mode": config.composite_runtime_computability_check_mode,
+        "composite_runtime_computability_penalty_on_ranking": config.composite_runtime_computability_penalty_on_ranking,
+        "fast_refresh_mode": config.fast_refresh_mode,
+        "skip_heavy_diagnostics": config.skip_heavy_diagnostics,
+        "reuse_existing_fold_results": config.reuse_existing_fold_results,
+        "restrict_to_existing_candidates": config.restrict_to_existing_candidates,
+        "max_families_for_refresh": config.max_families_for_refresh,
+        "max_candidates_for_refresh": config.max_candidates_for_refresh,
+    }
+
+
+def _stage_path(path_value: str | None, default_path: Path) -> Path:
+    return Path(path_value) if path_value else default_path
+
+
+def _summarize_promotions(promoted_dir: Path) -> dict[str, Any]:
+    index_path = promoted_dir / "promoted_strategies.json"
+    if not index_path.exists():
+        return {
+            "promoted_strategy_count": 0,
+            "promoted_unconditional_count": 0,
+            "promoted_conditional_count": 0,
+        }
+    payload = json.loads(index_path.read_text(encoding="utf-8"))
+    strategies = list(payload.get("strategies", []))
+    return {
+        "promoted_strategy_count": len(strategies),
+        "promoted_unconditional_count": sum(
+            1 for row in strategies if str(row.get("promotion_variant") or "unconditional") != "conditional"
+        ),
+        "promoted_conditional_count": sum(
+            1 for row in strategies if str(row.get("promotion_variant") or "") == "conditional"
+        ),
+    }
+
+
+def _summarize_portfolio(portfolio_dir: Path) -> dict[str, Any]:
+    try:
+        payload = load_strategy_portfolio(portfolio_dir)
+    except FileNotFoundError:
+        return {"selected_portfolio_strategy_count": 0}
+    selected_rows = list(payload.get("selected_strategies", []))
+    summary = dict(payload.get("summary") or {})
+    return {
+        "selected_portfolio_strategy_count": len(selected_rows),
+        "selected_conditional_portfolio_count": int(summary.get("selected_conditional_variant_count") or 0),
+    }
+
+
+def _summarize_activated_portfolio(activated_dir: Path | None) -> dict[str, Any]:
+    if activated_dir is None:
+        return {
+            "active_strategy_count": 0,
+            "activated_unconditional_count": 0,
+            "activated_conditional_count": 0,
+            "inactive_conditional_count": 0,
+        }
+    try:
+        payload = load_activated_strategy_portfolio(activated_dir)
+    except FileNotFoundError:
+        return {
+            "active_strategy_count": 0,
+            "activated_unconditional_count": 0,
+            "activated_conditional_count": 0,
+            "inactive_conditional_count": 0,
+        }
+    summary = dict(payload.get("summary") or {})
+    return {
+        "active_strategy_count": int(summary.get("active_row_count") or 0),
+        "activated_unconditional_count": int(summary.get("activated_unconditional_count") or 0),
+        "activated_conditional_count": int(summary.get("activated_conditional_count") or 0),
+        "inactive_conditional_count": int(summary.get("inactive_conditional_count") or 0),
+    }
+
+
+def _summarize_paper_run(paper_output_dir: Path) -> dict[str, Any]:
+    summary_path = paper_output_dir / "paper_run_summary_latest.json"
+    if not summary_path.exists():
+        return {
+            "requested_symbol_count": 0,
+            "usable_symbol_count": 0,
+            "pre_validation_target_symbol_count": 0,
+            "post_validation_target_symbol_count": 0,
+            "executable_order_count": 0,
+            "fill_count": 0,
+            "zero_target_reason": "",
+        }
+    payload = json.loads(summary_path.read_text(encoding="utf-8"))
+    return {
+        "requested_symbol_count": int(payload.get("requested_symbol_count") or 0),
+        "usable_symbol_count": int(payload.get("usable_symbol_count") or 0),
+        "pre_validation_target_symbol_count": int(payload.get("pre_validation_target_symbol_count") or 0),
+        "post_validation_target_symbol_count": int(payload.get("post_validation_target_symbol_count") or 0),
+        "executable_order_count": int(payload.get("executable_order_count") or 0),
+        "fill_count": int(payload.get("fill_count") or 0),
+        "zero_target_reason": str(payload.get("zero_target_reason") or ""),
+        "paper_summary_path": str(summary_path),
+        "source_portfolio_path": str(payload.get("source_portfolio_path") or ""),
+    }
+
+
+def _write_summary_artifacts(
+    *,
+    config: DailyTradingWorkflowConfig,
+    run_dir: Path,
+    started_at: str,
+    ended_at: str,
+    duration_seconds: float,
+    stage_records: list[DailyTradingStageRecord],
+    warnings: list[str],
+    errors: list[str],
+    key_artifacts: dict[str, str],
+    promotion_summary: dict[str, Any],
+    portfolio_summary: dict[str, Any],
+    activated_summary: dict[str, Any],
+    paper_summary: dict[str, Any],
+) -> tuple[Path, Path, str]:
+    failed_count = sum(1 for record in stage_records if record.status == "failed")
+    warning_count = sum(1 for record in stage_records if record.status == "warning")
+    status = "succeeded"
+    if failed_count and any(record.status in {"succeeded", "warning"} for record in stage_records):
+        status = "partial_failed"
+    elif failed_count:
+        status = "failed"
+    elif warning_count:
+        status = "warning"
+
+    summary_payload = {
+        "workflow_type": "daily_trading",
+        "run_name": config.run_name,
+        "run_id": config.run_id,
+        "timestamp": ended_at,
+        "started_at": started_at,
+        "ended_at": ended_at,
+        "duration_seconds": duration_seconds,
+        "status": status,
+        "strict_mode": config.strict_mode,
+        "best_effort_mode": config.best_effort_mode,
+        "run_dir": str(run_dir),
+        "stage_records": [record.to_dict() for record in stage_records],
+        "stage_statuses": {record.stage_name: record.status for record in stage_records},
+        "promoted_strategy_count": promotion_summary.get("promoted_strategy_count", 0),
+        "promoted_unconditional_count": promotion_summary.get("promoted_unconditional_count", 0),
+        "promoted_conditional_count": promotion_summary.get("promoted_conditional_count", 0),
+        "selected_portfolio_strategy_count": portfolio_summary.get("selected_portfolio_strategy_count", 0),
+        "selected_conditional_portfolio_count": portfolio_summary.get("selected_conditional_portfolio_count", 0),
+        "active_strategy_count": activated_summary.get("active_strategy_count", 0),
+        "activated_unconditional_count": activated_summary.get("activated_unconditional_count", 0),
+        "activated_conditional_count": activated_summary.get("activated_conditional_count", 0),
+        "inactive_conditional_count": activated_summary.get("inactive_conditional_count", 0),
+        "requested_symbol_count": paper_summary.get("requested_symbol_count", 0),
+        "usable_symbol_count": paper_summary.get("usable_symbol_count", 0),
+        "pre_validation_target_symbol_count": paper_summary.get("pre_validation_target_symbol_count", 0),
+        "post_validation_target_symbol_count": paper_summary.get("post_validation_target_symbol_count", 0),
+        "executable_order_count": paper_summary.get("executable_order_count", 0),
+        "fill_count": paper_summary.get("fill_count", 0),
+        "zero_target_reason": paper_summary.get("zero_target_reason", ""),
+        "source_artifact_paths": key_artifacts,
+        "warnings": warnings,
+        "errors": errors,
+    }
+    json_path = run_dir / "daily_trading_summary.json"
+    md_path = run_dir / "daily_trading_summary.md"
+    json_path.write_text(json.dumps(summary_payload, indent=2, default=str), encoding="utf-8")
+
+    lines = [
+        "# Daily Trading Summary",
+        "",
+        f"- run_name: `{config.run_name}`",
+        f"- run_id: `{config.run_id}`" if config.run_id else "- run_id: `none`",
+        f"- status: `{status}`",
+        f"- timestamp: `{ended_at}`",
+        f"- promoted_strategy_count: `{promotion_summary.get('promoted_strategy_count', 0)}`",
+        f"- promoted_unconditional_count: `{promotion_summary.get('promoted_unconditional_count', 0)}`",
+        f"- promoted_conditional_count: `{promotion_summary.get('promoted_conditional_count', 0)}`",
+        f"- selected_portfolio_strategy_count: `{portfolio_summary.get('selected_portfolio_strategy_count', 0)}`",
+        f"- selected_conditional_portfolio_count: `{portfolio_summary.get('selected_conditional_portfolio_count', 0)}`",
+        f"- active_strategy_count: `{activated_summary.get('active_strategy_count', 0)}`",
+        f"- activated_unconditional_count: `{activated_summary.get('activated_unconditional_count', 0)}`",
+        f"- activated_conditional_count: `{activated_summary.get('activated_conditional_count', 0)}`",
+        f"- inactive_conditional_count: `{activated_summary.get('inactive_conditional_count', 0)}`",
+        f"- requested_symbol_count: `{paper_summary.get('requested_symbol_count', 0)}`",
+        f"- usable_symbol_count: `{paper_summary.get('usable_symbol_count', 0)}`",
+        f"- pre_validation_target_symbol_count: `{paper_summary.get('pre_validation_target_symbol_count', 0)}`",
+        f"- post_validation_target_symbol_count: `{paper_summary.get('post_validation_target_symbol_count', 0)}`",
+        f"- executable_order_count: `{paper_summary.get('executable_order_count', 0)}`",
+        f"- fill_count: `{paper_summary.get('fill_count', 0)}`",
+        f"- zero_target_reason: `{paper_summary.get('zero_target_reason', '') or 'none'}`",
+        "",
+        "## Stages",
+        "",
+        "| stage | status | duration_seconds | error |",
+        "| --- | --- | ---: | --- |",
+    ]
+    for record in stage_records:
+        duration_text = f"{record.duration_seconds:.3f}" if record.duration_seconds is not None else "n/a"
+        lines.append(f"| {record.stage_name} | {record.status} | {duration_text} | {record.error_message or ''} |")
+    if key_artifacts:
+        lines.extend(["", "## Artifacts", ""])
+        for key, value in sorted(key_artifacts.items()):
+            lines.append(f"- {key}: `{value}`")
+    if warnings:
+        lines.extend(["", "## Warnings", ""])
+        for warning in warnings:
+            lines.append(f"- {warning}")
+    if errors:
+        lines.extend(["", "## Errors", ""])
+        for error in errors:
+            lines.append(f"- {error}")
+    md_path.write_text("\n".join(lines), encoding="utf-8")
+    return json_path, md_path, status
+
+
+def _build_multi_strategy_paper_config(result, reserve_cash_pct: float) -> PaperTradingConfig:
+    symbols = sorted(result.combined_target_weights)
+    return PaperTradingConfig(
+        symbols=symbols,
+        preset_name="multi_strategy",
+        universe_name=f"{result.summary['enabled_sleeve_count']}_sleeves",
+        strategy="multi_strategy",
+        signal_source="legacy",
+        reserve_cash_pct=reserve_cash_pct,
+    )
+
+
+def run_daily_trading_pipeline(config: DailyTradingWorkflowConfig) -> DailyTradingResult:
+    started_at = _now_utc()
+    started_clock = time.monotonic()
+    run_dir_name = str(config.run_name).strip()
+    if config.run_id:
+        run_dir_name = f"{run_dir_name}_{config.run_id}"
+    run_dir = Path(config.output_root) / run_dir_name
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    research_output_dir = _stage_path(config.research_output_dir, run_dir / "research")
+    registry_dir = _stage_path(config.registry_dir, research_output_dir / "research_registry")
+    promoted_dir = _stage_path(config.promoted_dir, run_dir / "promoted")
+    portfolio_dir = _stage_path(config.portfolio_dir, run_dir / "strategy_portfolio")
+    activated_dir = _stage_path(config.activated_dir, portfolio_dir / "activated")
+    export_dir = _stage_path(config.export_dir, run_dir / "run_bundle")
+    paper_output_dir = _stage_path(config.paper_output_dir, run_dir / "paper")
+    paper_state_path = Path(config.paper_state_path)
+    report_dir = (
+        _stage_path(config.report_dir, paper_output_dir / "report")
+        if config.report_dir
+        else (paper_output_dir / "report")
+    )
+
+    warnings: list[str] = []
+    errors: list[str] = []
+    key_artifacts: dict[str, str] = {}
+    stage_records: list[DailyTradingStageRecord] = []
+    refresh_result = None
+
+    db_lineage = DatabaseLineageService.from_config(
+        enable_database_metadata=config.enable_database_metadata,
+        database_url=config.database_url,
+        database_schema=config.database_schema,
+    )
+    research_memory = build_research_memory_service(
+        enable_database_metadata=config.enable_database_metadata,
+        database_url=config.database_url,
+        database_schema=config.database_schema,
+        write_candidates=config.tracking_write_candidates,
+        write_metrics=config.tracking_write_metrics,
+        write_promotions=config.tracking_write_promotions,
+    )
+    research_memory.init_schema(schema_name=config.database_schema)
+    portfolio_run_id = db_lineage.create_portfolio_run(
+        run_key=run_dir_name,
+        mode="daily_trading",
+        config_payload=config.to_cli_defaults(),
+        notes="daily_trading pipeline",
+    )
+
+    def run_stage(stage_name: str, enabled: bool, action) -> None:
+        record = DailyTradingStageRecord(stage_name=stage_name)
+        stage_records.append(record)
+        if not enabled:
+            record.status = "skipped"
+            return
+        record.started_at = _now_utc()
+        stage_start = time.monotonic()
+        try:
+            output = action(record)
+            if isinstance(output, dict):
+                record.outputs = output
+            if record.status == "pending":
+                record.status = "succeeded"
+        except Exception as exc:
+            record.status = "failed"
+            record.error_message = f"{type(exc).__name__}: {exc}"
+            errors.append(f"{stage_name}: {type(exc).__name__}: {exc}")
+            if config.strict_mode and not config.best_effort_mode:
+                raise
+        finally:
+            record.ended_at = _now_utc()
+            record.duration_seconds = time.monotonic() - stage_start
+
+    refresh_config = (
+        load_research_input_refresh_workflow_config(config.refresh_config) if config.refresh_config else None
+    )
+    research_config = load_alpha_research_workflow_config(config.research_config) if config.research_config else None
+
+    try:
+
+        def do_refresh(record: DailyTradingStageRecord) -> dict[str, Any]:
+            nonlocal refresh_result
+            if refresh_config is None:
+                raise ValueError("refresh_config is required for refresh_inputs stage")
+            refresh_result = refresh_research_inputs(request=_build_refresh_request(refresh_config))
+            key_artifacts["refresh_summary_path"] = str(
+                refresh_result.paths.get("research_input_refresh_summary_json", "")
+            )
+            return {
+                "feature_dir": str(refresh_result.feature_dir),
+                "metadata_dir": str(refresh_result.metadata_dir),
+                **{key: str(value) for key, value in refresh_result.paths.items()},
+            }
+
+        run_stage("refresh_inputs", config.stages.refresh_inputs, do_refresh)
+
+        def do_research(record: DailyTradingStageRecord) -> dict[str, Any]:
+            if config.research_mode == "skip":
+                record.status = "skipped"
+                record.warnings.append("research_mode_skip")
+                return {}
+            if research_config is None:
+                raise ValueError("research_config is required for research stage")
+            feature_dir = (
+                refresh_result.feature_dir if refresh_result is not None else Path(research_config.feature_dir)
+            )
+            research_output_dir.mkdir(parents=True, exist_ok=True)
+            runner = run_alpha_research if config.research_mode == "full" else refresh_alpha_research_artifacts
+            research_result = runner(
+                **_research_kwargs(
+                    research_config,
+                    feature_dir=feature_dir,
+                    output_dir=research_output_dir,
+                )
+            )
+            key_artifacts.update(
+                {
+                    "research_manifest_path": str(research_result.get("research_manifest_path", "")),
+                    "research_leaderboard_path": str(research_result.get("leaderboard_path", "")),
+                    "promoted_signals_path": str(research_result.get("promoted_signals_path", "")),
+                }
+            )
+            return {key: str(value) if isinstance(value, Path) else value for key, value in research_result.items()}
+
+        run_stage("research", config.stages.research, do_research)
+
+        def do_promote(record: DailyTradingStageRecord) -> dict[str, Any]:
+            policy = load_promotion_policy_config(config.promotion_policy_config)
+            artifacts_root = research_output_dir.parent
+            registry_bundle = refresh_research_registry_bundle(
+                artifacts_root=artifacts_root,
+                output_dir=registry_dir,
+            )
+            promotion_result = apply_research_promotions(
+                artifacts_root=artifacts_root,
+                registry_dir=registry_dir,
+                output_dir=promoted_dir,
+                policy=policy,
+                top_n=config.promotion_top_n,
+                allow_overwrite=config.allow_overwrite,
+                dry_run=False,
+                inactive=config.inactive,
+                override_validation=config.override_validation,
+            )
+            key_artifacts.update(
+                {
+                    "research_registry_path": str(registry_bundle.get("registry_json_path", "")),
+                    "promotion_candidates_path": str(registry_bundle.get("promotion_candidates_json_path", "")),
+                    "promoted_index_path": str(promotion_result.get("promoted_index_path", "")),
+                }
+            )
+            if int(promotion_result.get("selected_count") or 0) == 0:
+                record.status = "warning"
+                record.warnings.append("zero_promotions")
+                warnings.append("promotion stage produced zero promoted strategies")
+            return {
+                **{key: str(value) if isinstance(value, Path) else value for key, value in registry_bundle.items()},
+                **{
+                    key: str(value) if isinstance(value, Path) else value
+                    for key, value in promotion_result.items()
+                    if key != "promoted_rows"
+                },
+                "promoted_row_count": len(promotion_result.get("promoted_rows", [])),
+            }
+
+        run_stage("promote", config.stages.promote, do_promote)
+
+        def do_build_portfolio(record: DailyTradingStageRecord) -> dict[str, Any]:
+            if int(_summarize_promotions(promoted_dir).get("promoted_strategy_count") or 0) == 0:
+                record.status = "skipped"
+                record.warnings.append("zero_promotions")
+                return {}
+            policy = load_strategy_portfolio_policy_config(config.strategy_portfolio_policy_config)
+            portfolio_result = build_strategy_portfolio(
+                promoted_dir=promoted_dir,
+                output_dir=portfolio_dir,
+                policy=policy,
+                lifecycle_path=Path(config.lifecycle_path) if config.lifecycle_path else None,
+            )
+            key_artifacts.update(
+                {
+                    "strategy_portfolio_json_path": str(portfolio_result.get("strategy_portfolio_json_path", "")),
+                    "strategy_portfolio_csv_path": str(portfolio_result.get("strategy_portfolio_csv_path", "")),
+                    "strategy_portfolio_condition_summary_path": str(
+                        portfolio_result.get("strategy_portfolio_condition_summary_path", "")
+                    ),
+                }
+            )
+            return portfolio_result
+
+        run_stage("build_portfolio", config.stages.build_portfolio, do_build_portfolio)
+
+        def do_activate_portfolio(record: DailyTradingStageRecord) -> dict[str, Any]:
+            portfolio_json_path = portfolio_dir / "strategy_portfolio.json"
+            if not portfolio_json_path.exists():
+                record.status = "skipped"
+                record.warnings.append("missing_strategy_portfolio")
+                return {}
+            policy = load_strategy_portfolio_policy_config(config.strategy_portfolio_policy_config)
+            evaluate = (
+                config.evaluate_conditional_activation
+                if config.evaluate_conditional_activation is not None
+                else policy.evaluate_conditional_activation
+            )
+            activation_config = ConditionalActivationConfig(
+                evaluate_conditional_activation=bool(evaluate),
+                activation_context_sources=list(
+                    config.activation_context_sources
+                    if config.activation_context_sources is not None
+                    else policy.activation_context_sources
+                ),
+                include_inactive_conditionals_in_output=bool(
+                    config.include_inactive_conditionals_in_output
+                    if config.include_inactive_conditionals_in_output is not None
+                    else policy.include_inactive_conditionals_in_output
+                ),
+            )
+            activation_result = activate_strategy_portfolio(
+                portfolio_path=portfolio_dir,
+                output_dir=activated_dir,
+                config=activation_config,
+                market_regime_path=(refresh_config.market_regime_path if refresh_config is not None else None),
+                regime_labels_path=research_output_dir,
+                metadata_dir=(str(refresh_result.metadata_dir) if refresh_result is not None else None),
+            )
+            key_artifacts.update(
+                {
+                    "activated_strategy_portfolio_json_path": str(
+                        activation_result.get("activated_strategy_portfolio_json_path", "")
+                    ),
+                    "activated_strategy_portfolio_csv_path": str(
+                        activation_result.get("activated_strategy_portfolio_csv_path", "")
+                    ),
+                }
+            )
+            return activation_result
+
+        run_stage("activate_portfolio", config.stages.activate_portfolio, do_activate_portfolio)
+
+        def do_export_bundle(record: DailyTradingStageRecord) -> dict[str, Any]:
+            export_source = (
+                activated_dir if (activated_dir / "activated_strategy_portfolio.json").exists() else portfolio_dir
+            )
+            if export_source == activated_dir:
+                active_rows = list(load_activated_strategy_portfolio(activated_dir).get("active_strategies", []))
+                if not active_rows:
+                    if config.fail_if_no_active_strategies:
+                        raise ValueError("activated strategy portfolio contains zero active strategies")
+                    record.status = "warning"
+                    record.warnings.append("no_active_strategies")
+                    warnings.append("export stage found zero active strategies; active-only bundle not written")
+                    return {}
+            elif not (portfolio_dir / "strategy_portfolio.json").exists():
+                record.status = "skipped"
+                record.warnings.append("missing_strategy_portfolio")
+                return {}
+            export_result = export_strategy_portfolio_run_config(
+                strategy_portfolio_path=export_source,
+                output_dir=export_dir,
+            )
+            key_artifacts.update({key: str(value) for key, value in export_result.items()})
+            return export_result
+
+        run_stage("export_bundle", config.stages.export_bundle, do_export_bundle)
+
+        def do_paper_run(record: DailyTradingStageRecord) -> dict[str, Any]:
+            canonical_input = activated_dir / "activated_strategy_portfolio.json"
+            if not canonical_input.exists() or not config.use_activated_portfolio_for_paper:
+                canonical_input = portfolio_dir / "strategy_portfolio.json"
+            if not canonical_input.exists():
+                record.status = "skipped"
+                record.warnings.append("missing_portfolio_input")
+                return {}
+
+            handoff = resolve_strategy_execution_handoff(
+                canonical_input,
+                config=StrategyExecutionHandoffConfig(
+                    fail_if_no_active_strategies=config.fail_if_no_active_strategies,
+                    include_inactive_conditionals_in_reports=config.include_inactive_conditionals_in_reports,
+                ),
+            )
+            handoff_summary_path = write_strategy_execution_handoff_summary(
+                handoff=handoff,
+                output_dir=paper_output_dir,
+                artifact_name="paper_active_strategy_summary.json",
+            )
+            key_artifacts["paper_active_strategy_summary_path"] = str(handoff_summary_path)
+
+            if handoff.portfolio_config is None:
+                if config.fail_if_no_active_strategies:
+                    raise ValueError(f"No active strategies available for paper trading: {canonical_input}")
+                record.status = "warning"
+                record.warnings.append("no_active_strategies")
+                warnings.append("paper stage skipped because no active strategies were available")
+                return {"paper_active_strategy_summary_path": str(handoff_summary_path)}
+
+            portfolio_config = handoff.portfolio_config
+            execution_config = load_execution_config(config.execution_config) if config.execution_config else None
+            allocation_result = allocate_multi_strategy_portfolio(portfolio_config)
+            allocation_paths = write_multi_strategy_artifacts(allocation_result, paper_output_dir)
+            post_validation_target_count = int(
+                allocation_result.summary.get(
+                    "post_validation_target_symbol_count",
+                    len(allocation_result.combined_target_weights),
+                )
+                or len(allocation_result.combined_target_weights)
+            )
+
+            if config.fail_if_zero_targets_after_validation and post_validation_target_count == 0:
+                raise ValueError(
+                    f"zero targets after validation: {allocation_result.summary.get('zero_target_reason') or 'unknown'}"
+                )
+            if post_validation_target_count == 0:
+                record.status = "warning"
+                record.warnings.append(str(allocation_result.summary.get("zero_target_reason") or "zero_targets"))
+
+            paper_config = _build_multi_strategy_paper_config(
+                allocation_result,
+                reserve_cash_pct=portfolio_config.cash_reserve_pct,
+            )
+            state_store = JsonPaperStateStore(paper_state_path)
+            state_file_preexisting = paper_state_path.exists()
+            target_diagnostics = {
+                "portfolio_construction_mode": "multi_strategy",
+                "rebalance_timestamp": allocation_result.as_of,
+                "selected_symbols": ",".join(sorted(set(row["symbol"] for row in allocation_result.sleeve_rows))),
+                "target_selected_symbols": ",".join(sorted(allocation_result.combined_target_weights)),
+                "requested_active_strategy_count": allocation_result.summary.get("requested_active_strategy_count"),
+                "requested_symbol_count": allocation_result.summary.get("requested_symbol_count"),
+                "pre_validation_target_symbol_count": allocation_result.summary.get(
+                    "pre_validation_target_symbol_count"
+                ),
+                "post_validation_target_symbol_count": len(allocation_result.combined_target_weights),
+                "usable_symbol_count": allocation_result.summary.get("usable_symbol_count"),
+                "skipped_symbol_count": allocation_result.summary.get("skipped_symbol_count"),
+                "target_drop_stage": allocation_result.summary.get("target_drop_stage"),
+                "zero_target_reason": allocation_result.summary.get("zero_target_reason"),
+                "target_drop_reason": allocation_result.summary.get("target_drop_reason"),
+                "latest_price_source_summary": allocation_result.summary.get("latest_price_source_summary", {}),
+                "generated_preset_path": allocation_result.summary.get("generated_preset_path"),
+                "signal_artifact_path": allocation_result.summary.get("signal_artifact_path"),
+                "realized_holdings_count": len(allocation_result.combined_target_weights),
+                "realized_holdings_minus_top_n": 0,
+                "average_gross_exposure": allocation_result.summary["gross_exposure_after_constraints"],
+                "liquidity_excluded_count": sum(
+                    int(bundle.diagnostics.get("liquidity_excluded_count") or 0)
+                    for bundle in allocation_result.sleeve_bundles
+                ),
+                "sector_cap_excluded_count": sum(
+                    1
+                    for row in allocation_result.summary["symbols_removed_or_clipped"]
+                    if row["constraint_name"] == "sector_cap"
+                ),
+                "turnover_cap_binding_count": int(allocation_result.summary["turnover_cap_binding"]),
+                "turnover_buffer_blocked_replacements": sum(
+                    int(bundle.diagnostics.get("turnover_buffer_blocked_replacements") or 0)
+                    for bundle in allocation_result.sleeve_bundles
+                ),
+                "semantic_warning": (
+                    "portfolio_constraints_applied" if allocation_result.summary["symbols_removed_or_clipped"] else ""
+                ),
+                "target_selected_count": len(allocation_result.combined_target_weights),
+                "summary": {"mean_turnover": allocation_result.summary["turnover_estimate"]},
+                "multi_strategy_allocation": allocation_result.summary,
+                "strategy_execution_handoff": handoff.summary,
+            }
+            paper_cycle_result = run_paper_trading_cycle_for_targets(
+                config=paper_config,
+                state_store=state_store,
+                as_of=allocation_result.as_of,
+                latest_prices=allocation_result.latest_prices,
+                latest_scores={},
+                latest_scheduled_weights=allocation_result.combined_target_weights,
+                latest_effective_weights=allocation_result.combined_target_weights,
+                target_diagnostics=target_diagnostics,
+                skipped_symbols=sorted(
+                    {
+                        str(row["symbol"])
+                        for row in getattr(allocation_result, "execution_symbol_coverage_rows", [])
+                        if str(row.get("skip_reason") or "")
+                    }
+                ),
+                extra_diagnostics={
+                    "multi_strategy_allocation": allocation_result.summary,
+                    "strategy_execution_handoff": handoff.summary,
+                },
+                execution_config=execution_config,
+                auto_apply_fills=config.auto_apply_fills,
+            )
+            paper_paths = write_paper_trading_artifacts(result=paper_cycle_result, output_dir=paper_output_dir)
+            persistence_paths, _health_checks, latest_summary = persist_paper_run_outputs(
+                result=paper_cycle_result,
+                config=paper_config,
+                output_dir=paper_output_dir,
+                state_file_preexisting=state_file_preexisting,
+            )
+            key_artifacts.update(
+                {
+                    **{key: str(value) for key, value in allocation_paths.items()},
+                    **{key: str(value) for key, value in paper_paths.items()},
+                    **{key: str(value) for key, value in persistence_paths.items()},
+                    "paper_state_path": str(paper_state_path),
+                }
+            )
+            return {
+                "handoff_summary_path": str(handoff_summary_path),
+                "allocation_summary": allocation_result.summary,
+                "paper_summary": latest_summary,
+                **{key: str(value) for key, value in allocation_paths.items()},
+                **{key: str(value) for key, value in paper_paths.items()},
+                **{key: str(value) for key, value in persistence_paths.items()},
+            }
+
+        run_stage("paper_run", config.stages.paper_run, do_paper_run)
+
+        def do_report(record: DailyTradingStageRecord) -> dict[str, Any]:
+            if not paper_output_dir.exists():
+                record.status = "skipped"
+                record.warnings.append("missing_paper_output")
+                return {}
+            report = build_paper_account_report(paper_output_dir)
+            report_paths = write_paper_account_report(report=report, output_dir=report_dir)
+            key_artifacts.update(
+                {
+                    "paper_account_report_json_path": str(report_paths["json_path"]),
+                    "paper_account_report_csv_path": str(report_paths["csv_path"]),
+                }
+            )
+            return {key: str(value) for key, value in report_paths.items()}
+
+        run_stage("report", config.stages.report, do_report)
+    except Exception:
+        ended_at = _now_utc()
+        duration_seconds = time.monotonic() - started_clock
+        promotion_summary = _summarize_promotions(promoted_dir)
+        portfolio_summary = _summarize_portfolio(portfolio_dir)
+        activated_summary = _summarize_activated_portfolio(activated_dir)
+        paper_summary = _summarize_paper_run(paper_output_dir)
+        summary_json_path, summary_md_path, status = _write_summary_artifacts(
+            config=config,
+            run_dir=run_dir,
+            started_at=started_at,
+            ended_at=ended_at,
+            duration_seconds=duration_seconds,
+            stage_records=stage_records,
+            warnings=warnings,
+            errors=errors,
+            key_artifacts=key_artifacts,
+            promotion_summary=promotion_summary,
+            portfolio_summary=portfolio_summary,
+            activated_summary=activated_summary,
+            paper_summary=paper_summary,
+        )
+        db_lineage.fail_portfolio_run(portfolio_run_id, notes=f"status={status}; summary={summary_json_path}")
+        raise
+
+    ended_at = _now_utc()
+    duration_seconds = time.monotonic() - started_clock
+    promotion_summary = _summarize_promotions(promoted_dir)
+    portfolio_summary = _summarize_portfolio(portfolio_dir)
+    activated_summary = _summarize_activated_portfolio(activated_dir)
+    paper_summary = _summarize_paper_run(paper_output_dir)
+    summary_json_path, summary_md_path, status = _write_summary_artifacts(
+        config=config,
+        run_dir=run_dir,
+        started_at=started_at,
+        ended_at=ended_at,
+        duration_seconds=duration_seconds,
+        stage_records=stage_records,
+        warnings=warnings,
+        errors=errors,
+        key_artifacts=key_artifacts,
+        promotion_summary=promotion_summary,
+        portfolio_summary=portfolio_summary,
+        activated_summary=activated_summary,
+        paper_summary=paper_summary,
+    )
+    db_lineage.complete_portfolio_run(portfolio_run_id, notes=f"status={status}; summary={summary_json_path}")
+    return DailyTradingResult(
+        run_name=config.run_name,
+        run_id=config.run_id,
+        run_dir=str(run_dir),
+        started_at=started_at,
+        ended_at=ended_at,
+        duration_seconds=duration_seconds,
+        status=status,
+        stage_records=stage_records,
+        warnings=warnings,
+        errors=errors,
+        summary_json_path=str(summary_json_path),
+        summary_md_path=str(summary_md_path),
+        key_artifacts=key_artifacts,
+    )

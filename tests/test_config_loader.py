@@ -8,6 +8,7 @@ from trading_platform.config.loader import (
     load_alpha_cycle_workflow_config,
     load_backtester_validation_workflow_config,
     load_classification_build_workflow_config,
+    load_daily_trading_workflow_config,
     load_canonical_bundle_experiment_matrix_workflow_config,
     load_canonical_bundle_experiment_workflow_config,
     load_live_dry_run_workflow_config,
@@ -313,6 +314,48 @@ output_dir: artifacts/validation/vectorbt
     config = load_backtester_validation_workflow_config(path)
 
     assert config.output_dir == "artifacts/validation/vectorbt"
+
+
+def test_load_daily_trading_workflow_config_from_nested_yaml(tmp_path) -> None:
+    path = tmp_path / "pipeline_daily.yaml"
+    path.write_text(
+        """
+daily_trading:
+  run:
+    run_name: smoke_daily
+  mode:
+    strict_mode: true
+    best_effort_mode: false
+  research:
+    mode: fast_refresh
+  stages:
+    promote: true
+    build_portfolio: true
+    activate_portfolio: true
+    export_bundle: true
+    paper_run: true
+    report: true
+  configs:
+    research_config: configs/alpha_research.yaml
+    promotion_policy_config: configs/promotion.yaml
+    strategy_portfolio_policy_config: configs/strategy_portfolio.yaml
+  paths:
+    promoted_dir: artifacts/promoted/run_current
+    portfolio_dir: artifacts/strategy_portfolio/run_current
+    activated_dir: artifacts/strategy_portfolio/run_current/activated
+  paper:
+    auto_apply_fills: true
+""".strip(),
+        encoding="utf-8",
+    )
+
+    config = load_daily_trading_workflow_config(path)
+
+    assert config.run_name == "smoke_daily"
+    assert config.research_mode == "fast_refresh"
+    assert config.stages.promote is True
+    assert config.auto_apply_fills is True
+    assert config.activated_dir == "artifacts/strategy_portfolio/run_current/activated"
 
 
 def test_load_canonical_bundle_experiment_workflow_config(tmp_path) -> None:
@@ -1343,6 +1386,7 @@ def test_example_configs_load_from_repo() -> None:
     root = Path(__file__).resolve().parents[1]
 
     pipeline_config = load_pipeline_run_config(root / "configs" / "pipeline_daily.yaml")
+    daily_trading_config = load_daily_trading_workflow_config(root / "configs" / "pipeline_daily.yaml")
     classification_config = load_classification_build_workflow_config(root / "configs" / "classification_build.yaml")
     optimizer_config = load_portfolio_optimizer_workflow_config(root / "configs" / "portfolio_optimizer_research.yaml")
     validation_config = load_backtester_validation_workflow_config(root / "configs" / "backtester_validation.yaml")
@@ -1407,6 +1451,7 @@ def test_example_configs_load_from_repo() -> None:
     minimal_demo_config = load_pipeline_run_config(root / "configs" / "minimal_local_demo.yaml")
 
     assert pipeline_config.schedule_type == "daily"
+    assert daily_trading_config.run_name == "run_current"
     assert classification_config.output_dir == "artifacts/reference/classifications"
     assert optimizer_config.optimizer_name == "min_vol"
     assert validation_config.output_dir == "artifacts/validation/vectorbt"

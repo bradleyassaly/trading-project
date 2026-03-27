@@ -31,7 +31,10 @@ class PaperAccountReport:
 def _read_csv_if_exists(path: Path) -> pd.DataFrame:
     if not path.exists():
         return pd.DataFrame()
-    return pd.read_csv(path)
+    try:
+        return pd.read_csv(path)
+    except pd.errors.EmptyDataError:
+        return pd.DataFrame()
 
 
 def _safe_float(value: float | int | None) -> float:

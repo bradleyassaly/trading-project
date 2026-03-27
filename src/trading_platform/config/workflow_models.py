@@ -598,6 +598,103 @@ class AlphaCycleWorkflowConfig:
 
 
 @dataclass(frozen=True)
+class DailyTradingStageToggles:
+    refresh_inputs: bool = False
+    research: bool = False
+    promote: bool = True
+    build_portfolio: bool = True
+    activate_portfolio: bool = True
+    export_bundle: bool = True
+    paper_run: bool = True
+    report: bool = True
+
+    def enabled_stage_names(self) -> list[str]:
+        return [
+            stage_name
+            for stage_name in (
+                "refresh_inputs",
+                "research",
+                "promote",
+                "build_portfolio",
+                "activate_portfolio",
+                "export_bundle",
+                "paper_run",
+                "report",
+            )
+            if bool(getattr(self, stage_name))
+        ]
+
+
+@dataclass(frozen=True)
+class DailyTradingWorkflowConfig:
+    refresh_config: str | None = None
+    research_config: str | None = None
+    promotion_policy_config: str | None = None
+    strategy_portfolio_policy_config: str | None = None
+    execution_config: str | None = None
+    output_root: str = "artifacts/daily_trading"
+    research_output_dir: str = "artifacts/alpha_research/run_configured"
+    registry_dir: str = "artifacts/alpha_research/run_configured/research_registry"
+    promoted_dir: str = "artifacts/promoted/run_current"
+    portfolio_dir: str = "artifacts/strategy_portfolio/run_current"
+    activated_dir: str = "artifacts/strategy_portfolio/run_current/activated"
+    export_dir: str = "artifacts/strategy_portfolio/run_current/run_bundle_activated"
+    paper_output_dir: str = "artifacts/daily_trading/run_current/paper"
+    paper_state_path: str = "artifacts/daily_trading/run_current/paper_state.json"
+    report_dir: str | None = None
+    run_name: str = "daily_trading"
+    run_id: str | None = None
+    research_mode: str = "skip"
+    strict_mode: bool = True
+    best_effort_mode: bool = False
+    promotion_top_n: int | None = None
+    allow_overwrite: bool = True
+    inactive: bool = False
+    override_validation: bool = False
+    lifecycle_path: str | None = None
+    use_activated_portfolio_for_paper: bool = True
+    fail_if_no_active_strategies: bool = False
+    include_inactive_conditionals_in_reports: bool = True
+    auto_apply_fills: bool = True
+    fail_if_zero_targets_after_validation: bool = False
+    evaluate_conditional_activation: bool | None = None
+    activation_context_sources: list[str] | None = None
+    include_inactive_conditionals_in_output: bool | None = None
+    enable_database_metadata: bool = False
+    database_url: str | None = None
+    database_schema: str | None = None
+    tracking_write_candidates: bool = True
+    tracking_write_metrics: bool = True
+    tracking_write_promotions: bool = True
+    stages: DailyTradingStageToggles = field(default_factory=DailyTradingStageToggles)
+
+    def __post_init__(self) -> None:
+        if not str(self.run_name or "").strip():
+            raise ValueError("run_name must be a non-empty string")
+        if self.research_mode not in {"full", "fast_refresh", "skip"}:
+            raise ValueError("research_mode must be one of: full, fast_refresh, skip")
+        if self.strict_mode and self.best_effort_mode:
+            raise ValueError("strict_mode and best_effort_mode cannot both be true")
+        if self.promotion_top_n is not None and self.promotion_top_n <= 0:
+            raise ValueError("promotion_top_n must be > 0 when provided")
+        if self.stages.refresh_inputs and not self.refresh_config:
+            raise ValueError("refresh_config is required when refresh_inputs stage is enabled")
+        if self.stages.research and self.research_mode in {"full", "fast_refresh"} and not self.research_config:
+            raise ValueError(
+                "research_config is required when research stage is enabled with full or fast_refresh mode"
+            )
+        if self.stages.promote and not self.promotion_policy_config:
+            raise ValueError("promotion_policy_config is required when promote stage is enabled")
+        if self.stages.build_portfolio and not self.strategy_portfolio_policy_config:
+            raise ValueError("strategy_portfolio_policy_config is required when build_portfolio stage is enabled")
+
+    def to_cli_defaults(self) -> dict[str, Any]:
+        payload = asdict(self)
+        payload["stages"] = asdict(self.stages)
+        return payload
+
+
+@dataclass(frozen=True)
 class CanonicalBundleExperimentVariantConfig:
     name: str
     promotion_policy_overrides: dict[str, Any] = field(default_factory=dict)

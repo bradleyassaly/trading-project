@@ -77,7 +77,9 @@ def _write_research_run(
         index=False,
     )
     pd.DataFrame([{"return_drag": 0.05}]).to_csv(implementability_path, index=False)
-    diagnostics_path.write_text(json.dumps({"evaluation_mode": "cross_sectional_long_short"}, indent=2), encoding="utf-8")
+    diagnostics_path.write_text(
+        json.dumps({"evaluation_mode": "cross_sectional_long_short"}, indent=2), encoding="utf-8"
+    )
     approved_model_state_path.write_text(
         json.dumps({"source_artifact_dir": str(run_dir), "promoted_signals": []}, indent=2),
         encoding="utf-8",
@@ -150,7 +152,11 @@ def _write_stale_global_registry(root: Path, *, stale_run_id: str = "run_stale")
                 "timestamp": "2024-01-01T00:00:00+00:00",
                 "signal_family": "synthetic",
                 "promotion_recommendation": {"recommendation": "promotion_candidate", "eligible": True, "reasons": []},
-                "top_metrics": {"mean_spearman_ic": 0.99, "portfolio_sharpe": 9.99, "implementability_return_drag": 0.0},
+                "top_metrics": {
+                    "mean_spearman_ic": 0.99,
+                    "portfolio_sharpe": 9.99,
+                    "implementability_return_drag": 0.0,
+                },
                 "promoted_signal_count": 5,
                 "folds_tested": 6,
                 "candidate_count": 10,
@@ -271,7 +277,9 @@ def _runtime_snapshot(
 ) -> tuple[PaperSignalSnapshot, dict[str, object]]:
     timestamp = pd.Timestamp("2026-03-26")
     ordered_scores = {symbol: score_map.get(symbol) for symbol in symbols if symbol in score_map}
-    score_frame = pd.DataFrame([ordered_scores], index=[timestamp]) if ordered_scores else pd.DataFrame(index=[timestamp])
+    score_frame = (
+        pd.DataFrame([ordered_scores], index=[timestamp]) if ordered_scores else pd.DataFrame(index=[timestamp])
+    )
     close_frame = pd.DataFrame([{symbol: 100.0 for symbol in symbols}], index=[timestamp])
     asset_returns = pd.DataFrame([{symbol: 0.0 for symbol in symbols}], index=[timestamp])
     latest_component_scores = [
@@ -615,18 +623,24 @@ def test_promotion_can_emit_conditional_variant_alongside_unconditional_baseline
     variants = {row["promotion_variant"] for row in result["promoted_rows"]}
     assert result["selected_count"] == 2
     assert variants == {"unconditional", "conditional"}
-    promoted_index = json.loads((tmp_path / "generated_strategies" / "promoted_strategies.json").read_text(encoding="utf-8"))
+    promoted_index = json.loads(
+        (tmp_path / "generated_strategies" / "promoted_strategies.json").read_text(encoding="utf-8")
+    )
     assert promoted_index["summary"]["baseline_count"] == 1
     assert promoted_index["summary"]["conditional_count"] == 1
     assert Path(promoted_index["promoted_condition_summary_path"]).exists()
 
 
-def test_runtime_score_validation_passes_for_live_computable_composite(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_runtime_score_validation_passes_for_live_computable_composite(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     registry_dir = _seed_registry(tmp_path)
 
     monkeypatch.setattr(
         "trading_platform.research.promotion_pipeline.build_composite_paper_snapshot",
-        lambda config: _runtime_snapshot(symbols=list(config.symbols), score_map={"AAPL": 1.0, "MSFT": 0.8, "NVDA": 0.6}),
+        lambda config: _runtime_snapshot(
+            symbols=list(config.symbols), score_map={"AAPL": 1.0, "MSFT": 0.8, "NVDA": 0.6}
+        ),
     )
 
     result = apply_research_promotions(
@@ -645,7 +659,9 @@ def test_runtime_score_validation_passes_for_live_computable_composite(monkeypat
     assert row["runtime_score_validation_pass"] is True
     assert row["runtime_score_validation_reason"] == "runtime_scores_available"
     assert row["runtime_computable_symbol_count"] == 3
-    validation_payload = json.loads((tmp_path / "generated_strategies" / "runtime_score_validation.json").read_text(encoding="utf-8"))
+    validation_payload = json.loads(
+        (tmp_path / "generated_strategies" / "runtime_score_validation.json").read_text(encoding="utf-8")
+    )
     assert validation_payload["summary"]["passed_count"] == 1
 
 
@@ -672,15 +688,21 @@ def test_runtime_score_validation_blocks_non_computable_preset_when_required(
     )
 
     assert result["selected_count"] == 0
-    validation_rows = json.loads((tmp_path / "generated_strategies" / "runtime_score_validation.json").read_text(encoding="utf-8"))["rows"]
+    validation_rows = json.loads(
+        (tmp_path / "generated_strategies" / "runtime_score_validation.json").read_text(encoding="utf-8")
+    )["rows"]
     assert validation_rows[0]["promotion_action"] == "blocked"
     assert validation_rows[0]["validation_reason"] == "empty_signal_scores"
-    promoted_index = json.loads((tmp_path / "generated_strategies" / "promoted_strategies.json").read_text(encoding="utf-8"))
+    promoted_index = json.loads(
+        (tmp_path / "generated_strategies" / "promoted_strategies.json").read_text(encoding="utf-8")
+    )
     assert promoted_index["summary"]["runtime_validation_blocked_count"] >= 1
     assert promoted_index["summary"]["selected_count"] == 0
 
 
-def test_runtime_score_validation_can_emit_shadow_only_promotion(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_runtime_score_validation_can_emit_shadow_only_promotion(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     registry_dir = _seed_registry(tmp_path)
 
     monkeypatch.setattr(
@@ -705,7 +727,9 @@ def test_runtime_score_validation_can_emit_shadow_only_promotion(monkeypatch: py
     assert row["shadow_only"] is True
     assert row["execution_ready"] is False
     assert row["runtime_score_validation_reason"] == "empty_signal_scores"
-    validation_payload = json.loads((tmp_path / "generated_strategies" / "runtime_score_validation.json").read_text(encoding="utf-8"))
+    validation_payload = json.loads(
+        (tmp_path / "generated_strategies" / "runtime_score_validation.json").read_text(encoding="utf-8")
+    )
     assert validation_payload["summary"]["shadow_only_count"] == 1
 
 
@@ -747,6 +771,39 @@ def test_runtime_score_validation_refresh_removes_stale_same_run_promotions(
     assert second["selected_count"] == 0
     promoted_index = json.loads((output_dir / "promoted_strategies.json").read_text(encoding="utf-8"))
     assert promoted_index["strategies"] == []
+
+
+def test_refresh_same_run_preserves_rewritten_current_preset(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    registry_dir = _seed_registry(tmp_path)
+    output_dir = tmp_path / "generated_strategies"
+
+    monkeypatch.setattr(
+        "trading_platform.research.promotion_pipeline.build_composite_paper_snapshot",
+        lambda config: _runtime_snapshot(symbols=list(config.symbols), score_map={"AAPL": 1.0, "MSFT": 0.8}),
+    )
+    first = apply_research_promotions(
+        artifacts_root=tmp_path,
+        registry_dir=registry_dir,
+        output_dir=output_dir,
+        policy=PromotionPolicyConfig(max_strategies_total=1),
+    )
+    first_preset_path = Path(first["promoted_rows"][0]["generated_preset_path"])
+    assert first_preset_path.exists()
+
+    second = apply_research_promotions(
+        artifacts_root=tmp_path,
+        registry_dir=registry_dir,
+        output_dir=output_dir,
+        policy=PromotionPolicyConfig(max_strategies_total=1),
+    )
+
+    second_preset_path = Path(second["promoted_rows"][0]["generated_preset_path"])
+    assert second["selected_count"] == 1
+    assert second_preset_path == first_preset_path
+    assert second_preset_path.exists()
 
 
 def test_promotion_dry_run_and_duplicate_protection(tmp_path: Path) -> None:

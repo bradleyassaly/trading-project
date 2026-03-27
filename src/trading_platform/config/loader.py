@@ -23,6 +23,8 @@ from trading_platform.config.workflow_models import (
     CanonicalBundleExperimentVariantConfig,
     CanonicalBundleExperimentWorkflowConfig,
     ClassificationBuildWorkflowConfig,
+    DailyTradingStageToggles,
+    DailyTradingWorkflowConfig,
     FundamentalsSnapshotWorkflowConfig,
     LiveDryRunWorkflowConfig,
     PaperRunWorkflowConfig,
@@ -461,6 +463,75 @@ def load_alpha_cycle_workflow_config(path: str | Path) -> AlphaCycleWorkflowConf
     return AlphaCycleWorkflowConfig(**payload)
 
 
+def load_daily_trading_workflow_config(path: str | Path) -> DailyTradingWorkflowConfig:
+    data = _read_config_file(Path(path))
+    root_payload = dict(data)
+    payload = dict(root_payload.get("daily_trading") or root_payload)
+    stages_section = _pop_dict_section(payload, "stages")
+    configs_section = _pop_dict_section(payload, "configs")
+    paths_section = _pop_dict_section(payload, "paths")
+    run_section = _pop_dict_section(payload, "run")
+    mode_section = _pop_dict_section(payload, "mode")
+    research_section = _pop_dict_section(payload, "research")
+    promotion_section = _pop_dict_section(payload, "promotion")
+    portfolio_section = _pop_dict_section(payload, "portfolio")
+    activation_section = _pop_dict_section(payload, "activation")
+    paper_section = _pop_dict_section(payload, "paper")
+    tracking_section = _pop_dict_section(payload, "tracking")
+
+    _set_if_missing(payload, "refresh_config", configs_section)
+    _set_if_missing(payload, "research_config", configs_section)
+    _set_if_missing(payload, "promotion_policy_config", configs_section)
+    _set_if_missing(payload, "strategy_portfolio_policy_config", configs_section)
+    _set_if_missing(payload, "execution_config", configs_section)
+
+    _set_if_missing(payload, "output_root", paths_section)
+    _set_if_missing(payload, "research_output_dir", paths_section)
+    _set_if_missing(payload, "registry_dir", paths_section)
+    _set_if_missing(payload, "promoted_dir", paths_section)
+    _set_if_missing(payload, "portfolio_dir", paths_section)
+    _set_if_missing(payload, "activated_dir", paths_section)
+    _set_if_missing(payload, "export_dir", paths_section)
+    _set_if_missing(payload, "paper_output_dir", paths_section)
+    _set_if_missing(payload, "paper_state_path", paths_section)
+    _set_if_missing(payload, "report_dir", paths_section)
+
+    _set_if_missing(payload, "run_name", run_section)
+    _set_if_missing(payload, "run_id", run_section)
+
+    _set_if_missing(payload, "strict_mode", mode_section)
+    _set_if_missing(payload, "best_effort_mode", mode_section)
+
+    _set_if_missing(payload, "research_mode", research_section, "mode")
+
+    _set_if_missing(payload, "promotion_top_n", promotion_section, "top_n")
+    _set_if_missing(payload, "allow_overwrite", promotion_section)
+    _set_if_missing(payload, "inactive", promotion_section)
+    _set_if_missing(payload, "override_validation", promotion_section)
+
+    _set_if_missing(payload, "lifecycle_path", portfolio_section, "lifecycle")
+
+    _set_if_missing(payload, "evaluate_conditional_activation", activation_section)
+    _set_if_missing(payload, "activation_context_sources", activation_section)
+    _set_if_missing(payload, "include_inactive_conditionals_in_output", activation_section)
+
+    _set_if_missing(payload, "use_activated_portfolio_for_paper", paper_section)
+    _set_if_missing(payload, "fail_if_no_active_strategies", paper_section)
+    _set_if_missing(payload, "include_inactive_conditionals_in_reports", paper_section)
+    _set_if_missing(payload, "auto_apply_fills", paper_section)
+    _set_if_missing(payload, "fail_if_zero_targets_after_validation", paper_section)
+
+    _set_if_missing(payload, "enable_database_metadata", tracking_section, "database_enabled")
+    _set_if_missing(payload, "database_url", tracking_section)
+    _set_if_missing(payload, "database_schema", tracking_section)
+    _set_if_missing(payload, "tracking_write_candidates", tracking_section, "write_candidates")
+    _set_if_missing(payload, "tracking_write_metrics", tracking_section, "write_metrics")
+    _set_if_missing(payload, "tracking_write_promotions", tracking_section, "write_promotions")
+
+    payload["stages"] = DailyTradingStageToggles(**stages_section)
+    return DailyTradingWorkflowConfig(**payload)
+
+
 def load_canonical_bundle_experiment_workflow_config(path: str | Path) -> CanonicalBundleExperimentWorkflowConfig:
     data = _read_config_file(Path(path))
     payload = dict(data)
@@ -529,6 +600,7 @@ def load_multi_strategy_portfolio_config(path: str | Path) -> MultiStrategyPortf
 def load_pipeline_run_config(path: str | Path) -> PipelineRunConfig:
     data = _read_config_file(Path(path))
     payload = dict(data)
+    payload.pop("daily_trading", None)
     payload["stages"] = OrchestrationStageToggles(**payload.get("stages", {}))
     return PipelineRunConfig(**payload)
 

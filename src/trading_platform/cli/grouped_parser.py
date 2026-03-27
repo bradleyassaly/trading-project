@@ -62,6 +62,7 @@ from trading_platform.cli.commands.paper_run_multi_strategy import cmd_paper_run
 from trading_platform.cli.commands.paper_run_scheduled import cmd_paper_run_scheduled
 from trading_platform.cli.commands.pipeline import cmd_pipeline
 from trading_platform.cli.commands.pipeline_alpha_cycle import cmd_pipeline_alpha_cycle
+from trading_platform.cli.commands.pipeline_daily_trading import cmd_pipeline_daily_trading
 from trading_platform.cli.commands.pipeline_run import (
     cmd_pipeline_run,
     cmd_pipeline_run_daily,
@@ -2814,6 +2815,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--config", type=str, required=True, help="Path to the alpha cycle JSON/YAML config."
     )
     ops_pipeline_alpha_cycle.set_defaults(func=cmd_pipeline_alpha_cycle)
+    ops_pipeline_daily_trading = ops_pipeline_subparsers.add_parser(
+        "daily-trading", help="Run the automated daily paper-trading workflow"
+    )
+    ops_pipeline_daily_trading.add_argument(
+        "--config", type=str, required=True, help="Path to the daily-trading JSON/YAML config."
+    )
+    ops_pipeline_daily_trading.set_defaults(func=cmd_pipeline_daily_trading)
 
     ops_monitor = ops_subparsers.add_parser("monitor", help="Monitoring, alerting, and dashboard data builders")
     ops_monitor_subparsers = ops_monitor.add_subparsers(dest="ops_monitor_command", required=True)
@@ -3444,6 +3452,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--config", type=str, required=True, help="Path to the alpha cycle JSON/YAML config."
     )
     pipeline_alpha_cycle.set_defaults(func=cmd_pipeline_alpha_cycle)
+    pipeline_daily_trading = pipeline_subparsers.add_parser(
+        "daily-trading", help="Run the automated daily paper-trading workflow"
+    )
+    pipeline_daily_trading.add_argument(
+        "--config", type=str, required=True, help="Path to the daily-trading JSON/YAML config."
+    )
+    pipeline_daily_trading.set_defaults(func=cmd_pipeline_daily_trading)
 
     execution_parser = subparsers.add_parser("execution", help="Execution realism simulation commands")
     execution_subparsers = execution_parser.add_subparsers(dest="execution_command", required=True)

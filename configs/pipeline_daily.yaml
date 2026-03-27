@@ -29,3 +29,48 @@ stages:
   live_dry_run: true
   reporting: true
   monitoring: true
+
+daily_trading:
+  run:
+    run_name: run_current
+  mode:
+    strict_mode: true
+    best_effort_mode: false
+  stages:
+    refresh_inputs: false
+    research: false
+    promote: true
+    build_portfolio: true
+    activate_portfolio: true
+    export_bundle: true
+    paper_run: true
+    report: true
+  research:
+    mode: skip
+  configs:
+    promotion_policy_config: configs/promotion.yaml
+    strategy_portfolio_policy_config: configs/strategy_portfolio.yaml
+  paths:
+    output_root: artifacts/daily_trading
+    research_output_dir: artifacts/alpha_research/run_configured
+    registry_dir: artifacts/alpha_research/run_configured/research_registry
+    promoted_dir: artifacts/promoted/run_current
+    portfolio_dir: artifacts/strategy_portfolio/run_current
+    activated_dir: artifacts/strategy_portfolio/run_current/activated
+    export_dir: artifacts/strategy_portfolio/run_current/run_bundle_activated
+    paper_output_dir: artifacts/daily_trading/run_current/paper
+    paper_state_path: artifacts/daily_trading/run_current/paper_state.json
+    report_dir: artifacts/daily_trading/run_current/report
+  paper:
+    use_activated_portfolio_for_paper: true
+    fail_if_no_active_strategies: false
+    include_inactive_conditionals_in_reports: true
+    auto_apply_fills: true
+    fail_if_zero_targets_after_validation: false
+  tracking:
+    database_enabled: false
+    database_url:
+    database_schema:
+    write_candidates: true
+    write_metrics: true
+    write_promotions: true

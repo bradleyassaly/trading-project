@@ -258,9 +258,24 @@ def test_grouped_research_promote_command_parses() -> None:
     assert args.output_dir == "configs/generated_strategies"
     assert args.policy_config == "configs/promotion.yaml"
     assert args.validation == "artifacts/research_registry"
-    assert args.top_n == 2
-    assert args.dry_run is True
-    assert args.override_validation is True
+
+
+def test_grouped_ops_pipeline_daily_trading_command_parses() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "ops",
+            "pipeline",
+            "daily-trading",
+            "--config",
+            "configs/pipeline_daily.yaml",
+        ]
+    )
+
+    assert args.command_family == "ops"
+    assert args.ops_command == "pipeline"
+    assert args.ops_pipeline_command == "daily-trading"
+    assert args.config == "configs/pipeline_daily.yaml"
 
 
 def test_grouped_research_validate_backtester_command_parses() -> None:

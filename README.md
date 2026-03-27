@@ -701,6 +701,48 @@ The replay command writes step-local artifacts under `steps/YYYY-MM-DD/` plus ro
 
 The replay engine uses requested business dates by default. If a requested date cannot be matched exactly to the target-construction as-of date, that step is skipped and recorded in the replay summary instead of silently using a different day.
 
+For day-to-day paper operations, use the additive daily orchestration command:
+
+```bash
+trading-cli ops pipeline daily-trading --config configs/pipeline_daily.yaml
+```
+
+`ops pipeline daily-trading` is an artifact-first wrapper around the existing services. It can:
+
+- skip or refresh inputs
+- run full research, fast-refresh research approval, or skip research entirely
+- run promotion with runtime-computable guardrails
+- build and activate the strategy portfolio
+- export the active-only bundle
+- run multi-strategy paper execution
+- write a compact daily summary plus paper account report
+
+The example `configs/pipeline_daily.yaml` keeps the legacy top-level pipeline config intact and adds a nested `daily_trading` section for the new workflow. The validated default path reuses current artifacts and writes:
+
+- `artifacts/daily_trading/run_current/daily_trading_summary.json`
+- `artifacts/daily_trading/run_current/daily_trading_summary.md`
+- `artifacts/daily_trading/run_current/paper/...`
+- `artifacts/daily_trading/run_current/report/paper_account_report.json`
+
+The daily summary records stage outcomes plus the key paper handoff counts:
+
+- `promoted_strategy_count`
+- `promoted_unconditional_count`
+- `promoted_conditional_count`
+- `selected_portfolio_strategy_count`
+- `activated_unconditional_count`
+- `activated_conditional_count`
+- `inactive_conditional_count`
+- `requested_symbol_count`
+- `usable_symbol_count`
+- `pre_validation_target_symbol_count`
+- `post_validation_target_symbol_count`
+- `executable_order_count`
+- `fill_count`
+- `zero_target_reason`
+
+Use `research.mode: fast_refresh` for lightweight approval/registry refresh days, and `research.mode: full` for full recompute days. If DB tracking is enabled in the nested `tracking` section, the workflow reuses the existing bounded research/promotion lineage tracking without changing the artifact contracts.
+
 The portfolio policy can now control conditional handling through:
 
 - `include_conditional_strategies`
@@ -1005,6 +1047,7 @@ Experimental / advanced:
 - `paper run`
 - `paper schedule`
 - `paper run-multi-strategy`
+- `paper replay-multi-strategy`
 - `paper daily`
 - `paper report`
 
@@ -1054,6 +1097,7 @@ Main pages and APIs:
 - `ops pipeline run-daily`
 - `ops pipeline run-weekly`
 - `ops pipeline alpha-cycle`
+- `ops pipeline daily-trading`
 - `ops monitor latest`
 - `ops monitor run-health`
 - `ops monitor strategy-health`

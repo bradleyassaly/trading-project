@@ -113,6 +113,19 @@ def test_build_paper_account_report_handles_empty_ledgers(tmp_path: Path) -> Non
     assert report.open_position_count == 0
 
 
+def test_build_paper_account_report_handles_empty_csv_files(tmp_path: Path) -> None:
+    ledger_dir = tmp_path / "ledgers"
+    ledger_dir.mkdir(parents=True, exist_ok=True)
+    (ledger_dir / "fills.csv").write_text("", encoding="utf-8")
+    (ledger_dir / "equity_curve.csv").write_text("", encoding="utf-8")
+
+    report = build_paper_account_report(tmp_path)
+
+    assert report.as_of is None
+    assert report.latest_equity == 0.0
+    assert report.total_fills == 0
+
+
 def test_write_paper_account_report_writes_files(tmp_path: Path) -> None:
     ledger_dir = tmp_path / "ledgers"
     ledger_dir.mkdir(parents=True, exist_ok=True)
