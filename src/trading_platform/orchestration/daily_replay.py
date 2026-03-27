@@ -10,6 +10,7 @@ import pandas as pd
 
 from trading_platform.config.workflow_models import DailyReplayWorkflowConfig, DailyTradingWorkflowConfig
 from trading_platform.orchestration.daily_trading import DailyTradingResult, run_daily_trading_pipeline
+from trading_platform.portfolio.strategy_execution_handoff import resolve_strategy_execution_handoff
 
 
 @dataclass(frozen=True)
@@ -20,6 +21,7 @@ class DailyReplayDayResult:
     error_message: str | None
     summary_json_path: str | None
     trade_decision_log_path: str | None
+    input_summary_path: str | None
     state_before_path: str | None
     state_after_path: str | None
 
@@ -87,17 +89,32 @@ def _build_day_config(
     payload = base_config.to_cli_defaults()
     payload["stages"] = base_config.stages
     run_dir = replay_root / requested_date
+    research_stage_writes = bool(base_config.stages.research and base_config.research_mode in {"full", "fast_refresh"})
+    promote_stage_writes = bool(base_config.stages.promote)
+    portfolio_stage_writes = bool(base_config.stages.build_portfolio)
+    activate_stage_writes = bool(base_config.stages.activate_portfolio)
+    export_stage_writes = bool(base_config.stages.export_bundle)
     payload.update(
         {
             "output_root": str(replay_root),
             "run_name": requested_date,
             "run_id": None,
-            "research_output_dir": str(run_dir / "research"),
-            "registry_dir": str(run_dir / "research" / "research_registry"),
-            "promoted_dir": str(run_dir / "promoted"),
-            "portfolio_dir": str(run_dir / "strategy_portfolio"),
-            "activated_dir": str(run_dir / "strategy_portfolio" / "activated"),
-            "export_dir": str(run_dir / "run_bundle"),
+            "research_output_dir": str(run_dir / "research")
+            if research_stage_writes
+            else base_config.research_output_dir,
+            "registry_dir": str(run_dir / "research" / "research_registry")
+            if promote_stage_writes
+            else base_config.registry_dir,
+            "promoted_dir": str(run_dir / "promoted") if promote_stage_writes else base_config.promoted_dir,
+            "portfolio_dir": str(run_dir / "strategy_portfolio")
+            if portfolio_stage_writes
+            else base_config.portfolio_dir,
+            "activated_dir": (
+                str(run_dir / "strategy_portfolio" / "activated")
+                if activate_stage_writes
+                else base_config.activated_dir
+            ),
+            "export_dir": str(run_dir / "run_bundle") if export_stage_writes else base_config.export_dir,
             "paper_output_dir": str(run_dir / "paper"),
             "paper_state_path": str(state_path),
             "report_dir": str(run_dir / "report"),
@@ -105,6 +122,165 @@ def _build_day_config(
         }
     )
     return DailyTradingWorkflowConfig(**payload)
+
+
+def _count_rows(path: Path, *, key: str) -> int:
+    payload = _read_json(path)
+    return int(len(payload.get(key, []))) if payload else 0
+
+
+def _count_selected_strategy_rows(path: Path) -> int:
+    payload = _read_json(path)
+    return int(len(payload.get("selected_strategies", []))) if payload else 0
+
+
+def _count_active_strategy_rows(path: Path) -> int:
+    payload = _read_json(path)
+    if not payload:
+        return 0
+    return int(len(payload.get("active_strategies", []))) or int(
+        payload.get("summary", {}).get("active_row_count", 0) or 0
+    )
+
+
+def _resolve_replay_universe_inputs(day_config: DailyTradingWorkflowConfig) -> tuple[list[str], list[str], list[str]]:
+    canonical_input = Path(day_config.activated_dir) / "activated_strategy_portfolio.json"
+    if not canonical_input.exists() or not day_config.use_activated_portfolio_for_paper:
+        canonical_input = Path(day_config.portfolio_dir) / "strategy_portfolio.json"
+    if not canonical_input.exists():
+        return [], [], []
+    try:
+        handoff = resolve_strategy_execution_handoff(canonical_input)
+    except Exception:
+        return [], [], []
+    if handoff.portfolio_config is None:
+        return [], [], []
+    symbols: set[str] = set()
+    universe_paths: list[str] = []
+    preset_paths: list[str] = []
+    for sleeve in handoff.portfolio_config.sleeves:
+        if not sleeve.preset_path:
+            continue
+        preset_path = Path(str(sleeve.preset_path))
+        preset_paths.append(str(preset_path))
+        if not preset_path.exists():
+            continue
+        payload = _read_json(preset_path)
+        params = dict(payload.get("params") or {})
+        for symbol in params.get("symbols", []) or []:
+            symbols.add(str(symbol))
+        for maybe_path_key in ("universe_membership_path", "group_map_path", "reference_data_root"):
+            value = params.get(maybe_path_key)
+            if value:
+                universe_paths.append(str(value))
+    return sorted(symbols), sorted(dict.fromkeys(universe_paths)), sorted(dict.fromkeys(preset_paths))
+
+
+def _build_validation_drop_reason_counts(day_dir: Path) -> dict[str, int]:
+    coverage_path = day_dir / "paper" / "execution_symbol_coverage.csv"
+    if not coverage_path.exists():
+        return {}
+    try:
+        frame = pd.read_csv(coverage_path)
+    except (pd.errors.EmptyDataError, pd.errors.ParserError):
+        return {}
+    if frame.empty or "skip_reason" not in frame.columns:
+        return {}
+    filtered = frame["skip_reason"].fillna("").astype(str)
+    filtered = filtered[filtered != ""]
+    if filtered.empty:
+        return {}
+    return {str(index): int(value) for index, value in filtered.value_counts().items()}
+
+
+def _count_csv_rows(path: str | None) -> int:
+    if not path or not Path(path).exists():
+        return 0
+    try:
+        frame = pd.read_csv(path)
+    except (pd.errors.EmptyDataError, pd.errors.ParserError):
+        return 0
+    return int(len(frame.index))
+
+
+def _write_replay_day_input_summary(
+    *,
+    replay_root: Path,
+    requested_date: str,
+    day_config: DailyTradingWorkflowConfig,
+    day_result: DailyReplayDayResult,
+) -> str:
+    day_dir = replay_root / requested_date
+    research_output_dir = Path(day_config.research_output_dir)
+    registry_dir = Path(day_config.registry_dir)
+    promoted_dir = Path(day_config.promoted_dir)
+    portfolio_dir = Path(day_config.portfolio_dir)
+    activated_dir = Path(day_config.activated_dir)
+    paper_dir = Path(day_config.paper_output_dir)
+    daily_summary = _load_daily_summary(day_dir)
+    paper_summary = _load_paper_summary(day_dir)
+    research_registry_path = registry_dir / "research_registry.json"
+    promoted_index_path = promoted_dir / "promoted_strategies.json"
+    portfolio_json_path = portfolio_dir / "strategy_portfolio.json"
+    activated_json_path = activated_dir / "activated_strategy_portfolio.json"
+    universe_symbols, universe_artifact_paths, strategy_preset_paths = _resolve_replay_universe_inputs(day_config)
+    research_registry = _read_json(research_registry_path)
+    missing_input_warnings: list[str] = []
+    if day_config.stages.promote and not (research_output_dir.exists() and research_registry_path.exists()):
+        missing_input_warnings.append("missing_research_artifacts_for_promotion")
+    if day_config.stages.promote and int((research_registry.get("summary") or {}).get("run_count", 0) or 0) == 0:
+        missing_input_warnings.append("empty_research_registry_for_promotion")
+    if day_config.stages.build_portfolio and not promoted_index_path.exists():
+        missing_input_warnings.append("missing_promoted_artifact")
+    if day_config.stages.build_portfolio and _count_rows(promoted_index_path, key="strategies") == 0:
+        missing_input_warnings.append("zero_promoted_strategies")
+    if day_config.stages.activate_portfolio and not portfolio_json_path.exists():
+        missing_input_warnings.append("missing_strategy_portfolio_artifact")
+    if day_config.stages.paper_run and not activated_json_path.exists() and not portfolio_json_path.exists():
+        missing_input_warnings.append("missing_portfolio_input_for_paper")
+    payload = {
+        "replay_date": requested_date,
+        "daily_status": day_result.status,
+        "artifact_paths_used": {
+            "research_output_dir": str(research_output_dir),
+            "research_registry_path": str(research_registry_path),
+            "promoted_dir": str(promoted_dir),
+            "promoted_index_path": str(promoted_index_path),
+            "portfolio_dir": str(portfolio_dir),
+            "portfolio_json_path": str(portfolio_json_path),
+            "activated_dir": str(activated_dir),
+            "activated_json_path": str(activated_json_path),
+            "paper_output_dir": str(paper_dir),
+            "trade_decision_log_path": day_result.trade_decision_log_path,
+        },
+        "artifact_exists": {
+            "research_output_dir": research_output_dir.exists(),
+            "research_registry_path": research_registry_path.exists(),
+            "promoted_index_path": promoted_index_path.exists(),
+            "portfolio_json_path": portfolio_json_path.exists(),
+            "activated_json_path": activated_json_path.exists(),
+            "paper_output_dir": paper_dir.exists(),
+        },
+        "universe_artifact_paths_used": universe_artifact_paths,
+        "universe_symbol_count": len(universe_symbols),
+        "strategy_preset_paths_used": strategy_preset_paths,
+        "research_run_count": int((research_registry.get("summary") or {}).get("run_count", 0) or 0),
+        "promoted_strategy_count": _count_rows(promoted_index_path, key="strategies"),
+        "selected_strategy_count": _count_selected_strategy_rows(portfolio_json_path),
+        "active_strategy_count": _count_active_strategy_rows(activated_json_path),
+        "requested_symbol_count": int(paper_summary.get("requested_symbol_count", 0) or 0),
+        "usable_symbol_count": int(paper_summary.get("usable_symbol_count", 0) or 0),
+        "target_construction_ran": (paper_dir / "allocation_summary.json").exists(),
+        "validation_removed_all_symbols": bool(paper_summary.get("requested_symbol_count", 0))
+        and int(paper_summary.get("usable_symbol_count", 0) or 0) == 0,
+        "validation_drop_reason_counts": _build_validation_drop_reason_counts(day_dir),
+        "decision_log_rows_written": _count_csv_rows(day_result.trade_decision_log_path),
+        "missing_input_warnings": sorted(dict.fromkeys(missing_input_warnings)),
+        "stage_statuses": dict((daily_summary or {}).get("stage_statuses") or {}),
+    }
+    output_path = day_dir / "replay_day_input_summary.json"
+    output_path.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
+    return str(output_path)
 
 
 def _day_status_failed(status: str) -> bool:
@@ -162,6 +338,7 @@ def _compute_replay_summary(
     daily_metric_rows: list[dict[str, Any]],
     trade_log_rows: list[dict[str, Any]],
     strategy_activity_rows: list[dict[str, Any]],
+    replay_day_input_summaries: list[dict[str, Any]],
     state_transition_consistent: bool,
     holdings_changed: bool,
     aborted: bool,
@@ -169,6 +346,7 @@ def _compute_replay_summary(
     metrics_frame = pd.DataFrame(daily_metric_rows)
     activity_frame = pd.DataFrame(strategy_activity_rows)
     trade_frame = pd.DataFrame(trade_log_rows)
+    input_frame = pd.DataFrame(replay_day_input_summaries)
 
     total_order_count = (
         int(metrics_frame["executable_order_count"].sum()) if "executable_order_count" in metrics_frame else 0
@@ -218,7 +396,8 @@ def _compute_replay_summary(
     if "current_equity" in metrics_frame and not metrics_frame.empty:
         equity_series = metrics_frame["current_equity"].astype(float)
         rolling_max = equity_series.cummax().replace(0.0, pd.NA)
-        drawdowns = ((equity_series / rolling_max) - 1.0).fillna(0.0)
+        raw_drawdowns = (equity_series / rolling_max) - 1.0
+        drawdowns = raw_drawdowns.where(pd.notna(raw_drawdowns), 0.0)
         max_drawdown = float(drawdowns.min())
     else:
         max_drawdown = 0.0
@@ -292,6 +471,10 @@ def _compute_replay_summary(
         warnings.append("missing dashboard/report artifacts")
     if not state_transition_consistent:
         warnings.append("inconsistent state transitions")
+    if not input_frame.empty and any(
+        bool(rows) for rows in input_frame.get("missing_input_warnings", pd.Series(dtype=object)).tolist()
+    ):
+        warnings.append("missing replay upstream inputs")
     if config.replay.min_expected_trade_days is not None and trade_day_count < config.replay.min_expected_trade_days:
         warnings.append("trade day count below configured expectation")
     if (
@@ -332,6 +515,14 @@ def _compute_replay_summary(
         "readiness_flags": readiness_flags,
         "warnings": warnings,
         "aborted": aborted,
+        "missing_input_days": [
+            {
+                "date": str(row.get("replay_date")),
+                "warnings": list(row.get("missing_input_warnings") or []),
+            }
+            for row in replay_day_input_summaries
+            if row.get("missing_input_warnings")
+        ],
     }
     return summary, warnings, readiness_flags
 
@@ -436,6 +627,7 @@ def run_daily_replay(config: DailyReplayWorkflowConfig) -> DailyReplayResult:
     daily_metric_rows: list[dict[str, Any]] = []
     trade_log_rows: list[dict[str, Any]] = []
     strategy_activity_rows: list[dict[str, Any]] = []
+    replay_day_input_summaries: list[dict[str, Any]] = []
     previous_state_after_payload: str | None = None
     state_transition_consistent = True
     position_signatures: list[str] = []
@@ -510,10 +702,29 @@ def run_daily_replay(config: DailyReplayWorkflowConfig) -> DailyReplayResult:
                 trade_decision_log_path=str(day_dir / "trade_decision_log.csv")
                 if (day_dir / "trade_decision_log.csv").exists()
                 else None,
+                input_summary_path=None,
                 state_before_path=state_before_path,
                 state_after_path=state_after_path,
             )
         )
+        replay_day_input_summary_path = _write_replay_day_input_summary(
+            replay_root=replay_root,
+            requested_date=requested_date,
+            day_config=day_config,
+            day_result=day_results[-1],
+        )
+        day_results[-1] = DailyReplayDayResult(
+            requested_date=day_results[-1].requested_date,
+            run_dir=day_results[-1].run_dir,
+            status=day_results[-1].status,
+            error_message=day_results[-1].error_message,
+            summary_json_path=day_results[-1].summary_json_path,
+            trade_decision_log_path=day_results[-1].trade_decision_log_path,
+            input_summary_path=replay_day_input_summary_path,
+            state_before_path=day_results[-1].state_before_path,
+            state_after_path=day_results[-1].state_after_path,
+        )
+        replay_day_input_summaries.append(_read_json(Path(replay_day_input_summary_path)))
         if (
             (day_error_message or (result is not None and _day_status_failed(result.status)))
             and config.stop_on_error
@@ -530,6 +741,7 @@ def run_daily_replay(config: DailyReplayWorkflowConfig) -> DailyReplayResult:
         daily_metric_rows=daily_metric_rows,
         trade_log_rows=trade_log_rows,
         strategy_activity_rows=strategy_activity_rows,
+        replay_day_input_summaries=replay_day_input_summaries,
         state_transition_consistent=state_transition_consistent,
         holdings_changed=len(set(position_signatures)) > 1,
         aborted=aborted,

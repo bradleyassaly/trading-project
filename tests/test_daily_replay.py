@@ -11,7 +11,7 @@ from trading_platform.config.workflow_models import (
     DailyReplayTuningConfig,
     DailyTradingWorkflowConfig,
 )
-from trading_platform.orchestration.daily_replay import build_daily_replay_dates, run_daily_replay
+from trading_platform.orchestration.daily_replay import _build_day_config, build_daily_replay_dates, run_daily_replay
 from trading_platform.orchestration.daily_trading import DailyTradingResult
 
 
@@ -158,6 +158,37 @@ def test_build_daily_replay_dates_supports_range_and_dates_file(tmp_path: Path) 
     ]
 
 
+def test_build_day_config_preserves_upstream_inputs_when_research_is_skipped(tmp_path: Path) -> None:
+    base = DailyTradingWorkflowConfig(
+        run_name="base",
+        output_root=str(tmp_path / "daily"),
+        research_output_dir=str(tmp_path / "alpha_research" / "run_configured"),
+        registry_dir=str(tmp_path / "alpha_research" / "run_configured" / "research_registry"),
+        promoted_dir=str(tmp_path / "promoted" / "run_current"),
+        portfolio_dir=str(tmp_path / "strategy_portfolio" / "run_current"),
+        activated_dir=str(tmp_path / "strategy_portfolio" / "run_current" / "activated"),
+        export_dir=str(tmp_path / "strategy_portfolio" / "run_current" / "run_bundle_activated"),
+        paper_output_dir=str(tmp_path / "daily" / "run_current" / "paper"),
+        paper_state_path=str(tmp_path / "daily" / "run_current" / "paper_state.json"),
+        report_dir=str(tmp_path / "daily" / "run_current" / "report"),
+        promotion_policy_config="configs/promotion.yaml",
+        strategy_portfolio_policy_config="configs/strategy_portfolio.yaml",
+        research_mode="skip",
+    )
+
+    day_config = _build_day_config(
+        base,
+        replay_root=tmp_path / "replay",
+        requested_date="2025-01-03",
+        state_path=tmp_path / "replay" / "replay_state.json",
+    )
+
+    assert day_config.research_output_dir == base.research_output_dir
+    assert day_config.promoted_dir == str(tmp_path / "replay" / "2025-01-03" / "promoted")
+    assert day_config.portfolio_dir == str(tmp_path / "replay" / "2025-01-03" / "strategy_portfolio")
+    assert day_config.paper_output_dir == str(tmp_path / "replay" / "2025-01-03" / "paper")
+
+
 def test_run_daily_replay_writes_day_folders_and_carries_state(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _install_fake_daily_runner(monkeypatch)
     config = DailyReplayWorkflowConfig(
@@ -173,7 +204,7 @@ def test_run_daily_replay_writes_day_folders_and_carries_state(monkeypatch: pyte
 
     result = run_daily_replay(config)
 
-    assert result.status == "succeeded"
+    assert result.status == "warning"
     assert (tmp_path / "replay" / "2025-01-03" / "daily_trading_summary.json").exists()
     assert (tmp_path / "replay" / "2025-01-06" / "daily_trading_summary.json").exists()
     assert (tmp_path / "replay" / "2025-01-07" / "daily_trading_summary.json").exists()
@@ -188,6 +219,9 @@ def test_run_daily_replay_writes_day_folders_and_carries_state(monkeypatch: pyte
     assert summary["trade_day_count"] == 2
     assert summary["no_op_day_count"] == 1
     assert summary["failed_day_count"] == 0
+    assert summary["avg_requested_symbol_count"] > 0
+    assert summary["avg_usable_symbol_count"] > 0
+    assert (tmp_path / "replay" / "2025-01-03" / "replay_day_input_summary.json").exists()
     assert (tmp_path / "replay" / "replay_daily_metrics.csv").exists()
     assert (tmp_path / "replay" / "replay_trade_log.csv").exists()
     assert (tmp_path / "replay" / "replay_strategy_activity.csv").exists()
@@ -231,3 +265,47 @@ def test_run_daily_replay_stop_on_error_aborts(monkeypatch: pytest.MonkeyPatch, 
     assert result.status == "partial_failed"
     assert len(result.day_results) == 2
     assert result.summary["aborted"] is True
+
+
+def test_run_daily_replay_surfaces_missing_research_input_warning(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    def fake_run(config, *, replay_as_of_date=None, replay_settings=None):
+        run_dir = Path(config.output_root) / config.run_name
+        run_dir.mkdir(parents=True, exist_ok=True)
+        _write_json(run_dir / "daily_trading_summary.json", {"status": "warning", "active_strategy_count": 0})
+        return DailyTradingResult(
+            run_name=config.run_name,
+            run_id=None,
+            run_dir=str(run_dir),
+            started_at="2026-03-27T00:00:00+00:00",
+            ended_at="2026-03-27T00:00:01+00:00",
+            duration_seconds=1.0,
+            status="warning",
+            stage_records=[],
+            warnings=[],
+            errors=[],
+            summary_json_path=str(run_dir / "daily_trading_summary.json"),
+            summary_md_path=str(run_dir / "daily_trading_summary.md"),
+            key_artifacts={},
+        )
+
+    monkeypatch.setattr("trading_platform.orchestration.daily_replay.run_daily_trading_pipeline", fake_run)
+    config = DailyReplayWorkflowConfig(
+        daily_trading=_base_daily_config(tmp_path),
+        output_dir=str(tmp_path / "replay"),
+        start_date="2025-01-03",
+        end_date="2025-01-03",
+        stop_on_error=True,
+        continue_on_error=False,
+        replay=DailyReplayTuningConfig(),
+    )
+
+    result = run_daily_replay(config)
+
+    input_summary = json.loads(
+        (tmp_path / "replay" / "2025-01-03" / "replay_day_input_summary.json").read_text(encoding="utf-8")
+    )
+    assert "missing_research_artifacts_for_promotion" in input_summary["missing_input_warnings"]
+    assert "empty_research_registry_for_promotion" in input_summary["missing_input_warnings"]
+    assert "missing replay upstream inputs" in result.summary["warnings"]

@@ -948,11 +948,15 @@ def run_daily_trading_pipeline(
                     "promoted_index_path": str(promotion_result.get("promoted_index_path", "")),
                 }
             )
+            if int(registry_bundle.get("run_count") or 0) == 0:
+                record.warnings.append("empty_research_registry")
+                warnings.append(f"promotion stage found zero research runs under artifacts_root={artifacts_root}")
             if int(promotion_result.get("selected_count") or 0) == 0:
                 record.status = "warning"
                 record.warnings.append("zero_promotions")
                 warnings.append("promotion stage produced zero promoted strategies")
             return {
+                "artifacts_root": str(artifacts_root),
                 **{key: str(value) if isinstance(value, Path) else value for key, value in registry_bundle.items()},
                 **{
                     key: str(value) if isinstance(value, Path) else value

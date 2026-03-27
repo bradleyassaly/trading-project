@@ -771,6 +771,8 @@ trading-cli ops pipeline replay-daily \
 
 `ops pipeline replay-daily` reuses the same artifact-first daily trading pipeline, but runs it sequentially across a historical date set instead of a live schedule. Replay carries a persistent paper state forward between days, writes one folder per replay date, and produces replay-level diagnostics so activity and stability can be evaluated before longer paper-trading runs.
 
+Replay depends on upstream artifact inputs in the same way the daily pipeline does. In the common `research.mode: skip` configuration, replay expects prebuilt research artifacts under the configured `daily_trading.paths.research_output_dir`, then rebuilds per-day promotion, portfolio, activation, paper, and report artifacts from that input. Replay does not require rebuilding historical research artifacts unless the research stage is explicitly enabled.
+
 Expected replay output structure:
 
 - `artifacts/daily_replay/run_current/2025-01-03/daily_trading_summary.json`
@@ -785,6 +787,18 @@ Expected replay output structure:
 
 The per-day `trade_decision_log.csv` makes no-op days interpretable. It records candidate symbols, target and current weights/positions, the final action, and an `action_reason` such as `enter_new_position`, `exit_position`, `rebalance_weight_change`, or `hold_within_tolerance`.
 
+Each replay day now also writes `replay_day_input_summary.json`. Check this first when replay looks inert. It records:
+
+- the effective replay date
+- the resolved artifact paths used for research, promotion, portfolio, activation, and paper stages
+- whether each required upstream artifact exists
+- research run count, promoted strategy count, selected strategy count, and active strategy count
+- universe symbol count inferred from the active strategy preset inputs
+- requested symbol count and usable symbol count
+- whether target construction ran
+- validation drop reasons when symbols are filtered out
+- missing input warnings such as `missing_research_artifacts_for_promotion` or `missing_portfolio_input_for_paper`
+
 How to read replay results:
 
 - `no_op_day_count`: days where the pipeline ran normally but produced no executable rebalance orders.
@@ -794,6 +808,24 @@ How to read replay results:
 - `readiness_flags`: quick checks for stability, trade generation, state persistence consistency, multi-strategy activity, and diagnostics completeness.
 
 Replay-only testing knobs live under the nested `daily_replay.replay` config section. These are opt-in and do not change normal daily-trading defaults. They support light activity testing such as relaxing replay thresholds, setting minimum expected trade counts, and overriding minimum signal strength or maximum per-strategy weight during replay validation only.
+
+When `requested_symbol_count = 0`, check `replay_day_input_summary.json` in this order:
+
+- `promoted_strategy_count`
+- `selected_strategy_count`
+- `active_strategy_count`
+- `missing_input_warnings`
+
+If promotion is already zero, replay is not reaching a real paper decision stage and the issue is upstream of trade generation.
+
+When `usable_symbol_count = 0` but `requested_symbol_count > 0`, check:
+
+- `validation_drop_reason_counts`
+- `execution_data_availability_summary.json`
+- `sleeve_target_diagnostics.csv`
+- `execution_symbol_coverage.csv`
+
+That indicates the replay reached target construction, but market data, validation, or execution-availability filters removed the names later in the path.
 
 The portfolio policy can now control conditional handling through:
 
