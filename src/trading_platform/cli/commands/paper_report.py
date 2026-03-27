@@ -42,7 +42,9 @@ def cmd_paper_report(args) -> None:
             print(f"  {name}: {path}")
     if getattr(args, "quantstats_output_dir", None):
         equity_curve_path = account_dir / "portfolio_equity_curve.csv"
-        quantstats_input_path = Path(args.quantstats_output_dir) / "_quantstats_input.csv"
+        quantstats_output_dir = Path(args.quantstats_output_dir)
+        quantstats_output_dir.mkdir(parents=True, exist_ok=True)
+        quantstats_input_path = quantstats_output_dir / "_quantstats_input.csv"
         if equity_curve_path.exists():
             frame = pd.read_csv(equity_curve_path)
             if not frame.empty and "equity" in frame.columns:
@@ -56,7 +58,7 @@ def cmd_paper_report(args) -> None:
                     paths = maybe_run_quantstats_report(
                         enabled=True,
                         returns_csv_path=quantstats_input_path,
-                        output_dir=Path(args.quantstats_output_dir),
+                        output_dir=quantstats_output_dir,
                         title=f"Paper Account {account_dir.name}",
                     )
                     if paths:

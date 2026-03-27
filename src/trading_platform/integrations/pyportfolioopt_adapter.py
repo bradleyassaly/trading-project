@@ -4,6 +4,7 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
+import numpy as np
 import pandas as pd
 
 from trading_platform.integrations.optional_dependencies import require_dependency
@@ -60,9 +61,17 @@ def run_pyportfolioopt_optimizer(
         return _fallback_weights(symbols, optimizer_name, "optional_dependency_unavailable")
 
     clean_returns = returns_frame.copy().dropna(how="all").fillna(0.0)
+    covariance_status = "unknown"
+    expected_return_status = "unknown"
     try:
         expected_returns = pypfopt.expected_returns.mean_historical_return(clean_returns, returns_data=True)
+        expected_return_status = "available" if pd.Series(expected_returns).notna().any() else "all_nan"
         cov_matrix = pypfopt.risk_models.sample_cov(clean_returns, returns_data=True)
+        covariance_status = (
+            "singular"
+            if np.isclose(float(np.linalg.det(pd.DataFrame(cov_matrix).to_numpy())), 0.0)
+            else "ok"
+        )
         if optimizer_name == "hrp":
             optimizer = pypfopt.hierarchical_portfolio.HRPOpt(clean_returns)
             raw_weights = optimizer.optimize()
@@ -98,5 +107,13 @@ def run_pyportfolioopt_optimizer(
     )
     return OptimizerAdapterResult(
         weights=weights,
-        diagnostics={"status": "optimized", "optimizer_name": optimizer_name},
+        diagnostics={
+            "status": "optimized",
+            "optimizer_name": optimizer_name,
+            "optimizer_used": optimizer_name,
+            "fallback_triggered": False,
+            "universe_size": len(symbols),
+            "covariance_status": covariance_status,
+            "expected_return_status": expected_return_status,
+        },
     )

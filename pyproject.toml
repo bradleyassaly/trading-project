@@ -50,7 +50,8 @@ where = ["src"]
 
 [project.optional-dependencies]
 classification = [
-  "FinanceDatabase>=2.2"
+  "FinanceDatabase>=2.1,<2.2",
+  "pandas<3"
 ]
 research_diagnostics = [
   "alphalens-reloaded>=0.4",

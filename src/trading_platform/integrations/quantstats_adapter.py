@@ -27,7 +27,24 @@ def _normalize_return_series(returns: pd.Series) -> pd.Series:
     normalized = normalized[~normalized.index.isna()]
     if normalized.empty:
         raise ValueError("returns series has no valid datetime index values")
+    if len(normalized) < 2:
+        raise ValueError("returns series must contain at least 2 observations")
     return normalized.sort_index()
+
+
+def _normalize_metrics_frame(metrics_frame: pd.Series | pd.DataFrame) -> pd.DataFrame:
+    if isinstance(metrics_frame, pd.Series):
+        frame = metrics_frame.rename("value").reset_index().rename(columns={"index": "metric"})
+        return frame
+    frame = pd.DataFrame(metrics_frame).copy()
+    if frame.empty:
+        return pd.DataFrame(columns=["metric", "value"])
+    if not isinstance(frame.index, pd.RangeIndex):
+        frame = frame.reset_index().rename(columns={frame.index.name or "index": "metric"})
+    if "metric" not in frame.columns:
+        first_column = frame.columns[0]
+        frame = frame.rename(columns={first_column: "metric"})
+    return frame
 
 
 def write_quantstats_report(
@@ -36,6 +53,7 @@ def write_quantstats_report(
     output_dir: str | Path,
     benchmark: pd.Series | None = None,
     title: str = "Trading Platform Report",
+    metadata: dict[str, object] | None = None,
     package_override=None,
 ) -> QuantStatsArtifactBundle:
     quantstats = require_dependency(
@@ -58,14 +76,14 @@ def write_quantstats_report(
         mode="basic",
         display=False,
     )
-    if isinstance(metrics_frame, pd.Series):
-        metrics_frame = metrics_frame.to_frame().T
+    metrics_frame = _normalize_metrics_frame(metrics_frame)
     metrics_frame.to_csv(summary_csv_path, index=False)
     metrics_json_path.write_text(
         json.dumps(
             {
                 "row_count": int(len(metrics_frame)),
                 "metrics": metrics_frame.to_dict(orient="records"),
+                "metadata": metadata or {},
             },
             indent=2,
             default=str,

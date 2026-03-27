@@ -15,6 +15,10 @@ from trading_platform.config.loader import (
     load_notification_config,
     load_pipeline_run_config,
 )
+from trading_platform.system.integrations import (
+    build_integration_health_report,
+    write_integration_health_report,
+)
 
 
 def _now_utc() -> str:
@@ -51,6 +55,7 @@ def run_system_doctor(
     execution_config: str | None = None,
     broker_config: str | None = None,
     dashboard_config: str | None = None,
+    check_integrations: bool = False,
 ) -> tuple[dict[str, Any], dict[str, Path]]:
     checks: list[DoctorCheck] = []
     artifacts_path = Path(artifacts_root)
@@ -78,44 +83,80 @@ def run_system_doctor(
         try:
             config = load_pipeline_run_config(pipeline_config)
         except Exception as exc:
-            checks.append(DoctorCheck("pipeline_config", "fail", f"{type(exc).__name__}: {exc}", {"path": pipeline_config}))
+            checks.append(
+                DoctorCheck("pipeline_config", "fail", f"{type(exc).__name__}: {exc}", {"path": pipeline_config})
+            )
         else:
-            checks.append(DoctorCheck("pipeline_config", "pass", f"loaded {config.run_name}", {"path": pipeline_config}))
+            checks.append(
+                DoctorCheck("pipeline_config", "pass", f"loaded {config.run_name}", {"path": pipeline_config})
+            )
     if monitoring_config:
         try:
             load_monitoring_config(monitoring_config)
         except Exception as exc:
-            checks.append(DoctorCheck("monitoring_config", "fail", f"{type(exc).__name__}: {exc}", {"path": monitoring_config}))
+            checks.append(
+                DoctorCheck("monitoring_config", "fail", f"{type(exc).__name__}: {exc}", {"path": monitoring_config})
+            )
         else:
-            checks.append(DoctorCheck("monitoring_config", "pass", "loaded monitoring config", {"path": monitoring_config}))
+            checks.append(
+                DoctorCheck("monitoring_config", "pass", "loaded monitoring config", {"path": monitoring_config})
+            )
     if notification_config:
         try:
             load_notification_config(notification_config)
         except Exception as exc:
-            checks.append(DoctorCheck("notification_config", "fail", f"{type(exc).__name__}: {exc}", {"path": notification_config}))
+            checks.append(
+                DoctorCheck(
+                    "notification_config", "fail", f"{type(exc).__name__}: {exc}", {"path": notification_config}
+                )
+            )
         else:
-            checks.append(DoctorCheck("notification_config", "pass", "loaded notification config", {"path": notification_config}))
+            checks.append(
+                DoctorCheck("notification_config", "pass", "loaded notification config", {"path": notification_config})
+            )
     if execution_config:
         try:
             config = load_execution_config(execution_config)
         except Exception as exc:
-            checks.append(DoctorCheck("execution_config", "fail", f"{type(exc).__name__}: {exc}", {"path": execution_config}))
+            checks.append(
+                DoctorCheck("execution_config", "fail", f"{type(exc).__name__}: {exc}", {"path": execution_config})
+            )
         else:
-            checks.append(DoctorCheck("execution_config", "pass", f"loaded execution config enabled={config.enabled}", {"path": execution_config}))
+            checks.append(
+                DoctorCheck(
+                    "execution_config",
+                    "pass",
+                    f"loaded execution config enabled={config.enabled}",
+                    {"path": execution_config},
+                )
+            )
     if dashboard_config:
         try:
             config = load_dashboard_config(dashboard_config)
         except Exception as exc:
-            checks.append(DoctorCheck("dashboard_config", "fail", f"{type(exc).__name__}: {exc}", {"path": dashboard_config}))
+            checks.append(
+                DoctorCheck("dashboard_config", "fail", f"{type(exc).__name__}: {exc}", {"path": dashboard_config})
+            )
         else:
-            checks.append(DoctorCheck("dashboard_config", "pass", f"loaded dashboard config port={config.port}", {"path": dashboard_config}))
+            checks.append(
+                DoctorCheck(
+                    "dashboard_config",
+                    "pass",
+                    f"loaded dashboard config port={config.port}",
+                    {"path": dashboard_config},
+                )
+            )
     if broker_config:
         try:
             config = load_broker_config(broker_config)
         except Exception as exc:
             checks.append(DoctorCheck("broker_config", "fail", f"{type(exc).__name__}: {exc}", {"path": broker_config}))
         else:
-            checks.append(DoctorCheck("broker_config", "pass", f"loaded broker config for {config.broker_name}", {"path": broker_config}))
+            checks.append(
+                DoctorCheck(
+                    "broker_config", "pass", f"loaded broker config for {config.broker_name}", {"path": broker_config}
+                )
+            )
             if config.require_manual_enable_flag:
                 manual_flag_ok = bool(config.manual_enable_flag_path and Path(config.manual_enable_flag_path).exists())
                 checks.append(
@@ -142,13 +183,39 @@ def run_system_doctor(
                     DoctorCheck(
                         "broker_monitoring_status_path",
                         "pass" if monitoring_exists else "warn",
-                        "monitoring status artifact found" if monitoring_exists else "monitoring status artifact missing",
+                        (
+                            "monitoring status artifact found"
+                            if monitoring_exists
+                            else "monitoring status artifact missing"
+                        ),
                         {"path": config.monitoring_status_path},
                     )
                 )
 
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
+    paths: dict[str, Path] = {}
+    if check_integrations:
+        integration_report = build_integration_health_report(repo_root=Path.cwd())
+        integration_paths = write_integration_health_report(
+            report=integration_report,
+            output_dir=output_path,
+        )
+        paths.update(integration_paths)
+        for item in integration_report["integrations"]:
+            checks.append(
+                DoctorCheck(
+                    check_name=f"integration_{item['package_name']}",
+                    status="pass" if item["available"] else "warn",
+                    message=f"{item['display_name']} version={item['version'] or 'missing'}",
+                    context={
+                        "config_exists": item["config_exists"],
+                        "artifact_count_present": item["artifact_count_present"],
+                        "artifact_count_expected": item["artifact_count_expected"],
+                        "warnings": item["warnings"],
+                    },
+                )
+            )
     report = {
         "timestamp": _now_utc(),
         "status": _status_from_checks(checks),
@@ -174,4 +241,5 @@ def run_system_doctor(
     for check in checks:
         lines.append(f"- `{check.status}` {check.check_name}: {check.message}")
     md_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    return report, {"doctor_report_json_path": json_path, "doctor_report_md_path": md_path}
+    paths.update({"doctor_report_json_path": json_path, "doctor_report_md_path": md_path})
+    return report, paths

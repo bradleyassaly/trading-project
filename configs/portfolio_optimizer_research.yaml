@@ -1,4 +1,4 @@
-returns_path: artifacts/validation/optimizer_fixture_returns.csv
+returns_path: data/examples/optimizer_fixture_returns.csv
 output_dir: artifacts/portfolio_optimizer_research
 optimizer_name: min_vol
 fallback_optimizer_name: equal_weight

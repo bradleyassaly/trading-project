@@ -1995,6 +1995,20 @@ def test_grouped_portfolio_optimize_research_command_parses() -> None:
     assert args.optimizer_name == "max_sharpe"
 
 
+def test_rewrite_legacy_cli_args_keeps_portfolio_optimize_research_command() -> None:
+    argv, note = rewrite_legacy_cli_args(["portfolio", "optimize-research", "--config", "configs/portfolio.yaml"])
+
+    assert argv == ["portfolio", "optimize-research", "--config", "configs/portfolio.yaml"]
+    assert note is None
+
+
+def test_rewrite_legacy_cli_args_keeps_research_validate_backtester_command() -> None:
+    argv, note = rewrite_legacy_cli_args(["research", "validate-backtester", "--config", "configs/backtester.yaml"])
+
+    assert argv == ["research", "validate-backtester", "--config", "configs/backtester.yaml"]
+    assert note is None
+
+
 def test_grouped_portfolio_apply_execution_constraints_command_parses() -> None:
     parser = build_parser()
     args = parser.parse_args(

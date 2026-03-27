@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import importlib
+import importlib.util
 from dataclasses import dataclass
+from importlib import metadata
 
 OPTIONAL_DEPENDENCY_EXTRAS: dict[str, str] = {
     "financedatabase": "classification",
@@ -9,6 +11,13 @@ OPTIONAL_DEPENDENCY_EXTRAS: dict[str, str] = {
     "quantstats": "research_diagnostics",
     "pypfopt": "portfolio_optimizers",
     "vectorbt": "validation",
+}
+OPTIONAL_DEPENDENCY_DISTRIBUTIONS: dict[str, str] = {
+    "financedatabase": "FinanceDatabase",
+    "alphalens": "alphalens-reloaded",
+    "quantstats": "quantstats",
+    "pypfopt": "PyPortfolioOpt",
+    "vectorbt": "vectorbt",
 }
 
 
@@ -21,6 +30,8 @@ class OptionalDependencyStatus:
     package_name: str
     available: bool
     extra_name: str | None = None
+    version: str | None = None
+    import_error: str | None = None
 
 
 def dependency_available(package_name: str) -> bool:
@@ -31,11 +42,40 @@ def dependency_available(package_name: str) -> bool:
     return True
 
 
+def dependency_version(package_name: str) -> str | None:
+    try:
+        return metadata.version(OPTIONAL_DEPENDENCY_DISTRIBUTIONS.get(package_name, package_name))
+    except metadata.PackageNotFoundError:
+        return None
+    except Exception:
+        return "unknown"
+
+
 def dependency_status(package_name: str) -> OptionalDependencyStatus:
+    spec = importlib.util.find_spec(package_name)
+    if spec is None:
+        return OptionalDependencyStatus(
+            package_name=package_name,
+            available=False,
+            extra_name=OPTIONAL_DEPENDENCY_EXTRAS.get(package_name),
+            version=None,
+            import_error="module_not_found",
+        )
+    try:
+        importlib.import_module(package_name)
+    except Exception as exc:
+        return OptionalDependencyStatus(
+            package_name=package_name,
+            available=False,
+            extra_name=OPTIONAL_DEPENDENCY_EXTRAS.get(package_name),
+            version=dependency_version(package_name),
+            import_error=f"{type(exc).__name__}: {exc}",
+        )
     return OptionalDependencyStatus(
         package_name=package_name,
-        available=dependency_available(package_name),
+        available=True,
         extra_name=OPTIONAL_DEPENDENCY_EXTRAS.get(package_name),
+        version=dependency_version(package_name),
     )
 
 

@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pandas as pd
 
 from trading_platform.integrations.pyportfolioopt_adapter import run_pyportfolioopt_optimizer
@@ -61,16 +62,47 @@ def run_optimizer_experiment(
     package_override=None,
 ) -> dict[str, Any]:
     clean_returns = returns_frame.copy().dropna(how="all")
+    universe_size = int(len(clean_returns.columns))
+    expected_return_availability = (
+        ("all_nan" if clean_returns.mean().isna().all() else "available") if universe_size else "missing"
+    )
+    covariance_status = "missing"
+    if universe_size:
+        covariance = clean_returns.cov()
+        covariance_status = (
+            "singular" if covariance.empty or np.isclose(float(np.linalg.det(covariance.to_numpy())), 0.0) else "ok"
+        )
     if len(clean_returns) < policy.min_history_rows or len(clean_returns.columns) == 0:
         baseline = _baseline_weights(clean_returns if not clean_returns.empty else returns_frame, policy)
         return {
             "weights": baseline,
-            "diagnostics": {"status": "fallback", "reason": "insufficient_history"},
+            "diagnostics": {
+                "status": "fallback",
+                "optimizer_requested": policy.optimizer_name,
+                "optimizer_used": policy.fallback_optimizer_name,
+                "fallback_triggered": True,
+                "fallback_reason": "insufficient_history",
+                "universe_size": universe_size,
+                "covariance_status": covariance_status,
+                "expected_return_status": expected_return_availability,
+            },
         }
     if policy.optimizer_name in {"equal_weight", "metric_weighted"}:
         baseline = _baseline_weights(clean_returns, policy)
         baseline["optimizer_name"] = policy.optimizer_name
-        return {"weights": baseline, "diagnostics": {"status": "baseline", "optimizer_name": policy.optimizer_name}}
+        return {
+            "weights": baseline,
+            "diagnostics": {
+                "status": "baseline",
+                "optimizer_requested": policy.optimizer_name,
+                "optimizer_used": policy.optimizer_name,
+                "fallback_triggered": False,
+                "fallback_reason": "",
+                "universe_size": universe_size,
+                "covariance_status": covariance_status,
+                "expected_return_status": expected_return_availability,
+            },
+        }
     result = run_pyportfolioopt_optimizer(
         returns_frame=clean_returns,
         optimizer_name=policy.optimizer_name,
@@ -90,7 +122,23 @@ def run_optimizer_experiment(
     return {
         "weights": result.weights,
         "comparison": comparison.fillna(0.0),
-        "diagnostics": result.diagnostics,
+        "diagnostics": {
+            **result.diagnostics,
+            "optimizer_requested": policy.optimizer_name,
+            "optimizer_used": result.diagnostics.get(
+                "optimizer_name",
+                (
+                    policy.fallback_optimizer_name
+                    if result.diagnostics.get("status") == "fallback"
+                    else policy.optimizer_name
+                ),
+            ),
+            "fallback_triggered": result.diagnostics.get("status") == "fallback",
+            "fallback_reason": result.diagnostics.get("reason", ""),
+            "universe_size": universe_size,
+            "covariance_status": result.diagnostics.get("covariance_status", covariance_status),
+            "expected_return_status": result.diagnostics.get("expected_return_status", expected_return_availability),
+        },
     }
 
 

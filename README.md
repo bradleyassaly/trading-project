@@ -98,10 +98,35 @@ These integrations are intentionally optional:
 
 All external libraries live behind thin adapters under `src/trading_platform/integrations/`. The platform’s own CLI commands, artifacts, schemas, promotion flow, portfolio construction, and paper/live workflows remain the system of record.
 
+Validated install path:
+
+```bash
+pip install -e ".[classification,research_diagnostics,portfolio_optimizers,validation]"
+```
+
+Notes:
+
+- the `classification` extra is currently validated against `FinanceDatabase 2.1.x`
+- `classification` also constrains `pandas<3` because the current FinanceDatabase release has not been validated on pandas 3
+- all integrations remain optional; missing packages should degrade cleanly to the platform-native path
+
+Health check:
+
+```bash
+trading-cli ops doctor --check-integrations --output-dir artifacts/system_check/integration_validation
+```
+
+This writes:
+
+- `doctor_report.json`
+- `doctor_report.md`
+- `integration_health_check.json`
+- `integration_health_check.md`
+
 ### Build Classifications
 
 ```bash
-trading-cli data build-classifications --universe nasdaq100 --output-dir artifacts/reference/classifications
+trading-cli data build-classifications --config configs/classification_build.yaml
 ```
 
 Artifacts:
@@ -109,7 +134,7 @@ Artifacts:
 - `artifacts/reference/classifications/security_master.csv`
 - `artifacts/reference/classifications/classification_summary.json`
 
-The normalized security master is defensive by design and should be treated as reference enrichment, not point-in-time truth.
+The normalized security master is defensive by design and should be treated as reference enrichment, not point-in-time truth. The summary artifact includes requested vs matched symbol counts, match rate, duplicate counts, missing sector/industry counts, and asset-type counts so classification quality is auditable.
 
 ### Run Alphalens / QuantStats Diagnostics
 
@@ -142,6 +167,10 @@ Optional research artifacts include:
 - `quantstats_summary.csv`
 - `quantstats_tearsheet.html`
 
+Validated Alphalens metadata now records the factor column, price column, periods, grouping field, row counts before/after filtering, symbol count, date count, and whether the classification join was present.
+
+Alphalens remains diagnostic-only. Promotion and approval continue to depend on the platform’s canonical research outputs.
+
 ### Run Allocator Research Adapters
 
 ```bash
@@ -154,7 +183,7 @@ Artifacts:
 - `optimizer_diagnostics.json`
 - `optimizer_weight_comparison.csv`
 
-The canonical allocator is unchanged. These adapters are for research comparisons and fall back to baseline weights when optimization fails or the package is unavailable.
+The canonical allocator is unchanged. These adapters are for research comparisons and fall back to baseline weights when optimization fails or the package is unavailable. The diagnostics artifact records the requested optimizer, optimizer actually used, fallback status/reason, universe size, covariance status, and expected-return availability.
 
 ### Validate The Backtester Against vectorbt
 
@@ -168,13 +197,15 @@ Artifacts:
 - `vectorbt_validation_metrics.json`
 - `vectorbt_validation_trade_comparison.csv`
 
-This harness only checks a few deterministic benchmark scenarios with explicit assumptions. It does not replace the platform backtester.
+This harness only checks a few deterministic benchmark scenarios with explicit assumptions. It does not replace the platform backtester. Validation rows are labeled `pass`, `warn`, or `fail` so convention-level differences are separated from material mismatches.
 
 ### Generate QuantStats For Paper Runs
 
 ```bash
-trading-cli paper report --account-dir artifacts/paper/activated_portfolio_validation --quantstats-output-dir artifacts/paper/activated_portfolio_validation/quantstats
+trading-cli paper report --account-dir artifacts/paper/activated_portfolio_replay_validation --quantstats-output-dir artifacts/paper/activated_portfolio_replay_validation/quantstats_validation
 ```
+
+QuantStats is reporting-only. It reads the platform’s return/equity artifacts and produces secondary report outputs; it does not replace the platform’s accounting logic.
 
 ## Hybrid Storage Architecture
 

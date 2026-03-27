@@ -13,6 +13,7 @@ def cmd_doctor(args) -> None:
         execution_config=getattr(args, "execution_config", None),
         broker_config=getattr(args, "broker_config", None),
         dashboard_config=getattr(args, "dashboard_config", None),
+        check_integrations=bool(getattr(args, "check_integrations", False)),
     )
     print(f"Doctor status: {report['status']}")
     print(f"Checks: {report['check_count']} warnings={report['warning_count']} errors={report['error_count']}")

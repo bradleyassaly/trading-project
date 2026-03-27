@@ -54,3 +54,17 @@ def test_system_doctor_flags_bad_config(tmp_path: Path) -> None:
 
     assert report["status"] == "failed"
     assert any(check["check_name"] == "broker_config" and check["status"] == "fail" for check in report["checks"])
+
+
+def test_system_doctor_writes_integration_health_report(tmp_path: Path) -> None:
+    report, paths = run_system_doctor(
+        artifacts_root=tmp_path / "artifacts",
+        output_dir=tmp_path / "doctor",
+        check_integrations=True,
+    )
+
+    assert report["status"] in {"succeeded", "warning"}
+    assert paths["integration_health_check_json_path"].exists()
+    payload = json.loads(paths["integration_health_check_json_path"].read_text(encoding="utf-8"))
+    assert payload["integration_count"] >= 5
+    assert "integrations" in payload

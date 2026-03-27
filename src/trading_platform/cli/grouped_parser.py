@@ -202,8 +202,15 @@ _RESEARCH_GROUP_COMMANDS = {
     "db",
     "pipeline",
     "strategies",
+    "validate-backtester",
 }
-_PORTFOLIO_GROUP_COMMANDS = {"backtest", "topn", "allocate-multi-strategy", "apply-execution-constraints"}
+_PORTFOLIO_GROUP_COMMANDS = {
+    "backtest",
+    "topn",
+    "allocate-multi-strategy",
+    "apply-execution-constraints",
+    "optimize-research",
+}
 
 
 def rewrite_legacy_cli_args(argv: list[str]) -> tuple[list[str], str | None]:
@@ -2771,6 +2778,11 @@ def build_parser() -> argparse.ArgumentParser:
     ops_doctor.add_argument("--broker-config", type=str, default=None, help="Optional broker config to validate.")
     ops_doctor.add_argument("--dashboard-config", type=str, default=None, help="Optional dashboard config to validate.")
     ops_doctor.add_argument(
+        "--check-integrations",
+        action="store_true",
+        help="Check optional external integration packages, example configs, and validation artifacts.",
+    )
+    ops_doctor.add_argument(
         "--output-dir",
         type=str,
         default="artifacts/system_check",
@@ -3918,6 +3930,11 @@ def build_parser() -> argparse.ArgumentParser:
     doctor_parser.add_argument("--broker-config", type=str, default=None, help="Optional broker config to validate.")
     doctor_parser.add_argument(
         "--dashboard-config", type=str, default=None, help="Optional dashboard config to validate."
+    )
+    doctor_parser.add_argument(
+        "--check-integrations",
+        action="store_true",
+        help="Check optional external integration packages, example configs, and validation artifacts.",
     )
     doctor_parser.add_argument(
         "--output-dir",

@@ -33,10 +33,7 @@ def test_require_dependency_raises_actionable_error(monkeypatch) -> None:
 def test_build_classification_artifacts_normalizes_financedatabase_output(tmp_path: Path) -> None:
     class _Selector:
         def __init__(self, frame: pd.DataFrame) -> None:
-            self._frame = frame
-
-        def select(self, symbols=None):
-            return self._frame
+            self.data = frame
 
     fake_package = SimpleNamespace(
         Equities=lambda: _Selector(
@@ -87,6 +84,8 @@ def test_build_classification_artifacts_normalizes_financedatabase_output(tmp_pa
     )
     summary = json.loads(Path(paths["classification_summary_path"]).read_text(encoding="utf-8"))
     assert summary["point_in_time_warning"]
+    assert summary["matched_symbol_count"] == 2
+    assert summary["asset_type_counts"]["equity"] == 1
 
 
 def test_maybe_run_alphalens_diagnostics_writes_expected_artifacts(tmp_path: Path) -> None:
@@ -111,6 +110,7 @@ def test_maybe_run_alphalens_diagnostics_writes_expected_artifacts(tmp_path: Pat
         }
     )
     feature_frame.to_parquet(feature_dir / "AAPL.parquet")
+    feature_frame.assign(close=[200 + i for i in range(12)]).to_parquet(feature_dir / "MSFT.parquet")
 
     fake_alphalens = SimpleNamespace(
         utils=SimpleNamespace(
@@ -142,7 +142,7 @@ def test_maybe_run_alphalens_diagnostics_writes_expected_artifacts(tmp_path: Pat
         feature_dir=feature_dir,
         leaderboard_path=leaderboard_path,
         output_dir=tmp_path / "alphalens",
-        symbols=["AAPL"],
+        symbols=["AAPL", "MSFT"],
         signal_composition_preset="standard",
         enable_context_confirmations=None,
         enable_relative_features=None,
@@ -159,7 +159,7 @@ def test_quantstats_adapter_writes_metrics_with_fake_package(tmp_path: Path) -> 
     class _Reports:
         @staticmethod
         def metrics(returns, benchmark=None, mode="basic", display=False):
-            return pd.DataFrame([{"sharpe": 1.5, "cagr": 0.12}])
+            return pd.DataFrame({"Strategy": [1.5, 0.12]}, index=["Sharpe", "CAGR"])
 
         @staticmethod
         def html(returns, benchmark=None, output=None, title=None):
@@ -177,6 +177,9 @@ def test_quantstats_adapter_writes_metrics_with_fake_package(tmp_path: Path) -> 
     assert bundle.metrics_json_path.exists()
     assert bundle.summary_csv_path.exists()
     assert bundle.tearsheet_html_path is not None and bundle.tearsheet_html_path.exists()
+    summary = pd.read_csv(bundle.summary_csv_path)
+    assert {"metric", "Strategy"}.issubset(summary.columns)
+    assert set(summary["metric"]) == {"Sharpe", "CAGR"}
 
 
 def test_optimizer_experiment_uses_optimizer_and_comparison() -> None:
@@ -236,6 +239,9 @@ def test_vectorbt_validation_harness_writes_artifacts(monkeypatch, tmp_path: Pat
             returns=pd.Series([0.0, 0.01, -0.005], index=close_prices.index[:3]),
             equity=pd.Series([1.0, 1.01, 1.00495], index=close_prices.index[:3]),
             trades=pd.DataFrame([{"symbol": close_prices.columns[0], "size": 1.0}]),
+            turnover=0.0,
+            trade_count=1,
+            metrics={},
         ),
     )
 
@@ -245,5 +251,6 @@ def test_vectorbt_validation_harness_writes_artifacts(monkeypatch, tmp_path: Pat
     summary = pd.read_csv(paths["vectorbt_validation_summary_path"])
     assert not summary.empty
     assert "scenario_name" in summary.columns
+    assert "status_reason" in summary.columns
     metrics = json.loads(Path(paths["vectorbt_validation_metrics_path"]).read_text(encoding="utf-8"))
     assert metrics["rows"]

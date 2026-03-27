@@ -40,14 +40,39 @@ def _safe_float(value: float | int | None) -> float:
     return float(value)
 
 
+def _resolve_datetime_column(frame: pd.DataFrame, *candidates: str) -> str | None:
+    for candidate in candidates:
+        if candidate in frame.columns:
+            return candidate
+    return None
+
+
 def load_paper_ledgers(account_dir: str | Path) -> dict[str, pd.DataFrame]:
     base = Path(account_dir)
     ledger_dir = base / "ledgers"
+    fills_path = ledger_dir / "fills.csv"
+    equity_curve_path = ledger_dir / "equity_curve.csv"
+    positions_history_path = ledger_dir / "positions_history.csv"
+    orders_history_path = ledger_dir / "orders_history.csv"
+    if not fills_path.exists():
+        fills_path = base / "paper_fills.csv"
+    if not fills_path.exists():
+        fills_path = base / "rolling_fill_history.csv"
+    if not equity_curve_path.exists():
+        equity_curve_path = base / "portfolio_equity_curve.csv"
+    if not positions_history_path.exists():
+        positions_history_path = base / "paper_positions_history.csv"
+    if not positions_history_path.exists():
+        positions_history_path = base / "rolling_position_history.csv"
+    if not orders_history_path.exists():
+        orders_history_path = base / "paper_orders_history.csv"
+    if not orders_history_path.exists():
+        orders_history_path = base / "rolling_order_history.csv"
     return {
-        "fills": _read_csv_if_exists(ledger_dir / "fills.csv"),
-        "equity_curve": _read_csv_if_exists(ledger_dir / "equity_curve.csv"),
-        "positions_history": _read_csv_if_exists(ledger_dir / "positions_history.csv"),
-        "orders_history": _read_csv_if_exists(ledger_dir / "orders_history.csv"),
+        "fills": _read_csv_if_exists(fills_path),
+        "equity_curve": _read_csv_if_exists(equity_curve_path),
+        "positions_history": _read_csv_if_exists(positions_history_path),
+        "orders_history": _read_csv_if_exists(orders_history_path),
     }
 
 
@@ -65,7 +90,19 @@ def _compute_equity_metrics(equity_df: pd.DataFrame) -> dict[str, float | str | 
         }
 
     df = equity_df.copy()
-    df["as_of"] = pd.to_datetime(df["as_of"], errors="coerce")
+    datetime_col = _resolve_datetime_column(df, "as_of", "timestamp", "date", "processed_date")
+    if datetime_col is None:
+        return {
+            "as_of": None,
+            "latest_equity": 0.0,
+            "cumulative_return": 0.0,
+            "max_drawdown": 0.0,
+            "avg_daily_return": 0.0,
+            "daily_volatility": 0.0,
+            "sharpe_ratio": 0.0,
+            "gross_market_value": 0.0,
+        }
+    df["as_of"] = pd.to_datetime(df[datetime_col], errors="coerce")
     df = df.dropna(subset=["as_of"]).sort_values("as_of")
 
     if df.empty:
@@ -87,11 +124,7 @@ def _compute_equity_metrics(equity_df: pd.DataFrame) -> dict[str, float | str | 
     daily_returns = equity.pct_change().replace([float("inf"), float("-inf")], pd.NA).dropna()
     avg_daily_return = _safe_float(daily_returns.mean()) if not daily_returns.empty else 0.0
     daily_volatility = _safe_float(daily_returns.std(ddof=0)) if not daily_returns.empty else 0.0
-    sharpe_ratio = (
-        (avg_daily_return / daily_volatility) * (252 ** 0.5)
-        if daily_volatility > 0
-        else 0.0
-    )
+    sharpe_ratio = (avg_daily_return / daily_volatility) * (252**0.5) if daily_volatility > 0 else 0.0
 
     running_peak = equity.cummax()
     drawdowns = (equity / running_peak) - 1.0
@@ -147,7 +180,14 @@ def _compute_position_metrics(positions_df: pd.DataFrame, latest_equity: float) 
         }
 
     df = positions_df.copy()
-    df["as_of"] = pd.to_datetime(df["as_of"], errors="coerce")
+    datetime_col = _resolve_datetime_column(df, "as_of", "timestamp", "date", "processed_date")
+    if datetime_col is None:
+        return {
+            "open_position_count": 0,
+            "top_position_symbol": None,
+            "top_position_weight": 0.0,
+        }
+    df["as_of"] = pd.to_datetime(df[datetime_col], errors="coerce")
     df = df.dropna(subset=["as_of"]).sort_values("as_of")
 
     if df.empty:

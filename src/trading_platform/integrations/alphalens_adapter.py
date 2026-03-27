@@ -39,6 +39,14 @@ def build_clean_alphalens_factor_data(
         raise ValueError("factor_series is empty")
     if pricing_frame.empty:
         raise ValueError("pricing_frame is empty")
+    if not isinstance(factor_series.index, pd.MultiIndex) or list(factor_series.index.names)[:2] != ["date", "asset"]:
+        raise ValueError("factor_series must use a MultiIndex named ['date', 'asset']")
+    symbol_count = int(factor_series.index.get_level_values("asset").nunique())
+    date_count = int(factor_series.index.get_level_values("date").nunique())
+    if symbol_count < 2:
+        raise ValueError("factor_series must contain at least 2 unique assets for cross-sectional diagnostics")
+    if date_count < 5:
+        raise ValueError("factor_series must contain at least 5 unique dates for Alphalens diagnostics")
     factor_data = alphalens.utils.get_clean_factor_and_forward_returns(
         factor=factor_series.sort_index(),
         prices=pricing_frame.sort_index(),
@@ -56,6 +64,7 @@ def write_alphalens_artifacts(
     *,
     factor_data: pd.DataFrame,
     output_dir: str | Path,
+    metadata: dict[str, Any] | None = None,
     package_override=None,
 ) -> AlphalensArtifactBundle:
     alphalens = require_dependency(
@@ -115,7 +124,7 @@ def write_alphalens_artifacts(
     group_summary = (
         factor_data.reset_index()[["asset", "group"]]
         .dropna()
-        .groupby("group", as_index=False)
+        .groupby("group", as_index=False, observed=False)
         .agg(asset_count=("asset", "nunique"))
     )
     group_summary.to_csv(group_summary_path, index=False)
@@ -126,6 +135,7 @@ def write_alphalens_artifacts(
                 "row_count": int(len(factor_data)),
                 "columns": list(factor_data.columns),
                 "group_aware": bool("group" in factor_data.columns),
+                **(metadata or {}),
             },
             indent=2,
         ),

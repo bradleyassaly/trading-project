@@ -35,11 +35,49 @@ def _safe_bool(value: Any) -> bool | None:
     return None
 
 
+def _normalize_asset_type(value: Any) -> str | None:
+    text = _safe_str(value)
+    if text is None:
+        return None
+    normalized = text.lower()
+    mapping = {
+        "equities": "equity",
+        "equity": "equity",
+        "stocks": "equity",
+        "etfs": "etf",
+        "etf": "etf",
+        "funds": "fund",
+        "fund": "fund",
+        "indices": "index",
+        "index": "index",
+    }
+    return mapping.get(normalized, normalized)
+
+
+def _extract_series(frame: pd.DataFrame, *candidates: str) -> pd.Series:
+    for candidate in candidates:
+        if candidate not in frame.columns:
+            continue
+        column = frame[candidate]
+        if isinstance(column, pd.DataFrame):
+            for nested_name in column.columns:
+                nested_series = column[nested_name]
+                if nested_series.notna().any():
+                    return nested_series
+            return column.iloc[:, 0]
+        return column
+    return pd.Series(index=frame.index, dtype="object")
+
+
 @dataclass(frozen=True)
 class SecurityMasterBuildResult:
     frame: pd.DataFrame
     source: str
     as_of_date: str
+    requested_symbols: list[str]
+    matched_symbols: list[str]
+    unmatched_symbols: list[str]
+    duplicate_symbol_count: int
 
 
 def _normalize_financedatabase_frame(
@@ -79,36 +117,21 @@ def _normalize_financedatabase_frame(
     if "symbol" not in normalized.columns:
         raise ValueError("FinanceDatabase classification data must include a symbol column or symbol index")
 
-    rename_map = {
-        "ticker": "symbol",
-        "type": "asset_type",
-        "summary": "name",
-        "company_name": "name",
-        "group": "industry_group",
-        "industry_group_name": "industry_group",
-        "market": "exchange",
-        "market_exchange": "exchange",
-        "locale": "country",
-        "currency_code": "currency",
-        "quote_type": "asset_type",
-    }
-    normalized = normalized.rename(columns=rename_map)
-
     result = pd.DataFrame(
         {
-            "symbol": normalized["symbol"].map(_safe_str),
-            "asset_type": normalized.get("asset_type", pd.Series(index=normalized.index)).map(_safe_str),
-            "name": normalized.get("name", pd.Series(index=normalized.index)).map(_safe_str),
-            "sector": normalized.get("sector", pd.Series(index=normalized.index)).map(_safe_str),
-            "industry_group": normalized.get("industry_group", pd.Series(index=normalized.index)).map(_safe_str),
-            "industry": normalized.get("industry", pd.Series(index=normalized.index)).map(_safe_str),
-            "category": normalized.get("category", pd.Series(index=normalized.index)).map(_safe_str),
-            "exchange": normalized.get("exchange", pd.Series(index=normalized.index)).map(_safe_str),
-            "country": normalized.get("country", pd.Series(index=normalized.index)).map(_safe_str),
-            "currency": normalized.get("currency", pd.Series(index=normalized.index)).map(_safe_str),
-            "is_etf": normalized.get("is_etf", normalized.get("etf", pd.Series(index=normalized.index))).map(
-                _safe_bool
+            "symbol": _extract_series(normalized, "symbol", "ticker").map(_safe_str),
+            "asset_type": _extract_series(normalized, "asset_type", "type", "quote_type").map(_normalize_asset_type),
+            "name": _extract_series(normalized, "name", "company_name", "summary").map(_safe_str),
+            "sector": _extract_series(normalized, "sector").map(_safe_str),
+            "industry_group": _extract_series(normalized, "industry_group", "group", "industry_group_name").map(
+                _safe_str
             ),
+            "industry": _extract_series(normalized, "industry").map(_safe_str),
+            "category": _extract_series(normalized, "category", "category_group").map(_safe_str),
+            "exchange": _extract_series(normalized, "exchange", "market", "market_exchange").map(_safe_str),
+            "country": _extract_series(normalized, "country", "locale").map(_safe_str),
+            "currency": _extract_series(normalized, "currency", "currency_code").map(_safe_str),
+            "is_etf": _extract_series(normalized, "is_etf", "etf").map(_safe_bool),
             "source": source,
             "as_of_date": as_of_date,
         }
@@ -142,21 +165,16 @@ def _fetch_financedatabase_frames(symbols: list[str], *, package_override=None) 
         except Exception:
             continue
         frame = None
-        for method_name in ("select", "search"):
-            method = getattr(selector, method_name, None)
-            if method is None:
-                continue
-            try:
-                frame = method(symbols=symbols)
-                break
-            except TypeError:
-                try:
-                    frame = method(symbols)
-                    break
-                except Exception:
-                    continue
-            except Exception:
-                continue
+        raw_data = getattr(selector, "data", None)
+        if isinstance(raw_data, pd.DataFrame) and not raw_data.empty:
+            working = raw_data.copy()
+            if working.index.name and str(working.index.name).strip().lower() in {"symbol", "ticker"}:
+                working = working.reset_index()
+            elif "symbol" not in working.columns:
+                working = working.reset_index().rename(columns={"index": "symbol"})
+            if "symbol" in working.columns:
+                normalized_symbols = {str(symbol).strip().upper() for symbol in symbols}
+                frame = working[working["symbol"].astype(str).str.upper().isin(normalized_symbols)].copy()
         if frame is None:
             continue
         if isinstance(frame, pd.Series):
@@ -182,15 +200,27 @@ def build_security_master_from_financedatabase(
 ) -> SecurityMasterBuildResult:
     normalized_as_of = str(as_of_date or _utc_today())
     raw = _fetch_financedatabase_frames(symbols, package_override=package_override)
+    requested_symbols = list(dict.fromkeys(str(symbol).strip().upper() for symbol in symbols if str(symbol).strip()))
+    duplicate_symbol_count = (
+        int(raw["symbol"].astype(str).str.upper().duplicated().sum())
+        if not raw.empty and "symbol" in raw.columns
+        else 0
+    )
     frame = _normalize_financedatabase_frame(
         raw,
         source="financedatabase",
         as_of_date=normalized_as_of,
     )
+    matched_symbols = sorted(frame["symbol"].astype(str).str.upper().unique().tolist()) if not frame.empty else []
+    unmatched_symbols = sorted(set(requested_symbols) - set(matched_symbols))
     return SecurityMasterBuildResult(
         frame=frame,
         source="financedatabase",
         as_of_date=normalized_as_of,
+        requested_symbols=requested_symbols,
+        matched_symbols=matched_symbols,
+        unmatched_symbols=unmatched_symbols,
+        duplicate_symbol_count=duplicate_symbol_count,
     )
 
 

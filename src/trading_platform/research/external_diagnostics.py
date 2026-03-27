@@ -141,9 +141,23 @@ def maybe_run_alphalens_diagnostics(
         groupby=groupby,
         package_override=package_override,
     )
+    factor_frame = factor_series.reset_index()
     paths = write_alphalens_artifacts(
         factor_data=factor_data,
         output_dir=output_dir,
+        metadata={
+            "factor_column": "factor",
+            "price_column": "close",
+            "periods": [1, 5, 10],
+            "grouping_field": groupby_field,
+            "pre_filter_row_count": int(len(factor_series)),
+            "post_filter_row_count": int(len(factor_data)),
+            "symbol_count": int(factor_frame["asset"].nunique()) if not factor_frame.empty else 0,
+            "date_count": int(factor_frame["date"].nunique()) if not factor_frame.empty else 0,
+            "groupby_supplied": bool(groupby),
+            "classification_join_missing": bool(groupby_field and not groupby),
+            "source_leaderboard_path": str(leaderboard_path),
+        },
         package_override=package_override,
     )
     return {
@@ -179,6 +193,8 @@ def maybe_run_quantstats_report(
     if returns_col is None:
         return {}
     returns = pd.to_numeric(frame[returns_col], errors="coerce").dropna()
+    if len(returns) < 2:
+        return {}
     benchmark = None
     if benchmark_col and benchmark_col in frame.columns:
         benchmark = pd.to_numeric(frame[benchmark_col], errors="coerce").dropna()
@@ -187,6 +203,13 @@ def maybe_run_quantstats_report(
         benchmark=benchmark,
         output_dir=output_dir,
         title=title,
+        metadata={
+            "source_artifact_path": str(returns_csv_path),
+            "start_date": str(returns.index.min()) if len(returns) else None,
+            "end_date": str(returns.index.max()) if len(returns) else None,
+            "observation_count": int(len(returns)),
+            "benchmark_present": benchmark is not None and len(benchmark) > 0,
+        },
         package_override=package_override,
     )
     return {

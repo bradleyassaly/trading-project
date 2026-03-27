@@ -17,27 +17,75 @@ def test_build_paper_account_report_from_ledgers(tmp_path: Path) -> None:
     pd.DataFrame(
         [
             {"as_of": "2025-01-03", "cash": 10000.0, "gross_market_value": 0.0, "equity": 10000.0, "position_count": 0},
-            {"as_of": "2025-01-04", "cash": 9000.0, "gross_market_value": 1100.0, "equity": 10100.0, "position_count": 1},
-            {"as_of": "2025-01-05", "cash": 9200.0, "gross_market_value": 1200.0, "equity": 10400.0, "position_count": 1},
+            {
+                "as_of": "2025-01-04",
+                "cash": 9000.0,
+                "gross_market_value": 1100.0,
+                "equity": 10100.0,
+                "position_count": 1,
+            },
+            {
+                "as_of": "2025-01-05",
+                "cash": 9200.0,
+                "gross_market_value": 1200.0,
+                "equity": 10400.0,
+                "position_count": 1,
+            },
         ]
     ).to_csv(ledger_dir / "equity_curve.csv", index=False)
 
     pd.DataFrame(
         [
-            {"as_of": "2025-01-04", "symbol": "AAPL", "side": "BUY", "quantity": 10, "fill_price": 101.0, "notional": 1010.0, "commission": 1.0, "slippage_bps": 5.0},
-            {"as_of": "2025-01-05", "symbol": "MSFT", "side": "SELL", "quantity": 5, "fill_price": 202.0, "notional": 1010.0, "commission": 0.0, "slippage_bps": 0.0},
+            {
+                "as_of": "2025-01-04",
+                "symbol": "AAPL",
+                "side": "BUY",
+                "quantity": 10,
+                "fill_price": 101.0,
+                "notional": 1010.0,
+                "commission": 1.0,
+                "slippage_bps": 5.0,
+            },
+            {
+                "as_of": "2025-01-05",
+                "symbol": "MSFT",
+                "side": "SELL",
+                "quantity": 5,
+                "fill_price": 202.0,
+                "notional": 1010.0,
+                "commission": 0.0,
+                "slippage_bps": 0.0,
+            },
         ]
     ).to_csv(ledger_dir / "fills.csv", index=False)
 
     pd.DataFrame(
         [
-            {"as_of": "2025-01-05", "symbol": "NVDA", "quantity": 4, "avg_price": 250.0, "last_price": 300.0, "market_value": 1200.0},
+            {
+                "as_of": "2025-01-05",
+                "symbol": "NVDA",
+                "quantity": 4,
+                "avg_price": 250.0,
+                "last_price": 300.0,
+                "market_value": 1200.0,
+            },
         ]
     ).to_csv(ledger_dir / "positions_history.csv", index=False)
 
     pd.DataFrame(
         [
-            {"as_of": "2025-01-05", "symbol": "NVDA", "side": "BUY", "quantity": 4, "reference_price": 300.0, "target_weight": 0.12, "current_quantity": 0, "target_quantity": 4, "notional": 1200.0, "reason": "rebalance_to_target"},
+            {
+                "as_of": "2025-01-05",
+                "symbol": "NVDA",
+                "side": "BUY",
+                "quantity": 4,
+                "reference_price": 300.0,
+                "target_weight": 0.12,
+                "current_quantity": 0,
+                "target_quantity": 4,
+                "notional": 1200.0,
+                "reason": "rebalance_to_target",
+            },
         ]
     ).to_csv(ledger_dir / "orders_history.csv", index=False)
 
@@ -80,3 +128,30 @@ def test_write_paper_account_report_writes_files(tmp_path: Path) -> None:
 
     assert paths["json_path"].exists()
     assert paths["csv_path"].exists()
+
+
+def test_build_paper_account_report_from_root_level_rolling_artifacts(tmp_path: Path) -> None:
+    pd.DataFrame(
+        [
+            {"timestamp": "2025-01-03", "equity": 10000.0, "gross_market_value": 0.0},
+            {"timestamp": "2025-01-04", "equity": 10100.0, "gross_market_value": 1100.0},
+        ]
+    ).to_csv(tmp_path / "portfolio_equity_curve.csv", index=False)
+    pd.DataFrame(
+        [
+            {"timestamp": "2025-01-04", "symbol": "AAPL", "side": "BUY", "notional": 1000.0, "commission": 1.0},
+        ]
+    ).to_csv(tmp_path / "rolling_fill_history.csv", index=False)
+    pd.DataFrame(
+        [
+            {"timestamp": "2025-01-04", "symbol": "AAPL", "market_value": 1100.0},
+        ]
+    ).to_csv(tmp_path / "rolling_position_history.csv", index=False)
+
+    report = build_paper_account_report(tmp_path)
+
+    assert report.as_of == "2025-01-04"
+    assert report.latest_equity == 10100.0
+    assert report.total_fills == 1
+    assert report.open_position_count == 1
+    assert report.top_position_symbol == "AAPL"
