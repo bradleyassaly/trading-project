@@ -477,6 +477,8 @@ def load_daily_trading_workflow_config(path: str | Path) -> DailyTradingWorkflow
     portfolio_section = _pop_dict_section(payload, "portfolio")
     activation_section = _pop_dict_section(payload, "activation")
     paper_section = _pop_dict_section(payload, "paper")
+    report_section = _pop_dict_section(payload, "report")
+    dashboard_section = _pop_dict_section(payload, "dashboard")
     tracking_section = _pop_dict_section(payload, "tracking")
 
     _set_if_missing(payload, "refresh_config", configs_section)
@@ -495,6 +497,7 @@ def load_daily_trading_workflow_config(path: str | Path) -> DailyTradingWorkflow
     _set_if_missing(payload, "paper_output_dir", paths_section)
     _set_if_missing(payload, "paper_state_path", paths_section)
     _set_if_missing(payload, "report_dir", paths_section)
+    _set_if_missing(payload, "dashboard_output_dir", paths_section)
 
     _set_if_missing(payload, "run_name", run_section)
     _set_if_missing(payload, "run_id", run_section)
@@ -520,6 +523,10 @@ def load_daily_trading_workflow_config(path: str | Path) -> DailyTradingWorkflow
     _set_if_missing(payload, "include_inactive_conditionals_in_reports", paper_section)
     _set_if_missing(payload, "auto_apply_fills", paper_section)
     _set_if_missing(payload, "fail_if_zero_targets_after_validation", paper_section)
+    _set_if_missing(payload, "enable_strategy_diagnostics", report_section)
+    _set_if_missing(payload, "refresh_dashboard_static_data", dashboard_section)
+    _set_if_missing(payload, "refresh_dashboard_static_data", dashboard_section, "refresh_static_data")
+    _set_if_missing(payload, "dashboard_output_dir", dashboard_section, "output_dir")
 
     _set_if_missing(payload, "enable_database_metadata", tracking_section, "database_enabled")
     _set_if_missing(payload, "database_url", tracking_section)

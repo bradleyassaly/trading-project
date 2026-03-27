@@ -50,6 +50,17 @@ def _safe_read_csv(path: str | Path | None) -> pd.DataFrame:
         return pd.DataFrame()
 
 
+def _frame_to_records(frame: pd.DataFrame, *, head: int | None = None, tail: int | None = None) -> list[dict[str, Any]]:
+    if frame.empty:
+        return []
+    normalized = frame.astype(object).where(pd.notna(frame), None)
+    if head is not None:
+        normalized = normalized.head(head)
+    if tail is not None:
+        normalized = normalized.tail(tail)
+    return normalized.to_dict(orient="records")
+
+
 def _newest_path(paths: list[Path]) -> Path | None:
     existing = [path for path in paths if path.exists()]
     if not existing:
@@ -178,15 +189,60 @@ def _normalize_chart_payload(payload: dict[str, Any]) -> dict[str, Any]:
             for name, rows in indicators.items()
         }
     normalized["signals"] = _row_list_contract(payload.get("signals"), ["ts", "type", "price", "label", "score"])
-    normalized["orders"] = _row_list_contract(payload.get("orders"), ["ts", "symbol", "side", "qty", "price", "order_id", "status", "reason", "source_type"])
-    normalized["fills"] = _row_list_contract(payload.get("fills"), ["ts", "symbol", "side", "qty", "price", "order_id", "status", "reason", "source_type"])
+    normalized["orders"] = _row_list_contract(
+        payload.get("orders"), ["ts", "symbol", "side", "qty", "price", "order_id", "status", "reason", "source_type"]
+    )
+    normalized["fills"] = _row_list_contract(
+        payload.get("fills"), ["ts", "symbol", "side", "qty", "price", "order_id", "status", "reason", "source_type"]
+    )
     normalized["trades"] = _row_list_contract(
         payload.get("trades"),
-        ["trade_id", "symbol", "side", "qty", "entry_ts", "entry_price", "exit_ts", "exit_price", "realized_pnl", "status", "strategy_id", "source", "run_id", "mode", "trade_source", "trade_source_mode", "hold_duration_hours"],
+        [
+            "trade_id",
+            "symbol",
+            "side",
+            "qty",
+            "entry_ts",
+            "entry_price",
+            "exit_ts",
+            "exit_price",
+            "realized_pnl",
+            "status",
+            "strategy_id",
+            "source",
+            "run_id",
+            "mode",
+            "trade_source",
+            "trade_source_mode",
+            "hold_duration_hours",
+        ],
     )
     normalized["provenance"] = _row_list_contract(
         payload.get("provenance"),
-        ["ts", "symbol", "trade_id", "strategy_id", "run_id", "source", "mode", "signal_type", "signal_value", "ranking_score", "universe_rank", "selection_included", "selection_status", "exclusion_reason", "target_weight", "sizing_rationale", "constraint_hits", "order_intent_summary", "label", "regime_context", "artifact_path", "metadata_path"],
+        [
+            "ts",
+            "symbol",
+            "trade_id",
+            "strategy_id",
+            "run_id",
+            "source",
+            "mode",
+            "signal_type",
+            "signal_value",
+            "ranking_score",
+            "universe_rank",
+            "selection_included",
+            "selection_status",
+            "exclusion_reason",
+            "target_weight",
+            "sizing_rationale",
+            "constraint_hits",
+            "order_intent_summary",
+            "label",
+            "regime_context",
+            "artifact_path",
+            "metadata_path",
+        ],
     )
     normalized["position"] = dict(_json_safe(normalized.get("position") or {}))
     normalized["meta"] = dict(_json_safe(normalized.get("meta") or {}))
@@ -198,13 +254,29 @@ def _normalize_portfolio_overview_payload(payload: dict[str, Any]) -> dict[str, 
     normalized["summary"] = dict(_json_safe(normalized.get("summary") or {}))
     normalized["equity_curve"] = _row_list_contract(payload.get("equity_curve"), ["ts", "equity"])
     normalized["drawdown_curve"] = _row_list_contract(payload.get("drawdown_curve"), ["ts", "drawdown"])
-    normalized["positions"] = _row_list_contract(payload.get("positions"), ["symbol", "qty", "avg_price", "market_value", "side"])
-    normalized["exposure"] = _row_list_contract(payload.get("exposure"), ["symbol", "side", "market_value", "weight_proxy"])
-    normalized["recent_activity"] = _row_list_contract(payload.get("recent_activity"), ["kind", "ts", "symbol", "side", "qty", "price", "status"])
-    normalized["pnl_by_symbol"] = _row_list_contract(payload.get("pnl_by_symbol"), ["symbol", "trade_count", "closed_trade_count", "cumulative_realized_pnl", "win_rate"])
-    normalized["recent_realized_pnl"] = _row_list_contract(payload.get("recent_realized_pnl"), ["period", "realized_pnl"])
-    normalized["best_trades"] = _row_list_contract(payload.get("best_trades"), ["trade_id", "symbol", "side", "realized_pnl", "entry_ts", "exit_ts", "strategy_id"])
-    normalized["worst_trades"] = _row_list_contract(payload.get("worst_trades"), ["trade_id", "symbol", "side", "realized_pnl", "entry_ts", "exit_ts", "strategy_id"])
+    normalized["positions"] = _row_list_contract(
+        payload.get("positions"), ["symbol", "qty", "avg_price", "market_value", "side"]
+    )
+    normalized["exposure"] = _row_list_contract(
+        payload.get("exposure"), ["symbol", "side", "market_value", "weight_proxy"]
+    )
+    normalized["recent_activity"] = _row_list_contract(
+        payload.get("recent_activity"), ["kind", "ts", "symbol", "side", "qty", "price", "status"]
+    )
+    normalized["pnl_by_symbol"] = _row_list_contract(
+        payload.get("pnl_by_symbol"),
+        ["symbol", "trade_count", "closed_trade_count", "cumulative_realized_pnl", "win_rate"],
+    )
+    normalized["recent_realized_pnl"] = _row_list_contract(
+        payload.get("recent_realized_pnl"), ["period", "realized_pnl"]
+    )
+    normalized["best_trades"] = _row_list_contract(
+        payload.get("best_trades"), ["trade_id", "symbol", "side", "realized_pnl", "entry_ts", "exit_ts", "strategy_id"]
+    )
+    normalized["worst_trades"] = _row_list_contract(
+        payload.get("worst_trades"),
+        ["trade_id", "symbol", "side", "realized_pnl", "entry_ts", "exit_ts", "strategy_id"],
+    )
     normalized["meta"] = dict(_json_safe(normalized.get("meta") or {}))
     return normalized
 
@@ -212,12 +284,52 @@ def _normalize_portfolio_overview_payload(payload: dict[str, Any]) -> dict[str, 
 def _normalize_strategy_detail_payload(payload: dict[str, Any]) -> dict[str, Any]:
     normalized = dict(_json_safe(payload))
     normalized["summary"] = dict(_json_safe(normalized.get("summary") or {}))
-    normalized["trades"] = _row_list_contract(payload.get("trades"), ["trade_id", "symbol", "side", "qty", "entry_ts", "entry_price", "exit_ts", "exit_price", "realized_pnl", "status", "strategy_id", "source", "run_id", "mode"])
-    normalized["pnl_by_symbol"] = _row_list_contract(payload.get("pnl_by_symbol"), ["symbol", "trade_count", "closed_trade_count", "cumulative_realized_pnl", "win_rate"])
-    normalized["recent_realized_pnl"] = _row_list_contract(payload.get("recent_realized_pnl"), ["period", "realized_pnl"])
-    normalized["best_trades"] = _row_list_contract(payload.get("best_trades"), ["trade_id", "symbol", "side", "realized_pnl", "entry_ts", "exit_ts", "strategy_id"])
-    normalized["worst_trades"] = _row_list_contract(payload.get("worst_trades"), ["trade_id", "symbol", "side", "realized_pnl", "entry_ts", "exit_ts", "strategy_id"])
-    normalized["comparisons"] = _row_list_contract(payload.get("comparisons"), ["source", "run_id", "mode", "trade_count", "closed_trade_count", "open_trade_count", "cumulative_realized_pnl", "win_rate"])
+    normalized["trades"] = _row_list_contract(
+        payload.get("trades"),
+        [
+            "trade_id",
+            "symbol",
+            "side",
+            "qty",
+            "entry_ts",
+            "entry_price",
+            "exit_ts",
+            "exit_price",
+            "realized_pnl",
+            "status",
+            "strategy_id",
+            "source",
+            "run_id",
+            "mode",
+        ],
+    )
+    normalized["pnl_by_symbol"] = _row_list_contract(
+        payload.get("pnl_by_symbol"),
+        ["symbol", "trade_count", "closed_trade_count", "cumulative_realized_pnl", "win_rate"],
+    )
+    normalized["recent_realized_pnl"] = _row_list_contract(
+        payload.get("recent_realized_pnl"), ["period", "realized_pnl"]
+    )
+    normalized["best_trades"] = _row_list_contract(
+        payload.get("best_trades"), ["trade_id", "symbol", "side", "realized_pnl", "entry_ts", "exit_ts", "strategy_id"]
+    )
+    normalized["worst_trades"] = _row_list_contract(
+        payload.get("worst_trades"),
+        ["trade_id", "symbol", "side", "realized_pnl", "entry_ts", "exit_ts", "strategy_id"],
+    )
+    normalized["comparisons"] = _row_list_contract(
+        payload.get("comparisons"),
+        [
+            "source",
+            "run_id",
+            "mode",
+            "trade_count",
+            "closed_trade_count",
+            "open_trade_count",
+            "cumulative_realized_pnl",
+            "win_rate",
+        ],
+    )
     normalized["meta"] = dict(_json_safe(normalized.get("meta") or {}))
     normalized["meta"]["sources"] = _normalize_context_rows(normalized["meta"].get("sources"))
     return normalized
@@ -225,24 +337,108 @@ def _normalize_strategy_detail_payload(payload: dict[str, Any]) -> dict[str, Any
 
 def _normalize_trade_detail_payload(payload: dict[str, Any]) -> dict[str, Any]:
     normalized = dict(_json_safe(payload))
-    normalized["trade"] = _row_contract(payload.get("trade"), ["trade_id", "symbol", "side", "qty", "entry_ts", "entry_price", "exit_ts", "exit_price", "realized_pnl", "status", "strategy_id", "source", "run_id", "mode", "trade_source", "trade_source_mode", "hold_duration_hours"])
+    normalized["trade"] = _row_contract(
+        payload.get("trade"),
+        [
+            "trade_id",
+            "symbol",
+            "side",
+            "qty",
+            "entry_ts",
+            "entry_price",
+            "exit_ts",
+            "exit_price",
+            "realized_pnl",
+            "status",
+            "strategy_id",
+            "source",
+            "run_id",
+            "mode",
+            "trade_source",
+            "trade_source_mode",
+            "hold_duration_hours",
+        ],
+    )
     normalized["chart"] = _normalize_chart_payload(dict(payload.get("chart") or {}))
     normalized["signals"] = _row_list_contract(payload.get("signals"), ["ts", "type", "price", "label", "score"])
-    normalized["fills"] = _row_list_contract(payload.get("fills"), ["ts", "symbol", "side", "qty", "price", "order_id", "status", "reason", "source_type"])
-    normalized["orders"] = _row_list_contract(payload.get("orders"), ["ts", "symbol", "side", "qty", "price", "order_id", "status", "reason", "source_type"])
+    normalized["fills"] = _row_list_contract(
+        payload.get("fills"), ["ts", "symbol", "side", "qty", "price", "order_id", "status", "reason", "source_type"]
+    )
+    normalized["orders"] = _row_list_contract(
+        payload.get("orders"), ["ts", "symbol", "side", "qty", "price", "order_id", "status", "reason", "source_type"]
+    )
     normalized["trade_summary"] = dict(_json_safe(normalized.get("trade_summary") or {}))
     normalized["portfolio_context"] = dict(_json_safe(normalized.get("portfolio_context") or {}))
     normalized["execution_review"] = dict(_json_safe(normalized.get("execution_review") or {}))
     normalized["outcome_review"] = dict(_json_safe(normalized.get("outcome_review") or {}))
     normalized["related_metadata"] = dict(_json_safe(normalized.get("related_metadata") or {}))
     normalized["provenance"] = dict(_json_safe(normalized.get("provenance") or {}))
-    normalized["provenance"]["latest"] = _row_contract((payload.get("provenance") or {}).get("latest"), ["ts", "symbol", "trade_id", "strategy_id", "run_id", "source", "mode", "signal_type", "signal_value", "ranking_score", "universe_rank", "selection_included", "selection_status", "exclusion_reason", "target_weight", "sizing_rationale", "constraint_hits", "order_intent_summary", "label", "regime_context", "artifact_path", "metadata_path"])
-    normalized["provenance"]["rows"] = _row_list_contract((payload.get("provenance") or {}).get("rows"), ["ts", "symbol", "trade_id", "strategy_id", "run_id", "source", "mode", "signal_type", "signal_value", "ranking_score", "universe_rank", "selection_included", "selection_status", "exclusion_reason", "target_weight", "sizing_rationale", "constraint_hits", "order_intent_summary", "label", "regime_context", "artifact_path", "metadata_path"])
+    normalized["provenance"]["latest"] = _row_contract(
+        (payload.get("provenance") or {}).get("latest"),
+        [
+            "ts",
+            "symbol",
+            "trade_id",
+            "strategy_id",
+            "run_id",
+            "source",
+            "mode",
+            "signal_type",
+            "signal_value",
+            "ranking_score",
+            "universe_rank",
+            "selection_included",
+            "selection_status",
+            "exclusion_reason",
+            "target_weight",
+            "sizing_rationale",
+            "constraint_hits",
+            "order_intent_summary",
+            "label",
+            "regime_context",
+            "artifact_path",
+            "metadata_path",
+        ],
+    )
+    normalized["provenance"]["rows"] = _row_list_contract(
+        (payload.get("provenance") or {}).get("rows"),
+        [
+            "ts",
+            "symbol",
+            "trade_id",
+            "strategy_id",
+            "run_id",
+            "source",
+            "mode",
+            "signal_type",
+            "signal_value",
+            "ranking_score",
+            "universe_rank",
+            "selection_included",
+            "selection_status",
+            "exclusion_reason",
+            "target_weight",
+            "sizing_rationale",
+            "constraint_hits",
+            "order_intent_summary",
+            "label",
+            "regime_context",
+            "artifact_path",
+            "metadata_path",
+        ],
+    )
     normalized["lifecycle"] = _row_list_contract(payload.get("lifecycle"), ["ts", "kind", "label", "detail", "status"])
     comparison = dict(_json_safe(normalized.get("comparison") or {}))
-    comparison["related_trades"] = _row_list_contract((payload.get("comparison") or {}).get("related_trades"), ["trade_id", "symbol", "side", "qty", "entry_ts", "exit_ts", "realized_pnl", "status", "strategy_id"])
-    comparison["available_chart_sources"] = _normalize_context_rows((payload.get("comparison") or {}).get("available_chart_sources"))
-    comparison["available_provenance_sources"] = _normalize_context_rows((payload.get("comparison") or {}).get("available_provenance_sources"))
+    comparison["related_trades"] = _row_list_contract(
+        (payload.get("comparison") or {}).get("related_trades"),
+        ["trade_id", "symbol", "side", "qty", "entry_ts", "exit_ts", "realized_pnl", "status", "strategy_id"],
+    )
+    comparison["available_chart_sources"] = _normalize_context_rows(
+        (payload.get("comparison") or {}).get("available_chart_sources")
+    )
+    comparison["available_provenance_sources"] = _normalize_context_rows(
+        (payload.get("comparison") or {}).get("available_provenance_sources")
+    )
     normalized["comparison"] = comparison
     normalized["explain"] = dict(_json_safe(normalized.get("explain") or {}))
     normalized["meta"] = dict(_json_safe(normalized.get("meta") or {}))
@@ -288,7 +484,10 @@ def _normalize_trade_blotter_payload(payload: dict[str, Any]) -> dict[str, Any]:
 def _normalize_execution_diagnostics_payload(payload: dict[str, Any]) -> dict[str, Any]:
     normalized = dict(_json_safe(payload))
     normalized["summary"] = dict(_json_safe(normalized.get("summary") or {}))
-    normalized["rows"] = _row_list_contract(payload.get("rows"), ["symbol", "signal_ts", "fill_ts", "latency_seconds", "signal_price", "fill_price", "slippage_bps"])
+    normalized["rows"] = _row_list_contract(
+        payload.get("rows"),
+        ["symbol", "signal_ts", "fill_ts", "latency_seconds", "signal_price", "fill_price", "slippage_bps"],
+    )
     normalized["meta"] = dict(_json_safe(normalized.get("meta") or {}))
     return normalized
 
@@ -296,10 +495,54 @@ def _normalize_execution_diagnostics_payload(payload: dict[str, Any]) -> dict[st
 def _normalize_discovery_payload(payload: dict[str, Any]) -> dict[str, Any]:
     normalized = dict(_json_safe(payload))
     normalized["summary"] = dict(_json_safe(normalized.get("summary") or {}))
-    normalized["recent_symbols"] = _row_list_contract(payload.get("recent_symbols"), ["symbol", "trade_count", "latest_trade_id", "latest_entry_ts", "latest_strategy_id", "latest_source", "latest_run_id", "status"])
-    normalized["recent_trades"] = _row_list_contract(payload.get("recent_trades"), ["trade_id", "symbol", "strategy_id", "side", "qty", "entry_ts", "exit_ts", "entry_price", "exit_price", "realized_pnl", "status", "source", "run_id", "mode"])
-    normalized["recent_strategies"] = _row_list_contract(payload.get("recent_strategies"), ["strategy_id", "trade_count", "closed_trade_count", "latest_symbol", "latest_entry_ts", "latest_source", "latest_run_id"])
-    normalized["recent_run_contexts"] = _row_list_contract(payload.get("recent_run_contexts"), ["source", "run_id", "mode", "trade_count", "strategy_count", "symbol_count", "latest_entry_ts"])
+    normalized["recent_symbols"] = _row_list_contract(
+        payload.get("recent_symbols"),
+        [
+            "symbol",
+            "trade_count",
+            "latest_trade_id",
+            "latest_entry_ts",
+            "latest_strategy_id",
+            "latest_source",
+            "latest_run_id",
+            "status",
+        ],
+    )
+    normalized["recent_trades"] = _row_list_contract(
+        payload.get("recent_trades"),
+        [
+            "trade_id",
+            "symbol",
+            "strategy_id",
+            "side",
+            "qty",
+            "entry_ts",
+            "exit_ts",
+            "entry_price",
+            "exit_price",
+            "realized_pnl",
+            "status",
+            "source",
+            "run_id",
+            "mode",
+        ],
+    )
+    normalized["recent_strategies"] = _row_list_contract(
+        payload.get("recent_strategies"),
+        [
+            "strategy_id",
+            "trade_count",
+            "closed_trade_count",
+            "latest_symbol",
+            "latest_entry_ts",
+            "latest_source",
+            "latest_run_id",
+        ],
+    )
+    normalized["recent_run_contexts"] = _row_list_contract(
+        payload.get("recent_run_contexts"),
+        ["source", "run_id", "mode", "trade_count", "strategy_count", "symbol_count", "latest_entry_ts"],
+    )
     return normalized
 
 
@@ -312,11 +555,26 @@ def _normalize_portfolio_payload(payload: dict[str, Any]) -> dict[str, Any]:
     normalized["overlap"] = _normalize_context_rows(normalized.get("overlap"))
     normalized["clipped_symbols"] = _normalize_context_rows(normalized.get("clipped_symbols"))
     normalized["adaptive_allocation"] = dict(_json_safe(normalized.get("adaptive_allocation") or {}))
-    normalized["adaptive_allocation"]["top_changes"] = _normalize_context_rows(normalized["adaptive_allocation"].get("top_changes"))
-    normalized["adaptive_allocation"]["strategies"] = _normalize_context_rows(normalized["adaptive_allocation"].get("strategies"))
+    normalized["adaptive_allocation"]["top_changes"] = _normalize_context_rows(
+        normalized["adaptive_allocation"].get("top_changes")
+    )
+    normalized["adaptive_allocation"]["strategies"] = _normalize_context_rows(
+        normalized["adaptive_allocation"].get("strategies")
+    )
     normalized["market_regime"] = dict(_json_safe(normalized.get("market_regime") or {}))
     normalized["market_regime"]["summary"] = dict(_json_safe(normalized["market_regime"].get("summary") or {}))
     normalized["market_regime"]["history"] = _normalize_context_rows(normalized["market_regime"].get("history"))
+    normalized["strategy_quality"] = dict(_json_safe(normalized.get("strategy_quality") or {}))
+    normalized["strategy_quality"]["summary"] = dict(_json_safe(normalized["strategy_quality"].get("summary") or {}))
+    normalized["strategy_quality"]["strategy_comparison"] = _normalize_context_rows(
+        normalized["strategy_quality"].get("strategy_comparison")
+    )
+    normalized["strategy_quality"]["rolling_sharpe"] = _normalize_context_rows(
+        normalized["strategy_quality"].get("rolling_sharpe")
+    )
+    normalized["strategy_quality"]["rolling_ic"] = _normalize_context_rows(
+        normalized["strategy_quality"].get("rolling_ic")
+    )
     return normalized
 
 
@@ -370,9 +628,11 @@ class DashboardDataService:
                     "critical_alert_count": int(run_health.get("alert_counts", {}).get("critical", 0) or 0),
                     "warning_alert_count": int(run_health.get("alert_counts", {}).get("warning", 0) or 0),
                     "stage_count": int(len(stage_df.index)),
-                    "failed_stage_count": int((stage_df.get("status", pd.Series(dtype=object)) == "failed").sum())
-                    if not stage_df.empty
-                    else 0,
+                    "failed_stage_count": (
+                        int((stage_df.get("status", pd.Series(dtype=object)) == "failed").sum())
+                        if not stage_df.empty
+                        else 0
+                    ),
                     "artifact_dir": str(run_dir),
                 }
             )
@@ -463,7 +723,9 @@ class DashboardDataService:
                     "promotion_passed": promotion.get("passed") if promotion else None,
                     "promotion_summary": promotion.get("summary_metrics", {}) if promotion else {},
                     "degradation_status": degradation.get("status") if degradation else None,
-                    "degradation_summary": degradation.get("summary_metrics", degradation.get("metrics", {})) if degradation else {},
+                    "degradation_summary": (
+                        degradation.get("summary_metrics", degradation.get("metrics", {})) if degradation else {}
+                    ),
                     "paper_artifact_path": entry.paper_artifact_path,
                     "live_artifact_path": entry.live_artifact_path,
                 }
@@ -482,7 +744,9 @@ class DashboardDataService:
         candidates: list[Path] = []
         if run_dir is not None:
             candidates.append(run_dir / "portfolio_allocation" / "allocation_summary.json")
-        latest_summary_path = _newest_path(candidates + _candidate_files(self.artifacts_root, ["allocation_summary.json"]))
+        latest_summary_path = _newest_path(
+            candidates + _candidate_files(self.artifacts_root, ["allocation_summary.json"])
+        )
         if latest_summary_path is None:
             return {
                 "summary": {},
@@ -502,11 +766,17 @@ class DashboardDataService:
         sleeve_weights = []
         if not sleeve_df.empty and "sleeve_name" in sleeve_df.columns:
             weight_col = "scaled_target_weight" if "scaled_target_weight" in sleeve_df.columns else "target_weight"
-            aggregated = sleeve_df.groupby("sleeve_name", as_index=False)[weight_col].sum().sort_values(weight_col, ascending=False)
+            aggregated = (
+                sleeve_df.groupby("sleeve_name", as_index=False)[weight_col]
+                .sum()
+                .sort_values(weight_col, ascending=False)
+            )
             sleeve_weights = aggregated.to_dict(orient="records")
         top_positions = []
         if not combined_df.empty and "target_weight" in combined_df.columns:
-            sorted_df = combined_df.assign(abs_weight=combined_df["target_weight"].abs()).sort_values("abs_weight", ascending=False)
+            sorted_df = combined_df.assign(abs_weight=combined_df["target_weight"].abs()).sort_values(
+                "abs_weight", ascending=False
+            )
             top_positions = sorted_df.drop(columns=["abs_weight"]).head(10).to_dict(orient="records")
         return {
             "summary": summary,
@@ -543,7 +813,9 @@ class DashboardDataService:
             "requested_orders": _safe_read_csv(execution_dir / "requested_orders.csv").to_dict(orient="records"),
             "executable_orders": _safe_read_csv(execution_dir / "executable_orders.csv").to_dict(orient="records"),
             "rejected_orders": _safe_read_csv(execution_dir / "rejected_orders.csv").to_dict(orient="records"),
-            "liquidity_diagnostics": _safe_read_csv(execution_dir / "liquidity_constraints_report.csv").to_dict(orient="records"),
+            "liquidity_diagnostics": _safe_read_csv(execution_dir / "liquidity_constraints_report.csv").to_dict(
+                orient="records"
+            ),
             "turnover_summary": _safe_read_csv(execution_dir / "turnover_summary.csv").to_dict(orient="records"),
             "artifact_dir": str(execution_dir),
         }
@@ -567,7 +839,10 @@ class DashboardDataService:
         duplicate_events = []
         if submit_path is not None:
             duplicate_events = [
-                row for row in _safe_read_csv(Path(submit_path).parent / "broker_order_results.csv").to_dict(orient="records")
+                row
+                for row in _safe_read_csv(Path(submit_path).parent / "broker_order_results.csv").to_dict(
+                    orient="records"
+                )
                 if row.get("status") == "skipped"
             ]
         return {
@@ -581,10 +856,54 @@ class DashboardDataService:
             "submission_artifact_dir": str(submit_path.parent) if submit_path is not None else None,
         }
 
+    def latest_daily_trading_payload(self) -> dict[str, Any]:
+        summary_path = _latest_matching_file(self.artifacts_root, ["daily_trading_summary.json"])
+        payload = _safe_read_json(summary_path)
+        return {
+            "generated_at": _now_utc(),
+            "summary": payload,
+            "artifact_path": str(summary_path) if summary_path is not None else None,
+        }
+
+    def strategy_quality_payload(self) -> dict[str, Any]:
+        comparison_path = _latest_matching_file(self.artifacts_root, ["strategy_comparison_summary.csv"])
+        history_path = _latest_matching_file(self.artifacts_root, ["strategy_performance_history.csv"])
+        sharpe_path = _latest_matching_file(self.artifacts_root, ["rolling_sharpe_by_strategy.csv"])
+        ic_path = _latest_matching_file(self.artifacts_root, ["rolling_ic_by_signal.csv"])
+        drawdown_path = _latest_matching_file(self.artifacts_root, ["drawdown_by_strategy.csv"])
+        summary_path = _latest_matching_file(self.artifacts_root, ["strategy_quality_summary.json"])
+        comparison_rows = _frame_to_records(_safe_read_csv(comparison_path), head=50) if comparison_path else []
+        history_rows = _frame_to_records(_safe_read_csv(history_path), tail=200) if history_path else []
+        sharpe_rows = _frame_to_records(_safe_read_csv(sharpe_path), tail=200) if sharpe_path else []
+        ic_rows = _frame_to_records(_safe_read_csv(ic_path), tail=200) if ic_path else []
+        drawdown_rows = _frame_to_records(_safe_read_csv(drawdown_path), head=50) if drawdown_path else []
+        summary = _safe_read_json(summary_path).get("summary", {})
+        return {
+            "generated_at": _now_utc(),
+            "summary": summary,
+            "strategy_comparison": comparison_rows,
+            "strategy_history": history_rows,
+            "rolling_sharpe": sharpe_rows,
+            "rolling_ic": ic_rows,
+            "drawdown": drawdown_rows,
+            "artifact_paths": {
+                "strategy_comparison_summary_path": str(comparison_path) if comparison_path is not None else None,
+                "strategy_performance_history_path": str(history_path) if history_path is not None else None,
+                "rolling_sharpe_by_strategy_path": str(sharpe_path) if sharpe_path is not None else None,
+                "rolling_ic_by_signal_path": str(ic_path) if ic_path is not None else None,
+                "drawdown_by_strategy_path": str(drawdown_path) if drawdown_path is not None else None,
+                "strategy_quality_summary_path": str(summary_path) if summary_path is not None else None,
+            },
+        }
+
     def latest_alerts_payload(self) -> dict[str, Any]:
         run_payload = self.latest_run_payload()
         run_dir = Path(run_payload["run_dir"]) if run_payload.get("run_dir") else None
-        alert_path = run_dir / "monitoring" / "alerts.json" if run_dir is not None and (run_dir / "monitoring" / "alerts.json").exists() else _latest_matching_file(self.artifacts_root, ["alerts.json"])
+        alert_path = (
+            run_dir / "monitoring" / "alerts.json"
+            if run_dir is not None and (run_dir / "monitoring" / "alerts.json").exists()
+            else _latest_matching_file(self.artifacts_root, ["alerts.json"])
+        )
         alerts = []
         if alert_path is not None and alert_path.exists():
             try:
@@ -629,13 +948,17 @@ class DashboardDataService:
             "strategy_portfolio_path": str(strategy_portfolio_path) if strategy_portfolio_path is not None else None,
             "summary": {
                 "run_count": len(runs),
-                "signal_family_counts": _status_counts([str(row.get("signal_family")) for row in runs if row.get("signal_family")]),
+                "signal_family_counts": _status_counts(
+                    [str(row.get("signal_family")) for row in runs if row.get("signal_family")]
+                ),
                 "universe_counts": _status_counts([str(row.get("universe")) for row in runs if row.get("universe")]),
                 "eligible_candidate_count": len([row for row in candidate_rows if bool(row.get("eligible"))]),
                 "promoted_strategy_count": len(promoted_rows),
                 "validated_pass_count": len([row for row in validation_rows if row.get("validation_status") == "pass"]),
                 "validated_weak_count": len([row for row in validation_rows if row.get("validation_status") == "weak"]),
-                "degraded_strategy_count": len([row for row in lifecycle_rows if row.get("current_state") == "degraded"]),
+                "degraded_strategy_count": len(
+                    [row for row in lifecycle_rows if row.get("current_state") == "degraded"]
+                ),
                 "demoted_strategy_count": len([row for row in lifecycle_rows if row.get("current_state") == "demoted"]),
                 "strategy_portfolio_selected_count": len(strategy_portfolio_payload.get("selected_strategies", [])),
             },
@@ -813,6 +1136,8 @@ class DashboardDataService:
         experiments = self.experiments_payload()
         validation = self.strategy_validation_payload()
         lifecycle = self.strategy_lifecycle_payload()
+        daily_trading = self.latest_daily_trading_payload()
+        strategy_quality = self.strategy_quality_payload()
         latest_run_summary = latest_run.get("summary", {})
         latest_run_health = latest_run.get("health", {})
         portfolio_summary = portfolio.get("summary", {})
@@ -851,12 +1176,16 @@ class DashboardDataService:
                 "eligible_candidate_count": research.get("summary", {}).get("eligible_candidate_count", 0),
                 "promoted_strategy_count": research.get("summary", {}).get("promoted_strategy_count", 0),
                 "validated_pass_count": validation.get("summary", {}).get("pass_count", 0),
-                "strategy_portfolio_selected_count": research.get("summary", {}).get("strategy_portfolio_selected_count", 0),
+                "strategy_portfolio_selected_count": research.get("summary", {}).get(
+                    "strategy_portfolio_selected_count", 0
+                ),
                 "top_leaderboard_entry": research.get("leaderboard", [{}])[0] if research.get("leaderboard") else {},
             },
             "strategy_monitoring": {
                 "warning_strategy_count": strategy_monitoring.get("summary", {}).get("warning_strategy_count", 0),
-                "deactivation_candidate_count": strategy_monitoring.get("summary", {}).get("deactivation_candidate_count", 0),
+                "deactivation_candidate_count": strategy_monitoring.get("summary", {}).get(
+                    "deactivation_candidate_count", 0
+                ),
                 "aggregate_return": strategy_monitoring.get("summary", {}).get("aggregate_return"),
             },
             "strategy_lifecycle": {
@@ -877,7 +1206,15 @@ class DashboardDataService:
             "orchestration": {
                 "run_id": orchestration.get("summary", {}).get("run_id"),
                 "status": orchestration.get("summary", {}).get("status"),
-                "selected_strategy_count": orchestration.get("summary", {}).get("outputs", {}).get("selected_strategy_count", 0),
+                "selected_strategy_count": orchestration.get("summary", {})
+                .get("outputs", {})
+                .get("selected_strategy_count", 0),
+            },
+            "daily_trading": {
+                "status": daily_trading.get("summary", {}).get("status"),
+                "active_strategy_count": daily_trading.get("summary", {}).get("active_strategy_count"),
+                "fill_count": daily_trading.get("summary", {}).get("fill_count"),
+                "executable_order_count": daily_trading.get("summary", {}).get("executable_order_count"),
             },
             "experiments": {
                 "experiment_count": experiments.get("summary", {}).get("experiment_count", 0),
@@ -895,6 +1232,10 @@ class DashboardDataService:
                 "gross_exposure": portfolio_summary.get("gross_exposure_after_constraints"),
                 "net_exposure": portfolio_summary.get("net_exposure_after_constraints"),
             },
+            "strategy_quality": {
+                "strategy_count": strategy_quality.get("summary", {}).get("strategy_count", 0),
+                "active_strategy_count": strategy_quality.get("summary", {}).get("active_strategy_count", 0),
+            },
             "execution": {
                 "executable_order_count": execution_summary.get("executable_order_count"),
                 "rejected_order_count": execution_summary.get("rejected_order_count"),
@@ -910,6 +1251,7 @@ class DashboardDataService:
     def strategies_payload(self) -> dict[str, Any]:
         registry = self.registry_payload()
         lifecycle = self.strategy_lifecycle_payload()
+        strategy_quality = self.strategy_quality_payload()
         tags = sorted({tag for row in registry["strategies"] for tag in row.get("tags", [])})
         return {
             "generated_at": _now_utc(),
@@ -918,11 +1260,19 @@ class DashboardDataService:
                 "status_counts": registry["status_counts"],
                 "family_counts": registry["family_counts"],
                 "lifecycle_counts": lifecycle.get("summary", {}).get("state_counts", {}),
+                "strategy_quality_count": strategy_quality.get("summary", {}).get("strategy_count", 0),
             },
-            "filters": {"statuses": sorted(registry["status_counts"]), "families": sorted(registry["family_counts"]), "tags": tags},
+            "filters": {
+                "statuses": sorted(registry["status_counts"]),
+                "families": sorted(registry["family_counts"]),
+                "tags": tags,
+            },
             "strategies": registry["strategies"],
             "champion_challenger": registry["champion_challenger"],
             "strategy_lifecycle": lifecycle.get("strategies", []),
+            "strategy_comparison": strategy_quality.get("strategy_comparison", []),
+            "rolling_sharpe": strategy_quality.get("rolling_sharpe", []),
+            "rolling_ic": strategy_quality.get("rolling_ic", []),
         }
 
     def runs_payload(self) -> dict[str, Any]:
@@ -948,6 +1298,7 @@ class DashboardDataService:
         payload = self.latest_portfolio_payload()
         payload["adaptive_allocation"] = self.adaptive_allocation_payload()
         payload["market_regime"] = self.market_regime_payload()
+        payload["strategy_quality"] = self.strategy_quality_payload()
         payload["generated_at"] = _now_utc()
         return _normalize_portfolio_payload(payload)
 
@@ -1042,16 +1393,18 @@ class DashboardDataService:
         source: str | None = None,
         mode: str | None = None,
     ) -> dict[str, Any]:
-        return _normalize_chart_payload(build_chart_payload(
-            artifacts_root=self.artifacts_root,
-            feature_dir=self.feature_dir,
-            symbol=symbol,
-            timeframe=timeframe,
-            lookback=lookback,
-            run_id=run_id,
-            source=source,
-            mode=mode,
-        ))
+        return _normalize_chart_payload(
+            build_chart_payload(
+                artifacts_root=self.artifacts_root,
+                feature_dir=self.feature_dir,
+                symbol=symbol,
+                timeframe=timeframe,
+                lookback=lookback,
+                run_id=run_id,
+                source=source,
+                mode=mode,
+            )
+        )
 
     def trades_payload(
         self,
@@ -1069,8 +1422,29 @@ class DashboardDataService:
             mode=mode,
         )
         normalized = dict(_json_safe(payload))
-        normalized["trades"] = _row_list_contract(normalized.get("trades"), ["trade_id", "symbol", "side", "qty", "entry_ts", "entry_price", "exit_ts", "exit_price", "realized_pnl", "status", "strategy_id", "source", "run_id", "mode"])
-        normalized["fills"] = _row_list_contract(normalized.get("fills"), ["ts", "symbol", "side", "qty", "price", "order_id", "status", "reason", "source_type"])
+        normalized["trades"] = _row_list_contract(
+            normalized.get("trades"),
+            [
+                "trade_id",
+                "symbol",
+                "side",
+                "qty",
+                "entry_ts",
+                "entry_price",
+                "exit_ts",
+                "exit_price",
+                "realized_pnl",
+                "status",
+                "strategy_id",
+                "source",
+                "run_id",
+                "mode",
+            ],
+        )
+        normalized["fills"] = _row_list_contract(
+            normalized.get("fills"),
+            ["ts", "symbol", "side", "qty", "price", "order_id", "status", "reason", "source_type"],
+        )
         normalized["meta"] = dict(_json_safe(normalized.get("meta") or {}))
         return normalized
 

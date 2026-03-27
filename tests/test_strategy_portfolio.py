@@ -285,6 +285,71 @@ def test_strategy_portfolio_score_then_cap_prefers_higher_ranked_strategies(tmp_
     assert payload["summary"]["weighting_mode_resolved"] == "score_then_cap"
 
 
+def test_strategy_portfolio_accepts_strategy_weighting_aliases(tmp_path: Path) -> None:
+    promoted_dir = _write_promoted_strategies(tmp_path / "promoted")
+
+    build_strategy_portfolio(
+        promoted_dir=promoted_dir,
+        output_dir=tmp_path / "aliased_portfolio",
+        policy=StrategyPortfolioPolicyConfig(
+            max_active_strategies=2,
+            strategy_weighting_mode="metric_weighted",
+            strategy_weight_metric="ranking_value",
+            min_strategy_weight=0.2,
+            max_strategy_weight=0.8,
+            max_strategies_per_signal_family=2,
+        ),
+    )
+    payload = load_strategy_portfolio(tmp_path / "aliased_portfolio")
+
+    assert payload["summary"]["max_active_strategies"] == 2
+    assert payload["summary"]["strategy_weight_metric"] == "ranking_value"
+    assert payload["summary"]["weighting_mode_resolved"] == "metric_weighted"
+
+
+def test_strategy_portfolio_risk_adjusted_weighting_penalizes_drawdown(tmp_path: Path) -> None:
+    promoted_dir = tmp_path / "promoted"
+    promoted_dir.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "strategies": [
+            {
+                "preset_name": "lower_risk",
+                "source_run_id": "run-a",
+                "signal_family": "momentum",
+                "status": "active",
+                "ranking_metric": "portfolio_sharpe",
+                "ranking_value": 1.0,
+                "max_drawdown": 0.05,
+            },
+            {
+                "preset_name": "higher_risk",
+                "source_run_id": "run-b",
+                "signal_family": "value",
+                "status": "active",
+                "ranking_metric": "portfolio_sharpe",
+                "ranking_value": 1.0,
+                "max_drawdown": 0.45,
+            },
+        ]
+    }
+    (promoted_dir / "promoted_strategies.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+    build_strategy_portfolio(
+        promoted_dir=promoted_dir,
+        output_dir=tmp_path / "risk_adjusted",
+        policy=StrategyPortfolioPolicyConfig(
+            max_strategies=2,
+            max_strategies_per_signal_family=2,
+            weighting_mode="risk_adjusted",
+            max_weight_per_strategy=1.0,
+        ),
+    )
+    result = load_strategy_portfolio(tmp_path / "risk_adjusted")
+    rows = {row["preset_name"]: row for row in result["selected_strategies"]}
+
+    assert rows["lower_risk"]["allocation_weight"] > rows["higher_risk"]["allocation_weight"]
+
+
 def test_strategy_portfolio_can_keep_conditional_sibling_for_same_run_when_enabled(tmp_path: Path) -> None:
     promoted_dir = tmp_path / "promoted"
     promoted_dir.mkdir(parents=True, exist_ok=True)

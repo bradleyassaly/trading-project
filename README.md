@@ -723,6 +723,12 @@ The example `configs/pipeline_daily.yaml` keeps the legacy top-level pipeline co
 - `artifacts/daily_trading/run_current/daily_trading_summary.md`
 - `artifacts/daily_trading/run_current/paper/...`
 - `artifacts/daily_trading/run_current/report/paper_account_report.json`
+- `artifacts/daily_trading/run_current/report/strategy_comparison_summary.csv`
+- `artifacts/daily_trading/run_current/report/strategy_performance_history.csv`
+- `artifacts/daily_trading/run_current/report/rolling_sharpe_by_strategy.csv`
+- `artifacts/daily_trading/run_current/report/rolling_ic_by_signal.csv`
+- `artifacts/daily_trading/run_current/report/drawdown_by_strategy.csv`
+- `artifacts/daily_trading/run_current/dashboard/...` when `dashboard.refresh_static_data: true`
 
 The daily summary records stage outcomes plus the key paper handoff counts:
 
@@ -743,6 +749,14 @@ The daily summary records stage outcomes plus the key paper handoff counts:
 
 Use `research.mode: fast_refresh` for lightweight approval/registry refresh days, and `research.mode: full` for full recompute days. If DB tracking is enabled in the nested `tracking` section, the workflow reuses the existing bounded research/promotion lineage tracking without changing the artifact contracts.
 
+The daily markdown summary now also calls out:
+
+- top selected strategies
+- portfolio composition by signal family
+- active vs inactive conditional sleeves
+- paper performance snapshot
+- warnings and stage failures when present
+
 The portfolio policy can now control conditional handling through:
 
 - `include_conditional_strategies`
@@ -751,6 +765,12 @@ The portfolio policy can now control conditional handling through:
 - `require_baseline_for_conditional`
 - `conditional_weight_multiplier`
 - `conditional_selection_mode`
+- `min_active_strategies`
+- `max_active_strategies`
+- `strategy_weighting_mode`
+- `strategy_weight_metric`
+- `min_strategy_weight`
+- `max_strategy_weight`
 
 `conditional_selection_mode` supports:
 
@@ -760,6 +780,13 @@ The portfolio policy can now control conditional handling through:
   conditional strategies are still selected, but are marked with `portfolio_bucket=conditional`
 - `shadow_only`
   conditional strategies are emitted into portfolio artifacts for monitoring but are not allocated capital
+
+`strategy_weighting_mode` supports the existing baseline modes plus:
+
+- `risk_adjusted`
+  downweights otherwise strong strategies when promoted metadata shows larger drawdown
+- `conditional_aware`
+  keeps conditional siblings selectable while modestly preferring unconditional sleeves unless the conditional bonus justifies the slot
 
 When conditional rows are present, portfolio build also writes `strategy_portfolio_condition_summary.csv`.
 If an `activated/activated_strategy_portfolio.json` artifact exists, `strategy-portfolio export-run-config` and alpha-cycle export prefer its `active_strategies` payload so downstream paper/live dry-run style workflows can consume only active rows without changing unconditional workflows.
@@ -2026,6 +2053,8 @@ http://127.0.0.1:8000/trades/<TRADE_ID>
 http://127.0.0.1:8000/strategies
 http://127.0.0.1:8000/strategies/<STRATEGY_ID>
 http://127.0.0.1:8000/portfolio
+http://127.0.0.1:8000/execution
+http://127.0.0.1:8000/runs
 http://127.0.0.1:8000/ops
 http://127.0.0.1:8000/symbols/AAPL
 ```
@@ -2046,6 +2075,10 @@ What each page is for:
   strategy-linked trade history and run/source comparisons
 - `/portfolio`
   open positions, exposure, recent activity, contributors/detractors, and allocation context
+- `/execution`
+  latest execution, fills, symbol coverage, and handoff diagnostics
+- `/runs`
+  recent run summaries across research, promotion, portfolio, and paper stages
 - `/ops`
   run health, latest stages, live risk checks, execution diagnostics, and orchestration history
 - `/symbols/<SYMBOL>`

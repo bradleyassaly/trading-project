@@ -642,6 +642,7 @@ class DailyTradingWorkflowConfig:
     paper_output_dir: str = "artifacts/daily_trading/run_current/paper"
     paper_state_path: str = "artifacts/daily_trading/run_current/paper_state.json"
     report_dir: str | None = None
+    dashboard_output_dir: str | None = None
     run_name: str = "daily_trading"
     run_id: str | None = None
     research_mode: str = "skip"
@@ -657,6 +658,8 @@ class DailyTradingWorkflowConfig:
     include_inactive_conditionals_in_reports: bool = True
     auto_apply_fills: bool = True
     fail_if_zero_targets_after_validation: bool = False
+    enable_strategy_diagnostics: bool = True
+    refresh_dashboard_static_data: bool = False
     evaluate_conditional_activation: bool | None = None
     activation_context_sources: list[str] | None = None
     include_inactive_conditionals_in_output: bool | None = None

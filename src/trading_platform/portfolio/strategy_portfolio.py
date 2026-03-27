@@ -28,6 +28,8 @@ _VALID_WEIGHTING_MODES = {
     "capped_metric_weighted",
     "inverse_count_by_signal_family",
     "score_then_cap",
+    "risk_adjusted",
+    "conditional_aware",
 }
 
 
@@ -35,13 +37,19 @@ _VALID_WEIGHTING_MODES = {
 class StrategyPortfolioPolicyConfig:
     schema_version: int = STRATEGY_PORTFOLIO_SCHEMA_VERSION
     max_strategies: int | None = 5
+    min_active_strategies: int = 0
+    max_active_strategies: int | None = None
     max_strategies_per_signal_family: int | None = 1
     max_strategies_per_universe: int | None = None
     min_families_if_available: int = 0
     max_weight_per_strategy: float = 0.5
     min_weight_per_strategy: float = 0.0
+    max_strategy_weight: float | None = None
+    min_strategy_weight: float | None = None
     selection_metric: str = "ranking_value"
+    strategy_weight_metric: str | None = None
     weighting_mode: str = "equal"
+    strategy_weighting_mode: str | None = None
     metric_weight_cap_multiple: float = 1.5
     weighting_smoothing_power: float = 1.0
     require_active_only: bool = False
@@ -66,10 +74,28 @@ class StrategyPortfolioPolicyConfig:
     tags: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
+        if self.max_active_strategies is not None:
+            object.__setattr__(self, "max_strategies", self.max_active_strategies)
+        if self.max_strategy_weight is not None:
+            object.__setattr__(self, "max_weight_per_strategy", self.max_strategy_weight)
+        if self.min_strategy_weight is not None:
+            object.__setattr__(self, "min_weight_per_strategy", self.min_strategy_weight)
+        if self.strategy_weight_metric:
+            object.__setattr__(self, "selection_metric", self.strategy_weight_metric)
+        if self.strategy_weighting_mode:
+            object.__setattr__(self, "weighting_mode", self.strategy_weighting_mode)
         if self.schema_version != STRATEGY_PORTFOLIO_SCHEMA_VERSION:
             raise ValueError(f"Unsupported strategy portfolio schema_version: {self.schema_version}")
         if self.max_strategies is not None and self.max_strategies <= 0:
             raise ValueError("max_strategies must be > 0 when provided")
+        if self.min_active_strategies < 0:
+            raise ValueError("min_active_strategies must be >= 0")
+        if (
+            self.max_strategies is not None
+            and self.min_active_strategies > 0
+            and self.min_active_strategies > self.max_strategies
+        ):
+            raise ValueError("min_active_strategies must be <= max_strategies when max_strategies is provided")
         if self.max_strategies_per_signal_family is not None and self.max_strategies_per_signal_family <= 0:
             raise ValueError("max_strategies_per_signal_family must be > 0 when provided")
         if self.max_strategies_per_universe is not None and self.max_strategies_per_universe <= 0:
@@ -91,7 +117,8 @@ class StrategyPortfolioPolicyConfig:
             raise ValueError(
                 "weighting_mode must be one of: equal, metric_proportional, "
                 "equal_weight, metric_weighted, capped_metric_weighted, "
-                "inverse_count_by_signal_family, score_then_cap"
+                "inverse_count_by_signal_family, score_then_cap, "
+                "risk_adjusted, conditional_aware"
             )
         if self.metric_weight_cap_multiple <= 0:
             raise ValueError("metric_weight_cap_multiple must be > 0")
@@ -171,11 +198,7 @@ def _row_metric_value(row: dict[str, Any], metric_name: str) -> float | None:
 
 
 def _is_conditional_variant(row: dict[str, Any]) -> bool:
-    return bool(
-        row.get("condition_id")
-        or row.get("condition_type")
-        or row.get("promotion_variant") == "conditional"
-    )
+    return bool(row.get("condition_id") or row.get("condition_type") or row.get("promotion_variant") == "conditional")
 
 
 def _activation_state_for_row(
@@ -238,31 +261,30 @@ def _build_base_weights(rows: list[dict[str, Any]], policy: StrategyPortfolioPol
             conditional_variant_score_bonus=policy.conditional_variant_score_bonus,
         )
         count = len(ranked)
-        return {
-            str(row["preset_name"]): float(count - index)
-            for index, row in enumerate(ranked)
-        }
+        return {str(row["preset_name"]): float(count - index) for index, row in enumerate(ranked)}
     raw = {}
     for row in rows:
         name = str(row["preset_name"])
         value = max(_row_metric_value(row, policy.selection_metric) or 0.0, 0.0)
+        if weighting_mode == "risk_adjusted":
+            drawdown_penalty = abs(_safe_float(row.get("max_drawdown") or row.get("portfolio_max_drawdown")) or 0.0)
+            value = value / (1.0 + drawdown_penalty)
+        if weighting_mode == "conditional_aware":
+            if _is_conditional_variant(row):
+                value *= 1.0 + max(policy.conditional_variant_score_bonus, 0.0)
+            elif policy.conditional_weight_multiplier > 0:
+                value /= max(policy.conditional_weight_multiplier, 1.0)
         if _is_conditional_variant(row):
             value *= policy.conditional_weight_multiplier
         raw[name] = value
     if policy.weighting_smoothing_power != 1.0:
-        raw = {
-            name: value ** policy.weighting_smoothing_power if value > 0 else value
-            for name, value in raw.items()
-        }
+        raw = {name: value**policy.weighting_smoothing_power if value > 0 else value for name, value in raw.items()}
     if weighting_mode == "capped_metric_weighted":
         positive_metrics = sorted(value for value in raw.values() if value > 0)
         if positive_metrics:
             median_metric = float(pd.Series(positive_metrics).median())
             metric_cap = median_metric * policy.metric_weight_cap_multiple
-            raw = {
-                name: min(value, metric_cap) if value > 0 else value
-                for name, value in raw.items()
-            }
+            raw = {name: min(value, metric_cap) if value > 0 else value for name, value in raw.items()}
     total = sum(raw.values())
     if total <= 0 and policy.fallback_equal_weight_mode:
         return {str(row["preset_name"]): 1.0 for row in rows}
@@ -302,7 +324,6 @@ def _normalize_with_caps(
         raw = {str(row["preset_name"]): 1.0 for row in rows}
         total = float(len(rows))
         warnings.append("fallback_equal_weight_applied")
-    weights = {name: value / total for name, value in raw.items()}
     selected_names = [str(row["preset_name"]) for row in rows]
     fixed: dict[str, float] = {}
     remaining = set(selected_names)
@@ -347,9 +368,7 @@ def build_strategy_portfolio(
 ) -> dict[str, Any]:
     promoted_rows = _load_promoted_strategies(promoted_dir)
     if not promoted_rows:
-        raise FileNotFoundError(
-            f"No promoted strategies found under {Path(promoted_dir) / 'promoted_strategies.json'}"
-        )
+        raise FileNotFoundError(f"No promoted strategies found under {Path(promoted_dir) / 'promoted_strategies.json'}")
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
     lifecycle_lookup: dict[str, dict[str, Any]] = {}
@@ -595,12 +614,20 @@ def build_strategy_portfolio(
     family_effective_count = _effective_count(list(family_weight_summary.values()))
     effective_strategy_count = _effective_count([row["allocation_weight"] for row in selected_rows])
     conditional_selected_count = sum(1 for row in selected_rows if _is_conditional_variant(row))
+    if len(selected_rows) < policy.min_active_strategies:
+        warnings.append(
+            f"below_min_active_strategies:selected={len(selected_rows)}:required={policy.min_active_strategies}"
+        )
     shadow_conditional_count = len(shadow_rows)
     preset_path_ready_count = sum(
-        1 for row in selected_rows if row.get("generated_preset_path") and Path(str(row["generated_preset_path"])).suffix
+        1
+        for row in selected_rows
+        if row.get("generated_preset_path") and Path(str(row["generated_preset_path"])).suffix
     )
     pipeline_path_ready_count = sum(
-        1 for row in selected_rows if row.get("generated_pipeline_config_path") and Path(str(row["generated_pipeline_config_path"])).suffix
+        1
+        for row in selected_rows
+        if row.get("generated_pipeline_config_path") and Path(str(row["generated_pipeline_config_path"])).suffix
     )
     payload = {
         "schema_version": STRATEGY_PORTFOLIO_SCHEMA_VERSION,
@@ -609,8 +636,11 @@ def build_strategy_portfolio(
         "policy": asdict(policy),
         "summary": {
             "total_selected_strategies": len(selected_rows),
+            "min_active_strategies": policy.min_active_strategies,
+            "max_active_strategies": policy.max_strategies,
             "total_active_weight": total_active_weight,
             "weighting_mode_resolved": _resolve_weighting_mode(policy.weighting_mode),
+            "strategy_weight_metric": policy.selection_metric,
             "signal_family_counts": family_counts,
             "universe_counts": universe_counts,
             "signal_family_weights": family_weight_summary,
@@ -712,10 +742,7 @@ def export_multi_strategy_run_config_bundle(
             target_capital_weight=float(
                 row.get("target_capital_fraction", row.get("allocation_weight", row.get("adjusted_weight", 0.0))) or 0.0
             ),
-            preset_path=str(
-                row.get("generated_preset_path", row.get("preset_path", ""))
-            )
-            or None,
+            preset_path=str(row.get("generated_preset_path", row.get("preset_path", ""))) or None,
             enabled=bool(row.get("enabled", True)),
             promotion_variant=str(row.get("promotion_variant") or "") or None,
             condition_id=str(row.get("condition_id") or "") or None,
@@ -769,11 +796,7 @@ def export_multi_strategy_run_config_bundle(
     multi_strategy_config = MultiStrategyPortfolioConfig(
         sleeves=sleeves,
         source_portfolio_path=str((source_payload or {}).get("source_portfolio_path") or Path(source_artifact_path)),
-        source_activated_portfolio_path=(
-            str(Path(source_artifact_path))
-            if activation_applied
-            else None
-        ),
+        source_activated_portfolio_path=(str(Path(source_artifact_path)) if activation_applied else None),
         activation_applied=activation_applied,
         active_strategy_count=active_strategy_count,
         active_unconditional_count=active_unconditional_count,

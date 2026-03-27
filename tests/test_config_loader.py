@@ -345,6 +345,11 @@ daily_trading:
     activated_dir: artifacts/strategy_portfolio/run_current/activated
   paper:
     auto_apply_fills: true
+  report:
+    enable_strategy_diagnostics: true
+  dashboard:
+    refresh_static_data: true
+    output_dir: artifacts/daily_trading/run_current/dashboard
 """.strip(),
         encoding="utf-8",
     )
@@ -356,6 +361,9 @@ daily_trading:
     assert config.stages.promote is True
     assert config.auto_apply_fills is True
     assert config.activated_dir == "artifacts/strategy_portfolio/run_current/activated"
+    assert config.enable_strategy_diagnostics is True
+    assert config.refresh_dashboard_static_data is True
+    assert config.dashboard_output_dir == "artifacts/daily_trading/run_current/dashboard"
 
 
 def test_load_canonical_bundle_experiment_workflow_config(tmp_path) -> None:
@@ -1156,6 +1164,31 @@ metric_weight_cap_multiple: 1.25
 
     assert config.weighting_mode == "capped_metric_weighted"
     assert config.metric_weight_cap_multiple == 1.25
+
+
+def test_load_strategy_portfolio_policy_config_accepts_strategy_weight_aliases(tmp_path) -> None:
+    path = tmp_path / "strategy_portfolio.yaml"
+    path.write_text(
+        """
+schema_version: 1
+max_active_strategies: 3
+min_active_strategies: 2
+strategy_weighting_mode: risk_adjusted
+strategy_weight_metric: portfolio_sharpe
+min_strategy_weight: 0.1
+max_strategy_weight: 0.6
+""".strip(),
+        encoding="utf-8",
+    )
+
+    config = load_strategy_portfolio_policy_config(path)
+
+    assert config.max_strategies == 3
+    assert config.min_active_strategies == 2
+    assert config.weighting_mode == "risk_adjusted"
+    assert config.selection_metric == "portfolio_sharpe"
+    assert config.min_weight_per_strategy == 0.1
+    assert config.max_weight_per_strategy == 0.6
 
 
 def test_load_strategy_validation_policy_config_from_yaml(tmp_path) -> None:

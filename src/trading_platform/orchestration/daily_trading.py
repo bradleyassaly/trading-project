@@ -7,6 +7,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import pandas as pd
+
 from trading_platform.cli.common import UNIVERSES
 from trading_platform.config.loader import (
     load_alpha_research_workflow_config,
@@ -20,6 +22,7 @@ from trading_platform.config.workflow_models import (
     DailyTradingWorkflowConfig,
     ResearchInputRefreshWorkflowConfig,
 )
+from trading_platform.dashboard.server import build_dashboard_static_data
 from trading_platform.db.services import DatabaseLineageService, build_research_memory_service
 from trading_platform.paper.models import PaperTradingConfig
 from trading_platform.paper.persistence import persist_paper_run_outputs
@@ -50,6 +53,10 @@ from trading_platform.portfolio.strategy_portfolio import (
 from trading_platform.reporting.paper_account_report import (
     build_paper_account_report,
     write_paper_account_report,
+)
+from trading_platform.reporting.strategy_quality_report import (
+    build_strategy_quality_report,
+    write_strategy_quality_report,
 )
 from trading_platform.research.alpha_lab.runner import refresh_alpha_research_artifacts, run_alpha_research
 from trading_platform.research.promotion_pipeline import apply_research_promotions
@@ -311,16 +318,65 @@ def _summarize_paper_run(paper_output_dir: Path) -> dict[str, Any]:
             "zero_target_reason": "",
         }
     payload = json.loads(summary_path.read_text(encoding="utf-8"))
+    summary_payload = dict(payload.get("summary") or payload)
     return {
-        "requested_symbol_count": int(payload.get("requested_symbol_count") or 0),
-        "usable_symbol_count": int(payload.get("usable_symbol_count") or 0),
-        "pre_validation_target_symbol_count": int(payload.get("pre_validation_target_symbol_count") or 0),
-        "post_validation_target_symbol_count": int(payload.get("post_validation_target_symbol_count") or 0),
-        "executable_order_count": int(payload.get("executable_order_count") or 0),
-        "fill_count": int(payload.get("fill_count") or 0),
-        "zero_target_reason": str(payload.get("zero_target_reason") or ""),
+        "requested_symbol_count": int(summary_payload.get("requested_symbol_count") or 0),
+        "usable_symbol_count": int(summary_payload.get("usable_symbol_count") or 0),
+        "pre_validation_target_symbol_count": int(summary_payload.get("pre_validation_target_symbol_count") or 0),
+        "post_validation_target_symbol_count": int(summary_payload.get("post_validation_target_symbol_count") or 0),
+        "executable_order_count": int(summary_payload.get("executable_order_count") or 0),
+        "fill_count": int(summary_payload.get("fill_count") or 0),
+        "zero_target_reason": str(summary_payload.get("zero_target_reason") or ""),
         "paper_summary_path": str(summary_path),
-        "source_portfolio_path": str(payload.get("source_portfolio_path") or ""),
+        "source_portfolio_path": str(summary_payload.get("source_portfolio_path") or ""),
+    }
+
+
+def _build_strategy_report_summary(report_dir: Path) -> dict[str, Any]:
+    comparison_path = report_dir / "strategy_comparison_summary.csv"
+    account_report_path = report_dir / "paper_account_report.json"
+    top_selected: list[dict[str, Any]] = []
+    portfolio_composition: list[dict[str, Any]] = []
+    summary: dict[str, Any] = {}
+    if comparison_path.exists():
+        try:
+            frame = pd.read_csv(comparison_path)
+        except (pd.errors.EmptyDataError, pd.errors.ParserError):
+            frame = pd.DataFrame()
+        if not frame.empty:
+            frame = frame.astype(object).where(pd.notna(frame), None)
+            ordered = frame.sort_values(
+                ["is_active", "normalized_capital_weight", "ranking_value"],
+                ascending=[False, False, False],
+                kind="stable",
+            )
+            top_selected = ordered.head(5).to_dict(orient="records")
+            grouped = (
+                ordered.groupby("signal_family", dropna=False)
+                .agg(
+                    selected_count=("strategy_id", "count"),
+                    active_count=("is_active", lambda values: int(sum(bool(value) for value in values))),
+                    total_weight=("normalized_capital_weight", "sum"),
+                )
+                .reset_index()
+            )
+            grouped = grouped.astype(object).where(pd.notna(grouped), None)
+            portfolio_composition = grouped.to_dict(orient="records")
+            summary = {
+                "strategy_count": int(len(ordered)),
+                "active_strategy_count": int(sum(bool(value) for value in ordered["is_active"].tolist())),
+                "runtime_computable_count": int(
+                    sum(bool(value) for value in ordered["runtime_computability_pass"].tolist())
+                ),
+            }
+    performance_stats = (
+        json.loads(account_report_path.read_text(encoding="utf-8")) if account_report_path.exists() else {}
+    )
+    return {
+        "summary": summary,
+        "top_selected_strategies": top_selected,
+        "portfolio_composition": portfolio_composition,
+        "performance_stats": performance_stats,
     }
 
 
@@ -339,6 +395,7 @@ def _write_summary_artifacts(
     portfolio_summary: dict[str, Any],
     activated_summary: dict[str, Any],
     paper_summary: dict[str, Any],
+    strategy_report_summary: dict[str, Any],
 ) -> tuple[Path, Path, str]:
     failed_count = sum(1 for record in stage_records if record.status == "failed")
     warning_count = sum(1 for record in stage_records if record.status == "warning")
@@ -380,6 +437,10 @@ def _write_summary_artifacts(
         "executable_order_count": paper_summary.get("executable_order_count", 0),
         "fill_count": paper_summary.get("fill_count", 0),
         "zero_target_reason": paper_summary.get("zero_target_reason", ""),
+        "top_selected_strategies": strategy_report_summary.get("top_selected_strategies", []),
+        "portfolio_composition": strategy_report_summary.get("portfolio_composition", []),
+        "strategy_quality_summary": strategy_report_summary.get("summary", {}),
+        "performance_stats": strategy_report_summary.get("performance_stats", {}),
         "source_artifact_paths": key_artifacts,
         "warnings": warnings,
         "errors": errors,
@@ -412,11 +473,59 @@ def _write_summary_artifacts(
         f"- fill_count: `{paper_summary.get('fill_count', 0)}`",
         f"- zero_target_reason: `{paper_summary.get('zero_target_reason', '') or 'none'}`",
         "",
-        "## Stages",
+        "## Top Strategies",
         "",
-        "| stage | status | duration_seconds | error |",
-        "| --- | --- | ---: | --- |",
     ]
+    top_strategies = list(strategy_report_summary.get("top_selected_strategies", []))
+    if top_strategies:
+        for row in top_strategies:
+            lines.append(
+                "- "
+                f"`{row.get('strategy_id')}` "
+                f"family=`{row.get('signal_family')}` "
+                f"active=`{row.get('is_active')}` "
+                f"weight=`{row.get('normalized_capital_weight')}` "
+                f"metric=`{row.get('ranking_metric')}` "
+                f"value=`{row.get('ranking_value')}`"
+            )
+    else:
+        lines.append("- none")
+    lines.extend(
+        [
+            "",
+            "## Portfolio Composition",
+            "",
+        ]
+    )
+    portfolio_composition = list(strategy_report_summary.get("portfolio_composition", []))
+    if portfolio_composition:
+        for row in portfolio_composition:
+            lines.append(
+                "- "
+                f"`{row.get('signal_family')}` "
+                f"selected=`{row.get('selected_count')}` "
+                f"active=`{row.get('active_count')}` "
+                f"weight=`{row.get('total_weight')}`"
+            )
+    else:
+        lines.append("- none")
+    performance_stats = dict(strategy_report_summary.get("performance_stats") or {})
+    lines.extend(
+        [
+            "",
+            "## Performance",
+            "",
+            f"- latest_equity: `{performance_stats.get('latest_equity', 0)}`",
+            f"- cumulative_return: `{performance_stats.get('cumulative_return', 0)}`",
+            f"- max_drawdown: `{performance_stats.get('max_drawdown', 0)}`",
+            f"- sharpe_ratio: `{performance_stats.get('sharpe_ratio', 0)}`",
+            "",
+            "## Stages",
+            "",
+            "| stage | status | duration_seconds | error |",
+            "| --- | --- | ---: | --- |",
+        ]
+    )
     for record in stage_records:
         duration_text = f"{record.duration_seconds:.3f}" if record.duration_seconds is not None else "n/a"
         lines.append(f"| {record.stage_name} | {record.status} | {duration_text} | {record.error_message or ''} |")
@@ -469,6 +578,11 @@ def run_daily_trading_pipeline(config: DailyTradingWorkflowConfig) -> DailyTradi
         _stage_path(config.report_dir, paper_output_dir / "report")
         if config.report_dir
         else (paper_output_dir / "report")
+    )
+    dashboard_output_dir = (
+        _stage_path(config.dashboard_output_dir, run_dir / "dashboard")
+        if config.dashboard_output_dir
+        else (run_dir / "dashboard")
     )
 
     warnings: list[str] = []
@@ -871,13 +985,36 @@ def run_daily_trading_pipeline(config: DailyTradingWorkflowConfig) -> DailyTradi
                 return {}
             report = build_paper_account_report(paper_output_dir)
             report_paths = write_paper_account_report(report=report, output_dir=report_dir)
+            output_payload: dict[str, Any] = {key: str(value) for key, value in report_paths.items()}
+            if config.enable_strategy_diagnostics:
+                strategy_quality_report = build_strategy_quality_report(
+                    promoted_dir=promoted_dir,
+                    portfolio_dir=portfolio_dir,
+                    activated_dir=activated_dir,
+                    paper_output_dir=paper_output_dir,
+                    output_root=Path(config.output_root),
+                    run_name=config.run_name,
+                )
+                strategy_quality_paths = write_strategy_quality_report(
+                    report=strategy_quality_report,
+                    output_dir=report_dir,
+                )
+                output_payload.update({key: str(value) for key, value in strategy_quality_paths.items()})
+                key_artifacts.update({key: str(value) for key, value in strategy_quality_paths.items()})
+            if config.refresh_dashboard_static_data:
+                dashboard_paths = build_dashboard_static_data(
+                    artifacts_root=Path("artifacts"),
+                    output_dir=dashboard_output_dir,
+                )
+                output_payload.update({f"dashboard_{key}": str(value) for key, value in dashboard_paths.items()})
+                key_artifacts["dashboard_output_dir"] = str(dashboard_output_dir)
             key_artifacts.update(
                 {
                     "paper_account_report_json_path": str(report_paths["json_path"]),
                     "paper_account_report_csv_path": str(report_paths["csv_path"]),
                 }
             )
-            return {key: str(value) for key, value in report_paths.items()}
+            return output_payload
 
         run_stage("report", config.stages.report, do_report)
     except Exception:
@@ -887,6 +1024,12 @@ def run_daily_trading_pipeline(config: DailyTradingWorkflowConfig) -> DailyTradi
         portfolio_summary = _summarize_portfolio(portfolio_dir)
         activated_summary = _summarize_activated_portfolio(activated_dir)
         paper_summary = _summarize_paper_run(paper_output_dir)
+        strategy_report_summary = {
+            "summary": {},
+            "top_selected_strategies": [],
+            "portfolio_composition": [],
+            "performance_stats": {},
+        }
         summary_json_path, summary_md_path, status = _write_summary_artifacts(
             config=config,
             run_dir=run_dir,
@@ -901,6 +1044,7 @@ def run_daily_trading_pipeline(config: DailyTradingWorkflowConfig) -> DailyTradi
             portfolio_summary=portfolio_summary,
             activated_summary=activated_summary,
             paper_summary=paper_summary,
+            strategy_report_summary=strategy_report_summary,
         )
         db_lineage.fail_portfolio_run(portfolio_run_id, notes=f"status={status}; summary={summary_json_path}")
         raise
@@ -911,6 +1055,7 @@ def run_daily_trading_pipeline(config: DailyTradingWorkflowConfig) -> DailyTradi
     portfolio_summary = _summarize_portfolio(portfolio_dir)
     activated_summary = _summarize_activated_portfolio(activated_dir)
     paper_summary = _summarize_paper_run(paper_output_dir)
+    strategy_report_summary = _build_strategy_report_summary(report_dir)
     summary_json_path, summary_md_path, status = _write_summary_artifacts(
         config=config,
         run_dir=run_dir,
@@ -925,6 +1070,7 @@ def run_daily_trading_pipeline(config: DailyTradingWorkflowConfig) -> DailyTradi
         portfolio_summary=portfolio_summary,
         activated_summary=activated_summary,
         paper_summary=paper_summary,
+        strategy_report_summary=strategy_report_summary,
     )
     db_lineage.complete_portfolio_run(portfolio_run_id, notes=f"status={status}; summary={summary_json_path}")
     return DailyTradingResult(

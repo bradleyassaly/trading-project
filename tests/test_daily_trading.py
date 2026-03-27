@@ -9,7 +9,7 @@ import pytest
 
 from trading_platform.config.models import MultiStrategyPortfolioConfig, MultiStrategySleeveConfig
 from trading_platform.config.workflow_models import DailyTradingStageToggles, DailyTradingWorkflowConfig
-from trading_platform.orchestration.daily_trading import run_daily_trading_pipeline
+from trading_platform.orchestration.daily_trading import _summarize_paper_run, run_daily_trading_pipeline
 from trading_platform.paper.models import PaperPortfolioState, PaperTradingRunResult
 from trading_platform.portfolio.strategy_execution_handoff import StrategyExecutionHandoff
 
@@ -387,7 +387,14 @@ def test_daily_trading_happy_path_writes_summary(monkeypatch: pytest.MonkeyPatch
     assert summary["post_validation_target_symbol_count"] == 1
     assert summary["executable_order_count"] == 1
     assert summary["fill_count"] == 1
+    assert summary["top_selected_strategies"][0]["strategy_id"] == "generated_base"
+    assert summary["strategy_quality_summary"]["strategy_count"] == 2
     assert Path(result.summary_md_path).exists()
+    assert (Path(config.report_dir) / "strategy_comparison_summary.csv").exists()
+    assert (Path(config.report_dir) / "strategy_performance_history.csv").exists()
+    assert (Path(config.report_dir) / "rolling_sharpe_by_strategy.csv").exists()
+    assert (Path(config.report_dir) / "rolling_ic_by_signal.csv").exists()
+    assert (Path(config.report_dir) / "drawdown_by_strategy.csv").exists()
     assert lineage.created is True
     assert lineage.completed is True
 
@@ -563,6 +570,34 @@ def test_daily_trading_paper_stage_uses_target_weight_fallback_for_target_count(
 
     assert result.status == "succeeded"
     assert any(record.stage_name == "paper_run" and record.status == "succeeded" for record in result.stage_records)
+
+
+def test_summarize_paper_run_reads_nested_summary_payload(tmp_path: Path) -> None:
+    paper_dir = tmp_path / "paper"
+    _write_json(
+        paper_dir / "paper_run_summary_latest.json",
+        {
+            "summary": {
+                "requested_symbol_count": 10,
+                "usable_symbol_count": 9,
+                "pre_validation_target_symbol_count": 8,
+                "post_validation_target_symbol_count": 7,
+                "executable_order_count": 6,
+                "fill_count": 5,
+                "zero_target_reason": "",
+                "source_portfolio_path": "artifacts/strategy_portfolio/run_current",
+            }
+        },
+    )
+
+    summary = _summarize_paper_run(paper_dir)
+
+    assert summary["requested_symbol_count"] == 10
+    assert summary["usable_symbol_count"] == 9
+    assert summary["pre_validation_target_symbol_count"] == 8
+    assert summary["post_validation_target_symbol_count"] == 7
+    assert summary["executable_order_count"] == 6
+    assert summary["fill_count"] == 5
 
 
 def test_daily_trading_best_effort_continues_after_stage_failure(

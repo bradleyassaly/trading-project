@@ -67,6 +67,11 @@ daily_trading:
     include_inactive_conditionals_in_reports: true
     auto_apply_fills: true
     fail_if_zero_targets_after_validation: false
+  report:
+    enable_strategy_diagnostics: true
+  dashboard:
+    refresh_static_data: true
+    output_dir: artifacts/daily_trading/run_current/dashboard
   tracking:
     database_enabled: false
     database_url:

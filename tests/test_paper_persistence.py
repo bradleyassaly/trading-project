@@ -12,7 +12,7 @@ from trading_platform.paper.models import (
     PaperTradingConfig,
     PaperTradingRunResult,
 )
-from trading_platform.paper.persistence import persist_paper_run_outputs
+from trading_platform.paper.persistence import _upsert_csv, persist_paper_run_outputs
 
 
 def _build_result(*, equity: float = 10_100.0) -> PaperTradingRunResult:
@@ -161,3 +161,19 @@ def test_persist_paper_run_outputs_is_idempotent_for_same_run_key(tmp_path: Path
     assert len(orders_df) == 1
     assert len(health_df["check_name"].unique()) == len(health_df)
     assert float(summary_df.iloc[0]["current_equity"]) == 10_250.0
+
+
+def test_upsert_csv_handles_existing_empty_history_file(tmp_path: Path) -> None:
+    history_path = tmp_path / "paper_positions_history.csv"
+    pd.DataFrame(columns=["timestamp", "symbol", "qty"]).to_csv(history_path, index=False)
+
+    _upsert_csv(
+        path=history_path,
+        rows=[{"timestamp": "2025-01-21", "symbol": "AAPL", "qty": 10}],
+        key_columns=["timestamp", "symbol"],
+        columns=["timestamp", "symbol", "qty"],
+    )
+
+    frame = pd.read_csv(history_path)
+    assert len(frame) == 1
+    assert frame.iloc[0]["symbol"] == "AAPL"

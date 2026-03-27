@@ -29,13 +29,23 @@ def _upsert_csv(
         existing_df = pd.read_csv(output_path)
     else:
         existing_df = pd.DataFrame(columns=columns)
-
-    combined = pd.concat([existing_df, new_df], ignore_index=True)
+    existing_df = existing_df.reindex(columns=columns)
+    new_df = new_df.reindex(columns=columns)
+    if existing_df.empty:
+        combined = new_df.copy()
+    elif new_df.empty:
+        combined = existing_df.copy()
+    else:
+        combined = pd.concat([existing_df, new_df], ignore_index=True)
     if combined.empty:
         combined = pd.DataFrame(columns=columns)
     else:
         combined = combined.drop_duplicates(subset=key_columns, keep="last")
-        sort_columns = [column for column in ["rebalance_timestamp", "timestamp", "as_of", "symbol", "check_name", "order_index"] if column in combined.columns]
+        sort_columns = [
+            column
+            for column in ["rebalance_timestamp", "timestamp", "as_of", "symbol", "check_name", "order_index"]
+            if column in combined.columns
+        ]
         if sort_columns:
             combined = combined.sort_values(sort_columns, kind="stable")
     combined.to_csv(output_path, index=False)
@@ -177,7 +187,11 @@ def _health_checks(
     liquidity_excluded = int(summary_row["liquidity_excluded_count"] or 0)
     turnover_cap_bindings = int(summary_row["turnover_cap_binding_count"] or 0)
 
-    add("data_loaded", "pass" if available_symbols > 0 else "fail", f"loaded latest prices for {available_symbols} symbol(s)")
+    add(
+        "data_loaded",
+        "pass" if available_symbols > 0 else "fail",
+        f"loaded latest prices for {available_symbols} symbol(s)",
+    )
     if available_symbols >= top_n:
         add("available_symbols", "pass", f"{available_symbols} symbol(s) available for top_n={top_n}")
     elif available_symbols > 0:
@@ -203,14 +217,22 @@ def _health_checks(
         if realized_holdings <= top_n:
             add("holdings_vs_top_n", "pass", f"realized_holdings_count={realized_holdings} within top_n={top_n}")
         elif realized_holdings > top_n * 2:
-            add("holdings_vs_top_n", "fail", f"realized_holdings_count={realized_holdings} materially exceeds top_n={top_n}")
+            add(
+                "holdings_vs_top_n",
+                "fail",
+                f"realized_holdings_count={realized_holdings} materially exceeds top_n={top_n}",
+            )
         else:
             add("holdings_vs_top_n", "warn", f"realized_holdings_count={realized_holdings} exceeds top_n={top_n}")
     else:
         if realized_holdings <= top_n * 5:
             add("holdings_vs_top_n", "pass", f"transition realized_holdings_count={realized_holdings}")
         else:
-            add("holdings_vs_top_n", "warn", f"transition realized_holdings_count={realized_holdings} materially exceeds top_n={top_n}")
+            add(
+                "holdings_vs_top_n",
+                "warn",
+                f"transition realized_holdings_count={realized_holdings} materially exceeds top_n={top_n}",
+            )
 
     liquidity_status = "pass" if liquidity_excluded <= max(5, top_n * 2) else "warn"
     add("liquidity_exclusions", liquidity_status, f"liquidity_excluded_count={liquidity_excluded}")
@@ -279,18 +301,24 @@ def persist_paper_run_outputs(
         "starting_cash": float(accounting_diag.get("starting_cash", result.state.cash)),
         "ending_cash": float(accounting_diag.get("ending_cash", result.state.cash)),
         "starting_gross_market_value": float(accounting_diag.get("starting_gross_market_value", 0.0)),
-        "ending_gross_market_value": float(accounting_diag.get("ending_gross_market_value", result.state.gross_market_value)),
+        "ending_gross_market_value": float(
+            accounting_diag.get("ending_gross_market_value", result.state.gross_market_value)
+        ),
         "starting_equity": float(accounting_diag.get("starting_equity", result.state.equity)),
         "ending_equity": float(accounting_diag.get("ending_equity", result.state.equity)),
         "realized_pnl_delta": float(accounting_diag.get("realized_pnl_delta", 0.0)),
-        "cumulative_realized_pnl": float(accounting_diag.get("cumulative_realized_pnl", result.state.cumulative_realized_pnl)),
+        "cumulative_realized_pnl": float(
+            accounting_diag.get("cumulative_realized_pnl", result.state.cumulative_realized_pnl)
+        ),
         "unrealized_pnl": float(accounting_diag.get("unrealized_pnl", result.state.unrealized_pnl)),
         "total_pnl": float(accounting_diag.get("total_pnl", result.state.total_pnl)),
         "total_pnl_delta": float(accounting_diag.get("total_pnl_delta", 0.0)),
         "fees_paid_delta": float(accounting_diag.get("fees_paid_delta", 0.0)),
         "cumulative_fees": float(accounting_diag.get("cumulative_fees", result.state.cumulative_fees)),
         "realized_holdings_count": int(target_diag.get("realized_holdings_count", len(result.latest_target_weights))),
-        "target_selected_count": int(target_diag.get("target_selected_count", len([name for name in target_names.split(",") if name]))),
+        "target_selected_count": int(
+            target_diag.get("target_selected_count", len([name for name in target_names.split(",") if name]))
+        ),
         "realized_holdings_minus_top_n": int(target_diag.get("realized_holdings_minus_top_n", 0)),
         "selected_names": selected_names,
         "target_names": target_names,
@@ -304,10 +332,25 @@ def persist_paper_run_outputs(
         "skipped_symbol_count": int(len(result.skipped_symbols)),
         "estimated_execution_cost": float(execution_summary.get("expected_total_cost", 0.0) or 0.0),
         "estimated_slippage_cost": float(execution_summary.get("expected_slippage_cost_total", 0.0) or 0.0),
-        "latest_data_source": str(paper_execution_diag.get("latest_data_source", target_diag.get("latest_data_source", target_diag.get("latest_price_source", "yfinance"))) or "yfinance"),
-        "latest_data_fallback_used": bool(paper_execution_diag.get("latest_data_fallback_used", target_diag.get("latest_data_fallback_used", target_diag.get("latest_price_fallback_used", False)))),
-        "latest_bar_timestamp": paper_execution_diag.get("latest_bar_timestamp", target_diag.get("latest_bar_timestamp")),
-        "latest_bar_age_seconds": paper_execution_diag.get("latest_bar_age_seconds", target_diag.get("latest_bar_age_seconds")),
+        "latest_data_source": str(
+            paper_execution_diag.get(
+                "latest_data_source",
+                target_diag.get("latest_data_source", target_diag.get("latest_price_source", "yfinance")),
+            )
+            or "yfinance"
+        ),
+        "latest_data_fallback_used": bool(
+            paper_execution_diag.get(
+                "latest_data_fallback_used",
+                target_diag.get("latest_data_fallback_used", target_diag.get("latest_price_fallback_used", False)),
+            )
+        ),
+        "latest_bar_timestamp": paper_execution_diag.get(
+            "latest_bar_timestamp", target_diag.get("latest_bar_timestamp")
+        ),
+        "latest_bar_age_seconds": paper_execution_diag.get(
+            "latest_bar_age_seconds", target_diag.get("latest_bar_age_seconds")
+        ),
         "latest_data_stale": paper_execution_diag.get("latest_data_stale", target_diag.get("latest_data_stale")),
         "ensemble_enabled": bool(paper_execution_diag.get("ensemble_enabled", False)),
         "ensemble_mode": paper_execution_diag.get("ensemble_mode", "disabled"),
@@ -324,16 +367,22 @@ def persist_paper_run_outputs(
         "fill_notional": float(accounting_diag.get("fill_notional", 0.0)),
         "auto_apply_fills": bool(accounting_diag.get("auto_apply_fills", False)),
         "fill_application_status": str(accounting_diag.get("fill_application_status", "unknown") or "unknown"),
-        "turnover_before_execution_constraints": float(execution_summary.get("turnover_before_constraints", 0.0) or 0.0),
+        "turnover_before_execution_constraints": float(
+            execution_summary.get("turnover_before_constraints", 0.0) or 0.0
+        ),
         "turnover_after_execution_constraints": float(execution_summary.get("turnover_after_constraints", 0.0) or 0.0),
         "active_strategy_count": int(handoff.get("active_strategy_count", 0) or 0),
         "active_unconditional_count": int(handoff.get("active_unconditional_count", 0) or 0),
         "active_conditional_count": int(handoff.get("active_conditional_count", 0) or 0),
         "inactive_conditional_count": int(handoff.get("inactive_conditional_count", 0) or 0),
-        "requested_active_strategy_count": int(target_diag.get("requested_active_strategy_count", handoff.get("active_strategy_count", 0)) or 0),
+        "requested_active_strategy_count": int(
+            target_diag.get("requested_active_strategy_count", handoff.get("active_strategy_count", 0)) or 0
+        ),
         "requested_symbol_count": int(target_diag.get("requested_symbol_count", 0) or 0),
         "pre_validation_target_symbol_count": int(target_diag.get("pre_validation_target_symbol_count", 0) or 0),
-        "post_validation_target_symbol_count": int(target_diag.get("post_validation_target_symbol_count", len(result.latest_target_weights)) or 0),
+        "post_validation_target_symbol_count": int(
+            target_diag.get("post_validation_target_symbol_count", len(result.latest_target_weights)) or 0
+        ),
         "usable_symbol_count": int(target_diag.get("usable_symbol_count", len(result.latest_prices)) or 0),
         "zero_target_reason": str(target_diag.get("zero_target_reason", "") or ""),
         "target_drop_stage": str(target_diag.get("target_drop_stage", "") or ""),
