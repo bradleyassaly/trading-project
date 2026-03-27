@@ -538,9 +538,16 @@ def _write_summary_artifacts(
             "",
             "## Attribution",
             "",
+            f"- total_gross_realized_pnl: `{attribution_summary.get('total_gross_realized_pnl', 0)}`",
+            f"- total_net_realized_pnl: `{attribution_summary.get('total_net_realized_pnl', 0)}`",
             f"- total_realized_pnl: `{attribution_summary.get('total_realized_pnl', 0)}`",
+            f"- total_gross_unrealized_pnl: `{attribution_summary.get('total_gross_unrealized_pnl', 0)}`",
+            f"- total_net_unrealized_pnl: `{attribution_summary.get('total_net_unrealized_pnl', 0)}`",
             f"- total_unrealized_pnl: `{attribution_summary.get('total_unrealized_pnl', 0)}`",
+            f"- total_gross_pnl: `{attribution_summary.get('total_gross_pnl', 0)}`",
+            f"- total_net_pnl: `{attribution_summary.get('total_net_pnl', 0)}`",
             f"- total_pnl: `{attribution_summary.get('total_pnl', 0)}`",
+            f"- total_execution_cost: `{attribution_summary.get('total_execution_cost', 0)}`",
             "",
             "## Stages",
             "",
@@ -591,7 +598,7 @@ def _write_summary_artifacts(
     return json_path, md_path, status
 
 
-def _build_multi_strategy_paper_config(result, reserve_cash_pct: float) -> PaperTradingConfig:
+def _build_multi_strategy_paper_config(result, reserve_cash_pct: float, workflow_config) -> PaperTradingConfig:
     symbols = sorted(result.combined_target_weights)
     return PaperTradingConfig(
         symbols=symbols,
@@ -600,6 +607,13 @@ def _build_multi_strategy_paper_config(result, reserve_cash_pct: float) -> Paper
         strategy="multi_strategy",
         signal_source="legacy",
         reserve_cash_pct=reserve_cash_pct,
+        slippage_model=str(getattr(workflow_config, "slippage_model", "none") or "none"),
+        slippage_buy_bps=float(getattr(workflow_config, "slippage_buy_bps", 0.0) or 0.0),
+        slippage_sell_bps=float(getattr(workflow_config, "slippage_sell_bps", 0.0) or 0.0),
+        enable_cost_model=bool(getattr(workflow_config, "enable_cost_model", False)),
+        commission_bps=float(getattr(workflow_config, "commission_bps", 0.0) or 0.0),
+        minimum_commission=float(getattr(workflow_config, "minimum_commission", 0.0) or 0.0),
+        spread_bps=float(getattr(workflow_config, "spread_bps", 0.0) or 0.0),
     )
 
 
@@ -1201,6 +1215,7 @@ def run_daily_trading_pipeline(
             paper_config = _build_multi_strategy_paper_config(
                 allocation_result,
                 reserve_cash_pct=portfolio_config.cash_reserve_pct,
+                workflow_config=config,
             )
             if replay_as_of_date:
                 paper_config = replace(paper_config, replay_as_of_date=replay_as_of_date)

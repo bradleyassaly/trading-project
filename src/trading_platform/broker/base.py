@@ -29,8 +29,15 @@ class BrokerFill:
     quantity: int
     fill_price: float
     notional: float
+    reference_price: float = 0.0
+    gross_notional: float = 0.0
     commission: float = 0.0
     slippage_bps: float = 0.0
+    spread_bps: float = 0.0
+    slippage_cost: float = 0.0
+    spread_cost: float = 0.0
+    total_execution_cost: float = 0.0
+    cost_model: str = "disabled"
     realized_pnl: float = 0.0
     trade_id: str | None = None
     strategy_id: str | None = None

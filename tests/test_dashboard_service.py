@@ -1767,3 +1767,60 @@ def test_dashboard_static_data_build(tmp_path: Path) -> None:
     assert paths["experiments_latest_json"].exists()
     assert paths["system_evaluation_latest_json"].exists()
     assert paths["system_evaluation_history_json"].exists()
+
+
+def test_dashboard_cost_payloads(tmp_path: Path) -> None:
+    paper_dir = tmp_path / "paper"
+    paper_dir.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(
+        [
+            {
+                "date": "2025-01-03",
+                "strategy_id": "alpha",
+                "gross_total_pnl": 100.0,
+                "net_total_pnl": 93.7,
+                "total_pnl": 93.7,
+                "total_execution_cost": 6.3,
+                "turnover": 1_000.0,
+            }
+        ]
+    ).to_csv(paper_dir / "strategy_pnl_attribution.csv", index=False)
+    (paper_dir / "pnl_attribution_summary.json").write_text(
+        json.dumps(
+            {
+                "total_gross_pnl": 100.0,
+                "total_net_pnl": 93.7,
+                "total_execution_cost": 6.3,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (paper_dir / "paper_run_summary_latest.json").write_text(
+        json.dumps(
+            {
+                "summary": {
+                    "gross_total_pnl": 100.0,
+                    "net_total_pnl": 93.7,
+                    "total_execution_cost": 6.3,
+                    "total_slippage_cost": 2.0,
+                    "total_commission_cost": 3.0,
+                    "total_spread_cost": 1.3,
+                    "cost_drag_pct": 0.063,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    service = DashboardDataService(tmp_path)
+
+    execution_costs = service.execution_costs_latest_payload()
+    strategy_costs = service.strategy_costs_latest_payload()
+    cost_drag = service.cost_drag_latest_payload()
+
+    assert execution_costs["summary"]["gross_total_pnl"] == 100.0
+    assert execution_costs["summary"]["net_total_pnl"] == 93.7
+    assert execution_costs["summary"]["total_execution_cost"] == 6.3
+    assert strategy_costs["rows"][0]["strategy_id"] == "alpha"
+    assert strategy_costs["rows"][0]["total_execution_cost"] == 6.3
+    assert cost_drag["summary"]["total_execution_cost"] == 6.3

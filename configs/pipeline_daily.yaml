@@ -67,6 +67,17 @@ daily_trading:
     include_inactive_conditionals_in_reports: true
     auto_apply_fills: true
     fail_if_zero_targets_after_validation: false
+    execution:
+      slippage:
+        enabled: false
+        model: fixed_bps
+        buy_bps: 0.0
+        sell_bps: 0.0
+      cost_model:
+        enabled: false
+        commission_bps: 0.0
+        minimum_commission: 0.0
+        spread_bps: 0.0
   report:
     enable_strategy_diagnostics: true
   dashboard:

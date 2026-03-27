@@ -167,6 +167,10 @@ class PaperRunWorkflowConfig:
     slippage_model: str = "none"
     slippage_buy_bps: float = 0.0
     slippage_sell_bps: float = 0.0
+    enable_cost_model: bool = False
+    commission_bps: float = 0.0
+    minimum_commission: float = 0.0
+    spread_bps: float = 0.0
     ensemble_enabled: bool = False
     ensemble_mode: str = "disabled"
     ensemble_weight_method: str = "equal"
@@ -658,6 +662,13 @@ class DailyTradingWorkflowConfig:
     include_inactive_conditionals_in_reports: bool = True
     auto_apply_fills: bool = True
     fail_if_zero_targets_after_validation: bool = False
+    enable_cost_model: bool = False
+    slippage_model: str = "none"
+    slippage_buy_bps: float = 0.0
+    slippage_sell_bps: float = 0.0
+    commission_bps: float = 0.0
+    minimum_commission: float = 0.0
+    spread_bps: float = 0.0
     enable_strategy_diagnostics: bool = True
     refresh_dashboard_static_data: bool = False
     evaluate_conditional_activation: bool | None = None

@@ -1364,6 +1364,47 @@ class DashboardDataService:
             "meta": {"summary_path": str(summary_path) if summary_path is not None else None},
         }
 
+    def execution_costs_latest_payload(self) -> dict[str, Any]:
+        summary_path = _latest_matching_file(
+            self.artifacts_root, ["paper_run_summary_latest.json", "replay_summary.json"]
+        )
+        payload = _safe_read_json(summary_path)
+        summary = dict(payload.get("summary") or payload)
+        return {
+            "generated_at": _now_utc(),
+            "summary": {
+                "gross_total_pnl": summary.get("gross_total_pnl"),
+                "net_total_pnl": summary.get("net_total_pnl", summary.get("total_pnl")),
+                "total_execution_cost": summary.get("total_execution_cost"),
+                "total_slippage_cost": summary.get("total_slippage_cost"),
+                "total_commission_cost": summary.get("total_commission_cost"),
+                "total_spread_cost": summary.get("total_spread_cost"),
+                "cost_drag_pct": summary.get("cost_drag_pct"),
+            },
+            "meta": {"summary_path": str(summary_path) if summary_path is not None else None},
+        }
+
+    def strategy_costs_latest_payload(self) -> dict[str, Any]:
+        payload = self.strategy_pnl_latest_payload()
+        return {
+            "generated_at": payload.get("generated_at"),
+            "rows": payload.get("rows", []),
+            "meta": payload.get("meta", {}),
+        }
+
+    def cost_drag_latest_payload(self) -> dict[str, Any]:
+        attribution = self.attribution_latest_payload()
+        strategy_payload = self.strategy_pnl_latest_payload()
+        return {
+            "generated_at": _now_utc(),
+            "summary": attribution.get("summary", {}),
+            "strategies": strategy_payload.get("rows", []),
+            "meta": {
+                "summary_path": attribution.get("meta", {}).get("summary_path"),
+                "csv_path": strategy_payload.get("meta", {}).get("csv_path"),
+            },
+        }
+
     def execution_diagnostics_payload(self) -> dict[str, Any]:
         payload = build_execution_diagnostics_payload(artifacts_root=self.artifacts_root)
         payload["generated_at"] = _now_utc()

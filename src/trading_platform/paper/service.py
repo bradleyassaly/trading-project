@@ -88,7 +88,11 @@ class JsonPaperStateStore:
             last_targets={symbol: float(weight) for symbol, weight in payload.get("last_targets", {}).items()},
             initial_cash_basis=float(payload.get("initial_cash_basis", 0.0) or 0.0),
             cumulative_realized_pnl=float(payload.get("cumulative_realized_pnl", 0.0) or 0.0),
+            cumulative_gross_realized_pnl=float(payload.get("cumulative_gross_realized_pnl", 0.0) or 0.0),
             cumulative_fees=float(payload.get("cumulative_fees", 0.0) or 0.0),
+            cumulative_slippage_cost=float(payload.get("cumulative_slippage_cost", 0.0) or 0.0),
+            cumulative_spread_cost=float(payload.get("cumulative_spread_cost", 0.0) or 0.0),
+            cumulative_execution_cost=float(payload.get("cumulative_execution_cost", 0.0) or 0.0),
             open_lots={
                 symbol: [PaperTradeLot(**row) for row in rows]
                 for symbol, rows in dict(payload.get("open_lots", {})).items()
@@ -108,7 +112,11 @@ class JsonPaperStateStore:
             "last_targets": state.last_targets,
             "initial_cash_basis": state.initial_cash_basis,
             "cumulative_realized_pnl": state.cumulative_realized_pnl,
+            "cumulative_gross_realized_pnl": state.cumulative_gross_realized_pnl,
             "cumulative_fees": state.cumulative_fees,
+            "cumulative_slippage_cost": state.cumulative_slippage_cost,
+            "cumulative_spread_cost": state.cumulative_spread_cost,
+            "cumulative_execution_cost": state.cumulative_execution_cost,
             "open_lots": {symbol: [asdict(lot) for lot in lots] for symbol, lots in sorted(state.open_lots.items())},
             "next_trade_id": int(state.next_trade_id),
         }
@@ -169,7 +177,11 @@ def _clone_state(state: PaperPortfolioState) -> PaperPortfolioState:
         last_targets={symbol: float(weight) for symbol, weight in state.last_targets.items()},
         initial_cash_basis=float(state.initial_cash_basis),
         cumulative_realized_pnl=float(state.cumulative_realized_pnl),
+        cumulative_gross_realized_pnl=float(state.cumulative_gross_realized_pnl),
         cumulative_fees=float(state.cumulative_fees),
+        cumulative_slippage_cost=float(state.cumulative_slippage_cost),
+        cumulative_spread_cost=float(state.cumulative_spread_cost),
+        cumulative_execution_cost=float(state.cumulative_execution_cost),
         open_lots={
             symbol: [
                 PaperTradeLot(
@@ -180,9 +192,15 @@ def _clone_state(state: PaperPortfolioState) -> PaperPortfolioState:
                     signal_family=lot.signal_family,
                     side=lot.side,
                     entry_as_of=lot.entry_as_of,
+                    entry_reference_price=float(lot.entry_reference_price),
                     entry_price=float(lot.entry_price),
                     quantity=int(lot.quantity),
                     remaining_quantity=int(lot.remaining_quantity),
+                    entry_slippage_cost=float(lot.entry_slippage_cost),
+                    entry_spread_cost=float(lot.entry_spread_cost),
+                    entry_commission_cost=float(lot.entry_commission_cost),
+                    entry_total_execution_cost=float(lot.entry_total_execution_cost),
+                    cost_model=str(lot.cost_model),
                     attribution_method=lot.attribution_method,
                     metadata=dict(lot.metadata),
                 )
@@ -458,6 +476,60 @@ def _next_trade_id(state: PaperPortfolioState) -> str:
     return trade_id
 
 
+def _allocated_order_metrics(order: PaperOrder, quantity: int) -> dict[str, dict[str, float]]:
+    ownership = _normalized_order_ownership(order)
+    allocated_qty = allocate_integer_quantities(quantity, ownership)
+    total_qty = max(int(quantity), 0)
+    if total_qty <= 0:
+        return {}
+    metrics: dict[str, dict[str, float]] = {}
+    for strategy_id, strategy_qty in allocated_qty.items():
+        share = float(strategy_qty) / float(total_qty)
+        metrics[strategy_id] = {
+            "quantity": int(strategy_qty),
+            "gross_notional": float(order.reference_price) * float(strategy_qty),
+            "effective_notional": float(order.expected_fill_price or order.reference_price) * float(strategy_qty),
+            "slippage_cost": float(order.expected_slippage_cost) * share,
+            "spread_cost": float(order.expected_spread_cost) * share,
+            "commission_cost": float(order.expected_commission_cost) * share,
+            "total_execution_cost": float(order.expected_total_execution_cost) * share,
+        }
+    return metrics
+
+
+def _build_attributed_fill_rows(
+    *,
+    order: PaperOrder,
+    quantity: int,
+    as_of: str | None,
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    fill_date = pd.Timestamp(as_of).date().isoformat() if as_of else None
+    for strategy_id, metrics in sorted(_allocated_order_metrics(order, quantity).items()):
+        rows.append(
+            {
+                "date": fill_date,
+                "symbol": order.symbol,
+                "strategy_id": strategy_id,
+                "signal_source": _lot_signal_source(order, strategy_id),
+                "signal_family": _lot_signal_family(order, strategy_id),
+                "side": str(order.side).upper(),
+                "quantity": int(metrics["quantity"]),
+                "reference_price": float(order.reference_price),
+                "fill_price": float(order.expected_fill_price or order.reference_price),
+                "gross_notional": float(metrics["gross_notional"]),
+                "notional": float(metrics["effective_notional"]),
+                "slippage_cost": float(metrics["slippage_cost"]),
+                "spread_cost": float(metrics["spread_cost"]),
+                "commission_cost": float(metrics["commission_cost"]),
+                "total_execution_cost": float(metrics["total_execution_cost"]),
+                "fill_count": 1,
+                "cost_model": str(order.cost_model),
+            }
+        )
+    return rows
+
+
 def _append_open_lots(
     *,
     state: PaperPortfolioState,
@@ -466,14 +538,16 @@ def _append_open_lots(
     quantity: int,
     as_of: str | None,
 ) -> None:
-    ownership = _normalized_order_ownership(order)
-    if quantity <= 0 or not ownership:
+    if quantity <= 0:
         return
-    allocated = allocate_integer_quantities(quantity, ownership)
+    allocated = _allocated_order_metrics(order, quantity)
+    if not allocated:
+        return
     lots = state.open_lots.setdefault(order.symbol, [])
     side = "long" if str(order.side).upper() == "BUY" else "short"
     signed_qty = 1 if side == "long" else -1
-    for strategy_id, lot_qty in allocated.items():
+    for strategy_id, metrics in sorted(allocated.items()):
+        lot_qty = int(metrics["quantity"])
         lots.append(
             PaperTradeLot(
                 trade_id=_next_trade_id(state),
@@ -483,9 +557,15 @@ def _append_open_lots(
                 signal_family=_lot_signal_family(order, strategy_id),
                 side=side,
                 entry_as_of=str(as_of or state.as_of or ""),
+                entry_reference_price=float(order.reference_price),
                 entry_price=float(fill_price),
                 quantity=int(lot_qty * signed_qty),
                 remaining_quantity=int(lot_qty * signed_qty),
+                entry_slippage_cost=float(metrics["slippage_cost"]),
+                entry_spread_cost=float(metrics["spread_cost"]),
+                entry_commission_cost=float(metrics["commission_cost"]),
+                entry_total_execution_cost=float(metrics["total_execution_cost"]),
+                cost_model=str(order.cost_model),
                 metadata={
                     "order_reason": order.reason,
                     "target_weight": (order.provenance or {}).get("target_weight"),
@@ -512,6 +592,7 @@ def _close_open_lots(
     trade_rows: list[dict[str, Any]] = []
     fill_rows: list[dict[str, Any]] = []
     updated_lots: list[PaperTradeLot] = []
+    order_cost_allocations = _allocated_order_metrics(order, quantity)
     for lot in lots:
         remaining_qty = int(lot.remaining_quantity)
         if remaining_qty == 0:
@@ -521,12 +602,26 @@ def _close_open_lots(
             closed_qty = min(abs(remaining_qty), remaining_to_close)
             remaining_to_close -= closed_qty
             sign = 1.0 if lot_is_long else -1.0
-            realized_pnl = (float(fill_price) - float(lot.entry_price)) * closed_qty * sign
-            realized_total += realized_pnl
+            gross_realized_pnl = (float(order.reference_price) - float(lot.entry_reference_price)) * closed_qty * sign
+            net_realized_pnl = (float(fill_price) - float(lot.entry_price)) * closed_qty * sign
+            realized_total += net_realized_pnl
             exit_ts = pd.Timestamp(as_of).date().isoformat() if as_of else None
             holding_days = None
             if lot.entry_as_of and exit_ts:
                 holding_days = int((pd.Timestamp(exit_ts) - pd.Timestamp(lot.entry_as_of)).days)
+            lot_share = float(closed_qty) / float(abs(remaining_qty))
+            entry_slippage_cost = float(lot.entry_slippage_cost) * lot_share
+            entry_spread_cost = float(lot.entry_spread_cost) * lot_share
+            entry_commission_cost = float(lot.entry_commission_cost) * lot_share
+            entry_total_execution_cost = float(lot.entry_total_execution_cost) * lot_share
+            exit_metrics = order_cost_allocations.get(lot.strategy_id, {})
+            exit_qty = int(exit_metrics.get("quantity", 0))
+            exit_share = (float(closed_qty) / float(exit_qty)) if exit_qty > 0 else 0.0
+            exit_slippage_cost = float(exit_metrics.get("slippage_cost", 0.0)) * exit_share
+            exit_spread_cost = float(exit_metrics.get("spread_cost", 0.0)) * exit_share
+            exit_commission_cost = float(exit_metrics.get("commission_cost", 0.0)) * exit_share
+            exit_total_execution_cost = float(exit_metrics.get("total_execution_cost", 0.0)) * exit_share
+            total_execution_cost = float(entry_total_execution_cost + exit_total_execution_cost)
             trade_rows.append(
                 {
                     "trade_id": lot.trade_id,
@@ -537,11 +632,20 @@ def _close_open_lots(
                     "signal_family": lot.signal_family,
                     "side": lot.side,
                     "quantity": int(closed_qty),
+                    "entry_reference_price": float(lot.entry_reference_price),
                     "entry_price": float(lot.entry_price),
+                    "exit_reference_price": float(order.reference_price),
                     "exit_price": float(fill_price),
-                    "realized_pnl": float(realized_pnl),
+                    "gross_realized_pnl": float(gross_realized_pnl),
+                    "net_realized_pnl": float(net_realized_pnl),
+                    "realized_pnl": float(net_realized_pnl),
+                    "slippage_cost": float(entry_slippage_cost + exit_slippage_cost),
+                    "spread_cost": float(entry_spread_cost + exit_spread_cost),
+                    "commission_cost": float(entry_commission_cost + exit_commission_cost),
+                    "total_execution_cost": total_execution_cost,
                     "holding_period_days": holding_days,
                     "attribution_method": lot.attribution_method,
+                    "cost_model": str(lot.cost_model or order.cost_model),
                     "status": "closed",
                     "entry_date": lot.entry_as_of,
                     "exit_date": exit_ts,
@@ -556,9 +660,16 @@ def _close_open_lots(
                     "signal_family": lot.signal_family,
                     "side": closing_side,
                     "quantity": int(closed_qty),
+                    "reference_price": float(order.reference_price),
                     "fill_price": float(fill_price),
+                    "gross_notional": float(closed_qty * float(order.reference_price)),
                     "notional": float(closed_qty * fill_price),
+                    "slippage_cost": float(exit_slippage_cost),
+                    "spread_cost": float(exit_spread_cost),
+                    "commission_cost": float(exit_commission_cost),
+                    "total_execution_cost": float(exit_total_execution_cost),
                     "fill_count": 1,
+                    "cost_model": str(order.cost_model),
                 }
             )
             new_remaining = abs(remaining_qty) - closed_qty
@@ -567,6 +678,10 @@ def _close_open_lots(
                     replace(
                         lot,
                         remaining_quantity=int(new_remaining if lot_is_long else -new_remaining),
+                        entry_slippage_cost=float(lot.entry_slippage_cost - entry_slippage_cost),
+                        entry_spread_cost=float(lot.entry_spread_cost - entry_spread_cost),
+                        entry_commission_cost=float(lot.entry_commission_cost - entry_commission_cost),
+                        entry_total_execution_cost=float(lot.entry_total_execution_cost - entry_total_execution_cost),
                     )
                 )
             continue
@@ -580,7 +695,6 @@ def _apply_fill_to_state_with_attribution(
     state: PaperPortfolioState,
     order: PaperOrder,
     fill_price: float,
-    commission: float,
     as_of: str | None,
 ) -> tuple[float, list[dict[str, Any]], list[dict[str, Any]]]:
     current = state.positions.get(order.symbol)
@@ -596,7 +710,7 @@ def _apply_fill_to_state_with_attribution(
         quantity=closing_quantity,
         as_of=as_of,
     )
-    state.cash += (-signed_qty * float(fill_price)) - float(commission)
+    state.cash += -signed_qty * float(fill_price)
     new_quantity = prior_quantity + signed_qty
     if new_quantity == 0:
         state.positions.pop(order.symbol, None)
@@ -628,9 +742,22 @@ def _apply_fill_to_state_with_attribution(
             quantity=opening_quantity,
             as_of=as_of,
         )
-    state.cumulative_realized_pnl += float(realized_pnl - commission)
-    state.cumulative_fees += float(commission)
-    return float(realized_pnl - commission), trade_rows, fill_rows
+        fill_rows.extend(
+            _build_attributed_fill_rows(
+                order=order,
+                quantity=opening_quantity,
+                as_of=as_of,
+            )
+        )
+    state.cumulative_realized_pnl += float(realized_pnl)
+    state.cumulative_gross_realized_pnl += float(
+        sum(float(row.get("gross_realized_pnl", 0.0) or 0.0) for row in trade_rows)
+    )
+    state.cumulative_fees += float(order.expected_commission_cost)
+    state.cumulative_slippage_cost += float(order.expected_slippage_cost)
+    state.cumulative_spread_cost += float(order.expected_spread_cost)
+    state.cumulative_execution_cost += float(order.expected_total_execution_cost)
+    return float(realized_pnl), trade_rows, fill_rows
 
 
 def _estimate_order_realized_pnl(
@@ -638,13 +765,12 @@ def _estimate_order_realized_pnl(
     state: PaperPortfolioState,
     order: PaperOrder,
     fill_price: float,
-    commission: float,
 ) -> float:
     current = state.positions.get(order.symbol)
     if current is None:
-        return -float(commission)
+        return 0.0
     prior_quantity = int(current.quantity)
-    realized_pnl = -float(commission)
+    realized_pnl = 0.0
     if order.side == "SELL" and prior_quantity > 0:
         closed_quantity = min(prior_quantity, int(order.quantity))
         realized_pnl += (float(fill_price) - float(current.avg_price)) * float(closed_quantity)
@@ -661,7 +787,6 @@ def _apply_fill_to_state(
     side: str,
     quantity: int,
     fill_price: float,
-    commission: float,
 ) -> float:
     signed_qty = int(quantity) if side == "BUY" else -int(quantity)
     realized_pnl = _estimate_order_realized_pnl(
@@ -678,9 +803,8 @@ def _apply_fill_to_state(
             reason="fill_application",
         ),
         fill_price=float(fill_price),
-        commission=float(commission),
     )
-    state.cash += (-signed_qty * float(fill_price)) - float(commission)
+    state.cash += -signed_qty * float(fill_price)
     current = state.positions.get(symbol)
     prior_quantity = current.quantity if current else 0
     new_quantity = prior_quantity + signed_qty
@@ -704,7 +828,6 @@ def _apply_fill_to_state(
             last_price=float(fill_price),
         )
     state.cumulative_realized_pnl += float(realized_pnl)
-    state.cumulative_fees += float(commission)
     return float(realized_pnl)
 
 
@@ -723,7 +846,6 @@ def _apply_execution_orders_to_state(
             state=state,
             order=order,
             fill_price=fill_price,
-            commission=float(order.expected_fees),
             as_of=as_of,
         )
         trade_rows.extend(closed_trade_rows)
@@ -739,8 +861,15 @@ def _apply_execution_orders_to_state(
                 quantity=order.quantity,
                 fill_price=fill_price,
                 notional=float(order.quantity) * fill_price,
-                commission=float(order.expected_fees),
+                reference_price=float(order.reference_price),
+                gross_notional=float(order.expected_gross_notional or (float(order.reference_price) * order.quantity)),
+                commission=float(order.expected_commission_cost),
                 slippage_bps=float(order.expected_slippage_bps),
+                spread_bps=float(order.expected_spread_bps),
+                slippage_cost=float(order.expected_slippage_cost),
+                spread_cost=float(order.expected_spread_cost),
+                total_execution_cost=float(order.expected_total_execution_cost),
+                cost_model=str(order.cost_model),
                 realized_pnl=float(realized_pnl),
                 strategy_id=primary_strategy,
                 signal_source=str((order.provenance or {}).get("signal_source") or "multi_strategy"),
@@ -779,18 +908,14 @@ def _apply_execution_orders_with_paper_broker(
     trade_rows: list[dict[str, Any]] = []
     fill_rows: list[dict[str, Any]] = []
     for order, fill in zip(orders, broker_fills, strict=False):
-        commission = float(order.expected_fees)
         realized_pnl, closed_trade_rows, attributed_fill_rows = _apply_fill_to_state_with_attribution(
             state=accounting_state,
             order=order,
             fill_price=float(fill.fill_price),
-            commission=commission,
             as_of=as_of,
         )
         trade_rows.extend(closed_trade_rows)
         fill_rows.extend(attributed_fill_rows)
-        if commission:
-            state.cash -= commission
         position = state.positions.get(order.symbol)
         if position is not None:
             position.last_price = float(fill.fill_price)
@@ -805,8 +930,15 @@ def _apply_execution_orders_with_paper_broker(
                 quantity=int(fill.quantity),
                 fill_price=float(fill.fill_price),
                 notional=float(fill.notional),
-                commission=float(order.expected_fees),
+                reference_price=float(order.reference_price),
+                gross_notional=float(order.expected_gross_notional or (float(order.reference_price) * order.quantity)),
+                commission=float(order.expected_commission_cost),
                 slippage_bps=float(order.expected_slippage_bps),
+                spread_bps=float(order.expected_spread_bps),
+                slippage_cost=float(order.expected_slippage_cost),
+                spread_cost=float(order.expected_spread_cost),
+                total_execution_cost=float(order.expected_total_execution_cost),
+                cost_model=str(order.cost_model),
                 realized_pnl=float(realized_pnl),
                 strategy_id=primary_strategy,
                 signal_source=str((order.provenance or {}).get("signal_source") or "multi_strategy"),
@@ -814,7 +946,11 @@ def _apply_execution_orders_with_paper_broker(
             )
         )
     state.cumulative_realized_pnl = float(accounting_state.cumulative_realized_pnl)
+    state.cumulative_gross_realized_pnl = float(accounting_state.cumulative_gross_realized_pnl)
     state.cumulative_fees = float(accounting_state.cumulative_fees)
+    state.cumulative_slippage_cost = float(accounting_state.cumulative_slippage_cost)
+    state.cumulative_spread_cost = float(accounting_state.cumulative_spread_cost)
+    state.cumulative_execution_cost = float(accounting_state.cumulative_execution_cost)
     state.open_lots = accounting_state.open_lots
     state.next_trade_id = accounting_state.next_trade_id
     return state, fills, trade_rows, fill_rows
@@ -833,6 +969,15 @@ def _apply_paper_slippage(
         "slippage_model": model,
         "slippage_buy_bps": float(config.slippage_buy_bps),
         "slippage_sell_bps": float(config.slippage_sell_bps),
+        "cost_model_enabled": bool(config.enable_cost_model),
+        "commission_bps": float(config.commission_bps),
+        "minimum_commission": float(config.minimum_commission),
+        "spread_bps": float(config.spread_bps),
+        "cost_model": "paper_v2_cost_model" if bool(config.enable_cost_model) or model != "none" else "disabled",
+        "expected_slippage_cost": float(sum(order.expected_slippage_cost for order in adjusted)),
+        "expected_spread_cost": float(sum(order.expected_spread_cost for order in adjusted)),
+        "expected_commission_cost": float(sum(order.expected_commission_cost for order in adjusted)),
+        "expected_total_execution_cost": float(sum(order.expected_total_execution_cost for order in adjusted)),
         "slippage_order_count": len(adjusted),
     }
 
@@ -860,8 +1005,29 @@ def _build_accounting_summary(
     starting_equity = float(starting_state.equity)
     ending_equity = float(ending_state.equity)
     realized_delta = float(ending_state.cumulative_realized_pnl - starting_state.cumulative_realized_pnl)
+    gross_realized_delta = float(
+        ending_state.cumulative_gross_realized_pnl - starting_state.cumulative_gross_realized_pnl
+    )
     fee_delta = float(ending_state.cumulative_fees - starting_state.cumulative_fees)
+    slippage_cost_delta = float(ending_state.cumulative_slippage_cost - starting_state.cumulative_slippage_cost)
+    spread_cost_delta = float(ending_state.cumulative_spread_cost - starting_state.cumulative_spread_cost)
+    execution_cost_delta = float(ending_state.cumulative_execution_cost - starting_state.cumulative_execution_cost)
     total_pnl_delta = float(ending_equity - starting_equity)
+    gross_unrealized_pnl = 0.0
+    for lots in ending_state.open_lots.values():
+        for lot in lots:
+            remaining_qty = int(lot.remaining_quantity)
+            if remaining_qty == 0:
+                continue
+            position = ending_state.positions.get(lot.symbol)
+            if position is None:
+                continue
+            sign = 1.0 if remaining_qty > 0 else -1.0
+            gross_unrealized_pnl += (
+                float(position.last_price) - float(lot.entry_reference_price)
+            ) * abs(remaining_qty) * sign
+    gross_total_pnl = float(ending_state.cumulative_gross_realized_pnl + gross_unrealized_pnl)
+    net_total_pnl = float(ending_state.total_pnl)
     return {
         "auto_apply_fills": bool(auto_apply_fills),
         "fill_application_status": fill_application_status,
@@ -875,13 +1041,30 @@ def _build_accounting_summary(
         "buy_fill_count": int(buy_fill_count),
         "sell_fill_count": int(sell_fill_count),
         "fill_notional": float(fill_notional),
+        "gross_realized_pnl_delta": gross_realized_delta,
         "realized_pnl_delta": realized_delta,
+        "net_realized_pnl_delta": realized_delta,
+        "gross_realized_pnl": float(ending_state.cumulative_gross_realized_pnl),
         "cumulative_realized_pnl": float(ending_state.cumulative_realized_pnl),
+        "net_realized_pnl": float(ending_state.cumulative_realized_pnl),
+        "gross_unrealized_pnl": float(gross_unrealized_pnl),
         "unrealized_pnl": float(ending_state.unrealized_pnl),
-        "total_pnl": float(ending_state.total_pnl),
+        "net_unrealized_pnl": float(ending_state.unrealized_pnl),
+        "gross_total_pnl": gross_total_pnl,
+        "net_total_pnl": net_total_pnl,
+        "total_pnl": net_total_pnl,
         "total_pnl_delta": total_pnl_delta,
         "fees_paid_delta": fee_delta,
         "cumulative_fees": float(ending_state.cumulative_fees),
+        "total_commission_cost": float(ending_state.cumulative_fees),
+        "commission_cost_delta": fee_delta,
+        "total_slippage_cost": float(ending_state.cumulative_slippage_cost),
+        "slippage_cost_delta": slippage_cost_delta,
+        "total_spread_cost": float(ending_state.cumulative_spread_cost),
+        "spread_cost_delta": spread_cost_delta,
+        "total_execution_cost": float(ending_state.cumulative_execution_cost),
+        "execution_cost_delta": execution_cost_delta,
+        "cost_drag_pct": (execution_cost_delta / starting_equity) if starting_equity > 0.0 else 0.0,
         "position_count": int(len(ending_state.positions)),
         "target_weight_sum": float(sum(latest_effective_weights.values())),
     }
@@ -1020,6 +1203,15 @@ def run_paper_trading_cycle_for_targets(
             "slippage_model": slippage_diagnostics["slippage_model"],
             "slippage_buy_bps": slippage_diagnostics["slippage_buy_bps"],
             "slippage_sell_bps": slippage_diagnostics["slippage_sell_bps"],
+            "cost_model_enabled": slippage_diagnostics["cost_model_enabled"],
+            "cost_model": slippage_diagnostics["cost_model"],
+            "commission_bps": slippage_diagnostics["commission_bps"],
+            "minimum_commission": slippage_diagnostics["minimum_commission"],
+            "spread_bps": slippage_diagnostics["spread_bps"],
+            "expected_slippage_cost": slippage_diagnostics["expected_slippage_cost"],
+            "expected_spread_cost": slippage_diagnostics["expected_spread_cost"],
+            "expected_commission_cost": slippage_diagnostics["expected_commission_cost"],
+            "expected_total_execution_cost": slippage_diagnostics["expected_total_execution_cost"],
             "auto_apply_fills": bool(auto_apply_fills),
             "fill_application_status": accounting_summary["fill_application_status"],
             "ensemble_enabled": bool(config.ensemble_enabled and config.signal_source == "ensemble"),
@@ -1233,15 +1425,24 @@ def write_paper_trading_artifacts(
             "side": lot.side,
             "qty": abs(int(lot.remaining_quantity)),
             "entry_ts": lot.entry_as_of,
+            "entry_reference_price": float(lot.entry_reference_price),
             "entry_price": float(lot.entry_price),
             "exit_ts": None,
+            "exit_reference_price": None,
             "exit_price": None,
+            "gross_realized_pnl": 0.0,
+            "net_realized_pnl": 0.0,
             "realized_pnl": 0.0,
+            "slippage_cost": float(lot.entry_slippage_cost),
+            "spread_cost": float(lot.entry_spread_cost),
+            "commission_cost": float(lot.entry_commission_cost),
+            "total_execution_cost": float(lot.entry_total_execution_cost),
             "status": "open",
             "strategy_id": lot.strategy_id,
             "signal_source": lot.signal_source,
             "signal_family": lot.signal_family,
             "attribution_method": lot.attribution_method,
+            "cost_model": lot.cost_model,
         }
         for lots in result.state.open_lots.values()
         for lot in lots
@@ -1277,9 +1478,18 @@ def write_paper_trading_artifacts(
                 "gross_market_value": result.state.gross_market_value,
                 "equity": result.state.equity,
                 "cost_basis": result.state.cost_basis,
+                "gross_unrealized_pnl": float(result.diagnostics.get("accounting", {}).get("gross_unrealized_pnl", 0.0)),
                 "unrealized_pnl": result.state.unrealized_pnl,
+                "net_unrealized_pnl": result.state.unrealized_pnl,
+                "gross_realized_pnl": float(
+                    result.diagnostics.get("accounting", {}).get("gross_realized_pnl", result.state.cumulative_gross_realized_pnl)
+                ),
                 "cumulative_realized_pnl": result.state.cumulative_realized_pnl,
+                "net_realized_pnl": result.state.cumulative_realized_pnl,
+                "gross_total_pnl": float(result.diagnostics.get("accounting", {}).get("gross_total_pnl", 0.0)),
                 "total_pnl": result.state.total_pnl,
+                "net_total_pnl": result.state.total_pnl,
+                "total_execution_cost": float(result.state.cumulative_execution_cost),
                 "position_count": len(result.state.positions),
             }
         ]

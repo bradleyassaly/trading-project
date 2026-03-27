@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 from trading_platform.dashboard.service import DashboardDataService
 from trading_platform.decision_journal.models import DecisionJournalBundle
@@ -25,15 +26,20 @@ def _run_cycle(
     latest_price: float,
     target_weight: float,
     provenance: dict[str, dict],
+    config_overrides: dict | None = None,
 ) -> object:
+    payload = {
+        "symbols": ["AAPL"],
+        "preset_name": "multi_strategy",
+        "universe_name": "test",
+        "strategy": "multi_strategy",
+        "signal_source": "multi_strategy",
+        "initial_cash": 1_000.0,
+        "min_trade_dollars": 1.0,
+    }
+    payload.update(dict(config_overrides or {}))
     config = PaperTradingConfig(
-        symbols=["AAPL"],
-        preset_name="multi_strategy",
-        universe_name="test",
-        strategy="multi_strategy",
-        signal_source="multi_strategy",
-        initial_cash=1_000.0,
-        min_trade_dollars=1.0,
+        **payload,
     )
     return run_paper_trading_cycle_for_targets(
         config=config,
@@ -168,26 +174,16 @@ def test_partial_close_preserves_remaining_unrealized_ownership(tmp_path: Path) 
     trade_rows = result.attribution["trade_rows"]
     summary = result.attribution["summary"]
 
-    assert trade_rows == [
-        {
-            "trade_id": "paper-trade-1",
-            "date": "2025-01-03",
-            "symbol": "AAPL",
-            "strategy_id": "alpha",
-            "signal_source": "multi_strategy",
-            "signal_family": "momentum",
-            "side": "long",
-            "quantity": 5,
-            "entry_price": 100.0,
-            "exit_price": 110.0,
-            "realized_pnl": 50.0,
-            "holding_period_days": 1,
-            "attribution_method": "target_weight_proportional",
-            "status": "closed",
-            "entry_date": "2025-01-02",
-            "exit_date": "2025-01-03",
-        }
-    ]
+    assert len(trade_rows) == 1
+    assert trade_rows[0]["trade_id"] == "paper-trade-1"
+    assert trade_rows[0]["entry_reference_price"] == 100.0
+    assert trade_rows[0]["entry_price"] == 100.0
+    assert trade_rows[0]["exit_reference_price"] == 110.0
+    assert trade_rows[0]["exit_price"] == 110.0
+    assert trade_rows[0]["gross_realized_pnl"] == 50.0
+    assert trade_rows[0]["net_realized_pnl"] == 50.0
+    assert trade_rows[0]["realized_pnl"] == 50.0
+    assert trade_rows[0]["total_execution_cost"] == 0.0
     assert strategy_rows["alpha"]["realized_pnl"] == 50.0
     assert strategy_rows["beta"]["realized_pnl"] == 0.0
     assert strategy_rows["alpha"]["unrealized_pnl"] == 10.0
@@ -198,6 +194,135 @@ def test_partial_close_preserves_remaining_unrealized_ownership(tmp_path: Path) 
     assert summary["reconciliation"]["symbol_residual"] == 0.0
     assert summary["reconciliation"]["strategy_reconciled"] is True
     assert summary["reconciliation"]["symbol_reconciled"] is True
+
+
+def test_cost_model_slippage_and_commission_flow_into_gross_vs_net_attribution(tmp_path: Path) -> None:
+    state_path = tmp_path / "state.json"
+    provenance = {
+        "AAPL": {
+            "strategy_id": "alpha",
+            "strategy_ownership": {"alpha": 1.0},
+            "signal_source": "legacy",
+        }
+    }
+    result = _run_cycle(
+        state_path=state_path,
+        as_of="2025-01-02",
+        latest_price=100.0,
+        target_weight=1.0,
+        provenance=provenance,
+        config_overrides={
+            "slippage_model": "fixed_bps",
+            "slippage_buy_bps": 10.0,
+            "enable_cost_model": True,
+            "commission_bps": 10.0,
+            "minimum_commission": 0.0,
+            "spread_bps": 20.0,
+        },
+    )
+
+    strategy_row = result.attribution["strategy_rows"][0]
+    summary = result.attribution["summary"]
+    accounting = result.diagnostics["accounting"]
+    fill = result.fills[0]
+
+    assert fill.reference_price == 100.0
+    assert fill.fill_price == pytest.approx(100.3001)
+    assert fill.slippage_cost == pytest.approx(1.0)
+    assert fill.spread_cost == pytest.approx(1.001)
+    assert fill.commission == 1.0
+    assert fill.total_execution_cost == pytest.approx(3.001)
+    assert strategy_row["gross_unrealized_pnl"] == 0.0
+    assert strategy_row["net_unrealized_pnl"] == pytest.approx(-3.001)
+    assert strategy_row["total_execution_cost"] == pytest.approx(3.001)
+    assert summary["total_gross_pnl"] == 0.0
+    assert summary["total_net_pnl"] == pytest.approx(-3.001)
+    assert summary["total_execution_cost"] == pytest.approx(3.001)
+    assert accounting["gross_total_pnl"] == 0.0
+    assert accounting["net_total_pnl"] == pytest.approx(-3.001)
+    assert accounting["total_execution_cost"] == pytest.approx(3.001)
+
+
+def test_cost_model_round_trip_gross_vs_net_realized_pnl(tmp_path: Path) -> None:
+    state_path = tmp_path / "state.json"
+    provenance = {
+        "AAPL": {
+            "strategy_id": "alpha",
+            "strategy_ownership": {"alpha": 1.0},
+            "signal_source": "legacy",
+        }
+    }
+    _run_cycle(
+        state_path=state_path,
+        as_of="2025-01-02",
+        latest_price=100.0,
+        target_weight=1.0,
+        provenance=provenance,
+        config_overrides={
+            "slippage_model": "fixed_bps",
+            "slippage_buy_bps": 10.0,
+            "slippage_sell_bps": 10.0,
+            "enable_cost_model": True,
+            "commission_bps": 10.0,
+            "minimum_commission": 0.0,
+            "spread_bps": 20.0,
+        },
+    )
+    result = _run_cycle(
+        state_path=state_path,
+        as_of="2025-01-03",
+        latest_price=110.0,
+        target_weight=0.0,
+        provenance=provenance,
+        config_overrides={
+            "slippage_model": "fixed_bps",
+            "slippage_buy_bps": 10.0,
+            "slippage_sell_bps": 10.0,
+            "enable_cost_model": True,
+            "commission_bps": 10.0,
+            "minimum_commission": 0.0,
+            "spread_bps": 20.0,
+        },
+    )
+
+    trade_row = result.attribution["trade_rows"][0]
+    summary = result.attribution["summary"]
+
+    assert trade_row["gross_realized_pnl"] == 100.0
+    assert trade_row["net_realized_pnl"] == pytest.approx(93.7001)
+    assert trade_row["total_execution_cost"] == pytest.approx(6.2999)
+    assert summary["total_gross_realized_pnl"] == 100.0
+    assert summary["total_net_realized_pnl"] == pytest.approx(93.7001)
+    assert summary["total_execution_cost"] == pytest.approx(6.2999)
+    assert summary["reconciliation"]["strategy_reconciled"] is True
+    assert summary["reconciliation"]["symbol_reconciled"] is True
+
+
+def test_minimum_commission_applies_when_enabled(tmp_path: Path) -> None:
+    state_path = tmp_path / "state.json"
+    provenance = {
+        "AAPL": {
+            "strategy_id": "alpha",
+            "strategy_ownership": {"alpha": 1.0},
+            "signal_source": "legacy",
+        }
+    }
+    result = _run_cycle(
+        state_path=state_path,
+        as_of="2025-01-02",
+        latest_price=100.0,
+        target_weight=0.1,
+        provenance=provenance,
+        config_overrides={
+            "enable_cost_model": True,
+            "commission_bps": 1.0,
+            "minimum_commission": 2.0,
+        },
+    )
+
+    fill = result.fills[0]
+    assert fill.commission == 2.0
+    assert fill.total_execution_cost == 2.0
 
 
 def test_attribution_artifacts_and_dashboard_payloads(tmp_path: Path) -> None:

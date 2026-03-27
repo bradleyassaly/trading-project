@@ -527,6 +527,28 @@ def load_daily_trading_workflow_config(path: str | Path) -> DailyTradingWorkflow
     _set_if_missing(payload, "include_inactive_conditionals_in_reports", paper_section)
     _set_if_missing(payload, "auto_apply_fills", paper_section)
     _set_if_missing(payload, "fail_if_zero_targets_after_validation", paper_section)
+    execution_section = (
+        paper_section.get("execution", {}) if isinstance(paper_section.get("execution"), dict) else {}
+    )
+    slippage_section = (
+        execution_section.get("slippage", {}) if isinstance(execution_section.get("slippage"), dict) else {}
+    )
+    cost_section = (
+        execution_section.get("cost_model", {}) if isinstance(execution_section.get("cost_model"), dict) else {}
+    )
+    if "slippage_model" not in payload and slippage_section:
+        enabled = bool(slippage_section.get("enabled", False))
+        payload["slippage_model"] = str(slippage_section.get("model", "fixed_bps" if enabled else "none"))
+        if not enabled:
+            payload["slippage_model"] = "none"
+    if "slippage_buy_bps" not in payload and "buy_bps" in slippage_section:
+        payload["slippage_buy_bps"] = slippage_section["buy_bps"]
+    if "slippage_sell_bps" not in payload and "sell_bps" in slippage_section:
+        payload["slippage_sell_bps"] = slippage_section["sell_bps"]
+    _set_if_missing(payload, "enable_cost_model", cost_section, "enabled")
+    _set_if_missing(payload, "commission_bps", cost_section)
+    _set_if_missing(payload, "minimum_commission", cost_section)
+    _set_if_missing(payload, "spread_bps", cost_section)
     _set_if_missing(payload, "enable_strategy_diagnostics", report_section)
     _set_if_missing(payload, "refresh_dashboard_static_data", dashboard_section)
     _set_if_missing(payload, "refresh_dashboard_static_data", dashboard_section, "refresh_static_data")

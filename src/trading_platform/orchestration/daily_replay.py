@@ -387,6 +387,11 @@ def _compute_replay_summary(
         if "current_equity" in metrics_frame and not metrics_frame.empty
         else 0.0
     )
+    final_gross_equity = (
+        float(metrics_frame["final_gross_equity"].iloc[-1])
+        if "final_gross_equity" in metrics_frame and not metrics_frame.empty
+        else final_equity
+    )
     cumulative_realized_pnl = (
         float(metrics_frame["cumulative_realized_pnl"].iloc[-1])
         if "cumulative_realized_pnl" in metrics_frame and not metrics_frame.empty
@@ -397,6 +402,36 @@ def _compute_replay_summary(
         if "unrealized_pnl" in metrics_frame and not metrics_frame.empty
         else 0.0
     )
+    gross_total_pnl = (
+        float(metrics_frame["gross_total_pnl"].iloc[-1])
+        if "gross_total_pnl" in metrics_frame and not metrics_frame.empty
+        else float(cumulative_realized_pnl + cumulative_unrealized_pnl)
+    )
+    net_total_pnl = (
+        float(metrics_frame["net_total_pnl"].iloc[-1])
+        if "net_total_pnl" in metrics_frame and not metrics_frame.empty
+        else final_equity
+    )
+    total_execution_cost = (
+        float(metrics_frame["total_execution_cost"].iloc[-1])
+        if "total_execution_cost" in metrics_frame and not metrics_frame.empty
+        else 0.0
+    )
+    total_slippage_cost = (
+        float(metrics_frame["total_slippage_cost"].iloc[-1])
+        if "total_slippage_cost" in metrics_frame and not metrics_frame.empty
+        else 0.0
+    )
+    total_commission_cost = (
+        float(metrics_frame["total_commission_cost"].iloc[-1])
+        if "total_commission_cost" in metrics_frame and not metrics_frame.empty
+        else 0.0
+    )
+    total_spread_cost = (
+        float(metrics_frame["total_spread_cost"].iloc[-1])
+        if "total_spread_cost" in metrics_frame and not metrics_frame.empty
+        else 0.0
+    )
     if "current_equity" in metrics_frame and not metrics_frame.empty:
         equity_series = metrics_frame["current_equity"].astype(float)
         rolling_max = equity_series.cummax().replace(0.0, pd.NA)
@@ -405,6 +440,13 @@ def _compute_replay_summary(
         max_drawdown = float(drawdowns.min())
     else:
         max_drawdown = 0.0
+    if "final_gross_equity" in metrics_frame and not metrics_frame.empty:
+        gross_equity_series = metrics_frame["final_gross_equity"].astype(float)
+        gross_rolling_max = gross_equity_series.cummax().replace(0.0, pd.NA)
+        gross_drawdowns = ((gross_equity_series / gross_rolling_max) - 1.0).where(pd.notna(gross_rolling_max), 0.0)
+        max_drawdown_gross = float(gross_drawdowns.min())
+    else:
+        max_drawdown_gross = max_drawdown
 
     top_strategies_by_days_active: list[dict[str, Any]] = []
     top_strategies_by_average_weight: list[dict[str, Any]] = []
@@ -511,8 +553,24 @@ def _compute_replay_summary(
         "avg_usable_symbol_count": avg_usable_symbol_count,
         "cumulative_realized_pnl": cumulative_realized_pnl,
         "cumulative_unrealized_pnl": cumulative_unrealized_pnl,
+        "gross_total_pnl": gross_total_pnl,
+        "net_total_pnl": net_total_pnl,
         "final_equity": final_equity,
+        "final_gross_equity": final_gross_equity,
+        "final_net_equity": final_equity,
         "max_drawdown": max_drawdown,
+        "max_drawdown_gross": max_drawdown_gross,
+        "max_drawdown_net": max_drawdown,
+        "total_execution_cost": total_execution_cost,
+        "total_slippage_cost": total_slippage_cost,
+        "total_commission_cost": total_commission_cost,
+        "total_spread_cost": total_spread_cost,
+        "avg_daily_execution_cost": (
+            float(metrics_frame["execution_cost_delta"].mean())
+            if "execution_cost_delta" in metrics_frame and not metrics_frame.empty
+            else 0.0
+        ),
+        "cost_drag_pct": (total_execution_cost / gross_total_pnl) if gross_total_pnl not in (0.0, -0.0) else 0.0,
         "top_strategies_by_days_active": top_strategies_by_days_active,
         "top_strategies_by_average_weight": top_strategies_by_average_weight,
         "top_symbols_by_trade_count": top_symbols_by_trade_count,
@@ -557,8 +615,14 @@ def _write_replay_summary_artifacts(
                 f"- trade_day_count: `{summary.get('trade_day_count', 0)}`",
                 f"- no_op_day_count: `{summary.get('no_op_day_count', 0)}`",
                 f"- avg_daily_turnover: `{summary.get('avg_daily_turnover', 0.0)}`",
+                f"- avg_daily_execution_cost: `{summary.get('avg_daily_execution_cost', 0.0)}`",
+                f"- gross_total_pnl: `{summary.get('gross_total_pnl', 0.0)}`",
+                f"- net_total_pnl: `{summary.get('net_total_pnl', 0.0)}`",
+                f"- total_execution_cost: `{summary.get('total_execution_cost', 0.0)}`",
                 f"- final_equity: `{summary.get('final_equity', 0.0)}`",
+                f"- final_gross_equity: `{summary.get('final_gross_equity', 0.0)}`",
                 f"- max_drawdown: `{summary.get('max_drawdown', 0.0)}`",
+                f"- max_drawdown_gross: `{summary.get('max_drawdown_gross', 0.0)}`",
                 "",
                 "## Readiness",
                 "",
@@ -586,8 +650,16 @@ def _write_replay_summary_artifacts(
             "turnover_estimate",
             "position_count",
             "current_equity",
+            "final_gross_equity",
             "cumulative_realized_pnl",
             "unrealized_pnl",
+            "gross_total_pnl",
+            "net_total_pnl",
+            "execution_cost_delta",
+            "total_execution_cost",
+            "total_slippage_cost",
+            "total_commission_cost",
+            "total_spread_cost",
             "zero_target_reason",
         ],
     )
@@ -687,8 +759,16 @@ def run_daily_replay(config: DailyReplayWorkflowConfig) -> DailyReplayResult:
                 "turnover_estimate": float(paper_summary.get("turnover_estimate", 0.0) or 0.0),
                 "position_count": int(paper_summary.get("realized_holdings_count", 0) or 0),
                 "current_equity": float(paper_summary.get("current_equity", 0.0) or 0.0),
+                "final_gross_equity": float(paper_summary.get("final_gross_equity", paper_summary.get("current_equity", 0.0)) or 0.0),
                 "cumulative_realized_pnl": float(paper_summary.get("cumulative_realized_pnl", 0.0) or 0.0),
                 "unrealized_pnl": float(paper_summary.get("unrealized_pnl", 0.0) or 0.0),
+                "gross_total_pnl": float(paper_summary.get("gross_total_pnl", 0.0) or 0.0),
+                "net_total_pnl": float(paper_summary.get("net_total_pnl", paper_summary.get("total_pnl", 0.0)) or 0.0),
+                "execution_cost_delta": float(paper_summary.get("execution_cost_delta", 0.0) or 0.0),
+                "total_execution_cost": float(paper_summary.get("total_execution_cost", 0.0) or 0.0),
+                "total_slippage_cost": float(paper_summary.get("total_slippage_cost", 0.0) or 0.0),
+                "total_commission_cost": float(paper_summary.get("total_commission_cost", 0.0) or 0.0),
+                "total_spread_cost": float(paper_summary.get("total_spread_cost", 0.0) or 0.0),
                 "zero_target_reason": str(paper_summary.get("zero_target_reason", "") or ""),
             }
         )

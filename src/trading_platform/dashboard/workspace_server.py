@@ -1791,6 +1791,12 @@ def create_dashboard_app(
             status, headers, body = _json_response(service.symbol_pnl_latest_payload())
         elif path == "/api/attribution/latest":
             status, headers, body = _json_response(service.attribution_latest_payload())
+        elif path == "/api/execution-costs/latest":
+            status, headers, body = _json_response(service.execution_costs_latest_payload())
+        elif path == "/api/strategy-costs/latest":
+            status, headers, body = _json_response(service.strategy_costs_latest_payload())
+        elif path == "/api/cost-drag/latest":
+            status, headers, body = _json_response(service.cost_drag_latest_payload())
         elif path == "/api/execution/diagnostics":
             status, headers, body = _json_response(service.execution_diagnostics_payload())
         elif path == "/api/execution/latest":
@@ -1935,6 +1941,9 @@ def build_dashboard_static_data(*, artifacts_root: str | Path, output_dir: str |
         "strategy_pnl_latest.json": service.strategy_pnl_latest_payload(),
         "symbol_pnl_latest.json": service.symbol_pnl_latest_payload(),
         "attribution_latest.json": service.attribution_latest_payload(),
+        "execution_costs_latest.json": service.execution_costs_latest_payload(),
+        "strategy_costs_latest.json": service.strategy_costs_latest_payload(),
+        "cost_drag_latest.json": service.cost_drag_latest_payload(),
         "execution_latest.json": service.execution_payload(),
         "execution_diagnostics.json": service.execution_diagnostics_payload(),
         "live_latest.json": service.live_payload(),

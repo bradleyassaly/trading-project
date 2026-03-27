@@ -800,6 +800,31 @@ Paper runs and replay days now also write first-class PnL attribution artifacts:
 
 Attribution uses a documented proportional ownership model. For multi-strategy targets, each symbol's final target weight is decomposed into sleeve strategy ownership shares based on the same-direction contribution of each sleeve to the final blended weight. Realized PnL is then assigned when fills close those strategy-owned lots, and unrealized PnL is assigned from the end-of-day open lots. This is approximate ownership attribution, not exact causal alpha attribution, but it is consistent, auditable, and reconciled back to the paper portfolio total.
 
+Paper execution now also supports a first-class cost model. The paper ledger keeps gross and net views side by side:
+
+- `reference_price`: the pre-friction price used for gross PnL
+- `fill_price`: the effective post-friction price used for net state accounting
+- `slippage_bps`, `spread_bps`, `commission_bps`, `minimum_commission`: configurable friction inputs
+- `slippage_cost`, `spread_cost`, `commission_cost`, `total_execution_cost`: explicit fill-level cost fields
+- `gross_*` fields: performance before execution friction
+- `net_*` fields: performance after execution friction
+
+Cost model assumptions:
+
+- slippage still follows the configured paper slippage model
+- `spread_bps` is treated as a full spread, with one half-spread charged on each fill
+- commission is converted into an adverse per-share fill adjustment so open lots, closed trades, and end-of-day net PnL reconcile exactly
+- when the cost model is disabled, commission and spread are zero and prior paper behavior is preserved
+
+After a replay, inspect:
+
+- `paper/paper_fills.csv` for explicit per-fill cost components
+- `paper/strategy_pnl_attribution.csv` and `paper/symbol_pnl_attribution.csv` for gross vs net sleeve/name contribution
+- `paper/trade_pnl_attribution.csv` for round-trip gross vs net trade outcomes
+- `replay_pnl_attribution_summary.json` for total cost drag, highest-cost strategies, and gross-to-net reconciliation
+
+High-turnover sleeves that remain attractive only on gross PnL and flip negative on net PnL are the first candidates for downweighting or removal.
+
 Each replay day now also writes `replay_day_input_summary.json`. Check this first when replay looks inert. It records:
 
 - the effective replay date

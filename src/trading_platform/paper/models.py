@@ -61,6 +61,10 @@ class PaperTradingConfig:
     slippage_model: str = "none"
     slippage_buy_bps: float = 0.0
     slippage_sell_bps: float = 0.0
+    enable_cost_model: bool = False
+    commission_bps: float = 0.0
+    minimum_commission: float = 0.0
+    spread_bps: float = 0.0
     ensemble_enabled: bool = False
     ensemble_mode: str = "disabled"
     ensemble_weight_method: str = "equal"
@@ -110,9 +114,15 @@ class PaperTradeLot:
     signal_family: str | None
     side: str
     entry_as_of: str
+    entry_reference_price: float
     entry_price: float
     quantity: int
     remaining_quantity: int
+    entry_slippage_cost: float = 0.0
+    entry_spread_cost: float = 0.0
+    entry_commission_cost: float = 0.0
+    entry_total_execution_cost: float = 0.0
+    cost_model: str = "disabled"
     attribution_method: str = "target_weight_proportional"
     metadata: dict[str, Any] = field(default_factory=dict)
 
@@ -131,6 +141,13 @@ class PaperOrder:
     expected_fill_price: float | None = None
     expected_fees: float = 0.0
     expected_slippage_bps: float = 0.0
+    expected_spread_bps: float = 0.0
+    expected_slippage_cost: float = 0.0
+    expected_spread_cost: float = 0.0
+    expected_commission_cost: float = 0.0
+    expected_total_execution_cost: float = 0.0
+    expected_gross_notional: float = 0.0
+    cost_model: str = "disabled"
     provenance: dict[str, Any] = field(default_factory=dict)
 
 
@@ -142,7 +159,11 @@ class PaperPortfolioState:
     last_targets: dict[str, float] = field(default_factory=dict)
     initial_cash_basis: float = 0.0
     cumulative_realized_pnl: float = 0.0
+    cumulative_gross_realized_pnl: float = 0.0
     cumulative_fees: float = 0.0
+    cumulative_slippage_cost: float = 0.0
+    cumulative_spread_cost: float = 0.0
+    cumulative_execution_cost: float = 0.0
     open_lots: dict[str, list[PaperTradeLot]] = field(default_factory=dict)
     next_trade_id: int = 1
 
