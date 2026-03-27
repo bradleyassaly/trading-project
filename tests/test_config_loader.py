@@ -353,6 +353,13 @@ runtime:
   allow_research_only_noncomputable_candidates: false
   runtime_computability_penalty_on_ranking: 0.15
   runtime_computability_check_mode: penalize
+refresh:
+  fast_refresh_mode: true
+  skip_heavy_diagnostics: true
+  reuse_existing_fold_results: true
+  restrict_to_existing_candidates: true
+  max_families_for_refresh: 2
+  max_candidates_for_refresh: 12
 tracking:
   tracker_dir: artifacts/experiment_tracking
   database_enabled: true
@@ -387,6 +394,12 @@ tracking:
     assert config.allow_research_only_noncomputable_candidates is False
     assert config.runtime_computability_penalty_on_ranking == 0.15
     assert config.runtime_computability_check_mode == "penalize"
+    assert config.fast_refresh_mode is True
+    assert config.skip_heavy_diagnostics is True
+    assert config.reuse_existing_fold_results is True
+    assert config.restrict_to_existing_candidates is True
+    assert config.max_families_for_refresh == 2
+    assert config.max_candidates_for_refresh == 12
     assert config.enable_database_metadata is True
     assert config.database_url == "postgresql+psycopg://localhost/trading"
     assert config.database_schema == "research"

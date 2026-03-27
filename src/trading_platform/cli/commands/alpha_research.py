@@ -13,7 +13,7 @@ from trading_platform.research.experiment_tracking import (
     build_alpha_experiment_record,
     register_experiment,
 )
-from trading_platform.research.alpha_lab.runner import run_alpha_research
+from trading_platform.research.alpha_lab.runner import refresh_alpha_research_artifacts, run_alpha_research
 
 
 @dataclass(frozen=True)
@@ -76,6 +76,12 @@ class AlphaResearchRequest:
     allow_research_only_noncomputable_candidates: bool
     runtime_computability_penalty_on_ranking: float
     runtime_computability_check_mode: str
+    fast_refresh_mode: bool
+    skip_heavy_diagnostics: bool
+    reuse_existing_fold_results: bool
+    restrict_to_existing_candidates: bool
+    max_families_for_refresh: int | None
+    max_candidates_for_refresh: int | None
     experiment_tracker_dir: Path
     enable_database_metadata: bool
     database_url: str | None
@@ -154,6 +160,12 @@ def _build_alpha_research_request(args) -> AlphaResearchRequest:
         allow_research_only_noncomputable_candidates=bool(getattr(args, "allow_research_only_noncomputable_candidates", True)),
         runtime_computability_penalty_on_ranking=float(getattr(args, "runtime_computability_penalty_on_ranking", 0.02) or 0.02),
         runtime_computability_check_mode=str(getattr(args, "runtime_computability_check_mode", "strict") or "strict"),
+        fast_refresh_mode=bool(getattr(args, "fast_refresh_mode", False)),
+        skip_heavy_diagnostics=bool(True if getattr(args, "skip_heavy_diagnostics", None) is None else getattr(args, "skip_heavy_diagnostics")),
+        reuse_existing_fold_results=bool(True if getattr(args, "reuse_existing_fold_results", None) is None else getattr(args, "reuse_existing_fold_results")),
+        restrict_to_existing_candidates=bool(True if getattr(args, "restrict_to_existing_candidates", None) is None else getattr(args, "restrict_to_existing_candidates")),
+        max_families_for_refresh=getattr(args, "max_families_for_refresh", None),
+        max_candidates_for_refresh=getattr(args, "max_candidates_for_refresh", None),
         experiment_tracker_dir=tracker_dir,
         enable_database_metadata=bool(getattr(args, "enable_database_metadata", False)),
         database_url=getattr(args, "database_url", None),
@@ -199,7 +211,8 @@ def cmd_alpha_research(args) -> None:
         config_path=str(request.config_path) if request.config_path is not None else None,
     )
     try:
-        result = run_alpha_research(
+        runner = refresh_alpha_research_artifacts if request.fast_refresh_mode else run_alpha_research
+        result = runner(
             symbols=request.symbols,
             universe=None,
             feature_dir=request.feature_dir,
@@ -259,6 +272,12 @@ def cmd_alpha_research(args) -> None:
             allow_research_only_noncomputable_candidates=request.allow_research_only_noncomputable_candidates,
             runtime_computability_penalty_on_ranking=request.runtime_computability_penalty_on_ranking,
             runtime_computability_check_mode=request.runtime_computability_check_mode,
+            fast_refresh_mode=request.fast_refresh_mode,
+            skip_heavy_diagnostics=request.skip_heavy_diagnostics,
+            reuse_existing_fold_results=request.reuse_existing_fold_results,
+            restrict_to_existing_candidates=request.restrict_to_existing_candidates,
+            max_families_for_refresh=request.max_families_for_refresh,
+            max_candidates_for_refresh=request.max_candidates_for_refresh,
         )
         leaderboard_path = Path(result["leaderboard_path"])
         if leaderboard_path.exists():

@@ -296,6 +296,7 @@ def load_alpha_research_workflow_config(path: str | Path) -> AlphaResearchWorkfl
     regime_section = _pop_dict_section(payload, "regime")
     ensemble_section = _pop_dict_section(payload, "ensemble")
     runtime_section = _pop_dict_section(payload, "runtime")
+    refresh_section = _pop_dict_section(payload, "refresh")
     tracking_section = _pop_dict_section(payload, "tracking")
 
     if "symbols" not in payload and isinstance(selection_section.get("symbols"), list):
@@ -368,6 +369,12 @@ def load_alpha_research_workflow_config(path: str | Path) -> AlphaResearchWorkfl
     _set_if_missing(payload, "allow_research_only_noncomputable_candidates", runtime_section)
     _set_if_missing(payload, "runtime_computability_penalty_on_ranking", runtime_section)
     _set_if_missing(payload, "runtime_computability_check_mode", runtime_section)
+    _set_if_missing(payload, "fast_refresh_mode", refresh_section)
+    _set_if_missing(payload, "skip_heavy_diagnostics", refresh_section)
+    _set_if_missing(payload, "reuse_existing_fold_results", refresh_section)
+    _set_if_missing(payload, "restrict_to_existing_candidates", refresh_section)
+    _set_if_missing(payload, "max_families_for_refresh", refresh_section)
+    _set_if_missing(payload, "max_candidates_for_refresh", refresh_section)
 
     _set_if_missing(payload, "experiment_tracker_dir", tracking_section, "tracker_dir")
     _set_if_missing(payload, "enable_database_metadata", tracking_section, "database_enabled")

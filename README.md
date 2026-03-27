@@ -1584,6 +1584,22 @@ Research-time runtime computability:
   - `candidate_runtime_computability.csv`
   - `composite_member_runtime_validation.csv`
   - `research_runtime_computability_summary.csv`
+- for stale runs that only need approval and registry regeneration, `research alpha` also supports a bounded fast artifact refresh path:
+  - enable `refresh.fast_refresh_mode: true` in `configs/alpha_research.yaml`, or pass `--fast-refresh-mode`
+  - keep `refresh.reuse_existing_fold_results: true` to rebuild approval artifacts from the existing leaderboard/fold outputs instead of rerunning the full search
+  - use `refresh.max_families_for_refresh` and `refresh.max_candidates_for_refresh` to cap the refresh scope for local validation
+- fast refresh rewrites:
+  - `promoted_signals.csv`
+  - `research_registry.json/csv`
+  - `promotion_candidates.json/csv`
+  - `candidate_runtime_computability.csv`
+  - `composite_member_runtime_validation.csv`
+  - `research_runtime_computability_summary.csv`
+- example fast local refresh:
+
+```bash
+trading-cli research alpha --config artifacts/alpha_research/alpha_research_fast_refresh.yaml
+```
 
 ## Experimental Equity-Only Signal Families
 

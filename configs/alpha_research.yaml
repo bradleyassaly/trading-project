@@ -65,6 +65,14 @@ runtime:
   runtime_computability_penalty_on_ranking: 0.05
   runtime_computability_check_mode: strict
 
+refresh:
+  fast_refresh_mode: false
+  skip_heavy_diagnostics: true
+  reuse_existing_fold_results: true
+  restrict_to_existing_candidates: true
+  max_families_for_refresh: 4
+  max_candidates_for_refresh: 250
+
 tracking:
   database_enabled: true
   database_url: postgresql+psycopg://postgres:postgres@localhost:5432/trading_platform

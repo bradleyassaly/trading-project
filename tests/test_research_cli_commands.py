@@ -501,6 +501,122 @@ def test_cmd_alpha_research_passes_fundamental_feature_settings(monkeypatch, tmp
     assert Path(str(captured["fundamentals_daily_features_path"])) == Path("data/fundamentals/daily_fundamental_features.parquet")
 
 
+def test_cmd_alpha_research_fast_refresh_uses_refresh_runner(monkeypatch, tmp_path: Path) -> None:
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        "trading_platform.cli.commands.alpha_research.resolve_symbols",
+        lambda args: ["AAPL", "MSFT"],
+    )
+    monkeypatch.setattr(
+        "trading_platform.cli.commands.alpha_research.refresh_alpha_research_artifacts",
+        lambda **kwargs: captured.update(kwargs) or {
+            "leaderboard_path": str(tmp_path / "leaderboard.csv"),
+            "fold_results_path": str(tmp_path / "fold_results.csv"),
+            "portfolio_returns_path": str(tmp_path / "portfolio_returns.csv"),
+            "ensemble_member_summary_path": str(tmp_path / "ensemble_member_summary.csv"),
+            "implementability_report_path": str(tmp_path / "implementability_report.csv"),
+            "signal_performance_by_sub_universe_path": str(tmp_path / "signal_performance_by_sub_universe.csv"),
+            "signal_performance_by_benchmark_context_path": str(tmp_path / "signal_performance_by_benchmark_context.csv"),
+            "research_manifest_path": str(tmp_path / "research_manifest.json"),
+        },
+    )
+    monkeypatch.setattr(
+        "trading_platform.cli.commands.alpha_research.run_alpha_research",
+        lambda **kwargs: pytest.fail("full runner should not be used in fast refresh mode"),
+    )
+    monkeypatch.setattr(
+        "trading_platform.cli.commands.alpha_research.build_alpha_experiment_record",
+        lambda output_dir: {"output_dir": str(output_dir)},
+    )
+    monkeypatch.setattr(
+        "trading_platform.cli.commands.alpha_research.register_experiment",
+        lambda record, tracker_dir: {"experiment_registry_path": tracker_dir / "registry.csv"},
+    )
+
+    args = argparse.Namespace(
+        config=None,
+        symbols=["AAPL", "MSFT"],
+        universe=None,
+        feature_dir=str(tmp_path / "features"),
+        signal_family="momentum",
+        signal_families=None,
+        candidate_grid_preset="standard",
+        signal_composition_preset="standard",
+        max_variants_per_family=None,
+        lookbacks=[5],
+        horizons=[1],
+        min_rows=126,
+        equity_context_enabled=False,
+        equity_context_include_volume=False,
+        fundamentals_enabled=False,
+        fundamentals_daily_features_path=None,
+        enable_context_confirmations=None,
+        enable_relative_features=None,
+        enable_flow_confirmations=None,
+        enable_ensemble=False,
+        ensemble_mode="disabled",
+        ensemble_weight_method="equal",
+        ensemble_normalize_scores="rank_pct",
+        ensemble_max_members=5,
+        ensemble_max_members_per_family=None,
+        ensemble_minimum_member_observations=0,
+        ensemble_minimum_member_metric=None,
+        require_runtime_computability_for_approval=True,
+        min_runtime_computable_symbols_for_approval=5,
+        allow_research_only_noncomputable_candidates=False,
+        runtime_computability_penalty_on_ranking=0.05,
+        runtime_computability_check_mode="strict",
+        fast_refresh_mode=True,
+        skip_heavy_diagnostics=True,
+        reuse_existing_fold_results=True,
+        restrict_to_existing_candidates=True,
+        max_families_for_refresh=2,
+        max_candidates_for_refresh=25,
+        top_quantile=0.2,
+        bottom_quantile=0.2,
+        output_dir=str(tmp_path / "artifacts" / "alpha"),
+        train_size=252,
+        test_size=63,
+        step_size=None,
+        min_train_size=None,
+        portfolio_top_n=10,
+        portfolio_long_quantile=0.2,
+        portfolio_short_quantile=0.2,
+        commission=0.0,
+        min_price=None,
+        min_volume=None,
+        min_avg_dollar_volume=None,
+        max_adv_participation=0.05,
+        max_position_pct_of_adv=0.1,
+        max_notional_per_name=None,
+        slippage_bps_per_turnover=0.0,
+        slippage_bps_per_adv=10.0,
+        dynamic_recent_quality_window=20,
+        dynamic_min_history=5,
+        dynamic_downweight_mean_rank_ic=0.01,
+        dynamic_deactivate_mean_rank_ic=-0.02,
+        regime_aware_enabled=False,
+        regime_min_history=5,
+        regime_underweight_mean_rank_ic=0.01,
+        regime_exclude_mean_rank_ic=-0.01,
+        experiment_tracker_dir=None,
+        enable_database_metadata=False,
+        database_url=None,
+        database_schema=None,
+        tracking_write_candidates=True,
+        tracking_write_metrics=True,
+        tracking_write_promotions=True,
+        _cli_argv=["--symbols", "AAPL", "MSFT", "--fast-refresh-mode"],
+    )
+
+    cmd_alpha_research(args)
+
+    assert captured["fast_refresh_mode"] is True
+    assert captured["restrict_to_existing_candidates"] is True
+    assert captured["max_candidates_for_refresh"] == 25
+
+
 def test_cmd_refresh_research_inputs_passes_fmp_cache_controls(monkeypatch, tmp_path: Path) -> None:
     captured: dict[str, object] = {}
 

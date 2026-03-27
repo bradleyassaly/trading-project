@@ -475,6 +475,17 @@ def _add_alpha_research_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--regime-min-history", type=int, default=5, help="Minimum same-regime out-of-sample observations before regime-aware weighting reacts.")
     parser.add_argument("--regime-underweight-mean-rank-ic", type=float, default=0.01, help="Same-regime mean rank IC threshold below which signals are underweighted.")
     parser.add_argument("--regime-exclude-mean-rank-ic", type=float, default=-0.01, help="Same-regime mean rank IC threshold below which signals are excluded.")
+    parser.add_argument("--require-runtime-computability-for-approval", action="store_true", help="Block approval for candidates that cannot produce current computable scores.")
+    parser.add_argument("--min-runtime-computable-symbols-for-approval", type=int, default=5, help="Minimum symbols with current computable scores required to remain approval-eligible.")
+    parser.add_argument("--allow-research-only-noncomputable-candidates", action="store_true", help="Keep runtime-incomputable candidates for diagnostics while still blocking approval in strict mode.")
+    parser.add_argument("--runtime-computability-penalty-on-ranking", type=float, default=0.02, help="Penalty applied to ranking metrics when runtime computability check mode is penalize.")
+    parser.add_argument("--runtime-computability-check-mode", type=str, default="strict", choices=["strict", "penalize", "diagnostic_only"], help="How runtime computability affects candidate approval and ranking.")
+    parser.add_argument("--fast-refresh-mode", action="store_true", help="Refresh approval and registry artifacts from existing research outputs instead of running a full recompute.")
+    parser.add_argument("--skip-heavy-diagnostics", action="store_true", default=None, help="Skip optional heavy artifact rewrites during fast refresh.")
+    parser.add_argument("--reuse-existing-fold-results", action="store_true", default=None, help="Reuse existing leaderboard and fold-derived artifacts during fast refresh.")
+    parser.add_argument("--restrict-to-existing-candidates", action="store_true", default=None, help="Limit fast refresh to candidates already present in the existing leaderboard artifacts.")
+    parser.add_argument("--max-families-for-refresh", type=int, default=None, help="Optional cap on signal families refreshed during fast artifact recompute.")
+    parser.add_argument("--max-candidates-for-refresh", type=int, default=None, help="Optional cap on leaderboard candidates refreshed during fast artifact recompute.")
 
 
 def _add_alpha_loop_arguments(parser: argparse.ArgumentParser) -> None:

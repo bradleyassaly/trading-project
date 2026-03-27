@@ -43,6 +43,7 @@ from trading_platform.research.alpha_lab.promotion import (
 from trading_platform.research.alpha_lab.runner import (
     _add_equity_context_features,
     _load_symbol_feature_data,
+    refresh_alpha_research_artifacts,
     run_alpha_research,
 )
 from trading_platform.research.alpha_lab.signals import build_candidate_grid, build_signal
@@ -2446,6 +2447,88 @@ def test_run_alpha_research_runtime_computability_artifacts_and_registry_fields(
     assert summary_df.loc[0, "passed_count"] >= 1
     assert "runtime_computability_pass" in registry_payload["runs"][0]["top_metrics"]
     assert "runtime_computability_pass" in promotion_candidates_payload["rows"][0]
+
+
+def test_refresh_alpha_research_artifacts_recomputes_approval_state_from_existing_outputs(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    feature_dir = tmp_path / "features"
+    output_dir = tmp_path / "alpha_outputs"
+    feature_dir.mkdir(parents=True, exist_ok=True)
+
+    timestamps = pd.date_range("2024-01-01", periods=80, freq="D")
+    for symbol, daily_return in {"AAPL": 0.010, "MSFT": 0.015, "NVDA": 0.020}.items():
+        closes = [100.0]
+        for _ in range(79):
+            closes.append(closes[-1] * (1.0 + daily_return))
+        pd.DataFrame({"timestamp": timestamps, "symbol": [symbol] * len(timestamps), "close": closes}).to_parquet(
+            feature_dir / f"{symbol}.parquet",
+            index=False,
+        )
+
+    run_alpha_research(
+        symbols=["AAPL", "MSFT", "NVDA"],
+        universe=None,
+        feature_dir=feature_dir,
+        signal_family="momentum",
+        lookbacks=[1, 2],
+        horizons=[1],
+        min_rows=20,
+        top_quantile=0.34,
+        bottom_quantile=0.34,
+        output_dir=output_dir,
+        train_size=20,
+        test_size=10,
+        step_size=10,
+    )
+
+    from trading_platform.research.alpha_lab import runner as runner_module
+
+    original_build_signal = runner_module.build_signal
+
+    def patched_build_signal(*args, **kwargs):
+        signal = original_build_signal(*args, **kwargs)
+        if kwargs.get("lookback") == 2:
+            signal = signal.copy()
+            signal.iloc[-1] = float("nan")
+        return signal
+
+    monkeypatch.setattr(runner_module, "build_signal", patched_build_signal)
+
+    result = refresh_alpha_research_artifacts(
+        symbols=["AAPL", "MSFT", "NVDA"],
+        universe=None,
+        feature_dir=feature_dir,
+        signal_family="momentum",
+        lookbacks=[1, 2],
+        horizons=[1],
+        min_rows=20,
+        top_quantile=0.34,
+        bottom_quantile=0.34,
+        output_dir=output_dir,
+        train_size=20,
+        test_size=10,
+        step_size=10,
+        require_runtime_computability_for_approval=True,
+        min_runtime_computable_symbols_for_approval=1,
+        allow_research_only_noncomputable_candidates=False,
+        runtime_computability_check_mode="strict",
+        fast_refresh_mode=True,
+    )
+
+    promoted_signals_df = pd.read_csv(result["promoted_signals_path"])
+    candidate_runtime_df = pd.read_csv(result["candidate_runtime_computability_path"])
+    registry_payload = json.loads((output_dir / "research_registry.json").read_text(encoding="utf-8"))
+    promotion_candidates_payload = json.loads((output_dir / "promotion_candidates.json").read_text(encoding="utf-8"))
+
+    assert 2 not in promoted_signals_df["lookback"].tolist()
+    blocked_row = candidate_runtime_df.loc[candidate_runtime_df["lookback"] == 2].iloc[0]
+    assert blocked_row["blocked_from_approval"]
+    assert blocked_row["runtime_computability_reason"] == "empty_current_scores"
+    assert not any(int(row["lookback"]) == 2 for row in promotion_candidates_payload["rows"])
+    assert "runtime_computability_pass" in registry_payload["rows"][0]
+    assert Path(result["run_local_research_registry_path"]).exists()
 
 
 def test_run_alpha_research_handles_empty_outputs_and_edge_case_rejections(

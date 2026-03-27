@@ -377,6 +377,12 @@ class AlphaResearchWorkflowConfig:
     allow_research_only_noncomputable_candidates: bool = True
     runtime_computability_penalty_on_ranking: float = 0.02
     runtime_computability_check_mode: str = "strict"
+    fast_refresh_mode: bool = False
+    skip_heavy_diagnostics: bool = True
+    reuse_existing_fold_results: bool = True
+    restrict_to_existing_candidates: bool = True
+    max_families_for_refresh: int | None = None
+    max_candidates_for_refresh: int | None = None
     top_quantile: float = 0.2
     bottom_quantile: float = 0.2
     output_dir: str = "artifacts/alpha_research"
@@ -435,6 +441,10 @@ class AlphaResearchWorkflowConfig:
             raise ValueError("runtime_computability_penalty_on_ranking must be >= 0")
         if self.runtime_computability_check_mode not in {"strict", "penalize", "diagnostic_only"}:
             raise ValueError("runtime_computability_check_mode must be one of: strict, penalize, diagnostic_only")
+        if self.max_families_for_refresh is not None and self.max_families_for_refresh <= 0:
+            raise ValueError("max_families_for_refresh must be > 0 when provided")
+        if self.max_candidates_for_refresh is not None and self.max_candidates_for_refresh <= 0:
+            raise ValueError("max_candidates_for_refresh must be > 0 when provided")
 
     def to_cli_defaults(self) -> dict[str, Any]:
         return asdict(self)
