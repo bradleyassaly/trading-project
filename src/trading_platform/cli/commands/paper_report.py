@@ -2,10 +2,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pandas as pd
+
 from trading_platform.reporting.paper_account_report import (
     build_paper_account_report,
     write_paper_account_report,
 )
+from trading_platform.research.external_diagnostics import maybe_run_quantstats_report
 
 
 def cmd_paper_report(args) -> None:
@@ -27,10 +30,7 @@ def cmd_paper_report(args) -> None:
     print(f"Total commissions: {report.total_commissions:,.2f}")
     print(f"Open positions: {report.open_position_count}")
     print(f"Gross market value: {report.gross_market_value:,.2f}")
-    print(
-        "Top position: "
-        f"{report.top_position_symbol} ({report.top_position_weight * 100:.2f}%)"
-    )
+    print("Top position: " f"{report.top_position_symbol} ({report.top_position_weight * 100:.2f}%)")
 
     if args.output_dir:
         paths = write_paper_account_report(
@@ -40,3 +40,24 @@ def cmd_paper_report(args) -> None:
         print("Report files:")
         for name, path in sorted(paths.items()):
             print(f"  {name}: {path}")
+    if getattr(args, "quantstats_output_dir", None):
+        equity_curve_path = account_dir / "portfolio_equity_curve.csv"
+        quantstats_input_path = Path(args.quantstats_output_dir) / "_quantstats_input.csv"
+        if equity_curve_path.exists():
+            frame = pd.read_csv(equity_curve_path)
+            if not frame.empty and "equity" in frame.columns:
+                frame = frame.copy()
+                timestamp_col = (
+                    "timestamp" if "timestamp" in frame.columns else ("date" if "date" in frame.columns else None)
+                )
+                if timestamp_col is not None:
+                    frame["portfolio_return"] = pd.to_numeric(frame["equity"], errors="coerce").pct_change().fillna(0.0)
+                    frame[[timestamp_col, "portfolio_return"]].to_csv(quantstats_input_path, index=False)
+                    paths = maybe_run_quantstats_report(
+                        enabled=True,
+                        returns_csv_path=quantstats_input_path,
+                        output_dir=Path(args.quantstats_output_dir),
+                        title=f"Paper Account {account_dir.name}",
+                    )
+                    if paths:
+                        print(f"QuantStats summary: {paths['quantstats_summary_path']}")

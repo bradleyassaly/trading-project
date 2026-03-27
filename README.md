@@ -77,6 +77,105 @@ Windows PowerShell:
 .venv\Scripts\Activate.ps1
 ```
 
+Optional integration extras:
+
+```bash
+python -m pip install -e .[classification]
+python -m pip install -e .[research_diagnostics]
+python -m pip install -e .[portfolio_optimizers]
+python -m pip install -e .[validation]
+```
+
+These integrations are intentionally optional:
+
+- `FinanceDatabase` is only used to bootstrap classification/reference enrichment artifacts
+- `Alphalens` is only used for research diagnostics
+- `PyPortfolioOpt` is only used for allocator research adapters
+- `QuantStats` is only used for reporting artifacts
+- `vectorbt` is only used for narrow benchmark validation, not the canonical backtester
+
+## Optional Integrations
+
+All external libraries live behind thin adapters under `src/trading_platform/integrations/`. The platform’s own CLI commands, artifacts, schemas, promotion flow, portfolio construction, and paper/live workflows remain the system of record.
+
+### Build Classifications
+
+```bash
+trading-cli data build-classifications --universe nasdaq100 --output-dir artifacts/reference/classifications
+```
+
+Artifacts:
+
+- `artifacts/reference/classifications/security_master.csv`
+- `artifacts/reference/classifications/classification_summary.json`
+
+The normalized security master is defensive by design and should be treated as reference enrichment, not point-in-time truth.
+
+### Run Alphalens / QuantStats Diagnostics
+
+Enable them in `configs/alpha_research.yaml`:
+
+```yaml
+diagnostics:
+  alphalens_enabled: true
+  alphalens_groupby_field: sector
+  classification_path: artifacts/reference/classifications/security_master.csv
+
+reporting:
+  quantstats_enabled: true
+```
+
+Then run:
+
+```bash
+trading-cli research alpha --config configs/alpha_research.yaml
+```
+
+Optional research artifacts include:
+
+- `alphalens_factor_data.parquet`
+- `alphalens_ic_summary.csv`
+- `alphalens_quantile_returns.csv`
+- `alphalens_turnover.csv`
+- `alphalens_group_summary.csv`
+- `quantstats_metrics.json`
+- `quantstats_summary.csv`
+- `quantstats_tearsheet.html`
+
+### Run Allocator Research Adapters
+
+```bash
+trading-cli portfolio optimize-research --config configs/portfolio_optimizer_research.yaml
+```
+
+Artifacts:
+
+- `optimizer_weights.csv`
+- `optimizer_diagnostics.json`
+- `optimizer_weight_comparison.csv`
+
+The canonical allocator is unchanged. These adapters are for research comparisons and fall back to baseline weights when optimization fails or the package is unavailable.
+
+### Validate The Backtester Against vectorbt
+
+```bash
+trading-cli research validate-backtester --config configs/backtester_validation.yaml
+```
+
+Artifacts:
+
+- `vectorbt_validation_summary.csv`
+- `vectorbt_validation_metrics.json`
+- `vectorbt_validation_trade_comparison.csv`
+
+This harness only checks a few deterministic benchmark scenarios with explicit assumptions. It does not replace the platform backtester.
+
+### Generate QuantStats For Paper Runs
+
+```bash
+trading-cli paper report --account-dir artifacts/paper/activated_portfolio_validation --quantstats-output-dir artifacts/paper/activated_portfolio_validation/quantstats
+```
+
 ## Hybrid Storage Architecture
 
 The platform now supports a pragmatic hybrid storage model:

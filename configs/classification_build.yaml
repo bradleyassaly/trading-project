@@ -1,0 +1,6 @@
+symbols:
+  - AAPL
+  - MSFT
+  - NVDA
+output_dir: artifacts/reference/classifications
+as_of_date: "2026-03-27"

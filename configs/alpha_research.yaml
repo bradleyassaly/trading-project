@@ -78,6 +78,16 @@ refresh:
   max_families_for_refresh: 4
   max_candidates_for_refresh: 250
 
+diagnostics:
+  alphalens_enabled: false
+  alphalens_groupby_field: sector
+  classification_path: artifacts/reference/classifications/security_master.csv
+  output_dir: artifacts/alpha_research/run_configured/diagnostics
+
+reporting:
+  quantstats_enabled: false
+  quantstats_output_dir: artifacts/alpha_research/run_configured/reports/quantstats
+
 tracking:
   database_enabled: true
   database_url: postgresql+psycopg://postgres:postgres@localhost:5432/trading_platform

@@ -14,6 +14,10 @@ from trading_platform.research.experiment_tracking import (
     register_experiment,
 )
 from trading_platform.research.alpha_lab.runner import refresh_alpha_research_artifacts, run_alpha_research
+from trading_platform.research.external_diagnostics import (
+    maybe_run_alphalens_diagnostics,
+    maybe_run_quantstats_report,
+)
 
 
 @dataclass(frozen=True)
@@ -87,6 +91,12 @@ class AlphaResearchRequest:
     restrict_to_existing_candidates: bool
     max_families_for_refresh: int | None
     max_candidates_for_refresh: int | None
+    diagnostics_alphalens_enabled: bool
+    diagnostics_alphalens_groupby_field: str | None
+    diagnostics_classification_path: Path | None
+    diagnostics_output_dir: Path | None
+    reporting_quantstats_enabled: bool
+    reporting_quantstats_output_dir: Path | None
     experiment_tracker_dir: Path
     enable_database_metadata: bool
     database_url: str | None
@@ -160,22 +170,66 @@ def _build_alpha_research_request(args) -> AlphaResearchRequest:
         ensemble_max_members_per_family=getattr(args, "ensemble_max_members_per_family", None),
         ensemble_minimum_member_observations=getattr(args, "ensemble_minimum_member_observations", 0),
         ensemble_minimum_member_metric=getattr(args, "ensemble_minimum_member_metric", None),
-        require_runtime_computability_for_approval=bool(getattr(args, "require_runtime_computability_for_approval", False)),
-        min_runtime_computable_symbols_for_approval=int(getattr(args, "min_runtime_computable_symbols_for_approval", 5) or 5),
-        allow_research_only_noncomputable_candidates=bool(getattr(args, "allow_research_only_noncomputable_candidates", True)),
-        runtime_computability_penalty_on_ranking=float(getattr(args, "runtime_computability_penalty_on_ranking", 0.02) or 0.02),
+        require_runtime_computability_for_approval=bool(
+            getattr(args, "require_runtime_computability_for_approval", False)
+        ),
+        min_runtime_computable_symbols_for_approval=int(
+            getattr(args, "min_runtime_computable_symbols_for_approval", 5) or 5
+        ),
+        allow_research_only_noncomputable_candidates=bool(
+            getattr(args, "allow_research_only_noncomputable_candidates", True)
+        ),
+        runtime_computability_penalty_on_ranking=float(
+            getattr(args, "runtime_computability_penalty_on_ranking", 0.02) or 0.02
+        ),
         runtime_computability_check_mode=str(getattr(args, "runtime_computability_check_mode", "strict") or "strict"),
-        require_composite_runtime_computability_for_approval=bool(getattr(args, "require_composite_runtime_computability_for_approval", False)),
-        min_composite_runtime_computable_symbols_for_approval=int(getattr(args, "min_composite_runtime_computable_symbols_for_approval", 5) or 5),
-        allow_research_only_noncomputable_composites=bool(getattr(args, "allow_research_only_noncomputable_composites", True)),
-        composite_runtime_computability_check_mode=str(getattr(args, "composite_runtime_computability_check_mode", "strict") or "strict"),
-        composite_runtime_computability_penalty_on_ranking=float(getattr(args, "composite_runtime_computability_penalty_on_ranking", 0.02) or 0.02),
+        require_composite_runtime_computability_for_approval=bool(
+            getattr(args, "require_composite_runtime_computability_for_approval", False)
+        ),
+        min_composite_runtime_computable_symbols_for_approval=int(
+            getattr(args, "min_composite_runtime_computable_symbols_for_approval", 5) or 5
+        ),
+        allow_research_only_noncomputable_composites=bool(
+            getattr(args, "allow_research_only_noncomputable_composites", True)
+        ),
+        composite_runtime_computability_check_mode=str(
+            getattr(args, "composite_runtime_computability_check_mode", "strict") or "strict"
+        ),
+        composite_runtime_computability_penalty_on_ranking=float(
+            getattr(args, "composite_runtime_computability_penalty_on_ranking", 0.02) or 0.02
+        ),
         fast_refresh_mode=bool(getattr(args, "fast_refresh_mode", False)),
-        skip_heavy_diagnostics=bool(True if getattr(args, "skip_heavy_diagnostics", None) is None else getattr(args, "skip_heavy_diagnostics")),
-        reuse_existing_fold_results=bool(True if getattr(args, "reuse_existing_fold_results", None) is None else getattr(args, "reuse_existing_fold_results")),
-        restrict_to_existing_candidates=bool(True if getattr(args, "restrict_to_existing_candidates", None) is None else getattr(args, "restrict_to_existing_candidates")),
+        skip_heavy_diagnostics=bool(
+            True if getattr(args, "skip_heavy_diagnostics", None) is None else getattr(args, "skip_heavy_diagnostics")
+        ),
+        reuse_existing_fold_results=bool(
+            True
+            if getattr(args, "reuse_existing_fold_results", None) is None
+            else getattr(args, "reuse_existing_fold_results")
+        ),
+        restrict_to_existing_candidates=bool(
+            True
+            if getattr(args, "restrict_to_existing_candidates", None) is None
+            else getattr(args, "restrict_to_existing_candidates")
+        ),
         max_families_for_refresh=getattr(args, "max_families_for_refresh", None),
         max_candidates_for_refresh=getattr(args, "max_candidates_for_refresh", None),
+        diagnostics_alphalens_enabled=bool(getattr(args, "diagnostics_alphalens_enabled", False)),
+        diagnostics_alphalens_groupby_field=getattr(args, "diagnostics_alphalens_groupby_field", None),
+        diagnostics_classification_path=(
+            Path(getattr(args, "diagnostics_classification_path"))
+            if getattr(args, "diagnostics_classification_path", None)
+            else None
+        ),
+        diagnostics_output_dir=(
+            Path(getattr(args, "diagnostics_output_dir")) if getattr(args, "diagnostics_output_dir", None) else None
+        ),
+        reporting_quantstats_enabled=bool(getattr(args, "reporting_quantstats_enabled", False)),
+        reporting_quantstats_output_dir=(
+            Path(getattr(args, "reporting_quantstats_output_dir"))
+            if getattr(args, "reporting_quantstats_output_dir", None)
+            else None
+        ),
         experiment_tracker_dir=tracker_dir,
         enable_database_metadata=bool(getattr(args, "enable_database_metadata", False)),
         database_url=getattr(args, "database_url", None),
@@ -294,6 +348,33 @@ def cmd_alpha_research(args) -> None:
             max_families_for_refresh=request.max_families_for_refresh,
             max_candidates_for_refresh=request.max_candidates_for_refresh,
         )
+        diagnostics_output_dir = request.diagnostics_output_dir or (request.output_dir / "diagnostics" / "alphalens")
+        reporting_output_dir = request.reporting_quantstats_output_dir or (
+            request.output_dir / "reports" / "quantstats"
+        )
+        result.update(
+            maybe_run_alphalens_diagnostics(
+                enabled=request.diagnostics_alphalens_enabled,
+                feature_dir=request.feature_dir,
+                leaderboard_path=Path(result["leaderboard_path"]),
+                output_dir=diagnostics_output_dir,
+                symbols=request.symbols,
+                signal_composition_preset=request.signal_composition_preset,
+                enable_context_confirmations=request.enable_context_confirmations,
+                enable_relative_features=request.enable_relative_features,
+                enable_flow_confirmations=request.enable_flow_confirmations,
+                classification_path=request.diagnostics_classification_path,
+                groupby_field=request.diagnostics_alphalens_groupby_field,
+            )
+        )
+        result.update(
+            maybe_run_quantstats_report(
+                enabled=request.reporting_quantstats_enabled,
+                returns_csv_path=Path(result["portfolio_returns_path"]),
+                output_dir=reporting_output_dir,
+                title=f"Alpha Research {request.output_dir.name}",
+            )
+        )
         leaderboard_path = Path(result["leaderboard_path"])
         if leaderboard_path.exists():
             composite_runtime_path_raw = str(result.get("composite_runtime_computability_path") or "").strip()
@@ -326,3 +407,7 @@ def cmd_alpha_research(args) -> None:
     print(f"Benchmark-context slicing: {result['signal_performance_by_benchmark_context_path']}")
     print(f"Research manifest: {result['research_manifest_path']}")
     print(f"Experiment registry: {registry_paths['experiment_registry_path']}")
+    if result.get("alphalens_ic_summary_path"):
+        print(f"Alphalens IC summary: {result['alphalens_ic_summary_path']}")
+    if result.get("quantstats_summary_path"):
+        print(f"QuantStats summary: {result['quantstats_summary_path']}")

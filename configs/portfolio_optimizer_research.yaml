@@ -1,0 +1,6 @@
+returns_path: artifacts/validation/optimizer_fixture_returns.csv
+output_dir: artifacts/portfolio_optimizer_research
+optimizer_name: min_vol
+fallback_optimizer_name: equal_weight
+risk_free_rate: 0.02
+min_history_rows: 20

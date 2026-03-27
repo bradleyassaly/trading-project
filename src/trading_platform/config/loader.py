@@ -17,13 +17,16 @@ from trading_platform.config.workflow_models import (
     AlphaResearchWorkflowConfig,
     AlphaCycleStageToggles,
     AlphaCycleWorkflowConfig,
+    BacktesterValidationWorkflowConfig,
     CanonicalBundleExperimentMatrixCaseConfig,
     CanonicalBundleExperimentMatrixWorkflowConfig,
     CanonicalBundleExperimentVariantConfig,
     CanonicalBundleExperimentWorkflowConfig,
+    ClassificationBuildWorkflowConfig,
     FundamentalsSnapshotWorkflowConfig,
     LiveDryRunWorkflowConfig,
     PaperRunWorkflowConfig,
+    PortfolioOptimizerWorkflowConfig,
     ResearchInputRefreshWorkflowConfig,
     ResearchRunWorkflowConfig,
     WalkForwardWorkflowConfig,
@@ -66,9 +69,7 @@ def _read_config_file(path: Path) -> dict[str, Any]:
 
     if suffix in {".yaml", ".yml"}:
         if yaml is None:
-            raise ImportError(
-                "PyYAML is required for YAML config files. Install with `pip install pyyaml`."
-            )
+            raise ImportError("PyYAML is required for YAML config files. Install with `pip install pyyaml`.")
         data = yaml.safe_load(path.read_text(encoding="utf-8"))
         return data or {}
 
@@ -91,7 +92,9 @@ def _pop_dict_section(payload: dict[str, Any], key: str) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
-def _set_if_missing(payload: dict[str, Any], target_key: str, source: dict[str, Any], source_key: str | None = None) -> None:
+def _set_if_missing(
+    payload: dict[str, Any], target_key: str, source: dict[str, Any], source_key: str | None = None
+) -> None:
     if target_key not in payload:
         lookup_key = source_key or target_key
         if lookup_key in source:
@@ -136,21 +139,11 @@ def load_paper_run_workflow_config(path: str | Path) -> PaperRunWorkflowConfig:
     payload = _apply_database_section(dict(data))
     screening_section = _pop_dict_section(payload, "screening")
     paper_section = _pop_dict_section(payload, "paper")
-    execution_section = (
-        paper_section.get("execution", {})
-        if isinstance(paper_section.get("execution"), dict)
-        else {}
-    )
+    execution_section = paper_section.get("execution", {}) if isinstance(paper_section.get("execution"), dict) else {}
     slippage_section = (
-        execution_section.get("slippage", {})
-        if isinstance(execution_section.get("slippage"), dict)
-        else {}
+        execution_section.get("slippage", {}) if isinstance(execution_section.get("slippage"), dict) else {}
     )
-    ensemble_section = (
-        paper_section.get("ensemble", {})
-        if isinstance(paper_section.get("ensemble"), dict)
-        else {}
-    )
+    ensemble_section = paper_section.get("ensemble", {}) if isinstance(paper_section.get("ensemble"), dict) else {}
     _set_if_missing(payload, "latest_data_max_age_seconds", execution_section)
     if "slippage_model" not in payload and slippage_section:
         enabled = bool(slippage_section.get("enabled", False))
@@ -242,10 +235,16 @@ def load_research_input_refresh_workflow_config(path: str | Path) -> ResearchInp
     _set_if_missing(payload, "fundamentals_vendor_cache_root", fundamentals_section, "vendor_cache_root")
     _set_if_missing(payload, "fundamentals_vendor_cache_ttl_hours", fundamentals_section, "vendor_cache_ttl_hours")
     _set_if_missing(payload, "fundamentals_vendor_force_refresh", fundamentals_section, "vendor_force_refresh")
-    _set_if_missing(payload, "fundamentals_vendor_request_delay_seconds", fundamentals_section, "vendor_request_delay_seconds")
+    _set_if_missing(
+        payload, "fundamentals_vendor_request_delay_seconds", fundamentals_section, "vendor_request_delay_seconds"
+    )
     _set_if_missing(payload, "fundamentals_vendor_max_retries", fundamentals_section, "vendor_max_retries")
-    _set_if_missing(payload, "fundamentals_vendor_max_symbols_per_run", fundamentals_section, "vendor_max_symbols_per_run")
-    _set_if_missing(payload, "fundamentals_vendor_max_requests_per_run", fundamentals_section, "vendor_max_requests_per_run")
+    _set_if_missing(
+        payload, "fundamentals_vendor_max_symbols_per_run", fundamentals_section, "vendor_max_symbols_per_run"
+    )
+    _set_if_missing(
+        payload, "fundamentals_vendor_max_requests_per_run", fundamentals_section, "vendor_max_requests_per_run"
+    )
 
     return ResearchInputRefreshWorkflowConfig(**payload)
 
@@ -284,6 +283,21 @@ def load_fundamentals_snapshot_workflow_config(path: str | Path) -> Fundamentals
     return FundamentalsSnapshotWorkflowConfig(**payload)
 
 
+def load_classification_build_workflow_config(path: str | Path) -> ClassificationBuildWorkflowConfig:
+    data = _read_config_file(Path(path))
+    return ClassificationBuildWorkflowConfig(**data)
+
+
+def load_portfolio_optimizer_workflow_config(path: str | Path) -> PortfolioOptimizerWorkflowConfig:
+    data = _read_config_file(Path(path))
+    return PortfolioOptimizerWorkflowConfig(**data)
+
+
+def load_backtester_validation_workflow_config(path: str | Path) -> BacktesterValidationWorkflowConfig:
+    data = _read_config_file(Path(path))
+    return BacktesterValidationWorkflowConfig(**data)
+
+
 def load_alpha_research_workflow_config(path: str | Path) -> AlphaResearchWorkflowConfig:
     data = _read_config_file(Path(path))
     payload = dict(data)
@@ -297,6 +311,8 @@ def load_alpha_research_workflow_config(path: str | Path) -> AlphaResearchWorkfl
     ensemble_section = _pop_dict_section(payload, "ensemble")
     runtime_section = _pop_dict_section(payload, "runtime")
     refresh_section = _pop_dict_section(payload, "refresh")
+    diagnostics_section = _pop_dict_section(payload, "diagnostics")
+    reporting_section = _pop_dict_section(payload, "reporting")
     tracking_section = _pop_dict_section(payload, "tracking")
 
     if "symbols" not in payload and isinstance(selection_section.get("symbols"), list):
@@ -380,6 +396,12 @@ def load_alpha_research_workflow_config(path: str | Path) -> AlphaResearchWorkfl
     _set_if_missing(payload, "restrict_to_existing_candidates", refresh_section)
     _set_if_missing(payload, "max_families_for_refresh", refresh_section)
     _set_if_missing(payload, "max_candidates_for_refresh", refresh_section)
+    _set_if_missing(payload, "diagnostics_alphalens_enabled", diagnostics_section, "alphalens_enabled")
+    _set_if_missing(payload, "diagnostics_alphalens_groupby_field", diagnostics_section, "alphalens_groupby_field")
+    _set_if_missing(payload, "diagnostics_classification_path", diagnostics_section, "classification_path")
+    _set_if_missing(payload, "diagnostics_output_dir", diagnostics_section, "output_dir")
+    _set_if_missing(payload, "reporting_quantstats_enabled", reporting_section, "quantstats_enabled")
+    _set_if_missing(payload, "reporting_quantstats_output_dir", reporting_section, "quantstats_output_dir")
 
     _set_if_missing(payload, "experiment_tracker_dir", tracking_section, "tracker_dir")
     _set_if_missing(payload, "enable_database_metadata", tracking_section, "database_enabled")
@@ -467,10 +489,7 @@ def load_canonical_bundle_experiment_workflow_config(path: str | Path) -> Canoni
     _set_if_missing(payload, "preset_set", policy_section, "preset_set")
 
     raw_variants = payload.get("variants", [])
-    payload["variants"] = [
-        CanonicalBundleExperimentVariantConfig(**item)
-        for item in raw_variants
-    ]
+    payload["variants"] = [CanonicalBundleExperimentVariantConfig(**item) for item in raw_variants]
     return CanonicalBundleExperimentWorkflowConfig(**payload)
 
 
@@ -493,23 +512,14 @@ def load_canonical_bundle_experiment_matrix_workflow_config(
     )
 
     raw_cases = payload.get("cases", [])
-    payload["cases"] = [
-        CanonicalBundleExperimentMatrixCaseConfig(**item)
-        for item in raw_cases
-    ]
+    payload["cases"] = [CanonicalBundleExperimentMatrixCaseConfig(**item) for item in raw_cases]
     return CanonicalBundleExperimentMatrixWorkflowConfig(**payload)
 
 
 def load_multi_strategy_portfolio_config(path: str | Path) -> MultiStrategyPortfolioConfig:
     data = _read_config_file(Path(path))
-    sleeves = [
-        MultiStrategySleeveConfig(**item)
-        for item in data.get("sleeves", [])
-    ]
-    sector_caps = [
-        MultiStrategyGroupCap(**item)
-        for item in data.get("sector_caps", [])
-    ]
+    sleeves = [MultiStrategySleeveConfig(**item) for item in data.get("sleeves", [])]
+    sector_caps = [MultiStrategyGroupCap(**item) for item in data.get("sector_caps", [])]
     payload = dict(data)
     payload["sleeves"] = sleeves
     payload["sector_caps"] = sector_caps

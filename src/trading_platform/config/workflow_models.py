@@ -297,9 +297,15 @@ class ResearchInputRefreshWorkflowConfig:
             raise ValueError("fundamentals_vendor_request_delay_seconds must be >= 0")
         if self.fundamentals_vendor_max_retries < 0:
             raise ValueError("fundamentals_vendor_max_retries must be >= 0")
-        if self.fundamentals_vendor_max_symbols_per_run is not None and self.fundamentals_vendor_max_symbols_per_run <= 0:
+        if (
+            self.fundamentals_vendor_max_symbols_per_run is not None
+            and self.fundamentals_vendor_max_symbols_per_run <= 0
+        ):
             raise ValueError("fundamentals_vendor_max_symbols_per_run must be > 0 when provided")
-        if self.fundamentals_vendor_max_requests_per_run is not None and self.fundamentals_vendor_max_requests_per_run <= 0:
+        if (
+            self.fundamentals_vendor_max_requests_per_run is not None
+            and self.fundamentals_vendor_max_requests_per_run <= 0
+        ):
             raise ValueError("fundamentals_vendor_max_requests_per_run must be > 0 when provided")
 
     def to_cli_defaults(self) -> dict[str, Any]:
@@ -339,6 +345,55 @@ class FundamentalsSnapshotWorkflowConfig:
             raise ValueError("max_symbols_per_run must be > 0 when provided")
         if self.max_requests_per_run is not None and self.max_requests_per_run <= 0:
             raise ValueError("max_requests_per_run must be > 0 when provided")
+
+    def to_cli_defaults(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class ClassificationBuildWorkflowConfig:
+    symbols: list[str] | None = None
+    universe: str | None = None
+    output_dir: str = "artifacts/reference/classifications"
+    as_of_date: str | None = None
+
+    def __post_init__(self) -> None:
+        selected = sum(bool(value) for value in (self.symbols, self.universe))
+        if selected != 1:
+            raise ValueError("exactly one of symbols or universe must be provided")
+
+    def to_cli_defaults(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class PortfolioOptimizerWorkflowConfig:
+    returns_path: str
+    output_dir: str
+    optimizer_name: str = "equal_weight"
+    fallback_optimizer_name: str = "equal_weight"
+    risk_free_rate: float = 0.0
+    min_history_rows: int = 20
+
+    def __post_init__(self) -> None:
+        if not str(self.returns_path or "").strip():
+            raise ValueError("returns_path is required")
+        if not str(self.output_dir or "").strip():
+            raise ValueError("output_dir is required")
+        if self.min_history_rows <= 1:
+            raise ValueError("min_history_rows must be > 1")
+
+    def to_cli_defaults(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class BacktesterValidationWorkflowConfig:
+    output_dir: str = "artifacts/validation/vectorbt"
+
+    def __post_init__(self) -> None:
+        if not str(self.output_dir or "").strip():
+            raise ValueError("output_dir is required")
 
     def to_cli_defaults(self) -> dict[str, Any]:
         return asdict(self)
@@ -388,6 +443,12 @@ class AlphaResearchWorkflowConfig:
     restrict_to_existing_candidates: bool = True
     max_families_for_refresh: int | None = None
     max_candidates_for_refresh: int | None = None
+    diagnostics_alphalens_enabled: bool = False
+    diagnostics_alphalens_groupby_field: str | None = None
+    diagnostics_classification_path: str | None = None
+    diagnostics_output_dir: str | None = None
+    reporting_quantstats_enabled: bool = False
+    reporting_quantstats_output_dir: str | None = None
     top_quantile: float = 0.2
     bottom_quantile: float = 0.2
     output_dir: str = "artifacts/alpha_research"
@@ -427,7 +488,13 @@ class AlphaResearchWorkflowConfig:
         selected = sum(bool(value) for value in (self.symbols, self.universe))
         if selected != 1:
             raise ValueError("exactly one of symbols or universe must be provided")
-        normalized_families = list(dict.fromkeys(str(value).strip() for value in (self.signal_families or ([self.signal_family] if self.signal_family else [])) if str(value).strip()))
+        normalized_families = list(
+            dict.fromkeys(
+                str(value).strip()
+                for value in (self.signal_families or ([self.signal_family] if self.signal_family else []))
+                if str(value).strip()
+            )
+        )
         if not normalized_families:
             raise ValueError("at least one signal family must be provided")
         object.__setattr__(self, "signal_families", normalized_families)
@@ -435,9 +502,7 @@ class AlphaResearchWorkflowConfig:
         if self.candidate_grid_preset not in {"standard", "broad_v1"}:
             raise ValueError("candidate_grid_preset must be one of: standard, broad_v1")
         if self.signal_composition_preset not in {"standard", "composite_v1", "research_rich_v1"}:
-            raise ValueError(
-                "signal_composition_preset must be one of: standard, composite_v1, research_rich_v1"
-            )
+            raise ValueError("signal_composition_preset must be one of: standard, composite_v1, research_rich_v1")
         if self.max_variants_per_family is not None and self.max_variants_per_family <= 0:
             raise ValueError("max_variants_per_family must be > 0 when provided")
         if self.min_runtime_computable_symbols_for_approval < 0:
@@ -451,7 +516,9 @@ class AlphaResearchWorkflowConfig:
         if self.composite_runtime_computability_penalty_on_ranking < 0:
             raise ValueError("composite_runtime_computability_penalty_on_ranking must be >= 0")
         if self.composite_runtime_computability_check_mode not in {"strict", "penalize", "diagnostic_only"}:
-            raise ValueError("composite_runtime_computability_check_mode must be one of: strict, penalize, diagnostic_only")
+            raise ValueError(
+                "composite_runtime_computability_check_mode must be one of: strict, penalize, diagnostic_only"
+            )
         if self.max_families_for_refresh is not None and self.max_families_for_refresh <= 0:
             raise ValueError("max_families_for_refresh must be > 0 when provided")
         if self.max_candidates_for_refresh is not None and self.max_candidates_for_refresh <= 0:

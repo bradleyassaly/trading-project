@@ -5,7 +5,9 @@ from trading_platform.cli.grouped_parser import build_parser, rewrite_legacy_cli
 
 def test_grouped_data_ingest_command_parses() -> None:
     parser = build_parser()
-    args = parser.parse_args(["data", "ingest", "--symbols", "AAPL", "--failure-report", "artifacts/ingest_failures.csv"])
+    args = parser.parse_args(
+        ["data", "ingest", "--symbols", "AAPL", "--failure-report", "artifacts/ingest_failures.csv"]
+    )
 
     assert args.command_family == "data"
     assert args.data_command == "ingest"
@@ -95,6 +97,28 @@ def test_grouped_research_alpha_command_parses_config() -> None:
     assert args.command_family == "research"
     assert args.research_command == "alpha"
     assert args.config == "configs/alpha_research.yaml"
+
+
+def test_grouped_research_alpha_command_parses_external_diagnostics_args() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "research",
+            "alpha",
+            "--symbols",
+            "AAPL",
+            "--diagnostics-alphalens-enabled",
+            "--diagnostics-alphalens-groupby-field",
+            "sector",
+            "--diagnostics-classification-path",
+            "artifacts/reference/classifications/security_master.csv",
+            "--reporting-quantstats-enabled",
+        ]
+    )
+
+    assert args.diagnostics_alphalens_enabled is True
+    assert args.diagnostics_alphalens_groupby_field == "sector"
+    assert args.reporting_quantstats_enabled is True
 
 
 def test_grouped_research_alpha_command_parses_ensemble_args() -> None:
@@ -239,6 +263,21 @@ def test_grouped_research_promote_command_parses() -> None:
     assert args.override_validation is True
 
 
+def test_grouped_research_validate_backtester_command_parses() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "research",
+            "validate-backtester",
+            "--output-dir",
+            "artifacts/validation/vectorbt",
+        ]
+    )
+
+    assert args.research_command == "validate-backtester"
+    assert args.output_dir == "artifacts/validation/vectorbt"
+
+
 def test_grouped_research_db_commands_parse() -> None:
     parser = build_parser()
     init_args = parser.parse_args(
@@ -346,6 +385,27 @@ def test_grouped_data_refresh_research_inputs_command_parses_config() -> None:
     assert args.command_family == "data"
     assert args.data_command == "refresh-research-inputs"
     assert args.config == "configs/research_input_refresh.yaml"
+
+
+def test_grouped_data_build_classifications_command_parses() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "data",
+            "build-classifications",
+            "--universe",
+            "nasdaq100",
+            "--output-dir",
+            "artifacts/reference/classifications",
+            "--as-of-date",
+            "2026-03-27",
+        ]
+    )
+
+    assert args.command_family == "data"
+    assert args.data_command == "build-classifications"
+    assert args.universe == "nasdaq100"
+    assert args.as_of_date == "2026-03-27"
 
 
 def test_grouped_data_fundamentals_commands_parse() -> None:
@@ -1913,6 +1973,26 @@ def test_grouped_portfolio_allocate_multi_strategy_command_parses() -> None:
 
     assert args.portfolio_command == "allocate-multi-strategy"
     assert args.config == "configs/multi_strategy.json"
+
+
+def test_grouped_portfolio_optimize_research_command_parses() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "portfolio",
+            "optimize-research",
+            "--returns-path",
+            "artifacts/returns.csv",
+            "--output-dir",
+            "artifacts/optimizer",
+            "--optimizer-name",
+            "max_sharpe",
+        ]
+    )
+
+    assert args.portfolio_command == "optimize-research"
+    assert args.returns_path == "artifacts/returns.csv"
+    assert args.optimizer_name == "max_sharpe"
 
 
 def test_grouped_portfolio_apply_execution_constraints_command_parses() -> None:

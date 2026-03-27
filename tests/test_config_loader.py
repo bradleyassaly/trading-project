@@ -6,6 +6,8 @@ from pathlib import Path
 from trading_platform.config.loader import (
     load_alpha_research_workflow_config,
     load_alpha_cycle_workflow_config,
+    load_backtester_validation_workflow_config,
+    load_classification_build_workflow_config,
     load_canonical_bundle_experiment_matrix_workflow_config,
     load_canonical_bundle_experiment_workflow_config,
     load_live_dry_run_workflow_config,
@@ -18,6 +20,7 @@ from trading_platform.config.loader import (
     load_notification_config,
     load_paper_run_workflow_config,
     load_pipeline_run_config,
+    load_portfolio_optimizer_workflow_config,
     load_promotion_policy_config,
     load_research_input_refresh_workflow_config,
     load_research_run_workflow_config,
@@ -257,6 +260,61 @@ build:
     assert config.calendar_dir == "data/features"
 
 
+def test_load_classification_build_workflow_config(tmp_path) -> None:
+    path = tmp_path / "classification.yaml"
+    path.write_text(
+        """
+universe: nasdaq100
+output_dir: artifacts/reference/classifications
+as_of_date: "2026-03-27"
+""".strip(),
+        encoding="utf-8",
+    )
+
+    config = load_classification_build_workflow_config(path)
+
+    assert config.universe == "nasdaq100"
+    assert config.output_dir == "artifacts/reference/classifications"
+    assert config.as_of_date == "2026-03-27"
+
+
+def test_load_portfolio_optimizer_workflow_config(tmp_path) -> None:
+    path = tmp_path / "optimizer.yaml"
+    path.write_text(
+        """
+returns_path: artifacts/returns.csv
+output_dir: artifacts/optimizer
+optimizer_name: max_sharpe
+fallback_optimizer_name: metric_weighted
+risk_free_rate: 0.02
+min_history_rows: 30
+""".strip(),
+        encoding="utf-8",
+    )
+
+    config = load_portfolio_optimizer_workflow_config(path)
+
+    assert config.returns_path == "artifacts/returns.csv"
+    assert config.optimizer_name == "max_sharpe"
+    assert config.fallback_optimizer_name == "metric_weighted"
+    assert config.risk_free_rate == 0.02
+    assert config.min_history_rows == 30
+
+
+def test_load_backtester_validation_workflow_config(tmp_path) -> None:
+    path = tmp_path / "validation.yaml"
+    path.write_text(
+        """
+output_dir: artifacts/validation/vectorbt
+""".strip(),
+        encoding="utf-8",
+    )
+
+    config = load_backtester_validation_workflow_config(path)
+
+    assert config.output_dir == "artifacts/validation/vectorbt"
+
+
 def test_load_canonical_bundle_experiment_workflow_config(tmp_path) -> None:
     path = tmp_path / "canonical_bundle_experiment.yaml"
     path.write_text(
@@ -365,6 +423,14 @@ refresh:
   restrict_to_existing_candidates: true
   max_families_for_refresh: 2
   max_candidates_for_refresh: 12
+diagnostics:
+  alphalens_enabled: true
+  alphalens_groupby_field: sector
+  classification_path: artifacts/reference/classifications/security_master.csv
+  output_dir: artifacts/alpha_research/run_configured/diagnostics
+reporting:
+  quantstats_enabled: true
+  quantstats_output_dir: artifacts/alpha_research/run_configured/reports/quantstats
 tracking:
   tracker_dir: artifacts/experiment_tracking
   database_enabled: true
@@ -410,6 +476,12 @@ tracking:
     assert config.restrict_to_existing_candidates is True
     assert config.max_families_for_refresh == 2
     assert config.max_candidates_for_refresh == 12
+    assert config.diagnostics_alphalens_enabled is True
+    assert config.diagnostics_alphalens_groupby_field == "sector"
+    assert config.diagnostics_classification_path == "artifacts/reference/classifications/security_master.csv"
+    assert config.diagnostics_output_dir == "artifacts/alpha_research/run_configured/diagnostics"
+    assert config.reporting_quantstats_enabled is True
+    assert config.reporting_quantstats_output_dir == "artifacts/alpha_research/run_configured/reports/quantstats"
     assert config.enable_database_metadata is True
     assert config.database_url == "postgresql+psycopg://localhost/trading"
     assert config.database_schema == "research"
@@ -1271,6 +1343,9 @@ def test_example_configs_load_from_repo() -> None:
     root = Path(__file__).resolve().parents[1]
 
     pipeline_config = load_pipeline_run_config(root / "configs" / "pipeline_daily.yaml")
+    classification_config = load_classification_build_workflow_config(root / "configs" / "classification_build.yaml")
+    optimizer_config = load_portfolio_optimizer_workflow_config(root / "configs" / "portfolio_optimizer_research.yaml")
+    validation_config = load_backtester_validation_workflow_config(root / "configs" / "backtester_validation.yaml")
     monitoring_config = load_monitoring_config(root / "configs" / "monitoring.yaml")
     notification_config = load_notification_config(root / "configs" / "notifications.yaml")
     execution_config = load_execution_config(root / "configs" / "execution.yaml")
@@ -1279,12 +1354,16 @@ def test_example_configs_load_from_repo() -> None:
     promotion_config = load_promotion_policy_config(root / "configs" / "promotion.yaml")
     promotion_experiment_config = load_promotion_policy_config(root / "configs" / "promotion_experiment.yaml")
     strategy_validation_config = load_strategy_validation_policy_config(root / "configs" / "strategy_validation.yaml")
-    strategy_validation_experiment_config = load_strategy_validation_policy_config(root / "configs" / "strategy_validation_experiment.yaml")
+    strategy_validation_experiment_config = load_strategy_validation_policy_config(
+        root / "configs" / "strategy_validation_experiment.yaml"
+    )
     strategy_portfolio_config = load_strategy_portfolio_policy_config(root / "configs" / "strategy_portfolio.yaml")
     strategy_monitoring_config = load_strategy_monitoring_policy_config(root / "configs" / "strategy_monitoring.yaml")
     market_regime_config = load_market_regime_policy_config(root / "configs" / "market_regime.yaml")
     adaptive_allocation_config = load_adaptive_allocation_policy_config(root / "configs" / "adaptive_allocation.yaml")
-    adaptive_allocation_experiment_config = load_adaptive_allocation_policy_config(root / "configs" / "adaptive_allocation_experiment.yaml")
+    adaptive_allocation_experiment_config = load_adaptive_allocation_policy_config(
+        root / "configs" / "adaptive_allocation_experiment.yaml"
+    )
     strategy_governance_config = load_strategy_governance_policy_config(root / "configs" / "strategy_governance.yaml")
     orchestration_config = load_automated_orchestration_config(root / "configs" / "orchestration.yaml")
     experiment_config = load_experiment_spec_config(root / "configs" / "experiments.yaml")
@@ -1292,20 +1371,45 @@ def test_example_configs_load_from_repo() -> None:
     adaptive_campaign_config = load_experiment_spec_config(root / "configs" / "experiment_campaign_adaptive.yaml")
     governance_campaign_config = load_experiment_spec_config(root / "configs" / "experiment_campaign_governance.yaml")
     regime_campaign_fast_config = load_experiment_spec_config(root / "configs" / "experiment_campaign_regime_fast.yaml")
-    adaptive_campaign_fast_config = load_experiment_spec_config(root / "configs" / "experiment_campaign_adaptive_fast.yaml")
-    governance_campaign_fast_config = load_experiment_spec_config(root / "configs" / "experiment_campaign_governance_fast.yaml")
-    regime_campaign_medium_config = load_experiment_spec_config(root / "configs" / "experiment_campaign_regime_medium.yaml")
-    adaptive_campaign_medium_config = load_experiment_spec_config(root / "configs" / "experiment_campaign_adaptive_medium.yaml")
-    governance_campaign_medium_config = load_experiment_spec_config(root / "configs" / "experiment_campaign_governance_medium.yaml")
-    research_input_refresh_config = load_research_input_refresh_workflow_config(root / "configs" / "research_input_refresh.yaml")
-    orchestration_experiment_base = load_automated_orchestration_config(root / "configs" / "orchestration_experiment_base.yaml")
-    orchestration_experiment_fast = load_automated_orchestration_config(root / "configs" / "orchestration_experiment_fast.yaml")
-    orchestration_experiment_medium = load_automated_orchestration_config(root / "configs" / "orchestration_experiment_medium.yaml")
-    governance_strict_config = load_strategy_governance_policy_config(root / "configs" / "strategy_governance_strict.yaml")
-    governance_loose_config = load_strategy_governance_policy_config(root / "configs" / "strategy_governance_loose.yaml")
+    adaptive_campaign_fast_config = load_experiment_spec_config(
+        root / "configs" / "experiment_campaign_adaptive_fast.yaml"
+    )
+    governance_campaign_fast_config = load_experiment_spec_config(
+        root / "configs" / "experiment_campaign_governance_fast.yaml"
+    )
+    regime_campaign_medium_config = load_experiment_spec_config(
+        root / "configs" / "experiment_campaign_regime_medium.yaml"
+    )
+    adaptive_campaign_medium_config = load_experiment_spec_config(
+        root / "configs" / "experiment_campaign_adaptive_medium.yaml"
+    )
+    governance_campaign_medium_config = load_experiment_spec_config(
+        root / "configs" / "experiment_campaign_governance_medium.yaml"
+    )
+    research_input_refresh_config = load_research_input_refresh_workflow_config(
+        root / "configs" / "research_input_refresh.yaml"
+    )
+    orchestration_experiment_base = load_automated_orchestration_config(
+        root / "configs" / "orchestration_experiment_base.yaml"
+    )
+    orchestration_experiment_fast = load_automated_orchestration_config(
+        root / "configs" / "orchestration_experiment_fast.yaml"
+    )
+    orchestration_experiment_medium = load_automated_orchestration_config(
+        root / "configs" / "orchestration_experiment_medium.yaml"
+    )
+    governance_strict_config = load_strategy_governance_policy_config(
+        root / "configs" / "strategy_governance_strict.yaml"
+    )
+    governance_loose_config = load_strategy_governance_policy_config(
+        root / "configs" / "strategy_governance_loose.yaml"
+    )
     minimal_demo_config = load_pipeline_run_config(root / "configs" / "minimal_local_demo.yaml")
 
     assert pipeline_config.schedule_type == "daily"
+    assert classification_config.output_dir == "artifacts/reference/classifications"
+    assert optimizer_config.optimizer_name == "min_vol"
+    assert validation_config.output_dir == "artifacts/validation/vectorbt"
     assert monitoring_config.maximum_failed_stages == 0
     assert notification_config.channels[0].channel_type == "email"
     assert execution_config.enabled is True
@@ -1318,8 +1422,16 @@ def test_example_configs_load_from_repo() -> None:
     assert strategy_portfolio_config.selection_metric == "ranking_value"
     assert strategy_monitoring_config.kill_switch_mode == "recommendation_only"
     assert market_regime_config.short_return_window >= 1
-    assert adaptive_allocation_config.weighting_mode in {"performance_tilted", "drawdown_penalized", "score_scaled", "equal_weight"}
-    assert adaptive_allocation_experiment_config.max_weight_per_strategy >= adaptive_allocation_config.max_weight_per_strategy
+    assert adaptive_allocation_config.weighting_mode in {
+        "performance_tilted",
+        "drawdown_penalized",
+        "score_scaled",
+        "equal_weight",
+    }
+    assert (
+        adaptive_allocation_experiment_config.max_weight_per_strategy
+        >= adaptive_allocation_config.max_weight_per_strategy
+    )
     assert strategy_governance_config.demote_after_deactivate_events >= 1
     assert orchestration_config.schedule_frequency == "manual"
     assert orchestration_config.experiment_name == "baseline_regime_adaptive"
@@ -1346,10 +1458,18 @@ def test_example_configs_load_from_repo() -> None:
     assert orchestration_experiment_fast.research_artifacts_root == "artifacts/promotion_fixture"
     assert orchestration_experiment_fast.output_root_dir == "artifacts/orchestration_runs_fast"
     assert orchestration_experiment_fast.promotion_policy_config_path == "configs/promotion_experiment.yaml"
-    assert orchestration_experiment_fast.strategy_validation_policy_config_path == "configs/strategy_validation_experiment.yaml"
+    assert (
+        orchestration_experiment_fast.strategy_validation_policy_config_path
+        == "configs/strategy_validation_experiment.yaml"
+    )
     assert orchestration_experiment_medium.output_root_dir == "artifacts/orchestration_runs_medium"
     assert orchestration_experiment_medium.stages.paper is True
     assert orchestration_experiment_medium.stages.monitoring is True
-    assert orchestration_experiment_medium.adaptive_allocation_policy_config_path == "configs/adaptive_allocation_experiment.yaml"
-    assert governance_strict_config.demote_after_deactivate_events < governance_loose_config.demote_after_deactivate_events
+    assert (
+        orchestration_experiment_medium.adaptive_allocation_policy_config_path
+        == "configs/adaptive_allocation_experiment.yaml"
+    )
+    assert (
+        governance_strict_config.demote_after_deactivate_events < governance_loose_config.demote_after_deactivate_events
+    )
     assert minimal_demo_config.schedule_type == "ad_hoc"
