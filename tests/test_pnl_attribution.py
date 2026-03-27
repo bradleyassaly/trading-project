@@ -15,6 +15,7 @@ from trading_platform.paper.service import (
     write_paper_trading_artifacts,
 )
 from trading_platform.reporting.pnl_attribution import aggregate_replay_attribution
+from trading_platform.reporting.pnl_attribution import write_pnl_attribution_artifacts
 
 
 def _run_cycle(
@@ -282,3 +283,50 @@ def test_paper_summary_includes_attribution_summary(tmp_path: Path) -> None:
     )
     payload = json.loads((paper_dir / "paper_run_summary_latest.json").read_text(encoding="utf-8"))
     assert payload["pnl_attribution_summary"]["attribution_method"] == "target_weight_proportional"
+
+
+def test_writer_emits_header_only_csvs_for_empty_attribution(tmp_path: Path) -> None:
+    paths = write_pnl_attribution_artifacts(
+        output_dir=tmp_path,
+        attribution_payload={"strategy_rows": [], "symbol_rows": [], "trade_rows": [], "summary": {}},
+    )
+
+    strategy_text = paths["strategy_pnl_attribution_path"].read_text(encoding="utf-8").strip()
+    symbol_text = paths["symbol_pnl_attribution_path"].read_text(encoding="utf-8").strip()
+    trade_text = paths["trade_pnl_attribution_path"].read_text(encoding="utf-8").strip()
+
+    assert "strategy_id" in strategy_text
+    assert "symbol" in symbol_text
+    assert "trade_id" in trade_text
+
+
+def test_aggregate_replay_attribution_tolerates_zero_byte_trade_csv(tmp_path: Path) -> None:
+    day_dir = tmp_path / "2025-01-02" / "paper"
+    day_dir.mkdir(parents=True, exist_ok=True)
+    (day_dir / "trade_pnl_attribution.csv").write_text("", encoding="utf-8")
+
+    replay = aggregate_replay_attribution(replay_root=tmp_path)
+
+    assert replay["trade_rows"] == []
+    assert replay["summary"] == {}
+
+
+def test_aggregate_replay_attribution_tolerates_header_only_empty_csv(tmp_path: Path) -> None:
+    day_dir = tmp_path / "2025-01-02" / "paper"
+    day_dir.mkdir(parents=True, exist_ok=True)
+    (day_dir / "trade_pnl_attribution.csv").write_text("trade_id,date\n", encoding="utf-8")
+
+    replay = aggregate_replay_attribution(replay_root=tmp_path)
+
+    assert replay["trade_rows"] == []
+    assert replay["summary"] == {}
+
+
+def test_aggregate_replay_attribution_tolerates_missing_per_day_files(tmp_path: Path) -> None:
+    (tmp_path / "2025-01-02" / "paper").mkdir(parents=True, exist_ok=True)
+
+    replay = aggregate_replay_attribution(replay_root=tmp_path)
+
+    assert replay["strategy_rows"] == []
+    assert replay["symbol_rows"] == []
+    assert replay["trade_rows"] == []

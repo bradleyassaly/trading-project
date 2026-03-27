@@ -9,6 +9,57 @@ import pandas as pd
 
 from trading_platform.paper.models import PaperPortfolioState
 
+STRATEGY_PNL_COLUMNS = [
+    "date",
+    "strategy_id",
+    "strategy_weight",
+    "gross_exposure",
+    "net_exposure",
+    "position_count",
+    "realized_pnl",
+    "unrealized_pnl",
+    "total_pnl",
+    "turnover",
+    "trade_count",
+    "winning_trade_count",
+    "closed_trade_count",
+    "win_rate",
+    "average_holding_period",
+]
+SYMBOL_PNL_COLUMNS = [
+    "date",
+    "symbol",
+    "strategy_id",
+    "side",
+    "start_position",
+    "end_position",
+    "realized_pnl",
+    "unrealized_pnl",
+    "total_pnl",
+    "traded_notional",
+    "fill_count",
+    "signal_source",
+    "signal_family",
+]
+TRADE_PNL_COLUMNS = [
+    "trade_id",
+    "date",
+    "symbol",
+    "strategy_id",
+    "signal_source",
+    "signal_family",
+    "side",
+    "quantity",
+    "entry_price",
+    "exit_price",
+    "realized_pnl",
+    "holding_period_days",
+    "attribution_method",
+    "status",
+    "entry_date",
+    "exit_date",
+]
+
 
 def _safe_float(value: Any) -> float:
     try:
@@ -30,6 +81,30 @@ def _normalize_records(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     if frame.empty:
         return []
     return frame.astype(object).where(pd.notna(frame), None).to_dict(orient="records")
+
+
+def _write_csv_with_schema(path: Path, rows: list[dict[str, Any]], columns: list[str]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(rows, columns=columns).to_csv(path, index=False)
+
+
+def _read_csv_records(path: str | Path | None) -> list[dict[str, Any]]:
+    if path is None:
+        return []
+    file_path = Path(path)
+    if not file_path.exists():
+        return []
+    if file_path.stat().st_size <= 0:
+        return []
+    try:
+        frame = pd.read_csv(file_path)
+    except pd.errors.EmptyDataError:
+        return []
+    except pd.errors.ParserError:
+        return []
+    if frame.empty:
+        return []
+    return _normalize_records(frame.to_dict(orient="records"))
 
 
 def normalize_strategy_ownership(raw: dict[str, Any] | None) -> dict[str, float]:
@@ -473,9 +548,9 @@ def write_pnl_attribution_artifacts(
     symbol_path = output_path / "symbol_pnl_attribution.csv"
     trade_path = output_path / "trade_pnl_attribution.csv"
     summary_path = output_path / "pnl_attribution_summary.json"
-    pd.DataFrame(attribution_payload.get("strategy_rows", [])).to_csv(strategy_path, index=False)
-    pd.DataFrame(attribution_payload.get("symbol_rows", [])).to_csv(symbol_path, index=False)
-    pd.DataFrame(attribution_payload.get("trade_rows", [])).to_csv(trade_path, index=False)
+    _write_csv_with_schema(strategy_path, list(attribution_payload.get("strategy_rows", [])), STRATEGY_PNL_COLUMNS)
+    _write_csv_with_schema(symbol_path, list(attribution_payload.get("symbol_rows", [])), SYMBOL_PNL_COLUMNS)
+    _write_csv_with_schema(trade_path, list(attribution_payload.get("trade_rows", [])), TRADE_PNL_COLUMNS)
     summary_path.write_text(
         json.dumps(attribution_payload.get("summary", {}), indent=2, default=str),
         encoding="utf-8",
@@ -500,12 +575,9 @@ def aggregate_replay_attribution(
         strategy_path = day_dir / "paper" / "strategy_pnl_attribution.csv"
         symbol_path = day_dir / "paper" / "symbol_pnl_attribution.csv"
         trade_path = day_dir / "paper" / "trade_pnl_attribution.csv"
-        if strategy_path.exists():
-            strategy_rows.extend(_normalize_records(pd.read_csv(strategy_path).to_dict(orient="records")))
-        if symbol_path.exists():
-            symbol_rows.extend(_normalize_records(pd.read_csv(symbol_path).to_dict(orient="records")))
-        if trade_path.exists():
-            trade_rows.extend(_normalize_records(pd.read_csv(trade_path).to_dict(orient="records")))
+        strategy_rows.extend(_read_csv_records(strategy_path))
+        symbol_rows.extend(_read_csv_records(symbol_path))
+        trade_rows.extend(_read_csv_records(trade_path))
     if not strategy_rows and not symbol_rows and not trade_rows:
         return {
             "strategy_rows": [],
@@ -591,9 +663,9 @@ def write_replay_pnl_attribution_artifacts(
     symbol_path = root / "replay_symbol_pnl.csv"
     trade_path = root / "replay_trade_pnl.csv"
     summary_path = root / "replay_pnl_attribution_summary.json"
-    pd.DataFrame(replay_payload.get("strategy_rows", [])).to_csv(strategy_path, index=False)
-    pd.DataFrame(replay_payload.get("symbol_rows", [])).to_csv(symbol_path, index=False)
-    pd.DataFrame(replay_payload.get("trade_rows", [])).to_csv(trade_path, index=False)
+    _write_csv_with_schema(strategy_path, list(replay_payload.get("strategy_rows", [])), STRATEGY_PNL_COLUMNS)
+    _write_csv_with_schema(symbol_path, list(replay_payload.get("symbol_rows", [])), SYMBOL_PNL_COLUMNS)
+    _write_csv_with_schema(trade_path, list(replay_payload.get("trade_rows", [])), TRADE_PNL_COLUMNS)
     summary_path.write_text(json.dumps(replay_payload.get("summary", {}), indent=2, default=str), encoding="utf-8")
     return {
         "replay_strategy_pnl_path": strategy_path,
