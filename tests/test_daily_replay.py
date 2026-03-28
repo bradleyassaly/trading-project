@@ -32,8 +32,9 @@ def _write_json(path: Path, payload: dict) -> None:
 def _install_fake_daily_runner(monkeypatch: pytest.MonkeyPatch, *, fail_dates: set[str] | None = None) -> None:
     fail_dates = fail_dates or set()
 
-    def fake_run(config, *, replay_as_of_date=None, replay_settings=None):
+    def fake_run(config, *, replay_as_of_date=None, replay_settings=None, refresh_dashboard_static_data=None):
         assert replay_as_of_date is not None
+        assert refresh_dashboard_static_data is False
         if replay_as_of_date in fail_dates:
             raise RuntimeError(f"boom:{replay_as_of_date}")
         run_dir = Path(config.output_root) / config.run_name
@@ -274,7 +275,7 @@ def test_run_daily_replay_stop_on_error_aborts(monkeypatch: pytest.MonkeyPatch, 
 def test_run_daily_replay_surfaces_missing_research_input_warning(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    def fake_run(config, *, replay_as_of_date=None, replay_settings=None):
+    def fake_run(config, *, replay_as_of_date=None, replay_settings=None, refresh_dashboard_static_data=None):
         run_dir = Path(config.output_root) / config.run_name
         run_dir.mkdir(parents=True, exist_ok=True)
         _write_json(run_dir / "daily_trading_summary.json", {"status": "warning", "active_strategy_count": 0})
@@ -313,3 +314,88 @@ def test_run_daily_replay_surfaces_missing_research_input_warning(
     assert "missing_research_artifacts_for_promotion" in input_summary["missing_input_warnings"]
     assert "empty_research_registry_for_promotion" in input_summary["missing_input_warnings"]
     assert "missing replay upstream inputs" in result.summary["warnings"]
+
+
+def test_run_daily_replay_calls_replay_aggregation_once(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _install_fake_daily_runner(monkeypatch)
+    calls: list[str] = []
+
+    def fake_aggregate(*, replay_root):
+        calls.append(str(replay_root))
+        return {"strategy_rows": [], "symbol_rows": [], "trade_rows": [], "summary": {}}
+
+    monkeypatch.setattr("trading_platform.orchestration.daily_replay.aggregate_replay_attribution", fake_aggregate)
+    config = DailyReplayWorkflowConfig(
+        daily_trading=_base_daily_config(tmp_path),
+        output_dir=str(tmp_path / "replay"),
+        start_date="2025-01-03",
+        end_date="2025-01-07",
+        max_days=3,
+        stop_on_error=True,
+        continue_on_error=False,
+        replay=DailyReplayTuningConfig(),
+    )
+
+    run_daily_replay(config)
+
+    assert calls == [str(tmp_path / "replay")]
+
+
+def test_run_daily_replay_refreshes_dashboard_once_at_end(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _install_fake_daily_runner(monkeypatch)
+    dashboard_calls: list[tuple[str, str]] = []
+
+    def fake_dashboard(*, artifacts_root, output_dir):
+        output_path = Path(output_dir)
+        output_path.mkdir(parents=True, exist_ok=True)
+        marker = output_path / "overview.json"
+        marker.write_text("{}", encoding="utf-8")
+        dashboard_calls.append((str(artifacts_root), str(output_dir)))
+        return {"overview_json": marker}
+
+    monkeypatch.setattr("trading_platform.orchestration.daily_replay.build_dashboard_static_data", fake_dashboard)
+    config = DailyReplayWorkflowConfig(
+        daily_trading=DailyTradingWorkflowConfig(
+            run_name="base_daily",
+            output_root=str(tmp_path / "unused"),
+            promotion_policy_config="configs/promotion.yaml",
+            strategy_portfolio_policy_config="configs/strategy_portfolio.yaml",
+            refresh_dashboard_static_data=True,
+        ),
+        output_dir=str(tmp_path / "replay"),
+        start_date="2025-01-03",
+        end_date="2025-01-07",
+        max_days=3,
+        stop_on_error=True,
+        continue_on_error=False,
+        replay=DailyReplayTuningConfig(),
+    )
+
+    result = run_daily_replay(config)
+
+    assert dashboard_calls == [(str(tmp_path / "replay"), str(tmp_path / "replay" / "dashboard"))]
+    assert (tmp_path / "replay" / "dashboard" / "overview.json").exists()
+    assert result.summary["readiness_flags"]["diagnostics_complete"] is True
+
+
+def test_run_daily_replay_profile_timings_writes_artifacts(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _install_fake_daily_runner(monkeypatch)
+    config = DailyReplayWorkflowConfig(
+        daily_trading=_base_daily_config(tmp_path),
+        output_dir=str(tmp_path / "replay"),
+        start_date="2025-01-03",
+        end_date="2025-01-07",
+        max_days=2,
+        stop_on_error=True,
+        continue_on_error=False,
+        replay=DailyReplayTuningConfig(profile_timings=True),
+    )
+
+    result = run_daily_replay(config)
+
+    assert Path(result.artifact_paths["replay_timing_by_day_csv_path"]).exists()
+    assert Path(result.artifact_paths["replay_timing_summary_json_path"]).exists()
+    timing_summary = json.loads(
+        Path(result.artifact_paths["replay_timing_summary_json_path"]).read_text(encoding="utf-8")
+    )
+    assert timing_summary["day_count"] == 2

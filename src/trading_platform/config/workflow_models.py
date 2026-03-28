@@ -717,6 +717,7 @@ class DailyReplayTuningConfig:
     warn_if_turnover_too_low: float | None = None
     override_max_weight_per_strategy: float | None = None
     override_min_signal_strength: float | None = None
+    profile_timings: bool = False
 
     def __post_init__(self) -> None:
         if self.min_expected_trade_days is not None and self.min_expected_trade_days < 0:

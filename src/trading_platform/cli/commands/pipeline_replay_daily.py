@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 
 from trading_platform.config.loader import load_daily_replay_workflow_config
+from trading_platform.config.workflow_models import DailyReplayTuningConfig
 from trading_platform.orchestration.daily_replay import run_daily_replay
 
 
@@ -24,6 +25,8 @@ def cmd_pipeline_replay_daily(args) -> None:
         config = replace(config, stop_on_error=True, continue_on_error=False)
     if getattr(args, "continue_on_error", False):
         config = replace(config, stop_on_error=False, continue_on_error=True)
+    if getattr(args, "profile_replay", False):
+        config = replace(config, replay=DailyReplayTuningConfig(**{**config.replay.__dict__, "profile_timings": True}))
 
     result = run_daily_replay(config)
     print(f"Output dir: {result.output_dir}")

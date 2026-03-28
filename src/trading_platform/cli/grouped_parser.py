@@ -2866,6 +2866,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Optional maximum number of replay dates to process after date resolution.",
     )
+    ops_pipeline_replay_daily.add_argument(
+        "--profile-replay",
+        action="store_true",
+        help="Write replay_timing_summary.json and replay_timing_by_day.csv profiling artifacts.",
+    )
     ops_pipeline_replay_daily.set_defaults(func=cmd_pipeline_replay_daily)
 
     ops_monitor = ops_subparsers.add_parser("monitor", help="Monitoring, alerting, and dashboard data builders")
@@ -3544,6 +3549,11 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=None,
         help="Optional maximum number of replay dates to process after date resolution.",
+    )
+    pipeline_replay_daily.add_argument(
+        "--profile-replay",
+        action="store_true",
+        help="Write replay_timing_summary.json and replay_timing_by_day.csv profiling artifacts.",
     )
     pipeline_replay_daily.set_defaults(func=cmd_pipeline_replay_daily)
 

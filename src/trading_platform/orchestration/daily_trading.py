@@ -871,6 +871,7 @@ def run_daily_trading_pipeline(
     *,
     replay_as_of_date: str | None = None,
     replay_settings: dict[str, Any] | None = None,
+    refresh_dashboard_static_data: bool | None = None,
 ) -> DailyTradingResult:
     started_at = _now_utc()
     started_clock = time.monotonic()
@@ -1349,7 +1350,12 @@ def run_daily_trading_pipeline(
                 )
                 output_payload.update({key: str(value) for key, value in strategy_quality_paths.items()})
                 key_artifacts.update({key: str(value) for key, value in strategy_quality_paths.items()})
-            if config.refresh_dashboard_static_data:
+            should_refresh_dashboard = (
+                config.refresh_dashboard_static_data
+                if refresh_dashboard_static_data is None
+                else bool(refresh_dashboard_static_data)
+            )
+            if should_refresh_dashboard:
                 dashboard_paths = build_dashboard_static_data(
                     artifacts_root=Path("artifacts"),
                     output_dir=dashboard_output_dir,

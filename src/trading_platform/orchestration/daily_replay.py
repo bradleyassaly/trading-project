@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -9,6 +10,7 @@ from typing import Any
 import pandas as pd
 
 from trading_platform.config.workflow_models import DailyReplayWorkflowConfig, DailyTradingWorkflowConfig
+from trading_platform.dashboard.server import build_dashboard_static_data
 from trading_platform.orchestration.daily_trading import DailyTradingResult, run_daily_trading_pipeline
 from trading_platform.portfolio.strategy_execution_handoff import resolve_strategy_execution_handoff
 from trading_platform.reporting.pnl_attribution import (
@@ -42,6 +44,13 @@ class DailyReplayResult:
     summary_md_path: str
     artifact_paths: dict[str, str]
     summary: dict[str, Any]
+
+
+def _safe_float(value: Any) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -81,6 +90,48 @@ def _write_csv(path: Path, rows: list[dict[str, Any]], columns: list[str]) -> Pa
     path.parent.mkdir(parents=True, exist_ok=True)
     pd.DataFrame(rows, columns=columns).to_csv(path, index=False)
     return path
+
+
+def _stage_duration_map(result: DailyTradingResult | None) -> dict[str, float]:
+    if result is None:
+        return {}
+    return {
+        str(record.stage_name): float(record.duration_seconds or 0.0)
+        for record in result.stage_records
+    }
+
+
+def _write_replay_timing_artifacts(
+    *,
+    replay_root: Path,
+    day_rows: list[dict[str, Any]],
+    summary: dict[str, Any],
+) -> dict[str, str]:
+    timing_csv_path = _write_csv(
+        replay_root / "replay_timing_by_day.csv",
+        day_rows,
+        [
+            "date",
+            "status",
+            "setup_s",
+            "pipeline_s",
+            "research_s",
+            "promote_s",
+            "build_portfolio_s",
+            "activate_portfolio_s",
+            "export_bundle_s",
+            "paper_run_s",
+            "report_s",
+            "input_summary_s",
+            "total_s",
+        ],
+    )
+    summary_json_path = replay_root / "replay_timing_summary.json"
+    summary_json_path.write_text(json.dumps(summary, indent=2, default=str), encoding="utf-8")
+    return {
+        "replay_timing_by_day_csv_path": str(timing_csv_path),
+        "replay_timing_summary_json_path": str(summary_json_path),
+    }
 
 
 def _build_day_config(
@@ -485,9 +536,7 @@ def _compute_replay_summary(
         for row in day_results
     )
     if config.daily_trading.refresh_dashboard_static_data:
-        diagnostics_complete = diagnostics_complete and all(
-            (replay_root / row.requested_date / "dashboard").exists() for row in day_results
-        )
+        diagnostics_complete = diagnostics_complete and (replay_root / "dashboard").exists()
 
     readiness_flags = {
         "pipeline_stable": failed_day_count == 0 and not aborted,
@@ -689,6 +738,7 @@ def _write_replay_summary_artifacts(
 def run_daily_replay(config: DailyReplayWorkflowConfig) -> DailyReplayResult:
     replay_root = Path(config.output_dir)
     replay_root.mkdir(parents=True, exist_ok=True)
+    replay_started = time.monotonic()
     requested_dates = build_daily_replay_dates(
         start_date=config.start_date,
         end_date=config.end_date,
@@ -704,19 +754,23 @@ def run_daily_replay(config: DailyReplayWorkflowConfig) -> DailyReplayResult:
     trade_log_rows: list[dict[str, Any]] = []
     strategy_activity_rows: list[dict[str, Any]] = []
     replay_day_input_summaries: list[dict[str, Any]] = []
+    timing_rows: list[dict[str, Any]] = []
     previous_state_after_payload: str | None = None
     state_transition_consistent = True
     position_signatures: list[str] = []
     aborted = False
 
     for requested_date in requested_dates:
+        day_started = time.monotonic()
         day_dir = replay_root / requested_date
+        setup_started = time.monotonic()
         day_config = _build_day_config(
             config.daily_trading,
             replay_root=replay_root,
             requested_date=requested_date,
             state_path=state_path,
         )
+        setup_seconds = time.monotonic() - setup_started
         state_before_path = _safe_copy(state_path, day_dir / "paper_state_before.json")
         if previous_state_after_payload is not None and state_before_path is not None:
             current_before_payload = Path(state_before_path).read_text(encoding="utf-8")
@@ -726,16 +780,19 @@ def run_daily_replay(config: DailyReplayWorkflowConfig) -> DailyReplayResult:
 
         day_error_message: str | None = None
         result: DailyTradingResult | None = None
+        pipeline_started = time.monotonic()
         try:
             result = run_daily_trading_pipeline(
                 day_config,
                 replay_as_of_date=requested_date,
                 replay_settings=config.replay.__dict__,
+                refresh_dashboard_static_data=False,
             )
         except Exception as exc:
             day_error_message = f"{type(exc).__name__}: {exc}"
             if config.stop_on_error and not config.continue_on_error:
                 aborted = True
+        pipeline_seconds = time.monotonic() - pipeline_started
 
         state_after_path = _safe_copy(state_path, day_dir / "paper_state_after.json")
         if state_after_path:
@@ -791,12 +848,14 @@ def run_daily_replay(config: DailyReplayWorkflowConfig) -> DailyReplayResult:
                 state_after_path=state_after_path,
             )
         )
+        input_summary_started = time.monotonic()
         replay_day_input_summary_path = _write_replay_day_input_summary(
             replay_root=replay_root,
             requested_date=requested_date,
             day_config=day_config,
             day_result=day_results[-1],
         )
+        input_summary_seconds = time.monotonic() - input_summary_started
         day_results[-1] = DailyReplayDayResult(
             requested_date=day_results[-1].requested_date,
             run_dir=day_results[-1].run_dir,
@@ -809,6 +868,24 @@ def run_daily_replay(config: DailyReplayWorkflowConfig) -> DailyReplayResult:
             state_after_path=day_results[-1].state_after_path,
         )
         replay_day_input_summaries.append(_read_json(Path(replay_day_input_summary_path)))
+        stage_durations = _stage_duration_map(result)
+        timing_rows.append(
+            {
+                "date": requested_date,
+                "status": str((daily_summary or {}).get("status") or (result.status if result is not None else "failed")),
+                "setup_s": setup_seconds,
+                "pipeline_s": pipeline_seconds,
+                "research_s": _safe_float(stage_durations.get("research")),
+                "promote_s": _safe_float(stage_durations.get("promote")),
+                "build_portfolio_s": _safe_float(stage_durations.get("build_portfolio")),
+                "activate_portfolio_s": _safe_float(stage_durations.get("activate_portfolio")),
+                "export_bundle_s": _safe_float(stage_durations.get("export_bundle")),
+                "paper_run_s": _safe_float(stage_durations.get("paper_run")),
+                "report_s": _safe_float(stage_durations.get("report")),
+                "input_summary_s": input_summary_seconds,
+                "total_s": time.monotonic() - day_started,
+            }
+        )
         if (
             (day_error_message or (result is not None and _day_status_failed(result.status)))
             and config.stop_on_error
@@ -817,6 +894,7 @@ def run_daily_replay(config: DailyReplayWorkflowConfig) -> DailyReplayResult:
             aborted = True
             break
 
+    summary_started = time.monotonic()
     summary, _warnings, _flags = _compute_replay_summary(
         config=config,
         replay_root=replay_root,
@@ -830,7 +908,10 @@ def run_daily_replay(config: DailyReplayWorkflowConfig) -> DailyReplayResult:
         holdings_changed=len(set(position_signatures)) > 1,
         aborted=aborted,
     )
+    replay_summary_seconds = time.monotonic() - summary_started
+    attribution_started = time.monotonic()
     replay_attribution = aggregate_replay_attribution(replay_root=replay_root)
+    replay_attribution_seconds = time.monotonic() - attribution_started
     attribution_summary = dict(replay_attribution.get("summary") or {})
     if attribution_summary:
         summary["best_strategy_by_total_pnl"] = next(
@@ -861,6 +942,27 @@ def run_daily_replay(config: DailyReplayWorkflowConfig) -> DailyReplayResult:
         status = "warning"
     summary["status"] = status
 
+    replay_dashboard_seconds = 0.0
+    if config.daily_trading.refresh_dashboard_static_data:
+        dashboard_started = time.monotonic()
+        dashboard_paths = build_dashboard_static_data(
+            artifacts_root=replay_root,
+            output_dir=replay_root / "dashboard",
+        )
+        replay_dashboard_seconds = time.monotonic() - dashboard_started
+        core_diagnostics_complete = all(
+            Path(row.summary_json_path or "").exists() and Path(row.trade_decision_log_path or "").exists()
+            for row in day_results
+        )
+        diagnostics_complete = core_diagnostics_complete and (replay_root / "dashboard").exists()
+        summary.setdefault("readiness_flags", {})["diagnostics_complete"] = diagnostics_complete
+        warnings = [warning for warning in list(summary.get("warnings") or []) if warning != "missing dashboard/report artifacts"]
+        if not diagnostics_complete:
+            warnings.append("missing dashboard/report artifacts")
+        summary["warnings"] = warnings
+    else:
+        dashboard_paths = {}
+
     artifact_paths = _write_replay_summary_artifacts(
         replay_root=replay_root,
         summary=summary,
@@ -877,6 +979,39 @@ def run_daily_replay(config: DailyReplayWorkflowConfig) -> DailyReplayResult:
             ).items()
         }
     )
+    artifact_paths.update({f"dashboard_{key}": str(value) for key, value in dashboard_paths.items()})
+    if config.replay.profile_timings:
+        total_replay_seconds = time.monotonic() - replay_started
+        timing_summary = {
+            "total_replay_seconds": total_replay_seconds,
+            "total_setup_seconds": float(sum(_safe_float(row.get("setup_s")) for row in timing_rows)),
+            "total_daily_pipeline_seconds": float(sum(_safe_float(row.get("pipeline_s")) for row in timing_rows)),
+            "total_input_summary_seconds": float(sum(_safe_float(row.get("input_summary_s")) for row in timing_rows)),
+            "total_replay_summary_seconds": replay_summary_seconds,
+            "total_replay_aggregation_seconds": replay_attribution_seconds,
+            "total_dashboard_refresh_seconds": replay_dashboard_seconds,
+            "day_count": len(timing_rows),
+            "slowest_days": sorted(
+                (
+                    {
+                        "date": str(row.get("date")),
+                        "total_s": _safe_float(row.get("total_s")),
+                        "pipeline_s": _safe_float(row.get("pipeline_s")),
+                        "report_s": _safe_float(row.get("report_s")),
+                    }
+                    for row in timing_rows
+                ),
+                key=lambda row: float(row["total_s"]),
+                reverse=True,
+            )[:10],
+        }
+        artifact_paths.update(
+            _write_replay_timing_artifacts(
+                replay_root=replay_root,
+                day_rows=timing_rows,
+                summary=timing_summary,
+            )
+        )
     return DailyReplayResult(
         output_dir=str(replay_root),
         state_path=str(state_path),
