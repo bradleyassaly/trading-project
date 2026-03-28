@@ -140,6 +140,7 @@ def _build_day_config(
     replay_root: Path,
     requested_date: str,
     state_path: Path,
+    strategy_weighting_metrics_path: Path | None = None,
 ) -> DailyTradingWorkflowConfig:
     payload = base_config.to_cli_defaults()
     payload["stages"] = base_config.stages
@@ -172,6 +173,11 @@ def _build_day_config(
             "export_dir": str(run_dir / "run_bundle") if export_stage_writes else base_config.export_dir,
             "paper_output_dir": str(run_dir / "paper"),
             "paper_state_path": str(state_path),
+            "strategy_weighting_metrics_path": (
+                str(strategy_weighting_metrics_path)
+                if strategy_weighting_metrics_path is not None
+                else base_config.strategy_weighting_metrics_path
+            ),
             "report_dir": str(run_dir / "report"),
             "dashboard_output_dir": str(run_dir / "dashboard"),
         }
@@ -296,6 +302,31 @@ def _write_replay_day_input_summary(
     payload = {
         "replay_date": requested_date,
         "daily_status": day_result.status,
+        "execution_config": {
+            "slippage_model": str(day_config.slippage_model or "none"),
+            "slippage_buy_bps": float(day_config.slippage_buy_bps or 0.0),
+            "slippage_sell_bps": float(day_config.slippage_sell_bps or 0.0),
+            "cost_model_enabled": bool(day_config.enable_cost_model),
+            "commission_bps": float(day_config.commission_bps or 0.0),
+            "minimum_commission": float(day_config.minimum_commission or 0.0),
+            "spread_bps": float(day_config.spread_bps or 0.0),
+            "min_weight_change_to_trade": float(day_config.min_weight_change_to_trade or 0.0),
+            "score_band_enabled": any(
+                value is not None
+                for value in (
+                    day_config.entry_score_threshold,
+                    day_config.exit_score_threshold,
+                    day_config.entry_score_percentile,
+                    day_config.exit_score_percentile,
+                )
+            ),
+            "entry_score_threshold": day_config.entry_score_threshold,
+            "exit_score_threshold": day_config.exit_score_threshold,
+            "hold_score_band": bool(day_config.hold_score_band),
+            "use_percentile_thresholds": bool(day_config.use_percentile_thresholds),
+            "entry_score_percentile": day_config.entry_score_percentile,
+            "exit_score_percentile": day_config.exit_score_percentile,
+        },
         "artifact_paths_used": {
             "research_output_dir": str(research_output_dir),
             "research_registry_path": str(research_registry_path),
@@ -306,6 +337,7 @@ def _write_replay_day_input_summary(
             "activated_dir": str(activated_dir),
             "activated_json_path": str(activated_json_path),
             "paper_output_dir": str(paper_dir),
+            "strategy_weighting_metrics_path": day_config.strategy_weighting_metrics_path,
             "trade_decision_log_path": day_result.trade_decision_log_path,
         },
         "artifact_exists": {
@@ -432,6 +464,21 @@ def _compute_replay_summary(
         float(metrics_frame["usable_symbol_count"].mean())
         if "usable_symbol_count" in metrics_frame and not metrics_frame.empty
         else 0.0
+    )
+    blocked_entries_count = (
+        int(metrics_frame["blocked_entries_count"].sum())
+        if "blocked_entries_count" in metrics_frame and not metrics_frame.empty
+        else 0
+    )
+    held_in_hold_zone_count = (
+        int(metrics_frame["held_in_hold_zone_count"].sum())
+        if "held_in_hold_zone_count" in metrics_frame and not metrics_frame.empty
+        else 0
+    )
+    forced_exit_count = (
+        int(metrics_frame["forced_exit_count"].sum())
+        if "forced_exit_count" in metrics_frame and not metrics_frame.empty
+        else 0
     )
     final_equity = (
         float(metrics_frame["current_equity"].iloc[-1])
@@ -600,6 +647,9 @@ def _compute_replay_summary(
         "avg_active_position_count": avg_active_position_count,
         "avg_requested_symbol_count": avg_requested_symbol_count,
         "avg_usable_symbol_count": avg_usable_symbol_count,
+        "blocked_entries_count": blocked_entries_count,
+        "held_in_hold_zone_count": held_in_hold_zone_count,
+        "forced_exit_count": forced_exit_count,
         "cumulative_realized_pnl": cumulative_realized_pnl,
         "cumulative_unrealized_pnl": cumulative_unrealized_pnl,
         "gross_total_pnl": gross_total_pnl,
@@ -664,6 +714,9 @@ def _write_replay_summary_artifacts(
                 f"- trade_day_count: `{summary.get('trade_day_count', 0)}`",
                 f"- no_op_day_count: `{summary.get('no_op_day_count', 0)}`",
                 f"- avg_daily_turnover: `{summary.get('avg_daily_turnover', 0.0)}`",
+                f"- blocked_entries_count: `{summary.get('blocked_entries_count', 0)}`",
+                f"- held_in_hold_zone_count: `{summary.get('held_in_hold_zone_count', 0)}`",
+                f"- forced_exit_count: `{summary.get('forced_exit_count', 0)}`",
                 f"- avg_daily_execution_cost: `{summary.get('avg_daily_execution_cost', 0.0)}`",
                 f"- gross_total_pnl: `{summary.get('gross_total_pnl', 0.0)}`",
                 f"- net_total_pnl: `{summary.get('net_total_pnl', 0.0)}`",
@@ -695,6 +748,15 @@ def _write_replay_summary_artifacts(
             "requested_symbol_count",
             "usable_symbol_count",
             "executable_order_count",
+            "skipped_trades_count",
+            "skipped_turnover",
+            "effective_turnover_reduction",
+            "blocked_entries_count",
+            "held_in_hold_zone_count",
+            "forced_exit_count",
+            "score_band_enabled",
+            "entry_threshold_used",
+            "exit_threshold_used",
             "fill_count",
             "turnover_estimate",
             "position_count",
@@ -756,6 +818,7 @@ def run_daily_replay(config: DailyReplayWorkflowConfig) -> DailyReplayResult:
     replay_day_input_summaries: list[dict[str, Any]] = []
     timing_rows: list[dict[str, Any]] = []
     previous_state_after_payload: str | None = None
+    previous_strategy_weighting_metrics_path: Path | None = None
     state_transition_consistent = True
     position_signatures: list[str] = []
     aborted = False
@@ -769,6 +832,7 @@ def run_daily_replay(config: DailyReplayWorkflowConfig) -> DailyReplayResult:
             replay_root=replay_root,
             requested_date=requested_date,
             state_path=state_path,
+            strategy_weighting_metrics_path=previous_strategy_weighting_metrics_path,
         )
         setup_seconds = time.monotonic() - setup_started
         state_before_path = _safe_copy(state_path, day_dir / "paper_state_before.json")
@@ -799,6 +863,9 @@ def run_daily_replay(config: DailyReplayWorkflowConfig) -> DailyReplayResult:
             previous_state_after_payload = Path(state_after_path).read_text(encoding="utf-8")
             state_payload = _read_json(Path(state_after_path))
             position_signatures.append(json.dumps(state_payload.get("positions", {}), sort_keys=True))
+        current_strategy_metrics_path = day_dir / "paper" / "strategy_pnl_attribution.csv"
+        if current_strategy_metrics_path.exists():
+            previous_strategy_weighting_metrics_path = current_strategy_metrics_path
 
         daily_summary = _load_daily_summary(day_dir)
         paper_summary = _load_paper_summary(day_dir)
@@ -812,6 +879,17 @@ def run_daily_replay(config: DailyReplayWorkflowConfig) -> DailyReplayResult:
                 "requested_symbol_count": int(paper_summary.get("requested_symbol_count", 0) or 0),
                 "usable_symbol_count": int(paper_summary.get("usable_symbol_count", 0) or 0),
                 "executable_order_count": int(paper_summary.get("executable_order_count", 0) or 0),
+                "skipped_trades_count": int(paper_summary.get("skipped_trades_count", 0) or 0),
+                "skipped_turnover": float(paper_summary.get("skipped_turnover", 0.0) or 0.0),
+                "effective_turnover_reduction": float(
+                    paper_summary.get("effective_turnover_reduction", 0.0) or 0.0
+                ),
+                "blocked_entries_count": int(paper_summary.get("blocked_entries_count", 0) or 0),
+                "held_in_hold_zone_count": int(paper_summary.get("held_in_hold_zone_count", 0) or 0),
+                "forced_exit_count": int(paper_summary.get("forced_exit_count", 0) or 0),
+                "score_band_enabled": bool(paper_summary.get("score_band_enabled", False)),
+                "entry_threshold_used": paper_summary.get("entry_threshold_used"),
+                "exit_threshold_used": paper_summary.get("exit_threshold_used"),
                 "fill_count": int(paper_summary.get("fill_count", 0) or 0),
                 "turnover_estimate": float(paper_summary.get("turnover_estimate", 0.0) or 0.0),
                 "position_count": int(paper_summary.get("realized_holdings_count", 0) or 0),

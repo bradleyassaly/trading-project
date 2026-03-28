@@ -8,11 +8,12 @@ max_weight_per_strategy: 0.5
 min_weight_per_strategy: 0.1
 selection_metric: ranking_value
 strategy_weight_metric: ranking_value
-strategy_weighting_mode: conditional_aware
+strategy_weighting_mode: cost_adjusted
 # Supported weighting modes:
 # - equal / equal_weight
 # - metric_proportional / metric_weighted
 # - capped_metric_weighted
+# - cost_adjusted
 # - inverse_count_by_signal_family
 # - score_then_cap
 # - risk_adjusted

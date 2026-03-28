@@ -536,6 +536,9 @@ def load_daily_trading_workflow_config(path: str | Path) -> DailyTradingWorkflow
     cost_section = (
         execution_section.get("cost_model", {}) if isinstance(execution_section.get("cost_model"), dict) else {}
     )
+    score_band_section = (
+        execution_section.get("score_bands", {}) if isinstance(execution_section.get("score_bands"), dict) else {}
+    )
     if "slippage_model" not in payload and slippage_section:
         enabled = bool(slippage_section.get("enabled", False))
         payload["slippage_model"] = str(slippage_section.get("model", "fixed_bps" if enabled else "none"))
@@ -549,6 +552,16 @@ def load_daily_trading_workflow_config(path: str | Path) -> DailyTradingWorkflow
     _set_if_missing(payload, "commission_bps", cost_section)
     _set_if_missing(payload, "minimum_commission", cost_section)
     _set_if_missing(payload, "spread_bps", cost_section)
+    _set_if_missing(payload, "min_weight_change_to_trade", execution_section)
+    _set_if_missing(payload, "entry_score_threshold", score_band_section)
+    _set_if_missing(payload, "exit_score_threshold", score_band_section)
+    _set_if_missing(payload, "hold_score_band", score_band_section)
+    _set_if_missing(payload, "use_percentile_thresholds", score_band_section)
+    _set_if_missing(payload, "entry_score_percentile", score_band_section)
+    _set_if_missing(payload, "exit_score_percentile", score_band_section)
+    _set_if_missing(payload, "apply_bands_to_new_entries", score_band_section)
+    _set_if_missing(payload, "apply_bands_to_reductions", score_band_section)
+    _set_if_missing(payload, "apply_bands_to_full_exits", score_band_section)
     _set_if_missing(payload, "enable_strategy_diagnostics", report_section)
     _set_if_missing(payload, "refresh_dashboard_static_data", dashboard_section)
     _set_if_missing(payload, "refresh_dashboard_static_data", dashboard_section, "refresh_static_data")

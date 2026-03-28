@@ -346,6 +346,13 @@ daily_trading:
     activated_dir: artifacts/strategy_portfolio/run_current/activated
   paper:
     auto_apply_fills: true
+    execution:
+      min_weight_change_to_trade: 0.015
+      score_bands:
+        use_percentile_thresholds: true
+        entry_score_percentile: 0.85
+        exit_score_percentile: 0.60
+        hold_score_band: true
   report:
     enable_strategy_diagnostics: true
   dashboard:
@@ -361,6 +368,10 @@ daily_trading:
     assert config.research_mode == "fast_refresh"
     assert config.stages.promote is True
     assert config.auto_apply_fills is True
+    assert config.min_weight_change_to_trade == 0.015
+    assert config.use_percentile_thresholds is True
+    assert config.entry_score_percentile == 0.85
+    assert config.exit_score_percentile == 0.60
     assert config.activated_dir == "artifacts/strategy_portfolio/run_current/activated"
     assert config.enable_strategy_diagnostics is True
     assert config.refresh_dashboard_static_data is True
@@ -1199,7 +1210,7 @@ def test_load_strategy_portfolio_policy_config_accepts_new_weighting_modes(tmp_p
     path.write_text(
         """
 schema_version: 1
-weighting_mode: capped_metric_weighted
+weighting_mode: cost_adjusted
 metric_weight_cap_multiple: 1.25
 """.strip(),
         encoding="utf-8",
@@ -1207,7 +1218,7 @@ metric_weight_cap_multiple: 1.25
 
     config = load_strategy_portfolio_policy_config(path)
 
-    assert config.weighting_mode == "capped_metric_weighted"
+    assert config.weighting_mode == "cost_adjusted"
     assert config.metric_weight_cap_multiple == 1.25
 
 
@@ -1530,6 +1541,15 @@ def test_example_configs_load_from_repo() -> None:
 
     assert pipeline_config.schedule_type == "daily"
     assert daily_trading_config.run_name == "run_current"
+    assert daily_trading_config.slippage_model == "fixed_bps"
+    assert daily_trading_config.slippage_buy_bps == 10.0
+    assert daily_trading_config.slippage_sell_bps == 10.0
+    assert daily_trading_config.enable_cost_model is True
+    assert daily_trading_config.commission_bps == 10.0
+    assert daily_trading_config.minimum_commission == 1.0
+    assert daily_trading_config.spread_bps == 20.0
+    assert daily_trading_config.min_weight_change_to_trade == 0.02
+    assert daily_trading_config.hold_score_band is True
     assert classification_config.output_dir == "artifacts/reference/classifications"
     assert optimizer_config.optimizer_name == "min_vol"
     assert validation_config.output_dir == "artifacts/validation/vectorbt"

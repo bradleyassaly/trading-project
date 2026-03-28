@@ -63,7 +63,26 @@ def _build_result(*, equity: float = 10_100.0) -> PaperTradingRunResult:
                 "summary": {"mean_turnover": 0.12},
                 "skip_reasons": {},
             },
-            "order_generation": {"equity": 10_000.0},
+            "order_generation": {
+                "equity": 10_000.0,
+                "skipped_trades_count": 2,
+                "skipped_turnover": 0.03,
+                "effective_turnover_reduction": 0.2,
+            },
+            "paper_execution": {
+                "min_weight_change_to_trade": 0.02,
+                "score_band_enabled": True,
+                "entry_threshold_used": 0.85,
+                "exit_threshold_used": 0.60,
+                "blocked_entries_count": 3,
+                "held_in_hold_zone_count": 4,
+                "forced_exit_count": 1,
+                "skipped_due_to_entry_band_count": 3,
+                "skipped_due_to_hold_zone_count": 4,
+                "skipped_trades_count": 2,
+                "skipped_turnover": 0.03,
+                "effective_turnover_reduction": 0.2,
+            },
             "accounting": {
                 "starting_cash": 10_000.0,
                 "ending_cash": 9_150.0,
@@ -122,6 +141,13 @@ def test_persist_paper_run_outputs_writes_ledgers_and_latest_summaries(tmp_path:
     assert latest_payload["summary"]["portfolio_construction_mode"] == "transition"
     assert latest_payload["summary"]["fill_count"] == 1
     assert latest_payload["summary"]["total_pnl"] == 100.0
+    assert latest_payload["summary"]["skipped_trades_count"] == 2
+    assert latest_payload["summary"]["skipped_turnover"] == 0.03
+    assert latest_payload["summary"]["effective_turnover_reduction"] == 0.2
+    assert latest_payload["summary"]["min_weight_change_to_trade"] == 0.02
+    assert latest_payload["summary"]["score_band_enabled"] is True
+    assert latest_payload["summary"]["blocked_entries_count"] == 3
+    assert latest_payload["summary"]["held_in_hold_zone_count"] == 4
     assert "health_checks" in latest_payload
 
 

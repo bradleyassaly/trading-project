@@ -140,6 +140,18 @@ def _read_csv_records(path: str | Path | None) -> list[dict[str, Any]]:
     return _normalize_records(frame.to_dict(orient="records"))
 
 
+def _read_json(path: str | Path | None) -> dict[str, Any]:
+    if path is None:
+        return {}
+    file_path = Path(path)
+    if not file_path.exists():
+        return {}
+    try:
+        return json.loads(file_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+
+
 def normalize_strategy_ownership(raw: dict[str, Any] | None) -> dict[str, float]:
     weights = {
         str(strategy_id): abs(_safe_float(weight))
@@ -579,6 +591,9 @@ def build_reconciliation_summary(
     symbol_rows: list[dict[str, Any]],
     portfolio_realized_pnl: float,
     portfolio_unrealized_pnl: float,
+    portfolio_gross_realized_pnl: float | None = None,
+    portfolio_gross_unrealized_pnl: float | None = None,
+    portfolio_total_execution_cost: float | None = None,
     tolerance: float = 1e-6,
 ) -> dict[str, Any]:
     strategy_realized = float(sum(_safe_float(row.get("net_realized_pnl", row.get("realized_pnl"))) for row in strategy_rows))
@@ -604,32 +619,77 @@ def build_reconciliation_summary(
     strategy_cost_total = float(sum(_safe_float(row.get("total_execution_cost")) for row in strategy_rows))
     symbol_cost_total = float(sum(_safe_float(row.get("total_execution_cost")) for row in symbol_rows))
     portfolio_net_total = float(portfolio_realized_pnl + portfolio_unrealized_pnl)
+    portfolio_gross_realized = float(
+        portfolio_gross_realized_pnl if portfolio_gross_realized_pnl is not None else portfolio_realized_pnl
+    )
+    portfolio_gross_unrealized = float(
+        portfolio_gross_unrealized_pnl if portfolio_gross_unrealized_pnl is not None else portfolio_unrealized_pnl
+    )
+    portfolio_gross_total = float(portfolio_gross_realized + portfolio_gross_unrealized)
+    portfolio_cost_total = float(
+        portfolio_total_execution_cost if portfolio_total_execution_cost is not None else (portfolio_gross_total - portfolio_net_total)
+    )
     strategy_total = float(strategy_realized + strategy_unrealized)
     symbol_total = float(symbol_realized + symbol_unrealized)
+    strategy_gross_residual = float(portfolio_gross_total - strategy_gross_total)
+    symbol_gross_residual = float(portfolio_gross_total - symbol_gross_total)
     strategy_residual = float(portfolio_net_total - strategy_total)
     symbol_residual = float(portfolio_net_total - symbol_total)
-    strategy_cost_residual = float(strategy_gross_total - strategy_total - strategy_cost_total)
-    symbol_cost_residual = float(symbol_gross_total - symbol_total - symbol_cost_total)
+    strategy_cost_residual = float(portfolio_cost_total - strategy_cost_total)
+    symbol_cost_residual = float(portfolio_cost_total - symbol_cost_total)
+    strategy_realized_residual = float(portfolio_realized_pnl - strategy_realized)
+    symbol_realized_residual = float(portfolio_realized_pnl - symbol_realized)
+    strategy_unrealized_residual = float(portfolio_unrealized_pnl - strategy_unrealized)
+    symbol_unrealized_residual = float(portfolio_unrealized_pnl - symbol_unrealized)
     return {
         "portfolio_total_pnl": portfolio_net_total,
         "portfolio_net_total_pnl": portfolio_net_total,
         "portfolio_realized_pnl": float(portfolio_realized_pnl),
         "portfolio_unrealized_pnl": float(portfolio_unrealized_pnl),
-        "portfolio_total_execution_cost": strategy_cost_total,
-        "portfolio_gross_total_pnl": float(portfolio_net_total + strategy_cost_total),
+        "portfolio_gross_realized_pnl": portfolio_gross_realized,
+        "portfolio_gross_unrealized_pnl": portfolio_gross_unrealized,
+        "portfolio_total_execution_cost": portfolio_cost_total,
+        "portfolio_gross_total_pnl": portfolio_gross_total,
         "strategy_total_pnl": strategy_total,
         "strategy_net_total_pnl": strategy_total,
         "strategy_gross_total_pnl": strategy_gross_total,
         "symbol_total_pnl": symbol_total,
         "symbol_net_total_pnl": symbol_total,
         "symbol_gross_total_pnl": symbol_gross_total,
+        "strategy_realized_pnl": strategy_realized,
+        "symbol_realized_pnl": symbol_realized,
+        "strategy_unrealized_pnl": strategy_unrealized,
+        "symbol_unrealized_pnl": symbol_unrealized,
+        "strategy_gross_residual": strategy_gross_residual,
+        "symbol_gross_residual": symbol_gross_residual,
         "strategy_residual": strategy_residual,
         "symbol_residual": symbol_residual,
+        "strategy_realized_residual": strategy_realized_residual,
+        "symbol_realized_residual": symbol_realized_residual,
+        "strategy_unrealized_residual": strategy_unrealized_residual,
+        "symbol_unrealized_residual": symbol_unrealized_residual,
         "strategy_cost_residual": strategy_cost_residual,
         "symbol_cost_residual": symbol_cost_residual,
-        "cost_reconciled": abs(strategy_cost_residual) <= tolerance and abs(symbol_cost_residual) <= tolerance,
-        "strategy_reconciled": abs(strategy_residual) <= tolerance and abs(strategy_cost_residual) <= tolerance,
-        "symbol_reconciled": abs(symbol_residual) <= tolerance and abs(symbol_cost_residual) <= tolerance,
+        "cost_reconciled": (
+            abs(strategy_cost_residual) <= tolerance
+            and abs(symbol_cost_residual) <= tolerance
+            and abs(strategy_gross_residual) <= tolerance
+            and abs(symbol_gross_residual) <= tolerance
+        ),
+        "strategy_reconciled": (
+            abs(strategy_residual) <= tolerance
+            and abs(strategy_gross_residual) <= tolerance
+            and abs(strategy_cost_residual) <= tolerance
+            and abs(strategy_realized_residual) <= tolerance
+            and abs(strategy_unrealized_residual) <= tolerance
+        ),
+        "symbol_reconciled": (
+            abs(symbol_residual) <= tolerance
+            and abs(symbol_gross_residual) <= tolerance
+            and abs(symbol_cost_residual) <= tolerance
+            and abs(symbol_realized_residual) <= tolerance
+            and abs(symbol_unrealized_residual) <= tolerance
+        ),
         "tolerance": tolerance,
     }
 
@@ -768,13 +828,18 @@ def aggregate_replay_attribution(
     strategy_rows: list[dict[str, Any]] = []
     symbol_rows: list[dict[str, Any]] = []
     trade_rows: list[dict[str, Any]] = []
+    portfolio_summary: dict[str, Any] = {}
     for day_dir in sorted(path for path in root.iterdir() if path.is_dir()):
         strategy_path = day_dir / "paper" / "strategy_pnl_attribution.csv"
         symbol_path = day_dir / "paper" / "symbol_pnl_attribution.csv"
         trade_path = day_dir / "paper" / "trade_pnl_attribution.csv"
+        paper_summary_path = day_dir / "paper" / "paper_run_summary_latest.json"
         strategy_rows.extend(_read_csv_records(strategy_path))
         symbol_rows.extend(_read_csv_records(symbol_path))
         trade_rows.extend(_read_csv_records(trade_path))
+        day_summary = _read_json(paper_summary_path).get("summary")
+        if isinstance(day_summary, dict) and day_summary:
+            portfolio_summary = day_summary
     if not strategy_rows and not symbol_rows and not trade_rows:
         return {
             "strategy_rows": [],
@@ -919,8 +984,36 @@ def aggregate_replay_attribution(
     reconciliation = build_reconciliation_summary(
         strategy_rows=replay_strategy_rows,
         symbol_rows=replay_symbol_rows,
-        portfolio_realized_pnl=float(sum(_safe_float(row.get("realized_pnl")) for row in replay_strategy_rows)),
-        portfolio_unrealized_pnl=float(sum(_safe_float(row.get("unrealized_pnl")) for row in replay_strategy_rows)),
+        portfolio_realized_pnl=float(
+            portfolio_summary.get(
+                "net_realized_pnl",
+                portfolio_summary.get("cumulative_realized_pnl", sum(_safe_float(row.get("realized_pnl")) for row in replay_strategy_rows)),
+            )
+        ),
+        portfolio_unrealized_pnl=float(
+            portfolio_summary.get(
+                "net_unrealized_pnl",
+                portfolio_summary.get("unrealized_pnl", sum(_safe_float(row.get("unrealized_pnl")) for row in replay_strategy_rows)),
+            )
+        ),
+        portfolio_gross_realized_pnl=float(
+            portfolio_summary.get(
+                "gross_realized_pnl",
+                sum(_safe_float(row.get("gross_realized_pnl")) for row in replay_strategy_rows),
+            )
+        ),
+        portfolio_gross_unrealized_pnl=float(
+            portfolio_summary.get(
+                "gross_unrealized_pnl",
+                sum(_safe_float(row.get("gross_unrealized_pnl")) for row in replay_strategy_rows),
+            )
+        ),
+        portfolio_total_execution_cost=float(
+            portfolio_summary.get(
+                "total_execution_cost",
+                sum(_safe_float(row.get("total_execution_cost")) for row in replay_strategy_rows),
+            )
+        ),
     )
     summary = build_attribution_summary(
         strategy_rows=replay_strategy_rows,

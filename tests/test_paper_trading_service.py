@@ -13,9 +13,6 @@ from trading_platform.paper.models import (
     PaperPortfolioState,
     PaperPosition,
     PaperTradingConfig,
-    PaperOrder,
-    PaperSignalSnapshot,
-    OrderGenerationResult,
 )
 from trading_platform.paper.service import (
     JsonPaperStateStore,
@@ -46,6 +43,196 @@ def test_generate_rebalance_orders_creates_buys_and_sells() -> None:
     assert {order.symbol for order in result.orders} == {"AAPL", "MSFT", "NVDA"}
     assert {order.side for order in result.orders if order.symbol == "MSFT"} == {"SELL"}
     assert {order.side for order in result.orders if order.symbol == "NVDA"} == {"BUY"}
+
+
+def test_generate_rebalance_orders_skips_small_weight_change() -> None:
+    state = PaperPortfolioState(
+        cash=9_000.0,
+        positions={"AAPL": PaperPosition(symbol="AAPL", quantity=10, avg_price=100.0, last_price=100.0)},
+    )
+
+    result = generate_rebalance_orders(
+        state=state,
+        latest_target_weights={"AAPL": 0.11},
+        latest_prices={"AAPL": 100.0},
+        min_trade_dollars=1.0,
+        min_weight_change_to_trade=0.02,
+        lot_size=1,
+    )
+
+    assert result.orders == []
+    assert result.diagnostics["skipped_trades_count"] == 1
+    assert result.diagnostics["skipped_turnover"] == pytest.approx(0.01)
+    assert result.diagnostics["effective_turnover_reduction"] == pytest.approx(1.0)
+
+
+def test_generate_rebalance_orders_keeps_large_weight_change() -> None:
+    state = PaperPortfolioState(
+        cash=9_000.0,
+        positions={"AAPL": PaperPosition(symbol="AAPL", quantity=10, avg_price=100.0, last_price=100.0)},
+    )
+
+    result = generate_rebalance_orders(
+        state=state,
+        latest_target_weights={"AAPL": 0.15},
+        latest_prices={"AAPL": 100.0},
+        min_trade_dollars=1.0,
+        min_weight_change_to_trade=0.02,
+        lot_size=1,
+    )
+
+    assert len(result.orders) == 1
+    assert result.orders[0].symbol == "AAPL"
+    assert result.diagnostics["skipped_trades_count"] == 0
+    assert result.diagnostics["skipped_turnover"] == pytest.approx(0.0)
+
+
+def test_generate_rebalance_orders_reports_turnover_reduction_for_mixed_changes() -> None:
+    state = PaperPortfolioState(
+        cash=8_000.0,
+        positions={
+            "AAPL": PaperPosition(symbol="AAPL", quantity=10, avg_price=100.0, last_price=100.0),
+            "MSFT": PaperPosition(symbol="MSFT", quantity=10, avg_price=100.0, last_price=100.0),
+        },
+    )
+
+    result = generate_rebalance_orders(
+        state=state,
+        latest_target_weights={"AAPL": 0.11, "MSFT": 0.20},
+        latest_prices={"AAPL": 100.0, "MSFT": 100.0},
+        min_trade_dollars=1.0,
+        min_weight_change_to_trade=0.02,
+        lot_size=1,
+    )
+
+    assert {order.symbol for order in result.orders} == {"MSFT"}
+    assert result.diagnostics["skipped_trades_count"] == 1
+    assert result.diagnostics["skipped_turnover"] == pytest.approx(0.01)
+    assert result.diagnostics["effective_turnover_reduction"] == pytest.approx(0.01 / 0.11)
+
+
+def test_generate_rebalance_orders_blocks_new_entry_below_entry_threshold() -> None:
+    result = generate_rebalance_orders(
+        state=PaperPortfolioState(cash=10_000.0, positions={}),
+        latest_target_weights={"AAPL": 0.20},
+        latest_prices={"AAPL": 100.0},
+        latest_scores={"AAPL": 0.40},
+        config=PaperTradingConfig(
+            symbols=["AAPL"],
+            min_trade_dollars=1.0,
+            entry_score_threshold=0.60,
+            exit_score_threshold=0.40,
+        ),
+        min_trade_dollars=1.0,
+    )
+
+    assert result.orders == []
+    assert result.diagnostics["blocked_entries_count"] == 1
+    assert result.diagnostics["band_decision_rows"][0]["band_decision"] == "blocked_entry"
+
+
+def test_generate_rebalance_orders_allows_new_entry_above_entry_threshold() -> None:
+    result = generate_rebalance_orders(
+        state=PaperPortfolioState(cash=10_000.0, positions={}),
+        latest_target_weights={"AAPL": 0.20},
+        latest_prices={"AAPL": 100.0},
+        latest_scores={"AAPL": 0.90},
+        config=PaperTradingConfig(
+            symbols=["AAPL"],
+            min_trade_dollars=1.0,
+            entry_score_threshold=0.60,
+            exit_score_threshold=0.40,
+        ),
+        min_trade_dollars=1.0,
+    )
+
+    assert len(result.orders) == 1
+    assert result.orders[0].symbol == "AAPL"
+
+
+def test_generate_rebalance_orders_holds_position_in_hold_zone() -> None:
+    state = PaperPortfolioState(
+        cash=9_000.0,
+        positions={"AAPL": PaperPosition(symbol="AAPL", quantity=10, avg_price=100.0, last_price=100.0)},
+    )
+    result = generate_rebalance_orders(
+        state=state,
+        latest_target_weights={"AAPL": 0.0},
+        latest_prices={"AAPL": 100.0},
+        latest_scores={"AAPL": 0.50},
+        config=PaperTradingConfig(
+            symbols=["AAPL"],
+            min_trade_dollars=1.0,
+            entry_score_threshold=0.80,
+            exit_score_threshold=0.30,
+            hold_score_band=True,
+        ),
+        min_trade_dollars=1.0,
+    )
+
+    assert result.orders == []
+    assert result.diagnostics["held_in_hold_zone_count"] == 1
+    assert result.diagnostics["band_decision_rows"][0]["band_decision"] == "hold_zone"
+
+
+def test_generate_rebalance_orders_forces_exit_below_exit_threshold() -> None:
+    state = PaperPortfolioState(
+        cash=9_000.0,
+        positions={"AAPL": PaperPosition(symbol="AAPL", quantity=10, avg_price=100.0, last_price=100.0)},
+    )
+    result = generate_rebalance_orders(
+        state=state,
+        latest_target_weights={"AAPL": 0.0},
+        latest_prices={"AAPL": 100.0},
+        latest_scores={"AAPL": 0.10},
+        config=PaperTradingConfig(
+            symbols=["AAPL"],
+            min_trade_dollars=1.0,
+            entry_score_threshold=0.80,
+            exit_score_threshold=0.30,
+        ),
+        min_trade_dollars=1.0,
+    )
+
+    assert len(result.orders) == 1
+    assert result.orders[0].side == "SELL"
+    assert result.diagnostics["forced_exit_count"] == 1
+
+
+def test_generate_rebalance_orders_combines_score_bands_with_weight_hysteresis() -> None:
+    result = generate_rebalance_orders(
+        state=PaperPortfolioState(cash=10_000.0, positions={}),
+        latest_target_weights={"AAPL": 0.01},
+        latest_prices={"AAPL": 100.0},
+        latest_scores={"AAPL": 0.90},
+        config=PaperTradingConfig(
+            symbols=["AAPL"],
+            min_trade_dollars=1.0,
+            entry_score_threshold=0.80,
+            exit_score_threshold=0.50,
+            min_weight_change_to_trade=0.02,
+        ),
+        min_trade_dollars=1.0,
+        min_weight_change_to_trade=0.02,
+    )
+
+    assert result.orders == []
+    assert result.diagnostics["blocked_entries_count"] == 0
+    assert result.diagnostics["skipped_trades_count"] == 1
+
+
+def test_generate_rebalance_orders_disabled_score_bands_preserve_prior_behavior() -> None:
+    result = generate_rebalance_orders(
+        state=PaperPortfolioState(cash=10_000.0, positions={}),
+        latest_target_weights={"AAPL": 0.20},
+        latest_prices={"AAPL": 100.0},
+        latest_scores={"AAPL": 0.10},
+        config=PaperTradingConfig(symbols=["AAPL"], min_trade_dollars=1.0),
+        min_trade_dollars=1.0,
+    )
+
+    assert len(result.orders) == 1
+    assert result.diagnostics["score_band_enabled"] is False
 
 
 def test_apply_filled_orders_updates_cash_and_positions() -> None:

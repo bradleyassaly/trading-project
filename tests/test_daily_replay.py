@@ -82,6 +82,12 @@ def _install_fake_daily_runner(monkeypatch: pytest.MonkeyPatch, *, fail_dates: s
                     "requested_symbol_count": 3,
                     "usable_symbol_count": 2,
                     "executable_order_count": order_count,
+                    "blocked_entries_count": 1 if fill_count else 0,
+                    "held_in_hold_zone_count": 0 if fill_count else 1,
+                    "forced_exit_count": 0,
+                    "score_band_enabled": True,
+                    "entry_threshold_used": 0.85,
+                    "exit_threshold_used": 0.60,
                     "fill_count": fill_count,
                     "turnover_estimate": 0.2 if fill_count else 0.0,
                     "realized_holdings_count": len(positions),
@@ -119,6 +125,11 @@ def _install_fake_daily_runner(monkeypatch: pytest.MonkeyPatch, *, fail_dates: s
                     "signal_source": "multi_strategy",
                     "signal_score": 0.9,
                     "rank": 1,
+                    "score_value": 0.9,
+                    "score_rank": 1,
+                    "entry_threshold": 0.85,
+                    "exit_threshold": 0.60,
+                    "band_decision": "passed_entry",
                     "current_weight": 0.0,
                     "target_weight": 0.5,
                     "weight_delta": 0.5,
@@ -190,6 +201,58 @@ def test_build_day_config_preserves_upstream_inputs_when_research_is_skipped(tmp
     assert day_config.paper_output_dir == str(tmp_path / "replay" / "2025-01-03" / "paper")
 
 
+def test_build_day_config_preserves_execution_cost_settings(tmp_path: Path) -> None:
+    base = DailyTradingWorkflowConfig(
+        run_name="base",
+        output_root=str(tmp_path / "daily"),
+        promotion_policy_config="configs/promotion.yaml",
+        strategy_portfolio_policy_config="configs/strategy_portfolio.yaml",
+        slippage_model="fixed_bps",
+        slippage_buy_bps=10.0,
+        slippage_sell_bps=10.0,
+        enable_cost_model=True,
+        commission_bps=10.0,
+        minimum_commission=1.0,
+        spread_bps=20.0,
+    )
+
+    day_config = _build_day_config(
+        base,
+        replay_root=tmp_path / "replay",
+        requested_date="2025-01-03",
+        state_path=tmp_path / "replay" / "replay_state.json",
+    )
+
+    assert day_config.slippage_model == "fixed_bps"
+    assert day_config.slippage_buy_bps == 10.0
+    assert day_config.slippage_sell_bps == 10.0
+    assert day_config.enable_cost_model is True
+    assert day_config.commission_bps == 10.0
+    assert day_config.minimum_commission == 1.0
+    assert day_config.spread_bps == 20.0
+
+
+def test_build_day_config_can_override_strategy_weighting_metrics_path(tmp_path: Path) -> None:
+    base = DailyTradingWorkflowConfig(
+        run_name="base",
+        output_root=str(tmp_path / "daily"),
+        promotion_policy_config="configs/promotion.yaml",
+        strategy_portfolio_policy_config="configs/strategy_portfolio.yaml",
+        strategy_weighting_metrics_path=str(tmp_path / "base_metrics.csv"),
+    )
+    prior_metrics_path = tmp_path / "replay" / "2025-01-03" / "paper" / "strategy_pnl_attribution.csv"
+
+    day_config = _build_day_config(
+        base,
+        replay_root=tmp_path / "replay",
+        requested_date="2025-01-06",
+        state_path=tmp_path / "replay" / "replay_state.json",
+        strategy_weighting_metrics_path=prior_metrics_path,
+    )
+
+    assert day_config.strategy_weighting_metrics_path == str(prior_metrics_path)
+
+
 def test_run_daily_replay_writes_day_folders_and_carries_state(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _install_fake_daily_runner(monkeypatch)
     config = DailyReplayWorkflowConfig(
@@ -222,6 +285,8 @@ def test_run_daily_replay_writes_day_folders_and_carries_state(monkeypatch: pyte
     assert summary["failed_day_count"] == 0
     assert summary["avg_requested_symbol_count"] > 0
     assert summary["avg_usable_symbol_count"] > 0
+    assert summary["blocked_entries_count"] >= 0
+    assert summary["held_in_hold_zone_count"] >= 0
     assert (tmp_path / "replay" / "2025-01-03" / "replay_day_input_summary.json").exists()
     assert (tmp_path / "replay" / "replay_daily_metrics.csv").exists()
     assert (tmp_path / "replay" / "replay_trade_log.csv").exists()
@@ -399,3 +464,151 @@ def test_run_daily_replay_profile_timings_writes_artifacts(monkeypatch: pytest.M
         Path(result.artifact_paths["replay_timing_summary_json_path"]).read_text(encoding="utf-8")
     )
     assert timing_summary["day_count"] == 2
+
+
+def test_run_daily_replay_input_summary_includes_execution_cost_config(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _install_fake_daily_runner(monkeypatch)
+    config = DailyReplayWorkflowConfig(
+        daily_trading=DailyTradingWorkflowConfig(
+            run_name="base_daily",
+            output_root=str(tmp_path / "unused"),
+            promotion_policy_config="configs/promotion.yaml",
+            strategy_portfolio_policy_config="configs/strategy_portfolio.yaml",
+            slippage_model="fixed_bps",
+            slippage_buy_bps=10.0,
+            slippage_sell_bps=10.0,
+            enable_cost_model=True,
+            commission_bps=10.0,
+            minimum_commission=1.0,
+            spread_bps=20.0,
+        ),
+        output_dir=str(tmp_path / "replay"),
+        start_date="2025-01-03",
+        end_date="2025-01-03",
+        stop_on_error=True,
+        continue_on_error=False,
+        replay=DailyReplayTuningConfig(),
+    )
+
+    run_daily_replay(config)
+
+    input_summary = json.loads(
+        (tmp_path / "replay" / "2025-01-03" / "replay_day_input_summary.json").read_text(encoding="utf-8")
+    )
+    assert input_summary["execution_config"]["slippage_model"] == "fixed_bps"
+    assert input_summary["execution_config"]["cost_model_enabled"] is True
+    assert input_summary["execution_config"]["commission_bps"] == 10.0
+    assert input_summary["execution_config"]["spread_bps"] == 20.0
+
+
+def test_run_daily_replay_input_summary_includes_score_band_config(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _install_fake_daily_runner(monkeypatch)
+    config = DailyReplayWorkflowConfig(
+        daily_trading=DailyTradingWorkflowConfig(
+            run_name="base_daily",
+            output_root=str(tmp_path / "unused"),
+            promotion_policy_config="configs/promotion.yaml",
+            strategy_portfolio_policy_config="configs/strategy_portfolio.yaml",
+            use_percentile_thresholds=True,
+            entry_score_percentile=0.85,
+            exit_score_percentile=0.60,
+            hold_score_band=True,
+        ),
+        output_dir=str(tmp_path / "replay"),
+        start_date="2025-01-03",
+        end_date="2025-01-03",
+        stop_on_error=True,
+        continue_on_error=False,
+        replay=DailyReplayTuningConfig(),
+    )
+
+    run_daily_replay(config)
+
+    input_summary = json.loads(
+        (tmp_path / "replay" / "2025-01-03" / "replay_day_input_summary.json").read_text(encoding="utf-8")
+    )
+    assert input_summary["execution_config"]["score_band_enabled"] is True
+    assert input_summary["execution_config"]["use_percentile_thresholds"] is True
+    assert input_summary["execution_config"]["entry_score_percentile"] == 0.85
+    assert input_summary["execution_config"]["exit_score_percentile"] == 0.60
+
+
+def test_run_daily_replay_carries_forward_strategy_weighting_metrics_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    seen_paths: list[str | None] = []
+
+    def fake_run(config, *, replay_as_of_date=None, replay_settings=None, refresh_dashboard_static_data=None):
+        seen_paths.append(config.strategy_weighting_metrics_path)
+        run_dir = Path(config.output_root) / config.run_name
+        (run_dir / "paper").mkdir(parents=True, exist_ok=True)
+        (run_dir / "report").mkdir(parents=True, exist_ok=True)
+        _write_json(run_dir / "daily_trading_summary.json", {"status": "succeeded", "active_strategy_count": 2})
+        _write_json(
+            run_dir / "paper" / "paper_run_summary_latest.json",
+            {"summary": {"requested_symbol_count": 1, "usable_symbol_count": 1, "current_equity": 100_000.0}},
+        )
+        pd.DataFrame(
+            [
+                {
+                    "strategy_id": "alpha",
+                    "net_total_pnl": 10.0,
+                    "gross_total_pnl": 12.0,
+                    "turnover": 100.0,
+                    "total_execution_cost": 2.0,
+                    "trade_count": 1,
+                    "closed_trade_count": 1,
+                    "winning_trade_count": 1,
+                }
+            ]
+        ).to_csv(run_dir / "paper" / "strategy_pnl_attribution.csv", index=False)
+        pd.DataFrame(columns=["symbol", "side", "quantity", "fill_price"]).to_csv(run_dir / "paper" / "paper_fills.csv", index=False)
+        pd.DataFrame(columns=["strategy_id", "is_active", "normalized_capital_weight"]).to_csv(
+            run_dir / "report" / "strategy_comparison_summary.csv",
+            index=False,
+        )
+        pd.DataFrame(columns=["date", "symbol", "strategy_id", "action", "action_reason"]).to_csv(
+            run_dir / "trade_decision_log.csv",
+            index=False,
+        )
+        return DailyTradingResult(
+            run_name=config.run_name,
+            run_id=None,
+            run_dir=str(run_dir),
+            started_at="2026-03-27T00:00:00+00:00",
+            ended_at="2026-03-27T00:00:01+00:00",
+            duration_seconds=1.0,
+            status="succeeded",
+            stage_records=[],
+            warnings=[],
+            errors=[],
+            summary_json_path=str(run_dir / "daily_trading_summary.json"),
+            summary_md_path=str(run_dir / "daily_trading_summary.md"),
+            key_artifacts={},
+        )
+
+    monkeypatch.setattr("trading_platform.orchestration.daily_replay.run_daily_trading_pipeline", fake_run)
+    config = DailyReplayWorkflowConfig(
+        daily_trading=DailyTradingWorkflowConfig(
+            run_name="base_daily",
+            output_root=str(tmp_path / "unused"),
+            promotion_policy_config="configs/promotion.yaml",
+            strategy_portfolio_policy_config="configs/strategy_portfolio.yaml",
+        ),
+        output_dir=str(tmp_path / "replay"),
+        start_date="2025-01-03",
+        end_date="2025-01-07",
+        max_days=2,
+        stop_on_error=True,
+        continue_on_error=False,
+        replay=DailyReplayTuningConfig(),
+    )
+
+    run_daily_replay(config)
+
+    assert seen_paths[0] is None
+    assert seen_paths[1] == str(tmp_path / "replay" / "2025-01-03" / "paper" / "strategy_pnl_attribution.csv")

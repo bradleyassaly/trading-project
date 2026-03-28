@@ -4,6 +4,8 @@ import json
 from argparse import Namespace
 from pathlib import Path
 
+import pandas as pd
+
 from trading_platform.cli.commands.strategy_portfolio_build import cmd_strategy_portfolio_build
 from trading_platform.cli.commands.strategy_portfolio_activate import cmd_strategy_portfolio_activate
 from trading_platform.cli.commands.strategy_portfolio_export_run_config import (
@@ -86,6 +88,12 @@ def _write_promoted_strategies(root: Path) -> Path:
     }
     (root / "promoted_strategies.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
     return root
+
+
+def _write_strategy_pnl(root: Path, rows: list[dict[str, object]]) -> Path:
+    root.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(rows).to_csv(root / "strategy_pnl_attribution.csv", index=False)
+    return root / "strategy_pnl_attribution.csv"
 
 
 def test_strategy_portfolio_build_applies_caps_and_deduplicates(tmp_path: Path) -> None:
@@ -348,6 +356,89 @@ def test_strategy_portfolio_risk_adjusted_weighting_penalizes_drawdown(tmp_path:
     rows = {row["preset_name"]: row for row in result["selected_strategies"]}
 
     assert rows["lower_risk"]["allocation_weight"] > rows["higher_risk"]["allocation_weight"]
+
+
+def test_strategy_portfolio_cost_adjusted_weighting_prefers_high_efficiency_strategies(tmp_path: Path) -> None:
+    promoted_dir = _write_promoted_strategies(tmp_path / "promoted")
+    metrics_path = _write_strategy_pnl(
+        tmp_path / "paper",
+        [
+            {
+                "date": "2025-01-06",
+                "strategy_id": "generated_momentum_a",
+                "net_total_pnl": 120.0,
+                "gross_total_pnl": 150.0,
+                "turnover": 1000.0,
+                "total_execution_cost": 30.0,
+            },
+            {
+                "date": "2025-01-06",
+                "strategy_id": "generated_momentum_b",
+                "net_total_pnl": -10.0,
+                "gross_total_pnl": 20.0,
+                "turnover": 900.0,
+                "total_execution_cost": 30.0,
+            },
+            {
+                "date": "2025-01-06",
+                "strategy_id": "generated_value_a",
+                "net_total_pnl": 20.0,
+                "gross_total_pnl": 40.0,
+                "turnover": 1000.0,
+                "total_execution_cost": 20.0,
+            },
+        ],
+    )
+
+    build_strategy_portfolio(
+        promoted_dir=promoted_dir,
+        output_dir=tmp_path / "cost_adjusted",
+        policy=StrategyPortfolioPolicyConfig(
+            max_strategies=3,
+            max_strategies_per_signal_family=2,
+            max_weight_per_strategy=1.0,
+            deduplicate_source_runs=False,
+            weighting_mode="cost_adjusted",
+        ),
+        strategy_weighting_metrics_path=metrics_path,
+    )
+    payload = load_strategy_portfolio(tmp_path / "cost_adjusted")
+    rows = {row["preset_name"]: row for row in payload["selected_strategies"]}
+    diagnostics = json.loads((tmp_path / "cost_adjusted" / "strategy_weighting_diagnostics.json").read_text(encoding="utf-8"))
+
+    assert rows["generated_momentum_a"]["allocation_weight"] > rows["generated_value_a"]["allocation_weight"]
+    assert rows["generated_momentum_b"]["allocation_weight"] == 0.0
+    assert payload["summary"]["weighting_mode_resolved"] == "cost_adjusted"
+    assert payload["summary"]["strategy_weighting_metrics_available"] is True
+    assert diagnostics["efficiency_ranking"][0]["preset_name"] == "generated_momentum_a"
+    assert diagnostics["cost_drag_ranking"][0]["preset_name"] == "generated_momentum_b"
+
+
+def test_strategy_portfolio_cost_adjusted_falls_back_when_metrics_missing(tmp_path: Path) -> None:
+    promoted_dir = _write_promoted_strategies(tmp_path / "promoted")
+
+    build_strategy_portfolio(
+        promoted_dir=promoted_dir,
+        output_dir=tmp_path / "cost_adjusted_missing",
+        policy=StrategyPortfolioPolicyConfig(
+            max_strategies=2,
+            max_strategies_per_signal_family=2,
+            deduplicate_source_runs=False,
+            weighting_mode="cost_adjusted",
+            max_weight_per_strategy=1.0,
+        ),
+        strategy_weighting_metrics_path=tmp_path / "missing.csv",
+    )
+    payload = load_strategy_portfolio(tmp_path / "cost_adjusted_missing")
+
+    assert "strategy_weighting_metrics_unavailable" in payload["warnings"]
+    assert payload["summary"]["strategy_weighting_metrics_available"] is False
+    assert {
+        row["preset_name"]: row["allocation_weight"] for row in payload["selected_strategies"]
+    } == {
+        "generated_momentum_a": 0.5,
+        "generated_momentum_b": 0.5,
+    }
 
 
 def test_strategy_portfolio_can_keep_conditional_sibling_for_same_run_when_enabled(tmp_path: Path) -> None:

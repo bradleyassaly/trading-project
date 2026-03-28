@@ -26,6 +26,7 @@ _VALID_WEIGHTING_MODES = {
     "equal_weight",
     "metric_weighted",
     "capped_metric_weighted",
+    "cost_adjusted",
     "inverse_count_by_signal_family",
     "score_then_cap",
     "risk_adjusted",
@@ -116,7 +117,7 @@ class StrategyPortfolioPolicyConfig:
         if resolved_weighting_mode not in _VALID_WEIGHTING_MODES:
             raise ValueError(
                 "weighting_mode must be one of: equal, metric_proportional, "
-                "equal_weight, metric_weighted, capped_metric_weighted, "
+                "equal_weight, metric_weighted, capped_metric_weighted, cost_adjusted, "
                 "inverse_count_by_signal_family, score_then_cap, "
                 "risk_adjusted, conditional_aware"
             )
@@ -163,6 +164,18 @@ def _safe_read_json(path: str | Path | None) -> dict[str, Any]:
         return {}
 
 
+def _safe_read_csv(path: str | Path | None) -> pd.DataFrame:
+    if path is None:
+        return pd.DataFrame()
+    file_path = Path(path)
+    if not file_path.exists():
+        return pd.DataFrame()
+    try:
+        return pd.read_csv(file_path)
+    except (pd.errors.EmptyDataError, pd.errors.ParserError):
+        return pd.DataFrame()
+
+
 def _write_payload(path: Path, payload: dict[str, Any]) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     suffix = path.suffix.lower()
@@ -180,6 +193,64 @@ def _write_payload(path: Path, payload: dict[str, Any]) -> Path:
 def _resolve_weighting_mode(weighting_mode: str) -> str:
     normalized = str(weighting_mode or "").strip()
     return _WEIGHTING_MODE_ALIASES.get(normalized, normalized)
+
+
+def _load_strategy_weighting_metrics(strategy_metrics_path: str | Path | None) -> tuple[dict[str, dict[str, float]], dict[str, Any]]:
+    frame = _safe_read_csv(strategy_metrics_path)
+    diagnostics = {
+        "source_path": str(Path(strategy_metrics_path)) if strategy_metrics_path is not None else None,
+        "source_exists": bool(strategy_metrics_path and Path(strategy_metrics_path).exists()),
+        "source_row_count": int(len(frame.index)) if not frame.empty else 0,
+        "strategy_count": 0,
+        "metrics_available": False,
+        "warnings": [],
+    }
+    if frame.empty:
+        diagnostics["warnings"].append("strategy_weighting_metrics_unavailable")
+        return {}, diagnostics
+    if "strategy_id" not in frame.columns:
+        diagnostics["warnings"].append("strategy_weighting_metrics_missing_strategy_id")
+        return {}, diagnostics
+
+    working = frame.copy()
+    if "date" in working.columns:
+        working["_date_sort"] = pd.to_datetime(working["date"], errors="coerce", utc=True)
+    else:
+        working["_date_sort"] = pd.NaT
+
+    for column in ("net_total_pnl", "gross_total_pnl", "total_execution_cost", "turnover"):
+        if column not in working.columns:
+            working[column] = 0.0
+        working[column] = pd.to_numeric(working[column], errors="coerce").fillna(0.0)
+    working = working.sort_values(["strategy_id", "_date_sort"], kind="stable")
+
+    metrics_lookup: dict[str, dict[str, float]] = {}
+    for strategy_id, group in working.groupby("strategy_id", dropna=False):
+        key = str(strategy_id or "").strip()
+        if not key:
+            continue
+        latest = group.iloc[-1]
+        net_total_pnl = float(latest.get("net_total_pnl", 0.0) or 0.0)
+        gross_total_pnl = float(latest.get("gross_total_pnl", 0.0) or 0.0)
+        execution_cost = float(latest.get("total_execution_cost", 0.0) or 0.0)
+        turnover = float(group["turnover"].sum())
+        pnl_per_turnover = float(net_total_pnl / turnover) if abs(turnover) > 1e-12 else 0.0
+        cost_drag_pct = float(execution_cost / abs(gross_total_pnl)) if abs(gross_total_pnl) > 1e-12 else 0.0
+        metrics_lookup[key] = {
+            "net_total_pnl": net_total_pnl,
+            "gross_total_pnl": gross_total_pnl,
+            "execution_cost": execution_cost,
+            "turnover": turnover,
+            "pnl_per_turnover": pnl_per_turnover,
+            "cost_drag_pct": cost_drag_pct,
+            "efficiency_score": pnl_per_turnover,
+        }
+
+    diagnostics["strategy_count"] = len(metrics_lookup)
+    diagnostics["metrics_available"] = bool(metrics_lookup)
+    if not metrics_lookup:
+        diagnostics["warnings"].append("strategy_weighting_metrics_empty_after_grouping")
+    return metrics_lookup, diagnostics
 
 
 def _load_promoted_strategies(promoted_dir: str | Path) -> list[dict[str, Any]]:
@@ -239,7 +310,12 @@ def _passes_filters(row: dict[str, Any], policy: StrategyPortfolioPolicyConfig) 
     return True, None
 
 
-def _build_base_weights(rows: list[dict[str, Any]], policy: StrategyPortfolioPolicyConfig) -> dict[str, float]:
+def _build_base_weights(
+    rows: list[dict[str, Any]],
+    policy: StrategyPortfolioPolicyConfig,
+    *,
+    strategy_metrics_lookup: dict[str, dict[str, float]] | None = None,
+) -> dict[str, float]:
     if not rows:
         return {}
     weighting_mode = _resolve_weighting_mode(policy.weighting_mode)
@@ -254,6 +330,16 @@ def _build_base_weights(rows: list[dict[str, Any]], policy: StrategyPortfolioPol
             str(row["preset_name"]): 1.0 / max(family_counts.get(str(row.get("signal_family") or "unknown"), 1), 1)
             for row in rows
         }
+    if weighting_mode == "cost_adjusted":
+        raw: dict[str, float] = {}
+        metrics_lookup = strategy_metrics_lookup or {}
+        for row in rows:
+            name = str(row["preset_name"])
+            metrics = metrics_lookup.get(name, {})
+            raw[name] = max(float(metrics.get("efficiency_score", 0.0) or 0.0), 0.0)
+        if sum(raw.values()) <= 0 and policy.fallback_equal_weight_mode:
+            return {str(row["preset_name"]): 1.0 for row in rows}
+        return raw
     if weighting_mode == "score_then_cap":
         ranked = _rank_candidates(
             rows,
@@ -311,6 +397,8 @@ def _effective_count(weights: list[float]) -> float:
 def _normalize_with_caps(
     rows: list[dict[str, Any]],
     policy: StrategyPortfolioPolicyConfig,
+    *,
+    strategy_metrics_lookup: dict[str, dict[str, float]] | None = None,
 ) -> tuple[dict[str, float], list[str]]:
     warnings: list[str] = []
     if not rows:
@@ -318,7 +406,7 @@ def _normalize_with_caps(
     if len(rows) * policy.min_weight_per_strategy > 1.0 + 1e-12:
         raise ValueError("min_weight_per_strategy is too large for the number of selected strategies")
 
-    raw = _build_base_weights(rows, policy)
+    raw = _build_base_weights(rows, policy, strategy_metrics_lookup=strategy_metrics_lookup)
     total = sum(raw.values())
     if total <= 0:
         raw = {str(row["preset_name"]): 1.0 for row in rows}
@@ -365,12 +453,16 @@ def build_strategy_portfolio(
     output_dir: str | Path,
     policy: StrategyPortfolioPolicyConfig,
     lifecycle_path: str | Path | None = None,
+    strategy_weighting_metrics_path: str | Path | None = None,
 ) -> dict[str, Any]:
     promoted_rows = _load_promoted_strategies(promoted_dir)
     if not promoted_rows:
         raise FileNotFoundError(f"No promoted strategies found under {Path(promoted_dir) / 'promoted_strategies.json'}")
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
+    strategy_metrics_lookup, weighting_metrics_diagnostics = _load_strategy_weighting_metrics(
+        strategy_weighting_metrics_path
+    )
     lifecycle_lookup: dict[str, dict[str, Any]] = {}
     if lifecycle_path is not None and Path(lifecycle_path).exists():
         from trading_platform.governance.strategy_lifecycle import load_strategy_lifecycle
@@ -556,8 +648,13 @@ def build_strategy_portfolio(
         add_selected_row(row)
         selected_names.add(preset_name)
 
-    weights, allocation_warnings = _normalize_with_caps(selected_input, policy)
+    weights, allocation_warnings = _normalize_with_caps(
+        selected_input,
+        policy,
+        strategy_metrics_lookup=strategy_metrics_lookup,
+    )
     warnings = list(allocation_warnings)
+    warnings.extend(str(item) for item in weighting_metrics_diagnostics.get("warnings", []))
     if policy.warn_on_same_family_overlap:
         combos: dict[tuple[str, str], int] = {}
         for row in selected_input:
@@ -606,6 +703,18 @@ def build_strategy_portfolio(
                 "generated_preset_path": row.get("generated_preset_path"),
                 "generated_registry_path": row.get("generated_registry_path"),
                 "generated_pipeline_config_path": row.get("generated_pipeline_config_path"),
+                "net_total_pnl": float(strategy_metrics_lookup.get(preset_name, {}).get("net_total_pnl", 0.0) or 0.0),
+                "turnover": float(strategy_metrics_lookup.get(preset_name, {}).get("turnover", 0.0) or 0.0),
+                "execution_cost": float(
+                    strategy_metrics_lookup.get(preset_name, {}).get("execution_cost", 0.0) or 0.0
+                ),
+                "pnl_per_turnover": float(
+                    strategy_metrics_lookup.get(preset_name, {}).get("pnl_per_turnover", 0.0) or 0.0
+                ),
+                "cost_drag_pct": float(strategy_metrics_lookup.get(preset_name, {}).get("cost_drag_pct", 0.0) or 0.0),
+                "efficiency_score": float(
+                    strategy_metrics_lookup.get(preset_name, {}).get("efficiency_score", 0.0) or 0.0
+                ),
             }
         )
 
@@ -653,6 +762,9 @@ def build_strategy_portfolio(
             "preset_path_ready_count": preset_path_ready_count,
             "pipeline_path_ready_count": pipeline_path_ready_count,
             "warning_count": len(warnings),
+            "strategy_weighting_metrics_path": weighting_metrics_diagnostics.get("source_path"),
+            "strategy_weighting_metrics_available": bool(weighting_metrics_diagnostics.get("metrics_available")),
+            "strategy_weighting_metrics_strategy_count": int(weighting_metrics_diagnostics.get("strategy_count", 0) or 0),
         },
         "selected_strategies": selected_rows,
         "shadow_strategies": shadow_rows,
@@ -702,10 +814,70 @@ def build_strategy_portfolio(
         pd.DataFrame(condition_summary_rows).to_csv(condition_summary_path, index=False)
     elif condition_summary_path.exists():
         condition_summary_path.unlink()
+
+    weighting_diagnostics_rows = [
+        {
+            "preset_name": row.get("preset_name"),
+            "signal_family": row.get("signal_family"),
+            "universe": row.get("universe"),
+            "selection_rank": row.get("selection_rank"),
+            "selection_metric_value": row.get("selection_metric_value"),
+            "net_total_pnl": row.get("net_total_pnl"),
+            "turnover": row.get("turnover"),
+            "execution_cost": row.get("execution_cost"),
+            "pnl_per_turnover": row.get("pnl_per_turnover"),
+            "cost_drag_pct": row.get("cost_drag_pct"),
+            "efficiency_score": row.get("efficiency_score"),
+            "suggested_weight": row.get("allocation_weight"),
+        }
+        for row in selected_rows
+    ]
+    efficiency_ranking = [
+        {
+            "preset_name": row["preset_name"],
+            "efficiency_score": float(row.get("efficiency_score", 0.0) or 0.0),
+            "net_total_pnl": float(row.get("net_total_pnl", 0.0) or 0.0),
+            "turnover": float(row.get("turnover", 0.0) or 0.0),
+            "suggested_weight": float(row.get("allocation_weight", 0.0) or 0.0),
+        }
+        for row in sorted(weighting_diagnostics_rows, key=lambda item: float(item.get("efficiency_score") or 0.0), reverse=True)
+    ]
+    cost_drag_ranking = [
+        {
+            "preset_name": row["preset_name"],
+            "cost_drag_pct": float(row.get("cost_drag_pct", 0.0) or 0.0),
+            "execution_cost": float(row.get("execution_cost", 0.0) or 0.0),
+            "suggested_weight": float(row.get("suggested_weight", 0.0) or 0.0),
+        }
+        for row in sorted(weighting_diagnostics_rows, key=lambda item: float(item.get("cost_drag_pct") or 0.0), reverse=True)
+    ]
+    weighting_diagnostics_payload = {
+        "generated_at": _now_utc(),
+        "weighting_mode": _resolve_weighting_mode(policy.weighting_mode),
+        "strategy_weight_metric": policy.selection_metric,
+        "metrics_source": weighting_metrics_diagnostics,
+        "efficiency_ranking": efficiency_ranking,
+        "cost_drag_ranking": cost_drag_ranking,
+        "suggested_weights": {
+            str(row["preset_name"]): float(row.get("suggested_weight", 0.0) or 0.0)
+            for row in weighting_diagnostics_rows
+        },
+        "rows": weighting_diagnostics_rows,
+        "warnings": warnings,
+    }
+    weighting_diagnostics_json_path = output_path / "strategy_weighting_diagnostics.json"
+    weighting_diagnostics_json_path.write_text(
+        json.dumps(weighting_diagnostics_payload, indent=2, default=str),
+        encoding="utf-8",
+    )
+    weighting_diagnostics_csv_path = output_path / "strategy_weighting_diagnostics.csv"
+    pd.DataFrame(weighting_diagnostics_rows).to_csv(weighting_diagnostics_csv_path, index=False)
     return {
         "strategy_portfolio_json_path": str(json_path),
         "strategy_portfolio_csv_path": str(csv_path),
         "strategy_portfolio_condition_summary_path": str(condition_summary_path),
+        "strategy_weighting_diagnostics_json_path": str(weighting_diagnostics_json_path),
+        "strategy_weighting_diagnostics_csv_path": str(weighting_diagnostics_csv_path),
         "selected_count": len(selected_rows),
         "warning_count": len(warnings),
     }

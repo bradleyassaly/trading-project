@@ -65,6 +65,16 @@ class PaperTradingConfig:
     commission_bps: float = 0.0
     minimum_commission: float = 0.0
     spread_bps: float = 0.0
+    min_weight_change_to_trade: float = 0.0
+    entry_score_threshold: float | None = None
+    exit_score_threshold: float | None = None
+    hold_score_band: bool = True
+    use_percentile_thresholds: bool = False
+    entry_score_percentile: float | None = None
+    exit_score_percentile: float | None = None
+    apply_bands_to_new_entries: bool = True
+    apply_bands_to_reductions: bool = True
+    apply_bands_to_full_exits: bool = True
     ensemble_enabled: bool = False
     ensemble_mode: str = "disabled"
     ensemble_weight_method: str = "equal"

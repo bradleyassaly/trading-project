@@ -296,6 +296,7 @@ def test_cost_model_round_trip_gross_vs_net_realized_pnl(tmp_path: Path) -> None
     assert summary["total_execution_cost"] == pytest.approx(6.2999)
     assert summary["reconciliation"]["strategy_reconciled"] is True
     assert summary["reconciliation"]["symbol_reconciled"] is True
+    assert summary["reconciliation"]["cost_reconciled"] is True
 
 
 def test_minimum_commission_applies_when_enabled(tmp_path: Path) -> None:
@@ -583,6 +584,145 @@ def test_replay_attribution_reconciles_mixed_realized_and_unrealized(tmp_path: P
     assert reconciliation["symbol_residual"] == 0.0
     assert reconciliation["strategy_reconciled"] is True
     assert reconciliation["symbol_reconciled"] is True
+
+
+@pytest.mark.parametrize(
+    ("config_overrides", "expected_cost_floor"),
+    [
+        (
+            {
+                "slippage_model": "fixed_bps",
+                "slippage_buy_bps": 10.0,
+                "slippage_sell_bps": 10.0,
+            },
+            0.01,
+        ),
+        (
+            {
+                "enable_cost_model": True,
+                "commission_bps": 10.0,
+                "minimum_commission": 0.0,
+            },
+            0.01,
+        ),
+        (
+            {
+                "slippage_model": "fixed_bps",
+                "slippage_buy_bps": 10.0,
+                "slippage_sell_bps": 10.0,
+                "enable_cost_model": True,
+                "commission_bps": 10.0,
+                "minimum_commission": 0.0,
+                "spread_bps": 20.0,
+            },
+            0.01,
+        ),
+    ],
+)
+def test_replay_cost_reconciliation_matches_portfolio_totals(
+    tmp_path: Path,
+    config_overrides: dict[str, float | bool | str],
+    expected_cost_floor: float,
+) -> None:
+    state_path = tmp_path / "state.json"
+    provenance = {
+        "AAPL": {
+            "strategy_id": "multi_strategy",
+            "strategy_ownership": {"alpha": 0.6, "beta": 0.4},
+            "strategy_rows": [
+                {"strategy_id": "alpha", "signal_source": "multi_strategy", "signal_family": "momentum"},
+                {"strategy_id": "beta", "signal_source": "multi_strategy", "signal_family": "value"},
+            ],
+            "signal_source": "multi_strategy",
+            "signal_families": ["momentum", "value"],
+        }
+    }
+    replay_root = tmp_path / "replay"
+    day_one = replay_root / "2025-01-02" / "paper"
+    day_two = replay_root / "2025-01-03" / "paper"
+    day_three = replay_root / "2025-01-04" / "paper"
+    for output_dir in (day_one, day_two, day_three):
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+    result_one = _run_cycle(
+        state_path=state_path,
+        as_of="2025-01-02",
+        latest_price=100.0,
+        target_weight=1.0,
+        provenance=provenance,
+        config_overrides=config_overrides,
+    )
+    write_pnl_attribution_artifacts(output_dir=day_one, attribution_payload=result_one.attribution)
+    persist_paper_run_outputs(
+        result=result_one,
+        config=PaperTradingConfig(
+            symbols=["AAPL"],
+            preset_name="multi_strategy",
+            universe_name="test",
+            strategy="multi_strategy",
+            **config_overrides,
+        ),
+        output_dir=day_one,
+        state_file_preexisting=False,
+    )
+
+    result_two = _run_cycle(
+        state_path=state_path,
+        as_of="2025-01-03",
+        latest_price=105.0,
+        target_weight=1.0,
+        provenance=provenance,
+        config_overrides=config_overrides,
+    )
+    write_pnl_attribution_artifacts(output_dir=day_two, attribution_payload=result_two.attribution)
+    persist_paper_run_outputs(
+        result=result_two,
+        config=PaperTradingConfig(
+            symbols=["AAPL"],
+            preset_name="multi_strategy",
+            universe_name="test",
+            strategy="multi_strategy",
+            **config_overrides,
+        ),
+        output_dir=day_two,
+        state_file_preexisting=True,
+    )
+
+    result_three = _run_cycle(
+        state_path=state_path,
+        as_of="2025-01-04",
+        latest_price=110.0,
+        target_weight=0.0,
+        provenance=provenance,
+        config_overrides=config_overrides,
+    )
+    write_pnl_attribution_artifacts(output_dir=day_three, attribution_payload=result_three.attribution)
+    persist_paper_run_outputs(
+        result=result_three,
+        config=PaperTradingConfig(
+            symbols=["AAPL"],
+            preset_name="multi_strategy",
+            universe_name="test",
+            strategy="multi_strategy",
+            **config_overrides,
+        ),
+        output_dir=day_three,
+        state_file_preexisting=True,
+    )
+
+    replay = aggregate_replay_attribution(replay_root=replay_root)
+    reconciliation = replay["summary"]["reconciliation"]
+
+    assert replay["summary"]["total_execution_cost"] > expected_cost_floor
+    assert reconciliation["strategy_reconciled"] is True
+    assert reconciliation["symbol_reconciled"] is True
+    assert reconciliation["cost_reconciled"] is True
+    assert reconciliation["strategy_residual"] == pytest.approx(0.0)
+    assert reconciliation["symbol_residual"] == pytest.approx(0.0)
+    assert reconciliation["strategy_cost_residual"] == pytest.approx(0.0)
+    assert reconciliation["symbol_cost_residual"] == pytest.approx(0.0)
+    assert reconciliation["strategy_gross_residual"] == pytest.approx(0.0)
+    assert reconciliation["symbol_gross_residual"] == pytest.approx(0.0)
 
 
 def test_paper_summary_includes_attribution_summary(tmp_path: Path) -> None:

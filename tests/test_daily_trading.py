@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
 
+import pandas as pd
 import pytest
 
 from trading_platform.config.models import MultiStrategyPortfolioConfig, MultiStrategySleeveConfig
@@ -377,6 +378,12 @@ def _install_common_mocks(
             "fill_count": 0 if zero_targets else 1,
             "zero_target_reason": "no_targets_generated" if zero_targets else "",
             "source_portfolio_path": str(tmp_path / "portfolio" / "activated" / "activated_strategy_portfolio.json"),
+            "score_band_enabled": True,
+            "entry_threshold_used": 0.85,
+            "exit_threshold_used": 0.60,
+            "blocked_entries_count": 1,
+            "held_in_hold_zone_count": 2,
+            "forced_exit_count": 0,
         }
         output_path = Path(output_dir)
         _write_json(output_path / "paper_run_summary_latest.json", payload)
@@ -444,6 +451,8 @@ def test_daily_trading_happy_path_writes_summary(monkeypatch: pytest.MonkeyPatch
     assert summary["post_validation_target_symbol_count"] == 1
     assert summary["executable_order_count"] == 1
     assert summary["fill_count"] == 1
+    assert summary["score_band_enabled"] is True
+    assert summary["blocked_entries_count"] == 1
     assert (tmp_path / "daily" / "daily_smoke" / "trade_decision_log.csv").exists()
     assert summary["top_selected_strategies"][0]["strategy_id"] == "generated_base"
     assert summary["strategy_quality_summary"]["strategy_count"] == 2
@@ -455,6 +464,10 @@ def test_daily_trading_happy_path_writes_summary(monkeypatch: pytest.MonkeyPatch
     assert (Path(config.report_dir) / "drawdown_by_strategy.csv").exists()
     assert lineage.created is True
     assert lineage.completed is True
+    decision_log = pd.read_csv(tmp_path / "daily" / "daily_smoke" / "trade_decision_log.csv")
+    assert "band_decision" in decision_log.columns
+    assert "entry_threshold" in decision_log.columns
+    assert decision_log.iloc[0]["action_reason"] == "enter_new_position"
 
 
 def test_daily_trading_fast_refresh_uses_refresh_runner(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

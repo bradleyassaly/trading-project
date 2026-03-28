@@ -268,6 +268,14 @@ def _summarize_promotions(promoted_dir: Path) -> dict[str, Any]:
     }
 
 
+def _resolve_strategy_weighting_metrics_path(config: DailyTradingWorkflowConfig) -> Path | None:
+    if config.strategy_weighting_metrics_path:
+        candidate = Path(config.strategy_weighting_metrics_path)
+        return candidate if candidate.exists() else None
+    candidate = Path(config.paper_output_dir) / "strategy_pnl_attribution.csv"
+    return candidate if candidate.exists() else None
+
+
 def _summarize_portfolio(portfolio_dir: Path) -> dict[str, Any]:
     try:
         payload = load_strategy_portfolio(portfolio_dir)
@@ -317,6 +325,17 @@ def _summarize_paper_run(paper_output_dir: Path) -> dict[str, Any]:
             "pre_validation_target_symbol_count": 0,
             "post_validation_target_symbol_count": 0,
             "executable_order_count": 0,
+            "skipped_trades_count": 0,
+            "skipped_turnover": 0.0,
+            "effective_turnover_reduction": 0.0,
+            "blocked_entries_count": 0,
+            "held_in_hold_zone_count": 0,
+            "forced_exit_count": 0,
+            "skipped_due_to_entry_band_count": 0,
+            "skipped_due_to_hold_zone_count": 0,
+            "score_band_enabled": False,
+            "entry_threshold_used": None,
+            "exit_threshold_used": None,
             "fill_count": 0,
             "zero_target_reason": "",
             "attribution_summary": {},
@@ -332,6 +351,17 @@ def _summarize_paper_run(paper_output_dir: Path) -> dict[str, Any]:
         "pre_validation_target_symbol_count": int(summary_payload.get("pre_validation_target_symbol_count") or 0),
         "post_validation_target_symbol_count": int(summary_payload.get("post_validation_target_symbol_count") or 0),
         "executable_order_count": int(summary_payload.get("executable_order_count") or 0),
+        "skipped_trades_count": int(summary_payload.get("skipped_trades_count") or 0),
+        "skipped_turnover": float(summary_payload.get("skipped_turnover") or 0.0),
+        "effective_turnover_reduction": float(summary_payload.get("effective_turnover_reduction") or 0.0),
+        "blocked_entries_count": int(summary_payload.get("blocked_entries_count") or 0),
+        "held_in_hold_zone_count": int(summary_payload.get("held_in_hold_zone_count") or 0),
+        "forced_exit_count": int(summary_payload.get("forced_exit_count") or 0),
+        "skipped_due_to_entry_band_count": int(summary_payload.get("skipped_due_to_entry_band_count") or 0),
+        "skipped_due_to_hold_zone_count": int(summary_payload.get("skipped_due_to_hold_zone_count") or 0),
+        "score_band_enabled": bool(summary_payload.get("score_band_enabled", False)),
+        "entry_threshold_used": summary_payload.get("entry_threshold_used"),
+        "exit_threshold_used": summary_payload.get("exit_threshold_used"),
         "fill_count": int(summary_payload.get("fill_count") or 0),
         "zero_target_reason": str(summary_payload.get("zero_target_reason") or ""),
         "paper_summary_path": str(summary_path),
@@ -448,6 +478,14 @@ def _write_summary_artifacts(
         "executable_order_count": paper_summary.get("executable_order_count", 0),
         "fill_count": paper_summary.get("fill_count", 0),
         "zero_target_reason": paper_summary.get("zero_target_reason", ""),
+        "blocked_entries_count": paper_summary.get("blocked_entries_count", 0),
+        "held_in_hold_zone_count": paper_summary.get("held_in_hold_zone_count", 0),
+        "forced_exit_count": paper_summary.get("forced_exit_count", 0),
+        "skipped_due_to_entry_band_count": paper_summary.get("skipped_due_to_entry_band_count", 0),
+        "skipped_due_to_hold_zone_count": paper_summary.get("skipped_due_to_hold_zone_count", 0),
+        "score_band_enabled": paper_summary.get("score_band_enabled", False),
+        "entry_threshold_used": paper_summary.get("entry_threshold_used"),
+        "exit_threshold_used": paper_summary.get("exit_threshold_used"),
         "pnl_attribution_summary": paper_summary.get("attribution_summary", {}),
         "top_selected_strategies": strategy_report_summary.get("top_selected_strategies", []),
         "portfolio_composition": strategy_report_summary.get("portfolio_composition", []),
@@ -487,6 +525,12 @@ def _write_summary_artifacts(
         f"- executable_order_count: `{paper_summary.get('executable_order_count', 0)}`",
         f"- fill_count: `{paper_summary.get('fill_count', 0)}`",
         f"- zero_target_reason: `{paper_summary.get('zero_target_reason', '') or 'none'}`",
+        f"- score_band_enabled: `{paper_summary.get('score_band_enabled', False)}`",
+        f"- entry_threshold_used: `{paper_summary.get('entry_threshold_used')}`",
+        f"- exit_threshold_used: `{paper_summary.get('exit_threshold_used')}`",
+        f"- blocked_entries_count: `{paper_summary.get('blocked_entries_count', 0)}`",
+        f"- held_in_hold_zone_count: `{paper_summary.get('held_in_hold_zone_count', 0)}`",
+        f"- forced_exit_count: `{paper_summary.get('forced_exit_count', 0)}`",
         "",
         "## Top Strategies",
         "",
@@ -614,6 +658,16 @@ def _build_multi_strategy_paper_config(result, reserve_cash_pct: float, workflow
         commission_bps=float(getattr(workflow_config, "commission_bps", 0.0) or 0.0),
         minimum_commission=float(getattr(workflow_config, "minimum_commission", 0.0) or 0.0),
         spread_bps=float(getattr(workflow_config, "spread_bps", 0.0) or 0.0),
+        min_weight_change_to_trade=float(getattr(workflow_config, "min_weight_change_to_trade", 0.0) or 0.0),
+        entry_score_threshold=getattr(workflow_config, "entry_score_threshold", None),
+        exit_score_threshold=getattr(workflow_config, "exit_score_threshold", None),
+        hold_score_band=bool(getattr(workflow_config, "hold_score_band", True)),
+        use_percentile_thresholds=bool(getattr(workflow_config, "use_percentile_thresholds", False)),
+        entry_score_percentile=getattr(workflow_config, "entry_score_percentile", None),
+        exit_score_percentile=getattr(workflow_config, "exit_score_percentile", None),
+        apply_bands_to_new_entries=bool(getattr(workflow_config, "apply_bands_to_new_entries", True)),
+        apply_bands_to_reductions=bool(getattr(workflow_config, "apply_bands_to_reductions", True)),
+        apply_bands_to_full_exits=bool(getattr(workflow_config, "apply_bands_to_full_exits", True)),
     )
 
 
@@ -715,22 +769,42 @@ def _decision_row_reason(
 
 
 def _build_trade_decision_log_rows(
-    *, as_of: str, signal_source: str, decision_bundle: Any | None
+    *,
+    as_of: str,
+    signal_source: str,
+    decision_bundle: Any | None,
+    order_generation_diagnostics: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
-    if decision_bundle is None:
-        return []
-
-    candidate_by_symbol = {row.symbol: row for row in getattr(decision_bundle, "candidate_evaluations", [])}
-    selection_by_symbol = {row.symbol: row for row in getattr(decision_bundle, "selection_decisions", [])}
-    sizing_by_symbol = {row.symbol: row for row in getattr(decision_bundle, "sizing_decisions", [])}
-    trade_by_symbol = {row.symbol: row for row in getattr(decision_bundle, "trade_decisions", [])}
-    execution_by_symbol = {row.symbol: row for row in getattr(decision_bundle, "execution_decisions", [])}
+    candidate_by_symbol = {}
+    selection_by_symbol = {}
+    sizing_by_symbol = {}
+    trade_by_symbol = {}
+    execution_by_symbol = {}
+    if decision_bundle is not None:
+        candidate_by_symbol = {row.symbol: row for row in getattr(decision_bundle, "candidate_evaluations", [])}
+        selection_by_symbol = {row.symbol: row for row in getattr(decision_bundle, "selection_decisions", [])}
+        sizing_by_symbol = {row.symbol: row for row in getattr(decision_bundle, "sizing_decisions", [])}
+        trade_by_symbol = {row.symbol: row for row in getattr(decision_bundle, "trade_decisions", [])}
+        execution_by_symbol = {row.symbol: row for row in getattr(decision_bundle, "execution_decisions", [])}
+    order_generation_diagnostics = dict(order_generation_diagnostics or {})
+    band_lookup = {
+        str(row.get("symbol")): dict(row)
+        for row in list(order_generation_diagnostics.get("band_decision_rows") or [])
+        if row.get("symbol")
+    }
+    skipped_lookup = {
+        str(row.get("symbol")): dict(row)
+        for row in list(order_generation_diagnostics.get("skipped_trade_rows") or [])
+        if row.get("symbol")
+    }
     symbols = sorted(
         set(candidate_by_symbol)
         | set(selection_by_symbol)
         | set(sizing_by_symbol)
         | set(trade_by_symbol)
         | set(execution_by_symbol)
+        | set(band_lookup)
+        | set(skipped_lookup)
     )
     rows: list[dict[str, Any]] = []
     for symbol in symbols:
@@ -739,11 +813,15 @@ def _build_trade_decision_log_rows(
         sizing = sizing_by_symbol.get(symbol)
         trade = trade_by_symbol.get(symbol)
         execution = execution_by_symbol.get(symbol)
+        band_row = band_lookup.get(symbol, {})
+        skipped_row = skipped_lookup.get(symbol, {})
         current_weight = None
         if trade is not None:
             current_weight = (trade.metadata or {}).get("current_weight")
         if current_weight is None and execution is not None:
             current_weight = execution.current_weight
+        if current_weight is None:
+            current_weight = band_row.get("current_weight")
         target_weight = None
         if trade is not None:
             target_weight = trade.target_weight_post_constraint
@@ -751,6 +829,8 @@ def _build_trade_decision_log_rows(
             target_weight = sizing.target_weight_post_constraint
         if target_weight is None and execution is not None:
             target_weight = execution.target_weight
+        if target_weight is None:
+            target_weight = band_row.get("adjusted_target_weight", skipped_row.get("target_weight"))
         current_position = (
             trade.current_quantity if trade is not None else (sizing.current_quantity if sizing is not None else None)
         )
@@ -765,6 +845,28 @@ def _build_trade_decision_log_rows(
             explicit_reason = trade.entry_reason_summary or trade.rejection_reason
         if explicit_reason is None and selection is not None:
             explicit_reason = selection.rejection_reason or selection.rationale_summary
+        if explicit_reason is None:
+            explicit_reason = str(skipped_row.get("action_reason") or band_row.get("action_reason") or "") or None
+        signal_score = (
+            (trade.final_signal_score if trade is not None else None)
+            if trade is not None and trade.final_signal_score is not None
+            else (
+                (selection.final_signal_score if selection is not None else None)
+                if selection is not None and selection.final_signal_score is not None
+                else (candidate.final_signal_score if candidate is not None else None)
+            )
+        )
+        if signal_score is None:
+            signal_score = band_row.get("score_value")
+        rank_value = (
+            (selection.rank if selection is not None else None)
+            if selection is not None and selection.rank is not None
+            else (candidate.rank if candidate is not None else None)
+        )
+        if rank_value is None:
+            rank_value = band_row.get("score_rank")
+        if skipped_row:
+            action = "hold"
         rows.append(
             {
                 "date": str(pd.Timestamp(as_of).date()),
@@ -775,20 +877,14 @@ def _build_trade_decision_log_rows(
                     or (candidate.strategy_id if candidate is not None else None)
                 ),
                 "signal_source": signal_source,
-                "signal_score": (
-                    (trade.final_signal_score if trade is not None else None)
-                    if trade is not None and trade.final_signal_score is not None
-                    else (
-                        (selection.final_signal_score if selection is not None else None)
-                        if selection is not None and selection.final_signal_score is not None
-                        else (candidate.final_signal_score if candidate is not None else None)
-                    )
-                ),
-                "rank": (
-                    (selection.rank if selection is not None else None)
-                    if selection is not None and selection.rank is not None
-                    else (candidate.rank if candidate is not None else None)
-                ),
+                "signal_score": signal_score,
+                "rank": rank_value,
+                "score_value": band_row.get("score_value"),
+                "score_rank": band_row.get("score_rank"),
+                "score_percentile": band_row.get("score_percentile"),
+                "entry_threshold": band_row.get("entry_threshold"),
+                "exit_threshold": band_row.get("exit_threshold"),
+                "band_decision": band_row.get("band_decision"),
                 "current_weight": current_weight,
                 "target_weight": target_weight,
                 "weight_delta": (
@@ -851,6 +947,12 @@ def _write_trade_decision_log(*, output_dir: Path, rows: list[dict[str, Any]]) -
             "signal_source",
             "signal_score",
             "rank",
+            "score_value",
+            "score_rank",
+            "score_percentile",
+            "entry_threshold",
+            "exit_threshold",
+            "band_decision",
             "current_weight",
             "target_weight",
             "weight_delta",
@@ -1055,11 +1157,18 @@ def run_daily_trading_pipeline(
                 record.warnings.append("zero_promotions")
                 return {}
             policy = load_strategy_portfolio_policy_config(config.strategy_portfolio_policy_config)
+            strategy_weighting_metrics_path = _resolve_strategy_weighting_metrics_path(config)
+            if (
+                str(getattr(policy, "weighting_mode", "") or "").strip() == "cost_adjusted"
+                and strategy_weighting_metrics_path is None
+            ):
+                record.warnings.append("missing_strategy_weighting_metrics")
             portfolio_result = build_strategy_portfolio(
                 promoted_dir=promoted_dir,
                 output_dir=portfolio_dir,
                 policy=policy,
                 lifecycle_path=Path(config.lifecycle_path) if config.lifecycle_path else None,
+                strategy_weighting_metrics_path=strategy_weighting_metrics_path,
             )
             key_artifacts.update(
                 {
@@ -1067,6 +1176,12 @@ def run_daily_trading_pipeline(
                     "strategy_portfolio_csv_path": str(portfolio_result.get("strategy_portfolio_csv_path", "")),
                     "strategy_portfolio_condition_summary_path": str(
                         portfolio_result.get("strategy_portfolio_condition_summary_path", "")
+                    ),
+                    "strategy_weighting_diagnostics_json_path": str(
+                        portfolio_result.get("strategy_weighting_diagnostics_json_path", "")
+                    ),
+                    "strategy_weighting_diagnostics_csv_path": str(
+                        portfolio_result.get("strategy_weighting_diagnostics_csv_path", "")
                     ),
                 }
             )
@@ -1272,7 +1387,7 @@ def run_daily_trading_pipeline(
                 state_store=state_store,
                 as_of=allocation_result.as_of,
                 latest_prices=allocation_result.latest_prices,
-                latest_scores={},
+                latest_scores=getattr(allocation_result, "latest_scores", {}),
                 latest_scheduled_weights=allocation_result.combined_target_weights,
                 latest_effective_weights=allocation_result.combined_target_weights,
                 target_diagnostics=target_diagnostics,
@@ -1304,6 +1419,7 @@ def run_daily_trading_pipeline(
                     as_of=replay_as_of_date or paper_cycle_result.as_of,
                     signal_source=str(paper_config.signal_source or "multi_strategy"),
                     decision_bundle=paper_cycle_result.decision_bundle,
+                    order_generation_diagnostics=paper_cycle_result.diagnostics.get("order_generation", {}),
                 ),
             )
             key_artifacts.update(

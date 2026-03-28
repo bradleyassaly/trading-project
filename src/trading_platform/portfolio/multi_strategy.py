@@ -59,6 +59,7 @@ class MultiStrategyAllocationResult:
     target_generation_stage_rows: list[dict[str, Any]]
     sleeve_target_diagnostics_rows: list[dict[str, Any]]
     summary: dict[str, Any]
+    latest_scores: dict[str, float] = field(default_factory=dict)
 
 
 def _load_cli_preset(preset_name: str, preset_path: str | None = None) -> CliPreset:
@@ -184,6 +185,32 @@ def _resolve_capital_weights(
         raise ValueError("Enabled sleeve capital weights must sum to a positive number")
     normalized = {name: weight / total for name, weight in raw.items()}
     return raw, normalized, total
+
+
+def _combine_latest_scores(
+    sleeves: list[SleeveTargetBundle],
+    normalized_weights: dict[str, float],
+) -> dict[str, float]:
+    combined_scores: dict[str, float] = {}
+    combined_weight: dict[str, float] = {}
+    for bundle in sleeves:
+        sleeve_weight = abs(float(normalized_weights.get(bundle.sleeve.sleeve_name, 0.0) or 0.0))
+        if sleeve_weight <= 0.0:
+            continue
+        for symbol, raw_score in sorted(bundle.latest_scores.items()):
+            try:
+                score = float(raw_score)
+            except (TypeError, ValueError):
+                continue
+            if pd.isna(score):
+                continue
+            combined_scores[symbol] = combined_scores.get(symbol, 0.0) + (score * sleeve_weight)
+            combined_weight[symbol] = combined_weight.get(symbol, 0.0) + sleeve_weight
+    return {
+        symbol: float(total_score / combined_weight[symbol])
+        for symbol, total_score in sorted(combined_scores.items())
+        if combined_weight.get(symbol, 0.0) > 0.0
+    }
 
 
 def _apply_symbol_concentration_cap(
@@ -519,6 +546,7 @@ def allocate_multi_strategy_portfolio(
 ) -> MultiStrategyAllocationResult:
     sleeve_bundles = load_strategy_sleeves(portfolio_config, as_of_date=as_of_date)
     raw_weights, normalized_weights, raw_weight_sum = _resolve_capital_weights(sleeve_bundles)
+    latest_scores = _combine_latest_scores(sleeve_bundles, normalized_weights)
 
     sleeve_rows: list[dict[str, Any]] = []
     latest_prices: dict[str, float] = {}
@@ -937,6 +965,7 @@ def allocate_multi_strategy_portfolio(
         target_generation_stage_rows=target_generation_stage_rows,
         sleeve_target_diagnostics_rows=sleeve_target_diagnostics_rows,
         summary=summary,
+        latest_scores=latest_scores,
     )
 
 

@@ -645,6 +645,7 @@ class DailyTradingWorkflowConfig:
     export_dir: str = "artifacts/strategy_portfolio/run_current/run_bundle_activated"
     paper_output_dir: str = "artifacts/daily_trading/run_current/paper"
     paper_state_path: str = "artifacts/daily_trading/run_current/paper_state.json"
+    strategy_weighting_metrics_path: str | None = None
     report_dir: str | None = None
     dashboard_output_dir: str | None = None
     run_name: str = "daily_trading"
@@ -669,6 +670,16 @@ class DailyTradingWorkflowConfig:
     commission_bps: float = 0.0
     minimum_commission: float = 0.0
     spread_bps: float = 0.0
+    min_weight_change_to_trade: float = 0.0
+    entry_score_threshold: float | None = None
+    exit_score_threshold: float | None = None
+    hold_score_band: bool = True
+    use_percentile_thresholds: bool = False
+    entry_score_percentile: float | None = None
+    exit_score_percentile: float | None = None
+    apply_bands_to_new_entries: bool = True
+    apply_bands_to_reductions: bool = True
+    apply_bands_to_full_exits: bool = True
     enable_strategy_diagnostics: bool = True
     refresh_dashboard_static_data: bool = False
     evaluate_conditional_activation: bool | None = None

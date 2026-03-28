@@ -3039,3 +3039,40 @@ Run the full suite:
 ```bash
 pytest
 ```
+## Entry/Exit Score Bands
+
+Paper execution supports score-band hysteresis in addition to `min_weight_change_to_trade`.
+
+- `min_weight_change_to_trade` filters small rebalance trades using weight delta only.
+- score bands filter on conviction:
+  - new positions enter only above the entry threshold
+  - held positions can remain inside the hold zone between exit and entry thresholds
+  - positions exit only after the score falls below the exit threshold
+
+Example:
+
+```yaml
+daily_trading:
+  paper:
+    execution:
+      min_weight_change_to_trade: 0.015
+      score_bands:
+        use_percentile_thresholds: true
+        entry_score_percentile: 0.85
+        exit_score_percentile: 0.60
+        hold_score_band: true
+```
+
+To evaluate score bands in replay, inspect:
+
+- `trade_decision_log.csv`
+- `paper/paper_run_summary_latest.json`
+- `replay_summary.json`
+
+Useful fields:
+
+- `blocked_entries_count`
+- `held_in_hold_zone_count`
+- `forced_exit_count`
+- `band_decision`
+- `action_reason`

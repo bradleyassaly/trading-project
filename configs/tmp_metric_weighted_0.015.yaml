@@ -68,20 +68,7 @@ daily_trading:
     auto_apply_fills: true
     fail_if_zero_targets_after_validation: false
     execution:
-      min_weight_change_to_trade: 0.02
-      score_bands:
-        # Disabled by default. When enabled, entries require stronger scores and
-        # held names can remain inside a hold zone until conviction drops below
-        # the exit threshold.
-        entry_score_threshold:
-        exit_score_threshold:
-        hold_score_band: true
-        use_percentile_thresholds: false
-        entry_score_percentile:
-        exit_score_percentile:
-        apply_bands_to_new_entries: true
-        apply_bands_to_reductions: true
-        apply_bands_to_full_exits: true
+      min_weight_change_to_trade: 0.015
       slippage:
         enabled: true
         model: fixed_bps

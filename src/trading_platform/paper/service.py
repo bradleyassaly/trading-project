@@ -256,12 +256,192 @@ def sync_state_prices(
     return state
 
 
+def _score_band_enabled(config: PaperTradingConfig) -> bool:
+    return any(
+        value is not None
+        for value in (
+            config.entry_score_threshold,
+            config.exit_score_threshold,
+            config.entry_score_percentile,
+            config.exit_score_percentile,
+        )
+    )
+
+
+def _score_rank_lookup(latest_scores: dict[str, float]) -> dict[str, dict[str, float]]:
+    rows: list[tuple[str, float]] = []
+    for symbol, raw_score in sorted(latest_scores.items()):
+        try:
+            score = float(raw_score)
+        except (TypeError, ValueError):
+            continue
+        if pd.isna(score):
+            continue
+        rows.append((str(symbol), score))
+    ordered = sorted(rows, key=lambda item: (-item[1], item[0]))
+    total = len(ordered)
+    lookup: dict[str, dict[str, float]] = {}
+    for index, (symbol, score) in enumerate(ordered, start=1):
+        percentile = float((total - index + 1) / total) if total > 0 else 0.0
+        lookup[symbol] = {
+            "score_value": score,
+            "score_rank": float(index),
+            "score_percentile": percentile,
+        }
+    return lookup
+
+
+def _resolve_score_band_thresholds(
+    *,
+    config: PaperTradingConfig,
+) -> tuple[float | None, float | None]:
+    if config.use_percentile_thresholds:
+        entry_threshold = (
+            float(config.entry_score_percentile)
+            if config.entry_score_percentile is not None
+            else (
+                float(config.entry_score_threshold)
+                if config.entry_score_threshold is not None
+                else None
+            )
+        )
+        exit_threshold = (
+            float(config.exit_score_percentile)
+            if config.exit_score_percentile is not None
+            else (
+                float(config.exit_score_threshold)
+                if config.exit_score_threshold is not None
+                else entry_threshold
+            )
+        )
+        return entry_threshold, exit_threshold
+    entry_threshold = float(config.entry_score_threshold) if config.entry_score_threshold is not None else None
+    exit_threshold = (
+        float(config.exit_score_threshold)
+        if config.exit_score_threshold is not None
+        else entry_threshold
+    )
+    return entry_threshold, exit_threshold
+
+
+def _metric_for_band_decision(
+    *,
+    symbol: str,
+    latest_scores: dict[str, float],
+    rank_lookup: dict[str, dict[str, float]],
+    use_percentile_thresholds: bool,
+) -> tuple[float | None, float | None, float | None]:
+    rank_row = rank_lookup.get(symbol, {})
+    score_value = rank_row.get("score_value")
+    score_rank = rank_row.get("score_rank")
+    score_percentile = rank_row.get("score_percentile")
+    if score_value is None:
+        raw_score = latest_scores.get(symbol)
+        try:
+            score_value = None if raw_score is None else float(raw_score)
+        except (TypeError, ValueError):
+            score_value = None
+    metric_value = score_percentile if use_percentile_thresholds else score_value
+    return metric_value, score_value, score_rank
+
+
+def _apply_score_band_to_target(
+    *,
+    symbol: str,
+    current_weight: float,
+    target_weight: float,
+    latest_scores: dict[str, float],
+    rank_lookup: dict[str, dict[str, float]],
+    config: PaperTradingConfig,
+    entry_threshold: float | None,
+    exit_threshold: float | None,
+) -> tuple[float, dict[str, Any]]:
+    metric_value, score_value, score_rank = _metric_for_band_decision(
+        symbol=symbol,
+        latest_scores=latest_scores,
+        rank_lookup=rank_lookup,
+        use_percentile_thresholds=bool(config.use_percentile_thresholds),
+    )
+    score_percentile = rank_lookup.get(symbol, {}).get("score_percentile")
+    score_band_enabled = _score_band_enabled(config)
+    band_row = {
+        "symbol": symbol,
+        "score_value": score_value,
+        "score_rank": score_rank,
+        "score_percentile": score_percentile,
+        "entry_threshold": entry_threshold,
+        "exit_threshold": exit_threshold,
+        "score_band_enabled": score_band_enabled,
+        "band_decision": "bands_disabled",
+        "action_reason": "",
+        "band_metric_value": metric_value,
+        "band_metric_name": "score_percentile" if config.use_percentile_thresholds else "score_value",
+    }
+    if not score_band_enabled:
+        return target_weight, band_row
+    if metric_value is None:
+        band_row["band_decision"] = "missing_score"
+        band_row["action_reason"] = "missing_score_for_band_decision"
+        return target_weight, band_row
+
+    currently_held = abs(current_weight) > 1e-12
+    if not currently_held:
+        if (
+            config.apply_bands_to_new_entries
+            and abs(target_weight) > 1e-12
+            and entry_threshold is not None
+            and metric_value < entry_threshold
+        ):
+            band_row["band_decision"] = "blocked_entry"
+            band_row["action_reason"] = "blocked_below_entry_threshold"
+            return 0.0, band_row
+        if abs(target_weight) > 1e-12 and entry_threshold is not None:
+            band_row["band_decision"] = "passed_entry"
+            band_row["action_reason"] = "passed_entry_threshold"
+        return target_weight, band_row
+
+    if exit_threshold is not None and metric_value < exit_threshold:
+        if config.apply_bands_to_full_exits:
+            band_row["band_decision"] = "forced_exit"
+            band_row["action_reason"] = "exit_below_exit_threshold"
+            return 0.0, band_row
+        band_row["band_decision"] = "exit_threshold_observed"
+        band_row["action_reason"] = "exit_below_exit_threshold"
+        return target_weight, band_row
+
+    if (
+        bool(config.hold_score_band)
+        and entry_threshold is not None
+        and exit_threshold is not None
+        and exit_threshold <= metric_value < entry_threshold
+    ):
+        reducing = target_weight < current_weight - 1e-12
+        increasing = target_weight > current_weight + 1e-12
+        if (reducing and (config.apply_bands_to_reductions or (target_weight <= 0 and config.apply_bands_to_full_exits))) or (
+            increasing and config.apply_bands_to_new_entries
+        ):
+            band_row["band_decision"] = "hold_zone"
+            band_row["action_reason"] = "held_within_hold_zone"
+            return current_weight, band_row
+        band_row["band_decision"] = "hold_zone_observed"
+        band_row["action_reason"] = "held_within_hold_zone"
+        return target_weight, band_row
+
+    if entry_threshold is not None and metric_value >= entry_threshold:
+        band_row["band_decision"] = "passed_entry"
+        band_row["action_reason"] = "passed_entry_threshold"
+    return target_weight, band_row
+
+
 def generate_rebalance_orders(
     *,
     state: PaperPortfolioState,
     latest_target_weights: dict[str, float],
     latest_prices: dict[str, float],
+    latest_scores: dict[str, float] | None = None,
+    config: PaperTradingConfig | None = None,
     min_trade_dollars: float = 25.0,
+    min_weight_change_to_trade: float = 0.0,
     lot_size: int = 1,
     reserve_cash_pct: float = 0.0,
     provenance_by_symbol: dict[str, dict[str, Any]] | None = None,
@@ -272,7 +452,9 @@ def generate_rebalance_orders(
         raise ValueError("Investable equity cannot be negative")
 
     all_symbols = sorted(set(state.positions.keys()) | set(latest_target_weights.keys()))
+    active_config = config or PaperTradingConfig(symbols=sorted(latest_target_weights))
     effective_latest_prices = {str(symbol): float(price) for symbol, price in latest_prices.items()}
+    effective_latest_scores = {str(symbol): value for symbol, value in dict(latest_scores or {}).items()}
     exit_price_fallback_symbols: list[str] = []
     missing_price_symbols: list[str] = []
     for symbol in all_symbols:
@@ -290,19 +472,99 @@ def generate_rebalance_orders(
         "investable_equity": investable_equity,
         "reserve_cash_pct": reserve_cash_pct,
         "current_cash": state.cash,
+        "min_weight_change_to_trade": float(min_weight_change_to_trade),
+        "score_band_enabled": _score_band_enabled(active_config),
         "exit_price_fallback_symbols": exit_price_fallback_symbols,
         "missing_price_symbols": missing_price_symbols,
     }
+    entry_threshold, exit_threshold = _resolve_score_band_thresholds(config=active_config)
+    diagnostics["entry_threshold_used"] = entry_threshold
+    diagnostics["exit_threshold_used"] = exit_threshold
+    diagnostics["score_band_mode"] = "percentile" if active_config.use_percentile_thresholds else "raw_score"
     orders: list[PaperOrder] = []
+    skipped_trade_rows: list[dict[str, Any]] = []
+    band_decision_rows: list[dict[str, Any]] = []
+    skipped_turnover = 0.0
+    total_requested_turnover = 0.0
+    blocked_entries_count = 0
+    held_in_hold_zone_count = 0
+    forced_exit_count = 0
+    rank_lookup = _score_rank_lookup(effective_latest_scores)
+    adjusted_target_weights: dict[str, float] = {}
+    current_weight_lookup: dict[str, float] = {}
+    requested_target_weight_lookup: dict[str, float] = {}
+    for symbol in all_symbols:
+        current_price = float(effective_latest_prices.get(symbol, 0.0) or 0.0)
+        current_position = state.positions.get(symbol)
+        current_market_value = float(current_position.quantity * current_price) if current_position is not None else 0.0
+        current_weight = float(current_market_value / equity) if equity > 0.0 else 0.0
+        requested_target_weight = float(latest_target_weights.get(symbol, 0.0) or 0.0)
+        adjusted_target_weight, band_row = _apply_score_band_to_target(
+            symbol=symbol,
+            current_weight=current_weight,
+            target_weight=requested_target_weight,
+            latest_scores=effective_latest_scores,
+            rank_lookup=rank_lookup,
+            config=active_config,
+            entry_threshold=entry_threshold,
+            exit_threshold=exit_threshold,
+        )
+        band_decision_rows.append(
+            {
+                **band_row,
+                "current_weight": current_weight,
+                "requested_target_weight": requested_target_weight,
+                "adjusted_target_weight": adjusted_target_weight,
+            }
+        )
+        if band_row["band_decision"] == "blocked_entry":
+            blocked_entries_count += 1
+        elif band_row["band_decision"] in {"hold_zone", "hold_zone_observed"}:
+            held_in_hold_zone_count += 1
+        elif band_row["band_decision"] == "forced_exit":
+            forced_exit_count += 1
+        adjusted_target_weights[symbol] = float(adjusted_target_weight)
+        current_weight_lookup[symbol] = current_weight
+        requested_target_weight_lookup[symbol] = requested_target_weight
+
     execution_requests = build_execution_requests_from_target_weights(
-        target_weights=latest_target_weights,
+        target_weights=adjusted_target_weights,
         current_positions=state.positions,
         latest_prices=effective_latest_prices,
         portfolio_equity=equity,
         reserve_cash_pct=reserve_cash_pct,
         provenance_by_symbol=provenance_by_symbol,
     )
+    band_lookup = {str(row["symbol"]): row for row in band_decision_rows}
     for request in execution_requests:
+        current_price = float(effective_latest_prices.get(request.symbol, request.price) or request.price or 0.0)
+        current_weight = float(current_weight_lookup.get(request.symbol, 0.0) or 0.0)
+        requested_target_weight = float(requested_target_weight_lookup.get(request.symbol, request.target_weight) or 0.0)
+        band_row = dict(band_lookup.get(request.symbol) or {})
+        target_weight = float(request.target_weight)
+        weight_delta = float(target_weight - current_weight)
+        total_requested_turnover += abs(weight_delta)
+        if abs(weight_delta) < float(min_weight_change_to_trade or 0.0):
+            skipped_turnover += abs(weight_delta)
+            skipped_trade_rows.append(
+                {
+                    "symbol": request.symbol,
+                    "score_value": band_row.get("score_value"),
+                    "score_rank": band_row.get("score_rank"),
+                    "entry_threshold": band_row.get("entry_threshold"),
+                    "exit_threshold": band_row.get("exit_threshold"),
+                    "band_decision": band_row.get("band_decision"),
+                    "current_weight": current_weight,
+                    "target_weight": target_weight,
+                    "weight_delta": weight_delta,
+                    "requested_notional": float(request.requested_notional),
+                    "skip_reason": "below_min_weight_change_to_trade",
+                    "action_reason": "skipped_small_weight_delta",
+                }
+            )
+            continue
+        if abs(target_weight) <= 1e-12 and abs(current_weight) <= 1e-12:
+            continue
         notional = float(request.requested_notional)
         if notional < min_trade_dollars:
             continue
@@ -320,18 +582,44 @@ def generate_rebalance_orders(
                 target_quantity=int(target_quantity),
                 notional=notional,
                 reason="rebalance_to_target",
-                provenance=dict(request.provenance or {}),
+                provenance={
+                    **dict(request.provenance or {}),
+                    "current_weight": current_weight,
+                    "target_weight": target_weight,
+                    "weight_delta": weight_delta,
+                    "requested_target_weight": requested_target_weight,
+                    "score_value": band_row.get("score_value"),
+                    "score_rank": band_row.get("score_rank"),
+                    "score_percentile": band_row.get("score_percentile"),
+                    "entry_threshold": band_row.get("entry_threshold"),
+                    "exit_threshold": band_row.get("exit_threshold"),
+                    "band_decision": band_row.get("band_decision"),
+                    "action_reason": band_row.get("action_reason"),
+                },
             )
         )
 
     diagnostics["order_count"] = len(orders)
+    diagnostics["skipped_trades_count"] = len(skipped_trade_rows)
+    diagnostics["skipped_turnover"] = float(skipped_turnover)
+    diagnostics["effective_turnover_reduction"] = (
+        float(skipped_turnover / total_requested_turnover) if total_requested_turnover > 0.0 else 0.0
+    )
+    diagnostics["blocked_entries_count"] = int(blocked_entries_count)
+    diagnostics["held_in_hold_zone_count"] = int(held_in_hold_zone_count)
+    diagnostics["forced_exit_count"] = int(forced_exit_count)
+    diagnostics["skipped_due_to_entry_band_count"] = int(blocked_entries_count)
+    diagnostics["skipped_due_to_hold_zone_count"] = int(held_in_hold_zone_count)
+    diagnostics["skipped_trade_rows"] = skipped_trade_rows
+    diagnostics["band_decision_rows"] = band_decision_rows
     diagnostics["symbols_considered"] = len(all_symbols)
     diagnostics["target_weight_sum"] = float(sum(latest_target_weights.values()))
+    diagnostics["adjusted_target_weight_sum"] = float(sum(adjusted_target_weights.values()))
     diagnostics["estimated_buy_notional"] = float(sum(order.notional for order in orders if order.side == "BUY"))
     diagnostics["estimated_sell_notional"] = float(sum(order.notional for order in orders if order.side == "SELL"))
     return OrderGenerationResult(
         orders=orders,
-        target_weights=latest_target_weights,
+        target_weights=adjusted_target_weights,
         diagnostics=diagnostics,
     )
 
@@ -479,12 +767,13 @@ def _next_trade_id(state: PaperPortfolioState) -> str:
 def _allocated_order_metrics(order: PaperOrder, quantity: int) -> dict[str, dict[str, float]]:
     ownership = _normalized_order_ownership(order)
     allocated_qty = allocate_integer_quantities(quantity, ownership)
-    total_qty = max(int(quantity), 0)
-    if total_qty <= 0:
+    subset_qty = max(int(quantity), 0)
+    total_order_qty = abs(int(order.quantity))
+    if subset_qty <= 0 or total_order_qty <= 0:
         return {}
     metrics: dict[str, dict[str, float]] = {}
     for strategy_id, strategy_qty in allocated_qty.items():
-        share = float(strategy_qty) / float(total_qty)
+        share = float(strategy_qty) / float(total_order_qty)
         metrics[strategy_id] = {
             "quantity": int(strategy_qty),
             "gross_notional": float(order.reference_price) * float(strategy_qty),
@@ -588,11 +877,11 @@ def _close_open_lots(
     closing_side = str(order.side).upper()
     closes_long = closing_side == "SELL"
     remaining_to_close = int(quantity)
+    total_order_qty = abs(int(order.quantity))
     realized_total = 0.0
     trade_rows: list[dict[str, Any]] = []
     fill_rows: list[dict[str, Any]] = []
     updated_lots: list[PaperTradeLot] = []
-    order_cost_allocations = _allocated_order_metrics(order, quantity)
     for lot in lots:
         remaining_qty = int(lot.remaining_quantity)
         if remaining_qty == 0:
@@ -614,13 +903,11 @@ def _close_open_lots(
             entry_spread_cost = float(lot.entry_spread_cost) * lot_share
             entry_commission_cost = float(lot.entry_commission_cost) * lot_share
             entry_total_execution_cost = float(lot.entry_total_execution_cost) * lot_share
-            exit_metrics = order_cost_allocations.get(lot.strategy_id, {})
-            exit_qty = int(exit_metrics.get("quantity", 0))
-            exit_share = (float(closed_qty) / float(exit_qty)) if exit_qty > 0 else 0.0
-            exit_slippage_cost = float(exit_metrics.get("slippage_cost", 0.0)) * exit_share
-            exit_spread_cost = float(exit_metrics.get("spread_cost", 0.0)) * exit_share
-            exit_commission_cost = float(exit_metrics.get("commission_cost", 0.0)) * exit_share
-            exit_total_execution_cost = float(exit_metrics.get("total_execution_cost", 0.0)) * exit_share
+            exit_share = (float(closed_qty) / float(total_order_qty)) if total_order_qty > 0 else 0.0
+            exit_slippage_cost = float(order.expected_slippage_cost) * exit_share
+            exit_spread_cost = float(order.expected_spread_cost) * exit_share
+            exit_commission_cost = float(order.expected_commission_cost) * exit_share
+            exit_total_execution_cost = float(order.expected_total_execution_cost) * exit_share
             total_execution_cost = float(entry_total_execution_cost + exit_total_execution_cost)
             trade_rows.append(
                 {
@@ -1028,6 +1315,7 @@ def _build_accounting_summary(
             ) * abs(remaining_qty) * sign
     gross_total_pnl = float(ending_state.cumulative_gross_realized_pnl + gross_unrealized_pnl)
     net_total_pnl = float(ending_state.total_pnl)
+    net_unrealized_pnl = float(net_total_pnl - ending_state.cumulative_realized_pnl)
     return {
         "auto_apply_fills": bool(auto_apply_fills),
         "fill_application_status": fill_application_status,
@@ -1048,8 +1336,8 @@ def _build_accounting_summary(
         "cumulative_realized_pnl": float(ending_state.cumulative_realized_pnl),
         "net_realized_pnl": float(ending_state.cumulative_realized_pnl),
         "gross_unrealized_pnl": float(gross_unrealized_pnl),
-        "unrealized_pnl": float(ending_state.unrealized_pnl),
-        "net_unrealized_pnl": float(ending_state.unrealized_pnl),
+        "unrealized_pnl": net_unrealized_pnl,
+        "net_unrealized_pnl": net_unrealized_pnl,
         "gross_total_pnl": gross_total_pnl,
         "net_total_pnl": net_total_pnl,
         "total_pnl": net_total_pnl,
@@ -1099,7 +1387,10 @@ def run_paper_trading_cycle_for_targets(
         state=state,
         latest_target_weights=latest_effective_weights,
         latest_prices=latest_prices,
+        latest_scores=latest_scores,
+        config=config,
         min_trade_dollars=config.min_trade_dollars,
+        min_weight_change_to_trade=config.min_weight_change_to_trade,
         lot_size=config.lot_size,
         reserve_cash_pct=config.reserve_cash_pct,
         provenance_by_symbol=getattr(decision_bundle, "provenance_by_symbol", None),
@@ -1178,6 +1469,18 @@ def run_paper_trading_cycle_for_targets(
         symbol_rows=attribution_payload.get("symbol_rows", []),
         portfolio_realized_pnl=float(accounting_summary.get("realized_pnl_delta", 0.0)),
         portfolio_unrealized_pnl=float(accounting_summary.get("unrealized_pnl", 0.0)),
+        portfolio_gross_realized_pnl=float(accounting_summary.get("gross_realized_pnl_delta", 0.0)),
+        portfolio_gross_unrealized_pnl=float(accounting_summary.get("gross_unrealized_pnl", 0.0)),
+        portfolio_total_execution_cost=float(
+            (
+                float(accounting_summary.get("gross_realized_pnl_delta", 0.0) or 0.0)
+                + float(accounting_summary.get("gross_unrealized_pnl", 0.0) or 0.0)
+            )
+            - (
+                float(accounting_summary.get("realized_pnl_delta", 0.0) or 0.0)
+                + float(accounting_summary.get("unrealized_pnl", 0.0) or 0.0)
+            )
+        ),
     )
     attribution_summary = build_attribution_summary(
         strategy_rows=attribution_payload.get("strategy_rows", []),
@@ -1212,6 +1515,25 @@ def run_paper_trading_cycle_for_targets(
             "expected_spread_cost": slippage_diagnostics["expected_spread_cost"],
             "expected_commission_cost": slippage_diagnostics["expected_commission_cost"],
             "expected_total_execution_cost": slippage_diagnostics["expected_total_execution_cost"],
+            "min_weight_change_to_trade": float(config.min_weight_change_to_trade),
+            "score_band_enabled": bool(order_result.diagnostics.get("score_band_enabled", False)),
+            "entry_threshold_used": order_result.diagnostics.get("entry_threshold_used"),
+            "exit_threshold_used": order_result.diagnostics.get("exit_threshold_used"),
+            "score_band_mode": str(order_result.diagnostics.get("score_band_mode", "raw_score")),
+            "blocked_entries_count": int(order_result.diagnostics.get("blocked_entries_count", 0) or 0),
+            "held_in_hold_zone_count": int(order_result.diagnostics.get("held_in_hold_zone_count", 0) or 0),
+            "forced_exit_count": int(order_result.diagnostics.get("forced_exit_count", 0) or 0),
+            "skipped_due_to_entry_band_count": int(
+                order_result.diagnostics.get("skipped_due_to_entry_band_count", 0) or 0
+            ),
+            "skipped_due_to_hold_zone_count": int(
+                order_result.diagnostics.get("skipped_due_to_hold_zone_count", 0) or 0
+            ),
+            "skipped_trades_count": int(order_result.diagnostics.get("skipped_trades_count", 0) or 0),
+            "skipped_turnover": float(order_result.diagnostics.get("skipped_turnover", 0.0) or 0.0),
+            "effective_turnover_reduction": float(
+                order_result.diagnostics.get("effective_turnover_reduction", 0.0) or 0.0
+            ),
             "auto_apply_fills": bool(auto_apply_fills),
             "fill_application_status": accounting_summary["fill_application_status"],
             "ensemble_enabled": bool(config.ensemble_enabled and config.signal_source == "ensemble"),
@@ -1559,6 +1881,7 @@ def write_paper_trading_artifacts(
                 "as_of": result.as_of,
                 "requested_order_count": len(result.orders),
                 "fill_count": len(result.fills),
+                "order_generation": result.diagnostics.get("order_generation", {}),
                 "execution": execution_diag,
                 "paper_execution": paper_execution_diag,
                 "accounting": accounting_diag,
