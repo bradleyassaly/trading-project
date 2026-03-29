@@ -296,6 +296,7 @@ def test_run_daily_replay_writes_day_folders_and_carries_state(monkeypatch: pyte
     assert summary["held_in_hold_zone_count"] >= 0
     assert "ev_gate_blocked_count" in summary
     assert summary["ev_gate_mode"] == "soft"
+    assert "ev_gate_hybrid_alpha" in summary
     assert "ev_weighted_exposure" in summary
     assert (tmp_path / "replay" / "2025-01-03" / "replay_day_input_summary.json").exists()
     assert (tmp_path / "replay" / "replay_daily_metrics.csv").exists()

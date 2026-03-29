@@ -436,6 +436,138 @@ def test_build_trade_ev_training_dataset_realized_candidate_proxy_excludes_horiz
     assert summary["labeled_row_count"] == 0
 
 
+def test_build_trade_ev_training_dataset_hybrid_proxy_blends_market_and_realized(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    replay_root = tmp_path / "replay"
+    _write_candidate_day(
+        replay_root,
+        "2025-01-03",
+        symbol="AAPL",
+        score_percentile=0.95,
+        requested_weight_delta=0.10,
+        estimated_cost_pct=0.01,
+        candidate_outcome="executed",
+    )
+    pd.DataFrame(
+        [
+            {
+                "symbol": "AAPL",
+                "strategy_id": "alpha",
+                "gross_notional": 1_000.0,
+                "total_execution_cost": 10.0,
+                "quantity": 10,
+                "reference_price": 100.0,
+            }
+        ]
+    ).to_csv(replay_root / "2025-01-03" / "paper" / "paper_fills.csv", index=False)
+    _write_symbol_attr_day(
+        replay_root,
+        "2025-01-03",
+        symbol="AAPL",
+        strategy_id="alpha",
+        gross_realized_pnl=0.0,
+        net_realized_pnl=0.0,
+        gross_unrealized_pnl=20.0,
+        net_unrealized_pnl=10.0,
+    )
+    _write_symbol_attr_day(
+        replay_root,
+        "2025-01-06",
+        symbol="AAPL",
+        strategy_id="alpha",
+        gross_realized_pnl=5.0,
+        net_realized_pnl=4.0,
+        gross_unrealized_pnl=25.0,
+        net_unrealized_pnl=14.0,
+    )
+    _write_symbol_attr_day(
+        replay_root,
+        "2025-01-07",
+        symbol="AAPL",
+        strategy_id="alpha",
+        gross_realized_pnl=15.0,
+        net_realized_pnl=12.0,
+        gross_unrealized_pnl=40.0,
+        net_unrealized_pnl=25.0,
+    )
+
+    def fake_load_feature_frame(symbol: str) -> pd.DataFrame:
+        return pd.DataFrame(
+            {
+                "timestamp": pd.date_range("2024-12-15", periods=40, freq="D"),
+                "close": list(range(100, 140)),
+                "volume": [1_000_000] * 40,
+            }
+        )
+
+    monkeypatch.setattr("trading_platform.research.trade_ev.load_feature_frame", fake_load_feature_frame)
+    rows, summary = build_trade_ev_training_dataset(
+        history_root=replay_root,
+        as_of_date="2025-01-08",
+        horizon_days=2,
+        training_source="candidate_decisions",
+        target_type="hybrid_proxy",
+        hybrid_alpha=0.8,
+    )
+
+    assert len(rows) == 1
+    assert rows[0]["market_proxy_forward_net_return"] == pytest.approx(0.00680672268907557)
+    assert rows[0]["realized_candidate_forward_net_return"] == pytest.approx(0.041)
+    assert rows[0]["forward_net_return"] == pytest.approx((0.8 * 0.00680672268907557) + (0.2 * 0.041))
+    assert rows[0]["label_source"] == "hybrid_proxy"
+    assert rows[0]["realized_component_available"] is True
+    assert summary["target_type"] == "hybrid_proxy"
+    assert summary["hybrid_alpha"] == pytest.approx(0.8)
+    assert summary["hybrid_row_count"] == 1
+    assert summary["realized_component_available_ratio"] == pytest.approx(1.0)
+
+
+def test_build_trade_ev_training_dataset_hybrid_proxy_falls_back_to_market_when_realized_unavailable(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    replay_root = tmp_path / "replay"
+    _write_candidate_day(
+        replay_root,
+        "2025-01-03",
+        symbol="AAPL",
+        score_percentile=0.95,
+        requested_weight_delta=-0.10,
+        estimated_cost_pct=0.01,
+        candidate_outcome="score_band_blocked",
+    )
+    (replay_root / "2025-01-06" / "paper").mkdir(parents=True, exist_ok=True)
+    (replay_root / "2025-01-07" / "paper").mkdir(parents=True, exist_ok=True)
+
+    def fake_load_feature_frame(symbol: str) -> pd.DataFrame:
+        return pd.DataFrame(
+            {
+                "timestamp": pd.date_range("2024-12-15", periods=40, freq="D"),
+                "close": list(range(100, 140)),
+                "volume": [1_000_000] * 40,
+            }
+        )
+
+    monkeypatch.setattr("trading_platform.research.trade_ev.load_feature_frame", fake_load_feature_frame)
+    rows, summary = build_trade_ev_training_dataset(
+        history_root=replay_root,
+        as_of_date="2025-01-08",
+        horizon_days=2,
+        training_source="candidate_decisions",
+        target_type="hybrid_proxy",
+        hybrid_alpha=0.8,
+    )
+
+    assert len(rows) == 1
+    assert rows[0]["label_source"] == "hybrid_market_fallback"
+    assert rows[0]["realized_component_available"] is False
+    assert rows[0]["forward_net_return"] == pytest.approx(rows[0]["market_proxy_forward_net_return"])
+    assert summary["market_only_fallback_row_count"] == 1
+    assert summary["realized_component_available_ratio"] == pytest.approx(0.0)
+
+
 def test_bucketed_trade_ev_model_scores_candidates() -> None:
     model = train_trade_ev_model(
         training_rows=[
@@ -886,6 +1018,93 @@ def test_evaluate_replay_trade_ev_predictions_uses_prediction_files(monkeypatch,
     assert summary["target_type"] == "market_proxy"
     assert summary["prediction_row_count"] == 1
     assert summary["labeled_prediction_count"] == 1
+
+
+def test_evaluate_replay_trade_ev_predictions_hybrid_reports_coverage(monkeypatch, tmp_path: Path) -> None:
+    day_dir = tmp_path / "2025-01-03" / "paper"
+    day_dir.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(
+        [
+            {
+                "date": "2025-01-03",
+                "symbol": "AAPL",
+                "strategy_id": "alpha",
+                "weight_delta": 0.1,
+                "action": "buy",
+                "action_type": "entry",
+                "candidate_outcome": "executed",
+                "expected_net_return": 0.02,
+                "expected_gross_return": 0.03,
+                "expected_cost": 0.01,
+                "probability_positive": 0.7,
+                "ev_weight_multiplier": 1.1,
+            }
+        ]
+    ).to_csv(day_dir / "trade_ev_predictions.csv", index=False)
+    pd.DataFrame(
+        [
+            {
+                "symbol": "AAPL",
+                "strategy_id": "alpha",
+                "gross_notional": 1_000.0,
+                "total_execution_cost": 10.0,
+                "quantity": 10,
+                "reference_price": 100.0,
+            }
+        ]
+    ).to_csv(day_dir / "paper_fills.csv", index=False)
+    _write_symbol_attr_day(
+        tmp_path,
+        "2025-01-03",
+        symbol="AAPL",
+        strategy_id="alpha",
+        gross_realized_pnl=0.0,
+        net_realized_pnl=0.0,
+        gross_unrealized_pnl=5.0,
+        net_unrealized_pnl=3.0,
+    )
+    _write_symbol_attr_day(
+        tmp_path,
+        "2025-01-06",
+        symbol="AAPL",
+        strategy_id="alpha",
+        gross_realized_pnl=8.0,
+        net_realized_pnl=5.0,
+        gross_unrealized_pnl=10.0,
+        net_unrealized_pnl=7.0,
+    )
+    _write_symbol_attr_day(
+        tmp_path,
+        "2025-01-07",
+        symbol="AAPL",
+        strategy_id="alpha",
+        gross_realized_pnl=10.0,
+        net_realized_pnl=6.0,
+        gross_unrealized_pnl=15.0,
+        net_unrealized_pnl=9.0,
+    )
+
+    def fake_load_feature_frame(symbol: str) -> pd.DataFrame:
+        return pd.DataFrame(
+            {
+                "timestamp": pd.date_range("2025-01-01", periods=10, freq="D"),
+                "close": [100, 101, 102, 103, 104, 105, 106, 107, 108, 109],
+                "volume": [1_000_000] * 10,
+            }
+        )
+
+    monkeypatch.setattr("trading_platform.research.trade_ev.load_feature_frame", fake_load_feature_frame)
+    realized_rows, bucket_rows, summary = evaluate_replay_trade_ev_predictions(
+        replay_root=tmp_path,
+        horizon_days=2,
+        target_type="hybrid_proxy",
+        hybrid_alpha=0.8,
+    )
+    assert len(realized_rows) == 1
+    assert len(bucket_rows) == 1
+    assert summary["target_type"] == "hybrid_proxy"
+    assert summary["hybrid_alpha"] == pytest.approx(0.8)
+    assert summary["realized_component_available_ratio"] == pytest.approx(1.0)
 
 
 def test_generate_rebalance_orders_ev_gate_blocks_negative_expected_value_trade(monkeypatch) -> None:

@@ -598,6 +598,7 @@ def generate_rebalance_orders(
         getattr(active_config, "ev_gate_training_source", "executed_trades") or "executed_trades"
     ).lower()
     ev_target_type = str(getattr(active_config, "ev_gate_target_type", "market_proxy") or "market_proxy").lower()
+    ev_hybrid_alpha = float(getattr(active_config, "ev_gate_hybrid_alpha", 0.8) or 0.8)
     ev_extreme_negative_threshold = getattr(active_config, "ev_gate_extreme_negative_threshold", None)
     ev_score_clip_min = getattr(active_config, "ev_gate_score_clip_min", None)
     ev_score_clip_max = getattr(active_config, "ev_gate_score_clip_max", None)
@@ -622,6 +623,7 @@ def generate_rebalance_orders(
             horizon_days=int(active_config.ev_gate_horizon_days),
             training_source=ev_requested_training_source,
             target_type=ev_target_type,
+            hybrid_alpha=ev_hybrid_alpha,
         )
         if (
             ev_requested_training_source == "candidate_decisions"
@@ -633,6 +635,7 @@ def generate_rebalance_orders(
                 horizon_days=int(active_config.ev_gate_horizon_days),
                 training_source="executed_trades",
                 target_type=ev_target_type,
+                hybrid_alpha=ev_hybrid_alpha,
             )
             if len(fallback_rows) >= int(active_config.ev_gate_min_training_samples):
                 ev_training_rows = fallback_rows
@@ -659,6 +662,7 @@ def generate_rebalance_orders(
     diagnostics["ev_gate_training_summary"] = ev_training_summary
     diagnostics["ev_gate_model_type"] = str(active_config.ev_gate_model_type)
     diagnostics["ev_gate_target_type"] = ev_target_type
+    diagnostics["ev_gate_hybrid_alpha"] = ev_hybrid_alpha
     diagnostics["ev_gate_mode"] = ev_gate_mode
     diagnostics["ev_gate_weight_multiplier"] = ev_weight_multiplier_enabled
     diagnostics["ev_gate_weight_scale"] = ev_weight_scale

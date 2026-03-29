@@ -78,6 +78,8 @@ class PaperTradingConfig:
     ev_gate_enabled: bool = False
     ev_gate_model_type: str = "bucketed_mean"
     ev_gate_horizon_days: int = 5
+    ev_gate_target_type: str = "market_proxy"
+    ev_gate_hybrid_alpha: float = 0.8
     ev_gate_mode: str = "hard"
     ev_gate_weight_multiplier: bool = False
     ev_gate_weight_scale: float = 1.0

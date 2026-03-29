@@ -3117,6 +3117,7 @@ Paper trading and replay also support an expected-net-value gate.
 - Supported targets are:
   - `market_proxy`: forward market return over the configured horizon minus estimated execution cost
   - `realized_candidate_proxy`: for executed long entries/increases with full horizon coverage, realized symbol/strategy net PnL through the horizon plus the horizon-end mark, normalized by entry notional; unsupported cases fall back explicitly to `market_proxy`
+  - `hybrid_proxy`: `hybrid_alpha * market_proxy + (1 - hybrid_alpha) * realized_candidate_proxy`; if the realized component is unavailable for a row, the target falls back to `market_proxy` for that row and records hybrid fallback coverage
   - `realized_trade_proxy`: reserved for future work and currently falls back through the realized-candidate path
 - Horizon-incomplete rows are excluded from training and counted explicitly in `excluded_unlabeled_row_count`.
 - If there is not enough prior history, the EV gate falls back cleanly and records a warning.
@@ -3136,7 +3137,8 @@ daily_trading:
         model_type: bucketed_mean
         training_source: candidate_decisions
         horizon_days: 5
-        target_type: realized_candidate_proxy
+        target_type: hybrid_proxy
+        hybrid_alpha: 0.8
         weight_multiplier: true
         weight_scale: 5.0
         normalize_scores: true
@@ -3178,9 +3180,12 @@ Useful calibration fields:
 - `avg_ev_weight_multiplier`
 - `ev_weighted_exposure`
 - `target_type`
+- `hybrid_alpha`
 - `labeled_row_count`
 - `excluded_unlabeled_row_count`
 - `label_coverage_ratio`
+- `realized_component_available_ratio`
+- `market_only_fallback_row_count`
 
 Normalization and clipping semantics:
 
@@ -3193,5 +3198,6 @@ Normalization and clipping semantics:
 Current limitations:
 
 - `realized_candidate_proxy` is intentionally conservative: it is exact only for the executed long-entry/increase cases it can map cleanly from existing replay artifacts
+- `hybrid_proxy` is intended as the safer experimental target when realized labels are informative but too noisy on their own; start with `hybrid_alpha` in the `0.7` to `0.9` range
 - sell/reduction/exit candidates and unsupported cases still fall back to the proxy target
 - calibration artifacts are diagnostics, not training inputs

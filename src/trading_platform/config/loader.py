@@ -569,6 +569,7 @@ def load_daily_trading_workflow_config(path: str | Path) -> DailyTradingWorkflow
     _set_if_missing(payload, "ev_gate_model_type", ev_gate_section, "model_type")
     _set_if_missing(payload, "ev_gate_horizon_days", ev_gate_section, "horizon_days")
     _set_if_missing(payload, "ev_gate_target_type", ev_gate_section, "target_type")
+    _set_if_missing(payload, "ev_gate_hybrid_alpha", ev_gate_section, "hybrid_alpha")
     _set_if_missing(payload, "ev_gate_mode", ev_gate_section, "mode")
     _set_if_missing(payload, "ev_gate_weight_multiplier", ev_gate_section, "weight_multiplier")
     _set_if_missing(payload, "ev_gate_weight_scale", ev_gate_section, "weight_scale")

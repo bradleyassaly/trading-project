@@ -345,6 +345,7 @@ def _write_replay_day_input_summary(
             "ev_gate_model_type": str(day_config.ev_gate_model_type or "bucketed_mean"),
             "ev_gate_mode": str(day_config.ev_gate_mode or "hard"),
             "ev_gate_target_type": str(day_config.ev_gate_target_type or "market_proxy"),
+            "ev_gate_hybrid_alpha": float(day_config.ev_gate_hybrid_alpha or 0.8),
             "ev_gate_training_source": str(day_config.ev_gate_training_source or "executed_trades"),
             "ev_gate_normalization_method": str(day_config.ev_gate_normalization_method or "zscore"),
             "ev_gate_normalize_within": str(day_config.ev_gate_normalize_within or "all_candidates"),
@@ -472,6 +473,7 @@ def _aggregate_candidate_ev_dataset(replay_root: Path) -> tuple[list[dict[str, A
                 else 0,
                 "training_source_used": str(training_summary.get("training_source", "executed_trades") or "executed_trades"),
                 "target_type": str(training_summary.get("target_type", "market_proxy") or "market_proxy"),
+                "hybrid_alpha": float(training_summary.get("hybrid_alpha", 0.8) or 0.8),
                 "requested_training_source": str(
                     training_summary.get("requested_training_source", training_summary.get("training_source", "executed_trades"))
                     or "executed_trades"
@@ -493,6 +495,7 @@ def _aggregate_candidate_ev_dataset(replay_root: Path) -> tuple[list[dict[str, A
             else 0.0
         ),
         "target_type": str(coverage_rows[-1]["target_type"]) if coverage_rows else "market_proxy",
+        "hybrid_alpha": float(coverage_rows[-1]["hybrid_alpha"]) if coverage_rows else 0.8,
         "training_source_used": str(coverage_rows[-1]["training_source_used"]) if coverage_rows else "executed_trades",
     }
     return coverage_rows, summary
@@ -637,6 +640,11 @@ def _compute_replay_summary(
         str(metrics_frame["ev_gate_target_type"].iloc[-1])
         if "ev_gate_target_type" in metrics_frame and not metrics_frame.empty
         else "market_proxy"
+    )
+    ev_gate_hybrid_alpha = (
+        float(metrics_frame["ev_gate_hybrid_alpha"].iloc[-1])
+        if "ev_gate_hybrid_alpha" in metrics_frame and not metrics_frame.empty
+        else 0.8
     )
     ev_gate_training_source = (
         str(metrics_frame["ev_gate_training_source"].iloc[-1])
@@ -837,6 +845,7 @@ def _compute_replay_summary(
         "ev_gate_enabled": ev_gate_enabled,
         "ev_gate_mode": ev_gate_mode,
         "ev_gate_target_type": ev_gate_target_type,
+        "ev_gate_hybrid_alpha": ev_gate_hybrid_alpha,
         "ev_gate_training_source": ev_gate_training_source,
         "ev_gate_normalization_method": ev_gate_normalization_method,
         "ev_gate_normalize_within": ev_gate_normalize_within,
@@ -924,6 +933,7 @@ def _write_replay_summary_artifacts(
                 f"- ev_gate_enabled: `{summary.get('ev_gate_enabled', False)}`",
                 f"- ev_gate_mode: `{summary.get('ev_gate_mode', 'hard')}`",
                 f"- ev_gate_target_type: `{summary.get('ev_gate_target_type', 'market_proxy')}`",
+                f"- ev_gate_hybrid_alpha: `{summary.get('ev_gate_hybrid_alpha', 0.8)}`",
                 f"- ev_gate_training_source: `{summary.get('ev_gate_training_source', 'executed_trades')}`",
                 f"- ev_gate_normalization_method: `{summary.get('ev_gate_normalization_method', 'zscore')}`",
                 f"- ev_gate_normalize_within: `{summary.get('ev_gate_normalize_within', 'all_candidates')}`",
@@ -1156,6 +1166,7 @@ def run_daily_replay(config: DailyReplayWorkflowConfig) -> DailyReplayResult:
                 "ev_gate_enabled": bool(paper_summary.get("ev_gate_enabled", False)),
                 "ev_gate_mode": str(paper_summary.get("ev_gate_mode", "hard") or "hard"),
                 "ev_gate_target_type": str(paper_summary.get("ev_gate_target_type", "market_proxy") or "market_proxy"),
+                "ev_gate_hybrid_alpha": float(paper_summary.get("ev_gate_hybrid_alpha", 0.8) or 0.8),
                 "ev_gate_training_source": str(
                     paper_summary.get("ev_gate_training_source", "executed_trades") or "executed_trades"
                 ),
@@ -1281,12 +1292,19 @@ def run_daily_replay(config: DailyReplayWorkflowConfig) -> DailyReplayResult:
         replay_root=replay_root,
         horizon_days=int(config.daily_trading.ev_gate_horizon_days or 5),
         target_type=str(config.daily_trading.ev_gate_target_type or "market_proxy"),
+        hybrid_alpha=float(config.daily_trading.ev_gate_hybrid_alpha or 0.8),
     )
     candidate_coverage_rows, candidate_dataset_summary = _aggregate_candidate_ev_dataset(replay_root)
     if ev_calibration_summary:
         summary["replay_ev_calibration_summary"] = ev_calibration_summary
         summary["ev_gate_target_type"] = str(
             ev_calibration_summary.get("target_type", config.daily_trading.ev_gate_target_type or "market_proxy")
+        )
+        summary["ev_gate_hybrid_alpha"] = float(
+            ev_calibration_summary.get("hybrid_alpha", config.daily_trading.ev_gate_hybrid_alpha or 0.8) or 0.8
+        )
+        summary["realized_component_available_ratio"] = float(
+            ev_calibration_summary.get("realized_component_available_ratio", 0.0) or 0.0
         )
         summary["ev_top_bucket_realized_net_return"] = ev_calibration_summary.get("top_bucket_realized_net_return", 0.0)
         summary["ev_bottom_bucket_realized_net_return"] = ev_calibration_summary.get(
