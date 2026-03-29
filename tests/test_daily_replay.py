@@ -85,6 +85,13 @@ def _install_fake_daily_runner(monkeypatch: pytest.MonkeyPatch, *, fail_dates: s
                     "blocked_entries_count": 1 if fill_count else 0,
                     "held_in_hold_zone_count": 0 if fill_count else 1,
                     "forced_exit_count": 0,
+                    "ev_gate_blocked_count": 0 if fill_count else 1,
+                    "ev_gate_mode": "soft",
+                    "avg_expected_net_return_traded": 0.01 if fill_count else 0.0,
+                    "avg_expected_net_return_blocked": 0.0 if fill_count else -0.01,
+                    "avg_ev_executed_trades": 0.01 if fill_count else 0.0,
+                    "ev_weighted_exposure": 0.5 if fill_count else 0.0,
+                    "avg_ev_weight_multiplier": 1.1 if fill_count else 1.0,
                     "score_band_enabled": True,
                     "entry_threshold_used": 0.85,
                     "exit_threshold_used": 0.60,
@@ -287,6 +294,9 @@ def test_run_daily_replay_writes_day_folders_and_carries_state(monkeypatch: pyte
     assert summary["avg_usable_symbol_count"] > 0
     assert summary["blocked_entries_count"] >= 0
     assert summary["held_in_hold_zone_count"] >= 0
+    assert "ev_gate_blocked_count" in summary
+    assert summary["ev_gate_mode"] == "soft"
+    assert "ev_weighted_exposure" in summary
     assert (tmp_path / "replay" / "2025-01-03" / "replay_day_input_summary.json").exists()
     assert (tmp_path / "replay" / "replay_daily_metrics.csv").exists()
     assert (tmp_path / "replay" / "replay_trade_log.csv").exists()
@@ -295,6 +305,9 @@ def test_run_daily_replay_writes_day_folders_and_carries_state(monkeypatch: pyte
     assert (tmp_path / "replay" / "replay_symbol_pnl.csv").exists()
     assert (tmp_path / "replay" / "replay_trade_pnl.csv").exists()
     assert (tmp_path / "replay" / "replay_pnl_attribution_summary.json").exists()
+    assert (tmp_path / "replay" / "replay_candidate_ev_coverage.csv").exists()
+    assert (tmp_path / "replay" / "replay_candidate_ev_dataset_summary.json").exists()
+    assert "replay_candidate_ev_dataset_summary" in summary
 
 
 def test_run_daily_replay_continue_on_error_records_failure(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

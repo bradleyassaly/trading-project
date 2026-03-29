@@ -539,6 +539,9 @@ def load_daily_trading_workflow_config(path: str | Path) -> DailyTradingWorkflow
     score_band_section = (
         execution_section.get("score_bands", {}) if isinstance(execution_section.get("score_bands"), dict) else {}
     )
+    ev_gate_section = (
+        execution_section.get("ev_gate", {}) if isinstance(execution_section.get("ev_gate"), dict) else {}
+    )
     if "slippage_model" not in payload and slippage_section:
         enabled = bool(slippage_section.get("enabled", False))
         payload["slippage_model"] = str(slippage_section.get("model", "fixed_bps" if enabled else "none"))
@@ -562,6 +565,25 @@ def load_daily_trading_workflow_config(path: str | Path) -> DailyTradingWorkflow
     _set_if_missing(payload, "apply_bands_to_new_entries", score_band_section)
     _set_if_missing(payload, "apply_bands_to_reductions", score_band_section)
     _set_if_missing(payload, "apply_bands_to_full_exits", score_band_section)
+    _set_if_missing(payload, "ev_gate_enabled", ev_gate_section, "enabled")
+    _set_if_missing(payload, "ev_gate_model_type", ev_gate_section, "model_type")
+    _set_if_missing(payload, "ev_gate_horizon_days", ev_gate_section, "horizon_days")
+    _set_if_missing(payload, "ev_gate_mode", ev_gate_section, "mode")
+    _set_if_missing(payload, "ev_gate_weight_multiplier", ev_gate_section, "weight_multiplier")
+    _set_if_missing(payload, "ev_gate_weight_scale", ev_gate_section, "weight_scale")
+    _set_if_missing(payload, "ev_gate_extreme_negative_threshold", ev_gate_section, "extreme_negative_threshold")
+    _set_if_missing(payload, "ev_gate_score_clip_min", ev_gate_section, "score_clip_min")
+    _set_if_missing(payload, "ev_gate_score_clip_max", ev_gate_section, "score_clip_max")
+    _set_if_missing(payload, "ev_gate_normalize_scores", ev_gate_section, "normalize_scores")
+    _set_if_missing(payload, "ev_gate_weight_multiplier_min", ev_gate_section, "weight_multiplier_min")
+    _set_if_missing(payload, "ev_gate_weight_multiplier_max", ev_gate_section, "weight_multiplier_max")
+    _set_if_missing(payload, "ev_gate_min_expected_net_return", ev_gate_section, "min_expected_net_return")
+    _set_if_missing(payload, "ev_gate_min_probability_positive", ev_gate_section, "min_probability_positive")
+    _set_if_missing(payload, "ev_gate_risk_penalty_lambda", ev_gate_section, "risk_penalty_lambda")
+    _set_if_missing(payload, "ev_gate_fallback_to_score_bands", ev_gate_section, "fallback_to_score_bands")
+    _set_if_missing(payload, "ev_gate_training_root", ev_gate_section, "training_root")
+    _set_if_missing(payload, "ev_gate_training_source", ev_gate_section, "training_source")
+    _set_if_missing(payload, "ev_gate_min_training_samples", ev_gate_section, "min_training_samples")
     _set_if_missing(payload, "enable_strategy_diagnostics", report_section)
     _set_if_missing(payload, "refresh_dashboard_static_data", dashboard_section)
     _set_if_missing(payload, "refresh_dashboard_static_data", dashboard_section, "refresh_static_data")

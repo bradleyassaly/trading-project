@@ -353,6 +353,21 @@ daily_trading:
         entry_score_percentile: 0.85
         exit_score_percentile: 0.60
         hold_score_band: true
+      ev_gate:
+        enabled: true
+        model_type: bucketed_mean
+        horizon_days: 5
+        mode: soft
+        training_source: candidate_decisions
+        weight_multiplier: true
+        weight_scale: 8.0
+        extreme_negative_threshold: -0.01
+        score_clip_min: -0.5
+        score_clip_max: 0.5
+        normalize_scores: true
+        weight_multiplier_min: 0.5
+        weight_multiplier_max: 1.5
+        min_expected_net_return: 0.001
   report:
     enable_strategy_diagnostics: true
   dashboard:
@@ -372,6 +387,20 @@ daily_trading:
     assert config.use_percentile_thresholds is True
     assert config.entry_score_percentile == 0.85
     assert config.exit_score_percentile == 0.60
+    assert config.ev_gate_enabled is True
+    assert config.ev_gate_model_type == "bucketed_mean"
+    assert config.ev_gate_horizon_days == 5
+    assert config.ev_gate_mode == "soft"
+    assert config.ev_gate_training_source == "candidate_decisions"
+    assert config.ev_gate_weight_multiplier is True
+    assert config.ev_gate_weight_scale == 8.0
+    assert config.ev_gate_extreme_negative_threshold == -0.01
+    assert config.ev_gate_score_clip_min == -0.5
+    assert config.ev_gate_score_clip_max == 0.5
+    assert config.ev_gate_normalize_scores is True
+    assert config.ev_gate_weight_multiplier_min == 0.5
+    assert config.ev_gate_weight_multiplier_max == 1.5
+    assert config.ev_gate_min_expected_net_return == 0.001
     assert config.activated_dir == "artifacts/strategy_portfolio/run_current/activated"
     assert config.enable_strategy_diagnostics is True
     assert config.refresh_dashboard_static_data is True
@@ -1550,6 +1579,7 @@ def test_example_configs_load_from_repo() -> None:
     assert daily_trading_config.spread_bps == 20.0
     assert daily_trading_config.min_weight_change_to_trade == 0.02
     assert daily_trading_config.hold_score_band is True
+    assert daily_trading_config.ev_gate_enabled is False
     assert classification_config.output_dir == "artifacts/reference/classifications"
     assert optimizer_config.optimizer_name == "min_vol"
     assert validation_config.output_dir == "artifacts/validation/vectorbt"

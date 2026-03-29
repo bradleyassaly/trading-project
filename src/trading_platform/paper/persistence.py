@@ -131,6 +131,18 @@ def _summary_markdown(summary: dict[str, Any], health_checks: list[dict[str, Any
         f"- Blocked entries count: `{summary.get('blocked_entries_count', 0)}`",
         f"- Held in hold zone count: `{summary.get('held_in_hold_zone_count', 0)}`",
         f"- Forced exit count: `{summary.get('forced_exit_count', 0)}`",
+        f"- EV gate enabled: `{summary.get('ev_gate_enabled', False)}`",
+        f"- EV gate mode: `{summary.get('ev_gate_mode', 'hard')}`",
+        f"- EV training source: `{summary.get('ev_gate_training_source', 'executed_trades')}`",
+        f"- EV gate blocked count: `{summary.get('ev_gate_blocked_count', 0)}`",
+        f"- Avg expected net return traded: `{summary.get('avg_expected_net_return_traded', 0.0)}`",
+        f"- Avg expected net return blocked: `{summary.get('avg_expected_net_return_blocked', 0.0)}`",
+        f"- Avg EV executed trades: `{summary.get('avg_ev_executed_trades', 0.0)}`",
+        f"- EV-weighted exposure: `{summary.get('ev_weighted_exposure', 0.0)}`",
+        f"- Avg EV weight multiplier: `{summary.get('avg_ev_weight_multiplier', 1.0)}`",
+        f"- Candidate dataset row count: `{summary.get('candidate_dataset_row_count', 0)}`",
+        f"- Candidate executed count: `{summary.get('candidate_executed_count', 0)}`",
+        f"- Candidate skipped count: `{summary.get('candidate_skipped_count', 0)}`",
         f"- Estimated execution cost: `{summary.get('estimated_execution_cost', 0.0)}`",
         f"- Estimated slippage cost: `{summary.get('estimated_slippage_cost', 0.0)}`",
         f"- Latest data source: `{summary.get('latest_data_source')}`",
@@ -419,6 +431,32 @@ def persist_paper_run_outputs(
         "skipped_due_to_hold_zone_count": int(
             paper_execution_diag.get("skipped_due_to_hold_zone_count", 0) or 0
         ),
+        "ev_gate_enabled": bool(paper_execution_diag.get("ev_gate_enabled", False)),
+        "ev_gate_model_type": str(paper_execution_diag.get("ev_gate_model_type", "bucketed_mean") or "bucketed_mean"),
+        "ev_gate_mode": str(paper_execution_diag.get("ev_gate_mode", "hard") or "hard"),
+        "ev_gate_training_source": str(
+            paper_execution_diag.get("ev_gate_training_source", "executed_trades") or "executed_trades"
+        ),
+        "ev_gate_blocked_count": int(paper_execution_diag.get("ev_gate_blocked_count", 0) or 0),
+        "avg_expected_net_return_traded": float(
+            paper_execution_diag.get("avg_expected_net_return_traded", 0.0) or 0.0
+        ),
+        "avg_expected_net_return_blocked": float(
+            paper_execution_diag.get("avg_expected_net_return_blocked", 0.0) or 0.0
+        ),
+        "avg_ev_executed_trades": float(paper_execution_diag.get("avg_ev_executed_trades", 0.0) or 0.0),
+        "ev_weighted_exposure": float(paper_execution_diag.get("ev_weighted_exposure", 0.0) or 0.0),
+        "avg_ev_weight_multiplier": float(paper_execution_diag.get("avg_ev_weight_multiplier", 1.0) or 1.0),
+        "ev_distribution": json.dumps(paper_execution_diag.get("ev_distribution", {}), sort_keys=True),
+        "ev_calibration_summary": json.dumps(paper_execution_diag.get("ev_calibration_summary", {}), sort_keys=True),
+        "ev_model_training_window": json.dumps(
+            paper_execution_diag.get("ev_model_training_window", {}),
+            sort_keys=True,
+        ),
+        "ev_model_sample_count": int(paper_execution_diag.get("ev_model_sample_count", 0) or 0),
+        "candidate_dataset_row_count": int(paper_execution_diag.get("candidate_dataset_row_count", 0) or 0),
+        "candidate_executed_count": int(paper_execution_diag.get("candidate_executed_count", 0) or 0),
+        "candidate_skipped_count": int(paper_execution_diag.get("candidate_skipped_count", 0) or 0),
         "rejected_order_count": int(execution_summary.get("rejected_order_count", 0) or 0),
         "requested_order_count": int(execution_summary.get("requested_order_count", 0) or len(result.orders)),
         "executable_order_count": int(execution_summary.get("executable_order_count", 0) or len(result.orders)),

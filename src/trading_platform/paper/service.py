@@ -54,6 +54,14 @@ from trading_platform.reporting.pnl_attribution import (
 from trading_platform.settings import METADATA_DIR
 from trading_platform.paper.slippage import apply_order_slippage, validate_slippage_config
 from trading_platform.risk.pre_trade_checks import validate_orders
+from trading_platform.research.trade_ev import (
+    build_trade_ev_calibration,
+    build_trade_ev_candidate_market_features,
+    build_trade_ev_training_dataset,
+    score_trade_ev_candidates,
+    train_trade_ev_model,
+    write_trade_ev_artifacts,
+)
 from trading_platform.research.xsec_momentum import run_xsec_momentum_topn
 from trading_platform.signals.common import normalize_price_frame
 from trading_platform.signals.loaders import load_feature_frame, resolve_feature_frame_path
@@ -433,8 +441,45 @@ def _apply_score_band_to_target(
     return target_weight, band_row
 
 
+def _dominant_strategy_id(provenance: dict[str, Any] | None) -> str | None:
+    strategy_rows = list((provenance or {}).get("strategy_rows") or [])
+    if not strategy_rows:
+        return None
+    ordered = sorted(
+        strategy_rows,
+        key=lambda row: abs(float((row or {}).get("ownership_share", 0.0) or 0.0)),
+        reverse=True,
+    )
+    strategy_id = ordered[0].get("strategy_id") if ordered else None
+    return str(strategy_id) if strategy_id else None
+
+
+def _ev_distribution(values: list[float]) -> dict[str, float]:
+    if not values:
+        return {
+            "count": 0,
+            "mean": 0.0,
+            "min": 0.0,
+            "p25": 0.0,
+            "median": 0.0,
+            "p75": 0.0,
+            "max": 0.0,
+        }
+    series = pd.Series([float(value) for value in values], dtype=float)
+    return {
+        "count": int(series.count()),
+        "mean": float(series.mean()),
+        "min": float(series.min()),
+        "p25": float(series.quantile(0.25)),
+        "median": float(series.quantile(0.50)),
+        "p75": float(series.quantile(0.75)),
+        "max": float(series.max()),
+    }
+
+
 def generate_rebalance_orders(
     *,
+    as_of: str | None = None,
     state: PaperPortfolioState,
     latest_target_weights: dict[str, float],
     latest_prices: dict[str, float],
@@ -484,11 +529,14 @@ def generate_rebalance_orders(
     orders: list[PaperOrder] = []
     skipped_trade_rows: list[dict[str, Any]] = []
     band_decision_rows: list[dict[str, Any]] = []
+    ev_prediction_rows: list[dict[str, Any]] = []
+    candidate_trade_rows: list[dict[str, Any]] = []
     skipped_turnover = 0.0
     total_requested_turnover = 0.0
     blocked_entries_count = 0
     held_in_hold_zone_count = 0
     forced_exit_count = 0
+    ev_gate_blocked_count = 0
     rank_lookup = _score_rank_lookup(effective_latest_scores)
     adjusted_target_weights: dict[str, float] = {}
     current_weight_lookup: dict[str, float] = {}
@@ -536,16 +584,425 @@ def generate_rebalance_orders(
         provenance_by_symbol=provenance_by_symbol,
     )
     band_lookup = {str(row["symbol"]): row for row in band_decision_rows}
+    ev_training_rows: list[dict[str, Any]] = []
+    ev_model: dict[str, Any] = {}
+    ev_training_summary: dict[str, Any] = {
+        "training_sample_count": 0,
+        "warnings": [],
+        "training_available": False,
+    }
+    ev_gate_mode = str(getattr(active_config, "ev_gate_mode", "hard") or "hard").lower()
+    ev_weight_multiplier_enabled = bool(getattr(active_config, "ev_gate_weight_multiplier", False))
+    ev_weight_scale = float(getattr(active_config, "ev_gate_weight_scale", 1.0) or 0.0)
+    ev_requested_training_source = str(
+        getattr(active_config, "ev_gate_training_source", "executed_trades") or "executed_trades"
+    ).lower()
+    ev_extreme_negative_threshold = getattr(active_config, "ev_gate_extreme_negative_threshold", None)
+    ev_score_clip_min = getattr(active_config, "ev_gate_score_clip_min", None)
+    ev_score_clip_max = getattr(active_config, "ev_gate_score_clip_max", None)
+    ev_normalize_scores = bool(getattr(active_config, "ev_gate_normalize_scores", False))
+    ev_weight_multiplier_min = getattr(active_config, "ev_gate_weight_multiplier_min", None)
+    ev_weight_multiplier_max = getattr(active_config, "ev_gate_weight_multiplier_max", None)
+    if ev_extreme_negative_threshold is not None:
+        ev_extreme_negative_threshold = float(ev_extreme_negative_threshold)
+    if ev_weight_multiplier_min is not None:
+        ev_weight_multiplier_min = float(ev_weight_multiplier_min)
+    if ev_weight_multiplier_max is not None:
+        ev_weight_multiplier_max = float(ev_weight_multiplier_max)
+    if bool(active_config.ev_gate_enabled) and as_of:
+        ev_training_rows, ev_training_summary = build_trade_ev_training_dataset(
+            history_root=active_config.ev_gate_training_root,
+            as_of_date=as_of,
+            horizon_days=int(active_config.ev_gate_horizon_days),
+            training_source=ev_requested_training_source,
+        )
+        if (
+            ev_requested_training_source == "candidate_decisions"
+            and len(ev_training_rows) < int(active_config.ev_gate_min_training_samples)
+        ):
+            fallback_rows, fallback_summary = build_trade_ev_training_dataset(
+                history_root=active_config.ev_gate_training_root,
+                as_of_date=as_of,
+                horizon_days=int(active_config.ev_gate_horizon_days),
+                training_source="executed_trades",
+            )
+            if len(fallback_rows) >= int(active_config.ev_gate_min_training_samples):
+                ev_training_rows = fallback_rows
+                ev_training_summary = {
+                    **dict(fallback_summary or {}),
+                    "requested_training_source": ev_requested_training_source,
+                    "training_source": "executed_trades",
+                    "fallback_reason": "insufficient_candidate_history_for_ev_gate",
+                }
+        ev_model = train_trade_ev_model(
+            training_rows=ev_training_rows,
+            model_type=active_config.ev_gate_model_type,
+            min_training_samples=int(active_config.ev_gate_min_training_samples),
+        )
+        ev_training_summary = {
+            **dict(ev_training_summary or {}),
+            "requested_training_source": ev_requested_training_source,
+            "training_source": str((ev_training_summary or {}).get("training_source") or ev_requested_training_source),
+            "model_type": active_config.ev_gate_model_type,
+            "training_available": bool(ev_model.get("training_available", False)),
+            "training_sample_count": int(ev_model.get("training_sample_count", len(ev_training_rows))),
+        }
+    diagnostics["ev_gate_enabled"] = bool(active_config.ev_gate_enabled)
+    diagnostics["ev_gate_training_summary"] = ev_training_summary
+    diagnostics["ev_gate_model_type"] = str(active_config.ev_gate_model_type)
+    diagnostics["ev_gate_mode"] = ev_gate_mode
+    diagnostics["ev_gate_weight_multiplier"] = ev_weight_multiplier_enabled
+    diagnostics["ev_gate_weight_scale"] = ev_weight_scale
+    diagnostics["ev_gate_extreme_negative_threshold"] = ev_extreme_negative_threshold
+    diagnostics["ev_gate_score_clip_min"] = ev_score_clip_min
+    diagnostics["ev_gate_score_clip_max"] = ev_score_clip_max
+    diagnostics["ev_gate_normalize_scores"] = ev_normalize_scores
+    diagnostics["ev_gate_weight_multiplier_min"] = ev_weight_multiplier_min
+    diagnostics["ev_gate_weight_multiplier_max"] = ev_weight_multiplier_max
+    diagnostics["ev_gate_training_source"] = str(
+        (ev_training_summary or {}).get("training_source") or ev_requested_training_source
+    )
+    ev_executed_expected_net_returns: list[float] = []
+    ev_blocked_expected_net_returns: list[float] = []
+    ev_adjusted_exposures: list[float] = []
+    ev_executed_multipliers: list[float] = []
+    ev_calibration_rows: list[dict[str, Any]] = []
+    ev_calibration_summary: dict[str, Any] = {}
+    market_feature_cache: dict[str, pd.DataFrame] = {}
+    request_contexts: list[dict[str, Any]] = []
+    candidate_row_by_symbol: dict[str, dict[str, Any]] = {}
+    request_symbols: set[str] = set()
+    for symbol in all_symbols:
+        current_price = float(effective_latest_prices.get(symbol, 0.0) or 0.0)
+        current_weight = float(current_weight_lookup.get(symbol, 0.0) or 0.0)
+        requested_target_weight = float(requested_target_weight_lookup.get(symbol, 0.0) or 0.0)
+        adjusted_target_weight = float(adjusted_target_weights.get(symbol, requested_target_weight) or 0.0)
+        requested_weight_delta = float(requested_target_weight - current_weight)
+        adjusted_weight_delta = float(adjusted_target_weight - current_weight)
+        band_row = dict(band_lookup.get(symbol) or {})
+        if (
+            abs(requested_weight_delta) <= 1e-12
+            and str(band_row.get("band_decision") or "") not in {"blocked_entry", "hold_zone", "hold_zone_observed"}
+        ):
+            continue
+        market_features = (
+            build_trade_ev_candidate_market_features(
+                symbol=symbol,
+                as_of_date=as_of,
+                frame_cache=market_feature_cache,
+            )
+            if as_of
+            else {}
+        )
+        estimated_execution_cost_pct = 0.0
+        current_quantity = int(state.positions.get(symbol).quantity if state.positions.get(symbol) is not None else 0)
+        if current_price > 0.0 and abs(requested_weight_delta) > 1e-12:
+            requested_target_shares = int((equity * (1.0 - reserve_cash_pct) * requested_target_weight) / current_price)
+            requested_delta_shares = int(requested_target_shares - current_quantity)
+            if requested_delta_shares != 0:
+                provisional_order = apply_order_slippage(
+                    PaperOrder(
+                        symbol=symbol,
+                        side="BUY" if requested_delta_shares > 0 else "SELL",
+                        quantity=int(abs(requested_delta_shares)),
+                        reference_price=float(current_price),
+                        target_weight=requested_target_weight,
+                        current_quantity=current_quantity,
+                        target_quantity=int(requested_target_shares),
+                        notional=float(abs(requested_delta_shares)) * float(current_price),
+                        reason="candidate_pre_execution_filter",
+                        provenance=dict((provenance_by_symbol or {}).get(symbol) or {}),
+                    ),
+                    active_config,
+                )
+                gross_notional = abs(float(provisional_order.expected_gross_notional or 0.0))
+                if gross_notional > 0.0:
+                    estimated_execution_cost_pct = float(provisional_order.expected_total_execution_cost / gross_notional)
+        candidate_row = {
+            "date": as_of,
+            "symbol": symbol,
+            "strategy_id": _dominant_strategy_id((provenance_by_symbol or {}).get(symbol)),
+            "signal_score": band_row.get("score_value"),
+            "score_rank": band_row.get("score_rank"),
+            "score_percentile": band_row.get("score_percentile"),
+            "current_weight": current_weight,
+            "target_weight": adjusted_target_weight,
+            "weight_delta": adjusted_weight_delta,
+            "requested_target_weight": requested_target_weight,
+            "requested_weight_delta": requested_weight_delta,
+            "adjusted_target_weight": adjusted_target_weight,
+            "adjusted_weight_delta": adjusted_weight_delta,
+            "action": "buy" if requested_weight_delta > 0.0 else ("sell" if requested_weight_delta < 0.0 else "hold"),
+            "action_type": (
+                "entry"
+                if abs(current_weight) <= 1e-12 and abs(requested_target_weight) > 1e-12
+                else (
+                    "exit"
+                    if abs(current_weight) > 1e-12 and abs(requested_target_weight) <= 1e-12
+                    else ("increase" if requested_weight_delta > 0.0 else ("reduction" if requested_weight_delta < 0.0 else "hold"))
+                )
+            ),
+            "current_position_held": int(abs(current_weight) > 1e-12),
+            "estimated_execution_cost_pct": estimated_execution_cost_pct,
+            "recent_return_3d": float(market_features.get("recent_return_3d", 0.0) or 0.0),
+            "recent_return_5d": float(market_features.get("recent_return_5d", 0.0) or 0.0),
+            "recent_return_10d": float(market_features.get("recent_return_10d", 0.0) or 0.0),
+            "recent_vol_20d": float(market_features.get("recent_vol_20d", 0.0) or 0.0),
+            "dollar_volume": float(market_features.get("dollar_volume", 0.0) or 0.0),
+            "candidate_status": "considered",
+            "candidate_outcome": "pending",
+            "candidate_stage": "pre_execution_filter",
+            "skip_reason": None,
+            "action_reason": band_row.get("action_reason"),
+            "band_decision": band_row.get("band_decision"),
+            "entry_threshold": band_row.get("entry_threshold"),
+            "exit_threshold": band_row.get("exit_threshold"),
+            "score_band_enabled": bool(diagnostics["score_band_enabled"]),
+            "ev_gate_enabled": bool(active_config.ev_gate_enabled),
+            "ev_gate_mode": ev_gate_mode,
+            "ev_gate_decision": None,
+            "probability_positive": None,
+        }
+        candidate_trade_rows.append(candidate_row)
+        candidate_row_by_symbol[symbol] = candidate_row
     for request in execution_requests:
+        request_symbols.add(str(request.symbol))
         current_price = float(effective_latest_prices.get(request.symbol, request.price) or request.price or 0.0)
         current_weight = float(current_weight_lookup.get(request.symbol, 0.0) or 0.0)
         requested_target_weight = float(requested_target_weight_lookup.get(request.symbol, request.target_weight) or 0.0)
         band_row = dict(band_lookup.get(request.symbol) or {})
         target_weight = float(request.target_weight)
         weight_delta = float(target_weight - current_weight)
-        total_requested_turnover += abs(weight_delta)
-        if abs(weight_delta) < float(min_weight_change_to_trade or 0.0):
-            skipped_turnover += abs(weight_delta)
+        temp_order = apply_order_slippage(
+            PaperOrder(
+                symbol=request.symbol,
+                side=request.side,
+                quantity=int(abs(request.requested_shares)),
+                reference_price=float(current_price),
+                target_weight=target_weight,
+                current_quantity=int(request.current_shares),
+                target_quantity=int(request.target_shares),
+                notional=float(abs(request.requested_shares)) * float(current_price),
+                reason="rebalance_to_target",
+                provenance=dict(request.provenance or {}),
+            ),
+            active_config,
+        )
+        estimated_cost_pct = (
+            float(temp_order.expected_total_execution_cost / abs(temp_order.expected_gross_notional))
+            if abs(float(temp_order.expected_gross_notional or 0.0)) > 0.0
+            else 0.0
+        )
+        market_features = (
+            build_trade_ev_candidate_market_features(
+                symbol=request.symbol,
+                as_of_date=as_of,
+                frame_cache=market_feature_cache,
+            )
+            if as_of
+            else {}
+        )
+        candidate_row = {
+            "date": as_of,
+            "symbol": request.symbol,
+            "strategy_id": _dominant_strategy_id(request.provenance),
+            "signal_score": band_row.get("score_value"),
+            "score_rank": band_row.get("score_rank"),
+            "score_percentile": band_row.get("score_percentile"),
+            "current_weight": current_weight,
+            "target_weight": target_weight,
+            "weight_delta": weight_delta,
+            "action": request.side.lower(),
+            "action_type": (
+                "entry"
+                if abs(current_weight) <= 1e-12 and abs(target_weight) > 1e-12
+                else (
+                    "exit"
+                    if abs(current_weight) > 1e-12 and abs(target_weight) <= 1e-12
+                    else ("increase" if weight_delta > 0.0 else ("reduction" if weight_delta < 0.0 else "hold"))
+                )
+            ),
+            "current_position_held": int(abs(request.current_shares) > 0),
+            "estimated_execution_cost_pct": estimated_cost_pct,
+            "recent_return_3d": float(market_features.get("recent_return_3d", 0.0) or 0.0),
+            "recent_return_5d": float(market_features.get("recent_return_5d", 0.0) or 0.0),
+            "recent_return_10d": float(market_features.get("recent_return_10d", 0.0) or 0.0),
+            "recent_vol_20d": float(market_features.get("recent_vol_20d", 0.0) or 0.0),
+            "dollar_volume": float(market_features.get("dollar_volume", 0.0) or 0.0),
+        }
+        request_contexts.append(
+            {
+                "request": request,
+                "current_price": current_price,
+                "current_weight": current_weight,
+                "requested_target_weight": requested_target_weight,
+                "band_row": band_row,
+                "target_weight": target_weight,
+                "weight_delta": weight_delta,
+                "candidate_row": candidate_row,
+            }
+        )
+    ev_prediction_lookup: dict[str, dict[str, Any]] = {}
+    if (
+        bool(active_config.ev_gate_enabled)
+        and bool(ev_model.get("training_available", False))
+        and request_contexts
+    ):
+        scored_predictions = score_trade_ev_candidates(
+            model=ev_model,
+            candidate_rows=[dict(row["candidate_row"]) for row in request_contexts],
+            min_expected_net_return=float(active_config.ev_gate_min_expected_net_return),
+            min_probability_positive=active_config.ev_gate_min_probability_positive,
+            risk_penalty_lambda=float(active_config.ev_gate_risk_penalty_lambda),
+            score_clip_min=ev_score_clip_min,
+            score_clip_max=ev_score_clip_max,
+            normalize_scores=ev_normalize_scores,
+        )
+        ev_prediction_lookup = {str(row.get("symbol")): dict(row) for row in scored_predictions if row.get("symbol")}
+    if bool(active_config.ev_gate_enabled) and bool(ev_model.get("training_available", False)) and ev_training_rows:
+        training_predictions = score_trade_ev_candidates(
+            model=ev_model,
+            candidate_rows=[dict(row) for row in ev_training_rows],
+            min_expected_net_return=float(active_config.ev_gate_min_expected_net_return),
+            min_probability_positive=active_config.ev_gate_min_probability_positive,
+            risk_penalty_lambda=float(active_config.ev_gate_risk_penalty_lambda),
+            score_clip_min=ev_score_clip_min,
+            score_clip_max=ev_score_clip_max,
+            normalize_scores=False,
+        )
+        ev_calibration_rows, ev_calibration_summary = build_trade_ev_calibration(
+            prediction_rows=[
+                {
+                    **row,
+                    "realized_gross_return": float(row.get("forward_gross_return", 0.0) or 0.0),
+                    "realized_net_return": float(row.get("forward_net_return", 0.0) or 0.0),
+                    "execution_cost": float(row.get("estimated_execution_cost_pct", 0.0) or 0.0),
+                    "ev_weight_multiplier": 1.0,
+                }
+                for row in training_predictions
+            ]
+        )
+    for context in request_contexts:
+        request = context["request"]
+        current_weight = float(context["current_weight"])
+        requested_target_weight = float(context["requested_target_weight"])
+        band_row = dict(context["band_row"])
+        target_weight = float(context["target_weight"])
+        weight_delta = float(context["weight_delta"])
+        ev_prediction: dict[str, Any] | None = None
+        effective_request = request
+        ev_adjusted_target_weight = target_weight
+        ev_adjusted_weight_delta = weight_delta
+        ev_weight_multiplier = 1.0
+        if bool(active_config.ev_gate_enabled) and bool(ev_model.get("training_available", False)):
+            ev_prediction = dict(ev_prediction_lookup.get(request.symbol) or {})
+            ev_prediction["ev_gate_mode"] = ev_gate_mode
+            ev_prediction["ev_weight_multiplier"] = 1.0
+            ev_prediction["ev_adjusted_target_weight"] = target_weight
+            ev_prediction["ev_adjusted_weight_delta"] = weight_delta
+            ev_score = float(ev_prediction.get("ev_decision_score", 0.0) or 0.0)
+            if ev_gate_mode == "soft":
+                if ev_weight_multiplier_enabled:
+                    ev_weight_multiplier = max(0.0, 1.0 + (ev_weight_scale * ev_score))
+                    if ev_weight_multiplier_min is not None:
+                        ev_weight_multiplier = max(ev_weight_multiplier, ev_weight_multiplier_min)
+                    if ev_weight_multiplier_max is not None:
+                        ev_weight_multiplier = min(ev_weight_multiplier, ev_weight_multiplier_max)
+                ev_adjusted_target_weight = float(target_weight * ev_weight_multiplier)
+                ev_adjusted_weight_delta = float(ev_adjusted_target_weight - current_weight)
+                target_shares = int((equity * (1.0 - reserve_cash_pct) * ev_adjusted_target_weight) / current_price) if current_price > 0.0 else 0
+                requested_delta = int(target_shares - request.current_shares)
+                effective_request = replace(
+                    request,
+                    side="BUY" if requested_delta > 0 else "SELL",
+                    requested_shares=abs(requested_delta),
+                    requested_notional=float(abs(requested_delta) * current_price),
+                    target_shares=target_shares,
+                    target_weight=ev_adjusted_target_weight,
+                    provenance={
+                        **dict(request.provenance or {}),
+                        "ev_weight_multiplier": ev_weight_multiplier,
+                        "ev_adjusted_target_weight": ev_adjusted_target_weight,
+                        "ev_adjusted_weight_delta": ev_adjusted_weight_delta,
+                    },
+                )
+                ev_prediction["ev_weight_multiplier"] = ev_weight_multiplier
+                ev_prediction["ev_adjusted_target_weight"] = ev_adjusted_target_weight
+                ev_prediction["ev_adjusted_weight_delta"] = ev_adjusted_weight_delta
+                if abs(ev_adjusted_target_weight - target_weight) <= 1e-12:
+                    ev_prediction["ev_gate_decision"] = "allow"
+                    ev_prediction["action_reason"] = "passed_ev_soft_gate"
+                elif ev_adjusted_target_weight == 0.0:
+                    ev_prediction["ev_gate_decision"] = "scale_to_zero"
+                    ev_prediction["action_reason"] = "scaled_to_zero_by_ev_gate"
+                elif abs(ev_weight_multiplier - 1.0) <= 1e-12:
+                    ev_prediction["ev_gate_decision"] = "allow"
+                    ev_prediction["action_reason"] = "passed_ev_soft_gate"
+                elif ev_weight_multiplier > 1.0:
+                    ev_prediction["ev_gate_decision"] = "scale_up"
+                    ev_prediction["action_reason"] = "scaled_up_by_ev_gate"
+                else:
+                    ev_prediction["ev_gate_decision"] = "scale_down"
+                    ev_prediction["action_reason"] = "scaled_down_by_ev_gate"
+            if ev_extreme_negative_threshold is not None and ev_score < ev_extreme_negative_threshold:
+                ev_prediction["ev_gate_decision"] = "block"
+                ev_prediction["action_reason"] = "blocked_by_ev_gate"
+            ev_prediction_rows.append(ev_prediction)
+            if request.symbol in candidate_row_by_symbol:
+                candidate_row_by_symbol[request.symbol]["ev_gate_decision"] = ev_prediction.get("ev_gate_decision")
+                candidate_row_by_symbol[request.symbol]["probability_positive"] = ev_prediction.get(
+                    "probability_positive"
+                )
+            if ev_prediction["ev_gate_decision"] == "block":
+                ev_gate_blocked_count += 1
+                ev_blocked_expected_net_returns.append(float(ev_prediction.get("expected_net_return", 0.0) or 0.0))
+                if request.symbol in candidate_row_by_symbol:
+                    candidate_row_by_symbol[request.symbol]["candidate_status"] = "skipped"
+                    candidate_row_by_symbol[request.symbol]["candidate_outcome"] = "ev_gate_blocked"
+                    candidate_row_by_symbol[request.symbol]["candidate_stage"] = "ev_gate"
+                    candidate_row_by_symbol[request.symbol]["skip_reason"] = "ev_gate_blocked"
+                    candidate_row_by_symbol[request.symbol]["action_reason"] = "blocked_by_ev_gate"
+                skipped_trade_rows.append(
+                    {
+                        "symbol": request.symbol,
+                        "score_value": band_row.get("score_value"),
+                        "score_rank": band_row.get("score_rank"),
+                        "entry_threshold": band_row.get("entry_threshold"),
+                        "exit_threshold": band_row.get("exit_threshold"),
+                        "band_decision": band_row.get("band_decision"),
+                        "current_weight": current_weight,
+                        "target_weight": target_weight,
+                        "weight_delta": weight_delta,
+                        "requested_notional": float(request.requested_notional),
+                        "skip_reason": "ev_gate_blocked",
+                        "action_reason": "blocked_by_ev_gate",
+                        "expected_net_return": ev_prediction.get("expected_net_return"),
+                        "probability_positive": ev_prediction.get("probability_positive"),
+                    }
+                )
+                continue
+        adjusted_target_weights[request.symbol] = float(ev_adjusted_target_weight)
+        effective_target_weight = float(effective_request.target_weight)
+        effective_weight_delta = float(effective_target_weight - current_weight)
+        if abs(effective_request.requested_shares) == 0 and abs(effective_weight_delta) <= 1e-12:
+            if request.symbol in candidate_row_by_symbol:
+                candidate_row_by_symbol[request.symbol]["candidate_status"] = "skipped"
+                candidate_row_by_symbol[request.symbol]["candidate_outcome"] = "scaled_to_zero"
+                candidate_row_by_symbol[request.symbol]["candidate_stage"] = "ev_gate"
+                candidate_row_by_symbol[request.symbol]["skip_reason"] = "ev_scaled_to_zero"
+                candidate_row_by_symbol[request.symbol]["action_reason"] = str(
+                    (ev_prediction or {}).get("action_reason") or "scaled_to_zero_by_ev_gate"
+                )
+            continue
+        total_requested_turnover += abs(effective_weight_delta)
+        if abs(effective_weight_delta) < float(min_weight_change_to_trade or 0.0):
+            skipped_turnover += abs(effective_weight_delta)
+            if request.symbol in candidate_row_by_symbol:
+                candidate_row_by_symbol[request.symbol]["candidate_status"] = "skipped"
+                candidate_row_by_symbol[request.symbol]["candidate_outcome"] = "hysteresis_blocked"
+                candidate_row_by_symbol[request.symbol]["candidate_stage"] = "hysteresis"
+                candidate_row_by_symbol[request.symbol]["skip_reason"] = "below_min_weight_change_to_trade"
+                candidate_row_by_symbol[request.symbol]["action_reason"] = "skipped_small_weight_delta"
             skipped_trade_rows.append(
                 {
                     "symbol": request.symbol,
@@ -555,39 +1012,60 @@ def generate_rebalance_orders(
                     "exit_threshold": band_row.get("exit_threshold"),
                     "band_decision": band_row.get("band_decision"),
                     "current_weight": current_weight,
-                    "target_weight": target_weight,
-                    "weight_delta": weight_delta,
-                    "requested_notional": float(request.requested_notional),
+                    "target_weight": effective_target_weight,
+                    "weight_delta": effective_weight_delta,
+                    "requested_notional": float(effective_request.requested_notional),
                     "skip_reason": "below_min_weight_change_to_trade",
                     "action_reason": "skipped_small_weight_delta",
                 }
             )
             continue
-        if abs(target_weight) <= 1e-12 and abs(current_weight) <= 1e-12:
+        if abs(effective_target_weight) <= 1e-12 and abs(current_weight) <= 1e-12:
+            if request.symbol in candidate_row_by_symbol:
+                candidate_row_by_symbol[request.symbol]["candidate_status"] = "skipped"
+                candidate_row_by_symbol[request.symbol]["candidate_outcome"] = "not_actionable"
+                candidate_row_by_symbol[request.symbol]["candidate_stage"] = "post_adjustment"
+                candidate_row_by_symbol[request.symbol]["skip_reason"] = "zero_effective_target"
             continue
-        notional = float(request.requested_notional)
+        notional = float(effective_request.requested_notional)
         if notional < min_trade_dollars:
+            if request.symbol in candidate_row_by_symbol:
+                candidate_row_by_symbol[request.symbol]["candidate_status"] = "skipped"
+                candidate_row_by_symbol[request.symbol]["candidate_outcome"] = "below_min_trade_dollars"
+                candidate_row_by_symbol[request.symbol]["candidate_stage"] = "min_trade"
+                candidate_row_by_symbol[request.symbol]["skip_reason"] = "below_min_trade_dollars"
+                candidate_row_by_symbol[request.symbol]["action_reason"] = "below_min_trade_dollars"
             continue
         target_quantity = (
-            (int(request.target_shares) // lot_size) * lot_size if lot_size > 0 else int(request.target_shares)
+            (int(effective_request.target_shares) // lot_size) * lot_size
+            if lot_size > 0
+            else int(effective_request.target_shares)
         )
+        if ev_prediction is not None:
+            ev_executed_expected_net_returns.append(float(ev_prediction.get("expected_net_return", 0.0) or 0.0))
+            ev_adjusted_exposures.append(abs(effective_target_weight))
+            ev_executed_multipliers.append(float(ev_prediction.get("ev_weight_multiplier", 1.0) or 1.0))
         orders.append(
             PaperOrder(
-                symbol=request.symbol,
-                side=request.side,
-                quantity=int(request.requested_shares),
-                reference_price=float(request.price),
-                target_weight=float(request.target_weight),
-                current_quantity=int(request.current_shares),
+                symbol=effective_request.symbol,
+                side=effective_request.side,
+                quantity=int(effective_request.requested_shares),
+                reference_price=float(effective_request.price),
+                target_weight=float(effective_request.target_weight),
+                current_quantity=int(effective_request.current_shares),
                 target_quantity=int(target_quantity),
                 notional=notional,
                 reason="rebalance_to_target",
                 provenance={
-                    **dict(request.provenance or {}),
+                    **dict(effective_request.provenance or {}),
                     "current_weight": current_weight,
-                    "target_weight": target_weight,
-                    "weight_delta": weight_delta,
+                    "target_weight": effective_target_weight,
+                    "weight_delta": effective_weight_delta,
                     "requested_target_weight": requested_target_weight,
+                    "ev_requested_target_weight": target_weight,
+                    "ev_weight_multiplier": ev_weight_multiplier,
+                    "ev_adjusted_target_weight": ev_adjusted_target_weight,
+                    "ev_adjusted_weight_delta": ev_adjusted_weight_delta,
                     "score_value": band_row.get("score_value"),
                     "score_rank": band_row.get("score_rank"),
                     "score_percentile": band_row.get("score_percentile"),
@@ -598,6 +1076,16 @@ def generate_rebalance_orders(
                 },
             )
         )
+        if request.symbol in candidate_row_by_symbol:
+            candidate_row_by_symbol[request.symbol]["candidate_status"] = "executed"
+            candidate_row_by_symbol[request.symbol]["candidate_outcome"] = "executed"
+            candidate_row_by_symbol[request.symbol]["candidate_stage"] = "execution"
+            candidate_row_by_symbol[request.symbol]["skip_reason"] = None
+            candidate_row_by_symbol[request.symbol]["action_reason"] = "executed_candidate"
+            candidate_row_by_symbol[request.symbol]["target_weight"] = effective_target_weight
+            candidate_row_by_symbol[request.symbol]["weight_delta"] = effective_weight_delta
+            candidate_row_by_symbol[request.symbol]["adjusted_target_weight"] = effective_target_weight
+            candidate_row_by_symbol[request.symbol]["adjusted_weight_delta"] = effective_weight_delta
 
     diagnostics["order_count"] = len(orders)
     diagnostics["skipped_trades_count"] = len(skipped_trade_rows)
@@ -608,10 +1096,61 @@ def generate_rebalance_orders(
     diagnostics["blocked_entries_count"] = int(blocked_entries_count)
     diagnostics["held_in_hold_zone_count"] = int(held_in_hold_zone_count)
     diagnostics["forced_exit_count"] = int(forced_exit_count)
+    diagnostics["ev_gate_blocked_count"] = int(ev_gate_blocked_count)
     diagnostics["skipped_due_to_entry_band_count"] = int(blocked_entries_count)
     diagnostics["skipped_due_to_hold_zone_count"] = int(held_in_hold_zone_count)
     diagnostics["skipped_trade_rows"] = skipped_trade_rows
     diagnostics["band_decision_rows"] = band_decision_rows
+    diagnostics["ev_prediction_rows"] = ev_prediction_rows
+    for symbol, row in candidate_row_by_symbol.items():
+        if str(row.get("candidate_outcome") or "") != "pending":
+            continue
+        band_decision = str(row.get("band_decision") or "")
+        if symbol not in request_symbols and band_decision == "blocked_entry":
+            row["candidate_status"] = "skipped"
+            row["candidate_outcome"] = "score_band_blocked"
+            row["candidate_stage"] = "score_band"
+            row["skip_reason"] = "blocked_below_entry_threshold"
+            row["action_reason"] = "blocked_below_entry_threshold"
+        elif symbol not in request_symbols and band_decision in {"hold_zone", "hold_zone_observed"}:
+            row["candidate_status"] = "skipped"
+            row["candidate_outcome"] = "hold_zone_skipped"
+            row["candidate_stage"] = "score_band"
+            row["skip_reason"] = "held_within_hold_zone"
+            row["action_reason"] = "held_within_hold_zone"
+        else:
+            row["candidate_status"] = "skipped"
+            row["candidate_outcome"] = "not_executed"
+            row["candidate_stage"] = "pre_execution_filter"
+            row["skip_reason"] = str(row.get("skip_reason") or "not_executed")
+    diagnostics["candidate_trade_rows"] = candidate_trade_rows
+    diagnostics["candidate_dataset_row_count"] = len(candidate_trade_rows)
+    diagnostics["candidate_executed_count"] = sum(
+        1 for row in candidate_trade_rows if str(row.get("candidate_outcome") or "") == "executed"
+    )
+    diagnostics["candidate_skipped_count"] = sum(
+        1 for row in candidate_trade_rows if str(row.get("candidate_status") or "") == "skipped"
+    )
+    diagnostics["avg_expected_net_return_traded"] = (
+        float(sum(ev_executed_expected_net_returns) / len(ev_executed_expected_net_returns))
+        if ev_executed_expected_net_returns
+        else 0.0
+    )
+    diagnostics["avg_expected_net_return_blocked"] = (
+        float(sum(ev_blocked_expected_net_returns) / len(ev_blocked_expected_net_returns))
+        if ev_blocked_expected_net_returns
+        else 0.0
+    )
+    diagnostics["avg_ev_executed_trades"] = diagnostics["avg_expected_net_return_traded"]
+    diagnostics["ev_weighted_exposure"] = float(sum(ev_adjusted_exposures))
+    diagnostics["avg_ev_weight_multiplier"] = (
+        float(sum(ev_executed_multipliers) / len(ev_executed_multipliers)) if ev_executed_multipliers else 1.0
+    )
+    diagnostics["ev_distribution"] = _ev_distribution(
+        [float(row.get("expected_net_return", 0.0) or 0.0) for row in ev_prediction_rows]
+    )
+    diagnostics["ev_calibration_rows"] = ev_calibration_rows
+    diagnostics["ev_calibration_summary"] = ev_calibration_summary
     diagnostics["symbols_considered"] = len(all_symbols)
     diagnostics["target_weight_sum"] = float(sum(latest_target_weights.values()))
     diagnostics["adjusted_target_weight_sum"] = float(sum(adjusted_target_weights.values()))
@@ -1384,6 +1923,7 @@ def run_paper_trading_cycle_for_targets(
     starting_state = _clone_state(state)
 
     order_result = generate_rebalance_orders(
+        as_of=as_of,
         state=state,
         latest_target_weights=latest_effective_weights,
         latest_prices=latest_prices,
@@ -1523,6 +2063,42 @@ def run_paper_trading_cycle_for_targets(
             "blocked_entries_count": int(order_result.diagnostics.get("blocked_entries_count", 0) or 0),
             "held_in_hold_zone_count": int(order_result.diagnostics.get("held_in_hold_zone_count", 0) or 0),
             "forced_exit_count": int(order_result.diagnostics.get("forced_exit_count", 0) or 0),
+            "ev_gate_enabled": bool(order_result.diagnostics.get("ev_gate_enabled", False)),
+            "ev_gate_model_type": str(order_result.diagnostics.get("ev_gate_model_type", "bucketed_mean")),
+            "ev_gate_mode": str(order_result.diagnostics.get("ev_gate_mode", "hard") or "hard"),
+            "ev_gate_training_source": str(
+                order_result.diagnostics.get("ev_gate_training_source", "executed_trades") or "executed_trades"
+            ),
+            "ev_gate_weight_multiplier": bool(order_result.diagnostics.get("ev_gate_weight_multiplier", False)),
+            "ev_gate_weight_scale": float(order_result.diagnostics.get("ev_gate_weight_scale", 1.0) or 0.0),
+            "ev_gate_extreme_negative_threshold": order_result.diagnostics.get("ev_gate_extreme_negative_threshold"),
+            "ev_gate_score_clip_min": order_result.diagnostics.get("ev_gate_score_clip_min"),
+            "ev_gate_score_clip_max": order_result.diagnostics.get("ev_gate_score_clip_max"),
+            "ev_gate_normalize_scores": bool(order_result.diagnostics.get("ev_gate_normalize_scores", False)),
+            "ev_gate_weight_multiplier_min": order_result.diagnostics.get("ev_gate_weight_multiplier_min"),
+            "ev_gate_weight_multiplier_max": order_result.diagnostics.get("ev_gate_weight_multiplier_max"),
+            "ev_gate_blocked_count": int(order_result.diagnostics.get("ev_gate_blocked_count", 0) or 0),
+            "avg_expected_net_return_traded": float(
+                order_result.diagnostics.get("avg_expected_net_return_traded", 0.0) or 0.0
+            ),
+            "avg_expected_net_return_blocked": float(
+                order_result.diagnostics.get("avg_expected_net_return_blocked", 0.0) or 0.0
+            ),
+            "avg_ev_executed_trades": float(order_result.diagnostics.get("avg_ev_executed_trades", 0.0) or 0.0),
+            "ev_weighted_exposure": float(order_result.diagnostics.get("ev_weighted_exposure", 0.0) or 0.0),
+            "avg_ev_weight_multiplier": float(order_result.diagnostics.get("avg_ev_weight_multiplier", 1.0) or 1.0),
+            "ev_distribution": dict(order_result.diagnostics.get("ev_distribution", {}) or {}),
+            "ev_calibration_summary": dict(order_result.diagnostics.get("ev_calibration_summary", {}) or {}),
+            "ev_model_training_window": {
+                "start": (order_result.diagnostics.get("ev_gate_training_summary") or {}).get("training_window_start"),
+                "end": (order_result.diagnostics.get("ev_gate_training_summary") or {}).get("training_window_end"),
+            },
+            "ev_model_sample_count": int(
+                (order_result.diagnostics.get("ev_gate_training_summary") or {}).get("training_sample_count", 0) or 0
+            ),
+            "candidate_dataset_row_count": int(order_result.diagnostics.get("candidate_dataset_row_count", 0) or 0),
+            "candidate_executed_count": int(order_result.diagnostics.get("candidate_executed_count", 0) or 0),
+            "candidate_skipped_count": int(order_result.diagnostics.get("candidate_skipped_count", 0) or 0),
             "skipped_due_to_entry_band_count": int(
                 order_result.diagnostics.get("skipped_due_to_entry_band_count", 0) or 0
             ),
@@ -1943,6 +2519,16 @@ def write_paper_trading_artifacts(
         paths.update(execution_paths)
     paths.update(write_decision_journal_artifacts(bundle=result.decision_bundle, output_dir=output_path))
     paths.update(write_pnl_attribution_artifacts(output_dir=output_path, attribution_payload=result.attribution))
+    paths.update(
+        write_trade_ev_artifacts(
+            output_dir=output_path,
+            training_summary=dict((result.diagnostics.get("order_generation") or {}).get("ev_gate_training_summary") or {}),
+            prediction_rows=list((result.diagnostics.get("order_generation") or {}).get("ev_prediction_rows") or []),
+            candidate_rows=list((result.diagnostics.get("order_generation") or {}).get("candidate_trade_rows") or []),
+            calibration_rows=list((result.diagnostics.get("order_generation") or {}).get("ev_calibration_rows") or []),
+            calibration_summary=dict((result.diagnostics.get("order_generation") or {}).get("ev_calibration_summary") or {}),
+        )
+    )
     paths.update(
         write_universe_provenance_artifacts(
             bundle=result.universe_bundle,

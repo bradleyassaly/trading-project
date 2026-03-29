@@ -771,6 +771,35 @@ trading-cli ops pipeline replay-daily \
 
 `ops pipeline replay-daily` reuses the same artifact-first daily trading pipeline, but runs it sequentially across a historical date set instead of a live schedule. Replay carries a persistent paper state forward between days, writes one folder per replay date, and produces replay-level diagnostics so activity and stability can be evaluated before longer paper-trading runs.
 
+For reproducible EV A/B experiments, use explicit config files instead of mutating YAML inline with `sed`/`awk`. The repo now includes:
+
+- `configs/experiments/ev_baseline.yaml`
+- `configs/experiments/ev_hard.yaml`
+- `configs/experiments/ev_soft5.yaml`
+- `configs/experiments/ev_soft10.yaml`
+
+They all share the same replay baseline:
+
+- `min_weight_change_to_trade: 0.015`
+- score bands enabled
+- `entry_score_percentile: 0.90`
+- `exit_score_percentile: 0.65`
+- `hold_score_band: true`
+
+Run the full EV grid with:
+
+```powershell
+.\scripts\run_ev_mode_grid.ps1
+```
+
+Then summarize the replay outputs with:
+
+```powershell
+.\.venv\Scripts\python.exe .\scripts\summarize_ev_grid.py
+```
+
+This avoids YAML corruption from shell text replacement and keeps experiment inputs versionable and auditable.
+
 Replay depends on upstream artifact inputs in the same way the daily pipeline does. In the common `research.mode: skip` configuration, replay expects prebuilt research artifacts under the configured `daily_trading.paths.research_output_dir`, then rebuilds per-day promotion, portfolio, activation, paper, and report artifacts from that input. Replay does not require rebuilding historical research artifacts unless the research stage is explicitly enabled.
 
 Expected replay output structure:
@@ -3076,3 +3105,67 @@ Useful fields:
 - `forced_exit_count`
 - `band_decision`
 - `action_reason`
+
+## Trade EV Gate
+
+Paper trading and replay also support an expected-net-value gate.
+
+- Available models are `bucketed_mean` and `bucketed_linear`.
+- Training can use either `executed_trades` or `candidate_decisions`.
+- `candidate_decisions` captures the full pre-execution candidate set, including executed trades plus score-band, EV, and hysteresis skips.
+- All EV training remains walk-forward: replay day `N` trains only on labeled rows from dates strictly before `N`.
+- The target is forward market return over the configured horizon minus estimated execution cost.
+- If there is not enough prior history, the EV gate falls back cleanly and records a warning.
+- Soft EV weighting is currently preferred over hard blocking because the EV signal has been more useful as a ranking/sizing input than as an absolute pass/fail cutoff.
+
+Example:
+
+```yaml
+daily_trading:
+  paper:
+    execution:
+      ev_gate:
+        enabled: true
+        mode: soft
+        model_type: bucketed_linear
+        training_source: candidate_decisions
+        horizon_days: 5
+        weight_multiplier: true
+        weight_scale: 5.0
+        score_clip_min: -1.5
+        score_clip_max: 1.5
+        normalize_scores: true
+        weight_multiplier_min: 0.5
+        weight_multiplier_max: 1.5
+        min_expected_net_return: 0.001
+        fallback_to_score_bands: true
+```
+
+Inspect:
+
+- `paper/trade_ev_training_summary.json`
+- `paper/trade_candidate_dataset.csv`
+- `paper/trade_ev_predictions.csv`
+- `paper/trade_ev_calibration.csv`
+- `paper/ev_gate_decision_log.csv`
+- `paper/trade_ev_calibration_summary.json`
+- `replay_ev_bucket_summary.csv`
+- `replay_ev_calibration_summary.json`
+- `replay_candidate_ev_coverage.csv`
+- `replay_candidate_ev_dataset_summary.json`
+- `replay_summary.json`
+
+Useful calibration fields:
+
+- predicted vs realized net return by EV bucket
+- `rank_correlation`
+- `top_vs_bottom_bucket_spread`
+- `bucket_monotonicity`
+- `avg_ev_executed_trades`
+- `avg_ev_weight_multiplier`
+- `ev_weighted_exposure`
+
+Current limitations:
+
+- candidate training still uses the same forward-return proxy target, not full path-aware realized trade attribution
+- calibration artifacts are diagnostics, not training inputs

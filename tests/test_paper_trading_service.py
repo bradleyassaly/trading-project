@@ -235,6 +235,245 @@ def test_generate_rebalance_orders_disabled_score_bands_preserve_prior_behavior(
     assert result.diagnostics["score_band_enabled"] is False
 
 
+def test_generate_rebalance_orders_ev_gate_soft_mode_scales_target_weight(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "trading_platform.paper.service.build_trade_ev_training_dataset",
+        lambda **kwargs: ([{"forward_net_return": 0.02}], {"training_sample_count": 1}),
+    )
+    monkeypatch.setattr(
+        "trading_platform.paper.service.train_trade_ev_model",
+        lambda **kwargs: {"training_available": True, "training_sample_count": 10},
+    )
+    monkeypatch.setattr(
+        "trading_platform.paper.service.score_trade_ev_candidates",
+        lambda **kwargs: [
+            {
+                **kwargs["candidate_rows"][0],
+                "expected_gross_return": 0.02,
+                "expected_net_return": 0.02,
+                "expected_cost": 0.001,
+                "probability_positive": 0.7,
+                "ev_decision_score": 0.02,
+                "ev_gate_threshold": 0.001,
+                "ev_gate_decision": "allow",
+                "ev_model_bucket": "global",
+                "ev_training_sample_count": 10,
+                "action_reason": "passed_ev_gate",
+            }
+        ],
+    )
+
+    result = generate_rebalance_orders(
+        as_of="2025-01-07",
+        state=PaperPortfolioState(cash=10_000.0, positions={}),
+        latest_target_weights={"AAPL": 0.2},
+        latest_prices={"AAPL": 100.0},
+        latest_scores={"AAPL": 0.9},
+        config=PaperTradingConfig(
+            symbols=["AAPL"],
+            ev_gate_enabled=True,
+            ev_gate_mode="soft",
+            ev_gate_weight_multiplier=True,
+            ev_gate_weight_scale=10.0,
+            ev_gate_training_root="artifacts/daily_replay/run_current",
+            min_trade_dollars=1.0,
+        ),
+        min_trade_dollars=1.0,
+    )
+
+    assert len(result.orders) == 1
+    assert result.orders[0].target_weight == pytest.approx(0.24)
+    assert result.orders[0].provenance["ev_weight_multiplier"] == pytest.approx(1.2)
+    assert result.diagnostics["ev_gate_mode"] == "soft"
+    assert result.diagnostics["ev_weighted_exposure"] == pytest.approx(0.24)
+    assert result.diagnostics["avg_ev_executed_trades"] == pytest.approx(0.02)
+    assert result.diagnostics["candidate_dataset_row_count"] == 1
+    assert result.diagnostics["candidate_executed_count"] == 1
+    assert result.diagnostics["candidate_trade_rows"][0]["candidate_outcome"] == "executed"
+
+
+def test_generate_rebalance_orders_persists_score_band_blocked_candidate() -> None:
+    result = generate_rebalance_orders(
+        as_of="2025-01-07",
+        state=PaperPortfolioState(cash=10_000.0, positions={}),
+        latest_target_weights={"AAPL": 0.20},
+        latest_prices={"AAPL": 100.0},
+        latest_scores={"AAPL": 0.40},
+        config=PaperTradingConfig(
+            symbols=["AAPL"],
+            min_trade_dollars=1.0,
+            entry_score_threshold=0.60,
+            exit_score_threshold=0.40,
+        ),
+        min_trade_dollars=1.0,
+    )
+
+    assert result.orders == []
+    assert result.diagnostics["candidate_dataset_row_count"] == 1
+    assert result.diagnostics["candidate_skipped_count"] == 1
+    assert result.diagnostics["candidate_trade_rows"][0]["candidate_outcome"] == "score_band_blocked"
+
+
+def test_generate_rebalance_orders_candidate_training_source_falls_back_to_executed(monkeypatch) -> None:
+    calls: list[str] = []
+
+    def fake_build(**kwargs):
+        calls.append(kwargs["training_source"])
+        if kwargs["training_source"] == "candidate_decisions":
+            return [], {"training_source": "candidate_decisions", "training_sample_count": 0}
+        return [{"forward_net_return": 0.02}], {"training_source": "executed_trades", "training_sample_count": 1}
+
+    monkeypatch.setattr("trading_platform.paper.service.build_trade_ev_training_dataset", fake_build)
+    monkeypatch.setattr(
+        "trading_platform.paper.service.train_trade_ev_model",
+        lambda **kwargs: {"training_available": True, "training_sample_count": 1},
+    )
+    monkeypatch.setattr(
+        "trading_platform.paper.service.score_trade_ev_candidates",
+        lambda **kwargs: [
+            {
+                **kwargs["candidate_rows"][0],
+                "expected_gross_return": 0.02,
+                "expected_net_return": 0.01,
+                "expected_cost": 0.001,
+                "probability_positive": 0.6,
+                "ev_decision_score": 0.01,
+                "ev_gate_threshold": 0.0,
+                "ev_gate_decision": "allow",
+                "ev_model_bucket": "global",
+                "ev_training_sample_count": 1,
+                "action_reason": "passed_ev_gate",
+            }
+        ],
+    )
+
+    result = generate_rebalance_orders(
+        as_of="2025-01-07",
+        state=PaperPortfolioState(cash=10_000.0, positions={}),
+        latest_target_weights={"AAPL": 0.20},
+        latest_prices={"AAPL": 100.0},
+        latest_scores={"AAPL": 0.90},
+        config=PaperTradingConfig(
+            symbols=["AAPL"],
+            ev_gate_enabled=True,
+            ev_gate_mode="soft",
+            ev_gate_weight_multiplier=True,
+            ev_gate_weight_scale=5.0,
+            ev_gate_training_root="artifacts/daily_replay/run_current",
+            ev_gate_training_source="candidate_decisions",
+            ev_gate_min_training_samples=1,
+            min_trade_dollars=1.0,
+        ),
+        min_trade_dollars=1.0,
+    )
+
+    assert calls == ["candidate_decisions", "executed_trades"]
+    assert result.diagnostics["ev_gate_training_source"] == "executed_trades"
+    assert result.diagnostics["ev_gate_training_summary"]["fallback_reason"] == "insufficient_candidate_history_for_ev_gate"
+
+
+def test_generate_rebalance_orders_ev_gate_soft_mode_can_still_block_extreme_negative(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "trading_platform.paper.service.build_trade_ev_training_dataset",
+        lambda **kwargs: ([{"forward_net_return": -0.05}], {"training_sample_count": 1}),
+    )
+    monkeypatch.setattr(
+        "trading_platform.paper.service.train_trade_ev_model",
+        lambda **kwargs: {"training_available": True, "training_sample_count": 10},
+    )
+    monkeypatch.setattr(
+        "trading_platform.paper.service.score_trade_ev_candidates",
+        lambda **kwargs: [
+            {
+                **kwargs["candidate_rows"][0],
+                "expected_gross_return": -0.04,
+                "expected_net_return": -0.03,
+                "expected_cost": 0.001,
+                "probability_positive": 0.1,
+                "ev_decision_score": -0.03,
+                "ev_gate_threshold": 0.001,
+                "ev_gate_decision": "block",
+                "ev_model_bucket": "global",
+                "ev_training_sample_count": 10,
+                "action_reason": "blocked_by_ev_gate",
+            }
+        ],
+    )
+
+    result = generate_rebalance_orders(
+        as_of="2025-01-07",
+        state=PaperPortfolioState(cash=10_000.0, positions={}),
+        latest_target_weights={"AAPL": 0.2},
+        latest_prices={"AAPL": 100.0},
+        latest_scores={"AAPL": 0.9},
+        config=PaperTradingConfig(
+            symbols=["AAPL"],
+            ev_gate_enabled=True,
+            ev_gate_mode="soft",
+            ev_gate_weight_multiplier=True,
+            ev_gate_weight_scale=10.0,
+            ev_gate_extreme_negative_threshold=-0.02,
+            ev_gate_training_root="artifacts/daily_replay/run_current",
+            min_trade_dollars=1.0,
+        ),
+        min_trade_dollars=1.0,
+    )
+
+    assert result.orders == []
+    assert result.diagnostics["ev_gate_blocked_count"] == 1
+
+
+def test_generate_rebalance_orders_ev_gate_soft_mode_respects_multiplier_caps(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "trading_platform.paper.service.build_trade_ev_training_dataset",
+        lambda **kwargs: ([{"forward_net_return": 0.10}], {"training_sample_count": 1}),
+    )
+    monkeypatch.setattr(
+        "trading_platform.paper.service.train_trade_ev_model",
+        lambda **kwargs: {"training_available": True, "training_sample_count": 10},
+    )
+    monkeypatch.setattr(
+        "trading_platform.paper.service.score_trade_ev_candidates",
+        lambda **kwargs: [
+            {
+                **kwargs["candidate_rows"][0],
+                "expected_gross_return": 0.10,
+                "expected_net_return": 0.08,
+                "expected_cost": 0.01,
+                "probability_positive": 0.9,
+                "raw_ev_score": 0.08,
+                "ev_decision_score": 0.08,
+                "ev_gate_threshold": 0.001,
+                "ev_gate_decision": "allow",
+                "ev_model_bucket": "linear",
+                "ev_training_sample_count": 10,
+                "action_reason": "passed_ev_gate",
+            }
+        ],
+    )
+    result = generate_rebalance_orders(
+        as_of="2025-01-07",
+        state=PaperPortfolioState(cash=10_000.0, positions={}),
+        latest_target_weights={"AAPL": 0.2},
+        latest_prices={"AAPL": 100.0},
+        latest_scores={"AAPL": 0.9},
+        config=PaperTradingConfig(
+            symbols=["AAPL"],
+            ev_gate_enabled=True,
+            ev_gate_mode="soft",
+            ev_gate_weight_multiplier=True,
+            ev_gate_weight_scale=10.0,
+            ev_gate_weight_multiplier_min=0.5,
+            ev_gate_weight_multiplier_max=1.25,
+            ev_gate_training_root="artifacts/daily_replay/run_current",
+            min_trade_dollars=1.0,
+        ),
+        min_trade_dollars=1.0,
+    )
+    assert len(result.orders) == 1
+    assert result.orders[0].provenance["ev_weight_multiplier"] == pytest.approx(1.25)
+
+
 def test_apply_filled_orders_updates_cash_and_positions() -> None:
     state = PaperPortfolioState(
         cash=10_000.0,

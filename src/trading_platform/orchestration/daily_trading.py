@@ -318,6 +318,16 @@ def _summarize_activated_portfolio(activated_dir: Path | None) -> dict[str, Any]
 def _summarize_paper_run(paper_output_dir: Path) -> dict[str, Any]:
     summary_path = paper_output_dir / "paper_run_summary_latest.json"
     attribution_summary_path = paper_output_dir / "pnl_attribution_summary.json"
+    def _coerce_mapping(value: Any) -> dict[str, Any]:
+        if isinstance(value, dict):
+            return dict(value)
+        if isinstance(value, str) and value.strip():
+            try:
+                parsed = json.loads(value)
+            except json.JSONDecodeError:
+                return {}
+            return dict(parsed) if isinstance(parsed, dict) else {}
+        return {}
     if not summary_path.exists():
         return {
             "requested_symbol_count": 0,
@@ -336,6 +346,22 @@ def _summarize_paper_run(paper_output_dir: Path) -> dict[str, Any]:
             "score_band_enabled": False,
             "entry_threshold_used": None,
             "exit_threshold_used": None,
+            "ev_gate_enabled": False,
+            "ev_gate_model_type": "bucketed_mean",
+            "ev_gate_mode": "hard",
+            "ev_gate_training_source": "executed_trades",
+            "ev_gate_blocked_count": 0,
+            "avg_expected_net_return_traded": 0.0,
+            "avg_expected_net_return_blocked": 0.0,
+            "avg_ev_executed_trades": 0.0,
+            "ev_weighted_exposure": 0.0,
+            "avg_ev_weight_multiplier": 1.0,
+            "ev_distribution": {},
+            "ev_calibration_summary": {},
+            "ev_model_sample_count": 0,
+            "candidate_dataset_row_count": 0,
+            "candidate_executed_count": 0,
+            "candidate_skipped_count": 0,
             "fill_count": 0,
             "zero_target_reason": "",
             "attribution_summary": {},
@@ -362,6 +388,24 @@ def _summarize_paper_run(paper_output_dir: Path) -> dict[str, Any]:
         "score_band_enabled": bool(summary_payload.get("score_band_enabled", False)),
         "entry_threshold_used": summary_payload.get("entry_threshold_used"),
         "exit_threshold_used": summary_payload.get("exit_threshold_used"),
+        "ev_gate_enabled": bool(summary_payload.get("ev_gate_enabled", False)),
+        "ev_gate_model_type": str(summary_payload.get("ev_gate_model_type", "bucketed_mean") or "bucketed_mean"),
+        "ev_gate_mode": str(summary_payload.get("ev_gate_mode", "hard") or "hard"),
+        "ev_gate_training_source": str(
+            summary_payload.get("ev_gate_training_source", "executed_trades") or "executed_trades"
+        ),
+        "ev_gate_blocked_count": int(summary_payload.get("ev_gate_blocked_count") or 0),
+        "avg_expected_net_return_traded": float(summary_payload.get("avg_expected_net_return_traded") or 0.0),
+        "avg_expected_net_return_blocked": float(summary_payload.get("avg_expected_net_return_blocked") or 0.0),
+        "avg_ev_executed_trades": float(summary_payload.get("avg_ev_executed_trades") or 0.0),
+        "ev_weighted_exposure": float(summary_payload.get("ev_weighted_exposure") or 0.0),
+        "avg_ev_weight_multiplier": float(summary_payload.get("avg_ev_weight_multiplier") or 1.0),
+        "ev_distribution": _coerce_mapping(summary_payload.get("ev_distribution")),
+        "ev_calibration_summary": _coerce_mapping(summary_payload.get("ev_calibration_summary")),
+        "ev_model_sample_count": int(summary_payload.get("ev_model_sample_count") or 0),
+        "candidate_dataset_row_count": int(summary_payload.get("candidate_dataset_row_count") or 0),
+        "candidate_executed_count": int(summary_payload.get("candidate_executed_count") or 0),
+        "candidate_skipped_count": int(summary_payload.get("candidate_skipped_count") or 0),
         "fill_count": int(summary_payload.get("fill_count") or 0),
         "zero_target_reason": str(summary_payload.get("zero_target_reason") or ""),
         "paper_summary_path": str(summary_path),
@@ -486,6 +530,22 @@ def _write_summary_artifacts(
         "score_band_enabled": paper_summary.get("score_band_enabled", False),
         "entry_threshold_used": paper_summary.get("entry_threshold_used"),
         "exit_threshold_used": paper_summary.get("exit_threshold_used"),
+        "ev_gate_enabled": paper_summary.get("ev_gate_enabled", False),
+        "ev_gate_model_type": paper_summary.get("ev_gate_model_type", "bucketed_mean"),
+        "ev_gate_mode": paper_summary.get("ev_gate_mode", "hard"),
+        "ev_gate_training_source": paper_summary.get("ev_gate_training_source", "executed_trades"),
+        "ev_gate_blocked_count": paper_summary.get("ev_gate_blocked_count", 0),
+        "avg_expected_net_return_traded": paper_summary.get("avg_expected_net_return_traded", 0.0),
+        "avg_expected_net_return_blocked": paper_summary.get("avg_expected_net_return_blocked", 0.0),
+        "avg_ev_executed_trades": paper_summary.get("avg_ev_executed_trades", 0.0),
+        "ev_weighted_exposure": paper_summary.get("ev_weighted_exposure", 0.0),
+        "avg_ev_weight_multiplier": paper_summary.get("avg_ev_weight_multiplier", 1.0),
+        "ev_distribution": paper_summary.get("ev_distribution", {}),
+        "ev_calibration_summary": paper_summary.get("ev_calibration_summary", {}),
+        "ev_model_sample_count": paper_summary.get("ev_model_sample_count", 0),
+        "candidate_dataset_row_count": paper_summary.get("candidate_dataset_row_count", 0),
+        "candidate_executed_count": paper_summary.get("candidate_executed_count", 0),
+        "candidate_skipped_count": paper_summary.get("candidate_skipped_count", 0),
         "pnl_attribution_summary": paper_summary.get("attribution_summary", {}),
         "top_selected_strategies": strategy_report_summary.get("top_selected_strategies", []),
         "portfolio_composition": strategy_report_summary.get("portfolio_composition", []),
@@ -531,6 +591,21 @@ def _write_summary_artifacts(
         f"- blocked_entries_count: `{paper_summary.get('blocked_entries_count', 0)}`",
         f"- held_in_hold_zone_count: `{paper_summary.get('held_in_hold_zone_count', 0)}`",
         f"- forced_exit_count: `{paper_summary.get('forced_exit_count', 0)}`",
+        f"- ev_gate_enabled: `{paper_summary.get('ev_gate_enabled', False)}`",
+        f"- ev_gate_model_type: `{paper_summary.get('ev_gate_model_type', 'bucketed_mean')}`",
+        f"- ev_gate_mode: `{paper_summary.get('ev_gate_mode', 'hard')}`",
+        f"- ev_gate_training_source: `{paper_summary.get('ev_gate_training_source', 'executed_trades')}`",
+        f"- ev_gate_blocked_count: `{paper_summary.get('ev_gate_blocked_count', 0)}`",
+        f"- avg_expected_net_return_traded: `{paper_summary.get('avg_expected_net_return_traded', 0.0)}`",
+        f"- avg_expected_net_return_blocked: `{paper_summary.get('avg_expected_net_return_blocked', 0.0)}`",
+        f"- avg_ev_executed_trades: `{paper_summary.get('avg_ev_executed_trades', 0.0)}`",
+        f"- ev_weighted_exposure: `{paper_summary.get('ev_weighted_exposure', 0.0)}`",
+        f"- avg_ev_weight_multiplier: `{paper_summary.get('avg_ev_weight_multiplier', 1.0)}`",
+        f"- candidate_dataset_row_count: `{paper_summary.get('candidate_dataset_row_count', 0)}`",
+        f"- candidate_executed_count: `{paper_summary.get('candidate_executed_count', 0)}`",
+        f"- candidate_skipped_count: `{paper_summary.get('candidate_skipped_count', 0)}`",
+        f"- ev_rank_correlation: `{(paper_summary.get('ev_calibration_summary') or {}).get('rank_correlation', 0.0)}`",
+        f"- ev_top_vs_bottom_bucket_spread: `{(paper_summary.get('ev_calibration_summary') or {}).get('top_vs_bottom_bucket_spread', 0.0)}`",
         "",
         "## Top Strategies",
         "",
@@ -668,6 +743,29 @@ def _build_multi_strategy_paper_config(result, reserve_cash_pct: float, workflow
         apply_bands_to_new_entries=bool(getattr(workflow_config, "apply_bands_to_new_entries", True)),
         apply_bands_to_reductions=bool(getattr(workflow_config, "apply_bands_to_reductions", True)),
         apply_bands_to_full_exits=bool(getattr(workflow_config, "apply_bands_to_full_exits", True)),
+        ev_gate_enabled=bool(getattr(workflow_config, "ev_gate_enabled", False)),
+        ev_gate_model_type=str(getattr(workflow_config, "ev_gate_model_type", "bucketed_mean") or "bucketed_mean"),
+        ev_gate_horizon_days=int(getattr(workflow_config, "ev_gate_horizon_days", 5) or 5),
+        ev_gate_mode=str(getattr(workflow_config, "ev_gate_mode", "hard") or "hard"),
+        ev_gate_weight_multiplier=bool(getattr(workflow_config, "ev_gate_weight_multiplier", False)),
+        ev_gate_weight_scale=float(getattr(workflow_config, "ev_gate_weight_scale", 1.0) or 0.0),
+        ev_gate_extreme_negative_threshold=getattr(workflow_config, "ev_gate_extreme_negative_threshold", None),
+        ev_gate_score_clip_min=getattr(workflow_config, "ev_gate_score_clip_min", None),
+        ev_gate_score_clip_max=getattr(workflow_config, "ev_gate_score_clip_max", None),
+        ev_gate_normalize_scores=bool(getattr(workflow_config, "ev_gate_normalize_scores", False)),
+        ev_gate_weight_multiplier_min=getattr(workflow_config, "ev_gate_weight_multiplier_min", None),
+        ev_gate_weight_multiplier_max=getattr(workflow_config, "ev_gate_weight_multiplier_max", None),
+        ev_gate_min_expected_net_return=float(
+            getattr(workflow_config, "ev_gate_min_expected_net_return", 0.0) or 0.0
+        ),
+        ev_gate_min_probability_positive=getattr(workflow_config, "ev_gate_min_probability_positive", None),
+        ev_gate_risk_penalty_lambda=float(getattr(workflow_config, "ev_gate_risk_penalty_lambda", 0.0) or 0.0),
+        ev_gate_fallback_to_score_bands=bool(getattr(workflow_config, "ev_gate_fallback_to_score_bands", True)),
+        ev_gate_training_root=getattr(workflow_config, "ev_gate_training_root", None),
+        ev_gate_training_source=str(
+            getattr(workflow_config, "ev_gate_training_source", "executed_trades") or "executed_trades"
+        ),
+        ev_gate_min_training_samples=int(getattr(workflow_config, "ev_gate_min_training_samples", 20) or 20),
     )
 
 
@@ -797,6 +895,11 @@ def _build_trade_decision_log_rows(
         for row in list(order_generation_diagnostics.get("skipped_trade_rows") or [])
         if row.get("symbol")
     }
+    ev_lookup = {
+        str(row.get("symbol")): dict(row)
+        for row in list(order_generation_diagnostics.get("ev_prediction_rows") or [])
+        if row.get("symbol")
+    }
     symbols = sorted(
         set(candidate_by_symbol)
         | set(selection_by_symbol)
@@ -815,6 +918,7 @@ def _build_trade_decision_log_rows(
         execution = execution_by_symbol.get(symbol)
         band_row = band_lookup.get(symbol, {})
         skipped_row = skipped_lookup.get(symbol, {})
+        ev_row = ev_lookup.get(symbol, {})
         current_weight = None
         if trade is not None:
             current_weight = (trade.metadata or {}).get("current_weight")
@@ -846,7 +950,9 @@ def _build_trade_decision_log_rows(
         if explicit_reason is None and selection is not None:
             explicit_reason = selection.rejection_reason or selection.rationale_summary
         if explicit_reason is None:
-            explicit_reason = str(skipped_row.get("action_reason") or band_row.get("action_reason") or "") or None
+            explicit_reason = str(
+                skipped_row.get("action_reason") or ev_row.get("action_reason") or band_row.get("action_reason") or ""
+            ) or None
         signal_score = (
             (trade.final_signal_score if trade is not None else None)
             if trade is not None and trade.final_signal_score is not None
@@ -885,6 +991,14 @@ def _build_trade_decision_log_rows(
                 "entry_threshold": band_row.get("entry_threshold"),
                 "exit_threshold": band_row.get("exit_threshold"),
                 "band_decision": band_row.get("band_decision"),
+                "expected_gross_return": ev_row.get("expected_gross_return"),
+                "expected_net_return": ev_row.get("expected_net_return"),
+                "expected_cost": ev_row.get("expected_cost"),
+                "probability_positive": ev_row.get("probability_positive"),
+                "ev_gate_decision": ev_row.get("ev_gate_decision"),
+                "ev_weight_multiplier": ev_row.get("ev_weight_multiplier"),
+                "ev_adjusted_target_weight": ev_row.get("ev_adjusted_target_weight"),
+                "ev_adjusted_weight_delta": ev_row.get("ev_adjusted_weight_delta"),
                 "current_weight": current_weight,
                 "target_weight": target_weight,
                 "weight_delta": (
@@ -953,6 +1067,14 @@ def _write_trade_decision_log(*, output_dir: Path, rows: list[dict[str, Any]]) -
             "entry_threshold",
             "exit_threshold",
             "band_decision",
+            "expected_gross_return",
+            "expected_net_return",
+            "expected_cost",
+            "probability_positive",
+            "ev_gate_decision",
+            "ev_weight_multiplier",
+            "ev_adjusted_target_weight",
+            "ev_adjusted_weight_delta",
             "current_weight",
             "target_weight",
             "weight_delta",

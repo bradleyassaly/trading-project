@@ -13,6 +13,7 @@ from trading_platform.config.workflow_models import DailyReplayWorkflowConfig, D
 from trading_platform.dashboard.server import build_dashboard_static_data
 from trading_platform.orchestration.daily_trading import DailyTradingResult, run_daily_trading_pipeline
 from trading_platform.portfolio.strategy_execution_handoff import resolve_strategy_execution_handoff
+from trading_platform.research.trade_ev import evaluate_replay_trade_ev_predictions
 from trading_platform.reporting.pnl_attribution import (
     aggregate_replay_attribution,
     write_replay_pnl_attribution_artifacts,
@@ -55,6 +56,15 @@ def _safe_float(value: Any) -> float:
 
 def _read_json(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+
+
+def _read_csv(path: Path) -> pd.DataFrame:
+    if not path.exists() or path.stat().st_size == 0:
+        return pd.DataFrame()
+    try:
+        return pd.read_csv(path)
+    except (pd.errors.EmptyDataError, pd.errors.ParserError):
+        return pd.DataFrame()
 
 
 def _read_dates_file(path: str | Path) -> list[str]:
@@ -177,6 +187,11 @@ def _build_day_config(
                 str(strategy_weighting_metrics_path)
                 if strategy_weighting_metrics_path is not None
                 else base_config.strategy_weighting_metrics_path
+            ),
+            "ev_gate_training_root": (
+                str(replay_root)
+                if bool(base_config.ev_gate_enabled) and not base_config.ev_gate_training_root
+                else base_config.ev_gate_training_root
             ),
             "report_dir": str(run_dir / "report"),
             "dashboard_output_dir": str(run_dir / "dashboard"),
@@ -326,6 +341,14 @@ def _write_replay_day_input_summary(
             "use_percentile_thresholds": bool(day_config.use_percentile_thresholds),
             "entry_score_percentile": day_config.entry_score_percentile,
             "exit_score_percentile": day_config.exit_score_percentile,
+            "ev_gate_enabled": bool(day_config.ev_gate_enabled),
+            "ev_gate_model_type": str(day_config.ev_gate_model_type or "bucketed_mean"),
+            "ev_gate_mode": str(day_config.ev_gate_mode or "hard"),
+            "ev_gate_training_source": str(day_config.ev_gate_training_source or "executed_trades"),
+            "ev_gate_weight_multiplier": bool(day_config.ev_gate_weight_multiplier),
+            "ev_gate_weight_scale": float(day_config.ev_gate_weight_scale or 0.0),
+            "ev_gate_horizon_days": int(day_config.ev_gate_horizon_days or 5),
+            "ev_gate_min_expected_net_return": float(day_config.ev_gate_min_expected_net_return or 0.0),
         },
         "artifact_paths_used": {
             "research_output_dir": str(research_output_dir),
@@ -416,6 +439,57 @@ def _collect_strategy_activity_rows(day_dir: Path, requested_date: str) -> list[
     return frame.astype(object).where(pd.notna(frame), None).to_dict(orient="records")
 
 
+def _aggregate_candidate_ev_dataset(replay_root: Path) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    coverage_rows: list[dict[str, Any]] = []
+    for day_dir in sorted(path for path in replay_root.iterdir() if path.is_dir()):
+        try:
+            requested_date = str(pd.Timestamp(day_dir.name).date())
+        except (TypeError, ValueError):
+            continue
+        candidate_path = day_dir / "paper" / "trade_candidate_dataset.csv"
+        training_summary_path = day_dir / "paper" / "trade_ev_training_summary.json"
+        candidate_frame = _read_csv(candidate_path)
+        training_summary = _read_json(training_summary_path)
+        coverage_rows.append(
+            {
+                "date": requested_date,
+                "candidate_row_count": int(len(candidate_frame.index)) if not candidate_frame.empty else 0,
+                "executed_row_count": int(
+                    (candidate_frame.get("candidate_outcome", pd.Series(dtype=object)).astype(str) == "executed").sum()
+                )
+                if not candidate_frame.empty
+                else 0,
+                "skipped_row_count": int(
+                    (candidate_frame.get("candidate_status", pd.Series(dtype=object)).astype(str) == "skipped").sum()
+                )
+                if not candidate_frame.empty
+                else 0,
+                "training_source_used": str(training_summary.get("training_source", "executed_trades") or "executed_trades"),
+                "requested_training_source": str(
+                    training_summary.get("requested_training_source", training_summary.get("training_source", "executed_trades"))
+                    or "executed_trades"
+                ),
+                "training_sample_count": int(training_summary.get("training_sample_count", 0) or 0),
+                "labeled_row_count": int(training_summary.get("labeled_row_count", 0) or 0),
+                "positive_label_rate": float(training_summary.get("positive_label_rate", 0.0) or 0.0),
+                "fallback_reason": str(training_summary.get("fallback_reason", "") or ""),
+            }
+        )
+    summary = {
+        "candidate_row_count": int(sum(int(row.get("candidate_row_count", 0) or 0) for row in coverage_rows)),
+        "executed_row_count": int(sum(int(row.get("executed_row_count", 0) or 0) for row in coverage_rows)),
+        "skipped_row_count": int(sum(int(row.get("skipped_row_count", 0) or 0) for row in coverage_rows)),
+        "labeled_row_count": int(sum(int(row.get("labeled_row_count", 0) or 0) for row in coverage_rows)),
+        "avg_positive_label_rate": (
+            float(pd.DataFrame(coverage_rows)["positive_label_rate"].mean())
+            if coverage_rows
+            else 0.0
+        ),
+        "training_source_used": str(coverage_rows[-1]["training_source_used"]) if coverage_rows else "executed_trades",
+    }
+    return coverage_rows, summary
+
+
 def _compute_replay_summary(
     *,
     config: DailyReplayWorkflowConfig,
@@ -478,6 +552,72 @@ def _compute_replay_summary(
     forced_exit_count = (
         int(metrics_frame["forced_exit_count"].sum())
         if "forced_exit_count" in metrics_frame and not metrics_frame.empty
+        else 0
+    )
+    ev_gate_blocked_count = (
+        int(metrics_frame["ev_gate_blocked_count"].sum())
+        if "ev_gate_blocked_count" in metrics_frame and not metrics_frame.empty
+        else 0
+    )
+    avg_expected_net_return_traded = (
+        float(metrics_frame["avg_expected_net_return_traded"].mean())
+        if "avg_expected_net_return_traded" in metrics_frame and not metrics_frame.empty
+        else 0.0
+    )
+    avg_expected_net_return_blocked = (
+        float(metrics_frame["avg_expected_net_return_blocked"].mean())
+        if "avg_expected_net_return_blocked" in metrics_frame and not metrics_frame.empty
+        else 0.0
+    )
+    avg_ev_executed_trades = (
+        float(metrics_frame["avg_ev_executed_trades"].mean())
+        if "avg_ev_executed_trades" in metrics_frame and not metrics_frame.empty
+        else 0.0
+    )
+    ev_weighted_exposure = (
+        float(metrics_frame["ev_weighted_exposure"].sum())
+        if "ev_weighted_exposure" in metrics_frame and not metrics_frame.empty
+        else 0.0
+    )
+    avg_ev_weight_multiplier = (
+        float(metrics_frame["avg_ev_weight_multiplier"].mean())
+        if "avg_ev_weight_multiplier" in metrics_frame and not metrics_frame.empty
+        else 1.0
+    )
+    candidate_dataset_row_count = (
+        int(metrics_frame["candidate_dataset_row_count"].sum())
+        if "candidate_dataset_row_count" in metrics_frame and not metrics_frame.empty
+        else 0
+    )
+    candidate_executed_count = (
+        int(metrics_frame["candidate_executed_count"].sum())
+        if "candidate_executed_count" in metrics_frame and not metrics_frame.empty
+        else 0
+    )
+    candidate_skipped_count = (
+        int(metrics_frame["candidate_skipped_count"].sum())
+        if "candidate_skipped_count" in metrics_frame and not metrics_frame.empty
+        else 0
+    )
+    ev_model_type = (
+        str(metrics_frame["ev_gate_model_type"].iloc[-1])
+        if "ev_gate_model_type" in metrics_frame and not metrics_frame.empty
+        else "bucketed_mean"
+    )
+    ev_gate_enabled = bool(metrics_frame["ev_gate_enabled"].any()) if "ev_gate_enabled" in metrics_frame and not metrics_frame.empty else False
+    ev_gate_mode = (
+        str(metrics_frame["ev_gate_mode"].iloc[-1])
+        if "ev_gate_mode" in metrics_frame and not metrics_frame.empty
+        else "hard"
+    )
+    ev_gate_training_source = (
+        str(metrics_frame["ev_gate_training_source"].iloc[-1])
+        if "ev_gate_training_source" in metrics_frame and not metrics_frame.empty
+        else "executed_trades"
+    )
+    ev_model_sample_count = (
+        int(metrics_frame["ev_model_sample_count"].iloc[-1])
+        if "ev_model_sample_count" in metrics_frame and not metrics_frame.empty
         else 0
     )
     final_equity = (
@@ -650,6 +790,20 @@ def _compute_replay_summary(
         "blocked_entries_count": blocked_entries_count,
         "held_in_hold_zone_count": held_in_hold_zone_count,
         "forced_exit_count": forced_exit_count,
+        "ev_gate_blocked_count": ev_gate_blocked_count,
+        "ev_gate_enabled": ev_gate_enabled,
+        "ev_gate_mode": ev_gate_mode,
+        "ev_gate_training_source": ev_gate_training_source,
+        "ev_model_type": ev_model_type,
+        "avg_expected_net_return_traded": avg_expected_net_return_traded,
+        "avg_expected_net_return_blocked": avg_expected_net_return_blocked,
+        "avg_ev_executed_trades": avg_ev_executed_trades,
+        "ev_weighted_exposure": ev_weighted_exposure,
+        "avg_ev_weight_multiplier": avg_ev_weight_multiplier,
+        "ev_model_sample_count": ev_model_sample_count,
+        "candidate_dataset_row_count": candidate_dataset_row_count,
+        "candidate_executed_count": candidate_executed_count,
+        "candidate_skipped_count": candidate_skipped_count,
         "cumulative_realized_pnl": cumulative_realized_pnl,
         "cumulative_unrealized_pnl": cumulative_unrealized_pnl,
         "gross_total_pnl": gross_total_pnl,
@@ -717,6 +871,18 @@ def _write_replay_summary_artifacts(
                 f"- blocked_entries_count: `{summary.get('blocked_entries_count', 0)}`",
                 f"- held_in_hold_zone_count: `{summary.get('held_in_hold_zone_count', 0)}`",
                 f"- forced_exit_count: `{summary.get('forced_exit_count', 0)}`",
+                f"- ev_gate_enabled: `{summary.get('ev_gate_enabled', False)}`",
+                f"- ev_gate_mode: `{summary.get('ev_gate_mode', 'hard')}`",
+                f"- ev_gate_training_source: `{summary.get('ev_gate_training_source', 'executed_trades')}`",
+                f"- ev_model_type: `{summary.get('ev_model_type', 'bucketed_mean')}`",
+                f"- ev_gate_blocked_count: `{summary.get('ev_gate_blocked_count', 0)}`",
+                f"- avg_ev_executed_trades: `{summary.get('avg_ev_executed_trades', 0.0)}`",
+                f"- ev_weighted_exposure: `{summary.get('ev_weighted_exposure', 0.0)}`",
+                f"- candidate_dataset_row_count: `{summary.get('candidate_dataset_row_count', 0)}`",
+                f"- candidate_executed_count: `{summary.get('candidate_executed_count', 0)}`",
+                f"- candidate_skipped_count: `{summary.get('candidate_skipped_count', 0)}`",
+                f"- ev_rank_correlation: `{summary.get('ev_rank_correlation', 0.0)}`",
+                f"- ev_top_vs_bottom_bucket_spread: `{summary.get('ev_top_vs_bottom_bucket_spread', 0.0)}`",
                 f"- avg_daily_execution_cost: `{summary.get('avg_daily_execution_cost', 0.0)}`",
                 f"- gross_total_pnl: `{summary.get('gross_total_pnl', 0.0)}`",
                 f"- net_total_pnl: `{summary.get('net_total_pnl', 0.0)}`",
@@ -754,9 +920,23 @@ def _write_replay_summary_artifacts(
             "blocked_entries_count",
             "held_in_hold_zone_count",
             "forced_exit_count",
+            "ev_gate_blocked_count",
+            "avg_expected_net_return_traded",
+            "avg_expected_net_return_blocked",
+            "avg_ev_executed_trades",
+            "ev_weighted_exposure",
+            "avg_ev_weight_multiplier",
+            "candidate_dataset_row_count",
+            "candidate_executed_count",
+            "candidate_skipped_count",
             "score_band_enabled",
             "entry_threshold_used",
             "exit_threshold_used",
+            "ev_gate_enabled",
+            "ev_gate_mode",
+            "ev_gate_training_source",
+            "ev_gate_model_type",
+            "ev_model_sample_count",
             "fill_count",
             "turnover_estimate",
             "position_count",
@@ -887,9 +1067,29 @@ def run_daily_replay(config: DailyReplayWorkflowConfig) -> DailyReplayResult:
                 "blocked_entries_count": int(paper_summary.get("blocked_entries_count", 0) or 0),
                 "held_in_hold_zone_count": int(paper_summary.get("held_in_hold_zone_count", 0) or 0),
                 "forced_exit_count": int(paper_summary.get("forced_exit_count", 0) or 0),
+                "ev_gate_blocked_count": int(paper_summary.get("ev_gate_blocked_count", 0) or 0),
+                "avg_expected_net_return_traded": float(
+                    paper_summary.get("avg_expected_net_return_traded", 0.0) or 0.0
+                ),
+                "avg_expected_net_return_blocked": float(
+                    paper_summary.get("avg_expected_net_return_blocked", 0.0) or 0.0
+                ),
+                "avg_ev_executed_trades": float(paper_summary.get("avg_ev_executed_trades", 0.0) or 0.0),
+                "ev_weighted_exposure": float(paper_summary.get("ev_weighted_exposure", 0.0) or 0.0),
+                "avg_ev_weight_multiplier": float(paper_summary.get("avg_ev_weight_multiplier", 1.0) or 1.0),
+                "candidate_dataset_row_count": int(paper_summary.get("candidate_dataset_row_count", 0) or 0),
+                "candidate_executed_count": int(paper_summary.get("candidate_executed_count", 0) or 0),
+                "candidate_skipped_count": int(paper_summary.get("candidate_skipped_count", 0) or 0),
                 "score_band_enabled": bool(paper_summary.get("score_band_enabled", False)),
                 "entry_threshold_used": paper_summary.get("entry_threshold_used"),
                 "exit_threshold_used": paper_summary.get("exit_threshold_used"),
+                "ev_gate_enabled": bool(paper_summary.get("ev_gate_enabled", False)),
+                "ev_gate_mode": str(paper_summary.get("ev_gate_mode", "hard") or "hard"),
+                "ev_gate_training_source": str(
+                    paper_summary.get("ev_gate_training_source", "executed_trades") or "executed_trades"
+                ),
+                "ev_gate_model_type": str(paper_summary.get("ev_gate_model_type", "bucketed_mean") or "bucketed_mean"),
+                "ev_model_sample_count": int(paper_summary.get("ev_model_sample_count", 0) or 0),
                 "fill_count": int(paper_summary.get("fill_count", 0) or 0),
                 "turnover_estimate": float(paper_summary.get("turnover_estimate", 0.0) or 0.0),
                 "position_count": int(paper_summary.get("realized_holdings_count", 0) or 0),
@@ -991,6 +1191,21 @@ def run_daily_replay(config: DailyReplayWorkflowConfig) -> DailyReplayResult:
     replay_attribution = aggregate_replay_attribution(replay_root=replay_root)
     replay_attribution_seconds = time.monotonic() - attribution_started
     attribution_summary = dict(replay_attribution.get("summary") or {})
+    ev_realized_rows, ev_bucket_rows, ev_calibration_summary = evaluate_replay_trade_ev_predictions(
+        replay_root=replay_root,
+        horizon_days=int(config.daily_trading.ev_gate_horizon_days or 5),
+    )
+    candidate_coverage_rows, candidate_dataset_summary = _aggregate_candidate_ev_dataset(replay_root)
+    if ev_calibration_summary:
+        summary["replay_ev_calibration_summary"] = ev_calibration_summary
+        summary["ev_top_bucket_realized_net_return"] = ev_calibration_summary.get("top_bucket_realized_net_return", 0.0)
+        summary["ev_bottom_bucket_realized_net_return"] = ev_calibration_summary.get(
+            "bottom_bucket_realized_net_return",
+            0.0,
+        )
+        summary["ev_rank_correlation"] = ev_calibration_summary.get("rank_correlation", 0.0)
+        summary["ev_bucket_monotonicity"] = ev_calibration_summary.get("bucket_monotonicity", False)
+        summary["ev_top_vs_bottom_bucket_spread"] = ev_calibration_summary.get("top_vs_bottom_bucket_spread", 0.0)
     if attribution_summary:
         summary["best_strategy_by_total_pnl"] = next(
             iter(attribution_summary.get("top_strategies_by_total_pnl", [])),
@@ -1010,6 +1225,8 @@ def run_daily_replay(config: DailyReplayWorkflowConfig) -> DailyReplayResult:
         )
         summary["strategy_pnl_concentration"] = attribution_summary.get("strategy_concentration_metrics", {})
         summary["replay_pnl_attribution_summary"] = attribution_summary
+    if candidate_dataset_summary:
+        summary["replay_candidate_ev_dataset_summary"] = candidate_dataset_summary
     status = "succeeded"
     failed_day_count = int(summary.get("failed_day_count", 0) or 0)
     if failed_day_count and int(summary.get("successful_day_count", 0) or 0):
@@ -1057,6 +1274,51 @@ def run_daily_replay(config: DailyReplayWorkflowConfig) -> DailyReplayResult:
             ).items()
         }
     )
+    ev_bucket_path = _write_csv(
+        replay_root / "replay_ev_bucket_summary.csv",
+        ev_bucket_rows,
+        [
+            "bucket",
+            "trade_count",
+            "avg_predicted_gross_return",
+            "avg_predicted_net_return",
+            "avg_realized_gross_return",
+            "avg_realized_net_return",
+            "realized_hit_rate",
+            "avg_execution_cost",
+            "avg_weight_multiplier",
+        ],
+    )
+    ev_calibration_summary_path = replay_root / "replay_ev_calibration_summary.json"
+    ev_calibration_summary_path.write_text(
+        json.dumps(ev_calibration_summary, indent=2, default=str),
+        encoding="utf-8",
+    )
+    candidate_coverage_path = _write_csv(
+        replay_root / "replay_candidate_ev_coverage.csv",
+        candidate_coverage_rows,
+        [
+            "date",
+            "candidate_row_count",
+            "executed_row_count",
+            "skipped_row_count",
+            "training_source_used",
+            "requested_training_source",
+            "training_sample_count",
+            "labeled_row_count",
+            "positive_label_rate",
+            "fallback_reason",
+        ],
+    )
+    candidate_summary_path = replay_root / "replay_candidate_ev_dataset_summary.json"
+    candidate_summary_path.write_text(
+        json.dumps(candidate_dataset_summary, indent=2, default=str),
+        encoding="utf-8",
+    )
+    artifact_paths["replay_ev_bucket_summary_csv_path"] = str(ev_bucket_path)
+    artifact_paths["replay_ev_calibration_summary_json_path"] = str(ev_calibration_summary_path)
+    artifact_paths["replay_candidate_ev_coverage_csv_path"] = str(candidate_coverage_path)
+    artifact_paths["replay_candidate_ev_dataset_summary_json_path"] = str(candidate_summary_path)
     artifact_paths.update({f"dashboard_{key}": str(value) for key, value in dashboard_paths.items()})
     if config.replay.profile_timings:
         total_replay_seconds = time.monotonic() - replay_started
