@@ -6,6 +6,9 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+from sklearn.ensemble import HistGradientBoostingClassifier
+from sklearn.isotonic import IsotonicRegression
+from sklearn.linear_model import LogisticRegression
 
 RELIABILITY_NUMERIC_FEATURE_COLUMNS = [
     "predicted_return",
@@ -124,6 +127,38 @@ def _safe_corr(left: pd.Series, right: pd.Series, *, method: str = "pearson") ->
 def _sigmoid(values: np.ndarray) -> np.ndarray:
     clipped = np.clip(values, -30.0, 30.0)
     return 1.0 / (1.0 + np.exp(-clipped))
+
+
+def _fit_probability_calibrator(
+    *,
+    method: str,
+    raw_scores: np.ndarray,
+    labels: np.ndarray,
+    max_iter: int,
+) -> tuple[Any | None, np.ndarray]:
+    calibration_method = str(method or "none").lower()
+    if calibration_method == "isotonic":
+        calibrator = IsotonicRegression(out_of_bounds="clip")
+        calibrator.fit(raw_scores, labels)
+        calibrated = np.asarray(calibrator.transform(raw_scores), dtype=float)
+        return calibrator, calibrated
+    if calibration_method == "sigmoid":
+        calibrator = LogisticRegression(max_iter=max(int(max_iter), 100))
+        calibrator.fit(raw_scores.reshape(-1, 1), labels)
+        calibrated = np.asarray(calibrator.predict_proba(raw_scores.reshape(-1, 1))[:, 1], dtype=float)
+        return calibrator, calibrated
+    return None, np.asarray(_sigmoid(raw_scores), dtype=float)
+
+
+def _apply_probability_calibrator(*, calibrator: Any | None, method: str, raw_scores: np.ndarray) -> np.ndarray:
+    calibration_method = str(method or "none").lower()
+    if calibrator is None or calibration_method == "none":
+        return np.asarray(_sigmoid(raw_scores), dtype=float)
+    if calibration_method == "isotonic":
+        return np.asarray(calibrator.transform(raw_scores), dtype=float)
+    if calibration_method == "sigmoid":
+        return np.asarray(calibrator.predict_proba(raw_scores.reshape(-1, 1))[:, 1], dtype=float)
+    return np.asarray(_sigmoid(raw_scores), dtype=float)
 
 
 def _score_bucket(score_percentile: float) -> str:
@@ -587,6 +622,8 @@ def train_trade_ev_reliability_model(
     *,
     training_rows: list[dict[str, Any]],
     min_training_samples: int = 20,
+    model_type: str = "logistic",
+    calibration_method: str = "none",
     ridge_alpha: float = 1.0,
     max_iter: int = 400,
     learning_rate: float = 0.1,
@@ -595,11 +632,12 @@ def train_trade_ev_reliability_model(
 ) -> dict[str, Any]:
     if len(training_rows) < int(min_training_samples):
         return {
-            "model_type": "reliability_logistic",
+            "model_type": str(model_type),
             "training_available": False,
             "training_sample_count": int(len(training_rows)),
             "warnings": ["insufficient_history_for_reliability_model"],
             "target_type": str(target_type),
+            "calibration_method": str(calibration_method),
         }
     frame = pd.DataFrame(training_rows).copy()
     signal_families = sorted({str(value or "unknown") for value in frame.get("signal_family", [])})
@@ -611,29 +649,58 @@ def train_trade_ev_reliability_model(
     stds = np.where(stds <= 0.0, 1.0, stds)
     x = (x_raw - means) / stds
     y = pd.to_numeric(frame["reliability_target_value"], errors="coerce").fillna(0.0).to_numpy(dtype=float)
-    intercept = 0.0
-    coefficients = np.zeros(x.shape[1], dtype=float)
-    sample_count = max(len(frame.index), 1)
-    for _ in range(max(int(max_iter), 1)):
-        logits = intercept + (x @ coefficients)
-        probabilities = _sigmoid(logits)
-        error = probabilities - y
-        intercept -= float(learning_rate) * float(error.mean())
-        gradient = (x.T @ error) / sample_count + (float(ridge_alpha) * coefficients / sample_count)
-        coefficients -= float(learning_rate) * gradient
+    if len(np.unique(y)) < 2:
+        return {
+            "model_type": str(model_type),
+            "training_available": False,
+            "training_sample_count": int(len(training_rows)),
+            "warnings": ["single_class_reliability_labels"],
+            "target_type": str(target_type),
+            "calibration_method": str(calibration_method),
+        }
+    normalized_model_type = str(model_type or "logistic").lower()
+    if normalized_model_type == "gradient_boosting":
+        estimator = HistGradientBoostingClassifier(
+            max_depth=3,
+            max_iter=150,
+            learning_rate=0.05,
+            min_samples_leaf=max(2, min(10, max(len(frame.index) // 5, 2))),
+            random_state=0,
+        )
+        estimator.fit(x, y)
+        raw_scores = np.asarray(estimator.decision_function(x), dtype=float)
+    else:
+        estimator = LogisticRegression(
+            C=max(1e-6, 1.0 / max(float(ridge_alpha), 1e-6)),
+            max_iter=max(int(max_iter), 100),
+            solver="lbfgs",
+        )
+        estimator.fit(x, y)
+        raw_scores = np.asarray(estimator.decision_function(x), dtype=float)
+    calibrator, calibrated_probabilities = _fit_probability_calibrator(
+        method=calibration_method,
+        raw_scores=raw_scores,
+        labels=y,
+        max_iter=max_iter,
+    )
     return {
-        "model_type": "reliability_logistic",
+        "model_type": normalized_model_type,
         "training_available": True,
         "training_sample_count": int(len(training_rows)),
         "feature_means": [float(value) for value in means],
         "feature_stds": [float(value) for value in stds],
-        "intercept": float(intercept),
-        "coefficients": [float(value) for value in coefficients],
+        "estimator": estimator,
+        "calibrator": calibrator,
+        "calibration_method": str(calibration_method),
         "signal_families": signal_families,
         "score_buckets": score_buckets,
         "weekdays": weekdays,
         "recent_window": int(recent_window),
         "target_type": str(target_type),
+        "training_probability_min": float(np.min(calibrated_probabilities)),
+        "training_probability_max": float(np.max(calibrated_probabilities)),
+        "training_probability_std": float(np.std(calibrated_probabilities, ddof=0)),
+        "training_probability_unique_value_count": int(len(np.unique(np.round(calibrated_probabilities, 8)))),
         "warnings": [],
     }
 
@@ -772,8 +839,38 @@ def score_trade_ev_reliability_candidates(
     stds = np.array(model.get("feature_stds") or [1.0] * x_raw.shape[1], dtype=float)
     stds = np.where(stds <= 0.0, 1.0, stds)
     x = (x_raw - means) / stds
-    coefficients = np.array(model.get("coefficients") or [0.0] * x.shape[1], dtype=float)
-    probabilities = pd.Series(_sigmoid(float(model.get("intercept", 0.0)) + (x @ coefficients)), index=frame.index)
+    estimator = model.get("estimator")
+    if estimator is None:
+        return _normalize_records(
+            [
+                {
+                    **row,
+                    "ev_reliability": 0.5,
+                    "ev_reliability_rank_pct": 0.5,
+                    "ev_reliability_multiplier": 1.0,
+                    "prediction_available": False,
+                    "prediction_reason": "missing_reliability_estimator",
+                    "training_sample_count": int(model.get("training_sample_count", 0) or 0),
+                    "reliability_target_type": str(target_type),
+                    "reliability_usage_mode": str(usage_mode),
+                    "was_reliability_promoted": False,
+                    "was_filtered_by_reliability": False,
+                }
+                for row in current_rows
+            ]
+        )
+    raw_scores = np.asarray(
+        estimator.decision_function(x) if hasattr(estimator, "decision_function") else estimator.predict_proba(x)[:, 1],
+        dtype=float,
+    )
+    probabilities = pd.Series(
+        _apply_probability_calibrator(
+            calibrator=model.get("calibrator"),
+            method=str(model.get("calibration_method", "none") or "none"),
+            raw_scores=raw_scores,
+        ),
+        index=frame.index,
+    )
     rank_pct = _reliability_rank_pct(probabilities)
     promoted_indices: set[int] = set()
     if max_promoted_trades_per_day is not None and int(max_promoted_trades_per_day) >= 0:
@@ -810,6 +907,8 @@ def score_trade_ev_reliability_candidates(
                 "training_sample_count": int(model.get("training_sample_count", 0) or 0),
                 "reliability_target_type": str(target_type),
                 "reliability_usage_mode": str(usage_mode),
+                "reliability_model_type": str(model.get("model_type", "logistic") or "logistic"),
+                "reliability_calibration_method": str(model.get("calibration_method", "none") or "none"),
                 "was_reliability_promoted": promoted,
                 "was_filtered_by_reliability": filtered,
             }
@@ -921,6 +1020,10 @@ def build_trade_ev_reliability_analysis(
             "reliability_cost_drag_uplift": 0.0,
             "ev_rank_ic": 0.0,
             "combined_rank_ic": 0.0,
+            "reliability_score_std": 0.0,
+            "reliability_score_min": 0.0,
+            "reliability_score_max": 0.0,
+            "reliability_unique_value_count": 0,
             "bucket_count": 0,
         }
     frame = pd.DataFrame(reliability_rows).copy()
@@ -949,6 +1052,10 @@ def build_trade_ev_reliability_analysis(
             "reliability_cost_drag_uplift": 0.0,
             "ev_rank_ic": 0.0,
             "combined_rank_ic": 0.0,
+            "reliability_score_std": 0.0,
+            "reliability_score_min": 0.0,
+            "reliability_score_max": 0.0,
+            "reliability_unique_value_count": 0,
             "bucket_count": 0,
         }
     frame["hit_rate_after_costs"] = (frame["realized_return_after_costs"] > 0.0).astype(float)
@@ -1021,6 +1128,10 @@ def build_trade_ev_reliability_analysis(
             frame["realized_return_after_costs"],
             method="spearman",
         ),
+        "reliability_score_std": float(frame["ev_reliability"].std(ddof=0)),
+        "reliability_score_min": float(frame["ev_reliability"].min()),
+        "reliability_score_max": float(frame["ev_reliability"].max()),
+        "reliability_unique_value_count": int(len(np.unique(np.round(frame["ev_reliability"].to_numpy(dtype=float), 8)))),
         "bucket_count": int(len(grouped.index)),
     }
     return rows, _normalize_records(turnover_rows.to_dict(orient="records")), summary

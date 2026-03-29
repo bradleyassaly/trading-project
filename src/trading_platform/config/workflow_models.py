@@ -711,6 +711,7 @@ class DailyTradingWorkflowConfig:
     ev_gate_confidence_threshold: float = 0.0
     ev_gate_use_reliability_weighting: bool = False
     ev_gate_reliability_model_type: str = "logistic"
+    ev_gate_reliability_calibration_method: str = "none"
     ev_gate_use_reliability_filter: bool = False
     ev_gate_reliability_threshold: float = 0.5
     ev_gate_reliability_min_training_samples: int = 20

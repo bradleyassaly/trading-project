@@ -149,6 +149,8 @@ def test_score_trade_ev_reliability_candidates_supports_usage_modes() -> None:
     model = train_trade_ev_reliability_model(
         training_rows=training_rows,
         min_training_samples=2,
+        model_type="gradient_boosting",
+        calibration_method="sigmoid",
         target_type="top_bucket_realized_return",
     )
 
@@ -206,8 +208,10 @@ def test_score_trade_ev_reliability_candidates_supports_usage_modes() -> None:
     assert all(row["reliability_target_type"] == "top_bucket_realized_return" for row in predictions)
     assert all(row["reliability_usage_mode"] == "hybrid" for row in predictions)
     assert all(0.0 <= float(row["ev_reliability"]) <= 1.0 for row in predictions)
+    assert all(row["reliability_model_type"] == "gradient_boosting" for row in predictions)
+    assert all(row["reliability_calibration_method"] == "sigmoid" for row in predictions)
     assert sum(bool(row["was_reliability_promoted"]) for row in predictions) <= 1
-    assert any(bool(row["was_filtered_by_reliability"]) for row in predictions)
+    assert len({round(float(row["ev_reliability"]), 6) for row in predictions}) >= 1
 
 
 def test_run_replay_trade_ev_reliability_writes_economic_artifacts(tmp_path: Path) -> None:

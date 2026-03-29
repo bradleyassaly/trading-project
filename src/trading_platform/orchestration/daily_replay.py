@@ -382,6 +382,9 @@ def _write_replay_day_input_summary(
             "ev_gate_confidence_threshold": float(day_config.ev_gate_confidence_threshold),
             "ev_gate_use_reliability_weighting": bool(day_config.ev_gate_use_reliability_weighting),
             "ev_gate_reliability_model_type": str(day_config.ev_gate_reliability_model_type or "logistic"),
+            "ev_gate_reliability_calibration_method": str(
+                day_config.ev_gate_reliability_calibration_method or "none"
+            ),
             "ev_gate_use_reliability_filter": bool(day_config.ev_gate_use_reliability_filter),
             "ev_gate_reliability_threshold": float(day_config.ev_gate_reliability_threshold),
             "ev_gate_reliability_min_training_samples": int(
@@ -1106,6 +1109,10 @@ def _write_replay_summary_artifacts(
                 f"- reliability_rank_ic: `{summary.get('reliability_rank_ic', 0.0)}`",
                 f"- reliability_success_correlation: `{summary.get('reliability_success_correlation', 0.0)}`",
                 f"- reliability_top_vs_bottom_after_cost_spread: `{summary.get('reliability_top_vs_bottom_after_cost_spread', 0.0)}`",
+                f"- reliability_score_std: `{summary.get('reliability_score_std', 0.0)}`",
+                f"- reliability_score_min: `{summary.get('reliability_score_min', 0.0)}`",
+                f"- reliability_score_max: `{summary.get('reliability_score_max', 0.0)}`",
+                f"- reliability_unique_value_count: `{summary.get('reliability_unique_value_count', 0)}`",
                 f"- reliability_promoted_trade_count: `{summary.get('reliability_promoted_trade_count', 0)}`",
                 f"- reliability_turnover_uplift: `{summary.get('reliability_turnover_uplift', 0.0)}`",
                 f"- reliability_cost_drag_uplift: `{summary.get('reliability_cost_drag_uplift', 0.0)}`",
@@ -1676,6 +1683,12 @@ def run_daily_replay(config: DailyReplayWorkflowConfig) -> DailyReplayResult:
         summary["reliability_rank_ic"] = float(reliability_summary.get("reliability_rank_ic", 0.0) or 0.0)
         summary["reliability_top_vs_bottom_after_cost_spread"] = float(
             reliability_summary.get("reliability_top_vs_bottom_after_cost_spread", 0.0) or 0.0
+        )
+        summary["reliability_score_std"] = float(reliability_summary.get("reliability_score_std", 0.0) or 0.0)
+        summary["reliability_score_min"] = float(reliability_summary.get("reliability_score_min", 0.0) or 0.0)
+        summary["reliability_score_max"] = float(reliability_summary.get("reliability_score_max", 0.0) or 0.0)
+        summary["reliability_unique_value_count"] = int(
+            reliability_summary.get("reliability_unique_value_count", 0) or 0
         )
         summary["reliability_turnover_uplift"] = float(
             reliability_summary.get("reliability_turnover_uplift", 0.0) or 0.0

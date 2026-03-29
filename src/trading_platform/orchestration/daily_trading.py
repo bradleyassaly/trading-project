@@ -863,6 +863,9 @@ def _build_multi_strategy_paper_config(result, reserve_cash_pct: float, workflow
         ev_gate_reliability_model_type=str(
             getattr(workflow_config, "ev_gate_reliability_model_type", "logistic") or "logistic"
         ),
+        ev_gate_reliability_calibration_method=str(
+            getattr(workflow_config, "ev_gate_reliability_calibration_method", "none") or "none"
+        ),
         ev_gate_use_reliability_filter=bool(
             getattr(workflow_config, "ev_gate_use_reliability_filter", False)
         ),

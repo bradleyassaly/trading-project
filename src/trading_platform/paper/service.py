@@ -665,6 +665,9 @@ def generate_rebalance_orders(
     ev_reliability_model_type = str(
         getattr(active_config, "ev_gate_reliability_model_type", "logistic") or "logistic"
     ).lower()
+    ev_reliability_calibration_method = str(
+        getattr(active_config, "ev_gate_reliability_calibration_method", "none") or "none"
+    ).lower()
     ev_use_reliability_filter = bool(getattr(active_config, "ev_gate_use_reliability_filter", False))
     ev_reliability_threshold = float(getattr(active_config, "ev_gate_reliability_threshold", 0.5) or 0.5)
     ev_reliability_min_training_samples = int(
@@ -797,6 +800,7 @@ def generate_rebalance_orders(
     diagnostics["ev_gate_confidence_threshold"] = ev_confidence_threshold
     diagnostics["ev_gate_use_reliability_weighting"] = ev_use_reliability_weighting
     diagnostics["ev_gate_reliability_model_type"] = ev_reliability_model_type
+    diagnostics["ev_gate_reliability_calibration_method"] = ev_reliability_calibration_method
     diagnostics["ev_gate_use_reliability_filter"] = ev_use_reliability_filter
     diagnostics["ev_gate_reliability_threshold"] = ev_reliability_threshold
     diagnostics["ev_gate_reliability_min_training_samples"] = ev_reliability_min_training_samples
@@ -1102,6 +1106,8 @@ def generate_rebalance_orders(
         reliability_model = train_trade_ev_reliability_model(
             training_rows=reliability_training_rows,
             min_training_samples=ev_reliability_min_training_samples,
+            model_type=ev_reliability_model_type,
+            calibration_method=ev_reliability_calibration_method,
             recent_window=ev_reliability_recent_window,
             target_type=ev_reliability_target_type,
         )
@@ -2849,6 +2855,9 @@ def run_paper_trading_cycle_for_targets(
             ),
             "ev_gate_reliability_model_type": str(
                 order_result.diagnostics.get("ev_gate_reliability_model_type", "logistic") or "logistic"
+            ),
+            "ev_gate_reliability_calibration_method": str(
+                order_result.diagnostics.get("ev_gate_reliability_calibration_method", "none") or "none"
             ),
             "ev_gate_use_reliability_filter": bool(
                 order_result.diagnostics.get("ev_gate_use_reliability_filter", False)

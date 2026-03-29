@@ -389,6 +389,7 @@ daily_trading:
         confidence_threshold: 0.55
         use_reliability_weighting: true
         reliability_model_type: logistic
+        reliability_calibration_method: isotonic
         use_reliability_filter: true
         reliability_threshold: 0.62
         reliability_min_training_samples: 14
@@ -454,6 +455,7 @@ daily_trading:
     assert config.ev_gate_confidence_threshold == 0.55
     assert config.ev_gate_use_reliability_weighting is True
     assert config.ev_gate_reliability_model_type == "logistic"
+    assert config.ev_gate_reliability_calibration_method == "isotonic"
     assert config.ev_gate_use_reliability_filter is True
     assert config.ev_gate_reliability_threshold == 0.62
     assert config.ev_gate_reliability_min_training_samples == 14

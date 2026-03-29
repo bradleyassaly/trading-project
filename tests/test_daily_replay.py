@@ -389,6 +389,10 @@ def test_run_daily_replay_includes_reliability_summary_when_available(
                 "reliability_rank_ic": 0.19,
                 "reliability_success_correlation": 0.33,
                 "reliability_top_vs_bottom_after_cost_spread": 0.04,
+                "reliability_score_std": 0.12,
+                "reliability_score_min": 0.21,
+                "reliability_score_max": 0.83,
+                "reliability_unique_value_count": 9,
                 "reliability_turnover_uplift": -0.02,
                 "reliability_cost_drag_uplift": -0.01,
                 "ev_rank_ic": 0.12,
@@ -416,6 +420,10 @@ def test_run_daily_replay_includes_reliability_summary_when_available(
     assert result.summary["reliability_rank_ic"] == pytest.approx(0.19)
     assert result.summary["reliability_success_correlation"] == pytest.approx(0.33)
     assert result.summary["reliability_top_vs_bottom_after_cost_spread"] == pytest.approx(0.04)
+    assert result.summary["reliability_score_std"] == pytest.approx(0.12)
+    assert result.summary["reliability_score_min"] == pytest.approx(0.21)
+    assert result.summary["reliability_score_max"] == pytest.approx(0.83)
+    assert result.summary["reliability_unique_value_count"] == 9
     assert result.summary["reliability_turnover_uplift"] == pytest.approx(-0.02)
     assert result.summary["reliability_cost_drag_uplift"] == pytest.approx(-0.01)
     assert result.summary["ev_rank_ic"] == pytest.approx(0.12)

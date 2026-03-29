@@ -111,7 +111,8 @@ daily_trading:
         confidence_clip_min: 0.5
         confidence_clip_max: 1.5
         use_reliability_weighting: false
-        reliability_model_type: logistic
+        reliability_model_type: gradient_boosting
+        reliability_calibration_method: isotonic
         use_reliability_filter: false
         reliability_threshold: 0.55
         reliability_min_training_samples: 20
