@@ -587,6 +587,44 @@ def load_daily_trading_workflow_config(path: str | Path) -> DailyTradingWorkflow
     )
     _set_if_missing(payload, "ev_gate_weight_multiplier_min", ev_gate_section, "weight_multiplier_min")
     _set_if_missing(payload, "ev_gate_weight_multiplier_max", ev_gate_section, "weight_multiplier_max")
+    _set_if_missing(payload, "ev_gate_use_confidence_weighting", ev_gate_section, "use_confidence_weighting")
+    _set_if_missing(payload, "ev_gate_confidence_method", ev_gate_section, "confidence_method")
+    _set_if_missing(payload, "ev_gate_confidence_scale", ev_gate_section, "confidence_scale")
+    _set_if_missing(payload, "ev_gate_confidence_clip_min", ev_gate_section, "confidence_clip_min")
+    _set_if_missing(payload, "ev_gate_confidence_clip_max", ev_gate_section, "confidence_clip_max")
+    _set_if_missing(
+        payload,
+        "ev_gate_confidence_min_samples_per_bucket",
+        ev_gate_section,
+        "confidence_min_samples_per_bucket",
+    )
+    _set_if_missing(
+        payload,
+        "ev_gate_confidence_shrinkage_enabled",
+        ev_gate_section,
+        "confidence_shrinkage_enabled",
+    )
+    confidence_components_section = dict(ev_gate_section.get("confidence_components") or {})
+    _set_if_missing(
+        payload,
+        "ev_gate_confidence_component_residual_std_weight",
+        confidence_components_section,
+        "residual_std",
+    )
+    _set_if_missing(
+        payload,
+        "ev_gate_confidence_component_magnitude_weight",
+        confidence_components_section,
+        "magnitude",
+    )
+    _set_if_missing(
+        payload,
+        "ev_gate_confidence_component_model_performance_weight",
+        confidence_components_section,
+        "model_performance",
+    )
+    _set_if_missing(payload, "ev_gate_use_confidence_filter", ev_gate_section, "use_confidence_filter")
+    _set_if_missing(payload, "ev_gate_confidence_threshold", ev_gate_section, "confidence_threshold")
     _set_if_missing(payload, "ev_gate_min_expected_net_return", ev_gate_section, "min_expected_net_return")
     _set_if_missing(payload, "ev_gate_min_probability_positive", ev_gate_section, "min_probability_positive")
     _set_if_missing(payload, "ev_gate_risk_penalty_lambda", ev_gate_section, "risk_penalty_lambda")

@@ -3177,7 +3177,28 @@ daily_trading:
         score_clip_max: 0.02
         weight_multiplier_min: 0.5
         weight_multiplier_max: 1.5
+        use_confidence_weighting: true
+        confidence_method: residual_std
+        confidence_min_samples_per_bucket: 20
+        confidence_shrinkage_enabled: true
+        confidence_components:
+          residual_std: 0.6
+          magnitude: 0.25
+          model_performance: 0.15
+        confidence_scale: 1.0
+        confidence_clip_min: 0.5
+        confidence_clip_max: 1.5
+        use_confidence_filter: true
+        confidence_threshold: 0.55
 ```
+
+Confidence weighting semantics:
+
+- The regression EV point estimate still drives the raw expected-net-return signal.
+- Confidence affects soft sizing only, not hard EV blocking.
+- Residual-std confidence is bucketed by `signal_family` and score bucket, with optional shrinkage back to the global residual std when sample counts are thin.
+- The combined confidence signal is a weighted blend of residual-std confidence, prediction-magnitude confidence, and recent model-performance confidence.
+- `use_confidence_filter` is optional. When enabled, low-confidence regression trades are skipped explicitly and logged as confidence-filtered.
 
 Inspect:
 
@@ -3194,6 +3215,9 @@ Inspect:
 - `replay_trade_ev_regression_predictions.csv`
 - `replay_ev_regression_buckets.csv`
 - `replay_ev_regression_summary.json`
+- `replay_trade_ev_confidence.csv`
+- `replay_ev_confidence_summary.json`
+- `replay_ev_confidence_bucket_analysis.csv`
 - `artifacts/ev_model/ev_regression_model.pkl`
 - `replay_summary.json`
 
@@ -3207,8 +3231,12 @@ Useful calibration fields:
 - `avg_raw_ev_executed_trades`
 - `avg_normalized_ev_executed_trades`
 - `avg_ev_weighting_score`
+- `avg_ev_confidence`
+- `avg_ev_confidence_multiplier`
 - `avg_ev_weight_multiplier`
 - `ev_weighted_exposure`
+- `confidence_absolute_error_correlation`
+- `confidence_realized_return_correlation`
 - `target_type`
 - `hybrid_alpha`
 - `labeled_row_count`

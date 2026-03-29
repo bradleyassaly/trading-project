@@ -601,6 +601,189 @@ def test_generate_rebalance_orders_regression_soft_mode_uses_regression_weightin
     assert result.diagnostics["avg_regression_ev_weighting_score"] == pytest.approx(0.20)
 
 
+def test_generate_rebalance_orders_regression_soft_mode_applies_confidence_weighting(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "trading_platform.paper.service.build_trade_ev_training_dataset",
+        lambda **kwargs: ([{"forward_net_return": 0.02}], {"training_sample_count": 1}),
+    )
+    monkeypatch.setattr(
+        "trading_platform.paper.service.train_trade_ev_model",
+        lambda **kwargs: {"training_available": True, "training_sample_count": 1},
+    )
+    monkeypatch.setattr(
+        "trading_platform.paper.service.score_trade_ev_candidates",
+        lambda **kwargs: [
+            {
+                **kwargs["candidate_rows"][0],
+                "expected_gross_return": 0.01,
+                "expected_net_return": 0.01,
+                "expected_cost": 0.001,
+                "probability_positive": 0.6,
+                "raw_ev_score": 0.01,
+                "normalized_ev_score": 0.01,
+                "ev_score_pre_clip": 0.01,
+                "ev_score_post_clip": 0.01,
+                "ev_score_clipped": False,
+                "ev_weighting_score": 0.01,
+                "ev_decision_score": 0.01,
+                "ev_gate_threshold": 0.0,
+                "ev_gate_decision": "allow",
+                "ev_model_bucket": "global",
+                "ev_training_sample_count": 1,
+                "action_reason": "passed_ev_gate",
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        "trading_platform.paper.service.build_trade_ev_regression_history_dataset",
+        lambda **kwargs: ([{"realized_return": 0.03}], {"row_count": 1}),
+    )
+    monkeypatch.setattr(
+        "trading_platform.paper.service.train_trade_ev_regression_model",
+        lambda **kwargs: {"training_available": True, "training_sample_count": 10},
+    )
+    monkeypatch.setattr(
+        "trading_platform.paper.service.score_trade_ev_regression_candidates",
+        lambda **kwargs: [
+            {
+                "symbol": "AAPL",
+                "predicted_ev": 0.03,
+                "prediction_available": True,
+                "regression_raw_ev_score": 0.03,
+                "regression_normalized_ev_score": 0.20,
+                "regression_ev_score_post_clip": 0.20,
+                "ev_confidence": 0.8,
+                "ev_confidence_multiplier": 1.25,
+                "ev_score_before_confidence": 0.20,
+                "ev_score_after_confidence": 0.25,
+                "ev_weighting_score": 0.25,
+            }
+        ],
+    )
+
+    result = generate_rebalance_orders(
+        as_of="2025-01-07",
+        state=PaperPortfolioState(cash=10_000.0, positions={}),
+        latest_target_weights={"AAPL": 0.2},
+        latest_prices={"AAPL": 100.0},
+        latest_scores={"AAPL": 0.9},
+        config=PaperTradingConfig(
+            symbols=["AAPL"],
+            ev_gate_enabled=True,
+            ev_gate_model_type="regression",
+            ev_gate_mode="soft",
+            ev_gate_weight_multiplier=True,
+            ev_gate_weight_scale=3.0,
+            ev_gate_training_root="artifacts/daily_replay/run_current",
+            ev_gate_min_training_samples=1,
+            ev_gate_use_confidence_weighting=True,
+            ev_gate_confidence_method="residual_std",
+            ev_gate_confidence_scale=1.0,
+            ev_gate_confidence_clip_min=0.5,
+            ev_gate_confidence_clip_max=1.5,
+            min_trade_dollars=1.0,
+        ),
+        min_trade_dollars=1.0,
+    )
+
+    assert len(result.orders) == 1
+    assert result.orders[0].target_weight == pytest.approx(0.35)
+    assert result.orders[0].provenance["ev_confidence"] == pytest.approx(0.8)
+    assert result.orders[0].provenance["ev_confidence_multiplier"] == pytest.approx(1.25)
+    assert result.orders[0].provenance["ev_score_before_confidence"] == pytest.approx(0.20)
+    assert result.orders[0].provenance["ev_score_after_confidence"] == pytest.approx(0.25)
+    assert result.diagnostics["avg_ev_confidence"] == pytest.approx(0.8)
+    assert result.diagnostics["avg_ev_confidence_multiplier"] == pytest.approx(1.25)
+    assert result.diagnostics["avg_ev_score_after_confidence"] == pytest.approx(0.25)
+
+
+def test_generate_rebalance_orders_regression_soft_mode_can_filter_low_confidence(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "trading_platform.paper.service.build_trade_ev_training_dataset",
+        lambda **kwargs: ([{"forward_net_return": 0.02}], {"training_sample_count": 1}),
+    )
+    monkeypatch.setattr(
+        "trading_platform.paper.service.train_trade_ev_model",
+        lambda **kwargs: {"training_available": True, "training_sample_count": 1},
+    )
+    monkeypatch.setattr(
+        "trading_platform.paper.service.score_trade_ev_candidates",
+        lambda **kwargs: [
+            {
+                **kwargs["candidate_rows"][0],
+                "expected_gross_return": 0.01,
+                "expected_net_return": 0.01,
+                "expected_cost": 0.001,
+                "probability_positive": 0.6,
+                "raw_ev_score": 0.01,
+                "normalized_ev_score": 0.01,
+                "ev_score_pre_clip": 0.01,
+                "ev_score_post_clip": 0.01,
+                "ev_score_clipped": False,
+                "ev_weighting_score": 0.01,
+                "ev_decision_score": 0.01,
+                "ev_gate_threshold": 0.0,
+                "ev_gate_decision": "allow",
+                "ev_model_bucket": "global",
+                "ev_training_sample_count": 1,
+                "action_reason": "passed_ev_gate",
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        "trading_platform.paper.service.build_trade_ev_regression_history_dataset",
+        lambda **kwargs: ([{"realized_return": 0.03}], {"row_count": 1}),
+    )
+    monkeypatch.setattr(
+        "trading_platform.paper.service.train_trade_ev_regression_model",
+        lambda **kwargs: {"training_available": True, "training_sample_count": 10},
+    )
+    monkeypatch.setattr(
+        "trading_platform.paper.service.score_trade_ev_regression_candidates",
+        lambda **kwargs: [
+            {
+                "symbol": "AAPL",
+                "predicted_ev": 0.03,
+                "prediction_available": True,
+                "regression_raw_ev_score": 0.03,
+                "regression_normalized_ev_score": 0.20,
+                "regression_ev_score_post_clip": 0.20,
+                "ev_confidence": 0.2,
+                "ev_confidence_multiplier": 0.75,
+                "ev_score_before_confidence": 0.20,
+                "ev_score_after_confidence": 0.15,
+                "ev_weighting_score": 0.15,
+            }
+        ],
+    )
+
+    result = generate_rebalance_orders(
+        as_of="2025-01-07",
+        state=PaperPortfolioState(cash=10_000.0, positions={}),
+        latest_target_weights={"AAPL": 0.2},
+        latest_prices={"AAPL": 100.0},
+        latest_scores={"AAPL": 0.9},
+        config=PaperTradingConfig(
+            symbols=["AAPL"],
+            ev_gate_enabled=True,
+            ev_gate_model_type="regression",
+            ev_gate_mode="soft",
+            ev_gate_weight_multiplier=True,
+            ev_gate_weight_scale=3.0,
+            ev_gate_training_root="artifacts/daily_replay/run_current",
+            ev_gate_min_training_samples=1,
+            ev_gate_use_confidence_filter=True,
+            ev_gate_confidence_threshold=0.5,
+            min_trade_dollars=1.0,
+        ),
+        min_trade_dollars=1.0,
+    )
+
+    assert result.orders == []
+    assert result.diagnostics["confidence_filtered_count"] == 1
+    assert result.diagnostics["candidate_trade_rows"][0]["candidate_outcome"] == "confidence_filtered"
+
+
 def test_generate_rebalance_orders_regression_soft_mode_falls_back_when_prediction_missing(monkeypatch) -> None:
     monkeypatch.setattr(
         "trading_platform.paper.service.build_trade_ev_training_dataset",

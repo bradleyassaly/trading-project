@@ -833,6 +833,30 @@ def _build_multi_strategy_paper_config(result, reserve_cash_pct: float, workflow
         ),
         ev_gate_weight_multiplier_min=getattr(workflow_config, "ev_gate_weight_multiplier_min", None),
         ev_gate_weight_multiplier_max=getattr(workflow_config, "ev_gate_weight_multiplier_max", None),
+        ev_gate_use_confidence_weighting=bool(getattr(workflow_config, "ev_gate_use_confidence_weighting", False)),
+        ev_gate_confidence_method=str(
+            getattr(workflow_config, "ev_gate_confidence_method", "residual_std") or "residual_std"
+        ),
+        ev_gate_confidence_scale=float(getattr(workflow_config, "ev_gate_confidence_scale", 1.0) or 1.0),
+        ev_gate_confidence_clip_min=float(getattr(workflow_config, "ev_gate_confidence_clip_min", 0.5) or 0.5),
+        ev_gate_confidence_clip_max=float(getattr(workflow_config, "ev_gate_confidence_clip_max", 1.5) or 1.5),
+        ev_gate_confidence_min_samples_per_bucket=int(
+            getattr(workflow_config, "ev_gate_confidence_min_samples_per_bucket", 20) or 20
+        ),
+        ev_gate_confidence_shrinkage_enabled=bool(
+            getattr(workflow_config, "ev_gate_confidence_shrinkage_enabled", True)
+        ),
+        ev_gate_confidence_component_residual_std_weight=float(
+            getattr(workflow_config, "ev_gate_confidence_component_residual_std_weight", 1.0) or 0.0
+        ),
+        ev_gate_confidence_component_magnitude_weight=float(
+            getattr(workflow_config, "ev_gate_confidence_component_magnitude_weight", 0.0) or 0.0
+        ),
+        ev_gate_confidence_component_model_performance_weight=float(
+            getattr(workflow_config, "ev_gate_confidence_component_model_performance_weight", 0.0) or 0.0
+        ),
+        ev_gate_use_confidence_filter=bool(getattr(workflow_config, "ev_gate_use_confidence_filter", False)),
+        ev_gate_confidence_threshold=float(getattr(workflow_config, "ev_gate_confidence_threshold", 0.0) or 0.0),
         ev_gate_min_expected_net_return=float(
             getattr(workflow_config, "ev_gate_min_expected_net_return", 0.0) or 0.0
         ),

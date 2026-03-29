@@ -372,6 +372,19 @@ daily_trading:
         use_normalized_score_for_weighting: true
         weight_multiplier_min: 0.5
         weight_multiplier_max: 1.5
+        use_confidence_weighting: true
+        confidence_method: residual_std
+        confidence_scale: 1.25
+        confidence_clip_min: 0.6
+        confidence_clip_max: 1.4
+        confidence_min_samples_per_bucket: 12
+        confidence_shrinkage_enabled: true
+        confidence_components:
+          residual_std: 0.6
+          magnitude: 0.25
+          model_performance: 0.15
+        use_confidence_filter: true
+        confidence_threshold: 0.55
         min_expected_net_return: 0.001
   report:
     enable_strategy_diagnostics: true
@@ -410,6 +423,18 @@ daily_trading:
     assert config.ev_gate_use_normalized_score_for_weighting is True
     assert config.ev_gate_weight_multiplier_min == 0.5
     assert config.ev_gate_weight_multiplier_max == 1.5
+    assert config.ev_gate_use_confidence_weighting is True
+    assert config.ev_gate_confidence_method == "residual_std"
+    assert config.ev_gate_confidence_scale == 1.25
+    assert config.ev_gate_confidence_clip_min == 0.6
+    assert config.ev_gate_confidence_clip_max == 1.4
+    assert config.ev_gate_confidence_min_samples_per_bucket == 12
+    assert config.ev_gate_confidence_shrinkage_enabled is True
+    assert config.ev_gate_confidence_component_residual_std_weight == 0.6
+    assert config.ev_gate_confidence_component_magnitude_weight == 0.25
+    assert config.ev_gate_confidence_component_model_performance_weight == 0.15
+    assert config.ev_gate_use_confidence_filter is True
+    assert config.ev_gate_confidence_threshold == 0.55
     assert config.ev_gate_min_expected_net_return == 0.001
     assert config.activated_dir == "artifacts/strategy_portfolio/run_current/activated"
     assert config.enable_strategy_diagnostics is True

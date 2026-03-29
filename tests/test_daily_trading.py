@@ -384,6 +384,11 @@ def _install_common_mocks(
             "blocked_entries_count": 1,
             "held_in_hold_zone_count": 2,
             "forced_exit_count": 0,
+            "ev_gate_enabled": True,
+            "ev_gate_blocked_count": 2,
+            "avg_expected_net_return_traded": 0.01,
+            "avg_expected_net_return_blocked": -0.01,
+            "ev_model_sample_count": 24,
         }
         output_path = Path(output_dir)
         _write_json(output_path / "paper_run_summary_latest.json", payload)
@@ -453,6 +458,8 @@ def test_daily_trading_happy_path_writes_summary(monkeypatch: pytest.MonkeyPatch
     assert summary["fill_count"] == 1
     assert summary["score_band_enabled"] is True
     assert summary["blocked_entries_count"] == 1
+    assert summary["ev_gate_enabled"] is True
+    assert summary["ev_gate_blocked_count"] == 2
     assert (tmp_path / "daily" / "daily_smoke" / "trade_decision_log.csv").exists()
     assert summary["top_selected_strategies"][0]["strategy_id"] == "generated_base"
     assert summary["strategy_quality_summary"]["strategy_count"] == 2

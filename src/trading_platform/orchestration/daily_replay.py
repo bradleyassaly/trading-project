@@ -359,6 +359,26 @@ def _write_replay_day_input_summary(
             ),
             "ev_gate_weight_multiplier": bool(day_config.ev_gate_weight_multiplier),
             "ev_gate_weight_scale": float(day_config.ev_gate_weight_scale or 0.0),
+            "ev_gate_use_confidence_weighting": bool(day_config.ev_gate_use_confidence_weighting),
+            "ev_gate_confidence_method": str(day_config.ev_gate_confidence_method or "residual_std"),
+            "ev_gate_confidence_scale": float(day_config.ev_gate_confidence_scale),
+            "ev_gate_confidence_clip_min": float(day_config.ev_gate_confidence_clip_min),
+            "ev_gate_confidence_clip_max": float(day_config.ev_gate_confidence_clip_max),
+            "ev_gate_confidence_min_samples_per_bucket": int(
+                day_config.ev_gate_confidence_min_samples_per_bucket
+            ),
+            "ev_gate_confidence_shrinkage_enabled": bool(day_config.ev_gate_confidence_shrinkage_enabled),
+            "ev_gate_confidence_component_residual_std_weight": float(
+                day_config.ev_gate_confidence_component_residual_std_weight
+            ),
+            "ev_gate_confidence_component_magnitude_weight": float(
+                day_config.ev_gate_confidence_component_magnitude_weight
+            ),
+            "ev_gate_confidence_component_model_performance_weight": float(
+                day_config.ev_gate_confidence_component_model_performance_weight
+            ),
+            "ev_gate_use_confidence_filter": bool(day_config.ev_gate_use_confidence_filter),
+            "ev_gate_confidence_threshold": float(day_config.ev_gate_confidence_threshold),
             "ev_gate_horizon_days": int(day_config.ev_gate_horizon_days or 5),
             "ev_gate_min_expected_net_return": float(day_config.ev_gate_min_expected_net_return or 0.0),
         },
@@ -575,6 +595,11 @@ def _compute_replay_summary(
         if "ev_gate_blocked_count" in metrics_frame and not metrics_frame.empty
         else 0
     )
+    confidence_filtered_count = (
+        int(metrics_frame["confidence_filtered_count"].sum())
+        if "confidence_filtered_count" in metrics_frame and not metrics_frame.empty
+        else 0
+    )
     avg_expected_net_return_traded = (
         float(metrics_frame["avg_expected_net_return_traded"].mean())
         if "avg_expected_net_return_traded" in metrics_frame and not metrics_frame.empty
@@ -603,6 +628,26 @@ def _compute_replay_summary(
     avg_ev_weighting_score = (
         float(metrics_frame["avg_ev_weighting_score"].mean())
         if "avg_ev_weighting_score" in metrics_frame and not metrics_frame.empty
+        else 0.0
+    )
+    avg_ev_confidence = (
+        float(metrics_frame["avg_ev_confidence"].mean())
+        if "avg_ev_confidence" in metrics_frame and not metrics_frame.empty
+        else 1.0
+    )
+    avg_ev_confidence_multiplier = (
+        float(metrics_frame["avg_ev_confidence_multiplier"].mean())
+        if "avg_ev_confidence_multiplier" in metrics_frame and not metrics_frame.empty
+        else 1.0
+    )
+    avg_ev_score_before_confidence = (
+        float(metrics_frame["avg_ev_score_before_confidence"].mean())
+        if "avg_ev_score_before_confidence" in metrics_frame and not metrics_frame.empty
+        else 0.0
+    )
+    avg_ev_score_after_confidence = (
+        float(metrics_frame["avg_ev_score_after_confidence"].mean())
+        if "avg_ev_score_after_confidence" in metrics_frame and not metrics_frame.empty
         else 0.0
     )
     ev_weighted_exposure = (
@@ -887,6 +932,7 @@ def _compute_replay_summary(
         "held_in_hold_zone_count": held_in_hold_zone_count,
         "forced_exit_count": forced_exit_count,
         "ev_gate_blocked_count": ev_gate_blocked_count,
+        "confidence_filtered_count": confidence_filtered_count,
         "ev_gate_enabled": ev_gate_enabled,
         "ev_gate_mode": ev_gate_mode,
         "ev_gate_target_type": ev_gate_target_type,
@@ -905,6 +951,10 @@ def _compute_replay_summary(
         "avg_raw_ev_executed_trades": avg_raw_ev_executed_trades,
         "avg_normalized_ev_executed_trades": avg_normalized_ev_executed_trades,
         "avg_ev_weighting_score": avg_ev_weighting_score,
+        "avg_ev_confidence": avg_ev_confidence,
+        "avg_ev_confidence_multiplier": avg_ev_confidence_multiplier,
+        "avg_ev_score_before_confidence": avg_ev_score_before_confidence,
+        "avg_ev_score_after_confidence": avg_ev_score_after_confidence,
         "ev_weighted_exposure": ev_weighted_exposure,
         "avg_ev_weight_multiplier": avg_ev_weight_multiplier,
         "regression_prediction_available_count": regression_prediction_available_count,
@@ -993,10 +1043,15 @@ def _write_replay_summary_artifacts(
                 f"- ev_gate_use_normalized_score_for_weighting: `{summary.get('ev_gate_use_normalized_score_for_weighting', True)}`",
                 f"- ev_model_type: `{summary.get('ev_model_type', 'bucketed_mean')}`",
                 f"- ev_gate_blocked_count: `{summary.get('ev_gate_blocked_count', 0)}`",
+                f"- confidence_filtered_count: `{summary.get('confidence_filtered_count', 0)}`",
                 f"- avg_ev_executed_trades: `{summary.get('avg_ev_executed_trades', 0.0)}`",
                 f"- avg_raw_ev_executed_trades: `{summary.get('avg_raw_ev_executed_trades', 0.0)}`",
                 f"- avg_normalized_ev_executed_trades: `{summary.get('avg_normalized_ev_executed_trades', 0.0)}`",
                 f"- avg_ev_weighting_score: `{summary.get('avg_ev_weighting_score', 0.0)}`",
+                f"- avg_ev_confidence: `{summary.get('avg_ev_confidence', 1.0)}`",
+                f"- avg_ev_confidence_multiplier: `{summary.get('avg_ev_confidence_multiplier', 1.0)}`",
+                f"- avg_ev_score_before_confidence: `{summary.get('avg_ev_score_before_confidence', 0.0)}`",
+                f"- avg_ev_score_after_confidence: `{summary.get('avg_ev_score_after_confidence', 0.0)}`",
                 f"- ev_weighted_exposure: `{summary.get('ev_weighted_exposure', 0.0)}`",
                 f"- ev_model_type_requested: `{summary.get('ev_model_type_requested', 'bucketed_mean')}`",
                 f"- ev_model_type_used: `{summary.get('ev_model_type_used', 'bucketed_mean')}`",
@@ -1056,12 +1111,17 @@ def _write_replay_summary_artifacts(
             "held_in_hold_zone_count",
             "forced_exit_count",
             "ev_gate_blocked_count",
+            "confidence_filtered_count",
             "avg_expected_net_return_traded",
             "avg_expected_net_return_blocked",
             "avg_ev_executed_trades",
             "avg_raw_ev_executed_trades",
             "avg_normalized_ev_executed_trades",
             "avg_ev_weighting_score",
+            "avg_ev_confidence",
+            "avg_ev_confidence_multiplier",
+            "avg_ev_score_before_confidence",
+            "avg_ev_score_after_confidence",
             "ev_weighted_exposure",
             "avg_ev_weight_multiplier",
             "regression_prediction_available_count",
@@ -1217,6 +1277,7 @@ def run_daily_replay(config: DailyReplayWorkflowConfig) -> DailyReplayResult:
                 "held_in_hold_zone_count": int(paper_summary.get("held_in_hold_zone_count", 0) or 0),
                 "forced_exit_count": int(paper_summary.get("forced_exit_count", 0) or 0),
                 "ev_gate_blocked_count": int(paper_summary.get("ev_gate_blocked_count", 0) or 0),
+                "confidence_filtered_count": int(paper_summary.get("confidence_filtered_count", 0) or 0),
                 "avg_expected_net_return_traded": float(
                     paper_summary.get("avg_expected_net_return_traded", 0.0) or 0.0
                 ),
@@ -1231,6 +1292,16 @@ def run_daily_replay(config: DailyReplayWorkflowConfig) -> DailyReplayResult:
                     paper_summary.get("avg_normalized_ev_executed_trades", 0.0) or 0.0
                 ),
                 "avg_ev_weighting_score": float(paper_summary.get("avg_ev_weighting_score", 0.0) or 0.0),
+                "avg_ev_confidence": float(paper_summary.get("avg_ev_confidence", 1.0)),
+                "avg_ev_confidence_multiplier": float(
+                    paper_summary.get("avg_ev_confidence_multiplier", 1.0)
+                ),
+                "avg_ev_score_before_confidence": float(
+                    paper_summary.get("avg_ev_score_before_confidence", 0.0) or 0.0
+                ),
+                "avg_ev_score_after_confidence": float(
+                    paper_summary.get("avg_ev_score_after_confidence", 0.0) or 0.0
+                ),
                 "ev_weighted_exposure": float(paper_summary.get("ev_weighted_exposure", 0.0) or 0.0),
                 "avg_ev_weight_multiplier": float(paper_summary.get("avg_ev_weight_multiplier", 1.0) or 1.0),
                 "candidate_dataset_row_count": int(paper_summary.get("candidate_dataset_row_count", 0) or 0),
@@ -1397,14 +1468,37 @@ def run_daily_replay(config: DailyReplayWorkflowConfig) -> DailyReplayResult:
     )
     candidate_coverage_rows, candidate_dataset_summary = _aggregate_candidate_ev_dataset(replay_root)
     regression_summary: dict[str, Any] = {}
+    regression_artifact_paths: dict[str, str] = {}
     if ev_lifecycle_rows:
         regression_result = run_replay_trade_ev_regression(
             replay_root=replay_root,
             model_output_path=Path("artifacts") / "ev_model" / "ev_regression_model.pkl",
             expected_horizon_days=int(config.daily_trading.ev_gate_horizon_days or 5),
             min_training_samples=max(5, int(config.daily_trading.ev_gate_min_training_samples or 20)),
+            use_confidence_weighting=bool(config.daily_trading.ev_gate_use_confidence_weighting),
+            confidence_scale=float(config.daily_trading.ev_gate_confidence_scale or 1.0),
+            confidence_clip_min=float(config.daily_trading.ev_gate_confidence_clip_min or 0.5),
+            confidence_clip_max=float(config.daily_trading.ev_gate_confidence_clip_max or 1.5),
+            confidence_min_samples_per_bucket=int(
+                config.daily_trading.ev_gate_confidence_min_samples_per_bucket or 20
+            ),
+            confidence_shrinkage_enabled=bool(
+                config.daily_trading.ev_gate_confidence_shrinkage_enabled
+            ),
+            confidence_component_residual_std_weight=float(
+                config.daily_trading.ev_gate_confidence_component_residual_std_weight or 0.0
+            ),
+            confidence_component_magnitude_weight=float(
+                config.daily_trading.ev_gate_confidence_component_magnitude_weight or 0.0
+            ),
+            confidence_component_model_performance_weight=float(
+                config.daily_trading.ev_gate_confidence_component_model_performance_weight or 0.0
+            ),
         )
         regression_summary = dict(regression_result.get("summary") or {})
+        regression_artifact_paths = {
+            key: str(value) for key, value in dict(regression_result.get("artifact_paths") or {}).items()
+        }
     if ev_calibration_summary:
         summary["replay_ev_calibration_summary"] = ev_calibration_summary
         summary["ev_gate_target_type"] = str(
@@ -1468,6 +1562,28 @@ def run_daily_replay(config: DailyReplayWorkflowConfig) -> DailyReplayResult:
         summary["regression_ev_correlation"] = float(regression_summary.get("correlation", 0.0) or 0.0)
         summary["regression_ev_rank_correlation"] = float(regression_summary.get("rank_correlation", 0.0) or 0.0)
         summary["regression_ev_bucket_spread"] = float(regression_summary.get("bucket_spread", 0.0) or 0.0)
+        if max(
+            int(regression_summary.get("confidence_row_count", 0) or 0),
+            int(regression_summary.get("prediction_count", 0) or 0),
+        ) > 0:
+            summary["avg_ev_confidence"] = float(
+                regression_summary.get("avg_ev_confidence", summary.get("avg_ev_confidence", 1.0))
+            )
+            summary["avg_ev_confidence_multiplier"] = float(
+                regression_summary.get(
+                    "avg_ev_confidence_multiplier",
+                    summary.get("avg_ev_confidence_multiplier", 1.0),
+                )
+            )
+            summary["confidence_absolute_error_correlation"] = float(
+                regression_summary.get("confidence_absolute_error_correlation", 0.0) or 0.0
+            )
+            summary["confidence_realized_return_correlation"] = float(
+                regression_summary.get("confidence_realized_return_correlation", 0.0) or 0.0
+            )
+            summary["confidence_top_vs_bottom_bucket_spread"] = float(
+                regression_summary.get("top_vs_bottom_realized_return_spread", 0.0) or 0.0
+            )
         summary["replay_ev_regression_summary"] = regression_summary
     status = "succeeded"
     failed_day_count = int(summary.get("failed_day_count", 0) or 0)
@@ -1571,6 +1687,7 @@ def run_daily_replay(config: DailyReplayWorkflowConfig) -> DailyReplayResult:
     artifact_paths["replay_ev_calibration_summary_json_path"] = str(ev_calibration_summary_path)
     artifact_paths["replay_candidate_ev_coverage_csv_path"] = str(candidate_coverage_path)
     artifact_paths["replay_candidate_ev_dataset_summary_json_path"] = str(candidate_summary_path)
+    artifact_paths.update(regression_artifact_paths)
     artifact_paths.update({f"dashboard_{key}": str(value) for key, value in dashboard_paths.items()})
     if config.replay.profile_timings:
         total_replay_seconds = time.monotonic() - replay_started

@@ -331,8 +331,17 @@ def test_run_daily_replay_includes_regression_ev_summary_when_lifecycle_exists(
                 "correlation": 0.4,
                 "rank_correlation": 0.3,
                 "bucket_spread": 0.05,
+                "prediction_count": 5,
+                "avg_ev_confidence": 0.75,
+                "avg_ev_confidence_multiplier": 1.1,
+                "confidence_absolute_error_correlation": -0.2,
+                "confidence_realized_return_correlation": 0.1,
                 "model_type": "regression",
-            }
+            },
+            "artifact_paths": {
+                "replay_trade_ev_confidence_path": tmp_path / "replay" / "replay_trade_ev_confidence.csv",
+                "replay_ev_confidence_summary_path": tmp_path / "replay" / "replay_ev_confidence_summary.json",
+            },
         },
     )
     config = DailyReplayWorkflowConfig(
@@ -350,6 +359,9 @@ def test_run_daily_replay_includes_regression_ev_summary_when_lifecycle_exists(
     assert result.summary["regression_ev_correlation"] == pytest.approx(0.4)
     assert result.summary["regression_ev_rank_correlation"] == pytest.approx(0.3)
     assert result.summary["regression_ev_bucket_spread"] == pytest.approx(0.05)
+    assert result.summary["avg_ev_confidence"] == pytest.approx(0.75)
+    assert result.summary["avg_ev_confidence_multiplier"] == pytest.approx(1.1)
+    assert result.summary["confidence_absolute_error_correlation"] == pytest.approx(-0.2)
     assert result.summary["replay_ev_regression_summary"]["model_type"] == "regression"
 
 

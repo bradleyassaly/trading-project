@@ -634,6 +634,28 @@ def generate_rebalance_orders(
     )
     ev_weight_multiplier_min = getattr(active_config, "ev_gate_weight_multiplier_min", None)
     ev_weight_multiplier_max = getattr(active_config, "ev_gate_weight_multiplier_max", None)
+    ev_use_confidence_weighting = bool(getattr(active_config, "ev_gate_use_confidence_weighting", False))
+    ev_confidence_method = str(getattr(active_config, "ev_gate_confidence_method", "residual_std") or "residual_std")
+    ev_confidence_scale = float(getattr(active_config, "ev_gate_confidence_scale", 1.0))
+    ev_confidence_clip_min = float(getattr(active_config, "ev_gate_confidence_clip_min", 0.5))
+    ev_confidence_clip_max = float(getattr(active_config, "ev_gate_confidence_clip_max", 1.5))
+    ev_confidence_min_samples_per_bucket = int(
+        getattr(active_config, "ev_gate_confidence_min_samples_per_bucket", 20) or 20
+    )
+    ev_confidence_shrinkage_enabled = bool(
+        getattr(active_config, "ev_gate_confidence_shrinkage_enabled", True)
+    )
+    ev_confidence_component_residual_std_weight = float(
+        getattr(active_config, "ev_gate_confidence_component_residual_std_weight", 1.0) or 0.0
+    )
+    ev_confidence_component_magnitude_weight = float(
+        getattr(active_config, "ev_gate_confidence_component_magnitude_weight", 0.0) or 0.0
+    )
+    ev_confidence_component_model_performance_weight = float(
+        getattr(active_config, "ev_gate_confidence_component_model_performance_weight", 0.0) or 0.0
+    )
+    ev_use_confidence_filter = bool(getattr(active_config, "ev_gate_use_confidence_filter", False))
+    ev_confidence_threshold = float(getattr(active_config, "ev_gate_confidence_threshold", 0.0) or 0.0)
     requested_ev_model_type = str(getattr(active_config, "ev_gate_model_type", "bucketed_mean") or "bucketed_mean")
     execution_ev_model_type = requested_ev_model_type
     ev_model_fallback_reason: str | None = None
@@ -716,6 +738,22 @@ def generate_rebalance_orders(
     diagnostics["ev_gate_use_normalized_score_for_weighting"] = ev_use_normalized_score_for_weighting
     diagnostics["ev_gate_weight_multiplier_min"] = ev_weight_multiplier_min
     diagnostics["ev_gate_weight_multiplier_max"] = ev_weight_multiplier_max
+    diagnostics["ev_gate_use_confidence_weighting"] = ev_use_confidence_weighting
+    diagnostics["ev_gate_confidence_method"] = ev_confidence_method
+    diagnostics["ev_gate_confidence_scale"] = ev_confidence_scale
+    diagnostics["ev_gate_confidence_clip_min"] = ev_confidence_clip_min
+    diagnostics["ev_gate_confidence_clip_max"] = ev_confidence_clip_max
+    diagnostics["ev_gate_confidence_min_samples_per_bucket"] = ev_confidence_min_samples_per_bucket
+    diagnostics["ev_gate_confidence_shrinkage_enabled"] = ev_confidence_shrinkage_enabled
+    diagnostics["ev_gate_confidence_component_residual_std_weight"] = (
+        ev_confidence_component_residual_std_weight
+    )
+    diagnostics["ev_gate_confidence_component_magnitude_weight"] = ev_confidence_component_magnitude_weight
+    diagnostics["ev_gate_confidence_component_model_performance_weight"] = (
+        ev_confidence_component_model_performance_weight
+    )
+    diagnostics["ev_gate_use_confidence_filter"] = ev_use_confidence_filter
+    diagnostics["ev_gate_confidence_threshold"] = ev_confidence_threshold
     diagnostics["ev_gate_training_source"] = str(
         (ev_training_summary or {}).get("training_source") or ev_requested_training_source
     )
@@ -731,8 +769,13 @@ def generate_rebalance_orders(
     regression_executed_scores: list[float] = []
     regression_executed_weighting_scores: list[float] = []
     regression_adjusted_exposures: list[float] = []
+    ev_executed_confidences: list[float] = []
+    ev_executed_confidence_multipliers: list[float] = []
+    ev_executed_scores_before_confidence: list[float] = []
+    ev_executed_scores_after_confidence: list[float] = []
     ev_calibration_rows: list[dict[str, Any]] = []
     ev_calibration_summary: dict[str, Any] = {}
+    confidence_filtered_count = 0
     market_feature_cache: dict[str, pd.DataFrame] = {}
     request_contexts: list[dict[str, Any]] = []
     candidate_row_by_symbol: dict[str, dict[str, Any]] = {}
@@ -946,11 +989,22 @@ def generate_rebalance_orders(
         regression_model = train_trade_ev_regression_model(
             training_rows=regression_training_rows,
             min_training_samples=int(active_config.ev_gate_min_training_samples),
+            confidence_min_samples_per_bucket=ev_confidence_min_samples_per_bucket,
+            confidence_shrinkage_enabled=ev_confidence_shrinkage_enabled,
         )
         if bool(regression_model.get("training_available", False)):
             regression_predictions = score_trade_ev_regression_candidates(
                 model=regression_model,
                 candidate_rows=[dict(row["candidate_row"]) for row in request_contexts],
+                use_confidence_weighting=ev_use_confidence_weighting and ev_confidence_method == "residual_std",
+                confidence_scale=ev_confidence_scale,
+                confidence_clip_min=ev_confidence_clip_min,
+                confidence_clip_max=ev_confidence_clip_max,
+                confidence_min_samples_per_bucket=ev_confidence_min_samples_per_bucket,
+                confidence_shrinkage_enabled=ev_confidence_shrinkage_enabled,
+                confidence_component_residual_std_weight=ev_confidence_component_residual_std_weight,
+                confidence_component_magnitude_weight=ev_confidence_component_magnitude_weight,
+                confidence_component_model_performance_weight=ev_confidence_component_model_performance_weight,
                 score_clip_min=ev_score_clip_min,
                 score_clip_max=ev_score_clip_max,
                 normalize_scores=ev_normalize_scores,
@@ -1011,6 +1065,10 @@ def generate_rebalance_orders(
             ev_prediction["ev_weight_multiplier"] = 1.0
             ev_prediction["ev_adjusted_target_weight"] = target_weight
             ev_prediction["ev_adjusted_weight_delta"] = weight_delta
+            ev_prediction["ev_confidence"] = 1.0
+            ev_prediction["ev_confidence_multiplier"] = 1.0
+            ev_prediction["ev_score_before_confidence"] = ev_prediction.get("ev_weighting_score", ev_prediction.get("ev_decision_score", 0.0))
+            ev_prediction["ev_score_after_confidence"] = ev_prediction.get("ev_weighting_score", ev_prediction.get("ev_decision_score", 0.0))
             ev_score = float(ev_prediction.get("ev_decision_score", 0.0) or 0.0)
             ev_weighting_score = float(ev_prediction.get("ev_weighting_score", ev_score) or ev_score)
             if regression_requested_for_soft_weight:
@@ -1028,6 +1086,19 @@ def generate_rebalance_orders(
                     if local_ev_fallback_reason is None:
                         local_ev_fallback_reason = "regression_prediction_missing_for_candidate"
             ev_prediction["ev_weighting_score"] = ev_weighting_score
+            if regression_prediction is not None:
+                ev_prediction["ev_confidence"] = float(regression_prediction.get("ev_confidence", 1.0))
+                ev_prediction["ev_confidence_multiplier"] = float(
+                    regression_prediction.get("ev_confidence_multiplier", 1.0)
+                )
+                ev_prediction["ev_score_before_confidence"] = float(
+                    regression_prediction.get("ev_score_before_confidence", ev_weighting_score) or ev_weighting_score
+                )
+                ev_prediction["ev_score_after_confidence"] = float(
+                    regression_prediction.get("ev_score_after_confidence", ev_weighting_score) or ev_weighting_score
+                )
+                ev_prediction["residual_std_used"] = regression_prediction.get("residual_std_used")
+                ev_prediction["confidence_source"] = regression_prediction.get("confidence_source")
             if ev_gate_mode == "soft":
                 if ev_weight_multiplier_enabled:
                     ev_weight_multiplier = max(0.0, 1.0 + (ev_weight_scale * ev_weighting_score))
@@ -1049,11 +1120,15 @@ def generate_rebalance_orders(
                     provenance={
                         **dict(request.provenance or {}),
                         "ev_weight_multiplier": ev_weight_multiplier,
-                    "ev_adjusted_target_weight": ev_adjusted_target_weight,
-                    "ev_adjusted_weight_delta": ev_adjusted_weight_delta,
-                    "ev_weighting_score": ev_weighting_score,
-                },
-            )
+                        "ev_adjusted_target_weight": ev_adjusted_target_weight,
+                        "ev_adjusted_weight_delta": ev_adjusted_weight_delta,
+                        "ev_weighting_score": ev_weighting_score,
+                        "ev_confidence": ev_prediction.get("ev_confidence"),
+                        "ev_confidence_multiplier": ev_prediction.get("ev_confidence_multiplier"),
+                        "ev_score_before_confidence": ev_prediction.get("ev_score_before_confidence"),
+                        "ev_score_after_confidence": ev_prediction.get("ev_score_after_confidence"),
+                    },
+                )
                 ev_prediction["ev_weight_multiplier"] = ev_weight_multiplier
                 ev_prediction["ev_adjusted_target_weight"] = ev_adjusted_target_weight
                 ev_prediction["ev_adjusted_weight_delta"] = ev_adjusted_weight_delta
@@ -1102,6 +1177,38 @@ def generate_rebalance_orders(
                 candidate_row_by_symbol[request.symbol]["ev_weighting_score"] = ev_prediction.get(
                     "ev_weighting_score"
                 )
+                candidate_row_by_symbol[request.symbol]["ev_confidence"] = ev_prediction.get("ev_confidence")
+                candidate_row_by_symbol[request.symbol]["ev_confidence_multiplier"] = ev_prediction.get(
+                    "ev_confidence_multiplier"
+                )
+                candidate_row_by_symbol[request.symbol]["ev_score_before_confidence"] = ev_prediction.get(
+                    "ev_score_before_confidence"
+                )
+                candidate_row_by_symbol[request.symbol]["ev_score_after_confidence"] = ev_prediction.get(
+                    "ev_score_after_confidence"
+                )
+                candidate_row_by_symbol[request.symbol]["residual_std_bucket"] = ev_prediction.get(
+                    "residual_std_bucket"
+                )
+                candidate_row_by_symbol[request.symbol]["residual_std_global"] = ev_prediction.get(
+                    "residual_std_global"
+                )
+                candidate_row_by_symbol[request.symbol]["residual_std_final"] = ev_prediction.get(
+                    "residual_std_final"
+                )
+                candidate_row_by_symbol[request.symbol]["sample_size_used"] = ev_prediction.get("sample_size_used")
+                candidate_row_by_symbol[request.symbol]["residual_std_confidence"] = ev_prediction.get(
+                    "residual_std_confidence"
+                )
+                candidate_row_by_symbol[request.symbol]["magnitude_confidence"] = ev_prediction.get(
+                    "magnitude_confidence"
+                )
+                candidate_row_by_symbol[request.symbol]["model_performance_confidence"] = ev_prediction.get(
+                    "model_performance_confidence"
+                )
+                candidate_row_by_symbol[request.symbol]["combined_confidence"] = ev_prediction.get(
+                    "combined_confidence"
+                )
                 candidate_row_by_symbol[request.symbol]["normalization_method"] = ev_prediction.get(
                     "normalization_method"
                 )
@@ -1121,6 +1228,40 @@ def generate_rebalance_orders(
                 candidate_row_by_symbol[request.symbol]["regression_ev_score_post_clip"] = (
                     regression_prediction.get("regression_ev_score_post_clip") if regression_prediction else None
                 )
+            if (
+                regression_requested_for_soft_weight
+                and ev_use_confidence_filter
+                and float(ev_prediction.get("ev_confidence", 1.0)) < ev_confidence_threshold
+            ):
+                confidence_filtered_count += 1
+                ev_prediction["was_filtered_by_confidence"] = True
+                ev_prediction["ev_gate_decision"] = "confidence_filter_block"
+                ev_prediction["action_reason"] = "filtered_by_confidence"
+                if request.symbol in candidate_row_by_symbol:
+                    candidate_row_by_symbol[request.symbol]["candidate_status"] = "skipped"
+                    candidate_row_by_symbol[request.symbol]["candidate_outcome"] = "confidence_filtered"
+                    candidate_row_by_symbol[request.symbol]["candidate_stage"] = "confidence_filter"
+                    candidate_row_by_symbol[request.symbol]["skip_reason"] = "below_confidence_threshold"
+                    candidate_row_by_symbol[request.symbol]["action_reason"] = "filtered_by_confidence"
+                    candidate_row_by_symbol[request.symbol]["was_filtered_by_confidence"] = True
+                skipped_trade_rows.append(
+                    {
+                        "symbol": request.symbol,
+                        "score_value": band_row.get("score_value"),
+                        "score_rank": band_row.get("score_rank"),
+                        "entry_threshold": band_row.get("entry_threshold"),
+                        "exit_threshold": band_row.get("exit_threshold"),
+                        "band_decision": band_row.get("band_decision"),
+                        "current_weight": current_weight,
+                        "target_weight": target_weight,
+                        "weight_delta": weight_delta,
+                        "requested_notional": float(request.requested_notional),
+                        "skip_reason": "below_confidence_threshold",
+                        "action_reason": "filtered_by_confidence",
+                        "ev_confidence": ev_prediction.get("ev_confidence"),
+                    }
+                )
+                continue
             if ev_prediction["ev_gate_decision"] == "block":
                 ev_gate_blocked_count += 1
                 ev_blocked_expected_net_returns.append(float(ev_prediction.get("expected_net_return", 0.0) or 0.0))
@@ -1216,6 +1357,14 @@ def generate_rebalance_orders(
             ev_executed_raw_scores.append(float(ev_prediction.get("raw_ev_score", 0.0) or 0.0))
             ev_executed_normalized_scores.append(float(ev_prediction.get("normalized_ev_score", 0.0) or 0.0))
             ev_executed_weighting_scores.append(float(ev_prediction.get("ev_weighting_score", 0.0) or 0.0))
+            ev_executed_confidences.append(float(ev_prediction.get("ev_confidence", 1.0)))
+            ev_executed_confidence_multipliers.append(float(ev_prediction.get("ev_confidence_multiplier", 1.0)))
+            ev_executed_scores_before_confidence.append(
+                float(ev_prediction.get("ev_score_before_confidence", ev_prediction.get("ev_weighting_score", 0.0)) or 0.0)
+            )
+            ev_executed_scores_after_confidence.append(
+                float(ev_prediction.get("ev_score_after_confidence", ev_prediction.get("ev_weighting_score", 0.0)) or 0.0)
+            )
             if ev_model_type_used == "regression":
                 regression_executed_scores.append(
                     float((regression_prediction or {}).get("regression_raw_ev_score", 0.0) or 0.0)
@@ -1256,6 +1405,19 @@ def generate_rebalance_orders(
                     "raw_ev_score": (ev_prediction or {}).get("raw_ev_score"),
                     "normalized_ev_score": (ev_prediction or {}).get("normalized_ev_score"),
                     "ev_score_post_clip": (ev_prediction or {}).get("ev_score_post_clip"),
+                    "ev_confidence": (ev_prediction or {}).get("ev_confidence"),
+                    "ev_confidence_multiplier": (ev_prediction or {}).get("ev_confidence_multiplier"),
+                    "ev_score_before_confidence": (ev_prediction or {}).get("ev_score_before_confidence"),
+                    "ev_score_after_confidence": (ev_prediction or {}).get("ev_score_after_confidence"),
+                    "residual_std_bucket": (ev_prediction or {}).get("residual_std_bucket"),
+                    "residual_std_global": (ev_prediction or {}).get("residual_std_global"),
+                    "residual_std_final": (ev_prediction or {}).get("residual_std_final"),
+                    "sample_size_used": (ev_prediction or {}).get("sample_size_used"),
+                    "residual_std_confidence": (ev_prediction or {}).get("residual_std_confidence"),
+                    "magnitude_confidence": (ev_prediction or {}).get("magnitude_confidence"),
+                    "model_performance_confidence": (ev_prediction or {}).get("model_performance_confidence"),
+                    "combined_confidence": (ev_prediction or {}).get("combined_confidence"),
+                    "was_filtered_by_confidence": (ev_prediction or {}).get("was_filtered_by_confidence", False),
                     "ev_model_type_requested": requested_ev_model_type,
                     "ev_model_type_used": ev_model_type_used,
                     "ev_model_fallback_reason": local_ev_fallback_reason,
@@ -1290,6 +1452,7 @@ def generate_rebalance_orders(
     diagnostics["held_in_hold_zone_count"] = int(held_in_hold_zone_count)
     diagnostics["forced_exit_count"] = int(forced_exit_count)
     diagnostics["ev_gate_blocked_count"] = int(ev_gate_blocked_count)
+    diagnostics["confidence_filtered_count"] = int(confidence_filtered_count)
     diagnostics["skipped_due_to_entry_band_count"] = int(blocked_entries_count)
     diagnostics["skipped_due_to_hold_zone_count"] = int(held_in_hold_zone_count)
     diagnostics["skipped_trade_rows"] = skipped_trade_rows
@@ -1346,6 +1509,24 @@ def generate_rebalance_orders(
     diagnostics["avg_ev_weighting_score"] = (
         float(sum(ev_executed_weighting_scores) / len(ev_executed_weighting_scores))
         if ev_executed_weighting_scores
+        else 0.0
+    )
+    diagnostics["avg_ev_confidence"] = (
+        float(sum(ev_executed_confidences) / len(ev_executed_confidences)) if ev_executed_confidences else 1.0
+    )
+    diagnostics["avg_ev_confidence_multiplier"] = (
+        float(sum(ev_executed_confidence_multipliers) / len(ev_executed_confidence_multipliers))
+        if ev_executed_confidence_multipliers
+        else 1.0
+    )
+    diagnostics["avg_ev_score_before_confidence"] = (
+        float(sum(ev_executed_scores_before_confidence) / len(ev_executed_scores_before_confidence))
+        if ev_executed_scores_before_confidence
+        else 0.0
+    )
+    diagnostics["avg_ev_score_after_confidence"] = (
+        float(sum(ev_executed_scores_after_confidence) / len(ev_executed_scores_after_confidence))
+        if ev_executed_scores_after_confidence
         else 0.0
     )
     diagnostics["ev_weighted_exposure"] = float(sum(ev_adjusted_exposures))
@@ -2335,7 +2516,42 @@ def run_paper_trading_cycle_for_targets(
             ),
             "ev_gate_weight_multiplier_min": order_result.diagnostics.get("ev_gate_weight_multiplier_min"),
             "ev_gate_weight_multiplier_max": order_result.diagnostics.get("ev_gate_weight_multiplier_max"),
+            "ev_gate_use_confidence_weighting": bool(
+                order_result.diagnostics.get("ev_gate_use_confidence_weighting", False)
+            ),
+            "ev_gate_confidence_method": str(
+                order_result.diagnostics.get("ev_gate_confidence_method", "residual_std") or "residual_std"
+            ),
+            "ev_gate_confidence_scale": float(order_result.diagnostics.get("ev_gate_confidence_scale", 1.0)),
+            "ev_gate_confidence_clip_min": float(
+                order_result.diagnostics.get("ev_gate_confidence_clip_min", 0.5)
+            ),
+            "ev_gate_confidence_clip_max": float(
+                order_result.diagnostics.get("ev_gate_confidence_clip_max", 1.5)
+            ),
+            "ev_gate_confidence_min_samples_per_bucket": int(
+                order_result.diagnostics.get("ev_gate_confidence_min_samples_per_bucket", 20) or 20
+            ),
+            "ev_gate_confidence_shrinkage_enabled": bool(
+                order_result.diagnostics.get("ev_gate_confidence_shrinkage_enabled", True)
+            ),
+            "ev_gate_confidence_component_residual_std_weight": float(
+                order_result.diagnostics.get("ev_gate_confidence_component_residual_std_weight", 1.0) or 0.0
+            ),
+            "ev_gate_confidence_component_magnitude_weight": float(
+                order_result.diagnostics.get("ev_gate_confidence_component_magnitude_weight", 0.0) or 0.0
+            ),
+            "ev_gate_confidence_component_model_performance_weight": float(
+                order_result.diagnostics.get("ev_gate_confidence_component_model_performance_weight", 0.0) or 0.0
+            ),
+            "ev_gate_use_confidence_filter": bool(
+                order_result.diagnostics.get("ev_gate_use_confidence_filter", False)
+            ),
+            "ev_gate_confidence_threshold": float(
+                order_result.diagnostics.get("ev_gate_confidence_threshold", 0.0) or 0.0
+            ),
             "ev_gate_blocked_count": int(order_result.diagnostics.get("ev_gate_blocked_count", 0) or 0),
+            "confidence_filtered_count": int(order_result.diagnostics.get("confidence_filtered_count", 0) or 0),
             "avg_expected_net_return_traded": float(
                 order_result.diagnostics.get("avg_expected_net_return_traded", 0.0) or 0.0
             ),
@@ -2350,6 +2566,16 @@ def run_paper_trading_cycle_for_targets(
                 order_result.diagnostics.get("avg_normalized_ev_executed_trades", 0.0) or 0.0
             ),
             "avg_ev_weighting_score": float(order_result.diagnostics.get("avg_ev_weighting_score", 0.0) or 0.0),
+            "avg_ev_confidence": float(order_result.diagnostics.get("avg_ev_confidence", 1.0)),
+            "avg_ev_confidence_multiplier": float(
+                order_result.diagnostics.get("avg_ev_confidence_multiplier", 1.0)
+            ),
+            "avg_ev_score_before_confidence": float(
+                order_result.diagnostics.get("avg_ev_score_before_confidence", 0.0) or 0.0
+            ),
+            "avg_ev_score_after_confidence": float(
+                order_result.diagnostics.get("avg_ev_score_after_confidence", 0.0) or 0.0
+            ),
             "ev_weighted_exposure": float(order_result.diagnostics.get("ev_weighted_exposure", 0.0) or 0.0),
             "avg_ev_weight_multiplier": float(order_result.diagnostics.get("avg_ev_weight_multiplier", 1.0) or 1.0),
             "regression_prediction_available_count": int(

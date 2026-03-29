@@ -146,8 +146,17 @@ def _summary_markdown(summary: dict[str, Any], health_checks: list[dict[str, Any
         f"- Avg raw EV executed trades: `{summary.get('avg_raw_ev_executed_trades', 0.0)}`",
         f"- Avg normalized EV executed trades: `{summary.get('avg_normalized_ev_executed_trades', 0.0)}`",
         f"- Avg EV weighting score: `{summary.get('avg_ev_weighting_score', 0.0)}`",
+        f"- Avg EV confidence: `{summary.get('avg_ev_confidence', 1.0)}`",
+        f"- Avg EV confidence multiplier: `{summary.get('avg_ev_confidence_multiplier', 1.0)}`",
+        f"- Avg EV score before confidence: `{summary.get('avg_ev_score_before_confidence', 0.0)}`",
+        f"- Avg EV score after confidence: `{summary.get('avg_ev_score_after_confidence', 0.0)}`",
         f"- EV-weighted exposure: `{summary.get('ev_weighted_exposure', 0.0)}`",
         f"- Avg EV weight multiplier: `{summary.get('avg_ev_weight_multiplier', 1.0)}`",
+        f"- EV confidence weighting enabled: `{summary.get('ev_gate_use_confidence_weighting', False)}`",
+        f"- EV confidence method: `{summary.get('ev_gate_confidence_method', 'residual_std')}`",
+        f"- EV confidence filter enabled: `{summary.get('ev_gate_use_confidence_filter', False)}`",
+        f"- EV confidence threshold: `{summary.get('ev_gate_confidence_threshold', 0.0)}`",
+        f"- Confidence filtered count: `{summary.get('confidence_filtered_count', 0)}`",
         f"- Candidate dataset row count: `{summary.get('candidate_dataset_row_count', 0)}`",
         f"- Candidate executed count: `{summary.get('candidate_executed_count', 0)}`",
         f"- Candidate skipped count: `{summary.get('candidate_skipped_count', 0)}`",
@@ -465,7 +474,25 @@ def persist_paper_run_outputs(
         "ev_gate_use_normalized_score_for_weighting": bool(
             paper_execution_diag.get("ev_gate_use_normalized_score_for_weighting", True)
         ),
+        "ev_gate_use_confidence_weighting": bool(
+            paper_execution_diag.get("ev_gate_use_confidence_weighting", False)
+        ),
+        "ev_gate_confidence_method": str(
+            paper_execution_diag.get("ev_gate_confidence_method", "residual_std") or "residual_std"
+        ),
+        "ev_gate_confidence_scale": float(paper_execution_diag.get("ev_gate_confidence_scale", 1.0)),
+        "ev_gate_confidence_clip_min": float(
+            paper_execution_diag.get("ev_gate_confidence_clip_min", 0.5)
+        ),
+        "ev_gate_confidence_clip_max": float(
+            paper_execution_diag.get("ev_gate_confidence_clip_max", 1.5)
+        ),
         "ev_gate_blocked_count": int(paper_execution_diag.get("ev_gate_blocked_count", 0) or 0),
+        "ev_gate_use_confidence_filter": bool(
+            paper_execution_diag.get("ev_gate_use_confidence_filter", False)
+        ),
+        "ev_gate_confidence_threshold": float(paper_execution_diag.get("ev_gate_confidence_threshold", 0.0) or 0.0),
+        "confidence_filtered_count": int(paper_execution_diag.get("confidence_filtered_count", 0) or 0),
         "avg_expected_net_return_traded": float(
             paper_execution_diag.get("avg_expected_net_return_traded", 0.0) or 0.0
         ),
@@ -480,6 +507,16 @@ def persist_paper_run_outputs(
             paper_execution_diag.get("avg_normalized_ev_executed_trades", 0.0) or 0.0
         ),
         "avg_ev_weighting_score": float(paper_execution_diag.get("avg_ev_weighting_score", 0.0) or 0.0),
+        "avg_ev_confidence": float(paper_execution_diag.get("avg_ev_confidence", 1.0)),
+        "avg_ev_confidence_multiplier": float(
+            paper_execution_diag.get("avg_ev_confidence_multiplier", 1.0)
+        ),
+        "avg_ev_score_before_confidence": float(
+            paper_execution_diag.get("avg_ev_score_before_confidence", 0.0) or 0.0
+        ),
+        "avg_ev_score_after_confidence": float(
+            paper_execution_diag.get("avg_ev_score_after_confidence", 0.0) or 0.0
+        ),
         "ev_weighted_exposure": float(paper_execution_diag.get("ev_weighted_exposure", 0.0) or 0.0),
         "avg_ev_weight_multiplier": float(paper_execution_diag.get("avg_ev_weight_multiplier", 1.0) or 1.0),
         "regression_prediction_available_count": int(

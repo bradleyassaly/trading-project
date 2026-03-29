@@ -79,6 +79,18 @@ def _build_result(*, equity: float = 10_100.0) -> PaperTradingRunResult:
                 "forced_exit_count": 1,
                 "skipped_due_to_entry_band_count": 3,
                 "skipped_due_to_hold_zone_count": 4,
+                "ev_gate_enabled": True,
+                "ev_gate_model_type": "bucketed_mean",
+                "ev_gate_mode": "soft",
+                "ev_gate_blocked_count": 2,
+                "avg_expected_net_return_traded": 0.012,
+                "avg_expected_net_return_blocked": -0.004,
+                "avg_ev_executed_trades": 0.012,
+                "ev_weighted_exposure": 0.8,
+                "avg_ev_weight_multiplier": 1.1,
+                "ev_distribution": {"count": 3, "mean": 0.01},
+                "ev_model_training_window": {"start": "2025-01-01", "end": "2025-01-20"},
+                "ev_model_sample_count": 24,
                 "skipped_trades_count": 2,
                 "skipped_turnover": 0.03,
                 "effective_turnover_reduction": 0.2,
@@ -148,6 +160,10 @@ def test_persist_paper_run_outputs_writes_ledgers_and_latest_summaries(tmp_path:
     assert latest_payload["summary"]["score_band_enabled"] is True
     assert latest_payload["summary"]["blocked_entries_count"] == 3
     assert latest_payload["summary"]["held_in_hold_zone_count"] == 4
+    assert latest_payload["summary"]["ev_gate_enabled"] is True
+    assert latest_payload["summary"]["ev_gate_mode"] == "soft"
+    assert latest_payload["summary"]["ev_gate_blocked_count"] == 2
+    assert latest_payload["summary"]["ev_weighted_exposure"] == 0.8
     assert "health_checks" in latest_payload
 
 

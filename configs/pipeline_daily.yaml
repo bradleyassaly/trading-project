@@ -82,6 +82,16 @@ daily_trading:
         apply_bands_to_new_entries: true
         apply_bands_to_reductions: true
         apply_bands_to_full_exits: true
+      ev_gate:
+        enabled: false
+        model_type: bucketed_mean
+        horizon_days: 5
+        min_expected_net_return: 0.001
+        min_probability_positive:
+        risk_penalty_lambda: 0.0
+        fallback_to_score_bands: true
+        training_root:
+        min_training_samples: 20
       slippage:
         enabled: true
         model: fixed_bps
