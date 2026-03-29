@@ -386,10 +386,13 @@ def test_run_daily_replay_includes_reliability_summary_when_available(
             "summary": {
                 "avg_ev_reliability": 0.64,
                 "reliability_after_cost_correlation": 0.21,
+                "reliability_rank_ic": 0.19,
                 "reliability_success_correlation": 0.33,
                 "reliability_top_vs_bottom_after_cost_spread": 0.04,
                 "reliability_turnover_uplift": -0.02,
                 "reliability_cost_drag_uplift": -0.01,
+                "ev_rank_ic": 0.12,
+                "combined_rank_ic": 0.24,
             },
             "artifact_paths": {
                 "replay_trade_ev_reliability_path": tmp_path / "replay" / "replay_trade_ev_reliability.csv",
@@ -410,10 +413,13 @@ def test_run_daily_replay_includes_reliability_summary_when_available(
 
     assert result.summary["avg_ev_reliability"] == pytest.approx(0.64)
     assert result.summary["reliability_after_cost_correlation"] == pytest.approx(0.21)
+    assert result.summary["reliability_rank_ic"] == pytest.approx(0.19)
     assert result.summary["reliability_success_correlation"] == pytest.approx(0.33)
     assert result.summary["reliability_top_vs_bottom_after_cost_spread"] == pytest.approx(0.04)
     assert result.summary["reliability_turnover_uplift"] == pytest.approx(-0.02)
     assert result.summary["reliability_cost_drag_uplift"] == pytest.approx(-0.01)
+    assert result.summary["ev_rank_ic"] == pytest.approx(0.12)
+    assert result.summary["combined_rank_ic"] == pytest.approx(0.24)
     assert "replay_ev_reliability_summary" in result.summary
 
 

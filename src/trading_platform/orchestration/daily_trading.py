@@ -881,6 +881,7 @@ def _build_multi_strategy_paper_config(result, reserve_cash_pct: float, workflow
         ev_gate_reliability_top_percentile=float(
             getattr(workflow_config, "ev_gate_reliability_top_percentile", 0.8) or 0.8
         ),
+        ev_gate_reliability_top_bucket_pct=getattr(workflow_config, "ev_gate_reliability_top_bucket_pct", None),
         ev_gate_reliability_hurdle=float(getattr(workflow_config, "ev_gate_reliability_hurdle", 0.0) or 0.0),
         ev_gate_reliability_usage_mode=str(
             getattr(workflow_config, "ev_gate_reliability_usage_mode", "weighting_only") or "weighting_only"

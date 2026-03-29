@@ -14,7 +14,7 @@ from trading_platform.research.trade_ev_reliability import (
 )
 
 
-def test_build_trade_ev_reliability_history_dataset_populates_economic_targets(tmp_path: Path) -> None:
+def test_build_trade_ev_reliability_history_dataset_populates_top_bucket_targets(tmp_path: Path) -> None:
     replay_root = tmp_path / "replay"
     paper_dir = replay_root / "2025-01-03" / "paper"
     paper_dir.mkdir(parents=True, exist_ok=True)
@@ -85,8 +85,8 @@ def test_build_trade_ev_reliability_history_dataset_populates_economic_targets(t
         history_root=replay_root,
         as_of_date="2025-01-07",
         recent_window=5,
-        target_type="positive_net_realized_return",
-        top_percentile=0.5,
+        target_type="top_bucket_realized_return",
+        top_bucket_pct=0.5,
         hurdle=0.01,
     )
 
@@ -94,13 +94,18 @@ def test_build_trade_ev_reliability_history_dataset_populates_economic_targets(t
     rows_by_symbol = {str(row["symbol"]): row for row in rows}
     assert rows_by_symbol["AAPL"]["sign_success"] == 1
     assert rows_by_symbol["AAPL"]["positive_net_realized_return"] == 1
+    assert rows_by_symbol["AAPL"]["top_bucket_realized_return"] == 1
     assert rows_by_symbol["AAPL"]["positive_realized_minus_cost_hurdle"] == 1
     assert rows_by_symbol["AAPL"]["reliability_target_value"] == 1
     assert rows_by_symbol["MSFT"]["positive_net_realized_return"] == 0
+    assert rows_by_symbol["MSFT"]["top_bucket_realized_return"] == 0
     assert rows_by_symbol["MSFT"]["reliability_target_value"] == 0
     assert summary["row_count"] == 2
-    assert summary["target_type"] == "positive_net_realized_return"
+    assert summary["target_type"] == "top_bucket_realized_return"
     assert summary["positive_label_rate"] == pytest.approx(0.5)
+    assert summary["top_bucket_pct_used"] == pytest.approx(0.5)
+    assert summary["positive_label_count"] == 1
+    assert summary["negative_label_count"] == 1
 
 
 def test_score_trade_ev_reliability_candidates_supports_usage_modes() -> None:
@@ -144,7 +149,7 @@ def test_score_trade_ev_reliability_candidates_supports_usage_modes() -> None:
     model = train_trade_ev_reliability_model(
         training_rows=training_rows,
         min_training_samples=2,
-        target_type="positive_net_realized_return",
+        target_type="top_bucket_realized_return",
     )
 
     predictions = score_trade_ev_reliability_candidates(
@@ -193,12 +198,12 @@ def test_score_trade_ev_reliability_candidates_supports_usage_modes() -> None:
         neutral_band=0.01,
         max_promoted_trades_per_day=1,
         recent_window=5,
-        target_type="positive_net_realized_return",
+        target_type="top_bucket_realized_return",
     )
 
     assert len(predictions) == 2
     assert all(row["prediction_available"] is True for row in predictions)
-    assert all(row["reliability_target_type"] == "positive_net_realized_return" for row in predictions)
+    assert all(row["reliability_target_type"] == "top_bucket_realized_return" for row in predictions)
     assert all(row["reliability_usage_mode"] == "hybrid" for row in predictions)
     assert all(0.0 <= float(row["ev_reliability"]) <= 1.0 for row in predictions)
     assert sum(bool(row["was_reliability_promoted"]) for row in predictions) <= 1
@@ -282,3 +287,4 @@ def test_run_replay_trade_ev_reliability_writes_economic_artifacts(tmp_path: Pat
     assert "reliability_after_cost_correlation" in summary
     assert "reliability_top_vs_bottom_after_cost_spread" in summary
     assert "reliability_turnover_uplift" in summary
+    assert "reliability_rank_ic" in summary

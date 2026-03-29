@@ -677,6 +677,7 @@ def generate_rebalance_orders(
     ev_reliability_top_percentile = float(
         getattr(active_config, "ev_gate_reliability_top_percentile", 0.8) or 0.8
     )
+    ev_reliability_top_bucket_pct = getattr(active_config, "ev_gate_reliability_top_bucket_pct", None)
     ev_reliability_hurdle = float(getattr(active_config, "ev_gate_reliability_hurdle", 0.0) or 0.0)
     ev_reliability_usage_mode = str(
         getattr(active_config, "ev_gate_reliability_usage_mode", "weighting_only") or "weighting_only"
@@ -802,6 +803,7 @@ def generate_rebalance_orders(
     diagnostics["ev_gate_reliability_recent_window"] = ev_reliability_recent_window
     diagnostics["ev_gate_reliability_target_type"] = ev_reliability_target_type
     diagnostics["ev_gate_reliability_top_percentile"] = ev_reliability_top_percentile
+    diagnostics["ev_gate_reliability_top_bucket_pct"] = ev_reliability_top_bucket_pct
     diagnostics["ev_gate_reliability_hurdle"] = ev_reliability_hurdle
     diagnostics["ev_gate_reliability_usage_mode"] = ev_reliability_usage_mode
     diagnostics["ev_gate_reliability_weight_multiplier_min"] = ev_reliability_weight_multiplier_min
@@ -1094,6 +1096,7 @@ def generate_rebalance_orders(
             recent_window=ev_reliability_recent_window,
             target_type=ev_reliability_target_type,
             top_percentile=ev_reliability_top_percentile,
+            top_bucket_pct=ev_reliability_top_bucket_pct,
             hurdle=ev_reliability_hurdle,
         )
         reliability_model = train_trade_ev_reliability_model(

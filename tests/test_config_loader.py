@@ -395,6 +395,7 @@ daily_trading:
         reliability_recent_window: 18
         reliability_target_type: positive_net_realized_return
         reliability_top_percentile: 0.9
+        reliability_top_bucket_pct: 0.1
         reliability_hurdle: 0.002
         reliability_usage_mode: hybrid
         reliability_weight_multiplier_min: 0.85
@@ -459,6 +460,7 @@ daily_trading:
     assert config.ev_gate_reliability_recent_window == 18
     assert config.ev_gate_reliability_target_type == "positive_net_realized_return"
     assert config.ev_gate_reliability_top_percentile == 0.9
+    assert config.ev_gate_reliability_top_bucket_pct == pytest.approx(0.1)
     assert config.ev_gate_reliability_hurdle == pytest.approx(0.002)
     assert config.ev_gate_reliability_usage_mode == "hybrid"
     assert config.ev_gate_reliability_weight_multiplier_min == pytest.approx(0.85)

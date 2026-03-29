@@ -3204,6 +3204,7 @@ Reliability weighting semantics:
 
 - Reliability models when the EV signal is economically useful after costs, not just whether predicted and realized signs matched.
 - Historical labels are configurable: `sign_success`, `positive_net_realized_return`, `top_bucket_realized_return`, and `positive_realized_minus_cost_hurdle`. Artifacts also keep `realized_minus_predicted_after_costs` for diagnostics.
+- The most discriminative current option is `top_bucket_realized_return`, which labels trades that finish in the top configured after-cost bucket relative to other historical candidates, preferably cross-sectionally by day.
 - The first production reliability model is a walk-forward logistic regression trained only on prior candidate decisions and closed trade outcomes.
 - It uses entry-time features only: predicted EV, EV weighting score, target weight, expected horizon, execution-cost estimate, signal family, score bucket, recent returns/volatility, cross-sectional rank/dispersion, day of week, recent model hit rate, and recent symbol activity.
 - Reliability affects soft EV sizing and optional reliability filtering only. Hard EV gating behavior is unchanged. Usage modes are `weighting_only`, `filtering_only`, `reranking_only`, and `hybrid`.

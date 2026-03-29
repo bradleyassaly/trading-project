@@ -390,6 +390,7 @@ def _write_replay_day_input_summary(
             "ev_gate_reliability_recent_window": int(day_config.ev_gate_reliability_recent_window or 20),
             "ev_gate_reliability_target_type": str(day_config.ev_gate_reliability_target_type or "sign_success"),
             "ev_gate_reliability_top_percentile": float(day_config.ev_gate_reliability_top_percentile or 0.8),
+            "ev_gate_reliability_top_bucket_pct": day_config.ev_gate_reliability_top_bucket_pct,
             "ev_gate_reliability_hurdle": float(day_config.ev_gate_reliability_hurdle or 0.0),
             "ev_gate_reliability_usage_mode": str(day_config.ev_gate_reliability_usage_mode or "weighting_only"),
             "ev_gate_horizon_days": int(day_config.ev_gate_horizon_days or 5),
@@ -1102,6 +1103,7 @@ def _write_replay_summary_artifacts(
                 f"- regression_ev_weighted_exposure: `{summary.get('regression_ev_weighted_exposure', 0.0)}`",
                 f"- regression_ev_rank_correlation: `{summary.get('regression_ev_rank_correlation', 0.0)}`",
                 f"- reliability_after_cost_correlation: `{summary.get('reliability_after_cost_correlation', 0.0)}`",
+                f"- reliability_rank_ic: `{summary.get('reliability_rank_ic', 0.0)}`",
                 f"- reliability_success_correlation: `{summary.get('reliability_success_correlation', 0.0)}`",
                 f"- reliability_top_vs_bottom_after_cost_spread: `{summary.get('reliability_top_vs_bottom_after_cost_spread', 0.0)}`",
                 f"- reliability_promoted_trade_count: `{summary.get('reliability_promoted_trade_count', 0)}`",
@@ -1671,6 +1673,7 @@ def run_daily_replay(config: DailyReplayWorkflowConfig) -> DailyReplayResult:
         summary["reliability_success_correlation"] = float(
             reliability_summary.get("reliability_success_correlation", 0.0) or 0.0
         )
+        summary["reliability_rank_ic"] = float(reliability_summary.get("reliability_rank_ic", 0.0) or 0.0)
         summary["reliability_top_vs_bottom_after_cost_spread"] = float(
             reliability_summary.get("reliability_top_vs_bottom_after_cost_spread", 0.0) or 0.0
         )
@@ -1686,6 +1689,8 @@ def run_daily_replay(config: DailyReplayWorkflowConfig) -> DailyReplayResult:
                 errors="coerce",
             ).fillna(0.0).sum()
         )
+        summary["ev_rank_ic"] = float(reliability_summary.get("ev_rank_ic", 0.0) or 0.0)
+        summary["combined_rank_ic"] = float(reliability_summary.get("combined_rank_ic", 0.0) or 0.0)
         summary["replay_ev_reliability_summary"] = reliability_summary
     status = "succeeded"
     failed_day_count = int(summary.get("failed_day_count", 0) or 0)

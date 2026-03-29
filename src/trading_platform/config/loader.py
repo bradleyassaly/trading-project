@@ -643,6 +643,7 @@ def load_daily_trading_workflow_config(path: str | Path) -> DailyTradingWorkflow
     )
     _set_if_missing(payload, "ev_gate_reliability_target_type", ev_gate_section, "reliability_target_type")
     _set_if_missing(payload, "ev_gate_reliability_top_percentile", ev_gate_section, "reliability_top_percentile")
+    _set_if_missing(payload, "ev_gate_reliability_top_bucket_pct", ev_gate_section, "reliability_top_bucket_pct")
     _set_if_missing(payload, "ev_gate_reliability_hurdle", ev_gate_section, "reliability_hurdle")
     _set_if_missing(payload, "ev_gate_reliability_usage_mode", ev_gate_section, "reliability_usage_mode")
     _set_if_missing(

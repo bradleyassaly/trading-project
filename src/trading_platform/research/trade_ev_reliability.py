@@ -9,6 +9,7 @@ import pandas as pd
 
 RELIABILITY_NUMERIC_FEATURE_COLUMNS = [
     "predicted_return",
+    "predicted_return_zscore",
     "ev_weighting_score_entry",
     "target_weight_entry",
     "expected_horizon_days",
@@ -21,7 +22,9 @@ RELIABILITY_NUMERIC_FEATURE_COLUMNS = [
     "recent_vol_20d",
     "candidate_rank_pct",
     "predicted_return_rank_pct",
+    "signal_family_rank_pct",
     "signal_dispersion",
+    "candidate_count",
     "recent_model_hit_rate",
     "recent_symbol_trade_frequency",
     "recent_symbol_turnover",
@@ -48,7 +51,9 @@ RELIABILITY_ROW_COLUMNS = [
     "recent_vol_20d",
     "candidate_rank_pct",
     "predicted_return_rank_pct",
+    "signal_family_rank_pct",
     "signal_dispersion",
+    "candidate_count",
     "day_of_week",
     "recent_model_hit_rate",
     "recent_symbol_trade_frequency",
@@ -193,6 +198,37 @@ def _candidate_day_stats(candidate_frame: pd.DataFrame) -> dict[str, Any]:
     }
 
 
+def _predicted_return_zscore(candidate_row: dict[str, Any], *, candidate_frame: pd.DataFrame) -> float:
+    if candidate_frame.empty:
+        return 0.0
+    frame = candidate_frame.copy()
+    frame["predicted_proxy"] = frame.apply(
+        lambda row: _predicted_return_from_candidate(dict(row.astype(object).where(pd.notna(row), None))),
+        axis=1,
+    )
+    series = pd.to_numeric(frame["predicted_proxy"], errors="coerce").dropna()
+    if series.empty:
+        return 0.0
+    candidate_value = _predicted_return_from_candidate(candidate_row)
+    if candidate_value is None:
+        return 0.0
+    std = float(series.std(ddof=0))
+    if std <= 0.0:
+        return 0.0
+    return float((float(candidate_value) - float(series.mean())) / std)
+
+
+def _signal_family_rank_pct(candidate_row: dict[str, Any], *, candidate_frame: pd.DataFrame) -> float:
+    if candidate_frame.empty:
+        return 0.5
+    signal_family = str(candidate_row.get("signal_family") or "unknown")
+    frame = candidate_frame.copy()
+    frame = frame[frame.get("signal_family", pd.Series(index=frame.index, dtype=object)).astype(str) == signal_family]
+    if frame.empty:
+        return 0.5
+    return _predicted_return_rank_pct(candidate_row, candidate_frame=frame)
+
+
 def _candidate_rank_pct(candidate_row: dict[str, Any], *, candidate_frame: pd.DataFrame) -> float:
     candidate_count = max(int(len(candidate_frame.index)), 1)
     score_rank = _safe_float(candidate_row.get("score_rank"))
@@ -299,6 +335,7 @@ def _apply_target_columns(
     frame: pd.DataFrame,
     *,
     top_percentile: float,
+    top_bucket_pct: float | None = None,
     hurdle: float,
 ) -> pd.DataFrame:
     updated = frame.copy()
@@ -322,10 +359,32 @@ def _apply_target_columns(
     ).fillna(0.0)
     updated["sign_success"] = (((predicted > 0.0) & (realized > 0.0)) | ((predicted < 0.0) & (realized < 0.0))).astype(int)
     updated["positive_net_realized_return"] = (realized > 0.0).astype(int)
-    threshold = float(realized.quantile(min(max(float(top_percentile), 0.0), 1.0))) if len(realized.index) else 0.0
-    updated["top_bucket_realized_return"] = (realized >= threshold).astype(int)
+    effective_top_bucket_pct = (
+        min(max(float(top_bucket_pct), 0.0), 1.0)
+        if top_bucket_pct is not None
+        else 1.0 - min(max(float(top_percentile), 0.0), 1.0)
+    )
+    effective_top_bucket_pct = min(max(effective_top_bucket_pct, 0.0), 1.0)
+    effective_quantile = 1.0 - effective_top_bucket_pct
+    threshold = float(realized.quantile(effective_quantile)) if len(realized.index) else 0.0
+    top_bucket = pd.Series(index=updated.index, dtype=int)
+    if "entry_date" in updated.columns and updated["entry_date"].notna().any():
+        top_bucket = pd.Series(0, index=updated.index, dtype=int)
+        global_threshold = threshold
+        for _, group in updated.groupby(updated["entry_date"].astype(str), dropna=False):
+            group_realized = pd.to_numeric(group.get("realized_return_after_costs"), errors="coerce").fillna(0.0)
+            group_threshold = (
+                float(group_realized.quantile(effective_quantile))
+                if len(group_realized.index) >= 3
+                else global_threshold
+            )
+            top_bucket.loc[group.index] = (group_realized >= group_threshold).astype(int)
+    else:
+        top_bucket = (realized >= threshold).astype(int)
+    updated["top_bucket_realized_return"] = top_bucket.astype(int)
     updated["positive_realized_minus_cost_hurdle"] = (realized >= float(hurdle)).astype(int)
     updated["top_bucket_realized_return_threshold"] = threshold
+    updated["top_bucket_pct_used"] = effective_top_bucket_pct
     return updated
 
 
@@ -372,6 +431,7 @@ def build_trade_ev_reliability_history_dataset(
     recent_window: int = 20,
     target_type: str = "sign_success",
     top_percentile: float = 0.8,
+    top_bucket_pct: float | None = None,
     hurdle: float = 0.0,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     root = Path(history_root) if history_root else None
@@ -441,13 +501,27 @@ def build_trade_ev_reliability_history_dataset(
                     candidate_row,
                     candidate_frame=candidate_frame,
                 ),
+                "predicted_return_zscore": _predicted_return_zscore(
+                    candidate_row,
+                    candidate_frame=candidate_frame,
+                ),
+                "signal_family_rank_pct": _signal_family_rank_pct(
+                    candidate_row,
+                    candidate_frame=candidate_frame,
+                ),
                 "signal_dispersion": float(stats.get("signal_dispersion", 0.0)),
+                "candidate_count": int(stats.get("candidate_count", 0) or 0),
                 "day_of_week": int(pd.Timestamp(entry_date).dayofweek),
                 "realized_return_after_costs": realized_return,
                 "realized_minus_predicted_after_costs": float(realized_return - float(predicted_return)),
             }
         )
-    frame = _apply_target_columns(pd.DataFrame(joined_rows), top_percentile=top_percentile, hurdle=hurdle)
+    frame = _apply_target_columns(
+        pd.DataFrame(joined_rows),
+        top_percentile=top_percentile,
+        top_bucket_pct=top_bucket_pct,
+        hurdle=hurdle,
+    )
     rows = frame.astype(object).where(pd.notna(frame), None).to_dict(orient="records")
     enriched_rows: list[dict[str, Any]] = []
     for row in rows:
@@ -470,6 +544,8 @@ def build_trade_ev_reliability_history_dataset(
         row["reliability_target_value"] = int(_safe_float(row.get(str(target_type))))
         enriched_rows.append(row)
     frame = pd.DataFrame(enriched_rows)
+    positive_count = int(pd.to_numeric(frame.get("reliability_target_value"), errors="coerce").fillna(0.0).sum()) if not frame.empty else 0
+    negative_count = int(len(frame.index) - positive_count) if not frame.empty else 0
     return _normalize_records(enriched_rows), {
         "row_count": int(len(enriched_rows)),
         "labeled_row_count": int(len(enriched_rows)),
@@ -483,6 +559,11 @@ def build_trade_ev_reliability_history_dataset(
         )
         if not frame.empty
         else 0.0,
+        "top_bucket_pct_used": float(frame.get("top_bucket_pct_used", pd.Series([0.0])).iloc[0] or 0.0)
+        if not frame.empty
+        else 0.0,
+        "positive_label_count": positive_count,
+        "negative_label_count": negative_count,
         "hurdle": float(hurdle),
     }
 
@@ -617,7 +698,14 @@ def _build_current_candidate_rows(
                 "recent_vol_20d": _safe_float(raw.get("recent_vol_20d")),
                 "candidate_rank_pct": candidate_rank_pct,
                 "predicted_return_rank_pct": predicted_rank_pct,
+                "predicted_return_zscore": (
+                    float((float(predicted_return) - float(predicted_series.mean())) / float(predicted_series.std(ddof=0)))
+                    if predicted_return is not None and float(predicted_series.std(ddof=0) or 0.0) > 0.0
+                    else 0.0
+                ),
+                "signal_family_rank_pct": _signal_family_rank_pct(raw, candidate_frame=frame),
                 "signal_dispersion": signal_dispersion,
+                "candidate_count": int(candidate_count),
                 "day_of_week": int(pd.Timestamp(str(raw.get("date") or pd.Timestamp.utcnow().date())).dayofweek),
                 "recent_model_hit_rate": _recent_family_hit_rate(
                     training_rows,
@@ -826,10 +914,13 @@ def build_trade_ev_reliability_analysis(
             "row_count": 0,
             "avg_ev_reliability": 0.0,
             "reliability_after_cost_correlation": 0.0,
+            "reliability_rank_ic": 0.0,
             "reliability_success_correlation": 0.0,
             "reliability_top_vs_bottom_after_cost_spread": 0.0,
             "reliability_turnover_uplift": 0.0,
             "reliability_cost_drag_uplift": 0.0,
+            "ev_rank_ic": 0.0,
+            "combined_rank_ic": 0.0,
             "bucket_count": 0,
         }
     frame = pd.DataFrame(reliability_rows).copy()
@@ -851,13 +942,19 @@ def build_trade_ev_reliability_analysis(
             "row_count": 0,
             "avg_ev_reliability": 0.0,
             "reliability_after_cost_correlation": 0.0,
+            "reliability_rank_ic": 0.0,
             "reliability_success_correlation": 0.0,
             "reliability_top_vs_bottom_after_cost_spread": 0.0,
             "reliability_turnover_uplift": 0.0,
             "reliability_cost_drag_uplift": 0.0,
+            "ev_rank_ic": 0.0,
+            "combined_rank_ic": 0.0,
             "bucket_count": 0,
         }
     frame["hit_rate_after_costs"] = (frame["realized_return_after_costs"] > 0.0).astype(float)
+    frame["combined_ranking_score"] = (
+        pd.to_numeric(frame.get("predicted_return"), errors="coerce").fillna(0.0) * frame["ev_reliability"]
+    )
     frame["reliability_bucket"] = _bucket_label(frame["ev_reliability"], 5)
     grouped = (
         frame.groupby("reliability_bucket", dropna=False)
@@ -897,6 +994,11 @@ def build_trade_ev_reliability_analysis(
             frame["realized_return_after_costs"],
             method="spearman",
         ),
+        "reliability_rank_ic": _safe_corr(
+            frame["ev_reliability"],
+            frame["realized_return_after_costs"],
+            method="spearman",
+        ),
         "reliability_success_correlation": _safe_corr(
             frame["ev_reliability"],
             frame["hit_rate_after_costs"],
@@ -909,6 +1011,16 @@ def build_trade_ev_reliability_analysis(
         ),
         "reliability_turnover_uplift": float(frame["reliability_turnover_delta"].sum()),
         "reliability_cost_drag_uplift": float(frame["reliability_cost_drag_delta"].sum()),
+        "ev_rank_ic": _safe_corr(
+            pd.to_numeric(frame.get("predicted_return"), errors="coerce").fillna(0.0),
+            frame["realized_return_after_costs"],
+            method="spearman",
+        ),
+        "combined_rank_ic": _safe_corr(
+            frame["combined_ranking_score"],
+            frame["realized_return_after_costs"],
+            method="spearman",
+        ),
         "bucket_count": int(len(grouped.index)),
     }
     return rows, _normalize_records(turnover_rows.to_dict(orient="records")), summary

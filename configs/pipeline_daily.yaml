@@ -116,8 +116,9 @@ daily_trading:
         reliability_threshold: 0.55
         reliability_min_training_samples: 20
         reliability_recent_window: 20
-        reliability_target_type: positive_net_realized_return
+        reliability_target_type: top_bucket_realized_return
         reliability_top_percentile: 0.8
+        reliability_top_bucket_pct: 0.2
         reliability_hurdle: 0.0
         reliability_usage_mode: weighting_only
         reliability_weight_multiplier_min: 0.75

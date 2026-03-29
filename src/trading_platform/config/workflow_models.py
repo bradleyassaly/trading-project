@@ -717,6 +717,7 @@ class DailyTradingWorkflowConfig:
     ev_gate_reliability_recent_window: int = 20
     ev_gate_reliability_target_type: str = "sign_success"
     ev_gate_reliability_top_percentile: float = 0.8
+    ev_gate_reliability_top_bucket_pct: float | None = None
     ev_gate_reliability_hurdle: float = 0.0
     ev_gate_reliability_usage_mode: str = "weighting_only"
     ev_gate_reliability_weight_multiplier_min: float = 0.75
