@@ -3202,13 +3202,13 @@ Confidence weighting semantics:
 
 Reliability weighting semantics:
 
-- Reliability models when the EV sign is actually right, not just how noisy the residuals are.
-- Historical labels use `ev_success = 1` when `sign(predicted_return) == sign(realized_return)`, otherwise `0`, plus `realized_minus_predicted` for diagnostics.
+- Reliability models when the EV signal is economically useful after costs, not just whether predicted and realized signs matched.
+- Historical labels are configurable: `sign_success`, `positive_net_realized_return`, `top_bucket_realized_return`, and `positive_realized_minus_cost_hurdle`. Artifacts also keep `realized_minus_predicted_after_costs` for diagnostics.
 - The first production reliability model is a walk-forward logistic regression trained only on prior candidate decisions and closed trade outcomes.
-- It uses entry-time features only: predicted EV, signal family, score bucket, recent returns/volatility, cross-sectional rank/dispersion, day of week, and recent model success rate.
-- Reliability affects soft EV sizing and optional reliability filtering only. Hard EV gating behavior is unchanged.
-- The execution path applies `adjusted_ev_score = ev_weighting_score * ev_reliability` before the usual multiplier floor/cap logic.
-- Inspect `replay_trade_ev_reliability.csv`, `replay_ev_reliability_analysis.csv`, and `replay_ev_reliability_summary.json` to verify that top reliability buckets outperform low reliability buckets before enabling filtering by default.
+- It uses entry-time features only: predicted EV, EV weighting score, target weight, expected horizon, execution-cost estimate, signal family, score bucket, recent returns/volatility, cross-sectional rank/dispersion, day of week, recent model hit rate, and recent symbol activity.
+- Reliability affects soft EV sizing and optional reliability filtering only. Hard EV gating behavior is unchanged. Usage modes are `weighting_only`, `filtering_only`, `reranking_only`, and `hybrid`.
+- The execution path applies reliability after EV normalization/clipping. In weighting modes it adjusts the EV sizing score with a bounded multiplier; in filtering/reranking modes it can suppress low-reliability candidates without changing hard EV gating.
+- Inspect `replay_trade_ev_reliability.csv`, `replay_ev_reliability_economic_analysis.csv`, `replay_ev_reliability_turnover_analysis.csv`, and `replay_ev_reliability_summary.json` to verify that high-reliability buckets improve after-cost returns without causing unacceptable turnover or cost-drag uplift.
 
 Inspect:
 

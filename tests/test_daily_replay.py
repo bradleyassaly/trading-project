@@ -385,9 +385,11 @@ def test_run_daily_replay_includes_reliability_summary_when_available(
         lambda **kwargs: {
             "summary": {
                 "avg_ev_reliability": 0.64,
-                "reliability_realized_return_correlation": 0.21,
+                "reliability_after_cost_correlation": 0.21,
                 "reliability_success_correlation": 0.33,
-                "top_vs_bottom_realized_return_spread": 0.04,
+                "reliability_top_vs_bottom_after_cost_spread": 0.04,
+                "reliability_turnover_uplift": -0.02,
+                "reliability_cost_drag_uplift": -0.01,
             },
             "artifact_paths": {
                 "replay_trade_ev_reliability_path": tmp_path / "replay" / "replay_trade_ev_reliability.csv",
@@ -407,9 +409,11 @@ def test_run_daily_replay_includes_reliability_summary_when_available(
     result = run_daily_replay(config)
 
     assert result.summary["avg_ev_reliability"] == pytest.approx(0.64)
-    assert result.summary["reliability_realized_return_correlation"] == pytest.approx(0.21)
+    assert result.summary["reliability_after_cost_correlation"] == pytest.approx(0.21)
     assert result.summary["reliability_success_correlation"] == pytest.approx(0.33)
-    assert result.summary["reliability_top_vs_bottom_bucket_spread"] == pytest.approx(0.04)
+    assert result.summary["reliability_top_vs_bottom_after_cost_spread"] == pytest.approx(0.04)
+    assert result.summary["reliability_turnover_uplift"] == pytest.approx(-0.02)
+    assert result.summary["reliability_cost_drag_uplift"] == pytest.approx(-0.01)
     assert "replay_ev_reliability_summary" in result.summary
 
 

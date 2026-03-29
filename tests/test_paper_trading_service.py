@@ -841,7 +841,7 @@ def test_generate_rebalance_orders_regression_soft_mode_applies_reliability_weig
     )
     monkeypatch.setattr(
         "trading_platform.paper.service.build_trade_ev_reliability_history_dataset",
-        lambda **kwargs: ([{"ev_success": 1}], {"row_count": 1}),
+        lambda **kwargs: ([{"positive_net_realized_return": 1, "reliability_target_value": 1}], {"row_count": 1}),
     )
     monkeypatch.setattr(
         "trading_platform.paper.service.train_trade_ev_reliability_model",
@@ -854,8 +854,13 @@ def test_generate_rebalance_orders_regression_soft_mode_applies_reliability_weig
                 "symbol": "AAPL",
                 "prediction_available": True,
                 "ev_reliability": 0.25,
-                "ev_reliability_multiplier": 0.25,
+                "ev_reliability_rank_pct": 0.25,
+                "ev_reliability_multiplier": 0.5,
                 "training_sample_count": 12,
+                "reliability_target_type": "positive_net_realized_return",
+                "reliability_usage_mode": "weighting_only",
+                "was_reliability_promoted": False,
+                "was_filtered_by_reliability": False,
             }
         ],
     )
@@ -876,6 +881,8 @@ def test_generate_rebalance_orders_regression_soft_mode_applies_reliability_weig
             ev_gate_training_root="artifacts/daily_replay/run_current",
             ev_gate_min_training_samples=1,
             ev_gate_use_reliability_weighting=True,
+            ev_gate_reliability_target_type="positive_net_realized_return",
+            ev_gate_reliability_usage_mode="weighting_only",
             ev_gate_reliability_min_training_samples=1,
             min_trade_dollars=1.0,
         ),
@@ -883,12 +890,12 @@ def test_generate_rebalance_orders_regression_soft_mode_applies_reliability_weig
     )
 
     assert len(result.orders) == 1
-    assert result.orders[0].target_weight == pytest.approx(0.23)
+    assert result.orders[0].target_weight == pytest.approx(0.26)
     assert result.orders[0].provenance["ev_reliability"] == pytest.approx(0.25)
     assert result.orders[0].provenance["ev_score_before_reliability"] == pytest.approx(0.20)
-    assert result.orders[0].provenance["ev_score_after_reliability"] == pytest.approx(0.05)
+    assert result.orders[0].provenance["ev_score_after_reliability"] == pytest.approx(0.10)
     assert result.diagnostics["avg_ev_reliability"] == pytest.approx(0.25)
-    assert result.diagnostics["avg_ev_score_after_reliability"] == pytest.approx(0.05)
+    assert result.diagnostics["avg_ev_score_after_reliability"] == pytest.approx(0.10)
     assert result.diagnostics["candidate_trade_rows"][0]["reliability_training_sample_count"] == 12
 
 
@@ -949,7 +956,7 @@ def test_generate_rebalance_orders_regression_soft_mode_can_filter_low_reliabili
     )
     monkeypatch.setattr(
         "trading_platform.paper.service.build_trade_ev_reliability_history_dataset",
-        lambda **kwargs: ([{"ev_success": 1}], {"row_count": 1}),
+        lambda **kwargs: ([{"positive_net_realized_return": 1, "reliability_target_value": 1}], {"row_count": 1}),
     )
     monkeypatch.setattr(
         "trading_platform.paper.service.train_trade_ev_reliability_model",
@@ -962,8 +969,13 @@ def test_generate_rebalance_orders_regression_soft_mode_can_filter_low_reliabili
                 "symbol": "AAPL",
                 "prediction_available": True,
                 "ev_reliability": 0.2,
-                "ev_reliability_multiplier": 0.2,
+                "ev_reliability_rank_pct": 0.2,
+                "ev_reliability_multiplier": 1.0,
                 "training_sample_count": 12,
+                "reliability_target_type": "positive_net_realized_return",
+                "reliability_usage_mode": "filtering_only",
+                "was_reliability_promoted": False,
+                "was_filtered_by_reliability": True,
             }
         ],
     )
@@ -985,6 +997,8 @@ def test_generate_rebalance_orders_regression_soft_mode_can_filter_low_reliabili
             ev_gate_min_training_samples=1,
             ev_gate_use_reliability_filter=True,
             ev_gate_reliability_threshold=0.5,
+            ev_gate_reliability_target_type="positive_net_realized_return",
+            ev_gate_reliability_usage_mode="filtering_only",
             ev_gate_reliability_min_training_samples=1,
             min_trade_dollars=1.0,
         ),

@@ -388,6 +388,10 @@ def _write_replay_day_input_summary(
                 day_config.ev_gate_reliability_min_training_samples or 20
             ),
             "ev_gate_reliability_recent_window": int(day_config.ev_gate_reliability_recent_window or 20),
+            "ev_gate_reliability_target_type": str(day_config.ev_gate_reliability_target_type or "sign_success"),
+            "ev_gate_reliability_top_percentile": float(day_config.ev_gate_reliability_top_percentile or 0.8),
+            "ev_gate_reliability_hurdle": float(day_config.ev_gate_reliability_hurdle or 0.0),
+            "ev_gate_reliability_usage_mode": str(day_config.ev_gate_reliability_usage_mode or "weighting_only"),
             "ev_gate_horizon_days": int(day_config.ev_gate_horizon_days or 5),
             "ev_gate_min_expected_net_return": float(day_config.ev_gate_min_expected_net_return or 0.0),
         },
@@ -1097,9 +1101,12 @@ def _write_replay_summary_artifacts(
                 f"- avg_regression_ev_weighting_score: `{summary.get('avg_regression_ev_weighting_score', 0.0)}`",
                 f"- regression_ev_weighted_exposure: `{summary.get('regression_ev_weighted_exposure', 0.0)}`",
                 f"- regression_ev_rank_correlation: `{summary.get('regression_ev_rank_correlation', 0.0)}`",
-                f"- reliability_realized_return_correlation: `{summary.get('reliability_realized_return_correlation', 0.0)}`",
+                f"- reliability_after_cost_correlation: `{summary.get('reliability_after_cost_correlation', 0.0)}`",
                 f"- reliability_success_correlation: `{summary.get('reliability_success_correlation', 0.0)}`",
-                f"- reliability_top_vs_bottom_bucket_spread: `{summary.get('reliability_top_vs_bottom_bucket_spread', 0.0)}`",
+                f"- reliability_top_vs_bottom_after_cost_spread: `{summary.get('reliability_top_vs_bottom_after_cost_spread', 0.0)}`",
+                f"- reliability_promoted_trade_count: `{summary.get('reliability_promoted_trade_count', 0)}`",
+                f"- reliability_turnover_uplift: `{summary.get('reliability_turnover_uplift', 0.0)}`",
+                f"- reliability_cost_drag_uplift: `{summary.get('reliability_cost_drag_uplift', 0.0)}`",
                 f"- candidate_dataset_row_count: `{summary.get('candidate_dataset_row_count', 0)}`",
                 f"- candidate_executed_count: `{summary.get('candidate_executed_count', 0)}`",
                 f"- candidate_skipped_count: `{summary.get('candidate_skipped_count', 0)}`",
@@ -1153,6 +1160,7 @@ def _write_replay_summary_artifacts(
             "ev_gate_blocked_count",
             "confidence_filtered_count",
             "reliability_filtered_count",
+            "reliability_promoted_trade_count",
             "avg_expected_net_return_traded",
             "avg_expected_net_return_blocked",
             "avg_ev_executed_trades",
@@ -1166,6 +1174,8 @@ def _write_replay_summary_artifacts(
             "avg_ev_reliability",
             "avg_ev_score_before_reliability",
             "avg_ev_score_after_reliability",
+            "reliability_turnover_uplift",
+            "reliability_cost_drag_uplift",
             "ev_weighted_exposure",
             "avg_ev_weight_multiplier",
             "regression_prediction_available_count",
@@ -1323,6 +1333,9 @@ def run_daily_replay(config: DailyReplayWorkflowConfig) -> DailyReplayResult:
                 "ev_gate_blocked_count": int(paper_summary.get("ev_gate_blocked_count", 0) or 0),
                 "confidence_filtered_count": int(paper_summary.get("confidence_filtered_count", 0) or 0),
                 "reliability_filtered_count": int(paper_summary.get("reliability_filtered_count", 0) or 0),
+                "reliability_promoted_trade_count": int(
+                    paper_summary.get("reliability_promoted_trade_count", 0) or 0
+                ),
                 "avg_expected_net_return_traded": float(
                     paper_summary.get("avg_expected_net_return_traded", 0.0) or 0.0
                 ),
@@ -1353,6 +1366,12 @@ def run_daily_replay(config: DailyReplayWorkflowConfig) -> DailyReplayResult:
                 ),
                 "avg_ev_score_after_reliability": float(
                     paper_summary.get("avg_ev_score_after_reliability", 0.0) or 0.0
+                ),
+                "reliability_turnover_uplift": float(
+                    paper_summary.get("reliability_turnover_uplift", 0.0) or 0.0
+                ),
+                "reliability_cost_drag_uplift": float(
+                    paper_summary.get("reliability_cost_drag_uplift", 0.0) or 0.0
                 ),
                 "ev_weighted_exposure": float(paper_summary.get("ev_weighted_exposure", 0.0) or 0.0),
                 "avg_ev_weight_multiplier": float(paper_summary.get("avg_ev_weight_multiplier", 1.0) or 1.0),
@@ -1646,14 +1665,26 @@ def run_daily_replay(config: DailyReplayWorkflowConfig) -> DailyReplayResult:
         summary["replay_ev_regression_summary"] = regression_summary
     if reliability_summary:
         summary["avg_ev_reliability"] = float(reliability_summary.get("avg_ev_reliability", 1.0) or 1.0)
-        summary["reliability_realized_return_correlation"] = float(
-            reliability_summary.get("reliability_realized_return_correlation", 0.0) or 0.0
+        summary["reliability_after_cost_correlation"] = float(
+            reliability_summary.get("reliability_after_cost_correlation", 0.0) or 0.0
         )
         summary["reliability_success_correlation"] = float(
             reliability_summary.get("reliability_success_correlation", 0.0) or 0.0
         )
-        summary["reliability_top_vs_bottom_bucket_spread"] = float(
-            reliability_summary.get("top_vs_bottom_realized_return_spread", 0.0) or 0.0
+        summary["reliability_top_vs_bottom_after_cost_spread"] = float(
+            reliability_summary.get("reliability_top_vs_bottom_after_cost_spread", 0.0) or 0.0
+        )
+        summary["reliability_turnover_uplift"] = float(
+            reliability_summary.get("reliability_turnover_uplift", 0.0) or 0.0
+        )
+        summary["reliability_cost_drag_uplift"] = float(
+            reliability_summary.get("reliability_cost_drag_uplift", 0.0) or 0.0
+        )
+        summary["reliability_promoted_trade_count"] = int(
+            pd.to_numeric(
+                pd.DataFrame(daily_metric_rows).get("reliability_promoted_trade_count", pd.Series(dtype=float)),
+                errors="coerce",
+            ).fillna(0.0).sum()
         )
         summary["replay_ev_reliability_summary"] = reliability_summary
     status = "succeeded"

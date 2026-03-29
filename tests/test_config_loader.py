@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from trading_platform.config.loader import (
     load_alpha_research_workflow_config,
     load_alpha_cycle_workflow_config,
@@ -391,6 +393,14 @@ daily_trading:
         reliability_threshold: 0.62
         reliability_min_training_samples: 14
         reliability_recent_window: 18
+        reliability_target_type: positive_net_realized_return
+        reliability_top_percentile: 0.9
+        reliability_hurdle: 0.002
+        reliability_usage_mode: hybrid
+        reliability_weight_multiplier_min: 0.85
+        reliability_weight_multiplier_max: 1.1
+        reliability_neutral_band: 0.03
+        reliability_max_promoted_trades_per_day: 7
         min_expected_net_return: 0.001
   report:
     enable_strategy_diagnostics: true
@@ -447,6 +457,14 @@ daily_trading:
     assert config.ev_gate_reliability_threshold == 0.62
     assert config.ev_gate_reliability_min_training_samples == 14
     assert config.ev_gate_reliability_recent_window == 18
+    assert config.ev_gate_reliability_target_type == "positive_net_realized_return"
+    assert config.ev_gate_reliability_top_percentile == 0.9
+    assert config.ev_gate_reliability_hurdle == pytest.approx(0.002)
+    assert config.ev_gate_reliability_usage_mode == "hybrid"
+    assert config.ev_gate_reliability_weight_multiplier_min == pytest.approx(0.85)
+    assert config.ev_gate_reliability_weight_multiplier_max == pytest.approx(1.1)
+    assert config.ev_gate_reliability_neutral_band == pytest.approx(0.03)
+    assert config.ev_gate_reliability_max_promoted_trades_per_day == 7
     assert config.ev_gate_min_expected_net_return == 0.001
     assert config.activated_dir == "artifacts/strategy_portfolio/run_current/activated"
     assert config.enable_strategy_diagnostics is True

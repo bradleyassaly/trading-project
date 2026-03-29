@@ -153,6 +153,8 @@ def _summary_markdown(summary: dict[str, Any], health_checks: list[dict[str, Any
         f"- Avg EV reliability: `{summary.get('avg_ev_reliability', 1.0)}`",
         f"- Avg EV score before reliability: `{summary.get('avg_ev_score_before_reliability', 0.0)}`",
         f"- Avg EV score after reliability: `{summary.get('avg_ev_score_after_reliability', 0.0)}`",
+        f"- Reliability turnover uplift: `{summary.get('reliability_turnover_uplift', 0.0)}`",
+        f"- Reliability cost drag uplift: `{summary.get('reliability_cost_drag_uplift', 0.0)}`",
         f"- EV-weighted exposure: `{summary.get('ev_weighted_exposure', 0.0)}`",
         f"- Avg EV weight multiplier: `{summary.get('avg_ev_weight_multiplier', 1.0)}`",
         f"- EV confidence weighting enabled: `{summary.get('ev_gate_use_confidence_weighting', False)}`",
@@ -162,9 +164,12 @@ def _summary_markdown(summary: dict[str, Any], health_checks: list[dict[str, Any
         f"- Confidence filtered count: `{summary.get('confidence_filtered_count', 0)}`",
         f"- EV reliability weighting enabled: `{summary.get('ev_gate_use_reliability_weighting', False)}`",
         f"- EV reliability model type: `{summary.get('ev_gate_reliability_model_type', 'logistic')}`",
+        f"- EV reliability target type: `{summary.get('ev_gate_reliability_target_type', 'sign_success')}`",
+        f"- EV reliability usage mode: `{summary.get('ev_gate_reliability_usage_mode', 'weighting_only')}`",
         f"- EV reliability filter enabled: `{summary.get('ev_gate_use_reliability_filter', False)}`",
         f"- EV reliability threshold: `{summary.get('ev_gate_reliability_threshold', 0.5)}`",
         f"- Reliability filtered count: `{summary.get('reliability_filtered_count', 0)}`",
+        f"- Reliability promoted trade count: `{summary.get('reliability_promoted_trade_count', 0)}`",
         f"- Candidate dataset row count: `{summary.get('candidate_dataset_row_count', 0)}`",
         f"- Candidate executed count: `{summary.get('candidate_executed_count', 0)}`",
         f"- Candidate skipped count: `{summary.get('candidate_skipped_count', 0)}`",
@@ -513,7 +518,16 @@ def persist_paper_run_outputs(
         "ev_gate_reliability_threshold": float(
             paper_execution_diag.get("ev_gate_reliability_threshold", 0.5) or 0.5
         ),
+        "ev_gate_reliability_target_type": str(
+            paper_execution_diag.get("ev_gate_reliability_target_type", "sign_success") or "sign_success"
+        ),
+        "ev_gate_reliability_usage_mode": str(
+            paper_execution_diag.get("ev_gate_reliability_usage_mode", "weighting_only") or "weighting_only"
+        ),
         "reliability_filtered_count": int(paper_execution_diag.get("reliability_filtered_count", 0) or 0),
+        "reliability_promoted_trade_count": int(
+            paper_execution_diag.get("reliability_promoted_trade_count", 0) or 0
+        ),
         "avg_expected_net_return_traded": float(
             paper_execution_diag.get("avg_expected_net_return_traded", 0.0) or 0.0
         ),
@@ -544,6 +558,10 @@ def persist_paper_run_outputs(
         ),
         "avg_ev_score_after_reliability": float(
             paper_execution_diag.get("avg_ev_score_after_reliability", 0.0) or 0.0
+        ),
+        "reliability_turnover_uplift": float(paper_execution_diag.get("reliability_turnover_uplift", 0.0) or 0.0),
+        "reliability_cost_drag_uplift": float(
+            paper_execution_diag.get("reliability_cost_drag_uplift", 0.0) or 0.0
         ),
         "ev_weighted_exposure": float(paper_execution_diag.get("ev_weighted_exposure", 0.0) or 0.0),
         "avg_ev_weight_multiplier": float(paper_execution_diag.get("avg_ev_weight_multiplier", 1.0) or 1.0),

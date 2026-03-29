@@ -116,6 +116,14 @@ daily_trading:
         reliability_threshold: 0.55
         reliability_min_training_samples: 20
         reliability_recent_window: 20
+        reliability_target_type: positive_net_realized_return
+        reliability_top_percentile: 0.8
+        reliability_hurdle: 0.0
+        reliability_usage_mode: weighting_only
+        reliability_weight_multiplier_min: 0.75
+        reliability_weight_multiplier_max: 1.25
+        reliability_neutral_band: 0.05
+        reliability_max_promoted_trades_per_day:
       slippage:
         enabled: true
         model: fixed_bps

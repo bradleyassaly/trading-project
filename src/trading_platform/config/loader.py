@@ -641,6 +641,29 @@ def load_daily_trading_workflow_config(path: str | Path) -> DailyTradingWorkflow
         ev_gate_section,
         "reliability_recent_window",
     )
+    _set_if_missing(payload, "ev_gate_reliability_target_type", ev_gate_section, "reliability_target_type")
+    _set_if_missing(payload, "ev_gate_reliability_top_percentile", ev_gate_section, "reliability_top_percentile")
+    _set_if_missing(payload, "ev_gate_reliability_hurdle", ev_gate_section, "reliability_hurdle")
+    _set_if_missing(payload, "ev_gate_reliability_usage_mode", ev_gate_section, "reliability_usage_mode")
+    _set_if_missing(
+        payload,
+        "ev_gate_reliability_weight_multiplier_min",
+        ev_gate_section,
+        "reliability_weight_multiplier_min",
+    )
+    _set_if_missing(
+        payload,
+        "ev_gate_reliability_weight_multiplier_max",
+        ev_gate_section,
+        "reliability_weight_multiplier_max",
+    )
+    _set_if_missing(payload, "ev_gate_reliability_neutral_band", ev_gate_section, "reliability_neutral_band")
+    _set_if_missing(
+        payload,
+        "ev_gate_reliability_max_promoted_trades_per_day",
+        ev_gate_section,
+        "reliability_max_promoted_trades_per_day",
+    )
     _set_if_missing(payload, "ev_gate_min_expected_net_return", ev_gate_section, "min_expected_net_return")
     _set_if_missing(payload, "ev_gate_min_probability_positive", ev_gate_section, "min_probability_positive")
     _set_if_missing(payload, "ev_gate_risk_penalty_lambda", ev_gate_section, "risk_penalty_lambda")

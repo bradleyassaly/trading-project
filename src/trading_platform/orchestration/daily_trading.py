@@ -875,6 +875,30 @@ def _build_multi_strategy_paper_config(result, reserve_cash_pct: float, workflow
         ev_gate_reliability_recent_window=int(
             getattr(workflow_config, "ev_gate_reliability_recent_window", 20) or 20
         ),
+        ev_gate_reliability_target_type=str(
+            getattr(workflow_config, "ev_gate_reliability_target_type", "sign_success") or "sign_success"
+        ),
+        ev_gate_reliability_top_percentile=float(
+            getattr(workflow_config, "ev_gate_reliability_top_percentile", 0.8) or 0.8
+        ),
+        ev_gate_reliability_hurdle=float(getattr(workflow_config, "ev_gate_reliability_hurdle", 0.0) or 0.0),
+        ev_gate_reliability_usage_mode=str(
+            getattr(workflow_config, "ev_gate_reliability_usage_mode", "weighting_only") or "weighting_only"
+        ),
+        ev_gate_reliability_weight_multiplier_min=float(
+            getattr(workflow_config, "ev_gate_reliability_weight_multiplier_min", 0.75) or 0.75
+        ),
+        ev_gate_reliability_weight_multiplier_max=float(
+            getattr(workflow_config, "ev_gate_reliability_weight_multiplier_max", 1.25) or 1.25
+        ),
+        ev_gate_reliability_neutral_band=float(
+            getattr(workflow_config, "ev_gate_reliability_neutral_band", 0.05) or 0.05
+        ),
+        ev_gate_reliability_max_promoted_trades_per_day=getattr(
+            workflow_config,
+            "ev_gate_reliability_max_promoted_trades_per_day",
+            None,
+        ),
         ev_gate_min_expected_net_return=float(
             getattr(workflow_config, "ev_gate_min_expected_net_return", 0.0) or 0.0
         ),

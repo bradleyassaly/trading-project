@@ -101,10 +101,16 @@ CANDIDATE_COLUMNS = [
     "regression_ev_score_post_clip",
     "was_filtered_by_confidence",
     "ev_reliability",
+    "ev_reliability_rank_pct",
     "ev_reliability_multiplier",
+    "reliability_target_type",
+    "reliability_usage_mode",
     "ev_score_before_reliability",
     "ev_score_after_reliability",
     "was_filtered_by_reliability",
+    "was_reliability_promoted",
+    "reliability_turnover_delta",
+    "reliability_cost_drag_delta",
 ]
 
 PREDICTION_COLUMNS = [
@@ -171,10 +177,16 @@ PREDICTION_COLUMNS = [
     "confidence_source",
     "was_filtered_by_confidence",
     "ev_reliability",
+    "ev_reliability_rank_pct",
     "ev_reliability_multiplier",
+    "reliability_target_type",
+    "reliability_usage_mode",
     "ev_score_before_reliability",
     "ev_score_after_reliability",
     "was_filtered_by_reliability",
+    "was_reliability_promoted",
+    "reliability_turnover_delta",
+    "reliability_cost_drag_delta",
     "action_reason",
 ]
 

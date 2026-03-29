@@ -715,6 +715,14 @@ class DailyTradingWorkflowConfig:
     ev_gate_reliability_threshold: float = 0.5
     ev_gate_reliability_min_training_samples: int = 20
     ev_gate_reliability_recent_window: int = 20
+    ev_gate_reliability_target_type: str = "sign_success"
+    ev_gate_reliability_top_percentile: float = 0.8
+    ev_gate_reliability_hurdle: float = 0.0
+    ev_gate_reliability_usage_mode: str = "weighting_only"
+    ev_gate_reliability_weight_multiplier_min: float = 0.75
+    ev_gate_reliability_weight_multiplier_max: float = 1.25
+    ev_gate_reliability_neutral_band: float = 0.05
+    ev_gate_reliability_max_promoted_trades_per_day: int | None = None
     ev_gate_min_expected_net_return: float = 0.0
     ev_gate_min_probability_positive: float | None = None
     ev_gate_risk_penalty_lambda: float = 0.0
