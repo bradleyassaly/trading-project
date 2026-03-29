@@ -357,6 +357,7 @@ daily_trading:
         enabled: true
         model_type: bucketed_mean
         horizon_days: 5
+        target_type: realized_candidate_proxy
         mode: soft
         training_source: candidate_decisions
         weight_multiplier: true
@@ -393,6 +394,7 @@ daily_trading:
     assert config.ev_gate_enabled is True
     assert config.ev_gate_model_type == "bucketed_mean"
     assert config.ev_gate_horizon_days == 5
+    assert config.ev_gate_target_type == "realized_candidate_proxy"
     assert config.ev_gate_mode == "soft"
     assert config.ev_gate_training_source == "candidate_decisions"
     assert config.ev_gate_weight_multiplier is True

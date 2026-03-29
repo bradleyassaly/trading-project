@@ -344,6 +344,7 @@ def _write_replay_day_input_summary(
             "ev_gate_enabled": bool(day_config.ev_gate_enabled),
             "ev_gate_model_type": str(day_config.ev_gate_model_type or "bucketed_mean"),
             "ev_gate_mode": str(day_config.ev_gate_mode or "hard"),
+            "ev_gate_target_type": str(day_config.ev_gate_target_type or "market_proxy"),
             "ev_gate_training_source": str(day_config.ev_gate_training_source or "executed_trades"),
             "ev_gate_normalization_method": str(day_config.ev_gate_normalization_method or "zscore"),
             "ev_gate_normalize_within": str(day_config.ev_gate_normalize_within or "all_candidates"),
@@ -470,6 +471,7 @@ def _aggregate_candidate_ev_dataset(replay_root: Path) -> tuple[list[dict[str, A
                 if not candidate_frame.empty
                 else 0,
                 "training_source_used": str(training_summary.get("training_source", "executed_trades") or "executed_trades"),
+                "target_type": str(training_summary.get("target_type", "market_proxy") or "market_proxy"),
                 "requested_training_source": str(
                     training_summary.get("requested_training_source", training_summary.get("training_source", "executed_trades"))
                     or "executed_trades"
@@ -490,6 +492,7 @@ def _aggregate_candidate_ev_dataset(replay_root: Path) -> tuple[list[dict[str, A
             if coverage_rows
             else 0.0
         ),
+        "target_type": str(coverage_rows[-1]["target_type"]) if coverage_rows else "market_proxy",
         "training_source_used": str(coverage_rows[-1]["training_source_used"]) if coverage_rows else "executed_trades",
     }
     return coverage_rows, summary
@@ -629,6 +632,11 @@ def _compute_replay_summary(
         str(metrics_frame["ev_gate_mode"].iloc[-1])
         if "ev_gate_mode" in metrics_frame and not metrics_frame.empty
         else "hard"
+    )
+    ev_gate_target_type = (
+        str(metrics_frame["ev_gate_target_type"].iloc[-1])
+        if "ev_gate_target_type" in metrics_frame and not metrics_frame.empty
+        else "market_proxy"
     )
     ev_gate_training_source = (
         str(metrics_frame["ev_gate_training_source"].iloc[-1])
@@ -828,6 +836,7 @@ def _compute_replay_summary(
         "ev_gate_blocked_count": ev_gate_blocked_count,
         "ev_gate_enabled": ev_gate_enabled,
         "ev_gate_mode": ev_gate_mode,
+        "ev_gate_target_type": ev_gate_target_type,
         "ev_gate_training_source": ev_gate_training_source,
         "ev_gate_normalization_method": ev_gate_normalization_method,
         "ev_gate_normalize_within": ev_gate_normalize_within,
@@ -914,6 +923,7 @@ def _write_replay_summary_artifacts(
                 f"- forced_exit_count: `{summary.get('forced_exit_count', 0)}`",
                 f"- ev_gate_enabled: `{summary.get('ev_gate_enabled', False)}`",
                 f"- ev_gate_mode: `{summary.get('ev_gate_mode', 'hard')}`",
+                f"- ev_gate_target_type: `{summary.get('ev_gate_target_type', 'market_proxy')}`",
                 f"- ev_gate_training_source: `{summary.get('ev_gate_training_source', 'executed_trades')}`",
                 f"- ev_gate_normalization_method: `{summary.get('ev_gate_normalization_method', 'zscore')}`",
                 f"- ev_gate_normalize_within: `{summary.get('ev_gate_normalize_within', 'all_candidates')}`",
@@ -1145,6 +1155,7 @@ def run_daily_replay(config: DailyReplayWorkflowConfig) -> DailyReplayResult:
                 "exit_threshold_used": paper_summary.get("exit_threshold_used"),
                 "ev_gate_enabled": bool(paper_summary.get("ev_gate_enabled", False)),
                 "ev_gate_mode": str(paper_summary.get("ev_gate_mode", "hard") or "hard"),
+                "ev_gate_target_type": str(paper_summary.get("ev_gate_target_type", "market_proxy") or "market_proxy"),
                 "ev_gate_training_source": str(
                     paper_summary.get("ev_gate_training_source", "executed_trades") or "executed_trades"
                 ),
@@ -1159,6 +1170,12 @@ def run_daily_replay(config: DailyReplayWorkflowConfig) -> DailyReplayResult:
                 ),
                 "ev_gate_model_type": str(paper_summary.get("ev_gate_model_type", "bucketed_mean") or "bucketed_mean"),
                 "ev_model_sample_count": int(paper_summary.get("ev_model_sample_count", 0) or 0),
+                "ev_labeled_row_count": int(paper_summary.get("ev_labeled_row_count", 0) or 0),
+                "ev_excluded_unlabeled_row_count": int(
+                    paper_summary.get("ev_excluded_unlabeled_row_count", 0) or 0
+                ),
+                "ev_average_target_value": float(paper_summary.get("ev_average_target_value", 0.0) or 0.0),
+                "ev_positive_label_rate": float(paper_summary.get("ev_positive_label_rate", 0.0) or 0.0),
                 "fill_count": int(paper_summary.get("fill_count", 0) or 0),
                 "turnover_estimate": float(paper_summary.get("turnover_estimate", 0.0) or 0.0),
                 "position_count": int(paper_summary.get("realized_holdings_count", 0) or 0),
@@ -1263,10 +1280,14 @@ def run_daily_replay(config: DailyReplayWorkflowConfig) -> DailyReplayResult:
     ev_realized_rows, ev_bucket_rows, ev_calibration_summary = evaluate_replay_trade_ev_predictions(
         replay_root=replay_root,
         horizon_days=int(config.daily_trading.ev_gate_horizon_days or 5),
+        target_type=str(config.daily_trading.ev_gate_target_type or "market_proxy"),
     )
     candidate_coverage_rows, candidate_dataset_summary = _aggregate_candidate_ev_dataset(replay_root)
     if ev_calibration_summary:
         summary["replay_ev_calibration_summary"] = ev_calibration_summary
+        summary["ev_gate_target_type"] = str(
+            ev_calibration_summary.get("target_type", config.daily_trading.ev_gate_target_type or "market_proxy")
+        )
         summary["ev_top_bucket_realized_net_return"] = ev_calibration_summary.get("top_bucket_realized_net_return", 0.0)
         summary["ev_bottom_bucket_realized_net_return"] = ev_calibration_summary.get(
             "bottom_bucket_realized_net_return",

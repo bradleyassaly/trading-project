@@ -391,10 +391,10 @@ def test_generate_rebalance_orders_persists_score_band_blocked_candidate() -> No
 
 
 def test_generate_rebalance_orders_candidate_training_source_falls_back_to_executed(monkeypatch) -> None:
-    calls: list[str] = []
+    calls: list[tuple[str, str]] = []
 
     def fake_build(**kwargs):
-        calls.append(kwargs["training_source"])
+        calls.append((kwargs["training_source"], kwargs["target_type"]))
         if kwargs["training_source"] == "candidate_decisions":
             return [], {"training_source": "candidate_decisions", "training_sample_count": 0}
         return [{"forward_net_return": 0.02}], {"training_source": "executed_trades", "training_sample_count": 1}
@@ -437,14 +437,19 @@ def test_generate_rebalance_orders_candidate_training_source_falls_back_to_execu
             ev_gate_weight_scale=5.0,
             ev_gate_training_root="artifacts/daily_replay/run_current",
             ev_gate_training_source="candidate_decisions",
+            ev_gate_target_type="realized_candidate_proxy",
             ev_gate_min_training_samples=1,
             min_trade_dollars=1.0,
         ),
         min_trade_dollars=1.0,
     )
 
-    assert calls == ["candidate_decisions", "executed_trades"]
+    assert calls == [
+        ("candidate_decisions", "realized_candidate_proxy"),
+        ("executed_trades", "realized_candidate_proxy"),
+    ]
     assert result.diagnostics["ev_gate_training_source"] == "executed_trades"
+    assert result.diagnostics["ev_gate_target_type"] == "realized_candidate_proxy"
     assert result.diagnostics["ev_gate_training_summary"]["fallback_reason"] == "insufficient_candidate_history_for_ev_gate"
 
 

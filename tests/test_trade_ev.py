@@ -119,6 +119,41 @@ def _write_candidate_day(
     )
 
 
+def _write_symbol_attr_day(
+    root: Path,
+    date: str,
+    *,
+    symbol: str,
+    strategy_id: str,
+    gross_realized_pnl: float,
+    net_realized_pnl: float,
+    gross_unrealized_pnl: float,
+    net_unrealized_pnl: float,
+) -> None:
+    day_dir = root / date
+    (day_dir / "paper").mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(
+        [
+            {
+                "date": date,
+                "symbol": symbol,
+                "strategy_id": strategy_id,
+                "gross_realized_pnl": gross_realized_pnl,
+                "net_realized_pnl": net_realized_pnl,
+                "realized_pnl": net_realized_pnl,
+                "gross_unrealized_pnl": gross_unrealized_pnl,
+                "net_unrealized_pnl": net_unrealized_pnl,
+                "unrealized_pnl": net_unrealized_pnl,
+                "gross_total_pnl": gross_realized_pnl + gross_unrealized_pnl,
+                "net_total_pnl": net_realized_pnl + net_unrealized_pnl,
+                "total_pnl": net_realized_pnl + net_unrealized_pnl,
+                "total_execution_cost": (gross_realized_pnl + gross_unrealized_pnl)
+                - (net_realized_pnl + net_unrealized_pnl),
+            }
+        ]
+    ).to_csv(day_dir / "paper" / "symbol_pnl_attribution.csv", index=False)
+
+
 def test_build_trade_ev_training_dataset_respects_cutoff(monkeypatch, tmp_path: Path) -> None:
     replay_root = tmp_path / "replay"
     _write_day(replay_root, "2025-01-03", symbol="AAPL", score_percentile=0.95, cost_pct=0.001)
@@ -236,6 +271,169 @@ def test_build_trade_ev_training_dataset_candidate_mode_respects_cutoff(monkeypa
     assert len(rows) == 1
     assert rows[0]["date"] == "2025-01-03"
     assert summary["training_sample_count"] == 1
+
+
+def test_build_trade_ev_training_dataset_realized_candidate_proxy_uses_symbol_attribution(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    replay_root = tmp_path / "replay"
+    _write_candidate_day(
+        replay_root,
+        "2025-01-03",
+        symbol="AAPL",
+        score_percentile=0.95,
+        requested_weight_delta=0.10,
+        estimated_cost_pct=0.01,
+        candidate_outcome="executed",
+    )
+    pd.DataFrame(
+        [
+            {
+                "symbol": "AAPL",
+                "strategy_id": "alpha",
+                "gross_notional": 1_000.0,
+                "total_execution_cost": 10.0,
+                "quantity": 10,
+                "reference_price": 100.0,
+            }
+        ]
+    ).to_csv(replay_root / "2025-01-03" / "paper" / "paper_fills.csv", index=False)
+    _write_symbol_attr_day(
+        replay_root,
+        "2025-01-03",
+        symbol="AAPL",
+        strategy_id="alpha",
+        gross_realized_pnl=0.0,
+        net_realized_pnl=0.0,
+        gross_unrealized_pnl=20.0,
+        net_unrealized_pnl=10.0,
+    )
+    _write_symbol_attr_day(
+        replay_root,
+        "2025-01-06",
+        symbol="AAPL",
+        strategy_id="alpha",
+        gross_realized_pnl=5.0,
+        net_realized_pnl=4.0,
+        gross_unrealized_pnl=25.0,
+        net_unrealized_pnl=14.0,
+    )
+    _write_symbol_attr_day(
+        replay_root,
+        "2025-01-07",
+        symbol="AAPL",
+        strategy_id="alpha",
+        gross_realized_pnl=15.0,
+        net_realized_pnl=12.0,
+        gross_unrealized_pnl=40.0,
+        net_unrealized_pnl=25.0,
+    )
+
+    def fake_load_feature_frame(symbol: str) -> pd.DataFrame:
+        return pd.DataFrame(
+            {
+                "timestamp": pd.date_range("2024-12-15", periods=40, freq="D"),
+                "close": list(range(100, 140)),
+                "volume": [1_000_000] * 40,
+            }
+        )
+
+    monkeypatch.setattr("trading_platform.research.trade_ev.load_feature_frame", fake_load_feature_frame)
+    rows, summary = build_trade_ev_training_dataset(
+        history_root=replay_root,
+        as_of_date="2025-01-08",
+        horizon_days=2,
+        training_source="candidate_decisions",
+        target_type="realized_candidate_proxy",
+    )
+
+    assert len(rows) == 1
+    assert rows[0]["forward_gross_return"] == pytest.approx(0.06)
+    assert rows[0]["forward_net_return"] == pytest.approx(0.041)
+    assert summary["target_type"] == "realized_candidate_proxy"
+    assert summary["realized_label_count"] == 1
+    assert summary["proxy_fallback_count"] == 0
+
+
+def test_build_trade_ev_training_dataset_realized_candidate_proxy_excludes_horizon_incomplete_rows(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    replay_root = tmp_path / "replay"
+    _write_candidate_day(
+        replay_root,
+        "2025-01-03",
+        symbol="AAPL",
+        score_percentile=0.95,
+        requested_weight_delta=0.10,
+        estimated_cost_pct=0.01,
+        candidate_outcome="executed",
+    )
+    pd.DataFrame(
+        [
+            {
+                "symbol": "AAPL",
+                "strategy_id": "alpha",
+                "gross_notional": 1_000.0,
+                "total_execution_cost": 10.0,
+                "quantity": 10,
+                "reference_price": 100.0,
+            }
+        ]
+    ).to_csv(replay_root / "2025-01-03" / "paper" / "paper_fills.csv", index=False)
+    _write_symbol_attr_day(
+        replay_root,
+        "2025-01-03",
+        symbol="AAPL",
+        strategy_id="alpha",
+        gross_realized_pnl=0.0,
+        net_realized_pnl=0.0,
+        gross_unrealized_pnl=20.0,
+        net_unrealized_pnl=10.0,
+    )
+    _write_symbol_attr_day(
+        replay_root,
+        "2025-01-06",
+        symbol="AAPL",
+        strategy_id="alpha",
+        gross_realized_pnl=5.0,
+        net_realized_pnl=4.0,
+        gross_unrealized_pnl=25.0,
+        net_unrealized_pnl=14.0,
+    )
+    _write_symbol_attr_day(
+        replay_root,
+        "2025-01-07",
+        symbol="AAPL",
+        strategy_id="alpha",
+        gross_realized_pnl=15.0,
+        net_realized_pnl=12.0,
+        gross_unrealized_pnl=40.0,
+        net_unrealized_pnl=25.0,
+    )
+
+    def fake_load_feature_frame(symbol: str) -> pd.DataFrame:
+        return pd.DataFrame(
+            {
+                "timestamp": pd.date_range("2024-12-15", periods=40, freq="D"),
+                "close": list(range(100, 140)),
+                "volume": [1_000_000] * 40,
+            }
+        )
+
+    monkeypatch.setattr("trading_platform.research.trade_ev.load_feature_frame", fake_load_feature_frame)
+    rows, summary = build_trade_ev_training_dataset(
+        history_root=replay_root,
+        as_of_date="2025-01-07",
+        horizon_days=2,
+        training_source="candidate_decisions",
+        target_type="realized_candidate_proxy",
+    )
+
+    assert rows == []
+    assert summary["excluded_unlabeled_row_count"] == 1
+    assert summary["labeled_row_count"] == 0
 
 
 def test_bucketed_trade_ev_model_scores_candidates() -> None:
@@ -680,10 +878,14 @@ def test_evaluate_replay_trade_ev_predictions_uses_prediction_files(monkeypatch,
     realized_rows, bucket_rows, summary = evaluate_replay_trade_ev_predictions(
         replay_root=tmp_path,
         horizon_days=3,
+        target_type="market_proxy",
     )
     assert len(realized_rows) == 1
     assert len(bucket_rows) == 1
     assert summary["trade_count"] == 1
+    assert summary["target_type"] == "market_proxy"
+    assert summary["prediction_row_count"] == 1
+    assert summary["labeled_prediction_count"] == 1
 
 
 def test_generate_rebalance_orders_ev_gate_blocks_negative_expected_value_trade(monkeypatch) -> None:

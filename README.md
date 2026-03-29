@@ -3114,7 +3114,11 @@ Paper trading and replay also support an expected-net-value gate.
 - Training can use either `executed_trades` or `candidate_decisions`.
 - `candidate_decisions` captures the full pre-execution candidate set, including executed trades plus score-band, EV, and hysteresis skips.
 - All EV training remains walk-forward: replay day `N` trains only on labeled rows from dates strictly before `N`.
-- The target is forward market return over the configured horizon minus estimated execution cost.
+- Supported targets are:
+  - `market_proxy`: forward market return over the configured horizon minus estimated execution cost
+  - `realized_candidate_proxy`: for executed long entries/increases with full horizon coverage, realized symbol/strategy net PnL through the horizon plus the horizon-end mark, normalized by entry notional; unsupported cases fall back explicitly to `market_proxy`
+  - `realized_trade_proxy`: reserved for future work and currently falls back through the realized-candidate path
+- Horizon-incomplete rows are excluded from training and counted explicitly in `excluded_unlabeled_row_count`.
 - If there is not enough prior history, the EV gate falls back cleanly and records a warning.
 - Soft EV weighting is currently preferred over hard blocking because the EV signal has been more useful as a ranking/sizing input than as an absolute pass/fail cutoff.
 - EV hard/soft gating still uses the raw expected-net score in return units.
@@ -3132,6 +3136,7 @@ daily_trading:
         model_type: bucketed_mean
         training_source: candidate_decisions
         horizon_days: 5
+        target_type: realized_candidate_proxy
         weight_multiplier: true
         weight_scale: 5.0
         normalize_scores: true
@@ -3172,6 +3177,10 @@ Useful calibration fields:
 - `avg_ev_weighting_score`
 - `avg_ev_weight_multiplier`
 - `ev_weighted_exposure`
+- `target_type`
+- `labeled_row_count`
+- `excluded_unlabeled_row_count`
+- `label_coverage_ratio`
 
 Normalization and clipping semantics:
 
@@ -3183,5 +3192,6 @@ Normalization and clipping semantics:
 
 Current limitations:
 
-- candidate training still uses the same forward-return proxy target, not full path-aware realized trade attribution
+- `realized_candidate_proxy` is intentionally conservative: it is exact only for the executed long-entry/increase cases it can map cleanly from existing replay artifacts
+- sell/reduction/exit candidates and unsupported cases still fall back to the proxy target
 - calibration artifacts are diagnostics, not training inputs

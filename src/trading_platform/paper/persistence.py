@@ -133,6 +133,7 @@ def _summary_markdown(summary: dict[str, Any], health_checks: list[dict[str, Any
         f"- Forced exit count: `{summary.get('forced_exit_count', 0)}`",
         f"- EV gate enabled: `{summary.get('ev_gate_enabled', False)}`",
         f"- EV gate mode: `{summary.get('ev_gate_mode', 'hard')}`",
+        f"- EV target type: `{summary.get('ev_gate_target_type', 'market_proxy')}`",
         f"- EV training source: `{summary.get('ev_gate_training_source', 'executed_trades')}`",
         f"- EV normalization method: `{summary.get('ev_gate_normalization_method', 'zscore')}`",
         f"- EV normalize within: `{summary.get('ev_gate_normalize_within', 'all_candidates')}`",
@@ -439,6 +440,7 @@ def persist_paper_run_outputs(
         ),
         "ev_gate_enabled": bool(paper_execution_diag.get("ev_gate_enabled", False)),
         "ev_gate_model_type": str(paper_execution_diag.get("ev_gate_model_type", "bucketed_mean") or "bucketed_mean"),
+        "ev_gate_target_type": str(paper_execution_diag.get("ev_gate_target_type", "market_proxy") or "market_proxy"),
         "ev_gate_mode": str(paper_execution_diag.get("ev_gate_mode", "hard") or "hard"),
         "ev_gate_training_source": str(
             paper_execution_diag.get("ev_gate_training_source", "executed_trades") or "executed_trades"

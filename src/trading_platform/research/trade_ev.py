@@ -33,6 +33,8 @@ TRAINING_COLUMNS = [
     "positive_net_return",
 ]
 
+TARGET_TYPES = {"market_proxy", "realized_candidate_proxy", "realized_trade_proxy"}
+
 CANDIDATE_COLUMNS = [
     "date",
     "symbol",
@@ -219,6 +221,20 @@ def _iter_replay_day_dirs(history_root: str | Path, *, as_of_date: str) -> list[
     return day_dirs
 
 
+def _all_replay_day_dirs(history_root: str | Path) -> list[Path]:
+    root = Path(history_root)
+    if not root.exists():
+        return []
+    day_dirs: list[Path] = []
+    for path in sorted(item for item in root.iterdir() if item.is_dir()):
+        try:
+            pd.Timestamp(path.name).date()
+        except (TypeError, ValueError):
+            continue
+        day_dirs.append(path)
+    return day_dirs
+
+
 def _load_feature_snapshot_frame(symbol: str, frame_cache: dict[str, pd.DataFrame]) -> pd.DataFrame | None:
     if symbol not in frame_cache:
         try:
@@ -332,6 +348,183 @@ def _cost_pct_from_fills(frame: pd.DataFrame, symbol: str) -> float:
     return float(total_cost / gross_notional) if gross_notional > 0.0 else 0.0
 
 
+def _gross_notional_from_frame(frame: pd.DataFrame) -> float:
+    if frame.empty:
+        return 0.0
+    if "gross_notional" in frame.columns:
+        gross_notional = float(pd.to_numeric(frame["gross_notional"], errors="coerce").fillna(0.0).abs().sum())
+        if gross_notional > 0.0:
+            return gross_notional
+    if {"quantity", "reference_price"}.issubset(frame.columns):
+        return float(
+            (
+                pd.to_numeric(frame["quantity"], errors="coerce").fillna(0.0).abs()
+                * pd.to_numeric(frame["reference_price"], errors="coerce").fillna(0.0)
+            ).sum()
+        )
+    return 0.0
+
+
+def _filter_frame_by_symbol_strategy(frame: pd.DataFrame, *, symbol: str, strategy_id: str | None) -> pd.DataFrame:
+    if frame.empty:
+        return frame.iloc[0:0].copy()
+    result = frame
+    if "symbol" in result.columns:
+        result = result[result["symbol"].astype(str) == str(symbol)]
+    if strategy_id and "strategy_id" in result.columns:
+        result = result[result["strategy_id"].astype(str) == str(strategy_id)]
+    return result.copy()
+
+
+def _target_definition(target_type: str, horizon_days: int) -> str:
+    normalized = str(target_type or "market_proxy").lower()
+    if normalized == "realized_candidate_proxy":
+        return (
+            f"forward_{int(horizon_days)}d_realized_candidate_proxy_"
+            "using_daily_symbol_net_pnl_plus_horizon_mark_for_executed_long_entries"
+        )
+    if normalized == "realized_trade_proxy":
+        return (
+            f"forward_{int(horizon_days)}d_realized_trade_proxy_not_implemented_"
+            "falling_back_to_realized_candidate_proxy_or_market_proxy"
+        )
+    return f"forward_{int(horizon_days)}d_market_return_minus_estimated_cost"
+
+
+def _market_proxy_label(
+    *,
+    row: dict[str, Any],
+    as_of_date: str,
+    horizon_days: int,
+    frame_cache: dict[str, pd.DataFrame],
+) -> dict[str, Any] | None:
+    symbol = str(row.get("symbol") or "")
+    if not symbol:
+        return None
+    feature_row = _feature_snapshot(
+        symbol=symbol,
+        as_of_date=as_of_date,
+        horizon_days=horizon_days,
+        frame_cache=frame_cache,
+    )
+    if feature_row is None:
+        return None
+    side_sign = _action_side_sign(row)
+    if side_sign == 0.0:
+        return None
+    cost_pct = _safe_float(row.get("estimated_execution_cost_pct"))
+    forward_gross_return = side_sign * _safe_float(feature_row.get("forward_price_return"))
+    forward_net_return = float(forward_gross_return - cost_pct)
+    return {
+        "forward_gross_return": forward_gross_return,
+        "forward_net_return": forward_net_return,
+        "positive_net_return": int(forward_net_return > 0.0),
+        "label_source": "market_proxy",
+        "label_mode": "proxy",
+        "excluded_unlabeled": False,
+    }
+
+
+def _realized_candidate_proxy_label(
+    *,
+    row: dict[str, Any],
+    day_dir: Path,
+    ordered_day_dirs: list[Path],
+    day_index_by_date: dict[str, int],
+    as_of_date: str | None,
+    horizon_days: int,
+    frame_cache: dict[str, pd.DataFrame],
+) -> dict[str, Any] | None:
+    row_date = str(row.get("date") or day_dir.name)
+    symbol = str(row.get("symbol") or "")
+    if not row_date or not symbol:
+        return None
+    current_index = day_index_by_date.get(row_date)
+    if current_index is None:
+        return None
+    horizon_index = current_index + int(horizon_days)
+    if horizon_index >= len(ordered_day_dirs):
+        return None
+    horizon_day_dir = ordered_day_dirs[horizon_index]
+    horizon_date = str(pd.Timestamp(horizon_day_dir.name).date())
+    if as_of_date is not None and pd.Timestamp(horizon_date).date() >= pd.Timestamp(as_of_date).date():
+        return None
+
+    normalized_target_type = str(row.get("action_type") or _action_type(row)).lower()
+    candidate_outcome = str(row.get("candidate_outcome") or "executed").lower()
+    side_sign = _action_side_sign(row)
+    strategy_id = str(row.get("strategy_id") or "").strip() or None
+
+    market_proxy = _market_proxy_label(
+        row=row,
+        as_of_date=row_date,
+        horizon_days=horizon_days,
+        frame_cache=frame_cache,
+    )
+    if market_proxy is None:
+        return None
+
+    can_use_realized = (
+        candidate_outcome == "executed"
+        and side_sign > 0.0
+        and normalized_target_type in {"entry", "increase"}
+    )
+    if not can_use_realized:
+        return {
+            **market_proxy,
+            "label_source": "market_proxy_fallback",
+            "fallback_reason": "unsupported_candidate_type_for_realized_proxy",
+        }
+
+    fills_frame = _read_csv_frame(day_dir / "paper" / "paper_fills.csv")
+    fill_rows = _filter_frame_by_symbol_strategy(fills_frame, symbol=symbol, strategy_id=strategy_id)
+    gross_notional = _gross_notional_from_frame(fill_rows)
+    if gross_notional <= 0.0:
+        return {
+            **market_proxy,
+            "label_source": "market_proxy_fallback",
+            "fallback_reason": "missing_entry_fill_notional_for_realized_proxy",
+        }
+
+    gross_realized_total = 0.0
+    net_realized_total = 0.0
+    for future_day_dir in ordered_day_dirs[current_index : horizon_index + 1]:
+        symbol_frame = _read_csv_frame(future_day_dir / "paper" / "symbol_pnl_attribution.csv")
+        symbol_rows = _filter_frame_by_symbol_strategy(symbol_frame, symbol=symbol, strategy_id=strategy_id)
+        if symbol_rows.empty:
+            continue
+        gross_realized_total += float(
+            pd.to_numeric(symbol_rows.get("gross_realized_pnl"), errors="coerce").fillna(0.0).sum()
+        )
+        net_realized_total += float(
+            pd.to_numeric(symbol_rows.get("net_realized_pnl", symbol_rows.get("realized_pnl")), errors="coerce")
+            .fillna(0.0)
+            .sum()
+        )
+
+    horizon_symbol_frame = _read_csv_frame(horizon_day_dir / "paper" / "symbol_pnl_attribution.csv")
+    horizon_symbol_rows = _filter_frame_by_symbol_strategy(horizon_symbol_frame, symbol=symbol, strategy_id=strategy_id)
+    gross_unrealized = float(
+        pd.to_numeric(horizon_symbol_rows.get("gross_unrealized_pnl"), errors="coerce").fillna(0.0).sum()
+    )
+    net_unrealized = float(
+        pd.to_numeric(horizon_symbol_rows.get("net_unrealized_pnl", horizon_symbol_rows.get("unrealized_pnl")), errors="coerce")
+        .fillna(0.0)
+        .sum()
+    )
+    realized_gross_return = float((gross_realized_total + gross_unrealized) / gross_notional)
+    realized_net_return = float((net_realized_total + net_unrealized) / gross_notional)
+    return {
+        "forward_gross_return": realized_gross_return,
+        "forward_net_return": realized_net_return,
+        "positive_net_return": int(realized_net_return > 0.0),
+        "label_source": "realized_candidate_proxy",
+        "label_mode": "realized",
+        "fallback_reason": "",
+        "excluded_unlabeled": False,
+    }
+
+
 def _action_side_sign(row: dict[str, Any]) -> float:
     weight_delta = _safe_float(row.get("requested_weight_delta", row.get("weight_delta")))
     if weight_delta > 0.0:
@@ -417,9 +610,13 @@ def _training_summary_from_rows(
     horizon_days: int,
     warnings: list[str],
     training_source: str,
+    target_type: str = "market_proxy",
     candidate_row_count: int = 0,
     executed_row_count: int = 0,
     skipped_row_count: int = 0,
+    excluded_unlabeled_row_count: int = 0,
+    realized_label_count: int = 0,
+    proxy_fallback_count: int = 0,
     feature_missingness: dict[str, float] | None = None,
 ) -> dict[str, Any]:
     positive_rate = (
@@ -427,20 +624,33 @@ def _training_summary_from_rows(
         if rows
         else 0.0
     )
+    average_target_value = (
+        float(pd.Series([_safe_float(row.get("forward_net_return")) for row in rows], dtype=float).mean())
+        if rows
+        else 0.0
+    )
     return {
         "training_source": str(training_source),
+        "target_type": str(target_type or "market_proxy"),
         "training_sample_count": len(rows),
         "labeled_row_count": len(rows),
         "candidate_row_count": int(candidate_row_count),
         "executed_row_count": int(executed_row_count),
         "skipped_row_count": int(skipped_row_count),
+        "excluded_unlabeled_row_count": int(excluded_unlabeled_row_count),
+        "average_label_horizon_completeness": (
+            float(len(rows) / max(candidate_row_count, 1)) if candidate_row_count > 0 else 0.0
+        ),
         "positive_label_rate": positive_rate,
+        "average_target_value": average_target_value,
+        "realized_label_count": int(realized_label_count),
+        "proxy_fallback_count": int(proxy_fallback_count),
         "training_day_count": len({str(row.get("date") or "") for row in rows if row.get("date")}),
         "horizon_days": int(horizon_days),
         "training_window_start": rows[0]["date"] if rows else None,
         "training_window_end": rows[-1]["date"] if rows else None,
         "warnings": warnings,
-        "target_definition": f"forward_{int(horizon_days)}d_market_return_minus_estimated_cost",
+        "target_definition": _target_definition(target_type, horizon_days),
         "executed_only": training_source == "executed_trades",
         "feature_missingness": dict(feature_missingness or {}),
     }
@@ -451,6 +661,7 @@ def _build_executed_trade_ev_training_dataset(
     history_root: str | Path | None,
     as_of_date: str,
     horizon_days: int,
+    target_type: str = "market_proxy",
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     if history_root is None:
         return [], _training_summary_from_rows(
@@ -458,12 +669,18 @@ def _build_executed_trade_ev_training_dataset(
             horizon_days=horizon_days,
             warnings=["missing_ev_training_root"],
             training_source="executed_trades",
+            target_type=target_type,
         )
     frame_cache: dict[str, pd.DataFrame] = {}
     rows: list[dict[str, Any]] = []
     candidate_row_count = 0
     executed_row_count = 0
     skipped_row_count = 0
+    excluded_unlabeled_row_count = 0
+    realized_label_count = 0
+    proxy_fallback_count = 0
+    ordered_day_dirs = _all_replay_day_dirs(history_root)
+    day_index_by_date = {str(pd.Timestamp(path.name).date()): index for index, path in enumerate(ordered_day_dirs)}
     for day_dir in _iter_replay_day_dirs(history_root, as_of_date=as_of_date):
         decision_path = day_dir / "trade_decision_log.csv"
         fills_path = day_dir / "paper" / "paper_fills.csv"
@@ -483,20 +700,49 @@ def _build_executed_trade_ev_training_dataset(
                 skipped_row_count += 1
                 continue
             executed_row_count += 1
+            label = (
+                _realized_candidate_proxy_label(
+                    row={
+                        **row,
+                        "estimated_execution_cost_pct": _cost_pct_from_fills(fills_frame, symbol),
+                        "candidate_outcome": "executed",
+                    },
+                    day_dir=day_dir,
+                    ordered_day_dirs=ordered_day_dirs,
+                    day_index_by_date=day_index_by_date,
+                    as_of_date=as_of_date,
+                    horizon_days=horizon_days,
+                    frame_cache=frame_cache,
+                )
+                if str(target_type or "market_proxy").lower() in {"realized_candidate_proxy", "realized_trade_proxy"}
+                else _market_proxy_label(
+                    row={
+                        **row,
+                        "estimated_execution_cost_pct": _cost_pct_from_fills(fills_frame, symbol),
+                    },
+                    as_of_date=str(row.get("date") or day_dir.name),
+                    horizon_days=horizon_days,
+                    frame_cache=frame_cache,
+                )
+            )
+            if label is None:
+                excluded_unlabeled_row_count += 1
+                continue
             feature_row = _feature_snapshot(
                 symbol=symbol,
                 as_of_date=str(row.get("date") or day_dir.name),
-                horizon_days=horizon_days,
+                horizon_days=max(horizon_days, 10),
                 frame_cache=frame_cache,
             )
             if feature_row is None:
-                continue
+                feature_row = {}
             side_sign = _action_side_sign(row)
             if side_sign == 0.0:
                 continue
-            cost_pct = _cost_pct_from_fills(fills_frame, symbol)
-            forward_gross_return = side_sign * _safe_float(feature_row.get("forward_price_return"))
-            forward_net_return = float(forward_gross_return - cost_pct)
+            if str(label.get("label_mode") or "") == "realized":
+                realized_label_count += 1
+            if "fallback" in str(label.get("label_source") or ""):
+                proxy_fallback_count += 1
             rows.append(
                 {
                     "date": str(row.get("date") or day_dir.name),
@@ -511,15 +757,15 @@ def _build_executed_trade_ev_training_dataset(
                     "action": str(row.get("action") or ""),
                     "action_type": _action_type(row),
                     "current_position_held": int(_safe_float(row.get("current_position")) != 0.0),
-                    "estimated_execution_cost_pct": cost_pct,
+                    "estimated_execution_cost_pct": _cost_pct_from_fills(fills_frame, symbol),
                     "recent_return_3d": _safe_float(feature_row.get("recent_return_3d")),
                     "recent_return_5d": _safe_float(feature_row.get("recent_return_5d")),
                     "recent_return_10d": _safe_float(feature_row.get("recent_return_10d")),
                     "recent_vol_20d": _safe_float(feature_row.get("recent_vol_20d")),
                     "dollar_volume": _safe_float(feature_row.get("dollar_volume")),
-                    "forward_gross_return": forward_gross_return,
-                    "forward_net_return": forward_net_return,
-                    "positive_net_return": int(forward_net_return > 0.0),
+                    "forward_gross_return": _safe_float(label.get("forward_gross_return")),
+                    "forward_net_return": _safe_float(label.get("forward_net_return")),
+                    "positive_net_return": int(_safe_float(label.get("positive_net_return"))),
                 }
             )
     normalized_rows = _normalize_records(rows)
@@ -528,9 +774,13 @@ def _build_executed_trade_ev_training_dataset(
         horizon_days=horizon_days,
         warnings=[] if normalized_rows else ["insufficient_trade_history_for_ev_gate"],
         training_source="executed_trades",
+        target_type=target_type,
         candidate_row_count=candidate_row_count,
         executed_row_count=executed_row_count,
         skipped_row_count=skipped_row_count,
+        excluded_unlabeled_row_count=excluded_unlabeled_row_count,
+        realized_label_count=realized_label_count,
+        proxy_fallback_count=proxy_fallback_count,
     )
     return normalized_rows, summary
 
@@ -540,6 +790,7 @@ def _build_candidate_trade_ev_training_dataset(
     history_root: str | Path | None,
     as_of_date: str,
     horizon_days: int,
+    target_type: str = "market_proxy",
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     if history_root is None:
         return [], _training_summary_from_rows(
@@ -547,12 +798,18 @@ def _build_candidate_trade_ev_training_dataset(
             horizon_days=horizon_days,
             warnings=["missing_ev_training_root"],
             training_source="candidate_decisions",
+            target_type=target_type,
         )
     frame_cache: dict[str, pd.DataFrame] = {}
     rows: list[dict[str, Any]] = []
     candidate_row_count = 0
     executed_row_count = 0
     skipped_row_count = 0
+    excluded_unlabeled_row_count = 0
+    realized_label_count = 0
+    proxy_fallback_count = 0
+    ordered_day_dirs = _all_replay_day_dirs(history_root)
+    day_index_by_date = {str(pd.Timestamp(path.name).date()): index for index, path in enumerate(ordered_day_dirs)}
     missing_feature_counts = {
         "recent_return_3d": 0,
         "recent_return_5d": 0,
@@ -581,20 +838,42 @@ def _build_candidate_trade_ev_training_dataset(
             symbol = str(row.get("symbol") or "")
             if not symbol:
                 continue
+            label = (
+                _realized_candidate_proxy_label(
+                    row=row,
+                    day_dir=day_dir,
+                    ordered_day_dirs=ordered_day_dirs,
+                    day_index_by_date=day_index_by_date,
+                    as_of_date=as_of_date,
+                    horizon_days=horizon_days,
+                    frame_cache=frame_cache,
+                )
+                if str(target_type or "market_proxy").lower() in {"realized_candidate_proxy", "realized_trade_proxy"}
+                else _market_proxy_label(
+                    row=row,
+                    as_of_date=str(row.get("date") or day_dir.name),
+                    horizon_days=horizon_days,
+                    frame_cache=frame_cache,
+                )
+            )
+            if label is None:
+                excluded_unlabeled_row_count += 1
+                continue
             feature_row = _feature_snapshot(
                 symbol=symbol,
                 as_of_date=str(row.get("date") or day_dir.name),
-                horizon_days=horizon_days,
+                horizon_days=max(horizon_days, 10),
                 frame_cache=frame_cache,
             )
             if feature_row is None:
-                continue
+                feature_row = {}
             for key in missing_feature_counts:
                 if row.get(key) in (None, ""):
                     missing_feature_counts[key] += 1
-            cost_pct = _safe_float(row.get("estimated_execution_cost_pct"))
-            forward_gross_return = side_sign * _safe_float(feature_row.get("forward_price_return"))
-            forward_net_return = float(forward_gross_return - cost_pct)
+            if str(label.get("label_mode") or "") == "realized":
+                realized_label_count += 1
+            if "fallback" in str(label.get("label_source") or ""):
+                proxy_fallback_count += 1
             rows.append(
                 {
                     "date": str(row.get("date") or day_dir.name),
@@ -609,15 +888,15 @@ def _build_candidate_trade_ev_training_dataset(
                     "action": str(row.get("action") or ""),
                     "action_type": str(row.get("action_type") or _action_type(row)),
                     "current_position_held": int(_safe_float(row.get("current_position_held")) != 0.0),
-                    "estimated_execution_cost_pct": cost_pct,
+                    "estimated_execution_cost_pct": _safe_float(row.get("estimated_execution_cost_pct")),
                     "recent_return_3d": _safe_float(row.get("recent_return_3d", feature_row.get("recent_return_3d"))),
                     "recent_return_5d": _safe_float(row.get("recent_return_5d", feature_row.get("recent_return_5d"))),
                     "recent_return_10d": _safe_float(row.get("recent_return_10d", feature_row.get("recent_return_10d"))),
                     "recent_vol_20d": _safe_float(row.get("recent_vol_20d", feature_row.get("recent_vol_20d"))),
                     "dollar_volume": _safe_float(row.get("dollar_volume", feature_row.get("dollar_volume"))),
-                    "forward_gross_return": forward_gross_return,
-                    "forward_net_return": forward_net_return,
-                    "positive_net_return": int(forward_net_return > 0.0),
+                    "forward_gross_return": _safe_float(label.get("forward_gross_return")),
+                    "forward_net_return": _safe_float(label.get("forward_net_return")),
+                    "positive_net_return": int(_safe_float(label.get("positive_net_return"))),
                 }
             )
     normalized_rows = _normalize_records(rows)
@@ -630,9 +909,13 @@ def _build_candidate_trade_ev_training_dataset(
         horizon_days=horizon_days,
         warnings=[] if normalized_rows else ["insufficient_candidate_history_for_ev_gate"],
         training_source="candidate_decisions",
+        target_type=target_type,
         candidate_row_count=candidate_row_count,
         executed_row_count=executed_row_count,
         skipped_row_count=skipped_row_count,
+        excluded_unlabeled_row_count=excluded_unlabeled_row_count,
+        realized_label_count=realized_label_count,
+        proxy_fallback_count=proxy_fallback_count,
         feature_missingness=feature_missingness,
     )
     return normalized_rows, summary
@@ -644,18 +927,24 @@ def build_trade_ev_training_dataset(
     as_of_date: str,
     horizon_days: int,
     training_source: str = "executed_trades",
+    target_type: str = "market_proxy",
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     normalized_source = str(training_source or "executed_trades").lower()
+    normalized_target_type = str(target_type or "market_proxy").lower()
+    if normalized_target_type not in TARGET_TYPES:
+        raise ValueError(f"Unsupported EV target type: {target_type}")
     if normalized_source == "candidate_decisions":
         return _build_candidate_trade_ev_training_dataset(
             history_root=history_root,
             as_of_date=as_of_date,
             horizon_days=horizon_days,
+            target_type=normalized_target_type,
         )
     return _build_executed_trade_ev_training_dataset(
         history_root=history_root,
         as_of_date=as_of_date,
         horizon_days=horizon_days,
+        target_type=normalized_target_type,
     )
 
 
@@ -1056,6 +1345,7 @@ def evaluate_replay_trade_ev_predictions(
     *,
     replay_root: str | Path,
     horizon_days: int,
+    target_type: str = "market_proxy",
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
     root = Path(replay_root)
     prediction_rows: list[dict[str, Any]] = []
@@ -1073,43 +1363,67 @@ def evaluate_replay_trade_ev_predictions(
     if not prediction_rows:
         return [], [], {
             "trade_count": 0,
+            "prediction_row_count": 0,
+            "labeled_prediction_count": 0,
+            "excluded_unlabeled_prediction_count": 0,
+            "label_coverage_ratio": 0.0,
             "rank_correlation": 0.0,
             "top_vs_bottom_bucket_spread": 0.0,
             "bucket_monotonicity": False,
             "calibration_error": 0.0,
             "top_bucket_realized_net_return": 0.0,
             "bottom_bucket_realized_net_return": 0.0,
+            "target_type": str(target_type or "market_proxy"),
         }
     frame_cache: dict[str, pd.DataFrame] = {}
+    ordered_day_dirs = _all_replay_day_dirs(root)
+    day_index_by_date = {str(pd.Timestamp(path.name).date()): index for index, path in enumerate(ordered_day_dirs)}
     realized_rows: list[dict[str, Any]] = []
     for row in prediction_rows:
         symbol = str(row.get("symbol") or "")
         as_of_date = str(row.get("date") or "")
         if not symbol or not as_of_date:
             continue
-        feature_row = _feature_snapshot(
-            symbol=symbol,
-            as_of_date=as_of_date,
-            horizon_days=horizon_days,
-            frame_cache=frame_cache,
+        day_dir = root / as_of_date
+        label = (
+            _realized_candidate_proxy_label(
+                row={**row, "candidate_outcome": "executed"},
+                day_dir=day_dir,
+                ordered_day_dirs=ordered_day_dirs,
+                day_index_by_date=day_index_by_date,
+                as_of_date=None,
+                horizon_days=horizon_days,
+                frame_cache=frame_cache,
+            )
+            if str(target_type or "market_proxy").lower() in {"realized_candidate_proxy", "realized_trade_proxy"}
+            else _market_proxy_label(
+                row=row,
+                as_of_date=as_of_date,
+                horizon_days=horizon_days,
+                frame_cache=frame_cache,
+            )
         )
-        if feature_row is None:
+        if label is None:
             continue
-        side_sign = _action_side_sign(row)
-        if side_sign == 0.0:
-            continue
-        realized_gross = side_sign * _safe_float(feature_row.get("forward_price_return"))
-        execution_cost = _safe_float(row.get("expected_cost", row.get("estimated_execution_cost_pct")))
         realized_rows.append(
             {
                 **row,
-                "realized_gross_return": realized_gross,
-                "realized_net_return": float(realized_gross - execution_cost),
-                "execution_cost": execution_cost,
+                "realized_gross_return": _safe_float(label.get("forward_gross_return")),
+                "realized_net_return": _safe_float(label.get("forward_net_return")),
+                "execution_cost": float(
+                    _safe_float(label.get("forward_gross_return")) - _safe_float(label.get("forward_net_return"))
+                ),
             }
         )
     calibration_rows, calibration_summary = build_trade_ev_calibration(prediction_rows=realized_rows)
     bucket_rows = list(calibration_summary.pop("bucket_rows", []))
+    calibration_summary["prediction_row_count"] = int(len(prediction_rows))
+    calibration_summary["labeled_prediction_count"] = int(len(realized_rows))
+    calibration_summary["excluded_unlabeled_prediction_count"] = int(len(prediction_rows) - len(realized_rows))
+    calibration_summary["label_coverage_ratio"] = (
+        float(len(realized_rows) / len(prediction_rows)) if prediction_rows else 0.0
+    )
+    calibration_summary["target_type"] = str(target_type or "market_proxy")
     return _normalize_records(realized_rows), bucket_rows, calibration_summary
 
 
