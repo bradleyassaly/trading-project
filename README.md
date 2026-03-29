@@ -3117,6 +3117,8 @@ Paper trading and replay also support an expected-net-value gate.
 - The target is forward market return over the configured horizon minus estimated execution cost.
 - If there is not enough prior history, the EV gate falls back cleanly and records a warning.
 - Soft EV weighting is currently preferred over hard blocking because the EV signal has been more useful as a ranking/sizing input than as an absolute pass/fail cutoff.
+- EV hard/soft gating still uses the raw expected-net score in return units.
+- Same-day normalization and clipping can be enabled for soft weighting so sizing is more stable without changing the walk-forward target.
 
 Example:
 
@@ -3127,14 +3129,17 @@ daily_trading:
       ev_gate:
         enabled: true
         mode: soft
-        model_type: bucketed_linear
+        model_type: bucketed_mean
         training_source: candidate_decisions
         horizon_days: 5
         weight_multiplier: true
         weight_scale: 5.0
-        score_clip_min: -1.5
-        score_clip_max: 1.5
         normalize_scores: true
+        normalization_method: rank_pct
+        normalize_within: all_candidates
+        use_normalized_score_for_weighting: true
+        score_clip_min: -0.01
+        score_clip_max: 0.02
         weight_multiplier_min: 0.5
         weight_multiplier_max: 1.5
         min_expected_net_return: 0.001
@@ -3162,8 +3167,19 @@ Useful calibration fields:
 - `top_vs_bottom_bucket_spread`
 - `bucket_monotonicity`
 - `avg_ev_executed_trades`
+- `avg_raw_ev_executed_trades`
+- `avg_normalized_ev_executed_trades`
+- `avg_ev_weighting_score`
 - `avg_ev_weight_multiplier`
 - `ev_weighted_exposure`
+
+Normalization and clipping semantics:
+
+- `raw_ev_score` is the model output used for EV gate thresholds.
+- `normalized_ev_score` is computed from same-day candidates only and never uses future outcomes.
+- `ev_score_pre_clip` is the score entering clipping.
+- `ev_score_post_clip` is the clipped value.
+- `ev_weighting_score` is what soft sizing uses. When `use_normalized_score_for_weighting: true`, it uses the normalized/clipped score. When false, it uses the raw score.
 
 Current limitations:
 

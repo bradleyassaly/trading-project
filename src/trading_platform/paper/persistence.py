@@ -134,10 +134,16 @@ def _summary_markdown(summary: dict[str, Any], health_checks: list[dict[str, Any
         f"- EV gate enabled: `{summary.get('ev_gate_enabled', False)}`",
         f"- EV gate mode: `{summary.get('ev_gate_mode', 'hard')}`",
         f"- EV training source: `{summary.get('ev_gate_training_source', 'executed_trades')}`",
+        f"- EV normalization method: `{summary.get('ev_gate_normalization_method', 'zscore')}`",
+        f"- EV normalize within: `{summary.get('ev_gate_normalize_within', 'all_candidates')}`",
+        f"- EV use normalized score for weighting: `{summary.get('ev_gate_use_normalized_score_for_weighting', True)}`",
         f"- EV gate blocked count: `{summary.get('ev_gate_blocked_count', 0)}`",
         f"- Avg expected net return traded: `{summary.get('avg_expected_net_return_traded', 0.0)}`",
         f"- Avg expected net return blocked: `{summary.get('avg_expected_net_return_blocked', 0.0)}`",
         f"- Avg EV executed trades: `{summary.get('avg_ev_executed_trades', 0.0)}`",
+        f"- Avg raw EV executed trades: `{summary.get('avg_raw_ev_executed_trades', 0.0)}`",
+        f"- Avg normalized EV executed trades: `{summary.get('avg_normalized_ev_executed_trades', 0.0)}`",
+        f"- Avg EV weighting score: `{summary.get('avg_ev_weighting_score', 0.0)}`",
         f"- EV-weighted exposure: `{summary.get('ev_weighted_exposure', 0.0)}`",
         f"- Avg EV weight multiplier: `{summary.get('avg_ev_weight_multiplier', 1.0)}`",
         f"- Candidate dataset row count: `{summary.get('candidate_dataset_row_count', 0)}`",
@@ -437,6 +443,15 @@ def persist_paper_run_outputs(
         "ev_gate_training_source": str(
             paper_execution_diag.get("ev_gate_training_source", "executed_trades") or "executed_trades"
         ),
+        "ev_gate_normalization_method": str(
+            paper_execution_diag.get("ev_gate_normalization_method", "zscore") or "zscore"
+        ),
+        "ev_gate_normalize_within": str(
+            paper_execution_diag.get("ev_gate_normalize_within", "all_candidates") or "all_candidates"
+        ),
+        "ev_gate_use_normalized_score_for_weighting": bool(
+            paper_execution_diag.get("ev_gate_use_normalized_score_for_weighting", True)
+        ),
         "ev_gate_blocked_count": int(paper_execution_diag.get("ev_gate_blocked_count", 0) or 0),
         "avg_expected_net_return_traded": float(
             paper_execution_diag.get("avg_expected_net_return_traded", 0.0) or 0.0
@@ -445,6 +460,13 @@ def persist_paper_run_outputs(
             paper_execution_diag.get("avg_expected_net_return_blocked", 0.0) or 0.0
         ),
         "avg_ev_executed_trades": float(paper_execution_diag.get("avg_ev_executed_trades", 0.0) or 0.0),
+        "avg_raw_ev_executed_trades": float(
+            paper_execution_diag.get("avg_raw_ev_executed_trades", 0.0) or 0.0
+        ),
+        "avg_normalized_ev_executed_trades": float(
+            paper_execution_diag.get("avg_normalized_ev_executed_trades", 0.0) or 0.0
+        ),
+        "avg_ev_weighting_score": float(paper_execution_diag.get("avg_ev_weighting_score", 0.0) or 0.0),
         "ev_weighted_exposure": float(paper_execution_diag.get("ev_weighted_exposure", 0.0) or 0.0),
         "avg_ev_weight_multiplier": float(paper_execution_diag.get("avg_ev_weight_multiplier", 1.0) or 1.0),
         "ev_distribution": json.dumps(paper_execution_diag.get("ev_distribution", {}), sort_keys=True),

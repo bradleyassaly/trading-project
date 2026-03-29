@@ -253,7 +253,16 @@ def test_generate_rebalance_orders_ev_gate_soft_mode_scales_target_weight(monkey
                 "expected_net_return": 0.02,
                 "expected_cost": 0.001,
                 "probability_positive": 0.7,
+                "raw_ev_score": 0.02,
+                "normalized_ev_score": 0.4,
+                "ev_score_pre_clip": 0.4,
+                "ev_score_post_clip": 0.4,
+                "ev_score_clipped": False,
+                "ev_weighting_score": 0.4,
                 "ev_decision_score": 0.02,
+                "normalization_method": "rank_pct",
+                "normalize_within": "all_candidates",
+                "candidate_count_for_normalization": 1,
                 "ev_gate_threshold": 0.001,
                 "ev_gate_decision": "allow",
                 "ev_model_bucket": "global",
@@ -275,6 +284,80 @@ def test_generate_rebalance_orders_ev_gate_soft_mode_scales_target_weight(monkey
             ev_gate_mode="soft",
             ev_gate_weight_multiplier=True,
             ev_gate_weight_scale=10.0,
+            ev_gate_normalize_scores=True,
+            ev_gate_normalization_method="rank_pct",
+            ev_gate_use_normalized_score_for_weighting=True,
+            ev_gate_training_root="artifacts/daily_replay/run_current",
+            min_trade_dollars=1.0,
+        ),
+        min_trade_dollars=1.0,
+    )
+
+    assert len(result.orders) == 1
+    assert result.orders[0].target_weight == pytest.approx(1.0)
+    assert result.orders[0].provenance["ev_weight_multiplier"] == pytest.approx(5.0)
+    assert result.diagnostics["ev_gate_mode"] == "soft"
+    assert result.diagnostics["ev_weighted_exposure"] == pytest.approx(1.0)
+    assert result.diagnostics["avg_ev_executed_trades"] == pytest.approx(0.02)
+    assert result.diagnostics["avg_normalized_ev_executed_trades"] == pytest.approx(0.4)
+    assert result.diagnostics["avg_ev_weighting_score"] == pytest.approx(0.4)
+    assert result.diagnostics["candidate_dataset_row_count"] == 1
+    assert result.diagnostics["candidate_executed_count"] == 1
+    assert result.diagnostics["candidate_trade_rows"][0]["candidate_outcome"] == "executed"
+
+
+def test_generate_rebalance_orders_ev_gate_soft_mode_can_use_raw_score_for_weighting(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "trading_platform.paper.service.build_trade_ev_training_dataset",
+        lambda **kwargs: ([{"forward_net_return": 0.02}], {"training_sample_count": 1}),
+    )
+    monkeypatch.setattr(
+        "trading_platform.paper.service.train_trade_ev_model",
+        lambda **kwargs: {"training_available": True, "training_sample_count": 10},
+    )
+    monkeypatch.setattr(
+        "trading_platform.paper.service.score_trade_ev_candidates",
+        lambda **kwargs: [
+            {
+                **kwargs["candidate_rows"][0],
+                "expected_gross_return": 0.02,
+                "expected_net_return": 0.02,
+                "expected_cost": 0.001,
+                "probability_positive": 0.7,
+                "raw_ev_score": 0.02,
+                "normalized_ev_score": 0.4,
+                "ev_score_pre_clip": 0.4,
+                "ev_score_post_clip": 0.4,
+                "ev_score_clipped": False,
+                "ev_weighting_score": 0.02,
+                "ev_decision_score": 0.02,
+                "normalization_method": "rank_pct",
+                "normalize_within": "all_candidates",
+                "candidate_count_for_normalization": 1,
+                "ev_gate_threshold": 0.001,
+                "ev_gate_decision": "allow",
+                "ev_model_bucket": "global",
+                "ev_training_sample_count": 10,
+                "action_reason": "passed_ev_gate",
+            }
+        ],
+    )
+
+    result = generate_rebalance_orders(
+        as_of="2025-01-07",
+        state=PaperPortfolioState(cash=10_000.0, positions={}),
+        latest_target_weights={"AAPL": 0.2},
+        latest_prices={"AAPL": 100.0},
+        latest_scores={"AAPL": 0.9},
+        config=PaperTradingConfig(
+            symbols=["AAPL"],
+            ev_gate_enabled=True,
+            ev_gate_mode="soft",
+            ev_gate_weight_multiplier=True,
+            ev_gate_weight_scale=10.0,
+            ev_gate_normalize_scores=True,
+            ev_gate_normalization_method="rank_pct",
+            ev_gate_use_normalized_score_for_weighting=False,
             ev_gate_training_root="artifacts/daily_replay/run_current",
             min_trade_dollars=1.0,
         ),
@@ -283,13 +366,6 @@ def test_generate_rebalance_orders_ev_gate_soft_mode_scales_target_weight(monkey
 
     assert len(result.orders) == 1
     assert result.orders[0].target_weight == pytest.approx(0.24)
-    assert result.orders[0].provenance["ev_weight_multiplier"] == pytest.approx(1.2)
-    assert result.diagnostics["ev_gate_mode"] == "soft"
-    assert result.diagnostics["ev_weighted_exposure"] == pytest.approx(0.24)
-    assert result.diagnostics["avg_ev_executed_trades"] == pytest.approx(0.02)
-    assert result.diagnostics["candidate_dataset_row_count"] == 1
-    assert result.diagnostics["candidate_executed_count"] == 1
-    assert result.diagnostics["candidate_trade_rows"][0]["candidate_outcome"] == "executed"
 
 
 def test_generate_rebalance_orders_persists_score_band_blocked_candidate() -> None:

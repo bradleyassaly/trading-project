@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 from trading_platform.paper.models import PaperPortfolioState, PaperTradingConfig
 from trading_platform.paper.service import generate_rebalance_orders
@@ -336,6 +337,169 @@ def test_bucketed_trade_ev_model_scores_candidates() -> None:
     assert predictions[1]["ev_gate_decision"] == "block"
 
 
+def test_score_trade_ev_candidates_rank_pct_normalizes_same_day_candidates() -> None:
+    model = train_trade_ev_model(
+        training_rows=[
+            {
+                "date": "2025-01-03",
+                "symbol": "AAPL",
+                "strategy_id": "alpha",
+                "signal_score": 0.9,
+                "score_rank": 1,
+                "score_percentile": 0.95,
+                "current_weight": 0.0,
+                "target_weight": 0.1,
+                "weight_delta": 0.1,
+                "action": "buy",
+                "action_type": "entry",
+                "current_position_held": 0,
+                "estimated_execution_cost_pct": 0.001,
+                "recent_return_3d": 0.01,
+                "recent_return_5d": 0.02,
+                "recent_return_10d": 0.03,
+                "recent_vol_20d": 0.01,
+                "dollar_volume": 1_000_000.0,
+                "forward_gross_return": 0.03,
+                "forward_net_return": 0.025,
+                "positive_net_return": 1,
+            },
+            {
+                "date": "2025-01-04",
+                "symbol": "MSFT",
+                "strategy_id": "alpha",
+                "signal_score": 0.1,
+                "score_rank": 5,
+                "score_percentile": 0.10,
+                "current_weight": 0.0,
+                "target_weight": 0.1,
+                "weight_delta": 0.1,
+                "action": "buy",
+                "action_type": "entry",
+                "current_position_held": 0,
+                "estimated_execution_cost_pct": 0.001,
+                "recent_return_3d": -0.01,
+                "recent_return_5d": -0.02,
+                "recent_return_10d": -0.03,
+                "recent_vol_20d": 0.02,
+                "dollar_volume": 1_000_000.0,
+                "forward_gross_return": -0.02,
+                "forward_net_return": -0.025,
+                "positive_net_return": 0,
+            },
+        ],
+        model_type="bucketed_mean",
+        min_training_samples=2,
+    )
+    predictions = score_trade_ev_candidates(
+        model=model,
+        candidate_rows=[
+            {
+                "date": "2025-01-07",
+                "symbol": "AAPL",
+                "strategy_id": "alpha",
+                "signal_score": 0.9,
+                "score_rank": 1,
+                "score_percentile": 0.95,
+                "current_weight": 0.0,
+                "target_weight": 0.1,
+                "weight_delta": 0.1,
+                "action": "buy",
+                "action_type": "entry",
+                "current_position_held": 0,
+                "estimated_execution_cost_pct": 0.001,
+                "recent_return_3d": 0.01,
+                "recent_return_5d": 0.02,
+                "recent_return_10d": 0.03,
+                "recent_vol_20d": 0.01,
+                "dollar_volume": 1_000_000.0,
+            },
+            {
+                "date": "2025-01-07",
+                "symbol": "MSFT",
+                "strategy_id": "alpha",
+                "signal_score": 0.1,
+                "score_rank": 5,
+                "score_percentile": 0.10,
+                "current_weight": 0.0,
+                "target_weight": 0.1,
+                "weight_delta": 0.1,
+                "action": "buy",
+                "action_type": "entry",
+                "current_position_held": 0,
+                "estimated_execution_cost_pct": 0.001,
+                "recent_return_3d": -0.01,
+                "recent_return_5d": -0.02,
+                "recent_return_10d": -0.03,
+                "recent_vol_20d": 0.02,
+                "dollar_volume": 1_000_000.0,
+            },
+        ],
+        min_expected_net_return=0.0,
+        min_probability_positive=None,
+        risk_penalty_lambda=0.0,
+        normalize_scores=True,
+        normalization_method="rank_pct",
+        normalize_within="all_candidates",
+        use_normalized_score_for_weighting=True,
+    )
+    assert predictions[0]["raw_ev_score"] > predictions[1]["raw_ev_score"]
+    assert predictions[0]["normalized_ev_score"] > predictions[1]["normalized_ev_score"]
+    assert predictions[0]["ev_decision_score"] == predictions[0]["raw_ev_score"]
+    assert predictions[0]["ev_weighting_score"] == predictions[0]["ev_score_post_clip"]
+
+
+def test_score_trade_ev_candidates_clips_weighting_score_but_preserves_raw_score() -> None:
+    model = {
+        "model_type": "bucketed_mean",
+        "training_available": True,
+        "bucket_stats": {"0|buy|q5": {"sample_count": 10, "expected_gross_return": 0.05, "expected_net_return": 0.08, "probability_positive": 0.9}},
+        "side_stats": {},
+        "global_mean_gross_return": 0.0,
+        "global_mean_net_return": 0.0,
+        "global_probability_positive": 0.0,
+        "strategy_bias": {},
+        "training_sample_count": 10,
+    }
+    predictions = score_trade_ev_candidates(
+        model=model,
+        candidate_rows=[
+            {
+                "date": "2025-01-07",
+                "symbol": "AAPL",
+                "strategy_id": "alpha",
+                "signal_score": 0.9,
+                "score_rank": 1,
+                "score_percentile": 0.95,
+                "current_weight": 0.0,
+                "target_weight": 0.1,
+                "weight_delta": 0.1,
+                "action": "buy",
+                "action_type": "entry",
+                "current_position_held": 0,
+                "estimated_execution_cost_pct": 0.001,
+                "recent_return_3d": 0.01,
+                "recent_return_5d": 0.02,
+                "recent_return_10d": 0.03,
+                "recent_vol_20d": 0.01,
+                "dollar_volume": 1_000_000.0,
+            }
+        ],
+        min_expected_net_return=0.01,
+        min_probability_positive=None,
+        risk_penalty_lambda=0.0,
+        score_clip_min=-0.01,
+        score_clip_max=0.02,
+        normalize_scores=False,
+        use_normalized_score_for_weighting=True,
+    )
+    assert predictions[0]["raw_ev_score"] == pytest.approx(0.08)
+    assert predictions[0]["ev_score_pre_clip"] == pytest.approx(0.08)
+    assert predictions[0]["ev_score_post_clip"] == pytest.approx(0.02)
+    assert predictions[0]["ev_weighting_score"] == pytest.approx(0.02)
+    assert predictions[0]["ev_decision_score"] == pytest.approx(0.08)
+    assert predictions[0]["ev_score_clipped"] is True
+
+
 def test_bucketed_linear_trade_ev_model_scores_candidates() -> None:
     model = train_trade_ev_model(
         training_rows=[
@@ -449,6 +613,9 @@ def test_trade_ev_calibration_builds_bucket_summary() -> None:
                 "strategy_id": "alpha",
                 "expected_gross_return": 0.03,
                 "expected_net_return": 0.02,
+                "raw_ev_score": 0.02,
+                "normalized_ev_score": 0.30,
+                "ev_score_post_clip": 0.02,
                 "realized_gross_return": 0.04,
                 "realized_net_return": 0.03,
                 "execution_cost": 0.01,
@@ -461,6 +628,9 @@ def test_trade_ev_calibration_builds_bucket_summary() -> None:
                 "strategy_id": "beta",
                 "expected_gross_return": -0.01,
                 "expected_net_return": -0.02,
+                "raw_ev_score": -0.02,
+                "normalized_ev_score": -0.30,
+                "ev_score_post_clip": -0.02,
                 "realized_gross_return": -0.02,
                 "realized_net_return": -0.03,
                 "execution_cost": 0.01,
@@ -473,6 +643,8 @@ def test_trade_ev_calibration_builds_bucket_summary() -> None:
     assert len(calibration_rows) == 2
     assert "bucket_rows" in summary
     assert summary["trade_count"] == 2
+    assert "avg_raw_ev_score" in summary
+    assert "avg_normalized_ev_score" in summary
 
 
 def test_evaluate_replay_trade_ev_predictions_uses_prediction_files(monkeypatch, tmp_path: Path) -> None:

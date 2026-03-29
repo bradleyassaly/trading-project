@@ -365,6 +365,9 @@ daily_trading:
         score_clip_min: -0.5
         score_clip_max: 0.5
         normalize_scores: true
+        normalization_method: rank_pct
+        normalize_within: by_side
+        use_normalized_score_for_weighting: true
         weight_multiplier_min: 0.5
         weight_multiplier_max: 1.5
         min_expected_net_return: 0.001
@@ -398,6 +401,9 @@ daily_trading:
     assert config.ev_gate_score_clip_min == -0.5
     assert config.ev_gate_score_clip_max == 0.5
     assert config.ev_gate_normalize_scores is True
+    assert config.ev_gate_normalization_method == "rank_pct"
+    assert config.ev_gate_normalize_within == "by_side"
+    assert config.ev_gate_use_normalized_score_for_weighting is True
     assert config.ev_gate_weight_multiplier_min == 0.5
     assert config.ev_gate_weight_multiplier_max == 1.5
     assert config.ev_gate_min_expected_net_return == 0.001

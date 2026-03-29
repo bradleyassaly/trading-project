@@ -601,6 +601,11 @@ def generate_rebalance_orders(
     ev_score_clip_min = getattr(active_config, "ev_gate_score_clip_min", None)
     ev_score_clip_max = getattr(active_config, "ev_gate_score_clip_max", None)
     ev_normalize_scores = bool(getattr(active_config, "ev_gate_normalize_scores", False))
+    ev_normalization_method = str(getattr(active_config, "ev_gate_normalization_method", "zscore") or "zscore")
+    ev_normalize_within = str(getattr(active_config, "ev_gate_normalize_within", "all_candidates") or "all_candidates")
+    ev_use_normalized_score_for_weighting = bool(
+        getattr(active_config, "ev_gate_use_normalized_score_for_weighting", True)
+    )
     ev_weight_multiplier_min = getattr(active_config, "ev_gate_weight_multiplier_min", None)
     ev_weight_multiplier_max = getattr(active_config, "ev_gate_weight_multiplier_max", None)
     if ev_extreme_negative_threshold is not None:
@@ -657,6 +662,9 @@ def generate_rebalance_orders(
     diagnostics["ev_gate_score_clip_min"] = ev_score_clip_min
     diagnostics["ev_gate_score_clip_max"] = ev_score_clip_max
     diagnostics["ev_gate_normalize_scores"] = ev_normalize_scores
+    diagnostics["ev_gate_normalization_method"] = ev_normalization_method
+    diagnostics["ev_gate_normalize_within"] = ev_normalize_within
+    diagnostics["ev_gate_use_normalized_score_for_weighting"] = ev_use_normalized_score_for_weighting
     diagnostics["ev_gate_weight_multiplier_min"] = ev_weight_multiplier_min
     diagnostics["ev_gate_weight_multiplier_max"] = ev_weight_multiplier_max
     diagnostics["ev_gate_training_source"] = str(
@@ -666,6 +674,9 @@ def generate_rebalance_orders(
     ev_blocked_expected_net_returns: list[float] = []
     ev_adjusted_exposures: list[float] = []
     ev_executed_multipliers: list[float] = []
+    ev_executed_raw_scores: list[float] = []
+    ev_executed_normalized_scores: list[float] = []
+    ev_executed_weighting_scores: list[float] = []
     ev_calibration_rows: list[dict[str, Any]] = []
     ev_calibration_summary: dict[str, Any] = {}
     market_feature_cache: dict[str, pd.DataFrame] = {}
@@ -857,6 +868,9 @@ def generate_rebalance_orders(
             score_clip_min=ev_score_clip_min,
             score_clip_max=ev_score_clip_max,
             normalize_scores=ev_normalize_scores,
+            normalization_method=ev_normalization_method,
+            normalize_within=ev_normalize_within,
+            use_normalized_score_for_weighting=ev_use_normalized_score_for_weighting,
         )
         ev_prediction_lookup = {str(row.get("symbol")): dict(row) for row in scored_predictions if row.get("symbol")}
     if bool(active_config.ev_gate_enabled) and bool(ev_model.get("training_available", False)) and ev_training_rows:
@@ -869,6 +883,9 @@ def generate_rebalance_orders(
             score_clip_min=ev_score_clip_min,
             score_clip_max=ev_score_clip_max,
             normalize_scores=False,
+            normalization_method=ev_normalization_method,
+            normalize_within=ev_normalize_within,
+            use_normalized_score_for_weighting=ev_use_normalized_score_for_weighting,
         )
         ev_calibration_rows, ev_calibration_summary = build_trade_ev_calibration(
             prediction_rows=[
@@ -901,9 +918,10 @@ def generate_rebalance_orders(
             ev_prediction["ev_adjusted_target_weight"] = target_weight
             ev_prediction["ev_adjusted_weight_delta"] = weight_delta
             ev_score = float(ev_prediction.get("ev_decision_score", 0.0) or 0.0)
+            ev_weighting_score = float(ev_prediction.get("ev_weighting_score", ev_score) or ev_score)
             if ev_gate_mode == "soft":
                 if ev_weight_multiplier_enabled:
-                    ev_weight_multiplier = max(0.0, 1.0 + (ev_weight_scale * ev_score))
+                    ev_weight_multiplier = max(0.0, 1.0 + (ev_weight_scale * ev_weighting_score))
                     if ev_weight_multiplier_min is not None:
                         ev_weight_multiplier = max(ev_weight_multiplier, ev_weight_multiplier_min)
                     if ev_weight_multiplier_max is not None:
@@ -922,10 +940,11 @@ def generate_rebalance_orders(
                     provenance={
                         **dict(request.provenance or {}),
                         "ev_weight_multiplier": ev_weight_multiplier,
-                        "ev_adjusted_target_weight": ev_adjusted_target_weight,
-                        "ev_adjusted_weight_delta": ev_adjusted_weight_delta,
-                    },
-                )
+                    "ev_adjusted_target_weight": ev_adjusted_target_weight,
+                    "ev_adjusted_weight_delta": ev_adjusted_weight_delta,
+                    "ev_weighting_score": ev_weighting_score,
+                },
+            )
                 ev_prediction["ev_weight_multiplier"] = ev_weight_multiplier
                 ev_prediction["ev_adjusted_target_weight"] = ev_adjusted_target_weight
                 ev_prediction["ev_adjusted_weight_delta"] = ev_adjusted_weight_delta
@@ -952,6 +971,23 @@ def generate_rebalance_orders(
                 candidate_row_by_symbol[request.symbol]["ev_gate_decision"] = ev_prediction.get("ev_gate_decision")
                 candidate_row_by_symbol[request.symbol]["probability_positive"] = ev_prediction.get(
                     "probability_positive"
+                )
+                candidate_row_by_symbol[request.symbol]["raw_ev_score"] = ev_prediction.get("raw_ev_score")
+                candidate_row_by_symbol[request.symbol]["normalized_ev_score"] = ev_prediction.get(
+                    "normalized_ev_score"
+                )
+                candidate_row_by_symbol[request.symbol]["ev_score_pre_clip"] = ev_prediction.get("ev_score_pre_clip")
+                candidate_row_by_symbol[request.symbol]["ev_score_post_clip"] = ev_prediction.get("ev_score_post_clip")
+                candidate_row_by_symbol[request.symbol]["ev_score_clipped"] = ev_prediction.get("ev_score_clipped")
+                candidate_row_by_symbol[request.symbol]["ev_weighting_score"] = ev_prediction.get(
+                    "ev_weighting_score"
+                )
+                candidate_row_by_symbol[request.symbol]["normalization_method"] = ev_prediction.get(
+                    "normalization_method"
+                )
+                candidate_row_by_symbol[request.symbol]["normalize_within"] = ev_prediction.get("normalize_within")
+                candidate_row_by_symbol[request.symbol]["candidate_count_for_normalization"] = ev_prediction.get(
+                    "candidate_count_for_normalization"
                 )
             if ev_prediction["ev_gate_decision"] == "block":
                 ev_gate_blocked_count += 1
@@ -1045,6 +1081,9 @@ def generate_rebalance_orders(
             ev_executed_expected_net_returns.append(float(ev_prediction.get("expected_net_return", 0.0) or 0.0))
             ev_adjusted_exposures.append(abs(effective_target_weight))
             ev_executed_multipliers.append(float(ev_prediction.get("ev_weight_multiplier", 1.0) or 1.0))
+            ev_executed_raw_scores.append(float(ev_prediction.get("raw_ev_score", 0.0) or 0.0))
+            ev_executed_normalized_scores.append(float(ev_prediction.get("normalized_ev_score", 0.0) or 0.0))
+            ev_executed_weighting_scores.append(float(ev_prediction.get("ev_weighting_score", 0.0) or 0.0))
         orders.append(
             PaperOrder(
                 symbol=effective_request.symbol,
@@ -1142,6 +1181,19 @@ def generate_rebalance_orders(
         else 0.0
     )
     diagnostics["avg_ev_executed_trades"] = diagnostics["avg_expected_net_return_traded"]
+    diagnostics["avg_raw_ev_executed_trades"] = (
+        float(sum(ev_executed_raw_scores) / len(ev_executed_raw_scores)) if ev_executed_raw_scores else 0.0
+    )
+    diagnostics["avg_normalized_ev_executed_trades"] = (
+        float(sum(ev_executed_normalized_scores) / len(ev_executed_normalized_scores))
+        if ev_executed_normalized_scores
+        else 0.0
+    )
+    diagnostics["avg_ev_weighting_score"] = (
+        float(sum(ev_executed_weighting_scores) / len(ev_executed_weighting_scores))
+        if ev_executed_weighting_scores
+        else 0.0
+    )
     diagnostics["ev_weighted_exposure"] = float(sum(ev_adjusted_exposures))
     diagnostics["avg_ev_weight_multiplier"] = (
         float(sum(ev_executed_multipliers) / len(ev_executed_multipliers)) if ev_executed_multipliers else 1.0
@@ -2075,6 +2127,15 @@ def run_paper_trading_cycle_for_targets(
             "ev_gate_score_clip_min": order_result.diagnostics.get("ev_gate_score_clip_min"),
             "ev_gate_score_clip_max": order_result.diagnostics.get("ev_gate_score_clip_max"),
             "ev_gate_normalize_scores": bool(order_result.diagnostics.get("ev_gate_normalize_scores", False)),
+            "ev_gate_normalization_method": str(
+                order_result.diagnostics.get("ev_gate_normalization_method", "zscore") or "zscore"
+            ),
+            "ev_gate_normalize_within": str(
+                order_result.diagnostics.get("ev_gate_normalize_within", "all_candidates") or "all_candidates"
+            ),
+            "ev_gate_use_normalized_score_for_weighting": bool(
+                order_result.diagnostics.get("ev_gate_use_normalized_score_for_weighting", True)
+            ),
             "ev_gate_weight_multiplier_min": order_result.diagnostics.get("ev_gate_weight_multiplier_min"),
             "ev_gate_weight_multiplier_max": order_result.diagnostics.get("ev_gate_weight_multiplier_max"),
             "ev_gate_blocked_count": int(order_result.diagnostics.get("ev_gate_blocked_count", 0) or 0),
@@ -2085,6 +2146,13 @@ def run_paper_trading_cycle_for_targets(
                 order_result.diagnostics.get("avg_expected_net_return_blocked", 0.0) or 0.0
             ),
             "avg_ev_executed_trades": float(order_result.diagnostics.get("avg_ev_executed_trades", 0.0) or 0.0),
+            "avg_raw_ev_executed_trades": float(
+                order_result.diagnostics.get("avg_raw_ev_executed_trades", 0.0) or 0.0
+            ),
+            "avg_normalized_ev_executed_trades": float(
+                order_result.diagnostics.get("avg_normalized_ev_executed_trades", 0.0) or 0.0
+            ),
+            "avg_ev_weighting_score": float(order_result.diagnostics.get("avg_ev_weighting_score", 0.0) or 0.0),
             "ev_weighted_exposure": float(order_result.diagnostics.get("ev_weighted_exposure", 0.0) or 0.0),
             "avg_ev_weight_multiplier": float(order_result.diagnostics.get("avg_ev_weight_multiplier", 1.0) or 1.0),
             "ev_distribution": dict(order_result.diagnostics.get("ev_distribution", {}) or {}),

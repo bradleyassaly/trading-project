@@ -85,6 +85,9 @@ class PaperTradingConfig:
     ev_gate_score_clip_min: float | None = None
     ev_gate_score_clip_max: float | None = None
     ev_gate_normalize_scores: bool = False
+    ev_gate_normalization_method: str = "zscore"
+    ev_gate_normalize_within: str = "all_candidates"
+    ev_gate_use_normalized_score_for_weighting: bool = True
     ev_gate_weight_multiplier_min: float | None = None
     ev_gate_weight_multiplier_max: float | None = None
     ev_gate_min_expected_net_return: float = 0.0

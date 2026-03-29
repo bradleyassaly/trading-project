@@ -575,6 +575,14 @@ def load_daily_trading_workflow_config(path: str | Path) -> DailyTradingWorkflow
     _set_if_missing(payload, "ev_gate_score_clip_min", ev_gate_section, "score_clip_min")
     _set_if_missing(payload, "ev_gate_score_clip_max", ev_gate_section, "score_clip_max")
     _set_if_missing(payload, "ev_gate_normalize_scores", ev_gate_section, "normalize_scores")
+    _set_if_missing(payload, "ev_gate_normalization_method", ev_gate_section, "normalization_method")
+    _set_if_missing(payload, "ev_gate_normalize_within", ev_gate_section, "normalize_within")
+    _set_if_missing(
+        payload,
+        "ev_gate_use_normalized_score_for_weighting",
+        ev_gate_section,
+        "use_normalized_score_for_weighting",
+    )
     _set_if_missing(payload, "ev_gate_weight_multiplier_min", ev_gate_section, "weight_multiplier_min")
     _set_if_missing(payload, "ev_gate_weight_multiplier_max", ev_gate_section, "weight_multiplier_max")
     _set_if_missing(payload, "ev_gate_min_expected_net_return", ev_gate_section, "min_expected_net_return")

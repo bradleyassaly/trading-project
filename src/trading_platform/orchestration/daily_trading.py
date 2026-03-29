@@ -350,10 +350,16 @@ def _summarize_paper_run(paper_output_dir: Path) -> dict[str, Any]:
             "ev_gate_model_type": "bucketed_mean",
             "ev_gate_mode": "hard",
             "ev_gate_training_source": "executed_trades",
+            "ev_gate_normalization_method": "zscore",
+            "ev_gate_normalize_within": "all_candidates",
+            "ev_gate_use_normalized_score_for_weighting": True,
             "ev_gate_blocked_count": 0,
             "avg_expected_net_return_traded": 0.0,
             "avg_expected_net_return_blocked": 0.0,
             "avg_ev_executed_trades": 0.0,
+            "avg_raw_ev_executed_trades": 0.0,
+            "avg_normalized_ev_executed_trades": 0.0,
+            "avg_ev_weighting_score": 0.0,
             "ev_weighted_exposure": 0.0,
             "avg_ev_weight_multiplier": 1.0,
             "ev_distribution": {},
@@ -394,10 +400,24 @@ def _summarize_paper_run(paper_output_dir: Path) -> dict[str, Any]:
         "ev_gate_training_source": str(
             summary_payload.get("ev_gate_training_source", "executed_trades") or "executed_trades"
         ),
+        "ev_gate_normalization_method": str(
+            summary_payload.get("ev_gate_normalization_method", "zscore") or "zscore"
+        ),
+        "ev_gate_normalize_within": str(
+            summary_payload.get("ev_gate_normalize_within", "all_candidates") or "all_candidates"
+        ),
+        "ev_gate_use_normalized_score_for_weighting": bool(
+            summary_payload.get("ev_gate_use_normalized_score_for_weighting", True)
+        ),
         "ev_gate_blocked_count": int(summary_payload.get("ev_gate_blocked_count") or 0),
         "avg_expected_net_return_traded": float(summary_payload.get("avg_expected_net_return_traded") or 0.0),
         "avg_expected_net_return_blocked": float(summary_payload.get("avg_expected_net_return_blocked") or 0.0),
         "avg_ev_executed_trades": float(summary_payload.get("avg_ev_executed_trades") or 0.0),
+        "avg_raw_ev_executed_trades": float(summary_payload.get("avg_raw_ev_executed_trades") or 0.0),
+        "avg_normalized_ev_executed_trades": float(
+            summary_payload.get("avg_normalized_ev_executed_trades") or 0.0
+        ),
+        "avg_ev_weighting_score": float(summary_payload.get("avg_ev_weighting_score") or 0.0),
         "ev_weighted_exposure": float(summary_payload.get("ev_weighted_exposure") or 0.0),
         "avg_ev_weight_multiplier": float(summary_payload.get("avg_ev_weight_multiplier") or 1.0),
         "ev_distribution": _coerce_mapping(summary_payload.get("ev_distribution")),
@@ -534,10 +554,19 @@ def _write_summary_artifacts(
         "ev_gate_model_type": paper_summary.get("ev_gate_model_type", "bucketed_mean"),
         "ev_gate_mode": paper_summary.get("ev_gate_mode", "hard"),
         "ev_gate_training_source": paper_summary.get("ev_gate_training_source", "executed_trades"),
+        "ev_gate_normalization_method": paper_summary.get("ev_gate_normalization_method", "zscore"),
+        "ev_gate_normalize_within": paper_summary.get("ev_gate_normalize_within", "all_candidates"),
+        "ev_gate_use_normalized_score_for_weighting": paper_summary.get(
+            "ev_gate_use_normalized_score_for_weighting",
+            True,
+        ),
         "ev_gate_blocked_count": paper_summary.get("ev_gate_blocked_count", 0),
         "avg_expected_net_return_traded": paper_summary.get("avg_expected_net_return_traded", 0.0),
         "avg_expected_net_return_blocked": paper_summary.get("avg_expected_net_return_blocked", 0.0),
         "avg_ev_executed_trades": paper_summary.get("avg_ev_executed_trades", 0.0),
+        "avg_raw_ev_executed_trades": paper_summary.get("avg_raw_ev_executed_trades", 0.0),
+        "avg_normalized_ev_executed_trades": paper_summary.get("avg_normalized_ev_executed_trades", 0.0),
+        "avg_ev_weighting_score": paper_summary.get("avg_ev_weighting_score", 0.0),
         "ev_weighted_exposure": paper_summary.get("ev_weighted_exposure", 0.0),
         "avg_ev_weight_multiplier": paper_summary.get("avg_ev_weight_multiplier", 1.0),
         "ev_distribution": paper_summary.get("ev_distribution", {}),
@@ -595,10 +624,16 @@ def _write_summary_artifacts(
         f"- ev_gate_model_type: `{paper_summary.get('ev_gate_model_type', 'bucketed_mean')}`",
         f"- ev_gate_mode: `{paper_summary.get('ev_gate_mode', 'hard')}`",
         f"- ev_gate_training_source: `{paper_summary.get('ev_gate_training_source', 'executed_trades')}`",
+        f"- ev_gate_normalization_method: `{paper_summary.get('ev_gate_normalization_method', 'zscore')}`",
+        f"- ev_gate_normalize_within: `{paper_summary.get('ev_gate_normalize_within', 'all_candidates')}`",
+        f"- ev_gate_use_normalized_score_for_weighting: `{paper_summary.get('ev_gate_use_normalized_score_for_weighting', True)}`",
         f"- ev_gate_blocked_count: `{paper_summary.get('ev_gate_blocked_count', 0)}`",
         f"- avg_expected_net_return_traded: `{paper_summary.get('avg_expected_net_return_traded', 0.0)}`",
         f"- avg_expected_net_return_blocked: `{paper_summary.get('avg_expected_net_return_blocked', 0.0)}`",
         f"- avg_ev_executed_trades: `{paper_summary.get('avg_ev_executed_trades', 0.0)}`",
+        f"- avg_raw_ev_executed_trades: `{paper_summary.get('avg_raw_ev_executed_trades', 0.0)}`",
+        f"- avg_normalized_ev_executed_trades: `{paper_summary.get('avg_normalized_ev_executed_trades', 0.0)}`",
+        f"- avg_ev_weighting_score: `{paper_summary.get('avg_ev_weighting_score', 0.0)}`",
         f"- ev_weighted_exposure: `{paper_summary.get('ev_weighted_exposure', 0.0)}`",
         f"- avg_ev_weight_multiplier: `{paper_summary.get('avg_ev_weight_multiplier', 1.0)}`",
         f"- candidate_dataset_row_count: `{paper_summary.get('candidate_dataset_row_count', 0)}`",
@@ -753,6 +788,15 @@ def _build_multi_strategy_paper_config(result, reserve_cash_pct: float, workflow
         ev_gate_score_clip_min=getattr(workflow_config, "ev_gate_score_clip_min", None),
         ev_gate_score_clip_max=getattr(workflow_config, "ev_gate_score_clip_max", None),
         ev_gate_normalize_scores=bool(getattr(workflow_config, "ev_gate_normalize_scores", False)),
+        ev_gate_normalization_method=str(
+            getattr(workflow_config, "ev_gate_normalization_method", "zscore") or "zscore"
+        ),
+        ev_gate_normalize_within=str(
+            getattr(workflow_config, "ev_gate_normalize_within", "all_candidates") or "all_candidates"
+        ),
+        ev_gate_use_normalized_score_for_weighting=bool(
+            getattr(workflow_config, "ev_gate_use_normalized_score_for_weighting", True)
+        ),
         ev_gate_weight_multiplier_min=getattr(workflow_config, "ev_gate_weight_multiplier_min", None),
         ev_gate_weight_multiplier_max=getattr(workflow_config, "ev_gate_weight_multiplier_max", None),
         ev_gate_min_expected_net_return=float(

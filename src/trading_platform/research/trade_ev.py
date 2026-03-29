@@ -69,6 +69,15 @@ CANDIDATE_COLUMNS = [
     "ev_gate_mode",
     "ev_gate_decision",
     "probability_positive",
+    "raw_ev_score",
+    "normalized_ev_score",
+    "ev_score_pre_clip",
+    "ev_score_post_clip",
+    "ev_score_clipped",
+    "ev_weighting_score",
+    "normalization_method",
+    "normalize_within",
+    "candidate_count_for_normalization",
 ]
 
 PREDICTION_COLUMNS = [
@@ -95,6 +104,14 @@ PREDICTION_COLUMNS = [
     "expected_cost",
     "probability_positive",
     "raw_ev_score",
+    "normalized_ev_score",
+    "ev_score_pre_clip",
+    "ev_score_post_clip",
+    "ev_score_clipped",
+    "ev_weighting_score",
+    "normalization_method",
+    "normalize_within",
+    "candidate_count_for_normalization",
     "ev_decision_score",
     "ev_gate_threshold",
     "ev_gate_decision",
@@ -114,6 +131,9 @@ CALIBRATION_COLUMNS = [
     "bucket",
     "expected_gross_return",
     "expected_net_return",
+    "raw_ev_score",
+    "normalized_ev_score",
+    "ev_score_post_clip",
     "realized_gross_return",
     "realized_net_return",
     "execution_cost",
@@ -137,6 +157,9 @@ LINEAR_FEATURE_COLUMNS = [
     "recent_vol_20d",
     "log_dollar_volume",
     "strategy_bias",
+    "score_vol_interaction",
+    "score_cost_interaction",
+    "weight_cost_interaction",
 ]
 
 
@@ -172,6 +195,12 @@ def _read_csv_frame(path: str | Path) -> pd.DataFrame:
         return pd.read_csv(csv_path)
     except (pd.errors.EmptyDataError, pd.errors.ParserError):
         return pd.DataFrame()
+
+
+def _frame_numeric_column(frame: pd.DataFrame, column: str, default: float = 0.0) -> pd.Series:
+    if column in frame.columns:
+        return pd.to_numeric(frame[column], errors="coerce").fillna(default)
+    return pd.Series([default] * len(frame.index), index=frame.index, dtype=float)
 
 
 def _iter_replay_day_dirs(history_root: str | Path, *, as_of_date: str) -> list[Path]:
@@ -376,6 +405,9 @@ def _feature_matrix(frame: pd.DataFrame, strategy_bias: dict[str, float]) -> np.
     dollar_volume = pd.to_numeric(frame["dollar_volume"], errors="coerce").fillna(0.0).clip(lower=0.0)
     matrix["log_dollar_volume"] = np.log1p(dollar_volume)
     matrix["strategy_bias"] = frame["strategy_id"].map(lambda value: strategy_bias.get(str(value or ""), 0.0)).astype(float)
+    matrix["score_vol_interaction"] = matrix["score_percentile"] * matrix["recent_vol_20d"]
+    matrix["score_cost_interaction"] = matrix["score_percentile"] * matrix["estimated_execution_cost_pct"]
+    matrix["weight_cost_interaction"] = matrix["weight_delta_abs"] * matrix["estimated_execution_cost_pct"]
     return matrix[LINEAR_FEATURE_COLUMNS].to_numpy(dtype=float)
 
 
@@ -738,6 +770,77 @@ def train_trade_ev_model(
     return model
 
 
+def _normalization_group_series(frame: pd.DataFrame, normalize_within: str) -> pd.Series:
+    mode = str(normalize_within or "all_candidates").lower()
+    if mode == "by_side":
+        return frame["weight_delta"].map(lambda value: "buy" if _safe_float(value) > 0.0 else "sell").astype(str)
+    if mode == "by_strategy":
+        return frame["strategy_id"].astype(str).replace({"": "unknown"})
+    return pd.Series(["all_candidates"] * len(frame.index), index=frame.index, dtype=object)
+
+
+def _normalize_candidate_scores(
+    *,
+    frame: pd.DataFrame,
+    raw_score_column: str,
+    normalize_scores: bool,
+    normalization_method: str,
+    normalize_within: str,
+    score_clip_min: float | None,
+    score_clip_max: float | None,
+) -> pd.DataFrame:
+    result = frame.copy()
+    result["raw_ev_score"] = pd.to_numeric(result[raw_score_column], errors="coerce").fillna(0.0)
+    result["normalization_method"] = str(normalization_method if normalize_scores else "disabled")
+    result["normalize_within"] = str(normalize_within if normalize_scores else "all_candidates")
+    result["normalized_ev_score"] = result["raw_ev_score"]
+    result["candidate_count_for_normalization"] = len(result.index)
+    if normalize_scores and not result.empty:
+        method = str(normalization_method or "zscore").lower()
+        groups = _normalization_group_series(result, normalize_within)
+        normalized = pd.Series(index=result.index, dtype=float)
+        counts = pd.Series(index=result.index, dtype=float)
+        for _, group_frame in result.groupby(groups, dropna=False):
+            series = pd.to_numeric(group_frame["raw_ev_score"], errors="coerce").fillna(0.0)
+            if series.empty:
+                continue
+            counts.loc[group_frame.index] = float(len(series.index))
+            if method == "rank_pct":
+                if len(series.index) == 1:
+                    normalized.loc[group_frame.index] = 0.0
+                else:
+                    ranks = series.rank(method="average").astype(float)
+                    normalized.loc[group_frame.index] = (((ranks - 1.0) / float(len(series.index) - 1)) - 0.5).astype(
+                        float
+                    )
+            elif method == "robust_zscore":
+                median = float(series.median())
+                mad = float((series - median).abs().median())
+                scale = 1.4826 * mad
+                if scale <= 0.0:
+                    normalized.loc[group_frame.index] = 0.0
+                else:
+                    normalized.loc[group_frame.index] = ((series - median) / scale).astype(float)
+            else:
+                std = float(series.std(ddof=0) or 0.0)
+                if std <= 0.0:
+                    normalized.loc[group_frame.index] = 0.0
+                else:
+                    normalized.loc[group_frame.index] = ((series - float(series.mean())) / std).astype(float)
+        result["normalized_ev_score"] = normalized.fillna(0.0)
+        result["candidate_count_for_normalization"] = counts.fillna(float(len(result.index))).astype(int)
+    result["ev_score_pre_clip"] = result["normalized_ev_score"] if normalize_scores else result["raw_ev_score"]
+    result["ev_score_post_clip"] = result["ev_score_pre_clip"].astype(float)
+    if score_clip_min is not None:
+        result["ev_score_post_clip"] = result["ev_score_post_clip"].clip(lower=float(score_clip_min))
+    if score_clip_max is not None:
+        result["ev_score_post_clip"] = result["ev_score_post_clip"].clip(upper=float(score_clip_max))
+    result["ev_score_clipped"] = (
+        (result["ev_score_post_clip"] - result["ev_score_pre_clip"]).abs() > 1e-12
+    ).astype(bool)
+    return result
+
+
 def score_trade_ev_candidates(
     *,
     model: dict[str, Any],
@@ -748,6 +851,9 @@ def score_trade_ev_candidates(
     score_clip_min: float | None = None,
     score_clip_max: float | None = None,
     normalize_scores: bool = False,
+    normalization_method: str = "zscore",
+    normalize_within: str = "all_candidates",
+    use_normalized_score_for_weighting: bool = True,
 ) -> list[dict[str, Any]]:
     predictions: list[dict[str, Any]] = []
     bucket_stats = dict(model.get("bucket_stats") or {})
@@ -810,26 +916,53 @@ def score_trade_ev_candidates(
                 "ev_training_sample_count": sample_value,
             }
         )
-    score_series = pd.Series(raw_scores, dtype=float) if raw_scores else pd.Series(dtype=float)
-    if normalize_scores and not score_series.empty and float(score_series.std(ddof=0) or 0.0) > 0.0:
-        final_scores = (score_series - float(score_series.mean())) / float(score_series.std(ddof=0))
-    else:
-        final_scores = score_series.copy()
-    if score_clip_min is not None:
-        final_scores = final_scores.clip(lower=float(score_clip_min))
-    if score_clip_max is not None:
-        final_scores = final_scores.clip(upper=float(score_clip_max))
+    prediction_frame = pd.DataFrame(staged_predictions)
+    if not prediction_frame.empty:
+        prediction_frame = _normalize_candidate_scores(
+            frame=prediction_frame,
+            raw_score_column="raw_ev_score",
+            normalize_scores=normalize_scores,
+            normalization_method=normalization_method,
+            normalize_within=normalize_within,
+            score_clip_min=score_clip_min,
+            score_clip_max=score_clip_max,
+        )
     for index, row in enumerate(staged_predictions):
-        ev_score = float(final_scores.iloc[index]) if not final_scores.empty else float(row["raw_ev_score"])
+        normalized_row = prediction_frame.iloc[index] if not prediction_frame.empty else None
+        raw_ev_score = float(row["raw_ev_score"])
+        normalized_ev_score = (
+            float(normalized_row["normalized_ev_score"]) if normalized_row is not None else raw_ev_score
+        )
+        ev_score_pre_clip = (
+            float(normalized_row["ev_score_pre_clip"]) if normalized_row is not None else raw_ev_score
+        )
+        ev_score_post_clip = (
+            float(normalized_row["ev_score_post_clip"]) if normalized_row is not None else raw_ev_score
+        )
+        ev_weighting_score = ev_score_post_clip if use_normalized_score_for_weighting else raw_ev_score
         decision = "allow"
-        if ev_score < float(min_expected_net_return):
+        if raw_ev_score < float(min_expected_net_return):
             decision = "block"
         if min_probability_positive is not None and float(row["probability_positive"]) < float(min_probability_positive):
             decision = "block"
         predictions.append(
             {
                 **row,
-                "ev_decision_score": ev_score,
+                "normalized_ev_score": normalized_ev_score,
+                "ev_score_pre_clip": ev_score_pre_clip,
+                "ev_score_post_clip": ev_score_post_clip,
+                "ev_score_clipped": bool(normalized_row["ev_score_clipped"]) if normalized_row is not None else False,
+                "ev_weighting_score": ev_weighting_score,
+                "normalization_method": str(
+                    normalized_row["normalization_method"] if normalized_row is not None else "disabled"
+                ),
+                "normalize_within": str(
+                    normalized_row["normalize_within"] if normalized_row is not None else "all_candidates"
+                ),
+                "candidate_count_for_normalization": int(
+                    normalized_row["candidate_count_for_normalization"] if normalized_row is not None else len(staged_predictions)
+                ),
+                "ev_decision_score": raw_ev_score,
                 "ev_gate_threshold": float(min_expected_net_return),
                 "ev_gate_decision": decision,
                 "action_reason": "blocked_by_ev_gate" if decision == "block" else "passed_ev_gate",
@@ -852,16 +985,22 @@ def build_trade_ev_calibration(
             "calibration_error": 0.0,
             "top_bucket_realized_net_return": 0.0,
             "bottom_bucket_realized_net_return": 0.0,
+            "avg_raw_ev_score": 0.0,
+            "avg_normalized_ev_score": 0.0,
+            "avg_ev_score_post_clip": 0.0,
         }
         return [], empty_summary
     frame = pd.DataFrame(prediction_rows)
-    frame["expected_net_return"] = pd.to_numeric(frame["expected_net_return"], errors="coerce").fillna(0.0)
-    frame["expected_gross_return"] = pd.to_numeric(frame["expected_gross_return"], errors="coerce").fillna(0.0)
-    frame["realized_net_return"] = pd.to_numeric(frame["realized_net_return"], errors="coerce").fillna(0.0)
-    frame["realized_gross_return"] = pd.to_numeric(frame["realized_gross_return"], errors="coerce").fillna(0.0)
-    frame["execution_cost"] = pd.to_numeric(frame["execution_cost"], errors="coerce").fillna(0.0)
-    frame["probability_positive"] = pd.to_numeric(frame["probability_positive"], errors="coerce").fillna(0.0)
-    frame["ev_weight_multiplier"] = pd.to_numeric(frame.get("ev_weight_multiplier"), errors="coerce").fillna(1.0)
+    frame["expected_net_return"] = _frame_numeric_column(frame, "expected_net_return", 0.0)
+    frame["expected_gross_return"] = _frame_numeric_column(frame, "expected_gross_return", 0.0)
+    frame["realized_net_return"] = _frame_numeric_column(frame, "realized_net_return", 0.0)
+    frame["realized_gross_return"] = _frame_numeric_column(frame, "realized_gross_return", 0.0)
+    frame["execution_cost"] = _frame_numeric_column(frame, "execution_cost", 0.0)
+    frame["probability_positive"] = _frame_numeric_column(frame, "probability_positive", 0.0)
+    frame["ev_weight_multiplier"] = _frame_numeric_column(frame, "ev_weight_multiplier", 1.0)
+    frame["raw_ev_score"] = _frame_numeric_column(frame, "raw_ev_score", 0.0)
+    frame["normalized_ev_score"] = _frame_numeric_column(frame, "normalized_ev_score", 0.0)
+    frame["ev_score_post_clip"] = _frame_numeric_column(frame, "ev_score_post_clip", 0.0)
     if "date" not in frame.columns:
         frame["date"] = ""
     if "symbol" not in frame.columns:
@@ -881,6 +1020,9 @@ def build_trade_ev_calibration(
             realized_hit_rate=("positive_realized_net_return", "mean"),
             avg_execution_cost=("execution_cost", "mean"),
             avg_weight_multiplier=("ev_weight_multiplier", "mean"),
+            avg_raw_ev_score=("raw_ev_score", "mean"),
+            avg_normalized_ev_score=("normalized_ev_score", "mean"),
+            avg_ev_score_post_clip=("ev_score_post_clip", "mean"),
         )
         .reset_index()
         .sort_values("bucket", kind="stable")
@@ -901,6 +1043,9 @@ def build_trade_ev_calibration(
         "calibration_error": calibration_error,
         "top_bucket_realized_net_return": float(bucket_frame.iloc[-1]["avg_realized_net_return"]),
         "bottom_bucket_realized_net_return": float(bucket_frame.iloc[0]["avg_realized_net_return"]),
+        "avg_raw_ev_score": float(frame["raw_ev_score"].mean()),
+        "avg_normalized_ev_score": float(frame["normalized_ev_score"].mean()),
+        "avg_ev_score_post_clip": float(frame["ev_score_post_clip"].mean()),
         "bucket_rows": bucket_frame.astype(object).where(pd.notna(bucket_frame), None).to_dict(orient="records"),
     }
     calibration_rows = frame[CALIBRATION_COLUMNS].to_dict(orient="records")
