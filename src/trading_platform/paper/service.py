@@ -66,6 +66,11 @@ from trading_platform.research.trade_ev import (
     train_trade_ev_model,
     write_trade_ev_artifacts,
 )
+from trading_platform.research.trade_ev_regression import (
+    build_trade_ev_regression_history_dataset,
+    score_trade_ev_regression_candidates,
+    train_trade_ev_regression_model,
+)
 from trading_platform.research.xsec_momentum import run_xsec_momentum_topn
 from trading_platform.signals.common import normalize_price_frame
 from trading_platform.signals.loaders import load_feature_frame, resolve_feature_frame_path
@@ -458,6 +463,21 @@ def _dominant_strategy_id(provenance: dict[str, Any] | None) -> str | None:
     return str(strategy_id) if strategy_id else None
 
 
+def _dominant_signal_family(provenance: dict[str, Any] | None) -> str | None:
+    strategy_rows = list((provenance or {}).get("strategy_rows") or [])
+    ordered = sorted(
+        strategy_rows,
+        key=lambda row: abs(float((row or {}).get("ownership_share", 0.0) or 0.0)),
+        reverse=True,
+    )
+    for row in ordered:
+        family = row.get("signal_family")
+        if family:
+            return str(family)
+    families = list((provenance or {}).get("signal_families") or [])
+    return str(families[0]) if families else None
+
+
 def _ev_distribution(values: list[float]) -> dict[str, float]:
     if not values:
         return {
@@ -614,6 +634,12 @@ def generate_rebalance_orders(
     )
     ev_weight_multiplier_min = getattr(active_config, "ev_gate_weight_multiplier_min", None)
     ev_weight_multiplier_max = getattr(active_config, "ev_gate_weight_multiplier_max", None)
+    requested_ev_model_type = str(getattr(active_config, "ev_gate_model_type", "bucketed_mean") or "bucketed_mean")
+    execution_ev_model_type = requested_ev_model_type
+    ev_model_fallback_reason: str | None = None
+    if requested_ev_model_type.lower() == "regression":
+        execution_ev_model_type = "bucketed_mean"
+        ev_model_fallback_reason = "regression_model_is_soft_weight_only_for_now"
     if ev_extreme_negative_threshold is not None:
         ev_extreme_negative_threshold = float(ev_extreme_negative_threshold)
     if ev_weight_multiplier_min is not None:
@@ -651,20 +677,31 @@ def generate_rebalance_orders(
                 }
         ev_model = train_trade_ev_model(
             training_rows=ev_training_rows,
-            model_type=active_config.ev_gate_model_type,
+            model_type=execution_ev_model_type,
             min_training_samples=int(active_config.ev_gate_min_training_samples),
         )
         ev_training_summary = {
             **dict(ev_training_summary or {}),
             "requested_training_source": ev_requested_training_source,
             "training_source": str((ev_training_summary or {}).get("training_source") or ev_requested_training_source),
-            "model_type": active_config.ev_gate_model_type,
+            "requested_model_type": requested_ev_model_type,
+            "model_type": execution_ev_model_type,
             "training_available": bool(ev_model.get("training_available", False)),
             "training_sample_count": int(ev_model.get("training_sample_count", len(ev_training_rows))),
         }
+        if requested_ev_model_type.lower() == "regression":
+            ev_training_summary["fallback_reason"] = "regression_model_is_diagnostics_only_for_now"
+    regression_training_rows: list[dict[str, Any]] = []
+    regression_training_summary: dict[str, Any] = {}
+    regression_model: dict[str, Any] = {}
+    regression_prediction_lookup: dict[str, dict[str, Any]] = {}
     diagnostics["ev_gate_enabled"] = bool(active_config.ev_gate_enabled)
     diagnostics["ev_gate_training_summary"] = ev_training_summary
-    diagnostics["ev_gate_model_type"] = str(active_config.ev_gate_model_type)
+    diagnostics["ev_gate_model_type"] = str(execution_ev_model_type)
+    diagnostics["ev_gate_requested_model_type"] = str(requested_ev_model_type)
+    diagnostics["ev_model_type_requested"] = str(requested_ev_model_type)
+    diagnostics["ev_model_type_used"] = str(execution_ev_model_type)
+    diagnostics["ev_model_fallback_reason"] = ev_model_fallback_reason
     diagnostics["ev_gate_target_type"] = ev_target_type
     diagnostics["ev_gate_hybrid_alpha"] = ev_hybrid_alpha
     diagnostics["ev_gate_mode"] = ev_gate_mode
@@ -689,6 +726,11 @@ def generate_rebalance_orders(
     ev_executed_raw_scores: list[float] = []
     ev_executed_normalized_scores: list[float] = []
     ev_executed_weighting_scores: list[float] = []
+    regression_prediction_available_count = 0
+    regression_prediction_missing_count = 0
+    regression_executed_scores: list[float] = []
+    regression_executed_weighting_scores: list[float] = []
+    regression_adjusted_exposures: list[float] = []
     ev_calibration_rows: list[dict[str, Any]] = []
     ev_calibration_summary: dict[str, Any] = {}
     market_feature_cache: dict[str, pd.DataFrame] = {}
@@ -745,9 +787,11 @@ def generate_rebalance_orders(
             "date": as_of,
             "symbol": symbol,
             "strategy_id": _dominant_strategy_id((provenance_by_symbol or {}).get(symbol)),
+            "signal_family": _dominant_signal_family((provenance_by_symbol or {}).get(symbol)),
             "signal_score": band_row.get("score_value"),
             "score_rank": band_row.get("score_rank"),
             "score_percentile": band_row.get("score_percentile"),
+            "expected_horizon_days": int(active_config.ev_gate_horizon_days or 5),
             "current_weight": current_weight,
             "target_weight": adjusted_target_weight,
             "weight_delta": adjusted_weight_delta,
@@ -829,9 +873,11 @@ def generate_rebalance_orders(
             "date": as_of,
             "symbol": request.symbol,
             "strategy_id": _dominant_strategy_id(request.provenance),
+            "signal_family": _dominant_signal_family(request.provenance),
             "signal_score": band_row.get("score_value"),
             "score_rank": band_row.get("score_rank"),
             "score_percentile": band_row.get("score_percentile"),
+            "expected_horizon_days": int(active_config.ev_gate_horizon_days or 5),
             "current_weight": current_weight,
             "target_weight": target_weight,
             "weight_delta": weight_delta,
@@ -865,6 +911,12 @@ def generate_rebalance_orders(
                 "candidate_row": candidate_row,
             }
         )
+    regression_requested_for_soft_weight = (
+        bool(active_config.ev_gate_enabled)
+        and requested_ev_model_type.lower() == "regression"
+        and ev_gate_mode == "soft"
+        and bool(active_config.ev_gate_weight_multiplier)
+    )
     ev_prediction_lookup: dict[str, dict[str, Any]] = {}
     if (
         bool(active_config.ev_gate_enabled)
@@ -885,6 +937,32 @@ def generate_rebalance_orders(
             use_normalized_score_for_weighting=ev_use_normalized_score_for_weighting,
         )
         ev_prediction_lookup = {str(row.get("symbol")): dict(row) for row in scored_predictions if row.get("symbol")}
+    if regression_requested_for_soft_weight and as_of and request_contexts:
+        regression_training_rows, regression_training_summary = build_trade_ev_regression_history_dataset(
+            history_root=active_config.ev_gate_training_root,
+            as_of_date=as_of,
+            expected_horizon_days=int(active_config.ev_gate_horizon_days or 5),
+        )
+        regression_model = train_trade_ev_regression_model(
+            training_rows=regression_training_rows,
+            min_training_samples=int(active_config.ev_gate_min_training_samples),
+        )
+        if bool(regression_model.get("training_available", False)):
+            regression_predictions = score_trade_ev_regression_candidates(
+                model=regression_model,
+                candidate_rows=[dict(row["candidate_row"]) for row in request_contexts],
+                score_clip_min=ev_score_clip_min,
+                score_clip_max=ev_score_clip_max,
+                normalize_scores=ev_normalize_scores,
+                normalization_method=ev_normalization_method,
+                normalize_within=ev_normalize_within,
+                use_normalized_score_for_weighting=ev_use_normalized_score_for_weighting,
+            )
+            regression_prediction_lookup = {
+                str(row.get("symbol")): dict(row) for row in regression_predictions if row.get("symbol")
+            }
+        else:
+            ev_model_fallback_reason = "regression_predictions_unavailable"
     if bool(active_config.ev_gate_enabled) and bool(ev_model.get("training_available", False)) and ev_training_rows:
         training_predictions = score_trade_ev_candidates(
             model=ev_model,
@@ -913,16 +991,20 @@ def generate_rebalance_orders(
         )
     for context in request_contexts:
         request = context["request"]
+        current_price = float(context["current_price"])
         current_weight = float(context["current_weight"])
         requested_target_weight = float(context["requested_target_weight"])
         band_row = dict(context["band_row"])
         target_weight = float(context["target_weight"])
         weight_delta = float(context["weight_delta"])
         ev_prediction: dict[str, Any] | None = None
+        regression_prediction: dict[str, Any] | None = None
         effective_request = request
         ev_adjusted_target_weight = target_weight
         ev_adjusted_weight_delta = weight_delta
         ev_weight_multiplier = 1.0
+        ev_model_type_used = execution_ev_model_type
+        local_ev_fallback_reason = ev_model_fallback_reason
         if bool(active_config.ev_gate_enabled) and bool(ev_model.get("training_available", False)):
             ev_prediction = dict(ev_prediction_lookup.get(request.symbol) or {})
             ev_prediction["ev_gate_mode"] = ev_gate_mode
@@ -931,6 +1013,21 @@ def generate_rebalance_orders(
             ev_prediction["ev_adjusted_weight_delta"] = weight_delta
             ev_score = float(ev_prediction.get("ev_decision_score", 0.0) or 0.0)
             ev_weighting_score = float(ev_prediction.get("ev_weighting_score", ev_score) or ev_score)
+            if regression_requested_for_soft_weight:
+                regression_prediction = dict(regression_prediction_lookup.get(request.symbol) or {})
+                if bool(regression_prediction.get("prediction_available", False)):
+                    regression_prediction_available_count += 1
+                    ev_weighting_score = float(
+                        regression_prediction.get("ev_weighting_score", regression_prediction.get("predicted_ev", 0.0))
+                        or 0.0
+                    )
+                    ev_model_type_used = "regression"
+                    local_ev_fallback_reason = None
+                else:
+                    regression_prediction_missing_count += 1
+                    if local_ev_fallback_reason is None:
+                        local_ev_fallback_reason = "regression_prediction_missing_for_candidate"
+            ev_prediction["ev_weighting_score"] = ev_weighting_score
             if ev_gate_mode == "soft":
                 if ev_weight_multiplier_enabled:
                     ev_weight_multiplier = max(0.0, 1.0 + (ev_weight_scale * ev_weighting_score))
@@ -960,6 +1057,17 @@ def generate_rebalance_orders(
                 ev_prediction["ev_weight_multiplier"] = ev_weight_multiplier
                 ev_prediction["ev_adjusted_target_weight"] = ev_adjusted_target_weight
                 ev_prediction["ev_adjusted_weight_delta"] = ev_adjusted_weight_delta
+                ev_prediction["ev_model_type_requested"] = requested_ev_model_type
+                ev_prediction["ev_model_type_used"] = ev_model_type_used
+                ev_prediction["ev_model_fallback_reason"] = local_ev_fallback_reason
+                if regression_prediction is not None:
+                    ev_prediction["regression_raw_ev_score"] = regression_prediction.get("regression_raw_ev_score")
+                    ev_prediction["regression_normalized_ev_score"] = regression_prediction.get(
+                        "regression_normalized_ev_score"
+                    )
+                    ev_prediction["regression_ev_score_post_clip"] = regression_prediction.get(
+                        "regression_ev_score_post_clip"
+                    )
                 if abs(ev_adjusted_target_weight - target_weight) <= 1e-12:
                     ev_prediction["ev_gate_decision"] = "allow"
                     ev_prediction["action_reason"] = "passed_ev_soft_gate"
@@ -1000,6 +1108,18 @@ def generate_rebalance_orders(
                 candidate_row_by_symbol[request.symbol]["normalize_within"] = ev_prediction.get("normalize_within")
                 candidate_row_by_symbol[request.symbol]["candidate_count_for_normalization"] = ev_prediction.get(
                     "candidate_count_for_normalization"
+                )
+                candidate_row_by_symbol[request.symbol]["ev_model_type_requested"] = requested_ev_model_type
+                candidate_row_by_symbol[request.symbol]["ev_model_type_used"] = ev_model_type_used
+                candidate_row_by_symbol[request.symbol]["ev_model_fallback_reason"] = local_ev_fallback_reason
+                candidate_row_by_symbol[request.symbol]["regression_raw_ev_score"] = (
+                    regression_prediction.get("regression_raw_ev_score") if regression_prediction else None
+                )
+                candidate_row_by_symbol[request.symbol]["regression_normalized_ev_score"] = (
+                    regression_prediction.get("regression_normalized_ev_score") if regression_prediction else None
+                )
+                candidate_row_by_symbol[request.symbol]["regression_ev_score_post_clip"] = (
+                    regression_prediction.get("regression_ev_score_post_clip") if regression_prediction else None
                 )
             if ev_prediction["ev_gate_decision"] == "block":
                 ev_gate_blocked_count += 1
@@ -1096,6 +1216,12 @@ def generate_rebalance_orders(
             ev_executed_raw_scores.append(float(ev_prediction.get("raw_ev_score", 0.0) or 0.0))
             ev_executed_normalized_scores.append(float(ev_prediction.get("normalized_ev_score", 0.0) or 0.0))
             ev_executed_weighting_scores.append(float(ev_prediction.get("ev_weighting_score", 0.0) or 0.0))
+            if ev_model_type_used == "regression":
+                regression_executed_scores.append(
+                    float((regression_prediction or {}).get("regression_raw_ev_score", 0.0) or 0.0)
+                )
+                regression_executed_weighting_scores.append(float(ev_prediction.get("ev_weighting_score", 0.0) or 0.0))
+                regression_adjusted_exposures.append(abs(effective_target_weight))
         orders.append(
             PaperOrder(
                 symbol=effective_request.symbol,
@@ -1130,6 +1256,16 @@ def generate_rebalance_orders(
                     "raw_ev_score": (ev_prediction or {}).get("raw_ev_score"),
                     "normalized_ev_score": (ev_prediction or {}).get("normalized_ev_score"),
                     "ev_score_post_clip": (ev_prediction or {}).get("ev_score_post_clip"),
+                    "ev_model_type_requested": requested_ev_model_type,
+                    "ev_model_type_used": ev_model_type_used,
+                    "ev_model_fallback_reason": local_ev_fallback_reason,
+                    "regression_raw_ev_score": (regression_prediction or {}).get("regression_raw_ev_score"),
+                    "regression_normalized_ev_score": (regression_prediction or {}).get(
+                        "regression_normalized_ev_score"
+                    ),
+                    "regression_ev_score_post_clip": (regression_prediction or {}).get(
+                        "regression_ev_score_post_clip"
+                    ),
                 },
             )
         )
@@ -1216,6 +1352,28 @@ def generate_rebalance_orders(
     diagnostics["avg_ev_weight_multiplier"] = (
         float(sum(ev_executed_multipliers) / len(ev_executed_multipliers)) if ev_executed_multipliers else 1.0
     )
+    diagnostics["regression_prediction_available_count"] = int(regression_prediction_available_count)
+    diagnostics["regression_prediction_missing_count"] = int(regression_prediction_missing_count)
+    diagnostics["avg_regression_ev_executed_trades"] = (
+        float(sum(regression_executed_scores) / len(regression_executed_scores)) if regression_executed_scores else 0.0
+    )
+    diagnostics["avg_regression_ev_weighting_score"] = (
+        float(sum(regression_executed_weighting_scores) / len(regression_executed_weighting_scores))
+        if regression_executed_weighting_scores
+        else 0.0
+    )
+    diagnostics["regression_ev_weighted_exposure"] = float(sum(regression_adjusted_exposures))
+    diagnostics["ev_model_type_used"] = (
+        "regression"
+        if regression_requested_for_soft_weight and regression_prediction_available_count > 0
+        else str(execution_ev_model_type)
+    )
+    diagnostics["ev_model_fallback_reason"] = (
+        ev_model_fallback_reason
+        if regression_requested_for_soft_weight and regression_prediction_available_count == 0
+        else None
+    )
+    diagnostics["regression_training_summary"] = regression_training_summary
     diagnostics["ev_distribution"] = _ev_distribution(
         [float(row.get("expected_net_return", 0.0) or 0.0) for row in ev_prediction_rows]
     )
@@ -2147,6 +2305,14 @@ def run_paper_trading_cycle_for_targets(
             "forced_exit_count": int(order_result.diagnostics.get("forced_exit_count", 0) or 0),
             "ev_gate_enabled": bool(order_result.diagnostics.get("ev_gate_enabled", False)),
             "ev_gate_model_type": str(order_result.diagnostics.get("ev_gate_model_type", "bucketed_mean")),
+            "ev_model_type_requested": str(
+                order_result.diagnostics.get("ev_model_type_requested", "bucketed_mean") or "bucketed_mean"
+            ),
+            "ev_model_type_used": str(
+                order_result.diagnostics.get("ev_model_type_used", order_result.diagnostics.get("ev_gate_model_type", "bucketed_mean"))
+                or "bucketed_mean"
+            ),
+            "ev_model_fallback_reason": str(order_result.diagnostics.get("ev_model_fallback_reason", "") or ""),
             "ev_gate_target_type": str(order_result.diagnostics.get("ev_gate_target_type", "market_proxy") or "market_proxy"),
             "ev_gate_mode": str(order_result.diagnostics.get("ev_gate_mode", "hard") or "hard"),
             "ev_gate_training_source": str(
@@ -2186,6 +2352,21 @@ def run_paper_trading_cycle_for_targets(
             "avg_ev_weighting_score": float(order_result.diagnostics.get("avg_ev_weighting_score", 0.0) or 0.0),
             "ev_weighted_exposure": float(order_result.diagnostics.get("ev_weighted_exposure", 0.0) or 0.0),
             "avg_ev_weight_multiplier": float(order_result.diagnostics.get("avg_ev_weight_multiplier", 1.0) or 1.0),
+            "regression_prediction_available_count": int(
+                order_result.diagnostics.get("regression_prediction_available_count", 0) or 0
+            ),
+            "regression_prediction_missing_count": int(
+                order_result.diagnostics.get("regression_prediction_missing_count", 0) or 0
+            ),
+            "avg_regression_ev_executed_trades": float(
+                order_result.diagnostics.get("avg_regression_ev_executed_trades", 0.0) or 0.0
+            ),
+            "avg_regression_ev_weighting_score": float(
+                order_result.diagnostics.get("avg_regression_ev_weighting_score", 0.0) or 0.0
+            ),
+            "regression_ev_weighted_exposure": float(
+                order_result.diagnostics.get("regression_ev_weighted_exposure", 0.0) or 0.0
+            ),
             "ev_distribution": dict(order_result.diagnostics.get("ev_distribution", {}) or {}),
             "ev_calibration_summary": dict(order_result.diagnostics.get("ev_calibration_summary", {}) or {}),
             "ev_model_training_window": {

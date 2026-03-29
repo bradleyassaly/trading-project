@@ -3110,7 +3110,9 @@ Useful fields:
 
 Paper trading and replay also support an expected-net-value gate.
 
-- Available models are `bucketed_mean` and `bucketed_linear`.
+- Available execution models are `bucketed_mean` and `bucketed_linear`.
+- `regression` is available as a diagnostics-only replay candidate trained from `replay_trade_ev_lifecycle.csv`. If requested in config today, execution still falls back to `bucketed_mean` while replay diagnostics and model artifacts are produced separately.
+- `regression` is also available for controlled soft-weight experiments only. It is not used for hard blocking. If `mode: hard` and `model_type: regression` are requested together, execution falls back explicitly to the bucketed path and records the fallback reason.
 - Training can use either `executed_trades` or `candidate_decisions`.
 - `candidate_decisions` captures the full pre-execution candidate set, including executed trades plus score-band, EV, and hysteresis skips.
 - All EV training remains walk-forward: replay day `N` trains only on labeled rows from dates strictly before `N`.
@@ -3153,6 +3155,30 @@ daily_trading:
         fallback_to_score_bands: true
 ```
 
+For regression soft-weight experiments, start smaller than the bucketed EV scale:
+
+```yaml
+daily_trading:
+  paper:
+    execution:
+      ev_gate:
+        enabled: true
+        mode: soft
+        model_type: regression
+        training_source: candidate_decisions
+        target_type: market_proxy
+        weight_multiplier: true
+        weight_scale: 3.0
+        normalize_scores: true
+        normalization_method: rank_pct
+        normalize_within: all_candidates
+        use_normalized_score_for_weighting: true
+        score_clip_min: -0.01
+        score_clip_max: 0.02
+        weight_multiplier_min: 0.5
+        weight_multiplier_max: 1.5
+```
+
 Inspect:
 
 - `paper/trade_ev_training_summary.json`
@@ -3165,6 +3191,10 @@ Inspect:
 - `replay_ev_calibration_summary.json`
 - `replay_candidate_ev_coverage.csv`
 - `replay_candidate_ev_dataset_summary.json`
+- `replay_trade_ev_regression_predictions.csv`
+- `replay_ev_regression_buckets.csv`
+- `replay_ev_regression_summary.json`
+- `artifacts/ev_model/ev_regression_model.pkl`
 - `replay_summary.json`
 
 Useful calibration fields:
@@ -3186,6 +3216,16 @@ Useful calibration fields:
 - `label_coverage_ratio`
 - `realized_component_available_ratio`
 - `market_only_fallback_row_count`
+- `regression_ev_correlation`
+- `regression_ev_rank_correlation`
+- `regression_ev_bucket_spread`
+- `ev_model_type_requested`
+- `ev_model_type_used`
+- `ev_model_fallback_reason`
+- `regression_prediction_available_count`
+- `avg_regression_ev_executed_trades`
+- `avg_regression_ev_weighting_score`
+- `regression_ev_weighted_exposure`
 
 Normalization and clipping semantics:
 
@@ -3201,3 +3241,4 @@ Current limitations:
 - `hybrid_proxy` is intended as the safer experimental target when realized labels are informative but too noisy on their own; start with `hybrid_alpha` in the `0.7` to `0.9` range
 - sell/reduction/exit candidates and unsupported cases still fall back to the proxy target
 - calibration artifacts are diagnostics, not training inputs
+- the regression EV candidate is trained on closed lifecycle trades using entry-time features and is intended as a model-improvement benchmark, not a live execution model yet

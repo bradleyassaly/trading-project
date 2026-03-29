@@ -441,6 +441,15 @@ def persist_paper_run_outputs(
         ),
         "ev_gate_enabled": bool(paper_execution_diag.get("ev_gate_enabled", False)),
         "ev_gate_model_type": str(paper_execution_diag.get("ev_gate_model_type", "bucketed_mean") or "bucketed_mean"),
+        "ev_model_type_requested": str(
+            paper_execution_diag.get("ev_model_type_requested", paper_execution_diag.get("ev_gate_requested_model_type", "bucketed_mean"))
+            or "bucketed_mean"
+        ),
+        "ev_model_type_used": str(
+            paper_execution_diag.get("ev_model_type_used", paper_execution_diag.get("ev_gate_model_type", "bucketed_mean"))
+            or "bucketed_mean"
+        ),
+        "ev_model_fallback_reason": str(paper_execution_diag.get("ev_model_fallback_reason", "") or ""),
         "ev_gate_target_type": str(paper_execution_diag.get("ev_gate_target_type", "market_proxy") or "market_proxy"),
         "ev_gate_hybrid_alpha": float(paper_execution_diag.get("ev_gate_hybrid_alpha", 0.8) or 0.8),
         "ev_gate_mode": str(paper_execution_diag.get("ev_gate_mode", "hard") or "hard"),
@@ -473,6 +482,21 @@ def persist_paper_run_outputs(
         "avg_ev_weighting_score": float(paper_execution_diag.get("avg_ev_weighting_score", 0.0) or 0.0),
         "ev_weighted_exposure": float(paper_execution_diag.get("ev_weighted_exposure", 0.0) or 0.0),
         "avg_ev_weight_multiplier": float(paper_execution_diag.get("avg_ev_weight_multiplier", 1.0) or 1.0),
+        "regression_prediction_available_count": int(
+            paper_execution_diag.get("regression_prediction_available_count", 0) or 0
+        ),
+        "regression_prediction_missing_count": int(
+            paper_execution_diag.get("regression_prediction_missing_count", 0) or 0
+        ),
+        "avg_regression_ev_executed_trades": float(
+            paper_execution_diag.get("avg_regression_ev_executed_trades", 0.0) or 0.0
+        ),
+        "avg_regression_ev_weighting_score": float(
+            paper_execution_diag.get("avg_regression_ev_weighting_score", 0.0) or 0.0
+        ),
+        "regression_ev_weighted_exposure": float(
+            paper_execution_diag.get("regression_ev_weighted_exposure", 0.0) or 0.0
+        ),
         "ev_distribution": json.dumps(paper_execution_diag.get("ev_distribution", {}), sort_keys=True),
         "ev_calibration_summary": json.dumps(paper_execution_diag.get("ev_calibration_summary", {}), sort_keys=True),
         "ev_model_training_window": json.dumps(
