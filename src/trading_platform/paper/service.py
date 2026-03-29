@@ -51,6 +51,10 @@ from trading_platform.reporting.pnl_attribution import (
     build_reconciliation_summary,
     write_pnl_attribution_artifacts,
 )
+from trading_platform.reporting.ev_lifecycle import (
+    build_trade_ev_lifecycle_rows,
+    write_trade_ev_lifecycle_artifacts,
+)
 from trading_platform.settings import METADATA_DIR
 from trading_platform.paper.slippage import apply_order_slippage, validate_slippage_config
 from trading_platform.risk.pre_trade_checks import validate_orders
@@ -1120,6 +1124,12 @@ def generate_rebalance_orders(
                     "exit_threshold": band_row.get("exit_threshold"),
                     "band_decision": band_row.get("band_decision"),
                     "action_reason": band_row.get("action_reason"),
+                    "expected_gross_return": (ev_prediction or {}).get("expected_gross_return"),
+                    "expected_net_return": (ev_prediction or {}).get("expected_net_return"),
+                    "probability_positive": (ev_prediction or {}).get("probability_positive"),
+                    "raw_ev_score": (ev_prediction or {}).get("raw_ev_score"),
+                    "normalized_ev_score": (ev_prediction or {}).get("normalized_ev_score"),
+                    "ev_score_post_clip": (ev_prediction or {}).get("ev_score_post_clip"),
                 },
             )
         )
@@ -1457,6 +1467,10 @@ def _append_open_lots(
                 metadata={
                     "order_reason": order.reason,
                     "target_weight": (order.provenance or {}).get("target_weight"),
+                    "ev_entry": (order.provenance or {}).get("raw_ev_score"),
+                    "score_entry": (order.provenance or {}).get("score_value"),
+                    "score_percentile_entry": (order.provenance or {}).get("score_percentile"),
+                    "entry_reason": (order.provenance or {}).get("action_reason"),
                 },
             )
         )
@@ -1535,6 +1549,14 @@ def _close_open_lots(
                     "status": "closed",
                     "entry_date": lot.entry_as_of,
                     "exit_date": exit_ts,
+                    "ev_entry": lot.metadata.get("ev_entry"),
+                    "score_entry": lot.metadata.get("score_entry"),
+                    "score_percentile_entry": lot.metadata.get("score_percentile_entry"),
+                    "entry_reason": lot.metadata.get("entry_reason"),
+                    "ev_exit": (order.provenance or {}).get("raw_ev_score"),
+                    "score_exit": (order.provenance or {}).get("score_value"),
+                    "score_percentile_exit": (order.provenance or {}).get("score_percentile"),
+                    "exit_reason": (order.provenance or {}).get("action_reason") or order.reason,
                 }
             )
             fill_rows.append(
@@ -2608,6 +2630,14 @@ def write_paper_trading_artifacts(
         paths.update(execution_paths)
     paths.update(write_decision_journal_artifacts(bundle=result.decision_bundle, output_dir=output_path))
     paths.update(write_pnl_attribution_artifacts(output_dir=output_path, attribution_payload=result.attribution))
+    paths.update(
+        write_trade_ev_lifecycle_artifacts(
+            output_dir=output_path,
+            lifecycle_rows=build_trade_ev_lifecycle_rows(
+                trade_rows=list(result.attribution.get("trade_rows", [])),
+            ),
+        )
+    )
     paths.update(
         write_trade_ev_artifacts(
             output_dir=output_path,

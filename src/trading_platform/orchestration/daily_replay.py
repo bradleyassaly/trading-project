@@ -14,6 +14,10 @@ from trading_platform.dashboard.server import build_dashboard_static_data
 from trading_platform.orchestration.daily_trading import DailyTradingResult, run_daily_trading_pipeline
 from trading_platform.portfolio.strategy_execution_handoff import resolve_strategy_execution_handoff
 from trading_platform.research.trade_ev import evaluate_replay_trade_ev_predictions
+from trading_platform.reporting.ev_lifecycle import (
+    aggregate_replay_ev_lifecycle,
+    write_replay_ev_lifecycle_artifacts,
+)
 from trading_platform.reporting.pnl_attribution import (
     aggregate_replay_attribution,
     write_replay_pnl_attribution_artifacts,
@@ -950,6 +954,14 @@ def _write_replay_summary_artifacts(
                 f"- candidate_skipped_count: `{summary.get('candidate_skipped_count', 0)}`",
                 f"- ev_rank_correlation: `{summary.get('ev_rank_correlation', 0.0)}`",
                 f"- ev_top_vs_bottom_bucket_spread: `{summary.get('ev_top_vs_bottom_bucket_spread', 0.0)}`",
+                f"- avg_EV_entry: `{summary.get('avg_EV_entry', 0.0)}`",
+                f"- avg_EV_exit: `{summary.get('avg_EV_exit', 0.0)}`",
+                f"- exit_efficiency: `{summary.get('exit_efficiency', 0.0)}`",
+                f"- EV_alignment_rate: `{summary.get('EV_alignment_rate', 0.0)}`",
+                f"- pct_trades_EV_entry_positive: `{summary.get('pct_trades_EV_entry_positive', 0.0)}`",
+                f"- pct_exits_EV_exit_negative: `{summary.get('pct_exits_EV_exit_negative', 0.0)}`",
+                f"- EV_entry_realized_return_correlation: `{summary.get('EV_entry_realized_return_correlation', 0.0)}`",
+                f"- MFE_vs_EV_entry_correlation: `{summary.get('MFE_vs_EV_entry_correlation', 0.0)}`",
                 f"- avg_daily_execution_cost: `{summary.get('avg_daily_execution_cost', 0.0)}`",
                 f"- gross_total_pnl: `{summary.get('gross_total_pnl', 0.0)}`",
                 f"- net_total_pnl: `{summary.get('net_total_pnl', 0.0)}`",
@@ -1288,6 +1300,7 @@ def run_daily_replay(config: DailyReplayWorkflowConfig) -> DailyReplayResult:
     replay_attribution = aggregate_replay_attribution(replay_root=replay_root)
     replay_attribution_seconds = time.monotonic() - attribution_started
     attribution_summary = dict(replay_attribution.get("summary") or {})
+    ev_lifecycle_rows, ev_lifecycle_summary = aggregate_replay_ev_lifecycle(replay_root=replay_root)
     ev_realized_rows, ev_bucket_rows, ev_calibration_summary = evaluate_replay_trade_ev_predictions(
         replay_root=replay_root,
         horizon_days=int(config.daily_trading.ev_gate_horizon_days or 5),
@@ -1333,6 +1346,25 @@ def run_daily_replay(config: DailyReplayWorkflowConfig) -> DailyReplayResult:
         )
         summary["strategy_pnl_concentration"] = attribution_summary.get("strategy_concentration_metrics", {})
         summary["replay_pnl_attribution_summary"] = attribution_summary
+    if ev_lifecycle_summary:
+        summary["avg_EV_entry"] = float(ev_lifecycle_summary.get("avg_EV_entry", 0.0) or 0.0)
+        summary["avg_EV_exit"] = float(ev_lifecycle_summary.get("avg_EV_exit", 0.0) or 0.0)
+        summary["exit_efficiency"] = float(ev_lifecycle_summary.get("avg_exit_efficiency", 0.0) or 0.0)
+        summary["EV_alignment_rate"] = float(ev_lifecycle_summary.get("EV_alignment_rate", 0.0) or 0.0)
+        summary["EV_decay_stats"] = dict(ev_lifecycle_summary.get("EV_decay_stats") or {})
+        summary["pct_trades_EV_entry_positive"] = float(
+            ev_lifecycle_summary.get("pct_trades_EV_entry_positive", 0.0) or 0.0
+        )
+        summary["pct_exits_EV_exit_negative"] = float(
+            ev_lifecycle_summary.get("pct_exits_EV_exit_negative", 0.0) or 0.0
+        )
+        summary["EV_entry_realized_return_correlation"] = float(
+            ev_lifecycle_summary.get("EV_entry_realized_return_correlation", 0.0) or 0.0
+        )
+        summary["MFE_vs_EV_entry_correlation"] = float(
+            ev_lifecycle_summary.get("MFE_vs_EV_entry_correlation", 0.0) or 0.0
+        )
+        summary["replay_ev_lifecycle_summary"] = ev_lifecycle_summary
     if candidate_dataset_summary:
         summary["replay_candidate_ev_dataset_summary"] = candidate_dataset_summary
     status = "succeeded"
@@ -1379,6 +1411,16 @@ def run_daily_replay(config: DailyReplayWorkflowConfig) -> DailyReplayResult:
             for key, value in write_replay_pnl_attribution_artifacts(
                 replay_root=replay_root,
                 replay_payload=replay_attribution,
+            ).items()
+        }
+    )
+    artifact_paths.update(
+        {
+            key: str(value)
+            for key, value in write_replay_ev_lifecycle_artifacts(
+                replay_root=replay_root,
+                lifecycle_rows=ev_lifecycle_rows,
+                summary=ev_lifecycle_summary,
             ).items()
         }
     )
