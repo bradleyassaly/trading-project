@@ -365,6 +365,54 @@ def test_run_daily_replay_includes_regression_ev_summary_when_lifecycle_exists(
     assert result.summary["replay_ev_regression_summary"]["model_type"] == "regression"
 
 
+def test_run_daily_replay_includes_reliability_summary_when_available(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _install_fake_daily_runner(monkeypatch)
+    monkeypatch.setattr(
+        "trading_platform.orchestration.daily_replay.aggregate_replay_ev_lifecycle",
+        lambda replay_root: (
+            [{"trade_id": "t1", "entry_date": "2025-01-03", "exit_date": "2025-01-06", "ev_entry": 0.02}],
+            {"avg_EV_entry": 0.02, "EV_decay_stats": {"mean": 0.01}},
+        ),
+    )
+    monkeypatch.setattr(
+        "trading_platform.orchestration.daily_replay.run_replay_trade_ev_regression",
+        lambda **kwargs: {"summary": {}, "artifact_paths": {}},
+    )
+    monkeypatch.setattr(
+        "trading_platform.orchestration.daily_replay.run_replay_trade_ev_reliability",
+        lambda **kwargs: {
+            "summary": {
+                "avg_ev_reliability": 0.64,
+                "reliability_realized_return_correlation": 0.21,
+                "reliability_success_correlation": 0.33,
+                "top_vs_bottom_realized_return_spread": 0.04,
+            },
+            "artifact_paths": {
+                "replay_trade_ev_reliability_path": tmp_path / "replay" / "replay_trade_ev_reliability.csv",
+            },
+        },
+    )
+    config = DailyReplayWorkflowConfig(
+        daily_trading=_base_daily_config(tmp_path),
+        output_dir=str(tmp_path / "replay"),
+        start_date="2025-01-03",
+        end_date="2025-01-03",
+        stop_on_error=True,
+        continue_on_error=False,
+        replay=DailyReplayTuningConfig(),
+    )
+
+    result = run_daily_replay(config)
+
+    assert result.summary["avg_ev_reliability"] == pytest.approx(0.64)
+    assert result.summary["reliability_realized_return_correlation"] == pytest.approx(0.21)
+    assert result.summary["reliability_success_correlation"] == pytest.approx(0.33)
+    assert result.summary["reliability_top_vs_bottom_bucket_spread"] == pytest.approx(0.04)
+    assert "replay_ev_reliability_summary" in result.summary
+
+
 def test_run_daily_replay_continue_on_error_records_failure(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _install_fake_daily_runner(monkeypatch, fail_dates={"2025-01-06"})
     config = DailyReplayWorkflowConfig(

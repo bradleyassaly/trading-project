@@ -104,6 +104,12 @@ class PaperTradingConfig:
     ev_gate_confidence_component_model_performance_weight: float = 0.0
     ev_gate_use_confidence_filter: bool = False
     ev_gate_confidence_threshold: float = 0.0
+    ev_gate_use_reliability_weighting: bool = False
+    ev_gate_reliability_model_type: str = "logistic"
+    ev_gate_use_reliability_filter: bool = False
+    ev_gate_reliability_threshold: float = 0.5
+    ev_gate_reliability_min_training_samples: int = 20
+    ev_gate_reliability_recent_window: int = 20
     ev_gate_min_expected_net_return: float = 0.0
     ev_gate_min_probability_positive: float | None = None
     ev_gate_risk_penalty_lambda: float = 0.0

@@ -625,6 +625,22 @@ def load_daily_trading_workflow_config(path: str | Path) -> DailyTradingWorkflow
     )
     _set_if_missing(payload, "ev_gate_use_confidence_filter", ev_gate_section, "use_confidence_filter")
     _set_if_missing(payload, "ev_gate_confidence_threshold", ev_gate_section, "confidence_threshold")
+    _set_if_missing(payload, "ev_gate_use_reliability_weighting", ev_gate_section, "use_reliability_weighting")
+    _set_if_missing(payload, "ev_gate_reliability_model_type", ev_gate_section, "reliability_model_type")
+    _set_if_missing(payload, "ev_gate_use_reliability_filter", ev_gate_section, "use_reliability_filter")
+    _set_if_missing(payload, "ev_gate_reliability_threshold", ev_gate_section, "reliability_threshold")
+    _set_if_missing(
+        payload,
+        "ev_gate_reliability_min_training_samples",
+        ev_gate_section,
+        "reliability_min_training_samples",
+    )
+    _set_if_missing(
+        payload,
+        "ev_gate_reliability_recent_window",
+        ev_gate_section,
+        "reliability_recent_window",
+    )
     _set_if_missing(payload, "ev_gate_min_expected_net_return", ev_gate_section, "min_expected_net_return")
     _set_if_missing(payload, "ev_gate_min_probability_positive", ev_gate_section, "min_probability_positive")
     _set_if_missing(payload, "ev_gate_risk_penalty_lambda", ev_gate_section, "risk_penalty_lambda")

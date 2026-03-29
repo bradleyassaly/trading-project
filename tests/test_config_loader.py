@@ -385,6 +385,12 @@ daily_trading:
           model_performance: 0.15
         use_confidence_filter: true
         confidence_threshold: 0.55
+        use_reliability_weighting: true
+        reliability_model_type: logistic
+        use_reliability_filter: true
+        reliability_threshold: 0.62
+        reliability_min_training_samples: 14
+        reliability_recent_window: 18
         min_expected_net_return: 0.001
   report:
     enable_strategy_diagnostics: true
@@ -435,6 +441,12 @@ daily_trading:
     assert config.ev_gate_confidence_component_model_performance_weight == 0.15
     assert config.ev_gate_use_confidence_filter is True
     assert config.ev_gate_confidence_threshold == 0.55
+    assert config.ev_gate_use_reliability_weighting is True
+    assert config.ev_gate_reliability_model_type == "logistic"
+    assert config.ev_gate_use_reliability_filter is True
+    assert config.ev_gate_reliability_threshold == 0.62
+    assert config.ev_gate_reliability_min_training_samples == 14
+    assert config.ev_gate_reliability_recent_window == 18
     assert config.ev_gate_min_expected_net_return == 0.001
     assert config.activated_dir == "artifacts/strategy_portfolio/run_current/activated"
     assert config.enable_strategy_diagnostics is True

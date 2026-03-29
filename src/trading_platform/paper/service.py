@@ -71,6 +71,11 @@ from trading_platform.research.trade_ev_regression import (
     score_trade_ev_regression_candidates,
     train_trade_ev_regression_model,
 )
+from trading_platform.research.trade_ev_reliability import (
+    build_trade_ev_reliability_history_dataset,
+    score_trade_ev_reliability_candidates,
+    train_trade_ev_reliability_model,
+)
 from trading_platform.research.xsec_momentum import run_xsec_momentum_topn
 from trading_platform.signals.common import normalize_price_frame
 from trading_platform.signals.loaders import load_feature_frame, resolve_feature_frame_path
@@ -656,6 +661,16 @@ def generate_rebalance_orders(
     )
     ev_use_confidence_filter = bool(getattr(active_config, "ev_gate_use_confidence_filter", False))
     ev_confidence_threshold = float(getattr(active_config, "ev_gate_confidence_threshold", 0.0) or 0.0)
+    ev_use_reliability_weighting = bool(getattr(active_config, "ev_gate_use_reliability_weighting", False))
+    ev_reliability_model_type = str(
+        getattr(active_config, "ev_gate_reliability_model_type", "logistic") or "logistic"
+    ).lower()
+    ev_use_reliability_filter = bool(getattr(active_config, "ev_gate_use_reliability_filter", False))
+    ev_reliability_threshold = float(getattr(active_config, "ev_gate_reliability_threshold", 0.5) or 0.5)
+    ev_reliability_min_training_samples = int(
+        getattr(active_config, "ev_gate_reliability_min_training_samples", 20) or 20
+    )
+    ev_reliability_recent_window = int(getattr(active_config, "ev_gate_reliability_recent_window", 20) or 20)
     requested_ev_model_type = str(getattr(active_config, "ev_gate_model_type", "bucketed_mean") or "bucketed_mean")
     execution_ev_model_type = requested_ev_model_type
     ev_model_fallback_reason: str | None = None
@@ -754,6 +769,12 @@ def generate_rebalance_orders(
     )
     diagnostics["ev_gate_use_confidence_filter"] = ev_use_confidence_filter
     diagnostics["ev_gate_confidence_threshold"] = ev_confidence_threshold
+    diagnostics["ev_gate_use_reliability_weighting"] = ev_use_reliability_weighting
+    diagnostics["ev_gate_reliability_model_type"] = ev_reliability_model_type
+    diagnostics["ev_gate_use_reliability_filter"] = ev_use_reliability_filter
+    diagnostics["ev_gate_reliability_threshold"] = ev_reliability_threshold
+    diagnostics["ev_gate_reliability_min_training_samples"] = ev_reliability_min_training_samples
+    diagnostics["ev_gate_reliability_recent_window"] = ev_reliability_recent_window
     diagnostics["ev_gate_training_source"] = str(
         (ev_training_summary or {}).get("training_source") or ev_requested_training_source
     )
@@ -773,9 +794,13 @@ def generate_rebalance_orders(
     ev_executed_confidence_multipliers: list[float] = []
     ev_executed_scores_before_confidence: list[float] = []
     ev_executed_scores_after_confidence: list[float] = []
+    ev_executed_reliabilities: list[float] = []
+    ev_executed_scores_before_reliability: list[float] = []
+    ev_executed_scores_after_reliability: list[float] = []
     ev_calibration_rows: list[dict[str, Any]] = []
     ev_calibration_summary: dict[str, Any] = {}
     confidence_filtered_count = 0
+    reliability_filtered_count = 0
     market_feature_cache: dict[str, pd.DataFrame] = {}
     request_contexts: list[dict[str, Any]] = []
     candidate_row_by_symbol: dict[str, dict[str, Any]] = {}
@@ -960,6 +985,9 @@ def generate_rebalance_orders(
         and ev_gate_mode == "soft"
         and bool(active_config.ev_gate_weight_multiplier)
     )
+    reliability_requested_for_soft_weight = (
+        regression_requested_for_soft_weight and (ev_use_reliability_weighting or ev_use_reliability_filter)
+    )
     ev_prediction_lookup: dict[str, dict[str, Any]] = {}
     if (
         bool(active_config.ev_gate_enabled)
@@ -1017,6 +1045,38 @@ def generate_rebalance_orders(
             }
         else:
             ev_model_fallback_reason = "regression_predictions_unavailable"
+    reliability_training_rows: list[dict[str, Any]] = []
+    reliability_training_summary: dict[str, Any] = {}
+    reliability_model: dict[str, Any] = {}
+    reliability_prediction_lookup: dict[str, dict[str, Any]] = {}
+    if reliability_requested_for_soft_weight and as_of and request_contexts:
+        reliability_training_rows, reliability_training_summary = build_trade_ev_reliability_history_dataset(
+            history_root=active_config.ev_gate_training_root,
+            as_of_date=as_of,
+            recent_window=ev_reliability_recent_window,
+        )
+        reliability_model = train_trade_ev_reliability_model(
+            training_rows=reliability_training_rows,
+            min_training_samples=ev_reliability_min_training_samples,
+            recent_window=ev_reliability_recent_window,
+        )
+        diagnostics["reliability_training_summary"] = reliability_training_summary
+        if bool(reliability_model.get("training_available", False)):
+            reliability_candidate_rows = []
+            for context in request_contexts:
+                candidate_payload = dict(context["candidate_row"])
+                regression_payload = dict(regression_prediction_lookup.get(str(context["request"].symbol)) or {})
+                candidate_payload["regression_raw_ev_score"] = regression_payload.get("regression_raw_ev_score")
+                candidate_payload["raw_ev_score"] = regression_payload.get("regression_raw_ev_score")
+                candidate_payload["expected_net_return"] = regression_payload.get("predicted_ev")
+                reliability_candidate_rows.append(candidate_payload)
+            reliability_predictions = score_trade_ev_reliability_candidates(
+                model=reliability_model,
+                candidate_rows=reliability_candidate_rows,
+            )
+            reliability_prediction_lookup = {
+                str(row.get("symbol")): dict(row) for row in reliability_predictions if row.get("symbol")
+            }
     if bool(active_config.ev_gate_enabled) and bool(ev_model.get("training_available", False)) and ev_training_rows:
         training_predictions = score_trade_ev_candidates(
             model=ev_model,
@@ -1069,6 +1129,14 @@ def generate_rebalance_orders(
             ev_prediction["ev_confidence_multiplier"] = 1.0
             ev_prediction["ev_score_before_confidence"] = ev_prediction.get("ev_weighting_score", ev_prediction.get("ev_decision_score", 0.0))
             ev_prediction["ev_score_after_confidence"] = ev_prediction.get("ev_weighting_score", ev_prediction.get("ev_decision_score", 0.0))
+            ev_prediction["ev_reliability"] = 1.0
+            ev_prediction["ev_reliability_multiplier"] = 1.0
+            ev_prediction["ev_score_before_reliability"] = ev_prediction.get(
+                "ev_weighting_score", ev_prediction.get("ev_decision_score", 0.0)
+            )
+            ev_prediction["ev_score_after_reliability"] = ev_prediction.get(
+                "ev_weighting_score", ev_prediction.get("ev_decision_score", 0.0)
+            )
             ev_score = float(ev_prediction.get("ev_decision_score", 0.0) or 0.0)
             ev_weighting_score = float(ev_prediction.get("ev_weighting_score", ev_score) or ev_score)
             if regression_requested_for_soft_weight:
@@ -1099,6 +1167,18 @@ def generate_rebalance_orders(
                 )
                 ev_prediction["residual_std_used"] = regression_prediction.get("residual_std_used")
                 ev_prediction["confidence_source"] = regression_prediction.get("confidence_source")
+            if reliability_requested_for_soft_weight:
+                reliability_prediction = dict(reliability_prediction_lookup.get(request.symbol) or {})
+                if bool(reliability_prediction.get("prediction_available", False)):
+                    ev_reliability = float(reliability_prediction.get("ev_reliability", 1.0) or 0.0)
+                    ev_prediction["ev_reliability"] = ev_reliability
+                    ev_prediction["ev_reliability_multiplier"] = ev_reliability
+                    ev_prediction["reliability_training_sample_count"] = int(
+                        reliability_prediction.get("training_sample_count", 0) or 0
+                    )
+                    ev_prediction["ev_score_before_reliability"] = ev_weighting_score
+                    ev_weighting_score = float(ev_weighting_score * ev_reliability)
+                    ev_prediction["ev_score_after_reliability"] = ev_weighting_score
             if ev_gate_mode == "soft":
                 if ev_weight_multiplier_enabled:
                     ev_weight_multiplier = max(0.0, 1.0 + (ev_weight_scale * ev_weighting_score))
@@ -1127,6 +1207,10 @@ def generate_rebalance_orders(
                         "ev_confidence_multiplier": ev_prediction.get("ev_confidence_multiplier"),
                         "ev_score_before_confidence": ev_prediction.get("ev_score_before_confidence"),
                         "ev_score_after_confidence": ev_prediction.get("ev_score_after_confidence"),
+                        "ev_reliability": ev_prediction.get("ev_reliability"),
+                        "ev_reliability_multiplier": ev_prediction.get("ev_reliability_multiplier"),
+                        "ev_score_before_reliability": ev_prediction.get("ev_score_before_reliability"),
+                        "ev_score_after_reliability": ev_prediction.get("ev_score_after_reliability"),
                     },
                 )
                 ev_prediction["ev_weight_multiplier"] = ev_weight_multiplier
@@ -1187,6 +1271,19 @@ def generate_rebalance_orders(
                 candidate_row_by_symbol[request.symbol]["ev_score_after_confidence"] = ev_prediction.get(
                     "ev_score_after_confidence"
                 )
+                candidate_row_by_symbol[request.symbol]["ev_reliability"] = ev_prediction.get("ev_reliability")
+                candidate_row_by_symbol[request.symbol]["ev_reliability_multiplier"] = ev_prediction.get(
+                    "ev_reliability_multiplier"
+                )
+                candidate_row_by_symbol[request.symbol]["reliability_training_sample_count"] = ev_prediction.get(
+                    "reliability_training_sample_count"
+                )
+                candidate_row_by_symbol[request.symbol]["ev_score_before_reliability"] = ev_prediction.get(
+                    "ev_score_before_reliability"
+                )
+                candidate_row_by_symbol[request.symbol]["ev_score_after_reliability"] = ev_prediction.get(
+                    "ev_score_after_reliability"
+                )
                 candidate_row_by_symbol[request.symbol]["residual_std_bucket"] = ev_prediction.get(
                     "residual_std_bucket"
                 )
@@ -1228,6 +1325,10 @@ def generate_rebalance_orders(
                 candidate_row_by_symbol[request.symbol]["regression_ev_score_post_clip"] = (
                     regression_prediction.get("regression_ev_score_post_clip") if regression_prediction else None
                 )
+                candidate_row_by_symbol[request.symbol]["was_filtered_by_reliability"] = ev_prediction.get(
+                    "was_filtered_by_reliability",
+                    False,
+                )
             if (
                 regression_requested_for_soft_weight
                 and ev_use_confidence_filter
@@ -1259,6 +1360,40 @@ def generate_rebalance_orders(
                         "skip_reason": "below_confidence_threshold",
                         "action_reason": "filtered_by_confidence",
                         "ev_confidence": ev_prediction.get("ev_confidence"),
+                    }
+                )
+                continue
+            if (
+                reliability_requested_for_soft_weight
+                and ev_use_reliability_filter
+                and float(ev_prediction.get("ev_reliability", 1.0)) < ev_reliability_threshold
+            ):
+                reliability_filtered_count += 1
+                ev_prediction["was_filtered_by_reliability"] = True
+                ev_prediction["ev_gate_decision"] = "reliability_filter_block"
+                ev_prediction["action_reason"] = "filtered_by_reliability"
+                if request.symbol in candidate_row_by_symbol:
+                    candidate_row_by_symbol[request.symbol]["candidate_status"] = "skipped"
+                    candidate_row_by_symbol[request.symbol]["candidate_outcome"] = "reliability_filtered"
+                    candidate_row_by_symbol[request.symbol]["candidate_stage"] = "reliability_filter"
+                    candidate_row_by_symbol[request.symbol]["skip_reason"] = "below_reliability_threshold"
+                    candidate_row_by_symbol[request.symbol]["action_reason"] = "filtered_by_reliability"
+                    candidate_row_by_symbol[request.symbol]["was_filtered_by_reliability"] = True
+                skipped_trade_rows.append(
+                    {
+                        "symbol": request.symbol,
+                        "score_value": band_row.get("score_value"),
+                        "score_rank": band_row.get("score_rank"),
+                        "entry_threshold": band_row.get("entry_threshold"),
+                        "exit_threshold": band_row.get("exit_threshold"),
+                        "band_decision": band_row.get("band_decision"),
+                        "current_weight": current_weight,
+                        "target_weight": target_weight,
+                        "weight_delta": weight_delta,
+                        "requested_notional": float(request.requested_notional),
+                        "skip_reason": "below_reliability_threshold",
+                        "action_reason": "filtered_by_reliability",
+                        "ev_reliability": ev_prediction.get("ev_reliability"),
                     }
                 )
                 continue
@@ -1365,6 +1500,19 @@ def generate_rebalance_orders(
             ev_executed_scores_after_confidence.append(
                 float(ev_prediction.get("ev_score_after_confidence", ev_prediction.get("ev_weighting_score", 0.0)) or 0.0)
             )
+            ev_executed_reliabilities.append(float(ev_prediction.get("ev_reliability", 1.0) or 0.0))
+            ev_executed_scores_before_reliability.append(
+                float(
+                    ev_prediction.get("ev_score_before_reliability", ev_prediction.get("ev_weighting_score", 0.0))
+                    or 0.0
+                )
+            )
+            ev_executed_scores_after_reliability.append(
+                float(
+                    ev_prediction.get("ev_score_after_reliability", ev_prediction.get("ev_weighting_score", 0.0))
+                    or 0.0
+                )
+            )
             if ev_model_type_used == "regression":
                 regression_executed_scores.append(
                     float((regression_prediction or {}).get("regression_raw_ev_score", 0.0) or 0.0)
@@ -1409,6 +1557,10 @@ def generate_rebalance_orders(
                     "ev_confidence_multiplier": (ev_prediction or {}).get("ev_confidence_multiplier"),
                     "ev_score_before_confidence": (ev_prediction or {}).get("ev_score_before_confidence"),
                     "ev_score_after_confidence": (ev_prediction or {}).get("ev_score_after_confidence"),
+                    "ev_reliability": (ev_prediction or {}).get("ev_reliability"),
+                    "ev_reliability_multiplier": (ev_prediction or {}).get("ev_reliability_multiplier"),
+                    "ev_score_before_reliability": (ev_prediction or {}).get("ev_score_before_reliability"),
+                    "ev_score_after_reliability": (ev_prediction or {}).get("ev_score_after_reliability"),
                     "residual_std_bucket": (ev_prediction or {}).get("residual_std_bucket"),
                     "residual_std_global": (ev_prediction or {}).get("residual_std_global"),
                     "residual_std_final": (ev_prediction or {}).get("residual_std_final"),
@@ -1418,6 +1570,7 @@ def generate_rebalance_orders(
                     "model_performance_confidence": (ev_prediction or {}).get("model_performance_confidence"),
                     "combined_confidence": (ev_prediction or {}).get("combined_confidence"),
                     "was_filtered_by_confidence": (ev_prediction or {}).get("was_filtered_by_confidence", False),
+                    "was_filtered_by_reliability": (ev_prediction or {}).get("was_filtered_by_reliability", False),
                     "ev_model_type_requested": requested_ev_model_type,
                     "ev_model_type_used": ev_model_type_used,
                     "ev_model_fallback_reason": local_ev_fallback_reason,
@@ -1453,6 +1606,7 @@ def generate_rebalance_orders(
     diagnostics["forced_exit_count"] = int(forced_exit_count)
     diagnostics["ev_gate_blocked_count"] = int(ev_gate_blocked_count)
     diagnostics["confidence_filtered_count"] = int(confidence_filtered_count)
+    diagnostics["reliability_filtered_count"] = int(reliability_filtered_count)
     diagnostics["skipped_due_to_entry_band_count"] = int(blocked_entries_count)
     diagnostics["skipped_due_to_hold_zone_count"] = int(held_in_hold_zone_count)
     diagnostics["skipped_trade_rows"] = skipped_trade_rows
@@ -1527,6 +1681,19 @@ def generate_rebalance_orders(
     diagnostics["avg_ev_score_after_confidence"] = (
         float(sum(ev_executed_scores_after_confidence) / len(ev_executed_scores_after_confidence))
         if ev_executed_scores_after_confidence
+        else 0.0
+    )
+    diagnostics["avg_ev_reliability"] = (
+        float(sum(ev_executed_reliabilities) / len(ev_executed_reliabilities)) if ev_executed_reliabilities else 1.0
+    )
+    diagnostics["avg_ev_score_before_reliability"] = (
+        float(sum(ev_executed_scores_before_reliability) / len(ev_executed_scores_before_reliability))
+        if ev_executed_scores_before_reliability
+        else 0.0
+    )
+    diagnostics["avg_ev_score_after_reliability"] = (
+        float(sum(ev_executed_scores_after_reliability) / len(ev_executed_scores_after_reliability))
+        if ev_executed_scores_after_reliability
         else 0.0
     )
     diagnostics["ev_weighted_exposure"] = float(sum(ev_adjusted_exposures))
@@ -2550,8 +2717,21 @@ def run_paper_trading_cycle_for_targets(
             "ev_gate_confidence_threshold": float(
                 order_result.diagnostics.get("ev_gate_confidence_threshold", 0.0) or 0.0
             ),
+            "ev_gate_use_reliability_weighting": bool(
+                order_result.diagnostics.get("ev_gate_use_reliability_weighting", False)
+            ),
+            "ev_gate_reliability_model_type": str(
+                order_result.diagnostics.get("ev_gate_reliability_model_type", "logistic") or "logistic"
+            ),
+            "ev_gate_use_reliability_filter": bool(
+                order_result.diagnostics.get("ev_gate_use_reliability_filter", False)
+            ),
+            "ev_gate_reliability_threshold": float(
+                order_result.diagnostics.get("ev_gate_reliability_threshold", 0.5) or 0.5
+            ),
             "ev_gate_blocked_count": int(order_result.diagnostics.get("ev_gate_blocked_count", 0) or 0),
             "confidence_filtered_count": int(order_result.diagnostics.get("confidence_filtered_count", 0) or 0),
+            "reliability_filtered_count": int(order_result.diagnostics.get("reliability_filtered_count", 0) or 0),
             "avg_expected_net_return_traded": float(
                 order_result.diagnostics.get("avg_expected_net_return_traded", 0.0) or 0.0
             ),
@@ -2575,6 +2755,13 @@ def run_paper_trading_cycle_for_targets(
             ),
             "avg_ev_score_after_confidence": float(
                 order_result.diagnostics.get("avg_ev_score_after_confidence", 0.0) or 0.0
+            ),
+            "avg_ev_reliability": float(order_result.diagnostics.get("avg_ev_reliability", 1.0) or 1.0),
+            "avg_ev_score_before_reliability": float(
+                order_result.diagnostics.get("avg_ev_score_before_reliability", 0.0) or 0.0
+            ),
+            "avg_ev_score_after_reliability": float(
+                order_result.diagnostics.get("avg_ev_score_after_reliability", 0.0) or 0.0
             ),
             "ev_weighted_exposure": float(order_result.diagnostics.get("ev_weighted_exposure", 0.0) or 0.0),
             "avg_ev_weight_multiplier": float(order_result.diagnostics.get("avg_ev_weight_multiplier", 1.0) or 1.0),

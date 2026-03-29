@@ -86,12 +86,36 @@ daily_trading:
         enabled: false
         model_type: bucketed_mean
         horizon_days: 5
+        mode: hard
+        training_source: executed_trades
+        target_type: market_proxy
         min_expected_net_return: 0.001
         min_probability_positive:
         risk_penalty_lambda: 0.0
         fallback_to_score_bands: true
         training_root:
         min_training_samples: 20
+        weight_multiplier: false
+        weight_scale: 1.0
+        normalize_scores: false
+        normalization_method: rank_pct
+        normalize_within: all_candidates
+        use_normalized_score_for_weighting: true
+        score_clip_min:
+        score_clip_max:
+        weight_multiplier_min:
+        weight_multiplier_max:
+        use_confidence_weighting: false
+        confidence_method: residual_std
+        confidence_scale: 1.0
+        confidence_clip_min: 0.5
+        confidence_clip_max: 1.5
+        use_reliability_weighting: false
+        reliability_model_type: logistic
+        use_reliability_filter: false
+        reliability_threshold: 0.55
+        reliability_min_training_samples: 20
+        reliability_recent_window: 20
       slippage:
         enabled: true
         model: fixed_bps

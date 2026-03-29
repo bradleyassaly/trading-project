@@ -3200,6 +3200,16 @@ Confidence weighting semantics:
 - The combined confidence signal is a weighted blend of residual-std confidence, prediction-magnitude confidence, and recent model-performance confidence.
 - `use_confidence_filter` is optional. When enabled, low-confidence regression trades are skipped explicitly and logged as confidence-filtered.
 
+Reliability weighting semantics:
+
+- Reliability models when the EV sign is actually right, not just how noisy the residuals are.
+- Historical labels use `ev_success = 1` when `sign(predicted_return) == sign(realized_return)`, otherwise `0`, plus `realized_minus_predicted` for diagnostics.
+- The first production reliability model is a walk-forward logistic regression trained only on prior candidate decisions and closed trade outcomes.
+- It uses entry-time features only: predicted EV, signal family, score bucket, recent returns/volatility, cross-sectional rank/dispersion, day of week, and recent model success rate.
+- Reliability affects soft EV sizing and optional reliability filtering only. Hard EV gating behavior is unchanged.
+- The execution path applies `adjusted_ev_score = ev_weighting_score * ev_reliability` before the usual multiplier floor/cap logic.
+- Inspect `replay_trade_ev_reliability.csv`, `replay_ev_reliability_analysis.csv`, and `replay_ev_reliability_summary.json` to verify that top reliability buckets outperform low reliability buckets before enabling filtering by default.
+
 Inspect:
 
 - `paper/trade_ev_training_summary.json`
