@@ -284,6 +284,9 @@ def test_run_replay_trade_ev_reliability_writes_economic_artifacts(tmp_path: Pat
     assert Path(result["artifact_paths"]["replay_trade_ev_reliability_path"]).exists()
     assert Path(result["artifact_paths"]["replay_ev_reliability_economic_analysis_path"]).exists()
     assert Path(result["artifact_paths"]["replay_ev_reliability_turnover_analysis_path"]).exists()
+    assert Path(result["artifact_paths"]["replay_ev_reliability_training_audit_path"]).exists()
+    assert Path(result["artifact_paths"]["replay_ev_reliability_scoring_audit_path"]).exists()
+    assert Path(result["artifact_paths"]["replay_ev_reliability_feature_audit_path"]).exists()
     summary = json.loads(
         Path(result["artifact_paths"]["replay_ev_reliability_summary_path"]).read_text(encoding="utf-8")
     )
@@ -292,3 +295,5 @@ def test_run_replay_trade_ev_reliability_writes_economic_artifacts(tmp_path: Pat
     assert "reliability_top_vs_bottom_after_cost_spread" in summary
     assert "reliability_turnover_uplift" in summary
     assert "reliability_rank_ic" in summary
+    assert "training_fallback_reason_counts" in summary
+    assert "scoring_fallback_reason_counts" in summary

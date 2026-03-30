@@ -3210,7 +3210,8 @@ Reliability weighting semantics:
 - It uses entry-time features only: predicted EV, EV weighting score, target weight, expected horizon, execution-cost estimate, signal family, score bucket, recent returns/volatility, cross-sectional rank/dispersion, day of week, recent model hit rate, and recent symbol activity.
 - Reliability affects soft EV sizing and optional reliability filtering only. Hard EV gating behavior is unchanged. Usage modes are `weighting_only`, `filtering_only`, `reranking_only`, and `hybrid`.
 - The execution path applies reliability after EV normalization/clipping. In weighting modes it adjusts the EV sizing score with a bounded multiplier; in filtering/reranking modes it can suppress low-reliability candidates without changing hard EV gating.
-- Inspect `replay_trade_ev_reliability.csv`, `replay_ev_reliability_economic_analysis.csv`, `replay_ev_reliability_turnover_analysis.csv`, and `replay_ev_reliability_summary.json` to verify that high-reliability buckets improve after-cost returns without causing unacceptable turnover or cost-drag uplift.
+- Inspect `replay_trade_ev_reliability.csv`, `replay_ev_reliability_economic_analysis.csv`, `replay_ev_reliability_turnover_analysis.csv`, `replay_ev_reliability_summary.json`, `replay_ev_reliability_training_audit.csv`, `replay_ev_reliability_scoring_audit.csv`, and `replay_ev_reliability_feature_audit.csv` to verify that high-reliability buckets improve after-cost returns without causing unacceptable turnover or cost-drag uplift.
+- Reliability collapse is now audited explicitly. On the current full-window top-bucket runs, the live scorer collapsed because every replay day hit `insufficient_training_rows` before model fit, and early lifecycle rows were dropped from reliability training because their candidate artifacts did not yet contain entry-time EV prediction columns. The training/scoring audit CSVs make that failure mode visible day by day.
 
 Inspect:
 

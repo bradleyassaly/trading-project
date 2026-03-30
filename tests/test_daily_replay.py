@@ -397,6 +397,8 @@ def test_run_daily_replay_includes_reliability_summary_when_available(
                 "reliability_cost_drag_uplift": -0.01,
                 "ev_rank_ic": 0.12,
                 "combined_rank_ic": 0.24,
+                "training_fallback_reason_counts": {"single_class_training_slice": 2},
+                "scoring_fallback_reason_counts": {"single_class_training_slice": 2},
             },
             "artifact_paths": {
                 "replay_trade_ev_reliability_path": tmp_path / "replay" / "replay_trade_ev_reliability.csv",
@@ -428,6 +430,8 @@ def test_run_daily_replay_includes_reliability_summary_when_available(
     assert result.summary["reliability_cost_drag_uplift"] == pytest.approx(-0.01)
     assert result.summary["ev_rank_ic"] == pytest.approx(0.12)
     assert result.summary["combined_rank_ic"] == pytest.approx(0.24)
+    assert result.summary["reliability_training_fallback_reason_counts"] == {"single_class_training_slice": 2}
+    assert result.summary["reliability_scoring_fallback_reason_counts"] == {"single_class_training_slice": 2}
     assert "replay_ev_reliability_summary" in result.summary
 
 

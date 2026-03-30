@@ -1704,6 +1704,12 @@ def run_daily_replay(config: DailyReplayWorkflowConfig) -> DailyReplayResult:
         )
         summary["ev_rank_ic"] = float(reliability_summary.get("ev_rank_ic", 0.0) or 0.0)
         summary["combined_rank_ic"] = float(reliability_summary.get("combined_rank_ic", 0.0) or 0.0)
+        summary["reliability_training_fallback_reason_counts"] = dict(
+            reliability_summary.get("training_fallback_reason_counts", {}) or {}
+        )
+        summary["reliability_scoring_fallback_reason_counts"] = dict(
+            reliability_summary.get("scoring_fallback_reason_counts", {}) or {}
+        )
         summary["replay_ev_reliability_summary"] = reliability_summary
     status = "succeeded"
     failed_day_count = int(summary.get("failed_day_count", 0) or 0)

@@ -1112,31 +1112,45 @@ def generate_rebalance_orders(
             target_type=ev_reliability_target_type,
         )
         diagnostics["reliability_training_summary"] = reliability_training_summary
-        if bool(reliability_model.get("training_available", False)):
-            reliability_candidate_rows = []
-            for context in request_contexts:
-                candidate_payload = dict(context["candidate_row"])
-                regression_payload = dict(regression_prediction_lookup.get(str(context["request"].symbol)) or {})
-                candidate_payload["regression_raw_ev_score"] = regression_payload.get("regression_raw_ev_score")
-                candidate_payload["raw_ev_score"] = regression_payload.get("regression_raw_ev_score")
-                candidate_payload["expected_net_return"] = regression_payload.get("predicted_ev")
-                reliability_candidate_rows.append(candidate_payload)
-            reliability_predictions = score_trade_ev_reliability_candidates(
-                model=reliability_model,
-                candidate_rows=reliability_candidate_rows,
-                training_rows=reliability_training_rows,
-                usage_mode=ev_reliability_usage_mode,
-                threshold=ev_reliability_threshold,
-                weight_multiplier_min=ev_reliability_weight_multiplier_min,
-                weight_multiplier_max=ev_reliability_weight_multiplier_max,
-                neutral_band=ev_reliability_neutral_band,
-                max_promoted_trades_per_day=ev_reliability_max_promoted_trades_per_day,
-                recent_window=ev_reliability_recent_window,
-                target_type=ev_reliability_target_type,
-            )
-            reliability_prediction_lookup = {
-                str(row.get("symbol")): dict(row) for row in reliability_predictions if row.get("symbol")
-            }
+        reliability_candidate_rows = []
+        for context in request_contexts:
+            candidate_payload = dict(context["candidate_row"])
+            regression_payload = dict(regression_prediction_lookup.get(str(context["request"].symbol)) or {})
+            candidate_payload["regression_raw_ev_score"] = regression_payload.get("regression_raw_ev_score")
+            candidate_payload["raw_ev_score"] = regression_payload.get("regression_raw_ev_score")
+            candidate_payload["expected_net_return"] = regression_payload.get("predicted_ev")
+            reliability_candidate_rows.append(candidate_payload)
+        reliability_score_result = score_trade_ev_reliability_candidates(
+            model=reliability_model,
+            candidate_rows=reliability_candidate_rows,
+            training_rows=reliability_training_rows,
+            usage_mode=ev_reliability_usage_mode,
+            threshold=ev_reliability_threshold,
+            weight_multiplier_min=ev_reliability_weight_multiplier_min,
+            weight_multiplier_max=ev_reliability_weight_multiplier_max,
+            neutral_band=ev_reliability_neutral_band,
+            max_promoted_trades_per_day=ev_reliability_max_promoted_trades_per_day,
+            recent_window=ev_reliability_recent_window,
+            target_type=ev_reliability_target_type,
+            include_audit=True,
+        )
+        reliability_rows = (
+            list(reliability_score_result.get("rows") or [])
+            if isinstance(reliability_score_result, dict)
+            else list(reliability_score_result or [])
+        )
+        reliability_scoring_summary = (
+            dict(reliability_score_result.get("scoring_summary") or {})
+            if isinstance(reliability_score_result, dict)
+            else {}
+        )
+        diagnostics["reliability_training_summary"] = reliability_model.get("audit_summary", reliability_training_summary)
+        diagnostics["reliability_scoring_summary"] = reliability_scoring_summary
+        reliability_prediction_lookup = {
+            str(row.get("symbol")): dict(row)
+            for row in reliability_rows
+            if row.get("symbol")
+        }
     if bool(active_config.ev_gate_enabled) and bool(ev_model.get("training_available", False)) and ev_training_rows:
         training_predictions = score_trade_ev_candidates(
             model=ev_model,
@@ -1240,6 +1254,10 @@ def generate_rebalance_orders(
                     )
                     ev_prediction["ev_reliability_multiplier"] = float(
                         reliability_prediction.get("ev_reliability_multiplier", 1.0) or 1.0
+                    )
+                    ev_prediction["reliability_raw_score"] = reliability_prediction.get("reliability_raw_score")
+                    ev_prediction["reliability_calibrated_score"] = reliability_prediction.get(
+                        "reliability_calibrated_score"
                     )
                     ev_prediction["reliability_training_sample_count"] = int(
                         reliability_prediction.get("training_sample_count", 0) or 0
@@ -1393,6 +1411,12 @@ def generate_rebalance_orders(
                 )
                 candidate_row_by_symbol[request.symbol]["ev_reliability_multiplier"] = ev_prediction.get(
                     "ev_reliability_multiplier"
+                )
+                candidate_row_by_symbol[request.symbol]["reliability_raw_score"] = ev_prediction.get(
+                    "reliability_raw_score"
+                )
+                candidate_row_by_symbol[request.symbol]["reliability_calibrated_score"] = ev_prediction.get(
+                    "reliability_calibrated_score"
                 )
                 candidate_row_by_symbol[request.symbol]["reliability_training_sample_count"] = ev_prediction.get(
                     "reliability_training_sample_count"

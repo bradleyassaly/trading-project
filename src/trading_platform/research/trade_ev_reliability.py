@@ -34,6 +34,7 @@ RELIABILITY_NUMERIC_FEATURE_COLUMNS = [
 ]
 
 RELIABILITY_ROW_COLUMNS = [
+    "scoring_date",
     "trade_id",
     "entry_date",
     "exit_date",
@@ -75,11 +76,29 @@ RELIABILITY_ROW_COLUMNS = [
     "reliability_usage_mode",
     "prediction_available",
     "prediction_reason",
+    "reliability_raw_score",
+    "reliability_calibrated_score",
     "training_sample_count",
     "weight_delta",
     "reliability_turnover_delta",
     "reliability_cost_drag_delta",
     "was_reliability_promoted",
+]
+
+RELIABILITY_AUDIT_FEATURE_COLUMNS = [
+    "predicted_return",
+    "predicted_return_rank_pct",
+    "predicted_return_zscore",
+    "signal_family_rank_pct",
+    "candidate_count",
+    "signal_dispersion",
+    "recent_return_3d",
+    "recent_return_5d",
+    "recent_return_10d",
+    "recent_vol_20d",
+    "recent_model_hit_rate",
+    "recent_symbol_trade_frequency",
+    "recent_symbol_turnover",
 ]
 
 
@@ -113,6 +132,47 @@ def _normalize_records(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     if frame.empty:
         return []
     return frame.astype(object).where(pd.notna(frame), None).to_dict(orient="records")
+
+
+def _score_distribution_summary(values: np.ndarray | list[float] | pd.Series) -> dict[str, Any]:
+    array = np.asarray(values, dtype=float)
+    if array.size == 0:
+        return {
+            "min": 0.0,
+            "max": 0.0,
+            "mean": 0.0,
+            "std": 0.0,
+            "unique_value_count": 0,
+        }
+    return {
+        "min": float(np.min(array)),
+        "max": float(np.max(array)),
+        "mean": float(np.mean(array)),
+        "std": float(np.std(array, ddof=0)),
+        "unique_value_count": int(len(np.unique(np.round(array, 8)))),
+    }
+
+
+def _feature_audit_rows(frame: pd.DataFrame, *, date: str) -> list[dict[str, Any]]:
+    if frame.empty:
+        return []
+    rows: list[dict[str, Any]] = []
+    for feature in RELIABILITY_AUDIT_FEATURE_COLUMNS:
+        series = pd.to_numeric(frame.get(feature), errors="coerce")
+        non_na = series.dropna()
+        rows.append(
+            {
+                "date": str(date),
+                "feature_name": feature,
+                "feature_min": float(non_na.min()) if not non_na.empty else 0.0,
+                "feature_max": float(non_na.max()) if not non_na.empty else 0.0,
+                "feature_mean": float(non_na.mean()) if not non_na.empty else 0.0,
+                "feature_std": float(non_na.std(ddof=0)) if not non_na.empty else 0.0,
+                "feature_unique_value_count": int(non_na.nunique(dropna=True)) if not non_na.empty else 0,
+                "feature_missing_count": int(series.isna().sum()) if len(series.index) else 0,
+            }
+        )
+    return rows
 
 
 def _safe_corr(left: pd.Series, right: pd.Series, *, method: str = "pearson") -> float:
@@ -477,6 +537,10 @@ def build_trade_ev_reliability_history_dataset(
             "positive_label_rate": 0.0,
             "cutoff_date": str(as_of_date),
             "target_type": str(target_type),
+            "lifecycle_row_count": 0,
+            "candidate_joined_row_count": 0,
+            "rows_missing_candidate_match": 0,
+            "rows_missing_predicted_return": 0,
         }
     lifecycle_rows: list[dict[str, Any]] = []
     for day_dir in _historical_day_dirs(root, as_of_date=as_of_date):
@@ -486,6 +550,8 @@ def build_trade_ev_reliability_history_dataset(
         lifecycle_rows.extend(frame.astype(object).where(pd.notna(frame), None).to_dict(orient="records"))
     candidate_frame_cache: dict[str, pd.DataFrame] = {}
     joined_rows: list[dict[str, Any]] = []
+    rows_missing_candidate_match = 0
+    rows_missing_predicted_return = 0
     for lifecycle_row in lifecycle_rows:
         entry_date = str(lifecycle_row.get("entry_date") or "")
         symbol = str(lifecycle_row.get("symbol") or "")
@@ -502,9 +568,11 @@ def build_trade_ev_reliability_history_dataset(
             strategy_id=strategy_id,
         )
         if candidate_row is None:
+            rows_missing_candidate_match += 1
             continue
         predicted_return = _predicted_return_from_candidate(candidate_row)
         if predicted_return is None:
+            rows_missing_predicted_return += 1
             continue
         realized_return = _safe_float(lifecycle_row.get("realized_return"))
         stats = _candidate_day_stats(candidate_frame)
@@ -589,6 +657,10 @@ def build_trade_ev_reliability_history_dataset(
         else 0.0,
         "cutoff_date": str(as_of_date),
         "target_type": str(target_type),
+        "lifecycle_row_count": int(len(lifecycle_rows)),
+        "candidate_joined_row_count": int(len(joined_rows)),
+        "rows_missing_candidate_match": int(rows_missing_candidate_match),
+        "rows_missing_predicted_return": int(rows_missing_predicted_return),
         "top_bucket_realized_return_threshold": float(
             frame.get("top_bucket_realized_return_threshold", pd.Series([0.0])).iloc[0] or 0.0
         )
@@ -630,35 +702,84 @@ def train_trade_ev_reliability_model(
     recent_window: int = 20,
     target_type: str = "sign_success",
 ) -> dict[str, Any]:
+    normalized_model_type = str(model_type or "logistic").lower()
+    calibration_method_normalized = str(calibration_method or "none").lower()
+    base_summary = {
+        "model_type": normalized_model_type,
+        "calibration_method": calibration_method_normalized,
+        "target_type": str(target_type),
+        "training_row_count": int(len(training_rows)),
+        "positive_label_count": 0,
+        "negative_label_count": 0,
+        "unique_signal_family_count": 0,
+        "unique_score_bucket_count": 0,
+        "did_fit_model": False,
+        "did_apply_calibration": False,
+        "fallback_reason": "",
+        "raw_score_min": 0.0,
+        "raw_score_max": 0.0,
+        "raw_score_mean": 0.0,
+        "raw_score_std": 0.0,
+        "raw_score_unique_value_count": 0,
+        "calibrated_score_min": 0.0,
+        "calibrated_score_max": 0.0,
+        "calibrated_score_mean": 0.0,
+        "calibrated_score_std": 0.0,
+        "calibrated_score_unique_value_count": 0,
+    }
     if len(training_rows) < int(min_training_samples):
+        base_summary["fallback_reason"] = "insufficient_training_rows"
         return {
-            "model_type": str(model_type),
+            "model_type": normalized_model_type,
             "training_available": False,
             "training_sample_count": int(len(training_rows)),
             "warnings": ["insufficient_history_for_reliability_model"],
             "target_type": str(target_type),
-            "calibration_method": str(calibration_method),
+            "calibration_method": calibration_method_normalized,
+            "audit_summary": base_summary,
         }
     frame = pd.DataFrame(training_rows).copy()
+    base_summary["positive_label_count"] = int(
+        pd.to_numeric(frame.get("reliability_target_value"), errors="coerce").fillna(0.0).sum()
+    )
+    base_summary["negative_label_count"] = int(len(frame.index) - base_summary["positive_label_count"])
+    base_summary["unique_signal_family_count"] = int(
+        frame.get("signal_family", pd.Series(dtype=object)).astype(str).nunique(dropna=True)
+    )
+    base_summary["unique_score_bucket_count"] = int(
+        frame.get("score_bucket", pd.Series(dtype=object)).astype(str).nunique(dropna=True)
+    )
     signal_families = sorted({str(value or "unknown") for value in frame.get("signal_family", [])})
     score_buckets = sorted({str(value or "q1") for value in frame.get("score_bucket", [])})
     weekdays = sorted({int(_safe_float(value)) for value in frame.get("day_of_week", [])})
     x_raw = _design_matrix(frame, signal_families=signal_families, score_buckets=score_buckets, weekdays=weekdays)
+    if x_raw.size == 0 or x_raw.shape[1] == 0:
+        base_summary["fallback_reason"] = "no_valid_features_after_preprocessing"
+        return {
+            "model_type": normalized_model_type,
+            "training_available": False,
+            "training_sample_count": int(len(training_rows)),
+            "warnings": ["no_valid_features_after_preprocessing"],
+            "target_type": str(target_type),
+            "calibration_method": calibration_method_normalized,
+            "audit_summary": base_summary,
+        }
     means = x_raw.mean(axis=0)
     stds = x_raw.std(axis=0, ddof=0)
     stds = np.where(stds <= 0.0, 1.0, stds)
     x = (x_raw - means) / stds
     y = pd.to_numeric(frame["reliability_target_value"], errors="coerce").fillna(0.0).to_numpy(dtype=float)
     if len(np.unique(y)) < 2:
+        base_summary["fallback_reason"] = "single_class_training_slice"
         return {
-            "model_type": str(model_type),
+            "model_type": normalized_model_type,
             "training_available": False,
             "training_sample_count": int(len(training_rows)),
             "warnings": ["single_class_reliability_labels"],
             "target_type": str(target_type),
-            "calibration_method": str(calibration_method),
+            "calibration_method": calibration_method_normalized,
+            "audit_summary": base_summary,
         }
-    normalized_model_type = str(model_type or "logistic").lower()
     if normalized_model_type == "gradient_boosting":
         estimator = HistGradientBoostingClassifier(
             max_depth=3,
@@ -683,6 +804,24 @@ def train_trade_ev_reliability_model(
         labels=y,
         max_iter=max_iter,
     )
+    raw_summary = _score_distribution_summary(raw_scores)
+    calibrated_summary = _score_distribution_summary(calibrated_probabilities)
+    base_summary.update(
+        {
+            "did_fit_model": True,
+            "did_apply_calibration": calibration_method_normalized != "none",
+            "raw_score_min": raw_summary["min"],
+            "raw_score_max": raw_summary["max"],
+            "raw_score_mean": raw_summary["mean"],
+            "raw_score_std": raw_summary["std"],
+            "raw_score_unique_value_count": raw_summary["unique_value_count"],
+            "calibrated_score_min": calibrated_summary["min"],
+            "calibrated_score_max": calibrated_summary["max"],
+            "calibrated_score_mean": calibrated_summary["mean"],
+            "calibrated_score_std": calibrated_summary["std"],
+            "calibrated_score_unique_value_count": calibrated_summary["unique_value_count"],
+        }
+    )
     return {
         "model_type": normalized_model_type,
         "training_available": True,
@@ -702,6 +841,7 @@ def train_trade_ev_reliability_model(
         "training_probability_std": float(np.std(calibrated_probabilities, ddof=0)),
         "training_probability_unique_value_count": int(len(np.unique(np.round(calibrated_probabilities, 8)))),
         "warnings": [],
+        "audit_summary": base_summary,
     }
 
 
@@ -714,7 +854,10 @@ def _build_current_candidate_rows(
     if not candidate_rows:
         return []
     frame = pd.DataFrame(candidate_rows).copy()
-    signal_scores = pd.to_numeric(frame.get("signal_score"), errors="coerce")
+    signal_scores = pd.to_numeric(
+        frame.get("signal_score", pd.Series(index=frame.index, dtype=float)),
+        errors="coerce",
+    )
     signal_dispersion = float(signal_scores.std(ddof=0)) if signal_scores.notna().any() else 0.0
     candidate_count = max(len(frame.index), 1)
     predicted_series = pd.to_numeric(
@@ -801,16 +944,44 @@ def score_trade_ev_reliability_candidates(
     max_promoted_trades_per_day: int | None = None,
     recent_window: int = 20,
     target_type: str = "sign_success",
-) -> list[dict[str, Any]]:
+    include_audit: bool = False,
+) -> list[dict[str, Any]] | dict[str, Any]:
     if not candidate_rows:
-        return []
+        empty_result = {"rows": [], "scoring_summary": {}, "feature_audit_rows": []}
+        return empty_result if include_audit else []
     current_rows = _build_current_candidate_rows(
         candidate_rows=candidate_rows,
         training_rows=list(training_rows or []),
         recent_window=recent_window,
     )
+    current_frame = pd.DataFrame(current_rows)
+    scoring_date = str(current_rows[0].get("date") or "") if current_rows else ""
+    feature_audit_rows = _feature_audit_rows(current_frame, date=scoring_date)
+    scoring_summary = {
+        "date": scoring_date,
+        "scored_candidate_count": int(len(current_rows)),
+        "model_type": str(model.get("model_type", "logistic") or "logistic"),
+        "calibration_method": str(model.get("calibration_method", "none") or "none"),
+        "fallback_reason": "",
+        "did_fit_model": bool(model.get("training_available", False)),
+        "did_apply_calibration": str(model.get("calibration_method", "none") or "none").lower() != "none",
+        "raw_score_min": 0.0,
+        "raw_score_max": 0.0,
+        "raw_score_mean": 0.0,
+        "raw_score_std": 0.0,
+        "raw_score_unique_value_count": 0,
+        "reliability_score_min": 0.0,
+        "reliability_score_max": 0.0,
+        "reliability_score_mean": 0.0,
+        "reliability_score_std": 0.0,
+        "reliability_unique_value_count": 0,
+        "training_sample_count": int(model.get("training_sample_count", 0) or 0),
+    }
     if not bool(model.get("training_available", False)):
-        return _normalize_records(
+        scoring_summary["fallback_reason"] = str(
+            (model.get("audit_summary") or {}).get("fallback_reason") or "insufficient_history"
+        )
+        rows = _normalize_records(
             [
                 {
                     **row,
@@ -819,6 +990,8 @@ def score_trade_ev_reliability_candidates(
                     "ev_reliability_multiplier": 1.0,
                     "prediction_available": False,
                     "prediction_reason": "insufficient_history",
+                    "reliability_raw_score": 0.0,
+                    "reliability_calibrated_score": 0.5,
                     "training_sample_count": int(model.get("training_sample_count", 0) or 0),
                     "reliability_target_type": str(target_type),
                     "reliability_usage_mode": str(usage_mode),
@@ -828,6 +1001,7 @@ def score_trade_ev_reliability_candidates(
                 for row in current_rows
             ]
         )
+        return {"rows": rows, "scoring_summary": scoring_summary, "feature_audit_rows": feature_audit_rows} if include_audit else rows
     frame = pd.DataFrame(current_rows)
     x_raw = _design_matrix(
         frame,
@@ -841,7 +1015,8 @@ def score_trade_ev_reliability_candidates(
     x = (x_raw - means) / stds
     estimator = model.get("estimator")
     if estimator is None:
-        return _normalize_records(
+        scoring_summary["fallback_reason"] = "missing_reliability_estimator"
+        rows = _normalize_records(
             [
                 {
                     **row,
@@ -850,6 +1025,8 @@ def score_trade_ev_reliability_candidates(
                     "ev_reliability_multiplier": 1.0,
                     "prediction_available": False,
                     "prediction_reason": "missing_reliability_estimator",
+                    "reliability_raw_score": 0.0,
+                    "reliability_calibrated_score": 0.5,
                     "training_sample_count": int(model.get("training_sample_count", 0) or 0),
                     "reliability_target_type": str(target_type),
                     "reliability_usage_mode": str(usage_mode),
@@ -859,17 +1036,32 @@ def score_trade_ev_reliability_candidates(
                 for row in current_rows
             ]
         )
+        return {"rows": rows, "scoring_summary": scoring_summary, "feature_audit_rows": feature_audit_rows} if include_audit else rows
     raw_scores = np.asarray(
         estimator.decision_function(x) if hasattr(estimator, "decision_function") else estimator.predict_proba(x)[:, 1],
         dtype=float,
     )
-    probabilities = pd.Series(
-        _apply_probability_calibrator(
-            calibrator=model.get("calibrator"),
-            method=str(model.get("calibration_method", "none") or "none"),
-            raw_scores=raw_scores,
-        ),
-        index=frame.index,
+    calibrated_scores = _apply_probability_calibrator(
+        calibrator=model.get("calibrator"),
+        method=str(model.get("calibration_method", "none") or "none"),
+        raw_scores=raw_scores,
+    )
+    probabilities = pd.Series(calibrated_scores, index=frame.index)
+    raw_summary = _score_distribution_summary(raw_scores)
+    calibrated_summary = _score_distribution_summary(calibrated_scores)
+    scoring_summary.update(
+        {
+            "raw_score_min": raw_summary["min"],
+            "raw_score_max": raw_summary["max"],
+            "raw_score_mean": raw_summary["mean"],
+            "raw_score_std": raw_summary["std"],
+            "raw_score_unique_value_count": raw_summary["unique_value_count"],
+            "reliability_score_min": calibrated_summary["min"],
+            "reliability_score_max": calibrated_summary["max"],
+            "reliability_score_mean": calibrated_summary["mean"],
+            "reliability_score_std": calibrated_summary["std"],
+            "reliability_unique_value_count": calibrated_summary["unique_value_count"],
+        }
     )
     rank_pct = _reliability_rank_pct(probabilities)
     promoted_indices: set[int] = set()
@@ -899,11 +1091,14 @@ def score_trade_ev_reliability_candidates(
         rows.append(
             {
                 **row,
+                "scoring_date": scoring_date,
                 "ev_reliability": probability,
                 "ev_reliability_rank_pct": reliability_rank,
                 "ev_reliability_multiplier": multiplier,
                 "prediction_available": True,
-                "prediction_reason": "reliability_logistic_model",
+                "prediction_reason": f"reliability_{str(model.get('model_type', 'logistic') or 'logistic')}_model",
+                "reliability_raw_score": float(raw_scores[index]),
+                "reliability_calibrated_score": float(probabilities.iloc[index]),
                 "training_sample_count": int(model.get("training_sample_count", 0) or 0),
                 "reliability_target_type": str(target_type),
                 "reliability_usage_mode": str(usage_mode),
@@ -913,7 +1108,14 @@ def score_trade_ev_reliability_candidates(
                 "was_filtered_by_reliability": filtered,
             }
         )
-    return _normalize_records(rows)
+    normalized_rows = _normalize_records(rows)
+    if include_audit:
+        return {
+            "rows": normalized_rows,
+            "scoring_summary": scoring_summary,
+            "feature_audit_rows": feature_audit_rows,
+        }
+    return normalized_rows
 
 
 def _bucket_label(series: pd.Series, bucket_count: int) -> pd.Series:
@@ -1144,26 +1346,106 @@ def run_replay_trade_ev_reliability(
     root = Path(replay_root)
     reliability_rows = _build_execution_reliability_rows(replay_root=root)
     bucket_rows, turnover_rows, summary = build_trade_ev_reliability_analysis(reliability_rows=reliability_rows)
+    training_audit_rows: list[dict[str, Any]] = []
+    scoring_audit_rows: list[dict[str, Any]] = []
+    feature_audit_rows: list[dict[str, Any]] = []
+    training_fallback_counts: dict[str, int] = {}
+    scoring_fallback_counts: dict[str, int] = {}
+    for day_dir in _all_replay_day_dirs(root):
+        requested_date = str(pd.Timestamp(day_dir.name).date())
+        input_summary = {}
+        input_summary_path = day_dir / "replay_day_input_summary.json"
+        if input_summary_path.exists():
+            try:
+                input_summary = json.loads(input_summary_path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                input_summary = {}
+        ev_config = dict(input_summary.get("execution_config", {}) or {})
+        training_rows, history_summary = build_trade_ev_reliability_history_dataset(
+            history_root=root,
+            as_of_date=requested_date,
+            recent_window=int(ev_config.get("ev_gate_reliability_recent_window", 20) or 20),
+            target_type=str(ev_config.get("ev_gate_reliability_target_type", "sign_success") or "sign_success"),
+            top_percentile=float(ev_config.get("ev_gate_reliability_top_percentile", 0.8) or 0.8),
+            top_bucket_pct=ev_config.get("ev_gate_reliability_top_bucket_pct"),
+            hurdle=float(ev_config.get("ev_gate_reliability_hurdle", 0.0) or 0.0),
+        )
+        model = train_trade_ev_reliability_model(
+            training_rows=training_rows,
+            min_training_samples=int(ev_config.get("ev_gate_reliability_min_training_samples", 20) or 20),
+            model_type=str(ev_config.get("ev_gate_reliability_model_type", "logistic") or "logistic"),
+            calibration_method=str(ev_config.get("ev_gate_reliability_calibration_method", "none") or "none"),
+            recent_window=int(ev_config.get("ev_gate_reliability_recent_window", 20) or 20),
+            target_type=str(ev_config.get("ev_gate_reliability_target_type", "sign_success") or "sign_success"),
+        )
+        training_summary = {
+            "date": requested_date,
+            **history_summary,
+            **dict(model.get("audit_summary") or {}),
+        }
+        training_audit_rows.append(training_summary)
+        training_reason = str(training_summary.get("fallback_reason", "") or "")
+        if training_reason:
+            training_fallback_counts[training_reason] = training_fallback_counts.get(training_reason, 0) + 1
+        candidate_rows = _read_csv_frame(day_dir / "paper" / "trade_candidate_dataset.csv")
+        score_result = score_trade_ev_reliability_candidates(
+            model=model,
+            candidate_rows=candidate_rows.astype(object).where(pd.notna(candidate_rows), None).to_dict(orient="records")
+            if not candidate_rows.empty
+            else [],
+            training_rows=training_rows,
+            usage_mode=str(ev_config.get("ev_gate_reliability_usage_mode", "weighting_only") or "weighting_only"),
+            threshold=float(ev_config.get("ev_gate_reliability_threshold", 0.5) or 0.5),
+            weight_multiplier_min=float(ev_config.get("ev_gate_reliability_weight_multiplier_min", 0.75) or 0.75),
+            weight_multiplier_max=float(ev_config.get("ev_gate_reliability_weight_multiplier_max", 1.25) or 1.25),
+            neutral_band=float(ev_config.get("ev_gate_reliability_neutral_band", 0.05) or 0.05),
+            max_promoted_trades_per_day=ev_config.get("ev_gate_reliability_max_promoted_trades_per_day"),
+            recent_window=int(ev_config.get("ev_gate_reliability_recent_window", 20) or 20),
+            target_type=str(ev_config.get("ev_gate_reliability_target_type", "sign_success") or "sign_success"),
+            include_audit=True,
+        )
+        scoring_summary = dict(score_result.get("scoring_summary") or {})
+        scoring_summary["date"] = requested_date
+        scoring_summary["rows_before_scoring"] = int(len(candidate_rows.index)) if not candidate_rows.empty else 0
+        scoring_audit_rows.append(scoring_summary)
+        scoring_reason = str(scoring_summary.get("fallback_reason", "") or "")
+        if scoring_reason:
+            scoring_fallback_counts[scoring_reason] = scoring_fallback_counts.get(scoring_reason, 0) + 1
+        feature_audit_rows.extend(score_result.get("feature_audit_rows") or [])
     rows_path = root / "replay_trade_ev_reliability.csv"
     analysis_path = root / "replay_ev_reliability_analysis.csv"
     economic_path = root / "replay_ev_reliability_economic_analysis.csv"
     turnover_path = root / "replay_ev_reliability_turnover_analysis.csv"
     summary_path = root / "replay_ev_reliability_summary.json"
+    training_audit_path = root / "replay_ev_reliability_training_audit.csv"
+    scoring_audit_path = root / "replay_ev_reliability_scoring_audit.csv"
+    feature_audit_path = root / "replay_ev_reliability_feature_audit.csv"
     pd.DataFrame(reliability_rows, columns=RELIABILITY_ROW_COLUMNS).to_csv(rows_path, index=False)
     pd.DataFrame(bucket_rows).to_csv(analysis_path, index=False)
     pd.DataFrame(bucket_rows).to_csv(economic_path, index=False)
     pd.DataFrame(turnover_rows).to_csv(turnover_path, index=False)
+    pd.DataFrame(training_audit_rows).to_csv(training_audit_path, index=False)
+    pd.DataFrame(scoring_audit_rows).to_csv(scoring_audit_path, index=False)
+    pd.DataFrame(feature_audit_rows).to_csv(feature_audit_path, index=False)
+    summary["training_fallback_reason_counts"] = training_fallback_counts
+    summary["scoring_fallback_reason_counts"] = scoring_fallback_counts
     summary_path.write_text(json.dumps(summary, indent=2, default=str), encoding="utf-8")
     return {
         "rows": reliability_rows,
         "bucket_rows": bucket_rows,
         "turnover_rows": turnover_rows,
+        "training_audit_rows": training_audit_rows,
+        "scoring_audit_rows": scoring_audit_rows,
+        "feature_audit_rows": feature_audit_rows,
         "summary": summary,
         "artifact_paths": {
             "replay_trade_ev_reliability_path": rows_path,
             "replay_ev_reliability_analysis_path": analysis_path,
             "replay_ev_reliability_economic_analysis_path": economic_path,
             "replay_ev_reliability_turnover_analysis_path": turnover_path,
+            "replay_ev_reliability_training_audit_path": training_audit_path,
+            "replay_ev_reliability_scoring_audit_path": scoring_audit_path,
+            "replay_ev_reliability_feature_audit_path": feature_audit_path,
             "replay_ev_reliability_summary_path": summary_path,
         },
     }
