@@ -1361,8 +1361,12 @@ def build_trade_ev_reliability_analysis(
 def run_replay_trade_ev_reliability(
     *,
     replay_root: str | Path,
+    output_root: str | Path | None = None,
+    ev_config_overrides: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     root = Path(replay_root)
+    artifact_root = Path(output_root) if output_root is not None else root
+    artifact_root.mkdir(parents=True, exist_ok=True)
     reliability_rows = _build_execution_reliability_rows(replay_root=root)
     bucket_rows, turnover_rows, summary = build_trade_ev_reliability_analysis(reliability_rows=reliability_rows)
     training_audit_rows: list[dict[str, Any]] = []
@@ -1380,6 +1384,8 @@ def run_replay_trade_ev_reliability(
             except json.JSONDecodeError:
                 input_summary = {}
         ev_config = dict(input_summary.get("execution_config", {}) or {})
+        if ev_config_overrides:
+            ev_config.update(ev_config_overrides)
         training_rows, history_summary = build_trade_ev_reliability_history_dataset(
             history_root=root,
             as_of_date=requested_date,
@@ -1486,14 +1492,14 @@ def run_replay_trade_ev_reliability(
         if scoring_reason:
             scoring_fallback_counts[scoring_reason] = scoring_fallback_counts.get(scoring_reason, 0) + 1
         feature_audit_rows.extend(score_result.get("feature_audit_rows") or [])
-    rows_path = root / "replay_trade_ev_reliability.csv"
-    analysis_path = root / "replay_ev_reliability_analysis.csv"
-    economic_path = root / "replay_ev_reliability_economic_analysis.csv"
-    turnover_path = root / "replay_ev_reliability_turnover_analysis.csv"
-    summary_path = root / "replay_ev_reliability_summary.json"
-    training_audit_path = root / "replay_ev_reliability_training_audit.csv"
-    scoring_audit_path = root / "replay_ev_reliability_scoring_audit.csv"
-    feature_audit_path = root / "replay_ev_reliability_feature_audit.csv"
+    rows_path = artifact_root / "replay_trade_ev_reliability.csv"
+    analysis_path = artifact_root / "replay_ev_reliability_analysis.csv"
+    economic_path = artifact_root / "replay_ev_reliability_economic_analysis.csv"
+    turnover_path = artifact_root / "replay_ev_reliability_turnover_analysis.csv"
+    summary_path = artifact_root / "replay_ev_reliability_summary.json"
+    training_audit_path = artifact_root / "replay_ev_reliability_training_audit.csv"
+    scoring_audit_path = artifact_root / "replay_ev_reliability_scoring_audit.csv"
+    feature_audit_path = artifact_root / "replay_ev_reliability_feature_audit.csv"
     pd.DataFrame(reliability_rows, columns=RELIABILITY_ROW_COLUMNS).to_csv(rows_path, index=False)
     pd.DataFrame(bucket_rows).to_csv(analysis_path, index=False)
     pd.DataFrame(bucket_rows).to_csv(economic_path, index=False)

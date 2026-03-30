@@ -299,3 +299,72 @@ def test_run_replay_trade_ev_reliability_writes_economic_artifacts(tmp_path: Pat
     assert "scoring_fallback_reason_counts" in summary
     assert "total_rows_dropped_missing_predicted_return" in summary
     assert "days_reliability_active" in summary
+
+
+def test_run_replay_trade_ev_reliability_supports_output_root_and_overrides(tmp_path: Path) -> None:
+    replay_root = tmp_path / "replay"
+    paper_dir = replay_root / "2025-01-03" / "paper"
+    paper_dir.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(
+        [
+            {
+                "trade_id": "t1",
+                "entry_date": "2025-01-03",
+                "exit_date": "2025-01-06",
+                "symbol": "AAPL",
+                "strategy_id": "alpha",
+                "signal_family": "momentum",
+                "realized_return": 0.03,
+            }
+        ]
+    ).to_csv(paper_dir / "trade_ev_lifecycle.csv", index=False)
+    pd.DataFrame(
+        [
+            {
+                "date": "2025-01-03",
+                "symbol": "AAPL",
+                "strategy_id": "alpha",
+                "signal_family": "momentum",
+                "candidate_outcome": "executed",
+                "signal_score": 0.8,
+                "score_rank": 1,
+                "score_percentile": 0.9,
+                "regression_raw_ev_score": 0.02,
+                "ev_weighting_score": 0.02,
+                "requested_target_weight": 0.2,
+                "estimated_execution_cost_pct": 0.002,
+                "recent_return_3d": 0.01,
+                "recent_return_5d": 0.01,
+                "recent_return_10d": 0.01,
+                "recent_vol_20d": 0.1,
+            }
+        ]
+    ).to_csv(paper_dir / "trade_candidate_dataset.csv", index=False)
+    (replay_root / "2025-01-03" / "replay_day_input_summary.json").write_text(
+        json.dumps(
+            {
+                "execution_config": {
+                    "ev_gate_reliability_model_type": "logistic",
+                    "ev_gate_reliability_calibration_method": "none",
+                    "ev_gate_reliability_target_type": "top_bucket_realized_return",
+                    "ev_gate_reliability_min_training_samples": 99,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    output_root = tmp_path / "audit_output"
+    result = run_replay_trade_ev_reliability(
+        replay_root=replay_root,
+        output_root=output_root,
+        ev_config_overrides={
+            "ev_gate_reliability_model_type": "gradient_boosting",
+            "ev_gate_reliability_min_training_samples": 1,
+        },
+    )
+
+    summary_path = Path(result["artifact_paths"]["replay_ev_reliability_summary_path"])
+    assert summary_path.parent == output_root
+    training_audit = pd.read_csv(result["artifact_paths"]["replay_ev_reliability_training_audit_path"])
+    assert training_audit.iloc[0]["model_type"] == "gradient_boosting"
