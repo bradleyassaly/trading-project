@@ -297,3 +297,5 @@ def test_run_replay_trade_ev_reliability_writes_economic_artifacts(tmp_path: Pat
     assert "reliability_rank_ic" in summary
     assert "training_fallback_reason_counts" in summary
     assert "scoring_fallback_reason_counts" in summary
+    assert "total_rows_dropped_missing_predicted_return" in summary
+    assert "days_reliability_active" in summary

@@ -1079,6 +1079,90 @@ def test_generate_rebalance_orders_regression_soft_mode_falls_back_when_predicti
     assert result.diagnostics["regression_prediction_missing_count"] == 1
 
 
+def test_generate_rebalance_orders_persists_candidate_ev_fields_during_reliability_cold_start(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "trading_platform.paper.service.build_trade_ev_training_dataset",
+        lambda **kwargs: ([{"forward_net_return": 0.02}], {"training_sample_count": 1}),
+    )
+    monkeypatch.setattr(
+        "trading_platform.paper.service.train_trade_ev_model",
+        lambda **kwargs: {"training_available": True, "training_sample_count": 1},
+    )
+    monkeypatch.setattr(
+        "trading_platform.paper.service.score_trade_ev_candidates",
+        lambda **kwargs: [
+            {
+                **kwargs["candidate_rows"][0],
+                "symbol": "AAPL",
+                "expected_gross_return": 0.02,
+                "expected_net_return": 0.02,
+                "expected_cost": 0.001,
+                "probability_positive": 0.6,
+                "raw_ev_score": 0.02,
+                "normalized_ev_score": 0.02,
+                "ev_score_pre_clip": 0.02,
+                "ev_score_post_clip": 0.02,
+                "ev_score_clipped": False,
+                "ev_weighting_score": 0.02,
+                "ev_decision_score": 0.02,
+                "ev_gate_threshold": 0.0,
+                "ev_gate_decision": "allow",
+                "ev_model_bucket": "global",
+                "ev_training_sample_count": 1,
+                "action_reason": "passed_ev_gate",
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        "trading_platform.paper.service.build_trade_ev_regression_history_dataset",
+        lambda **kwargs: ([{"realized_return": 0.03}], {"row_count": 1}),
+    )
+    monkeypatch.setattr(
+        "trading_platform.paper.service.train_trade_ev_regression_model",
+        lambda **kwargs: {"training_available": False, "training_sample_count": 0},
+    )
+    monkeypatch.setattr(
+        "trading_platform.paper.service.build_trade_ev_reliability_history_dataset",
+        lambda **kwargs: ([], {"row_count": 0, "rows_missing_predicted_return": 0}),
+    )
+
+    result = generate_rebalance_orders(
+        as_of="2025-01-07",
+        state=PaperPortfolioState(cash=10_000.0, positions={}),
+        latest_target_weights={"AAPL": 0.2},
+        latest_prices={"AAPL": 100.0},
+        latest_scores={"AAPL": 0.9},
+        config=PaperTradingConfig(
+            symbols=["AAPL"],
+            ev_gate_enabled=True,
+            ev_gate_model_type="regression",
+            ev_gate_mode="soft",
+            ev_gate_weight_multiplier=True,
+            ev_gate_weight_scale=3.0,
+            ev_gate_training_root="artifacts/daily_replay/run_current",
+            ev_gate_min_training_samples=1,
+            ev_gate_use_reliability_weighting=True,
+            ev_gate_reliability_target_type="top_bucket_realized_return",
+            ev_gate_reliability_usage_mode="reranking_only",
+            ev_gate_reliability_bootstrap_min_training_samples=5,
+            ev_gate_reliability_min_training_samples=10,
+            ev_gate_reliability_enabled_after_min_history_rows=3,
+            ev_gate_reliability_cold_start_behavior="neutral_score",
+            min_trade_dollars=1.0,
+        ),
+        min_trade_dollars=1.0,
+    )
+
+    candidate_row = result.diagnostics["candidate_trade_rows"][0]
+    assert candidate_row["predicted_return"] == pytest.approx(0.02)
+    assert candidate_row["predicted_return_source"] == "ev_gate_model"
+    assert candidate_row["ev_weighting_score"] == pytest.approx(0.02)
+    assert candidate_row["ev_reliability_status"] == "cold_start"
+    assert candidate_row["ev_reliability_fallback_reason"] == "reliability_history_below_activation_threshold"
+    assert candidate_row["ev_reliability_model_fit_available"] is False
+    assert result.diagnostics["reliability_status"] == "cold_start"
+
+
 def test_generate_rebalance_orders_regression_hard_mode_does_not_use_regression_predictions(monkeypatch) -> None:
     monkeypatch.setattr(
         "trading_platform.paper.service.build_trade_ev_training_dataset",

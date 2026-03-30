@@ -392,7 +392,11 @@ daily_trading:
         reliability_calibration_method: isotonic
         use_reliability_filter: true
         reliability_threshold: 0.62
+        reliability_bootstrap_min_training_samples: 8
         reliability_min_training_samples: 14
+        reliability_enabled_after_min_history_rows: 12
+        reliability_enabled_after_min_fit_days: 3
+        reliability_cold_start_behavior: neutral_score
         reliability_recent_window: 18
         reliability_target_type: positive_net_realized_return
         reliability_top_percentile: 0.9
@@ -458,7 +462,11 @@ daily_trading:
     assert config.ev_gate_reliability_calibration_method == "isotonic"
     assert config.ev_gate_use_reliability_filter is True
     assert config.ev_gate_reliability_threshold == 0.62
+    assert config.ev_gate_reliability_bootstrap_min_training_samples == 8
     assert config.ev_gate_reliability_min_training_samples == 14
+    assert config.ev_gate_reliability_enabled_after_min_history_rows == 12
+    assert config.ev_gate_reliability_enabled_after_min_fit_days == 3
+    assert config.ev_gate_reliability_cold_start_behavior == "neutral_score"
     assert config.ev_gate_reliability_recent_window == 18
     assert config.ev_gate_reliability_target_type == "positive_net_realized_return"
     assert config.ev_gate_reliability_top_percentile == 0.9

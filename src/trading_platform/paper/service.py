@@ -145,6 +145,34 @@ class JsonPaperStateStore:
         self.path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
+def _historical_reliability_fit_days(*, history_root: str | Path | None, as_of_date: str | None) -> int:
+    if not history_root or not as_of_date:
+        return 0
+    root = Path(history_root)
+    if not root.exists():
+        return 0
+    cutoff = pd.Timestamp(str(as_of_date)).date()
+    fit_days = 0
+    for day_dir in sorted(path for path in root.iterdir() if path.is_dir()):
+        try:
+            day = pd.Timestamp(day_dir.name).date()
+        except (TypeError, ValueError):
+            continue
+        if day >= cutoff:
+            continue
+        summary_path = day_dir / "paper" / "paper_run_summary_latest.json"
+        if not summary_path.exists():
+            continue
+        try:
+            payload = json.loads(summary_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            continue
+        summary = dict(payload.get("summary") or {})
+        if bool(summary.get("reliability_model_fit_available", False)):
+            fit_days += 1
+    return fit_days
+
+
 def _load_xsec_prepared_frames(
     symbols: list[str],
 ) -> tuple[dict[str, dict[str, object]], list[str], dict[str, str]]:
@@ -670,9 +698,24 @@ def generate_rebalance_orders(
     ).lower()
     ev_use_reliability_filter = bool(getattr(active_config, "ev_gate_use_reliability_filter", False))
     ev_reliability_threshold = float(getattr(active_config, "ev_gate_reliability_threshold", 0.5) or 0.5)
+    ev_reliability_bootstrap_min_training_samples = getattr(
+        active_config,
+        "ev_gate_reliability_bootstrap_min_training_samples",
+        None,
+    )
     ev_reliability_min_training_samples = int(
         getattr(active_config, "ev_gate_reliability_min_training_samples", 20) or 20
     )
+    ev_reliability_enabled_after_min_history_rows = int(
+        getattr(active_config, "ev_gate_reliability_enabled_after_min_history_rows", 0) or 0
+    )
+    ev_reliability_enabled_after_min_fit_days = int(
+        getattr(active_config, "ev_gate_reliability_enabled_after_min_fit_days", 0) or 0
+    )
+    ev_reliability_cold_start_behavior = str(
+        getattr(active_config, "ev_gate_reliability_cold_start_behavior", "disabled_passthrough")
+        or "disabled_passthrough"
+    ).lower()
     ev_reliability_recent_window = int(getattr(active_config, "ev_gate_reliability_recent_window", 20) or 20)
     ev_reliability_target_type = str(
         getattr(active_config, "ev_gate_reliability_target_type", "sign_success") or "sign_success"
@@ -803,7 +846,11 @@ def generate_rebalance_orders(
     diagnostics["ev_gate_reliability_calibration_method"] = ev_reliability_calibration_method
     diagnostics["ev_gate_use_reliability_filter"] = ev_use_reliability_filter
     diagnostics["ev_gate_reliability_threshold"] = ev_reliability_threshold
+    diagnostics["ev_gate_reliability_bootstrap_min_training_samples"] = ev_reliability_bootstrap_min_training_samples
     diagnostics["ev_gate_reliability_min_training_samples"] = ev_reliability_min_training_samples
+    diagnostics["ev_gate_reliability_enabled_after_min_history_rows"] = ev_reliability_enabled_after_min_history_rows
+    diagnostics["ev_gate_reliability_enabled_after_min_fit_days"] = ev_reliability_enabled_after_min_fit_days
+    diagnostics["ev_gate_reliability_cold_start_behavior"] = ev_reliability_cold_start_behavior
     diagnostics["ev_gate_reliability_recent_window"] = ev_reliability_recent_window
     diagnostics["ev_gate_reliability_target_type"] = ev_reliability_target_type
     diagnostics["ev_gate_reliability_top_percentile"] = ev_reliability_top_percentile
@@ -939,6 +986,19 @@ def generate_rebalance_orders(
             "ev_gate_mode": ev_gate_mode,
             "ev_gate_decision": None,
             "probability_positive": None,
+            "predicted_return": None,
+            "predicted_return_source": "unavailable",
+            "ev_weighting_score": None,
+            "ev_score_before_reliability": None,
+            "ev_score_after_reliability": None,
+            "ev_model_type_requested": requested_ev_model_type,
+            "ev_model_type_used": execution_ev_model_type,
+            "ev_model_fallback_reason": ev_model_fallback_reason,
+            "ev_regression_prediction_available": False,
+            "ev_reliability": None,
+            "ev_reliability_status": "cold_start",
+            "ev_reliability_fallback_reason": "reliability_not_scored_yet",
+            "ev_reliability_model_fit_available": False,
         }
         candidate_trade_rows.append(candidate_row)
         candidate_row_by_symbol[symbol] = candidate_row
@@ -1005,10 +1065,23 @@ def generate_rebalance_orders(
             "estimated_execution_cost_pct": estimated_cost_pct,
             "recent_return_3d": float(market_features.get("recent_return_3d", 0.0) or 0.0),
             "recent_return_5d": float(market_features.get("recent_return_5d", 0.0) or 0.0),
-            "recent_return_10d": float(market_features.get("recent_return_10d", 0.0) or 0.0),
-            "recent_vol_20d": float(market_features.get("recent_vol_20d", 0.0) or 0.0),
-            "dollar_volume": float(market_features.get("dollar_volume", 0.0) or 0.0),
-        }
+                "recent_return_10d": float(market_features.get("recent_return_10d", 0.0) or 0.0),
+                "recent_vol_20d": float(market_features.get("recent_vol_20d", 0.0) or 0.0),
+                "dollar_volume": float(market_features.get("dollar_volume", 0.0) or 0.0),
+                "predicted_return": None,
+                "predicted_return_source": "unavailable",
+                "ev_weighting_score": None,
+                "ev_score_before_reliability": None,
+                "ev_score_after_reliability": None,
+                "ev_model_type_requested": requested_ev_model_type,
+                "ev_model_type_used": execution_ev_model_type,
+                "ev_model_fallback_reason": ev_model_fallback_reason,
+                "ev_regression_prediction_available": False,
+                "ev_reliability": None,
+                "ev_reliability_status": "cold_start",
+                "ev_reliability_fallback_reason": "reliability_not_scored_yet",
+                "ev_reliability_model_fit_available": False,
+            }
         request_contexts.append(
             {
                 "request": request,
@@ -1036,11 +1109,11 @@ def generate_rebalance_orders(
     if (
         bool(active_config.ev_gate_enabled)
         and bool(ev_model.get("training_available", False))
-        and request_contexts
+        and candidate_trade_rows
     ):
         scored_predictions = score_trade_ev_candidates(
             model=ev_model,
-            candidate_rows=[dict(row["candidate_row"]) for row in request_contexts],
+            candidate_rows=[dict(row) for row in candidate_trade_rows],
             min_expected_net_return=float(active_config.ev_gate_min_expected_net_return),
             min_probability_positive=active_config.ev_gate_min_probability_positive,
             risk_penalty_lambda=float(active_config.ev_gate_risk_penalty_lambda),
@@ -1067,7 +1140,7 @@ def generate_rebalance_orders(
         if bool(regression_model.get("training_available", False)):
             regression_predictions = score_trade_ev_regression_candidates(
                 model=regression_model,
-                candidate_rows=[dict(row["candidate_row"]) for row in request_contexts],
+                candidate_rows=[dict(row) for row in candidate_trade_rows],
                 use_confidence_weighting=ev_use_confidence_weighting and ev_confidence_method == "residual_std",
                 confidence_scale=ev_confidence_scale,
                 confidence_clip_min=ev_confidence_clip_min,
@@ -1093,7 +1166,11 @@ def generate_rebalance_orders(
     reliability_training_summary: dict[str, Any] = {}
     reliability_model: dict[str, Any] = {}
     reliability_prediction_lookup: dict[str, dict[str, Any]] = {}
-    if reliability_requested_for_soft_weight and as_of and request_contexts:
+    reliability_fit_available = False
+    reliability_status = "disabled"
+    reliability_fallback_reason = ""
+    historical_reliability_fit_days = 0
+    if reliability_requested_for_soft_weight and as_of and candidate_trade_rows:
         reliability_training_rows, reliability_training_summary = build_trade_ev_reliability_history_dataset(
             history_root=active_config.ev_gate_training_root,
             as_of_date=as_of,
@@ -1103,22 +1180,58 @@ def generate_rebalance_orders(
             top_bucket_pct=ev_reliability_top_bucket_pct,
             hurdle=ev_reliability_hurdle,
         )
-        reliability_model = train_trade_ev_reliability_model(
-            training_rows=reliability_training_rows,
-            min_training_samples=ev_reliability_min_training_samples,
-            model_type=ev_reliability_model_type,
-            calibration_method=ev_reliability_calibration_method,
-            recent_window=ev_reliability_recent_window,
-            target_type=ev_reliability_target_type,
+        historical_reliability_fit_days = _historical_reliability_fit_days(
+            history_root=active_config.ev_gate_training_root,
+            as_of_date=as_of,
         )
+        effective_reliability_min_samples = ev_reliability_min_training_samples
+        if (
+            ev_reliability_bootstrap_min_training_samples is not None
+            and historical_reliability_fit_days < max(ev_reliability_enabled_after_min_fit_days, 1)
+        ):
+            effective_reliability_min_samples = min(
+                ev_reliability_min_training_samples,
+                int(ev_reliability_bootstrap_min_training_samples),
+            )
+        if len(reliability_training_rows) < ev_reliability_enabled_after_min_history_rows:
+            reliability_status = "cold_start"
+            reliability_fallback_reason = "reliability_history_below_activation_threshold"
+        elif historical_reliability_fit_days < ev_reliability_enabled_after_min_fit_days:
+            reliability_status = "cold_start"
+            reliability_fallback_reason = "reliability_fit_days_below_activation_threshold"
+        else:
+            reliability_model = train_trade_ev_reliability_model(
+                training_rows=reliability_training_rows,
+                min_training_samples=effective_reliability_min_samples,
+                model_type=ev_reliability_model_type,
+                calibration_method=ev_reliability_calibration_method,
+                recent_window=ev_reliability_recent_window,
+                target_type=ev_reliability_target_type,
+            )
+            reliability_fit_available = bool(reliability_model.get("training_available", False))
+            reliability_status = "active" if reliability_fit_available else "insufficient_history"
+            reliability_fallback_reason = str(
+                (reliability_model.get("audit_summary") or {}).get("fallback_reason") or ""
+            )
         diagnostics["reliability_training_summary"] = reliability_training_summary
         reliability_candidate_rows = []
-        for context in request_contexts:
-            candidate_payload = dict(context["candidate_row"])
-            regression_payload = dict(regression_prediction_lookup.get(str(context["request"].symbol)) or {})
+        for candidate_row in candidate_trade_rows:
+            candidate_payload = dict(candidate_row)
+            regression_payload = dict(regression_prediction_lookup.get(str(candidate_row.get("symbol"))) or {})
+            base_payload = dict(ev_prediction_lookup.get(str(candidate_row.get("symbol"))) or {})
             candidate_payload["regression_raw_ev_score"] = regression_payload.get("regression_raw_ev_score")
-            candidate_payload["raw_ev_score"] = regression_payload.get("regression_raw_ev_score")
-            candidate_payload["expected_net_return"] = regression_payload.get("predicted_ev")
+            candidate_payload["raw_ev_score"] = regression_payload.get(
+                "regression_raw_ev_score",
+                base_payload.get("raw_ev_score"),
+            )
+            candidate_payload["expected_net_return"] = regression_payload.get(
+                "predicted_ev",
+                base_payload.get("expected_net_return"),
+            )
+            candidate_payload["ev_weighting_score"] = regression_payload.get(
+                "ev_weighting_score",
+                base_payload.get("ev_weighting_score"),
+            )
             reliability_candidate_rows.append(candidate_payload)
         reliability_score_result = score_trade_ev_reliability_candidates(
             model=reliability_model,
@@ -1144,13 +1257,70 @@ def generate_rebalance_orders(
             if isinstance(reliability_score_result, dict)
             else {}
         )
-        diagnostics["reliability_training_summary"] = reliability_model.get("audit_summary", reliability_training_summary)
+        diagnostics["reliability_training_summary"] = {
+            **dict(reliability_training_summary or {}),
+            **dict(reliability_model.get("audit_summary") or {}),
+            "historical_fit_day_count": int(historical_reliability_fit_days),
+            "effective_min_training_samples": int(effective_reliability_min_samples),
+            "reliability_status": reliability_status,
+            "fallback_reason": reliability_fallback_reason,
+        }
+        reliability_scoring_summary.setdefault("fallback_reason", reliability_fallback_reason)
+        reliability_scoring_summary["reliability_status"] = reliability_status
+        reliability_scoring_summary["model_fit_available"] = reliability_fit_available
         diagnostics["reliability_scoring_summary"] = reliability_scoring_summary
         reliability_prediction_lookup = {
             str(row.get("symbol")): dict(row)
             for row in reliability_rows
             if row.get("symbol")
         }
+    elif regression_requested_for_soft_weight:
+        reliability_status = "model_unavailable"
+        reliability_fallback_reason = "reliability_not_requested_for_soft_weight"
+
+    for symbol, row in candidate_row_by_symbol.items():
+        base_prediction = dict(ev_prediction_lookup.get(symbol) or {})
+        regression_prediction = dict(regression_prediction_lookup.get(symbol) or {})
+        fallback_reliability_value = 0.5 if ev_reliability_cold_start_behavior == "neutral_score" else None
+        predicted_return = regression_prediction.get("predicted_ev", base_prediction.get("expected_net_return"))
+        ev_weighting_score_value = regression_prediction.get(
+            "ev_weighting_score",
+            base_prediction.get("ev_weighting_score"),
+        )
+        row["predicted_return"] = predicted_return
+        row["predicted_return_source"] = (
+            "regression"
+            if regression_prediction.get("prediction_available")
+            else ("ev_gate_model" if predicted_return is not None else "unavailable")
+        )
+        row["ev_weighting_score"] = ev_weighting_score_value
+        row["ev_score_before_reliability"] = base_prediction.get(
+            "ev_weighting_score",
+            ev_weighting_score_value,
+        )
+        row["ev_score_after_reliability"] = row.get("ev_score_after_reliability", ev_weighting_score_value)
+        row["ev_model_type_requested"] = requested_ev_model_type
+        row["ev_model_type_used"] = (
+            "regression" if regression_prediction.get("prediction_available") else execution_ev_model_type
+        )
+        row["ev_model_fallback_reason"] = (
+            None if regression_prediction.get("prediction_available") else ev_model_fallback_reason
+        )
+        row["ev_regression_prediction_available"] = bool(regression_prediction.get("prediction_available", False))
+        reliability_prediction = dict(reliability_prediction_lookup.get(symbol) or {})
+        row["ev_reliability"] = reliability_prediction.get(
+            "ev_reliability",
+            row.get("ev_reliability", fallback_reliability_value if reliability_status != "active" else None),
+        )
+        row["ev_reliability_status"] = (
+            "active" if reliability_prediction.get("prediction_available") else reliability_status
+        )
+        row["ev_reliability_fallback_reason"] = (
+            ""
+            if reliability_prediction.get("prediction_available")
+            else reliability_fallback_reason or str(reliability_prediction.get("prediction_reason", "") or "")
+        )
+        row["ev_reliability_model_fit_available"] = bool(reliability_fit_available)
     if bool(active_config.ev_gate_enabled) and bool(ev_model.get("training_available", False)) and ev_training_rows:
         training_predictions = score_trade_ev_candidates(
             model=ev_model,
@@ -1203,9 +1373,21 @@ def generate_rebalance_orders(
             ev_prediction["ev_confidence_multiplier"] = 1.0
             ev_prediction["ev_score_before_confidence"] = ev_prediction.get("ev_weighting_score", ev_prediction.get("ev_decision_score", 0.0))
             ev_prediction["ev_score_after_confidence"] = ev_prediction.get("ev_weighting_score", ev_prediction.get("ev_decision_score", 0.0))
-            ev_prediction["ev_reliability"] = 1.0
-            ev_prediction["ev_reliability_rank_pct"] = 1.0
+            ev_prediction["ev_reliability"] = candidate_row_by_symbol.get(request.symbol, {}).get("ev_reliability")
+            ev_prediction["ev_reliability_rank_pct"] = candidate_row_by_symbol.get(request.symbol, {}).get(
+                "ev_reliability_rank_pct",
+                None,
+            )
             ev_prediction["ev_reliability_multiplier"] = 1.0
+            ev_prediction["ev_reliability_status"] = candidate_row_by_symbol.get(request.symbol, {}).get(
+                "ev_reliability_status",
+                reliability_status,
+            )
+            ev_prediction["ev_reliability_fallback_reason"] = candidate_row_by_symbol.get(request.symbol, {}).get(
+                "ev_reliability_fallback_reason",
+                reliability_fallback_reason,
+            )
+            ev_prediction["ev_reliability_model_fit_available"] = reliability_fit_available
             ev_prediction["reliability_target_type"] = ev_reliability_target_type
             ev_prediction["reliability_usage_mode"] = ev_reliability_usage_mode
             ev_prediction["ev_score_before_reliability"] = ev_prediction.get(
@@ -1274,6 +1456,9 @@ def generate_rebalance_orders(
                     ev_prediction["was_filtered_by_reliability"] = bool(
                         reliability_prediction.get("was_filtered_by_reliability", False)
                     )
+                    ev_prediction["ev_reliability_status"] = "active"
+                    ev_prediction["ev_reliability_fallback_reason"] = ""
+                    ev_prediction["ev_reliability_model_fit_available"] = True
                     ev_prediction["ev_score_before_reliability"] = ev_weighting_score
                     if ev_reliability_usage_mode in {"weighting_only", "hybrid"}:
                         ev_weighting_score = float(
@@ -1395,6 +1580,18 @@ def generate_rebalance_orders(
                 candidate_row_by_symbol[request.symbol]["ev_weighting_score"] = ev_prediction.get(
                     "ev_weighting_score"
                 )
+                candidate_row_by_symbol[request.symbol]["predicted_return"] = ev_prediction.get(
+                    "expected_net_return",
+                    regression_prediction.get("predicted_ev") if regression_prediction else None,
+                )
+                candidate_row_by_symbol[request.symbol]["predicted_return_source"] = (
+                    "regression"
+                    if regression_prediction and regression_prediction.get("prediction_available")
+                    else "ev_gate_model"
+                )
+                candidate_row_by_symbol[request.symbol]["ev_regression_prediction_available"] = bool(
+                    regression_prediction.get("prediction_available", False) if regression_prediction else False
+                )
                 candidate_row_by_symbol[request.symbol]["ev_confidence"] = ev_prediction.get("ev_confidence")
                 candidate_row_by_symbol[request.symbol]["ev_confidence_multiplier"] = ev_prediction.get(
                     "ev_confidence_multiplier"
@@ -1411,6 +1608,15 @@ def generate_rebalance_orders(
                 )
                 candidate_row_by_symbol[request.symbol]["ev_reliability_multiplier"] = ev_prediction.get(
                     "ev_reliability_multiplier"
+                )
+                candidate_row_by_symbol[request.symbol]["ev_reliability_status"] = ev_prediction.get(
+                    "ev_reliability_status"
+                )
+                candidate_row_by_symbol[request.symbol]["ev_reliability_fallback_reason"] = ev_prediction.get(
+                    "ev_reliability_fallback_reason"
+                )
+                candidate_row_by_symbol[request.symbol]["ev_reliability_model_fit_available"] = ev_prediction.get(
+                    "ev_reliability_model_fit_available"
                 )
                 candidate_row_by_symbol[request.symbol]["reliability_raw_score"] = ev_prediction.get(
                     "reliability_raw_score"
@@ -1850,6 +2056,11 @@ def generate_rebalance_orders(
         if ev_executed_scores_after_reliability
         else 0.0
     )
+    diagnostics["reliability_status"] = reliability_status
+    diagnostics["reliability_fallback_reason"] = reliability_fallback_reason
+    diagnostics["reliability_model_fit_available"] = bool(reliability_fit_available)
+    diagnostics["reliability_historical_fit_day_count"] = int(historical_reliability_fit_days)
+    diagnostics["reliability_training_row_count"] = int(len(reliability_training_rows))
     diagnostics["reliability_promoted_trade_count"] = int(reliability_promoted_trade_count)
     diagnostics["reliability_turnover_uplift"] = float(reliability_turnover_uplift)
     diagnostics["reliability_cost_drag_uplift"] = float(reliability_cost_drag_uplift)
@@ -2901,6 +3112,19 @@ def run_paper_trading_cycle_for_targets(
             "ev_gate_reliability_threshold": float(
                 order_result.diagnostics.get("ev_gate_reliability_threshold", 0.5) or 0.5
             ),
+            "ev_gate_reliability_bootstrap_min_training_samples": order_result.diagnostics.get(
+                "ev_gate_reliability_bootstrap_min_training_samples"
+            ),
+            "ev_gate_reliability_enabled_after_min_history_rows": int(
+                order_result.diagnostics.get("ev_gate_reliability_enabled_after_min_history_rows", 0) or 0
+            ),
+            "ev_gate_reliability_enabled_after_min_fit_days": int(
+                order_result.diagnostics.get("ev_gate_reliability_enabled_after_min_fit_days", 0) or 0
+            ),
+            "ev_gate_reliability_cold_start_behavior": str(
+                order_result.diagnostics.get("ev_gate_reliability_cold_start_behavior", "disabled_passthrough")
+                or "disabled_passthrough"
+            ),
             "ev_gate_reliability_weight_multiplier_min": float(
                 order_result.diagnostics.get("ev_gate_reliability_weight_multiplier_min", 0.75) or 0.75
             ),
@@ -2949,6 +3173,19 @@ def run_paper_trading_cycle_for_targets(
             ),
             "avg_ev_score_after_reliability": float(
                 order_result.diagnostics.get("avg_ev_score_after_reliability", 0.0) or 0.0
+            ),
+            "reliability_status": str(order_result.diagnostics.get("reliability_status", "disabled") or "disabled"),
+            "reliability_fallback_reason": str(
+                order_result.diagnostics.get("reliability_fallback_reason", "") or ""
+            ),
+            "reliability_model_fit_available": bool(
+                order_result.diagnostics.get("reliability_model_fit_available", False)
+            ),
+            "reliability_historical_fit_day_count": int(
+                order_result.diagnostics.get("reliability_historical_fit_day_count", 0) or 0
+            ),
+            "reliability_training_row_count": int(
+                order_result.diagnostics.get("reliability_training_row_count", 0) or 0
             ),
             "reliability_turnover_uplift": float(
                 order_result.diagnostics.get("reliability_turnover_uplift", 0.0) or 0.0

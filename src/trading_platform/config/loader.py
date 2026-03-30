@@ -637,9 +637,33 @@ def load_daily_trading_workflow_config(path: str | Path) -> DailyTradingWorkflow
     _set_if_missing(payload, "ev_gate_reliability_threshold", ev_gate_section, "reliability_threshold")
     _set_if_missing(
         payload,
+        "ev_gate_reliability_bootstrap_min_training_samples",
+        ev_gate_section,
+        "reliability_bootstrap_min_training_samples",
+    )
+    _set_if_missing(
+        payload,
         "ev_gate_reliability_min_training_samples",
         ev_gate_section,
         "reliability_min_training_samples",
+    )
+    _set_if_missing(
+        payload,
+        "ev_gate_reliability_enabled_after_min_history_rows",
+        ev_gate_section,
+        "reliability_enabled_after_min_history_rows",
+    )
+    _set_if_missing(
+        payload,
+        "ev_gate_reliability_enabled_after_min_fit_days",
+        ev_gate_section,
+        "reliability_enabled_after_min_fit_days",
+    )
+    _set_if_missing(
+        payload,
+        "ev_gate_reliability_cold_start_behavior",
+        ev_gate_section,
+        "reliability_cold_start_behavior",
     )
     _set_if_missing(
         payload,

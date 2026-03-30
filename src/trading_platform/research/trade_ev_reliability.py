@@ -541,6 +541,9 @@ def build_trade_ev_reliability_history_dataset(
             "candidate_joined_row_count": 0,
             "rows_missing_candidate_match": 0,
             "rows_missing_predicted_return": 0,
+            "rows_missing_ev_score": 0,
+            "rows_missing_required_features": 0,
+            "final_training_row_count": 0,
         }
     lifecycle_rows: list[dict[str, Any]] = []
     for day_dir in _historical_day_dirs(root, as_of_date=as_of_date):
@@ -552,6 +555,8 @@ def build_trade_ev_reliability_history_dataset(
     joined_rows: list[dict[str, Any]] = []
     rows_missing_candidate_match = 0
     rows_missing_predicted_return = 0
+    rows_missing_ev_score = 0
+    rows_missing_required_features = 0
     for lifecycle_row in lifecycle_rows:
         entry_date = str(lifecycle_row.get("entry_date") or "")
         symbol = str(lifecycle_row.get("symbol") or "")
@@ -573,6 +578,17 @@ def build_trade_ev_reliability_history_dataset(
         predicted_return = _predicted_return_from_candidate(candidate_row)
         if predicted_return is None:
             rows_missing_predicted_return += 1
+            continue
+        if candidate_row.get("ev_weighting_score") is None:
+            rows_missing_ev_score += 1
+            continue
+        required_features = (
+            candidate_row.get("score_percentile"),
+            candidate_row.get("signal_score"),
+            candidate_row.get("recent_vol_20d"),
+        )
+        if all(value is None for value in required_features):
+            rows_missing_required_features += 1
             continue
         realized_return = _safe_float(lifecycle_row.get("realized_return"))
         stats = _candidate_day_stats(candidate_frame)
@@ -661,6 +677,9 @@ def build_trade_ev_reliability_history_dataset(
         "candidate_joined_row_count": int(len(joined_rows)),
         "rows_missing_candidate_match": int(rows_missing_candidate_match),
         "rows_missing_predicted_return": int(rows_missing_predicted_return),
+        "rows_missing_ev_score": int(rows_missing_ev_score),
+        "rows_missing_required_features": int(rows_missing_required_features),
+        "final_training_row_count": int(len(enriched_rows)),
         "top_bucket_realized_return_threshold": float(
             frame.get("top_bucket_realized_return_threshold", pd.Series([0.0])).iloc[0] or 0.0
         )
@@ -1370,18 +1389,73 @@ def run_replay_trade_ev_reliability(
             top_bucket_pct=ev_config.get("ev_gate_reliability_top_bucket_pct"),
             hurdle=float(ev_config.get("ev_gate_reliability_hurdle", 0.0) or 0.0),
         )
-        model = train_trade_ev_reliability_model(
-            training_rows=training_rows,
-            min_training_samples=int(ev_config.get("ev_gate_reliability_min_training_samples", 20) or 20),
-            model_type=str(ev_config.get("ev_gate_reliability_model_type", "logistic") or "logistic"),
-            calibration_method=str(ev_config.get("ev_gate_reliability_calibration_method", "none") or "none"),
-            recent_window=int(ev_config.get("ev_gate_reliability_recent_window", 20) or 20),
-            target_type=str(ev_config.get("ev_gate_reliability_target_type", "sign_success") or "sign_success"),
-        )
+        configured_min_training_samples = int(ev_config.get("ev_gate_reliability_min_training_samples", 20) or 20)
+        bootstrap_min_training_samples = ev_config.get("ev_gate_reliability_bootstrap_min_training_samples")
+        enabled_after_min_history_rows = int(ev_config.get("ev_gate_reliability_enabled_after_min_history_rows", 0) or 0)
+        enabled_after_min_fit_days = int(ev_config.get("ev_gate_reliability_enabled_after_min_fit_days", 0) or 0)
+        effective_min_training_samples = configured_min_training_samples
+        historical_fit_day_count = int(sum(bool(row.get("did_fit_model", False)) for row in training_audit_rows))
+        if bootstrap_min_training_samples is not None and historical_fit_day_count < max(enabled_after_min_fit_days, 1):
+            effective_min_training_samples = min(configured_min_training_samples, int(bootstrap_min_training_samples))
+        if len(training_rows) < enabled_after_min_history_rows:
+            model = {
+                "training_available": False,
+                "training_sample_count": int(len(training_rows)),
+                "audit_summary": {
+                    "model_type": str(ev_config.get("ev_gate_reliability_model_type", "logistic") or "logistic"),
+                    "calibration_method": str(
+                        ev_config.get("ev_gate_reliability_calibration_method", "none") or "none"
+                    ),
+                    "target_type": str(ev_config.get("ev_gate_reliability_target_type", "sign_success") or "sign_success"),
+                    "training_row_count": int(len(training_rows)),
+                    "positive_label_count": int(history_summary.get("positive_label_count", 0) or 0),
+                    "negative_label_count": int(history_summary.get("negative_label_count", 0) or 0),
+                    "unique_signal_family_count": 0,
+                    "unique_score_bucket_count": 0,
+                    "did_fit_model": False,
+                    "did_apply_calibration": False,
+                    "fallback_reason": "reliability_history_below_activation_threshold",
+                },
+            }
+            reliability_status = "cold_start"
+        elif historical_fit_day_count < enabled_after_min_fit_days:
+            model = {
+                "training_available": False,
+                "training_sample_count": int(len(training_rows)),
+                "audit_summary": {
+                    "model_type": str(ev_config.get("ev_gate_reliability_model_type", "logistic") or "logistic"),
+                    "calibration_method": str(
+                        ev_config.get("ev_gate_reliability_calibration_method", "none") or "none"
+                    ),
+                    "target_type": str(ev_config.get("ev_gate_reliability_target_type", "sign_success") or "sign_success"),
+                    "training_row_count": int(len(training_rows)),
+                    "positive_label_count": int(history_summary.get("positive_label_count", 0) or 0),
+                    "negative_label_count": int(history_summary.get("negative_label_count", 0) or 0),
+                    "unique_signal_family_count": 0,
+                    "unique_score_bucket_count": 0,
+                    "did_fit_model": False,
+                    "did_apply_calibration": False,
+                    "fallback_reason": "reliability_fit_days_below_activation_threshold",
+                },
+            }
+            reliability_status = "cold_start"
+        else:
+            model = train_trade_ev_reliability_model(
+                training_rows=training_rows,
+                min_training_samples=effective_min_training_samples,
+                model_type=str(ev_config.get("ev_gate_reliability_model_type", "logistic") or "logistic"),
+                calibration_method=str(ev_config.get("ev_gate_reliability_calibration_method", "none") or "none"),
+                recent_window=int(ev_config.get("ev_gate_reliability_recent_window", 20) or 20),
+                target_type=str(ev_config.get("ev_gate_reliability_target_type", "sign_success") or "sign_success"),
+            )
+            reliability_status = "active" if bool(model.get("training_available", False)) else "insufficient_history"
         training_summary = {
             "date": requested_date,
             **history_summary,
             **dict(model.get("audit_summary") or {}),
+            "historical_fit_day_count": historical_fit_day_count,
+            "effective_min_training_samples": effective_min_training_samples,
+            "reliability_status": reliability_status,
         }
         training_audit_rows.append(training_summary)
         training_reason = str(training_summary.get("fallback_reason", "") or "")
@@ -1429,6 +1503,22 @@ def run_replay_trade_ev_reliability(
     pd.DataFrame(feature_audit_rows).to_csv(feature_audit_path, index=False)
     summary["training_fallback_reason_counts"] = training_fallback_counts
     summary["scoring_fallback_reason_counts"] = scoring_fallback_counts
+    summary["total_rows_dropped_missing_predicted_return"] = int(
+        sum(int(row.get("rows_missing_predicted_return", 0) or 0) for row in training_audit_rows)
+    )
+    summary["total_rows_dropped_missing_ev_fields"] = int(
+        sum(
+            int(row.get("rows_missing_ev_score", 0) or 0)
+            + int(row.get("rows_missing_required_features", 0) or 0)
+            for row in training_audit_rows
+        )
+    )
+    summary["days_reliability_inactive_cold_start"] = int(
+        sum(str(row.get("reliability_status", "") or "") == "cold_start" for row in training_audit_rows)
+    )
+    summary["days_reliability_active"] = int(
+        sum(bool(row.get("did_fit_model", False)) for row in training_audit_rows)
+    )
     summary_path.write_text(json.dumps(summary, indent=2, default=str), encoding="utf-8")
     return {
         "rows": reliability_rows,

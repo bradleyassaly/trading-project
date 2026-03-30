@@ -109,7 +109,11 @@ class PaperTradingConfig:
     ev_gate_reliability_calibration_method: str = "none"
     ev_gate_use_reliability_filter: bool = False
     ev_gate_reliability_threshold: float = 0.5
+    ev_gate_reliability_bootstrap_min_training_samples: int | None = None
     ev_gate_reliability_min_training_samples: int = 20
+    ev_gate_reliability_enabled_after_min_history_rows: int = 0
+    ev_gate_reliability_enabled_after_min_fit_days: int = 0
+    ev_gate_reliability_cold_start_behavior: str = "disabled_passthrough"
     ev_gate_reliability_recent_window: int = 20
     ev_gate_reliability_target_type: str = "sign_success"
     ev_gate_reliability_top_percentile: float = 0.8

@@ -387,8 +387,18 @@ def _write_replay_day_input_summary(
             ),
             "ev_gate_use_reliability_filter": bool(day_config.ev_gate_use_reliability_filter),
             "ev_gate_reliability_threshold": float(day_config.ev_gate_reliability_threshold),
+            "ev_gate_reliability_bootstrap_min_training_samples": day_config.ev_gate_reliability_bootstrap_min_training_samples,
             "ev_gate_reliability_min_training_samples": int(
                 day_config.ev_gate_reliability_min_training_samples or 20
+            ),
+            "ev_gate_reliability_enabled_after_min_history_rows": int(
+                day_config.ev_gate_reliability_enabled_after_min_history_rows or 0
+            ),
+            "ev_gate_reliability_enabled_after_min_fit_days": int(
+                day_config.ev_gate_reliability_enabled_after_min_fit_days or 0
+            ),
+            "ev_gate_reliability_cold_start_behavior": str(
+                day_config.ev_gate_reliability_cold_start_behavior or "disabled_passthrough"
             ),
             "ev_gate_reliability_recent_window": int(day_config.ev_gate_reliability_recent_window or 20),
             "ev_gate_reliability_target_type": str(day_config.ev_gate_reliability_target_type or "sign_success"),
@@ -1710,6 +1720,16 @@ def run_daily_replay(config: DailyReplayWorkflowConfig) -> DailyReplayResult:
         summary["reliability_scoring_fallback_reason_counts"] = dict(
             reliability_summary.get("scoring_fallback_reason_counts", {}) or {}
         )
+        summary["total_rows_dropped_missing_predicted_return"] = int(
+            reliability_summary.get("total_rows_dropped_missing_predicted_return", 0) or 0
+        )
+        summary["total_rows_dropped_missing_ev_fields"] = int(
+            reliability_summary.get("total_rows_dropped_missing_ev_fields", 0) or 0
+        )
+        summary["days_reliability_inactive_cold_start"] = int(
+            reliability_summary.get("days_reliability_inactive_cold_start", 0) or 0
+        )
+        summary["days_reliability_active"] = int(reliability_summary.get("days_reliability_active", 0) or 0)
         summary["replay_ev_reliability_summary"] = reliability_summary
     status = "succeeded"
     failed_day_count = int(summary.get("failed_day_count", 0) or 0)

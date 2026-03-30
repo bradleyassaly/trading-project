@@ -872,8 +872,23 @@ def _build_multi_strategy_paper_config(result, reserve_cash_pct: float, workflow
         ev_gate_reliability_threshold=float(
             getattr(workflow_config, "ev_gate_reliability_threshold", 0.5) or 0.5
         ),
+        ev_gate_reliability_bootstrap_min_training_samples=getattr(
+            workflow_config,
+            "ev_gate_reliability_bootstrap_min_training_samples",
+            None,
+        ),
         ev_gate_reliability_min_training_samples=int(
             getattr(workflow_config, "ev_gate_reliability_min_training_samples", 20) or 20
+        ),
+        ev_gate_reliability_enabled_after_min_history_rows=int(
+            getattr(workflow_config, "ev_gate_reliability_enabled_after_min_history_rows", 0) or 0
+        ),
+        ev_gate_reliability_enabled_after_min_fit_days=int(
+            getattr(workflow_config, "ev_gate_reliability_enabled_after_min_fit_days", 0) or 0
+        ),
+        ev_gate_reliability_cold_start_behavior=str(
+            getattr(workflow_config, "ev_gate_reliability_cold_start_behavior", "disabled_passthrough")
+            or "disabled_passthrough"
         ),
         ev_gate_reliability_recent_window=int(
             getattr(workflow_config, "ev_gate_reliability_recent_window", 20) or 20
