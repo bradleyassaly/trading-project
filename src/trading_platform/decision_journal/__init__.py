@@ -7,6 +7,7 @@ from trading_platform.decision_journal.models import (
     ScreenCheckResult,
     SignalBreakdown,
     SizingDecision,
+    TradeDecision,
     TradeDecisionRecord,
     TradeLifecycleRecord,
 )
@@ -20,6 +21,7 @@ __all__ = [
     "ScreenCheckResult",
     "SignalBreakdown",
     "SizingDecision",
+    "TradeDecision",
     "TradeDecisionRecord",
     "TradeLifecycleRecord",
 ]

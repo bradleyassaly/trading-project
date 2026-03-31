@@ -4,6 +4,7 @@ from pathlib import Path
 
 from trading_platform.config.models import FeatureConfig
 from trading_platform.features.build import build_features
+from trading_platform.features.store import LocalFeatureStore
 from trading_platform.settings import FEATURES_DIR
 
 
@@ -29,7 +30,15 @@ def run_feature_build_with_dirs(
         normalized_data_dir=normalized_dir,
         features_dir=features_dir,
     )
-    return Path(output_path)
+    output_file = Path(output_path)
+    LocalFeatureStore().write_from_parquet(
+        source_path=output_file,
+        symbol=config.symbol,
+        timeframe="1d",
+        feature_groups=config.feature_groups,
+        metadata={"source_feature_path": str(output_file)},
+    )
+    return output_file
 
 
 def feature_output_path(symbol: str) -> Path:

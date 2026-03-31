@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import pandas as pd
 
 from trading_platform.data.ingest import ingest_symbol
@@ -56,6 +57,10 @@ def test_ingest_symbol_writes_normalized_parquet(tmp_path, monkeypatch) -> None:
         "low",
         "close",
         "volume",
+        "timeframe",
+        "provider",
+        "asset_class",
+        "schema_version",
     ]
     assert df["symbol"].tolist() == ["AAPL", "AAPL"]
 
@@ -81,3 +86,30 @@ def test_ingest_symbol_writes_raw_snapshot(tmp_path, monkeypatch) -> None:
 
     assert raw_path.exists()
     assert norm_path.exists()
+
+
+def test_ingest_symbol_writes_unified_market_data_artifacts(tmp_path, monkeypatch) -> None:
+    market_data_root = tmp_path / "market_data"
+    monkeypatch.setattr("trading_platform.data.ingest.RAW_DATA_DIR", tmp_path / "raw")
+    monkeypatch.setattr("trading_platform.data.ingest.NORMALIZED_DATA_DIR", tmp_path / "normalized")
+    monkeypatch.setattr("trading_platform.ingestion.framework.MARKET_DATA_ARTIFACTS_DIR", market_data_root)
+
+    (tmp_path / "raw").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "normalized").mkdir(parents=True, exist_ok=True)
+
+    ingest_symbol(
+        symbol="MSFT",
+        start="2024-01-01",
+        provider=FakeBarDataProvider(),
+    )
+
+    unified_root = market_data_root / "equity" / "yahoo" / "1d"
+    manifest_path = unified_root / "MSFT.manifest.json"
+    dataset_path = unified_root / "MSFT.parquet"
+
+    assert manifest_path.exists()
+    assert dataset_path.exists()
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert payload["schema_version"] == "market_data_v1"
+    assert payload["provider"] == "yahoo"
+    assert payload["asset_class"] == "equity"

@@ -1,0 +1,18 @@
+{
+  "symbol": "MSFT",
+  "timeframe": "1d",
+  "provider": "yahoo",
+  "asset_class": "equity",
+  "row_count": 2,
+  "schema_version": "market_data_v1",
+  "start_timestamp": "2024-01-01T00:00:00",
+  "end_timestamp": "2024-01-02T00:00:00",
+  "raw_path": "C:\\Users\\bradl\\PycharmProjects\\trading_platform\\data\\market_data\\equity\\yahoo\\1d\\MSFT.raw.parquet",
+  "normalized_path": "C:\\Users\\bradl\\PycharmProjects\\trading_platform\\data\\market_data\\equity\\yahoo\\1d\\MSFT.parquet",
+  "manifest_path": "C:\\Users\\bradl\\PycharmProjects\\trading_platform\\data\\market_data\\equity\\yahoo\\1d\\MSFT.manifest.json",
+  "validation_report_path": "C:\\Users\\bradl\\PycharmProjects\\trading_platform\\data\\market_data\\equity\\yahoo\\1d\\MSFT.validation.json",
+  "metadata": {
+    "legacy_normalized_path": "C:\\Users\\bradl\\AppData\\Local\\Temp\\pytest-of-bradl\\pytest-713\\test_ingest_symbol_writes_raw_0\\normalized\\MSFT.parquet",
+    "legacy_raw_path": "C:\\Users\\bradl\\AppData\\Local\\Temp\\pytest-of-bradl\\pytest-713\\test_ingest_symbol_writes_raw_0\\raw\\MSFT.parquet"
+  }
+}

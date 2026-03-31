@@ -40,6 +40,37 @@ from trading_platform.universe_provenance.service import build_universe_provenan
 logger = logging.getLogger(__name__)
 
 
+@dataclass(frozen=True)
+class TargetConstructionRuntimeDependencies:
+    load_feature_frame_fn: Any = load_feature_frame
+    resolve_feature_frame_path_fn: Any = resolve_feature_frame_path
+    run_xsec_momentum_topn_fn: Any = run_xsec_momentum_topn
+    normalize_price_frame_fn: Any = normalize_price_frame
+    signal_registry: Any = field(default_factory=lambda: SIGNAL_REGISTRY)
+    build_group_series_fn: Any = build_group_series
+    build_top_n_portfolio_weights_fn: Any = build_top_n_portfolio_weights
+    normalize_paper_weighting_scheme_fn: Any = normalize_paper_weighting_scheme
+    execution_policy_cls: Any = ExecutionPolicy
+    build_executed_weights_fn: Any = build_executed_weights
+
+
+def configure_runtime_dependencies(
+    *,
+    dependencies: TargetConstructionRuntimeDependencies | None = None,
+) -> None:
+    runtime = dependencies or TargetConstructionRuntimeDependencies()
+    globals()["load_feature_frame"] = runtime.load_feature_frame_fn
+    globals()["resolve_feature_frame_path"] = runtime.resolve_feature_frame_path_fn
+    globals()["run_xsec_momentum_topn"] = runtime.run_xsec_momentum_topn_fn
+    globals()["normalize_price_frame"] = runtime.normalize_price_frame_fn
+    globals()["SIGNAL_REGISTRY"] = runtime.signal_registry
+    globals()["build_group_series"] = runtime.build_group_series_fn
+    globals()["build_top_n_portfolio_weights"] = runtime.build_top_n_portfolio_weights_fn
+    globals()["normalize_paper_weighting_scheme"] = runtime.normalize_paper_weighting_scheme_fn
+    globals()["ExecutionPolicy"] = runtime.execution_policy_cls
+    globals()["build_executed_weights"] = runtime.build_executed_weights_fn
+
+
 def _replay_as_of_timestamp(config: PaperTradingConfig | None) -> pd.Timestamp | None:
     if config is None or not getattr(config, "replay_as_of_date", None):
         return None

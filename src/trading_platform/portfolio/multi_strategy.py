@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass, field, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -11,6 +11,12 @@ from trading_platform.cli.presets import CliPreset, resolve_cli_preset
 from trading_platform.config.models import MultiStrategyPortfolioConfig, MultiStrategySleeveConfig
 from trading_platform.metadata.groups import build_group_series
 from trading_platform.paper.models import PaperExecutionPriceSnapshot, PaperTradingConfig
+from trading_platform.portfolio.contracts import (
+    AllocationRationaleRecord,
+    ConflictResolutionRecord,
+    ExposureConstraintDecision,
+    StrategyPortfolioInput,
+)
 from trading_platform.services.target_construction_service import build_target_construction_result
 from trading_platform.universes.registry import get_universe_symbols
 
@@ -52,12 +58,16 @@ class MultiStrategyAllocationResult:
     sleeve_rows: list[dict[str, Any]]
     combined_rows: list[dict[str, Any]]
     symbol_overlap_rows: list[dict[str, Any]]
+    conflict_resolution_rows: list[dict[str, Any]]
     sleeve_attribution_rows: list[dict[str, Any]]
     portfolio_diagnostics_rows: list[dict[str, Any]]
     overlap_matrix_rows: list[dict[str, Any]]
     execution_symbol_coverage_rows: list[dict[str, Any]]
     target_generation_stage_rows: list[dict[str, Any]]
     sleeve_target_diagnostics_rows: list[dict[str, Any]]
+    strategy_input_rows: list[dict[str, Any]]
+    exposure_constraint_rows: list[dict[str, Any]]
+    allocation_rationale_rows: list[dict[str, Any]]
     summary: dict[str, Any]
     latest_scores: dict[str, float] = field(default_factory=dict)
 
@@ -185,6 +195,48 @@ def _resolve_capital_weights(
         raise ValueError("Enabled sleeve capital weights must sum to a positive number")
     normalized = {name: weight / total for name, weight in raw.items()}
     return raw, normalized, total
+
+
+def build_strategy_portfolio_inputs(
+    sleeves: list[SleeveTargetBundle],
+    *,
+    raw_weights: dict[str, float],
+    normalized_weights: dict[str, float],
+) -> list[StrategyPortfolioInput]:
+    inputs: list[StrategyPortfolioInput] = []
+    for bundle in sleeves:
+        sleeve_name = bundle.sleeve.sleeve_name
+        inputs.append(
+            StrategyPortfolioInput(
+                sleeve_name=sleeve_name,
+                preset_name=bundle.sleeve.preset_name,
+                as_of=bundle.as_of,
+                capital_weight_raw=float(raw_weights[sleeve_name]),
+                capital_weight_normalized=float(normalized_weights[sleeve_name]),
+                scheduled_target_weights=dict(bundle.scheduled_target_weights),
+                effective_target_weights=dict(bundle.effective_target_weights),
+                latest_prices=dict(bundle.latest_prices),
+                latest_scores=dict(bundle.latest_scores),
+                skipped_symbols=list(bundle.skipped_symbols),
+                diagnostics=dict(bundle.diagnostics),
+                metadata={
+                    "preset_path": bundle.sleeve.preset_path,
+                    "promotion_variant": bundle.sleeve.promotion_variant,
+                    "condition_id": bundle.sleeve.condition_id,
+                    "condition_type": bundle.sleeve.condition_type,
+                    "activation_state": bundle.sleeve.activation_state,
+                    "is_active": bundle.sleeve.is_active,
+                    "activation_reason": bundle.sleeve.activation_reason,
+                    "portfolio_bucket": bundle.sleeve.portfolio_bucket,
+                    "rebalance_priority": bundle.sleeve.rebalance_priority,
+                    "notes": bundle.sleeve.notes,
+                    "tags": list(bundle.sleeve.tags),
+                    "signal_source": getattr(bundle.paper_config, "signal_source", None),
+                    "strategy": getattr(bundle.paper_config, "strategy", None),
+                },
+            )
+        )
+    return inputs
 
 
 def _combine_latest_scores(
@@ -333,6 +385,151 @@ def _constraint_summary(weights: dict[str, float]) -> dict[str, float]:
         "position_count": float(sum(1 for weight in weights.values() if abs(weight) > 0)),
         "max_abs_weight": max((abs(weight) for weight in weights.values()), default=0.0),
     }
+
+
+def _build_conflict_resolution_records(
+    symbol_contributions: dict[str, dict[str, float]],
+) -> list[ConflictResolutionRecord]:
+    records: list[ConflictResolutionRecord] = []
+    for symbol, sleeve_weights in sorted(symbol_contributions.items()):
+        long_sleeves = sorted(name for name, weight in sleeve_weights.items() if weight > 0)
+        short_sleeves = sorted(name for name, weight in sleeve_weights.items() if weight < 0)
+        overlap_type = "conflict" if long_sleeves and short_sleeves else ("overlap" if len(sleeve_weights) > 1 else "single")
+        resolution_rule = (
+            "net_opposing_sleeves"
+            if overlap_type == "conflict"
+            else ("sum_same_direction_sleeves" if overlap_type == "overlap" else "single_sleeve_passthrough")
+        )
+        records.append(
+            ConflictResolutionRecord(
+                symbol=symbol,
+                resolution_rule=resolution_rule,
+                overlap_type=overlap_type,
+                sleeve_count=len(sleeve_weights),
+                gross_weight_before=float(sum(abs(weight) for weight in sleeve_weights.values())),
+                net_weight_after=float(sum(sleeve_weights.values())),
+                conflicting_sleeves=long_sleeves + short_sleeves,
+                metadata={
+                    "long_sleeve_count": len(long_sleeves),
+                    "short_sleeve_count": len(short_sleeves),
+                },
+            )
+        )
+    return records
+
+
+def _build_exposure_constraint_records(
+    *,
+    clipped_rows: list[dict[str, Any]],
+    before_summary: dict[str, float],
+    after_summary: dict[str, float],
+    portfolio_config: MultiStrategyPortfolioConfig,
+) -> list[ExposureConstraintDecision]:
+    records: list[ExposureConstraintDecision] = []
+    for row in clipped_rows:
+        records.append(
+            ExposureConstraintDecision(
+                constraint_name=str(row.get("constraint_name") or "unknown_constraint"),
+                scope="symbol" if str(row.get("symbol")) != "PORTFOLIO" else "portfolio",
+                binding=True,
+                before_weight=float(row.get("before_weight") or 0.0),
+                after_weight=float(row.get("after_weight") or 0.0),
+                affected_symbol=str(row.get("symbol")) if row.get("symbol") is not None else None,
+                action=str(row.get("action")) if row.get("action") is not None else None,
+                metadata={},
+            )
+        )
+    records.extend(
+        [
+            ExposureConstraintDecision(
+                constraint_name="max_symbol_concentration_budget",
+                scope="portfolio",
+                binding=any(row.constraint_name == "max_symbol_concentration" for row in records),
+                before_weight=before_summary["gross_exposure"],
+                after_weight=after_summary["gross_exposure"],
+                action="monitor_only",
+                metadata={"configured_limit": float(portfolio_config.max_symbol_concentration)},
+            ),
+            ExposureConstraintDecision(
+                constraint_name="max_position_weight_budget",
+                scope="portfolio",
+                binding=any(row.constraint_name == "max_position_weight" for row in records),
+                before_weight=before_summary["max_abs_weight"],
+                after_weight=after_summary["max_abs_weight"],
+                action="monitor_only",
+                metadata={"configured_limit": float(portfolio_config.max_position_weight)},
+            ),
+            ExposureConstraintDecision(
+                constraint_name="gross_leverage_cap_budget",
+                scope="portfolio",
+                binding=after_summary["gross_exposure"] < before_summary["gross_exposure"] - 1e-12
+                and before_summary["gross_exposure"] > float(portfolio_config.gross_leverage_cap),
+                before_weight=before_summary["gross_exposure"],
+                after_weight=after_summary["gross_exposure"],
+                action="monitor_only",
+                metadata={"configured_limit": float(portfolio_config.gross_leverage_cap)},
+            ),
+            ExposureConstraintDecision(
+                constraint_name="net_exposure_cap_budget",
+                scope="portfolio",
+                binding=abs(after_summary["net_exposure"]) < abs(before_summary["net_exposure"]) - 1e-12
+                and abs(before_summary["net_exposure"]) > float(portfolio_config.net_exposure_cap),
+                before_weight=before_summary["net_exposure"],
+                after_weight=after_summary["net_exposure"],
+                action="monitor_only",
+                metadata={"configured_limit": float(portfolio_config.net_exposure_cap)},
+            ),
+        ]
+    )
+    return records
+
+
+def _build_allocation_rationale_records(
+    *,
+    constrained_weights: dict[str, float],
+    symbol_contributions: dict[str, dict[str, float]],
+    conflict_records: list[ConflictResolutionRecord],
+    clipped_rows: list[dict[str, Any]],
+    latest_prices: dict[str, float],
+) -> list[AllocationRationaleRecord]:
+    conflict_lookup = {row.symbol: row for row in conflict_records}
+    constraint_lookup: dict[str, list[dict[str, Any]]] = {}
+    for row in clipped_rows:
+        symbol = str(row.get("symbol") or "")
+        if symbol == "PORTFOLIO":
+            continue
+        constraint_lookup.setdefault(symbol, []).append(row)
+    records: list[AllocationRationaleRecord] = []
+    for symbol, final_weight in sorted(constrained_weights.items()):
+        sleeves = sorted(symbol_contributions.get(symbol, {}))
+        conflict = conflict_lookup.get(symbol)
+        symbol_constraints = constraint_lookup.get(symbol, [])
+        rationale_codes = ["normalized_strategy_input"]
+        if conflict is not None:
+            rationale_codes.append(conflict.resolution_rule)
+            if conflict.overlap_type == "conflict":
+                rationale_codes.append("opposing_sleeves_netted")
+            elif conflict.overlap_type == "overlap":
+                rationale_codes.append("same_direction_sleeves_combined")
+            else:
+                rationale_codes.append("single_sleeve_passthrough")
+        if symbol_constraints:
+            rationale_codes.extend(str(row.get("constraint_name")) for row in symbol_constraints if row.get("constraint_name"))
+        records.append(
+            AllocationRationaleRecord(
+                symbol=symbol,
+                final_target_weight=float(final_weight),
+                rationale_codes=rationale_codes,
+                source_sleeves=sleeves,
+                constraint_actions=[str(row.get("action")) for row in symbol_constraints if row.get("action")],
+                metadata={
+                    "latest_price": latest_prices.get(symbol),
+                    "source_sleeve_count": len(sleeves),
+                    "conflict_overlap_type": conflict.overlap_type if conflict is not None else "single",
+                },
+            )
+        )
+    return records
 
 
 def _positive_float(value: Any) -> float | None:
@@ -546,6 +743,11 @@ def allocate_multi_strategy_portfolio(
 ) -> MultiStrategyAllocationResult:
     sleeve_bundles = load_strategy_sleeves(portfolio_config, as_of_date=as_of_date)
     raw_weights, normalized_weights, raw_weight_sum = _resolve_capital_weights(sleeve_bundles)
+    strategy_inputs = build_strategy_portfolio_inputs(
+        sleeve_bundles,
+        raw_weights=raw_weights,
+        normalized_weights=normalized_weights,
+    )
     latest_scores = _combine_latest_scores(sleeve_bundles, normalized_weights)
 
     sleeve_rows: list[dict[str, Any]] = []
@@ -664,6 +866,7 @@ def allocate_multi_strategy_portfolio(
                 "sleeves": "|".join(sorted(sleeve_weights)),
             }
         )
+    conflict_resolution_records = _build_conflict_resolution_records(symbol_contributions)
 
     clipped_rows: list[dict[str, Any]] = []
     constrained_contributions = _apply_symbol_concentration_cap(
@@ -904,6 +1107,19 @@ def allocate_multi_strategy_portfolio(
         {"metric": "missing_latest_price_symbol_count", "value": float(missing_latest_price_count)},
         {"metric": "invalid_zero_price_symbol_count", "value": float(invalid_price_count)},
     ]
+    exposure_constraint_records = _build_exposure_constraint_records(
+        clipped_rows=clipped_rows,
+        before_summary=before_summary,
+        after_summary=after_summary,
+        portfolio_config=portfolio_config,
+    )
+    allocation_rationale_records = _build_allocation_rationale_records(
+        constrained_weights=constrained_weights,
+        symbol_contributions=symbol_contributions,
+        conflict_records=conflict_resolution_records,
+        clipped_rows=clipped_rows,
+        latest_prices=latest_prices,
+    )
 
     as_of = max(bundle.as_of for bundle in sleeve_bundles)
     summary = {
@@ -958,12 +1174,16 @@ def allocate_multi_strategy_portfolio(
         sleeve_rows=sleeve_rows,
         combined_rows=combined_rows,
         symbol_overlap_rows=symbol_overlap_rows,
+        conflict_resolution_rows=[row.to_dict() for row in conflict_resolution_records],
         sleeve_attribution_rows=sleeve_attribution_rows,
         portfolio_diagnostics_rows=portfolio_diagnostics_rows,
         overlap_matrix_rows=overlap_matrix_rows,
         execution_symbol_coverage_rows=execution_symbol_coverage_rows,
         target_generation_stage_rows=target_generation_stage_rows,
         sleeve_target_diagnostics_rows=sleeve_target_diagnostics_rows,
+        strategy_input_rows=[row.to_dict() for row in strategy_inputs],
+        exposure_constraint_rows=[row.to_dict() for row in exposure_constraint_records],
+        allocation_rationale_rows=[row.to_dict() for row in allocation_rationale_records],
         summary=summary,
         latest_scores=latest_scores,
     )
@@ -1013,6 +1233,7 @@ def write_multi_strategy_artifacts(
     combined_path = output_path / "combined_target_weights.csv"
     sleeve_path = output_path / "sleeve_target_weights.csv"
     overlap_path = output_path / "symbol_overlap_report.csv"
+    conflict_resolution_path = output_path / "conflict_resolution_report.csv"
     summary_json_path = output_path / "allocation_summary.json"
     summary_md_path = output_path / "allocation_summary.md"
     sleeve_attr_path = output_path / "sleeve_attribution.csv"
@@ -1023,6 +1244,9 @@ def write_multi_strategy_artifacts(
     target_generation_summary_path = output_path / "target_generation_summary.json"
     target_generation_stage_counts_path = output_path / "target_generation_stage_counts.csv"
     sleeve_target_diagnostics_path = output_path / "sleeve_target_diagnostics.csv"
+    strategy_inputs_path = output_path / "strategy_portfolio_inputs.json"
+    exposure_constraint_path = output_path / "exposure_constraint_report.csv"
+    allocation_rationale_path = output_path / "allocation_rationale_report.csv"
 
     pd.DataFrame(
         result.combined_rows,
@@ -1055,6 +1279,7 @@ def write_multi_strategy_artifacts(
         ],
     ).to_csv(sleeve_path, index=False)
     pd.DataFrame(result.symbol_overlap_rows).to_csv(overlap_path, index=False)
+    pd.DataFrame(result.conflict_resolution_rows).to_csv(conflict_resolution_path, index=False)
     pd.DataFrame(result.sleeve_attribution_rows).to_csv(sleeve_attr_path, index=False)
     pd.DataFrame(result.portfolio_diagnostics_rows).to_csv(diagnostics_path, index=False)
     pd.DataFrame(result.overlap_matrix_rows).to_csv(overlap_matrix_path, index=False)
@@ -1105,6 +1330,8 @@ def write_multi_strategy_artifacts(
             "as_of",
         ],
     ).to_csv(sleeve_target_diagnostics_path, index=False)
+    pd.DataFrame(result.exposure_constraint_rows).to_csv(exposure_constraint_path, index=False)
+    pd.DataFrame(result.allocation_rationale_rows).to_csv(allocation_rationale_path, index=False)
 
     summary_json_path.write_text(
         json.dumps(
@@ -1158,12 +1385,24 @@ def write_multi_strategy_artifacts(
         ),
         encoding="utf-8",
     )
+    strategy_inputs_path.write_text(
+        json.dumps(
+            {
+                "as_of": result.as_of,
+                "strategy_inputs": result.strategy_input_rows,
+            },
+            indent=2,
+            default=str,
+        ),
+        encoding="utf-8",
+    )
     summary_md_path.write_text(_render_summary_markdown(result), encoding="utf-8")
 
     return {
         "combined_target_weights_path": combined_path,
         "sleeve_target_weights_path": sleeve_path,
         "symbol_overlap_report_path": overlap_path,
+        "conflict_resolution_report_path": conflict_resolution_path,
         "allocation_summary_json_path": summary_json_path,
         "allocation_summary_md_path": summary_md_path,
         "sleeve_attribution_path": sleeve_attr_path,
@@ -1174,4 +1413,7 @@ def write_multi_strategy_artifacts(
         "target_generation_summary_path": target_generation_summary_path,
         "target_generation_stage_counts_path": target_generation_stage_counts_path,
         "sleeve_target_diagnostics_path": sleeve_target_diagnostics_path,
+        "strategy_portfolio_inputs_path": strategy_inputs_path,
+        "exposure_constraint_report_path": exposure_constraint_path,
+        "allocation_rationale_report_path": allocation_rationale_path,
     }

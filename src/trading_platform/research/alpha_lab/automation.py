@@ -23,6 +23,7 @@ from trading_platform.research.alpha_lab.generation import (
     build_generated_signal,
     generate_candidate_signals,
 )
+from trading_platform.research.alpha_lab.signals import build_candidate_grid, build_candidate_name
 from trading_platform.research.alpha_lab.labels import add_forward_return_labels
 from trading_platform.research.alpha_lab.metrics import (
     compute_cross_sectional_daily_metrics,
@@ -33,6 +34,10 @@ from trading_platform.research.alpha_lab.promotion import (
     apply_promotion_rules,
 )
 from trading_platform.research.approved_model_state import write_approved_model_state
+from trading_platform.research.experiment_tracking import (
+    build_automated_alpha_loop_experiment_record,
+    register_experiment,
+)
 
 
 @dataclass(frozen=True)
@@ -40,6 +45,25 @@ class SignalSearchSpace:
     signal_family: str
     lookbacks: tuple[int, ...]
     horizons: tuple[int, ...]
+    candidate_grid_preset: str = "standard"
+    max_variants_per_family: int | None = None
+
+    def to_dict(self) -> dict[str, object]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class ResearchResourceAllocationConfig:
+    max_candidates_per_iteration: int | None = None
+    max_variants_per_family: int | None = None
+    prioritize_by_family_promise: bool = True
+    prune_deferred_candidates: bool = False
+
+    def __post_init__(self) -> None:
+        if self.max_candidates_per_iteration is not None and self.max_candidates_per_iteration <= 0:
+            raise ValueError("max_candidates_per_iteration must be > 0 when provided")
+        if self.max_variants_per_family is not None and self.max_variants_per_family <= 0:
+            raise ValueError("max_variants_per_family must be > 0 when provided")
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
@@ -64,19 +88,29 @@ class AutomatedAlphaResearchConfig:
     force: bool = False
     stale_after_days: int | None = None
     max_iterations: int | None = 1
+    resource_allocation: ResearchResourceAllocationConfig = ResearchResourceAllocationConfig()
+    experiment_tracker_dir: Path | None = None
 
     def to_dict(self) -> dict[str, object]:
         payload = asdict(self)
         payload["feature_dir"] = str(self.feature_dir)
         payload["output_dir"] = str(self.output_dir)
+        payload["experiment_tracker_dir"] = (
+            str(self.experiment_tracker_dir) if self.experiment_tracker_dir is not None else None
+        )
         return payload
 
 
 REGISTRY_COLUMNS = [
     "candidate_id",
+    "candidate_name",
+    "variant_id",
+    "signal_variant",
     "signal_name",
     "signal_family",
     "parameters_json",
+    "variant_parameters_json",
+    "config_json",
     "lookback",
     "window",
     "threshold",
@@ -103,9 +137,14 @@ REGISTRY_COLUMNS = [
 HISTORY_COLUMNS = [
     "run_id",
     "candidate_id",
+    "candidate_name",
+    "variant_id",
+    "signal_variant",
     "signal_name",
     "signal_family",
     "parameters_json",
+    "variant_parameters_json",
+    "config_json",
     "lookback",
     "window",
     "threshold",
@@ -183,6 +222,7 @@ def build_signal_family_summary(
         "universe",
         "signal_family",
         "candidate_count",
+        "variant_count",
         "mean_spearman_ic",
         "top_spearman_ic",
         "promotion_count",
@@ -199,11 +239,13 @@ def build_signal_family_summary(
                 continue
             for reason in str(reason_string).split(";"):
                 rejection_counts[reason] = rejection_counts.get(reason, 0) + 1
+        variant_series = family_df.get("signal_variant", pd.Series(index=family_df.index, dtype="object")).fillna("base").astype(str)
         rows.append(
             {
                 "universe": universe or "custom",
                 "signal_family": signal_family,
                 "candidate_count": int(len(family_df)),
+                "variant_count": int(variant_series.nunique()),
                 "mean_spearman_ic": float(pd.to_numeric(family_df["mean_spearman_ic"], errors="coerce").mean()),
                 "top_spearman_ic": float(pd.to_numeric(family_df["mean_spearman_ic"], errors="coerce").max()),
                 "promotion_count": int((family_df["promotion_status"] == "promote").sum()),
@@ -599,24 +641,71 @@ def generate_candidate_configs(
 
     rows: list[dict[str, object]] = []
     for space in search_spaces or ():
-        for lookback in space.lookbacks:
-            for horizon in space.horizons:
-                params = {"lookback": int(lookback)}
-                rows.append(
-                    {
-                        "candidate_id": f"{space.signal_family}|horizon={int(horizon)}|lookback={int(lookback)}",
-                        "signal_name": space.signal_family,
-                        "signal_family": space.signal_family,
-                        "parameters_json": json.dumps(params, sort_keys=True),
-                        "lookback": int(lookback),
-                        "window": pd.NA,
-                        "threshold": pd.NA,
-                        "feature_a": pd.NA,
-                        "feature_b": pd.NA,
-                        "horizon": int(horizon),
-                    }
-                )
-    return pd.DataFrame(rows).drop_duplicates(subset=["candidate_id"]).reset_index(drop=True)
+        for candidate_spec in build_candidate_grid(
+            signal_family=space.signal_family,
+            lookbacks=list(space.lookbacks),
+            horizons=list(space.horizons),
+            candidate_grid_preset=space.candidate_grid_preset,
+            max_variants_per_family=space.max_variants_per_family,
+        ):
+            params = {"lookback": int(candidate_spec.lookback)}
+            normalized_variant = str(candidate_spec.signal_variant or "base")
+            config_payload = {
+                "signal_family": candidate_spec.signal_family,
+                "signal_name": candidate_spec.signal_family,
+                "horizon": int(candidate_spec.horizon),
+                "parameters": params,
+                "variant_id": normalized_variant,
+                "variant_params": candidate_spec.variant_params,
+            }
+            base_candidate_id = f"{candidate_spec.signal_family}|horizon={int(candidate_spec.horizon)}|lookback={int(candidate_spec.lookback)}"
+            candidate_id = (
+                base_candidate_id
+                if normalized_variant == "base"
+                else f"{base_candidate_id}|variant={normalized_variant}"
+            )
+            rows.append(
+                {
+                    "candidate_id": candidate_id,
+                    "candidate_name": build_candidate_name(
+                        candidate_spec.signal_family,
+                        signal_variant=normalized_variant,
+                        lookback=int(candidate_spec.lookback),
+                        horizon=int(candidate_spec.horizon),
+                    ),
+                    "variant_id": normalized_variant,
+                    "signal_variant": normalized_variant,
+                    "signal_name": candidate_spec.signal_family,
+                    "signal_family": candidate_spec.signal_family,
+                    "parameters_json": json.dumps(params, sort_keys=True),
+                    "variant_parameters_json": json.dumps(candidate_spec.variant_params, sort_keys=True),
+                    "config_json": json.dumps(config_payload, sort_keys=True),
+                    "lookback": int(candidate_spec.lookback),
+                    "window": pd.NA,
+                    "threshold": pd.NA,
+                    "feature_a": pd.NA,
+                    "feature_b": pd.NA,
+                    "horizon": int(candidate_spec.horizon),
+                }
+            )
+    columns = [
+        "candidate_id",
+        "candidate_name",
+        "variant_id",
+        "signal_variant",
+        "signal_name",
+        "signal_family",
+        "parameters_json",
+        "variant_parameters_json",
+        "config_json",
+        "lookback",
+        "window",
+        "threshold",
+        "feature_a",
+        "feature_b",
+        "horizon",
+    ]
+    return pd.DataFrame(rows, columns=columns).drop_duplicates(subset=["candidate_id"]).reset_index(drop=True)
 
 
 def load_research_registry(path: Path) -> pd.DataFrame:
@@ -677,6 +766,144 @@ def select_candidates_for_evaluation(
     return candidates_df.loc[
         pending_mask | candidates_df["candidate_id"].isin(stale_ids)
     ].reset_index(drop=True)
+
+
+def build_research_resource_allocation_plan(
+    candidates_df: pd.DataFrame,
+    registry_df: pd.DataFrame,
+    *,
+    config: ResearchResourceAllocationConfig,
+) -> pd.DataFrame:
+    columns = [
+        "candidate_id",
+        "candidate_name",
+        "signal_family",
+        "variant_id",
+        "signal_variant",
+        "family_priority_score",
+        "allocation_score",
+        "family_history_candidates",
+        "family_history_promotions",
+        "family_history_promotion_rate",
+        "family_history_mean_rank_ic",
+        "family_priority_reason",
+        "family_rank",
+        "family_variant_rank",
+        "allocation_rank",
+        "allocation_status",
+        "pruning_reason",
+    ]
+    if candidates_df.empty:
+        return pd.DataFrame(columns=columns)
+
+    completed_registry = registry_df.loc[registry_df.get("evaluation_status", pd.Series(dtype="object")) == "completed"].copy()
+    family_stats: dict[str, dict[str, object]] = {}
+    if not completed_registry.empty and "signal_family" in completed_registry.columns:
+        for signal_family, family_df in completed_registry.groupby("signal_family", dropna=False):
+            mean_rank_ic = float(pd.to_numeric(family_df.get("mean_spearman_ic"), errors="coerce").fillna(0.0).mean())
+            promotion_rate = float((family_df.get("promotion_status", pd.Series(dtype="object")) == "promote").mean())
+            family_stats[str(signal_family)] = {
+                "family_history_candidates": int(len(family_df)),
+                "family_history_promotions": int((family_df.get("promotion_status", pd.Series(dtype="object")) == "promote").sum()),
+                "family_history_promotion_rate": promotion_rate,
+                "family_history_mean_rank_ic": mean_rank_ic,
+                "family_priority_score": (promotion_rate + max(mean_rank_ic, 0.0)) if config.prioritize_by_family_promise else 0.0,
+                "family_priority_reason": "historical_promise" if config.prioritize_by_family_promise else "uniform_priority",
+            }
+
+    rows: list[dict[str, object]] = []
+    family_counts: dict[str, int] = {}
+    selected_count = 0
+    ranked_candidates = candidates_df.copy()
+    ranked_candidates["signal_family"] = ranked_candidates["signal_family"].astype(str)
+    ranked_candidates["signal_variant"] = ranked_candidates.get("signal_variant", pd.Series(index=ranked_candidates.index, dtype="object")).fillna("base").astype(str)
+    ranked_candidates["candidate_name"] = ranked_candidates.get("candidate_name", ranked_candidates["candidate_id"]).astype(str)
+    ranked_candidates["variant_id"] = ranked_candidates.get("variant_id", ranked_candidates["signal_variant"]).fillna("base").astype(str)
+    ranked_candidates["family_rank"] = ranked_candidates.groupby("signal_family", sort=True).cumcount() + 1
+    ranked_candidates["family_variant_rank"] = ranked_candidates.groupby(["signal_family", "signal_variant"], sort=True).cumcount() + 1
+
+    priority_rows: list[dict[str, object]] = []
+    for _, row in ranked_candidates.iterrows():
+        signal_family = str(row["signal_family"])
+        family_payload = family_stats.get(
+            signal_family,
+            {
+                "family_history_candidates": 0,
+                "family_history_promotions": 0,
+                "family_history_promotion_rate": 0.0,
+                "family_history_mean_rank_ic": 0.0,
+                "family_priority_score": 0.0,
+                "family_priority_reason": "no_history",
+            },
+        )
+        family_rank = int(row["family_rank"])
+        family_variant_rank = int(row["family_variant_rank"])
+        allocation_score = float(family_payload["family_priority_score"]) - 0.001 * family_rank - 0.0001 * family_variant_rank
+        priority_rows.append(
+            {
+                **row.to_dict(),
+                **family_payload,
+                "allocation_score": allocation_score,
+            }
+        )
+
+    ordered_df = pd.DataFrame(priority_rows).sort_values(
+        ["allocation_score", "signal_family", "signal_variant", "candidate_id"],
+        ascending=[False, True, True, True],
+    ).reset_index(drop=True)
+    ordered_df["allocation_rank"] = ordered_df.index + 1
+
+    for _, row in ordered_df.iterrows():
+        signal_family = str(row["signal_family"])
+        family_selected = family_counts.get(signal_family, 0)
+        pruning_reason = ""
+        allocation_status = "selected"
+        if (
+            config.max_variants_per_family is not None
+            and family_selected >= config.max_variants_per_family
+        ):
+            allocation_status = "deferred"
+            pruning_reason = "family_variant_cap"
+        elif (
+            config.max_candidates_per_iteration is not None
+            and selected_count >= config.max_candidates_per_iteration
+        ):
+            allocation_status = "deferred"
+            pruning_reason = "iteration_candidate_cap"
+        elif (
+            config.prune_deferred_candidates
+            and float(row["allocation_score"]) < 0.0
+        ):
+            allocation_status = "pruned"
+            pruning_reason = "negative_priority_score"
+
+        if allocation_status == "selected":
+            selected_count += 1
+            family_counts[signal_family] = family_selected + 1
+
+        rows.append(
+            {
+                "candidate_id": row["candidate_id"],
+                "candidate_name": row["candidate_name"],
+                "signal_family": signal_family,
+                "variant_id": row["variant_id"],
+                "signal_variant": row["signal_variant"],
+                "family_priority_score": float(row["family_priority_score"]),
+                "allocation_score": float(row["allocation_score"]),
+                "family_history_candidates": int(row["family_history_candidates"]),
+                "family_history_promotions": int(row["family_history_promotions"]),
+                "family_history_promotion_rate": float(row["family_history_promotion_rate"]),
+                "family_history_mean_rank_ic": float(row["family_history_mean_rank_ic"]),
+                "family_priority_reason": str(row["family_priority_reason"]),
+                "family_rank": int(row["family_rank"]),
+                "family_variant_rank": int(row["family_variant_rank"]),
+                "allocation_rank": int(row["allocation_rank"]),
+                "allocation_status": allocation_status,
+                "pruning_reason": pruning_reason,
+            }
+        )
+
+    return pd.DataFrame(rows, columns=columns)
 
 
 def should_run_scheduled_loop(
@@ -818,6 +1045,11 @@ def evaluate_candidate_signal(
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     signal_name = str(candidate_row["signal_name"])
     signal_family = str(candidate_row["signal_family"])
+    candidate_name = str(candidate_row.get("candidate_name") or candidate_row["candidate_id"])
+    variant_id = str(candidate_row.get("variant_id") or candidate_row.get("signal_variant") or "base")
+    signal_variant = str(candidate_row.get("signal_variant") or variant_id)
+    variant_parameters_json = str(candidate_row.get("variant_parameters_json") or "{}")
+    config_json = str(candidate_row.get("config_json") or "{}")
     lookback = int(candidate_row["lookback"]) if pd.notna(candidate_row.get("lookback")) else pd.NA
     window = int(candidate_row["window"]) if pd.notna(candidate_row.get("window")) else pd.NA
     threshold = float(candidate_row["threshold"]) if pd.notna(candidate_row.get("threshold")) else pd.NA
@@ -872,8 +1104,13 @@ def evaluate_candidate_signal(
         fold_rows.append(
             {
                 "candidate_id": str(candidate_row["candidate_id"]),
+                "candidate_name": candidate_name,
+                "variant_id": variant_id,
+                "signal_variant": signal_variant,
                 "signal_name": signal_name,
                 "signal_family": signal_family,
+                "variant_parameters_json": variant_parameters_json,
+                "config_json": config_json,
                 "lookback": lookback,
                 "window": window,
                 "threshold": threshold,
@@ -893,8 +1130,13 @@ def evaluate_candidate_signal(
         fold_rows,
         columns=[
             "candidate_id",
+            "candidate_name",
+            "variant_id",
+            "signal_variant",
             "signal_name",
             "signal_family",
+            "variant_parameters_json",
+            "config_json",
             "lookback",
             "window",
             "threshold",
@@ -937,8 +1179,13 @@ def evaluate_candidate_signal(
             fold_results_df.groupby(
                 [
                     "candidate_id",
+                    "candidate_name",
+                    "variant_id",
+                    "signal_variant",
                     "signal_name",
                     "signal_family",
+                    "variant_parameters_json",
+                    "config_json",
                     "lookback",
                     "window",
                     "threshold",
@@ -966,6 +1213,11 @@ def evaluate_candidate_signal(
         )
         leaderboard_df = apply_promotion_rules(leaderboard_df)
         leaderboard_df["parameters_json"] = candidate_row["parameters_json"]
+        leaderboard_df["candidate_name"] = candidate_name
+        leaderboard_df["variant_id"] = variant_id
+        leaderboard_df["signal_variant"] = signal_variant
+        leaderboard_df["variant_parameters_json"] = variant_parameters_json
+        leaderboard_df["config_json"] = config_json
         leaderboard_df["evaluation_status"] = "completed"
         leaderboard_df["last_evaluated_at"] = datetime.now(UTC).isoformat()
         leaderboard_df = leaderboard_df[REGISTRY_COLUMNS]
@@ -1049,6 +1301,87 @@ def _compute_redundancy_diagnostics(
     return pd.DataFrame(rows, columns=columns)
 
 
+def _build_candidate_grid_summary(
+    candidates_df: pd.DataFrame,
+    *,
+    config: AutomatedAlphaResearchConfig,
+) -> dict[str, object]:
+    if candidates_df.empty:
+        return {
+            "schema_version": 1,
+            "candidate_count": 0,
+            "candidate_families": [],
+            "candidate_variants": [],
+            "family_variant_counts": {},
+            "config": config.to_dict(),
+        }
+
+    family_variant_counts = {}
+    for signal_family, family_df in candidates_df.groupby("signal_family", dropna=False):
+        variants = sorted(
+            family_df.get("signal_variant", pd.Series(index=family_df.index, dtype="object"))
+            .fillna("base")
+            .astype(str)
+            .unique()
+            .tolist()
+        )
+        family_variant_counts[str(signal_family)] = {
+            "candidate_count": int(len(family_df)),
+            "variant_count": len(variants),
+            "variants": variants,
+        }
+
+    return {
+        "schema_version": 1,
+        "candidate_count": int(len(candidates_df)),
+        "candidate_families": sorted(candidates_df["signal_family"].dropna().astype(str).unique().tolist()),
+        "candidate_variants": sorted(candidates_df.get("signal_variant", pd.Series(dtype="object")).dropna().astype(str).unique().tolist()),
+        "family_variant_counts": family_variant_counts,
+        "config": config.to_dict(),
+    }
+
+
+def _build_research_allocation_summary(
+    allocation_df: pd.DataFrame,
+    *,
+    config: ResearchResourceAllocationConfig,
+) -> dict[str, object]:
+    if allocation_df.empty:
+        return {
+            "schema_version": 1,
+            "config": config.to_dict(),
+            "candidate_count": 0,
+            "selected_count": 0,
+            "deferred_count": 0,
+            "pruned_count": 0,
+            "family_summary": {},
+        }
+
+    family_summary: dict[str, dict[str, object]] = {}
+    for signal_family, family_df in allocation_df.groupby("signal_family", dropna=False):
+        family_summary[str(signal_family)] = {
+            "candidate_count": int(len(family_df)),
+            "selected_count": int((family_df["allocation_status"] == "selected").sum()),
+            "deferred_count": int((family_df["allocation_status"] == "deferred").sum()),
+            "pruned_count": int((family_df["allocation_status"] == "pruned").sum()),
+            "mean_allocation_score": float(pd.to_numeric(family_df["allocation_score"], errors="coerce").mean()),
+            "mean_family_priority_score": float(pd.to_numeric(family_df["family_priority_score"], errors="coerce").mean()),
+        }
+    return {
+        "schema_version": 1,
+        "config": config.to_dict(),
+        "candidate_count": int(len(allocation_df)),
+        "selected_count": int((allocation_df["allocation_status"] == "selected").sum()),
+        "deferred_count": int((allocation_df["allocation_status"] == "deferred").sum()),
+        "pruned_count": int((allocation_df["allocation_status"] == "pruned").sum()),
+        "family_summary": family_summary,
+    }
+
+
+def _write_json(path: Path, payload: dict[str, object]) -> None:
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True, default=str), encoding="utf-8")
+
+
 def aggregate_research_registry(
     registry_df: pd.DataFrame,
     *,
@@ -1063,9 +1396,14 @@ def aggregate_research_registry(
             leaderboard_df[
                 [
                     "candidate_id",
+                    "candidate_name",
+                    "variant_id",
+                    "signal_variant",
                     "signal_name",
                     "signal_family",
                     "parameters_json",
+                    "variant_parameters_json",
+                    "config_json",
                     "lookback",
                     "window",
                     "threshold",
@@ -1133,7 +1471,21 @@ def aggregate_research_registry(
         )
         composite_inputs["horizons"][str(int(horizon))] = {
             "selected_signals": selected_df[
-                ["candidate_id", "signal_name", "signal_family", "lookback", "window", "threshold", "feature_a", "feature_b", "horizon"]
+                [
+                    "candidate_id",
+                    "candidate_name",
+                    "variant_id",
+                    "signal_variant",
+                    "signal_name",
+                    "signal_family",
+                    "lookback",
+                    "window",
+                    "threshold",
+                    "feature_a",
+                    "feature_b",
+                    "horizon",
+                    "variant_parameters_json",
+                ]
             ].to_dict(orient="records"),
             "excluded_signals": excluded_rows,
         }
@@ -1211,6 +1563,15 @@ def _run_automated_alpha_research_iteration(
         generation_config=config.generation_config,
         feature_columns=candidate_feature_columns,
     )
+    if not candidates_df.empty:
+        candidates_df = candidates_df.sort_values(["signal_family", "signal_variant", "candidate_id"]).reset_index(drop=True)
+    candidate_grid_path = output_dir / "candidate_grid.csv"
+    candidate_grid_manifest_path = output_dir / "candidate_grid_manifest.json"
+    candidates_df.to_csv(candidate_grid_path, index=False)
+    _write_json(
+        candidate_grid_manifest_path,
+        _build_candidate_grid_summary(candidates_df, config=config),
+    )
     registry_df = load_research_registry(registry_path)
     history_df = load_research_history(history_path)
     pending_candidates_df = select_candidates_for_evaluation(
@@ -1218,12 +1579,32 @@ def _run_automated_alpha_research_iteration(
         registry_df,
         stale_after_days=config.stale_after_days,
     )
+    allocation_plan_df = build_research_resource_allocation_plan(
+        pending_candidates_df,
+        registry_df,
+        config=config.resource_allocation,
+    )
+    selected_candidates_df = allocation_plan_df.loc[allocation_plan_df["allocation_status"] == "selected", ["candidate_id"]].merge(
+        pending_candidates_df,
+        on="candidate_id",
+        how="left",
+    ) if not allocation_plan_df.empty else pending_candidates_df.iloc[0:0].copy()
+    selected_candidates_df = selected_candidates_df[pending_candidates_df.columns] if not selected_candidates_df.empty else pending_candidates_df.iloc[0:0].copy()
+    candidate_allocation_path = output_dir / "candidate_allocation_plan.csv"
+    deferred_candidates_path = output_dir / "candidate_allocation_deferred.csv"
+    allocation_summary_path = output_dir / "candidate_allocation_summary.json"
+    allocation_plan_df.to_csv(candidate_allocation_path, index=False)
+    allocation_plan_df.loc[allocation_plan_df["allocation_status"] != "selected"].to_csv(deferred_candidates_path, index=False)
+    _write_json(
+        allocation_summary_path,
+        _build_research_allocation_summary(allocation_plan_df, config=config.resource_allocation),
+    )
 
     unique_horizons = sorted(
         set(candidates_df.get("horizon", pd.Series(dtype="int64")).dropna().astype(int).tolist())
     )
     symbol_data: dict[str, pd.DataFrame] = {}
-    if not pending_candidates_df.empty:
+    if not selected_candidates_df.empty:
         for symbol in resolved_symbols:
             try:
                 df = _load_symbol_feature_data(config.feature_dir, symbol)
@@ -1244,7 +1625,7 @@ def _run_automated_alpha_research_iteration(
     run_id = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     registry_updates: list[pd.DataFrame] = []
     history_rows: list[dict[str, object]] = []
-    for _, candidate_row in pending_candidates_df.iterrows():
+    for _, candidate_row in selected_candidates_df.iterrows():
         fold_results_df, daily_metrics_df, score_panel_df, leaderboard_df = evaluate_candidate_signal(
             candidate_row,
             symbol_data=symbol_data,
@@ -1255,9 +1636,14 @@ def _run_automated_alpha_research_iteration(
         if leaderboard_df.empty:
             row = {
                 "candidate_id": candidate_row["candidate_id"],
+                "candidate_name": candidate_row.get("candidate_name", candidate_row["candidate_id"]),
+                "variant_id": candidate_row.get("variant_id", candidate_row.get("signal_variant", "base")),
+                "signal_variant": candidate_row.get("signal_variant", candidate_row.get("variant_id", "base")),
                 "signal_name": candidate_row["signal_name"],
                 "signal_family": candidate_row["signal_family"],
                 "parameters_json": candidate_row["parameters_json"],
+                "variant_parameters_json": candidate_row.get("variant_parameters_json", "{}"),
+                "config_json": candidate_row.get("config_json", "{}"),
                 "lookback": int(candidate_row["lookback"]) if pd.notna(candidate_row["lookback"]) else pd.NA,
                 "window": int(candidate_row["window"]) if pd.notna(candidate_row["window"]) else pd.NA,
                 "threshold": float(candidate_row["threshold"]) if pd.notna(candidate_row["threshold"]) else pd.NA,
@@ -1293,9 +1679,14 @@ def _run_automated_alpha_research_iteration(
             {
                 "run_id": run_id,
                 "candidate_id": str(candidate_row["candidate_id"]),
+                "candidate_name": str(candidate_row.get("candidate_name") or candidate_row["candidate_id"]),
+                "variant_id": str(candidate_row.get("variant_id") or candidate_row.get("signal_variant") or "base"),
+                "signal_variant": str(candidate_row.get("signal_variant") or candidate_row.get("variant_id") or "base"),
                 "signal_name": str(candidate_row["signal_name"]),
                 "signal_family": str(candidate_row["signal_family"]),
                 "parameters_json": str(candidate_row["parameters_json"]),
+                "variant_parameters_json": str(candidate_row.get("variant_parameters_json") or "{}"),
+                "config_json": str(candidate_row.get("config_json") or "{}"),
                 "lookback": int(candidate_row["lookback"]) if pd.notna(candidate_row["lookback"]) else pd.NA,
                 "window": int(candidate_row["window"]) if pd.notna(candidate_row["window"]) else pd.NA,
                 "threshold": float(candidate_row["threshold"]) if pd.notna(candidate_row["threshold"]) else pd.NA,
@@ -1373,16 +1764,58 @@ def _run_automated_alpha_research_iteration(
     )
     now = datetime.now(UTC)
     schedule_payload = {
+        "schema_version": 1,
         "last_run_at": now.isoformat(),
         "next_run_at": _next_run_at(now, config.schedule_frequency),
         "schedule_frequency": config.schedule_frequency,
         "run_id": run_id,
         "candidates_generated": int(len(candidates_df)),
-        "candidates_evaluated": int(len(pending_candidates_df)),
+        "candidates_pending": int(len(pending_candidates_df)),
+        "candidates_evaluated": int(len(selected_candidates_df)),
+        "candidates_deferred": int((allocation_plan_df["allocation_status"] != "selected").sum()) if not allocation_plan_df.empty else 0,
     }
-    schedule_path.write_text(json.dumps(schedule_payload, indent=2), encoding="utf-8")
+    _write_json(schedule_path, schedule_payload)
     config_path = output_dir / "research_loop_config.json"
-    config_path.write_text(json.dumps(config.to_dict(), indent=2), encoding="utf-8")
+    _write_json(config_path, config.to_dict())
+    run_summary_path = output_dir / "research_loop_run_summary.json"
+    run_summary_payload = {
+        "schema_version": 1,
+        "run_id": run_id,
+        "status": "completed",
+        "universe": config.universe or "custom",
+        "symbols_requested": resolved_symbols,
+        "schedule_frequency": config.schedule_frequency,
+        "candidates_generated": int(len(candidates_df)),
+        "candidates_pending": int(len(pending_candidates_df)),
+        "candidates_evaluated": int(len(selected_candidates_df)),
+        "candidates_deferred": int((allocation_plan_df["allocation_status"] != "selected").sum()) if not allocation_plan_df.empty else 0,
+        "registry_rows": int(len(updated_registry)),
+        "history_rows": int(len(updated_history)),
+        "promoted_candidates": int((updated_registry.get("promotion_status", pd.Series(dtype="object")) == "promote").sum()),
+        "rejected_candidates": int((updated_registry.get("promotion_status", pd.Series(dtype="object")) != "promote").sum()),
+        "candidate_grid_path": str(candidate_grid_path),
+        "candidate_grid_manifest_path": str(candidate_grid_manifest_path),
+        "candidate_allocation_path": str(candidate_allocation_path),
+        "deferred_candidates_path": str(deferred_candidates_path),
+        "allocation_summary_path": str(allocation_summary_path),
+        "config_path": str(config_path),
+        "schedule_path": str(schedule_path),
+        "registry_path": str(registry_path),
+        "history_path": str(history_path),
+        "artifact_paths": {
+            "signal_family_summary_path": str(signal_family_summary_path),
+            "feature_availability_report_path": str(feature_availability_report_path),
+            "skipped_candidates_report_path": str(skipped_candidates_report_path),
+            "fallback_usage_report_path": str(fallback_usage_report_path),
+            **aggregate_paths,
+        },
+    }
+    _write_json(run_summary_path, run_summary_payload)
+    tracker_dir = config.experiment_tracker_dir or (output_dir / "experiment_tracking")
+    experiment_registry_paths = register_experiment(
+        build_automated_alpha_loop_experiment_record(output_dir),
+        tracker_dir=tracker_dir,
+    )
 
     return {
         "status": "completed",
@@ -1391,10 +1824,17 @@ def _run_automated_alpha_research_iteration(
         "history_path": str(history_path),
         "schedule_path": str(schedule_path),
         "config_path": str(config_path),
+        "candidate_grid_path": str(candidate_grid_path),
+        "candidate_grid_manifest_path": str(candidate_grid_manifest_path),
+        "candidate_allocation_path": str(candidate_allocation_path),
+        "deferred_candidates_path": str(deferred_candidates_path),
+        "allocation_summary_path": str(allocation_summary_path),
+        "run_summary_path": str(run_summary_path),
         "signal_family_summary_path": str(signal_family_summary_path),
         "feature_availability_report_path": str(feature_availability_report_path),
         "skipped_candidates_report_path": str(skipped_candidates_report_path),
         "fallback_usage_report_path": str(fallback_usage_report_path),
+        **experiment_registry_paths,
         **aggregate_paths,
     }
 

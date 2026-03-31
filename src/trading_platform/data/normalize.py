@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import pandas as pd
 
+from trading_platform.ingestion.normalize import normalize_market_data_frame
 from trading_platform.schemas.bars import BAR_COLUMNS
-from trading_platform.data.providers.yahoo import YahooBarDataProvider
 
 
 YAHOO_COLUMN_RENAMES = {
@@ -42,7 +42,7 @@ def _flatten_yahoo_columns(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def normalize_yahoo_bars(df: pd.DataFrame, symbol: str) -> pd.DataFrame:
+def normalize_yahoo_bars(df: pd.DataFrame, symbol: str, *, timeframe: str = "1d") -> pd.DataFrame:
     """
     Convert raw yfinance output into the platform's canonical bar schema.
     """
@@ -74,7 +74,13 @@ def normalize_yahoo_bars(df: pd.DataFrame, symbol: str) -> pd.DataFrame:
     out["symbol"] = out["symbol"].astype(str)
     out = out.sort_values(["timestamp", "symbol"]).reset_index(drop=True)
 
-    return out
+    return normalize_market_data_frame(
+        out,
+        symbol=symbol,
+        timeframe=timeframe,
+        provider="yahoo",
+        asset_class="equity",
+    )
 
 def normalize_bars(
     df: pd.DataFrame,

@@ -12,6 +12,12 @@ from trading_platform.config.models import (
     MultiStrategySleeveConfig,
 )
 from trading_platform.paper.models import PaperExecutionPriceSnapshot, PaperSignalSnapshot
+from trading_platform.portfolio.contracts import (
+    AllocationRationaleRecord,
+    ConflictResolutionRecord,
+    ExposureConstraintDecision,
+    StrategyPortfolioInput,
+)
 from trading_platform.portfolio.multi_strategy import (
     allocate_multi_strategy_portfolio,
     write_multi_strategy_artifacts,
@@ -104,6 +110,66 @@ def test_allocate_multi_strategy_combines_non_overlapping_sleeves(monkeypatch) -
 
     assert result.combined_target_weights == {"AAPL": pytest.approx(0.6), "MSFT": pytest.approx(0.4)}
     assert result.summary["raw_enabled_capital_weight_sum"] == pytest.approx(1.0)
+    assert {row["sleeve_name"] for row in result.strategy_input_rows} == {"core", "satellite"}
+
+
+def test_strategy_portfolio_input_contract_round_trips_deterministically() -> None:
+    contract = StrategyPortfolioInput(
+        sleeve_name="core",
+        preset_name="generated_momentum_a",
+        as_of="2025-01-04",
+        capital_weight_raw=0.6,
+        capital_weight_normalized=0.6,
+        scheduled_target_weights={"MSFT": 0.4, "AAPL": 0.6},
+        effective_target_weights={"MSFT": 0.4, "AAPL": 0.6},
+        latest_prices={"MSFT": 200.0, "AAPL": 100.0},
+        latest_scores={"MSFT": 0.8, "AAPL": 0.9},
+        skipped_symbols=["NVDA"],
+        diagnostics={"z": 3, "a": 1},
+        metadata={"bucket": "core"},
+    )
+
+    payload = contract.to_dict()
+    assert payload["scheduled_target_weights"] == {"AAPL": 0.6, "MSFT": 0.4}
+    assert payload["diagnostics"] == {"a": 1, "z": 3}
+    assert StrategyPortfolioInput.from_dict(payload) == contract
+
+
+def test_conflict_and_exposure_contracts_round_trip_deterministically() -> None:
+    conflict = ConflictResolutionRecord(
+        symbol="AAPL",
+        resolution_rule="net_opposing_sleeves",
+        overlap_type="conflict",
+        sleeve_count=2,
+        gross_weight_before=1.0,
+        net_weight_after=0.0,
+        conflicting_sleeves=["left", "right"],
+        metadata={"z": 3, "a": 1},
+    )
+    exposure = ExposureConstraintDecision(
+        constraint_name="gross_leverage_cap_budget",
+        scope="portfolio",
+        binding=True,
+        before_weight=1.2,
+        after_weight=0.8,
+        action="monitor_only",
+        metadata={"z": 3, "a": 1},
+    )
+
+    assert ConflictResolutionRecord.from_dict(conflict.to_dict()) == conflict
+    assert conflict.to_dict()["metadata"] == {"a": 1, "z": 3}
+    assert ExposureConstraintDecision.from_dict(exposure.to_dict()) == exposure
+    assert exposure.to_dict()["metadata"] == {"a": 1, "z": 3}
+    rationale = AllocationRationaleRecord(
+        symbol="AAPL",
+        final_target_weight=0.25,
+        rationale_codes=["normalized_strategy_input", "max_position_weight"],
+        source_sleeves=["core"],
+        constraint_actions=["clipped_position"],
+        metadata={"z": 3, "a": 1},
+    )
+    assert AllocationRationaleRecord.from_dict(rationale.to_dict()) == rationale
+    assert rationale.to_dict()["metadata"] == {"a": 1, "z": 3}
 
 
 def test_allocate_multi_strategy_nets_overlapping_symbol(monkeypatch) -> None:
@@ -132,6 +198,9 @@ def test_allocate_multi_strategy_nets_overlapping_symbol(monkeypatch) -> None:
     assert result.combined_target_weights == {}
     overlap = pd.DataFrame(result.symbol_overlap_rows)
     assert overlap.loc[0, "overlap_type"] == "conflict"
+    conflict = pd.DataFrame(result.conflict_resolution_rows)
+    assert conflict.loc[0, "resolution_rule"] == "net_opposing_sleeves"
+    assert conflict.loc[0, "net_weight_after"] == pytest.approx(0.0)
 
 
 def test_allocate_multi_strategy_enforces_max_position_weight(monkeypatch) -> None:
@@ -153,6 +222,8 @@ def test_allocate_multi_strategy_enforces_max_position_weight(monkeypatch) -> No
 
     assert result.combined_target_weights["AAPL"] == pytest.approx(0.25)
     assert result.summary["symbols_removed_or_clipped"]
+    rationale = pd.DataFrame(result.allocation_rationale_rows)
+    assert "max_position_weight" in rationale.loc[rationale["symbol"] == "AAPL", "rationale_codes"].iloc[0]
 
 
 def test_allocate_multi_strategy_enforces_gross_and_net_caps(monkeypatch) -> None:
@@ -185,6 +256,10 @@ def test_allocate_multi_strategy_enforces_gross_and_net_caps(monkeypatch) -> Non
     net = abs(sum(result.combined_target_weights.values()))
     assert gross == pytest.approx(0.6)
     assert net == pytest.approx(0.6)
+    constraints = pd.DataFrame(result.exposure_constraint_rows)
+    assert "gross_leverage_cap_budget" in set(constraints["constraint_name"])
+    assert "net_exposure_cap_budget" in set(constraints["constraint_name"])
+    assert constraints.loc[constraints["constraint_name"] == "gross_leverage_cap_budget", "binding"].iloc[0]
 
 
 def test_allocate_multi_strategy_normalizes_capital_weights_when_not_one(monkeypatch) -> None:
@@ -270,6 +345,12 @@ def test_write_multi_strategy_artifacts_is_deterministic(monkeypatch, tmp_path: 
     ).read_text(encoding="utf-8")
     assert Path(first_paths["allocation_summary_json_path"]).read_text(encoding="utf-8") == Path(
         second_paths["allocation_summary_json_path"]
+    ).read_text(encoding="utf-8")
+    assert Path(first_paths["strategy_portfolio_inputs_path"]).read_text(encoding="utf-8") == Path(
+        second_paths["strategy_portfolio_inputs_path"]
+    ).read_text(encoding="utf-8")
+    assert Path(first_paths["allocation_rationale_report_path"]).read_text(encoding="utf-8") == Path(
+        second_paths["allocation_rationale_report_path"]
     ).read_text(encoding="utf-8")
 
 

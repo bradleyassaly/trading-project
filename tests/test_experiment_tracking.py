@@ -7,6 +7,7 @@ import pandas as pd
 
 from trading_platform.research.experiment_tracking import (
     build_alpha_experiment_record,
+    build_automated_alpha_loop_experiment_record,
     build_experiment_summary_report,
     build_latest_model_state,
     build_paper_experiment_record,
@@ -121,6 +122,69 @@ def _write_paper_artifacts(artifact_dir: Path) -> None:
         ),
         encoding="utf-8",
     )
+
+
+def _write_automated_alpha_loop_artifacts(artifact_dir: Path) -> None:
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    (artifact_dir / "research_loop_config.json").write_text(
+        json.dumps(
+            {
+                "generation_config": {"signal_families": ["momentum", "mean_reversion"]},
+                "resource_allocation": {"max_candidates_per_iteration": 4, "max_variants_per_family": 1},
+                "schedule_frequency": "manual",
+                "universe": "custom",
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    (artifact_dir / "candidate_grid_manifest.json").write_text(
+        json.dumps(
+            {
+                "candidate_count": 6,
+                "candidate_families": ["mean_reversion", "momentum"],
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    (artifact_dir / "candidate_allocation_summary.json").write_text(
+        json.dumps(
+            {
+                "selected_count": 4,
+                "deferred_count": 2,
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    (artifact_dir / "promotion_threshold_diagnostics.json").write_text(
+        json.dumps(
+            {
+                "mean_rank_ic_distribution": {"mean": 0.015},
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    (artifact_dir / "research_loop_run_summary.json").write_text(
+        json.dumps(
+            {
+                "run_id": "loop_001",
+                "candidates_generated": 6,
+                "candidates_evaluated": 4,
+                "promoted_candidates": 1,
+                "rejected_candidates": 3,
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    pd.DataFrame([{"candidate_id": "mom_a"}]).to_csv(artifact_dir / "promoted_signals.csv", index=False)
+    pd.DataFrame([{"candidate_id": "mom_b"}, {"candidate_id": "rev_a"}, {"candidate_id": "rev_b"}]).to_csv(
+        artifact_dir / "rejected_signals.csv",
+        index=False,
+    )
     (artifact_dir / "composite_diagnostics.json").write_text(
         json.dumps(
             {
@@ -180,6 +244,23 @@ def test_duplicate_experiment_detection_marks_duplicate_of_existing_run(tmp_path
 
     assert len(registry_df) == 2
     assert registry_df["duplicate_of"].iloc[1] == registry_df["experiment_id"].iloc[0]
+
+
+def test_build_automated_alpha_loop_experiment_record_and_register(tmp_path: Path) -> None:
+    tracker_dir = tmp_path / "tracker"
+    loop_dir = tmp_path / "alpha_loop"
+    _write_automated_alpha_loop_artifacts(loop_dir)
+
+    record = build_automated_alpha_loop_experiment_record(loop_dir)
+    register_experiment(record, tracker_dir=tracker_dir)
+
+    registry_df = load_experiment_registry(tracker_dir / "experiment_registry.csv")
+
+    assert record["experiment_type"] == "alpha_research_loop"
+    assert record["run_id"] == "loop_001"
+    assert json.loads(str(record["parameters_json"]))["candidate_count"] == 6
+    assert len(registry_df) == 1
+    assert registry_df.loc[0, "experiment_type"] == "alpha_research_loop"
 
 
 def test_latest_model_state_reports_differences_between_approved_configurations(tmp_path: Path) -> None:

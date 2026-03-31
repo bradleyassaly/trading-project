@@ -27,9 +27,16 @@ def test_normalize_yahoo_bars_standard_columns() -> None:
         "low",
         "close",
         "volume",
+        "timeframe",
+        "provider",
+        "asset_class",
+        "schema_version",
     ]
     assert out["symbol"].tolist() == ["AAPL", "AAPL"]
     assert out["open"].tolist() == [100.0, 101.0]
+    assert out["timeframe"].tolist() == ["1d", "1d"]
+    assert out["provider"].tolist() == ["yahoo", "yahoo"]
+    assert out["asset_class"].tolist() == ["equity", "equity"]
     assert pd.api.types.is_datetime64_any_dtype(out["timestamp"])
 
 

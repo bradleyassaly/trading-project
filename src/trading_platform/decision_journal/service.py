@@ -15,6 +15,7 @@ from trading_platform.decision_journal.models import (
     ScreenCheckResult,
     SignalBreakdown,
     SizingDecision,
+    TradeDecision,
     TradeDecisionRecord,
     TradeLifecycleRecord,
 )
@@ -48,6 +49,8 @@ def _safe_float(value: object) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
 
 
 def summarize_entry_reason(record: TradeDecisionRecord | dict[str, Any]) -> str:
@@ -92,6 +95,417 @@ def summarize_sizing_context(record: SizingDecision | dict[str, Any]) -> str:
     if payload.get("target_quantity") is not None:
         parts.append(f"qty={payload['target_quantity']}")
     return " | ".join(parts) or "no sizing context"
+
+
+def _trade_decision_side(candidate_row: dict[str, Any]) -> str:
+    candidate_action = str(candidate_row.get("action") or candidate_row.get("action_type") or "").strip().lower()
+    target_weight = _safe_float(candidate_row.get("ev_adjusted_target_weight"))
+    if target_weight is None:
+        target_weight = _safe_float(candidate_row.get("target_weight"))
+    current_weight = _safe_float(candidate_row.get("current_weight")) or 0.0
+    if target_weight is not None:
+        if target_weight > current_weight:
+            return "BUY"
+        if target_weight < current_weight:
+            return "SELL"
+    if candidate_action in {"entry", "increase", "buy", "long"}:
+        return "BUY"
+    if candidate_action in {"exit", "reduction", "sell", "short"}:
+        return "SELL"
+    return "HOLD"
+
+
+def _trade_decision_veto_reasons(candidate_row: dict[str, Any]) -> list[str]:
+    reasons: list[str] = []
+    for value in (
+        candidate_row.get("skip_reason"),
+        candidate_row.get("action_reason"),
+        candidate_row.get("ev_gate_decision"),
+        candidate_row.get("ev_model_fallback_reason"),
+        candidate_row.get("ev_reliability_fallback_reason"),
+    ):
+        reason = str(value or "").strip()
+        if reason and reason not in reasons:
+            reasons.append(reason)
+    return reasons
+
+
+def _trade_decision_rationale_fields(
+    *,
+    candidate_row: dict[str, Any],
+    vetoed: bool,
+    veto_reasons: list[str],
+) -> dict[str, Any]:
+    rationale_labels: list[str] = []
+    for value in (
+        candidate_row.get("candidate_status"),
+        candidate_row.get("candidate_outcome"),
+        candidate_row.get("candidate_stage"),
+        candidate_row.get("band_decision"),
+        candidate_row.get("ev_gate_decision"),
+        candidate_row.get("action_reason"),
+    ):
+        label = str(value or "").strip()
+        if label and label not in rationale_labels:
+            rationale_labels.append(label)
+    for reason in veto_reasons:
+        if reason not in rationale_labels:
+            rationale_labels.append(reason)
+
+    summary_parts: list[str] = []
+    status = str(candidate_row.get("candidate_status") or "").strip()
+    outcome = str(candidate_row.get("candidate_outcome") or "").strip()
+    action_reason = str(candidate_row.get("action_reason") or "").strip()
+    skip_reason = str(candidate_row.get("skip_reason") or "").strip()
+    band_decision = str(candidate_row.get("band_decision") or "").strip()
+    if status:
+        summary_parts.append(status)
+    if outcome and outcome != status:
+        summary_parts.append(outcome)
+    if action_reason and action_reason not in summary_parts:
+        summary_parts.append(action_reason)
+    if vetoed:
+        for reason in veto_reasons:
+            if reason and reason not in summary_parts:
+                summary_parts.append(reason)
+    elif skip_reason and skip_reason not in summary_parts:
+        summary_parts.append(skip_reason)
+    if band_decision and band_decision not in summary_parts:
+        summary_parts.append(band_decision)
+    rationale_summary = " | ".join(summary_parts) if summary_parts else "trade_decision_contract"
+
+    rationale_context = {
+        "candidate_status": candidate_row.get("candidate_status"),
+        "candidate_outcome": candidate_row.get("candidate_outcome"),
+        "candidate_stage": candidate_row.get("candidate_stage"),
+        "action_reason": candidate_row.get("action_reason"),
+        "skip_reason": candidate_row.get("skip_reason"),
+        "band_decision": candidate_row.get("band_decision"),
+        "ev_gate_decision": candidate_row.get("ev_gate_decision"),
+        "signal_source": candidate_row.get("signal_source"),
+        "signal_family": candidate_row.get("signal_family"),
+        "veto_reason_count": len(veto_reasons),
+        "has_veto": vetoed,
+    }
+    rationale_context = {
+        str(key): value
+        for key, value in rationale_context.items()
+        if value not in (None, "", [])
+    }
+
+    return {
+        "rationale_summary": rationale_summary,
+        "rationale_labels": rationale_labels,
+        "rationale_context": rationale_context,
+    }
+
+
+def _trade_decision_sort_key(candidate_row: dict[str, Any]) -> tuple[str, str, str, str]:
+    return (
+        str(candidate_row.get("date") or candidate_row.get("timestamp") or ""),
+        str(candidate_row.get("symbol") or ""),
+        str(candidate_row.get("strategy_id") or ""),
+        str(candidate_row.get("decision_id") or candidate_row.get("candidate_id") or ""),
+    )
+
+
+def _resolve_trade_decision_ev_fields(
+    *,
+    candidate_row: dict[str, Any],
+    prediction_row: dict[str, Any],
+) -> dict[str, Any]:
+    predicted_return = _safe_float(candidate_row.get("predicted_return"))
+    predicted_return_value_source = "candidate_row.predicted_return" if predicted_return is not None else None
+    if predicted_return is None:
+        predicted_return = _safe_float(prediction_row.get("expected_net_return"))
+        if predicted_return is not None:
+            predicted_return_value_source = "prediction_row.expected_net_return"
+    if predicted_return is None:
+        predicted_return = _safe_float(candidate_row.get("expected_net_return"))
+        if predicted_return is not None:
+            predicted_return_value_source = "candidate_row.expected_net_return"
+    if predicted_return is None:
+        predicted_return = _safe_float(candidate_row.get("ev_weighting_score"))
+        if predicted_return is not None:
+            predicted_return_value_source = "candidate_row.ev_weighting_score"
+    if predicted_return is None:
+        predicted_return = 0.0
+        predicted_return_value_source = "default_zero"
+
+    expected_cost = _safe_float(prediction_row.get("expected_cost"))
+    expected_cost_source = "prediction_row.expected_cost" if expected_cost is not None else None
+    if expected_cost is None:
+        expected_cost = _safe_float(candidate_row.get("expected_cost"))
+        if expected_cost is not None:
+            expected_cost_source = "candidate_row.expected_cost"
+    if expected_cost is None:
+        expected_cost = _safe_float(candidate_row.get("estimated_execution_cost_pct"))
+        if expected_cost is not None:
+            expected_cost_source = "candidate_row.estimated_execution_cost_pct"
+    if expected_cost is None:
+        expected_cost = 0.0
+        expected_cost_source = "default_zero"
+
+    expected_value_net = _safe_float(prediction_row.get("expected_net_return"))
+    expected_value_net_source = "prediction_row.expected_net_return" if expected_value_net is not None else None
+    expected_value_net_derived = False
+    if expected_value_net is None:
+        expected_value_net = _safe_float(candidate_row.get("expected_net_return"))
+        if expected_value_net is not None:
+            expected_value_net_source = "candidate_row.expected_net_return"
+    if expected_value_net is None:
+        expected_value_net = float(predicted_return)
+        expected_value_net_source = f"derived_from.{predicted_return_value_source}"
+        expected_value_net_derived = True
+
+    expected_value_gross = _safe_float(prediction_row.get("expected_gross_return"))
+    expected_value_gross_source = "prediction_row.expected_gross_return" if expected_value_gross is not None else None
+    expected_value_gross_derived = False
+    if expected_value_gross is None:
+        expected_value_gross = _safe_float(candidate_row.get("expected_gross_return"))
+        if expected_value_gross is not None:
+            expected_value_gross_source = "candidate_row.expected_gross_return"
+    if expected_value_gross is None:
+        expected_value_gross = float(expected_value_net) + float(expected_cost)
+        expected_value_gross_source = "derived_from.expected_value_net_plus_expected_cost"
+        expected_value_gross_derived = True
+
+    decomposition_status = "explicit"
+    if expected_value_net_derived or expected_value_gross_derived:
+        decomposition_status = "derived"
+    elif "default_zero" in {predicted_return_value_source, expected_cost_source}:
+        decomposition_status = "partial"
+
+    return {
+        "predicted_return": float(predicted_return),
+        "predicted_return_value_source": predicted_return_value_source,
+        "expected_cost": float(expected_cost),
+        "expected_cost_source": expected_cost_source,
+        "expected_value_net": float(expected_value_net),
+        "expected_value_net_source": expected_value_net_source,
+        "expected_value_net_derived": expected_value_net_derived,
+        "expected_value_gross": float(expected_value_gross),
+        "expected_value_gross_source": expected_value_gross_source,
+        "expected_value_gross_derived": expected_value_gross_derived,
+        "ev_decomposition_status": decomposition_status,
+    }
+
+
+def _resolve_trade_decision_quality_fields(
+    *,
+    candidate_row: dict[str, Any],
+    prediction_row: dict[str, Any],
+) -> dict[str, Any]:
+    probability_positive = _safe_float(candidate_row.get("probability_positive"))
+    probability_positive_source = "candidate_row.probability_positive" if probability_positive is not None else None
+    if probability_positive is None:
+        probability_positive = _safe_float(prediction_row.get("probability_positive"))
+        if probability_positive is not None:
+            probability_positive_source = "prediction_row.probability_positive"
+
+    confidence_score = _safe_float(candidate_row.get("ev_confidence"))
+    confidence_score_source = "candidate_row.ev_confidence" if confidence_score is not None else None
+    if confidence_score is None:
+        confidence_score = _safe_float(candidate_row.get("combined_confidence"))
+        if confidence_score is not None:
+            confidence_score_source = "candidate_row.combined_confidence"
+
+    reliability_score = _safe_float(candidate_row.get("ev_reliability"))
+    reliability_score_source = "candidate_row.ev_reliability" if reliability_score is not None else None
+    if reliability_score is None:
+        reliability_score = _safe_float(candidate_row.get("reliability_calibrated_score"))
+        if reliability_score is not None:
+            reliability_score_source = "candidate_row.reliability_calibrated_score"
+
+    uncertainty_score = _safe_float(candidate_row.get("residual_std_final"))
+    uncertainty_score_source = "candidate_row.residual_std_final" if uncertainty_score is not None else None
+    if uncertainty_score is None:
+        uncertainty_score = _safe_float(candidate_row.get("residual_std_used"))
+        if uncertainty_score is not None:
+            uncertainty_score_source = "candidate_row.residual_std_used"
+
+    calibration_score = _safe_float(candidate_row.get("reliability_calibrated_score"))
+    calibration_score_source = "candidate_row.reliability_calibrated_score" if calibration_score is not None else None
+    if calibration_score is None:
+        calibration_score = _safe_float(candidate_row.get("probability_positive"))
+        if calibration_score is not None:
+            calibration_score_source = "candidate_row.probability_positive"
+    if calibration_score is None:
+        calibration_score = _safe_float(prediction_row.get("probability_positive"))
+        if calibration_score is not None:
+            calibration_score_source = "prediction_row.probability_positive"
+
+    return {
+        "probability_positive": probability_positive,
+        "probability_positive_source": probability_positive_source,
+        "confidence_score": confidence_score,
+        "confidence_score_source": confidence_score_source,
+        "reliability_score": reliability_score,
+        "reliability_score_source": reliability_score_source,
+        "uncertainty_score": uncertainty_score,
+        "uncertainty_score_source": uncertainty_score_source,
+        "calibration_score": calibration_score,
+        "calibration_score_source": calibration_score_source,
+    }
+
+
+def build_trade_decision_contracts(
+    *,
+    candidate_rows: list[dict[str, Any]] | None,
+    prediction_rows: list[dict[str, Any]] | None = None,
+    schema_version: str = "trade_decision_contract_v1",
+) -> list[TradeDecision]:
+    rows = [dict(row) for row in candidate_rows or []]
+    if not rows:
+        return []
+    prediction_lookup = {
+        str(row.get("symbol") or ""): dict(row)
+        for row in prediction_rows or []
+        if str(row.get("symbol") or "")
+    }
+    decisions: list[TradeDecision] = []
+    for candidate_row in sorted(rows, key=_trade_decision_sort_key):
+        symbol = str(candidate_row.get("symbol") or "")
+        strategy_id = str(candidate_row.get("strategy_id") or "unknown_strategy")
+        prediction_row = dict(prediction_lookup.get(symbol) or {})
+        ev_fields = _resolve_trade_decision_ev_fields(
+            candidate_row=candidate_row,
+            prediction_row=prediction_row,
+        )
+        quality_fields = _resolve_trade_decision_quality_fields(
+            candidate_row=candidate_row,
+            prediction_row=prediction_row,
+        )
+        horizon_days = int(candidate_row.get("expected_horizon_days") or prediction_row.get("horizon_days") or 1)
+        side = _trade_decision_side(candidate_row)
+        vetoed = str(candidate_row.get("candidate_outcome") or candidate_row.get("candidate_status") or "").lower() not in {
+            "executed",
+            "selected",
+        }
+        veto_reasons = _trade_decision_veto_reasons(candidate_row) if vetoed else []
+        rationale_fields = _trade_decision_rationale_fields(
+            candidate_row=candidate_row,
+            vetoed=vetoed,
+            veto_reasons=veto_reasons,
+        )
+        candidate_id = candidate_row.get("decision_id") or candidate_row.get("candidate_id")
+        if candidate_id is None:
+            candidate_id = _decision_id(
+                schema_version,
+                candidate_row.get("date") or candidate_row.get("timestamp") or "unknown_date",
+                symbol,
+                strategy_id,
+            )
+        decisions.append(
+            TradeDecision(
+                decision_id=str(candidate_id),
+                timestamp=str(candidate_row.get("date") or candidate_row.get("timestamp") or ""),
+                strategy_id=strategy_id,
+                strategy_family=(
+                    str(candidate_row.get("signal_family") or candidate_row.get("strategy_family") or "") or None
+                ),
+                candidate_id=str(candidate_row.get("candidate_id") or candidate_row.get("decision_id") or "") or None,
+                instrument=symbol,
+                side=side,
+                horizon_days=horizon_days,
+                predicted_return=float(ev_fields["predicted_return"]),
+                expected_value_gross=float(ev_fields["expected_value_gross"]),
+                expected_cost=float(ev_fields["expected_cost"]),
+                expected_value_net=float(ev_fields["expected_value_net"]),
+                probability_positive=quality_fields["probability_positive"],
+                confidence_score=quality_fields["confidence_score"],
+                reliability_score=quality_fields["reliability_score"],
+                uncertainty_score=quality_fields["uncertainty_score"],
+                calibration_score=quality_fields["calibration_score"],
+                regime_label=(
+                    str(candidate_row.get("regime_label") or candidate_row.get("reliability_target_type") or "")
+                    or None
+                ),
+                sizing_signal=_safe_float(
+                    candidate_row.get("ev_adjusted_target_weight", candidate_row.get("target_weight"))
+                ),
+                vetoed=vetoed,
+                veto_reasons=veto_reasons,
+                rationale_summary=rationale_fields["rationale_summary"],
+                rationale_labels=rationale_fields["rationale_labels"],
+                rationale_context=rationale_fields["rationale_context"],
+                metadata={
+                    "schema_version": schema_version,
+                    "candidate_status": candidate_row.get("candidate_status"),
+                    "candidate_outcome": candidate_row.get("candidate_outcome"),
+                    "candidate_stage": candidate_row.get("candidate_stage"),
+                    "signal_source": candidate_row.get("signal_source"),
+                    "signal_family": candidate_row.get("signal_family"),
+                    "predicted_return_semantics": "primary_trade_return_forecast",
+                    "ev_gate_decision": candidate_row.get("ev_gate_decision"),
+                    "predicted_return_source": candidate_row.get("predicted_return_source"),
+                    "predicted_return_value_source": ev_fields["predicted_return_value_source"],
+                    "probability_positive_source": quality_fields["probability_positive_source"],
+                    "confidence_score_source": quality_fields["confidence_score_source"],
+                    "reliability_score_source": quality_fields["reliability_score_source"],
+                    "uncertainty_score_source": quality_fields["uncertainty_score_source"],
+                    "calibration_score_source": quality_fields["calibration_score_source"],
+                    "expected_cost_source": ev_fields["expected_cost_source"],
+                    "expected_value_net_source": ev_fields["expected_value_net_source"],
+                    "expected_value_net_derived": ev_fields["expected_value_net_derived"],
+                    "expected_value_gross_source": ev_fields["expected_value_gross_source"],
+                    "expected_value_gross_derived": ev_fields["expected_value_gross_derived"],
+                    "ev_decomposition_status": ev_fields["ev_decomposition_status"],
+                    "rationale_labels": list(rationale_fields["rationale_labels"]),
+                    "rationale_context": dict(rationale_fields["rationale_context"]),
+                    "veto_reason_count": len(veto_reasons),
+                    "ev_model_type_requested": candidate_row.get("ev_model_type_requested"),
+                    "ev_model_type_used": candidate_row.get("ev_model_type_used"),
+                    "ev_model_fallback_reason": candidate_row.get("ev_model_fallback_reason"),
+                    "ev_regression_prediction_available": candidate_row.get("ev_regression_prediction_available"),
+                    "ev_reliability_status": candidate_row.get("ev_reliability_status"),
+                    "ev_reliability_fallback_reason": candidate_row.get("ev_reliability_fallback_reason"),
+                    "ev_reliability_model_fit_available": candidate_row.get("ev_reliability_model_fit_available"),
+                    "was_filtered_by_confidence": candidate_row.get("was_filtered_by_confidence"),
+                    "was_filtered_by_reliability": candidate_row.get("was_filtered_by_reliability"),
+                },
+            )
+        )
+    return decisions
+
+
+def write_trade_decision_contract_artifacts(
+    *,
+    candidate_rows: list[dict[str, Any]] | None,
+    output_dir: str | Path,
+    prediction_rows: list[dict[str, Any]] | None = None,
+    schema_version: str = "trade_decision_contract_v1",
+) -> dict[str, Path]:
+    decisions = build_trade_decision_contracts(
+        candidate_rows=candidate_rows,
+        prediction_rows=prediction_rows,
+        schema_version=schema_version,
+    )
+    return write_trade_decision_contracts(
+        decisions=decisions,
+        output_dir=output_dir,
+    )
+
+
+def write_trade_decision_contracts(
+    *,
+    decisions: list[TradeDecision] | None,
+    output_dir: str | Path,
+) -> dict[str, Path]:
+    if not decisions:
+        return {}
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+    json_name = "trade_decision_contracts_v1.json"
+    csv_name = "trade_decision_contracts_v1.csv"
+    json_path = output_path / json_name
+    csv_path = output_path / csv_name
+    json_path.write_text(json.dumps([row.to_dict() for row in decisions], indent=2, default=str), encoding="utf-8")
+    pd.DataFrame([row.flat_dict() for row in decisions]).to_csv(csv_path, index=False)
+    return {
+        json_name.replace(".", "_"): json_path,
+        csv_name.replace(".", "_"): csv_path,
+    }
 
 
 def _bundle_append(bundle: DecisionJournalBundle | None, **updates: list[Any]) -> DecisionJournalBundle:
@@ -507,7 +921,9 @@ def enrich_bundle_with_orders(
 
 
 def write_decision_journal_artifacts(
-    *, bundle: DecisionJournalBundle | None, output_dir: str | Path
+    *,
+    bundle: DecisionJournalBundle | None,
+    output_dir: str | Path,
 ) -> dict[str, Path]:
     if bundle is None:
         return {}

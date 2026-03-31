@@ -25,6 +25,28 @@ def _flat_dict(payload: dict[str, Any], *, skip_keys: set[str] | None = None) ->
     return flat
 
 
+def _normalize_list(value: Any) -> list[Any]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return list(value)
+    if isinstance(value, tuple):
+        return list(value)
+    return [value]
+
+
+def _normalize_metadata(value: Any) -> dict[str, Any]:
+    if value is None:
+        return {}
+    if isinstance(value, dict):
+        return {str(key): value[key] for key in sorted(value)}
+    raise TypeError("metadata must be a mapping")
+
+
+def _normalize_string_list(value: Any) -> list[str]:
+    return [str(item) for item in _normalize_list(value) if str(item)]
+
+
 @dataclass(frozen=True)
 class ScreenCheckResult:
     check_name: str
@@ -173,6 +195,126 @@ class TradeDecisionRecord:
 
     def flat_dict(self) -> dict[str, Any]:
         return _flat_dict(self.to_dict())
+
+
+@dataclass(frozen=True)
+class TradeDecision:
+    decision_id: str
+    timestamp: str
+    strategy_id: str
+    instrument: str
+    side: str
+    horizon_days: int
+    predicted_return: float
+    expected_value_gross: float
+    expected_cost: float
+    expected_value_net: float
+    strategy_family: str | None = None
+    candidate_id: str | None = None
+    probability_positive: float | None = None
+    confidence_score: float | None = None
+    reliability_score: float | None = None
+    uncertainty_score: float | None = None
+    calibration_score: float | None = None
+    regime_label: str | None = None
+    sizing_signal: float | None = None
+    vetoed: bool = False
+    veto_reasons: list[str] = field(default_factory=list)
+    rationale_summary: str | None = None
+    rationale_labels: list[str] = field(default_factory=list)
+    rationale_context: dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        required_fields = {
+            "decision_id": self.decision_id,
+            "timestamp": self.timestamp,
+            "strategy_id": self.strategy_id,
+            "instrument": self.instrument,
+            "side": self.side,
+        }
+        for field_name, value in required_fields.items():
+            if not str(value or "").strip():
+                raise ValueError(f"{field_name} must be a non-empty string")
+        if int(self.horizon_days) <= 0:
+            raise ValueError("horizon_days must be > 0")
+        if not isinstance(self.metadata, dict):
+            raise TypeError("metadata must be a mapping")
+        if not isinstance(self.rationale_context, dict):
+            raise TypeError("rationale_context must be a mapping")
+        object.__setattr__(self, "veto_reasons", _normalize_string_list(self.veto_reasons))
+        object.__setattr__(self, "rationale_labels", _normalize_string_list(self.rationale_labels))
+        object.__setattr__(self, "rationale_context", _normalize_metadata(self.rationale_context))
+        object.__setattr__(self, "metadata", _normalize_metadata(self.metadata))
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "TradeDecision":
+        data = dict(payload or {})
+        data.setdefault("strategy_family", None)
+        data.setdefault("candidate_id", None)
+        data.setdefault("probability_positive", None)
+        data.setdefault("confidence_score", None)
+        data.setdefault("reliability_score", None)
+        data.setdefault("uncertainty_score", None)
+        data.setdefault("calibration_score", None)
+        data.setdefault("regime_label", None)
+        data.setdefault("sizing_signal", None)
+        data.setdefault("vetoed", False)
+        data.setdefault("veto_reasons", [])
+        data.setdefault("rationale_summary", None)
+        data.setdefault("rationale_labels", [])
+        data.setdefault("rationale_context", {})
+        data.setdefault("metadata", {})
+        data["veto_reasons"] = _normalize_list(data.get("veto_reasons"))
+        data["rationale_labels"] = _normalize_list(data.get("rationale_labels"))
+        data["rationale_context"] = _normalize_metadata(data.get("rationale_context"))
+        data["metadata"] = _normalize_metadata(data.get("metadata"))
+        return cls(
+            decision_id=str(data["decision_id"]),
+            timestamp=str(data["timestamp"]),
+            strategy_id=str(data["strategy_id"]),
+            instrument=str(data["instrument"]),
+            side=str(data["side"]),
+            horizon_days=int(data["horizon_days"]),
+            predicted_return=float(data["predicted_return"]),
+            expected_value_gross=float(data["expected_value_gross"]),
+            expected_cost=float(data["expected_cost"]),
+            expected_value_net=float(data["expected_value_net"]),
+            strategy_family=data.get("strategy_family"),
+            candidate_id=data.get("candidate_id"),
+            probability_positive=(
+                float(data["probability_positive"]) if data.get("probability_positive") is not None else None
+            ),
+            confidence_score=float(data["confidence_score"]) if data.get("confidence_score") is not None else None,
+            reliability_score=float(data["reliability_score"]) if data.get("reliability_score") is not None else None,
+            uncertainty_score=float(data["uncertainty_score"]) if data.get("uncertainty_score") is not None else None,
+            calibration_score=float(data["calibration_score"]) if data.get("calibration_score") is not None else None,
+            regime_label=data.get("regime_label"),
+            sizing_signal=float(data["sizing_signal"]) if data.get("sizing_signal") is not None else None,
+            vetoed=bool(data.get("vetoed", False)),
+            veto_reasons=_normalize_string_list(data.get("veto_reasons", [])),
+            rationale_summary=data.get("rationale_summary"),
+            rationale_labels=_normalize_string_list(data.get("rationale_labels", [])),
+            rationale_context=dict(data.get("rationale_context") or {}),
+            metadata=dict(data.get("metadata") or {}),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        payload = asdict(self)
+        payload["rationale_context"] = dict(self.rationale_context)
+        payload["metadata"] = dict(self.metadata)
+        payload["veto_reasons"] = list(self.veto_reasons)
+        payload["rationale_labels"] = list(self.rationale_labels)
+        return payload
+
+    def flat_dict(self) -> dict[str, Any]:
+        payload = self.to_dict()
+        flat = _flat_dict(payload, skip_keys={"metadata", "veto_reasons", "rationale_labels", "rationale_context"})
+        flat["metadata"] = _csv_scalar(self.metadata)
+        flat["veto_reasons"] = _csv_scalar(self.veto_reasons)
+        flat["rationale_labels"] = _csv_scalar(self.rationale_labels)
+        flat["rationale_context"] = _csv_scalar(self.rationale_context)
+        return flat
 
 
 @dataclass(frozen=True)

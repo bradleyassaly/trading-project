@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from trading_platform.broker.live_models import (
@@ -8,6 +8,8 @@ from trading_platform.broker.live_models import (
     LiveBrokerOrderRequest,
     LiveBrokerPosition,
 )
+from trading_platform.execution.order_lifecycle import OrderLifecycleRecord
+from trading_platform.paper.models import PaperPortfolioState
 
 
 @dataclass(frozen=True)
@@ -16,6 +18,119 @@ class ReconciliationResult:
     target_quantities: dict[str, int]
     current_quantities: dict[str, int]
     diagnostics: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class ReconciliationMismatch:
+    mismatch_type: str
+    symbol: str
+    expected: Any
+    actual: Any
+    reason_code: str
+    severity: str = "warn"
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "mismatch_type": self.mismatch_type,
+            "symbol": self.symbol,
+            "expected": self.expected,
+            "actual": self.actual,
+            "reason_code": self.reason_code,
+            "severity": self.severity,
+            "metadata": dict(self.metadata),
+        }
+
+
+@dataclass(frozen=True)
+class OrderLifecycleReconciliationResult:
+    as_of: str
+    intended_target_weights: dict[str, float]
+    realized_positions: dict[str, int]
+    order_lifecycle_records: list[OrderLifecycleRecord]
+    mismatches: list[ReconciliationMismatch]
+    diagnostics: dict[str, Any]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "as_of": self.as_of,
+            "intended_target_weights": dict(self.intended_target_weights),
+            "realized_positions": dict(self.realized_positions),
+            "order_lifecycle_records": [row.to_dict() for row in self.order_lifecycle_records],
+            "mismatches": [row.to_dict() for row in self.mismatches],
+            "diagnostics": dict(self.diagnostics),
+        }
+
+
+def build_order_lifecycle_reconciliation_skeleton(
+    *,
+    as_of: str,
+    intended_target_weights: dict[str, float],
+    lifecycle_records: list[OrderLifecycleRecord],
+    realized_state: PaperPortfolioState,
+) -> OrderLifecycleReconciliationResult:
+    realized_positions = {
+        symbol: int(position.quantity)
+        for symbol, position in sorted(realized_state.positions.items())
+    }
+    lifecycle_by_symbol = {record.intent.symbol: record for record in lifecycle_records}
+    mismatches: list[ReconciliationMismatch] = []
+
+    for symbol, target_weight in sorted(intended_target_weights.items()):
+        lifecycle = lifecycle_by_symbol.get(symbol)
+        realized_quantity = realized_positions.get(symbol, 0)
+        if abs(float(target_weight)) > 0.0 and lifecycle is None and realized_quantity == 0:
+            mismatches.append(
+                ReconciliationMismatch(
+                    mismatch_type="missing_lifecycle_record",
+                    symbol=symbol,
+                    expected=float(target_weight),
+                    actual=realized_quantity,
+                    reason_code="missing_order_lifecycle",
+                    severity="warn",
+                )
+            )
+        elif lifecycle is not None and lifecycle.final_status == "intent" and realized_quantity == 0:
+            mismatches.append(
+                ReconciliationMismatch(
+                    mismatch_type="unfilled_intent",
+                    symbol=symbol,
+                    expected=float(target_weight),
+                    actual=realized_quantity,
+                    reason_code="intent_not_submitted_or_filled",
+                    severity="warn",
+                    metadata={"final_status": lifecycle.final_status},
+                )
+            )
+
+    for symbol, quantity in sorted(realized_positions.items()):
+        if symbol not in intended_target_weights and quantity != 0:
+            mismatches.append(
+                ReconciliationMismatch(
+                    mismatch_type="unexpected_realized_position",
+                    symbol=symbol,
+                    expected=0.0,
+                    actual=quantity,
+                    reason_code="realized_position_without_intent",
+                    severity="warn",
+                )
+            )
+
+    diagnostics = {
+        "intended_symbol_count": len(intended_target_weights),
+        "realized_symbol_count": len(realized_positions),
+        "lifecycle_record_count": len(lifecycle_records),
+        "mismatch_count": len(mismatches),
+        "reconciled": len(mismatches) == 0,
+    }
+    return OrderLifecycleReconciliationResult(
+        as_of=as_of,
+        intended_target_weights={str(symbol): float(weight) for symbol, weight in sorted(intended_target_weights.items())},
+        realized_positions=realized_positions,
+        order_lifecycle_records=lifecycle_records,
+        mismatches=mismatches,
+        diagnostics=diagnostics,
+    )
 
 
 def build_rebalance_orders_from_broker_state(

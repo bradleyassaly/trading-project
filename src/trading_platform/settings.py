@@ -6,6 +6,7 @@ DATA_DIR = PROJECT_ROOT / "data"
 RAW_DATA_DIR = DATA_DIR / "raw"
 NORMALIZED_DATA_DIR = DATA_DIR / "normalized"
 FEATURES_DIR = DATA_DIR / "features"
+FEATURE_STORE_DIR = DATA_DIR / "feature_store"
 METADATA_DIR = DATA_DIR / "metadata"
 FUNDAMENTALS_DIR = DATA_DIR / "fundamentals"
 
@@ -18,6 +19,7 @@ for path in [
     RAW_DATA_DIR,
     NORMALIZED_DATA_DIR,
     FEATURES_DIR,
+    FEATURE_STORE_DIR,
     METADATA_DIR,
     FUNDAMENTALS_DIR,
     ARTIFACTS_DIR,

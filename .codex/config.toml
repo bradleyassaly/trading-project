@@ -1,0 +1,18 @@
+model = "gpt-5.4"
+model_reasoning_effort = "medium"
+
+approval_policy = "on-request"
+sandbox_mode = "workspace-write"
+
+[tools]
+web_search = true
+
+# Optional: trigger a local script whenever a turn completes.
+# Good for desktop alerts or a webhook notifier.
+notify = ["python", ".codex/scripts/notify.py"]
+
+[profiles.default]
+model = "gpt-5.4"
+model_reasoning_effort = "medium"
+approval_policy = "on-request"
+sandbox_mode = "workspace-write"

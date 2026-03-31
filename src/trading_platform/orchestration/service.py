@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, replace
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from time import perf_counter
@@ -13,13 +13,11 @@ from trading_platform.artifacts.summary_utils import add_standard_summary_fields
 from trading_platform.config.loader import (
     load_execution_config,
     load_monitoring_config,
-    load_multi_strategy_portfolio_config,
     load_notification_config,
 )
 from trading_platform.config.models import FeatureConfig, IngestConfig, ResearchWorkflowConfig
 from trading_platform.governance.models import RegistrySelectionOptions
 from trading_platform.governance.persistence import (
-    get_registry_entry,
     load_governance_criteria_config,
     load_strategy_registry,
     save_strategy_registry,
@@ -39,7 +37,6 @@ from trading_platform.live.preview import (
 from trading_platform.monitoring.notification_service import send_notifications
 from trading_platform.monitoring.service import evaluate_run_health_snapshot
 from trading_platform.orchestration.models import (
-    PIPELINE_STAGE_NAMES,
     PipelineRunConfig,
     PipelineRunResult,
     PipelineStageRecord,
@@ -56,6 +53,7 @@ from trading_platform.portfolio.multi_strategy import (
     write_multi_strategy_artifacts,
 )
 from trading_platform.portfolio.strategy_execution_handoff import (
+    StrategyExecutionHandoff,
     StrategyExecutionHandoffConfig,
     resolve_strategy_execution_handoff,
     write_strategy_execution_handoff_summary,
@@ -108,6 +106,42 @@ def _build_multi_strategy_paper_config(result, reserve_cash_pct: float) -> Paper
         signal_source="legacy",
         reserve_cash_pct=reserve_cash_pct,
     )
+
+
+def _strategy_execution_handoff_cache_key(config: PipelineRunConfig, context: dict[str, Any]) -> tuple[Any, ...]:
+    return (
+        context.get("multi_strategy_config_path"),
+        config.use_activated_portfolio_for_paper,
+        config.fail_if_no_active_strategies,
+        config.include_inactive_conditionals_in_reports,
+    )
+
+
+def _get_cached_strategy_execution_handoff(config: PipelineRunConfig, context: dict[str, Any]) -> StrategyExecutionHandoff:
+    cache = context.setdefault("stage_runtime_cache", {})
+    handoff_cache = cache.setdefault("strategy_execution_handoff", {})
+    cache_key = _strategy_execution_handoff_cache_key(config, context)
+    if cache_key not in handoff_cache:
+        handoff_cache[cache_key] = resolve_strategy_execution_handoff(
+            context["multi_strategy_config_path"],
+            config=StrategyExecutionHandoffConfig(
+                use_activated_portfolio_for_paper=config.use_activated_portfolio_for_paper,
+                fail_if_no_active_strategies=config.fail_if_no_active_strategies,
+                include_inactive_conditionals_in_reports=config.include_inactive_conditionals_in_reports,
+            ),
+        )
+    return handoff_cache[cache_key]
+
+
+def _get_cached_execution_config(config: PipelineRunConfig, context: dict[str, Any]) -> Any:
+    cache = context.setdefault("stage_runtime_cache", {})
+    execution_config_cache = cache.setdefault("execution_config", {})
+    cache_key = str(config.execution_config_path) if config.execution_config_path else None
+    if cache_key not in execution_config_cache:
+        execution_config_cache[cache_key] = (
+            load_execution_config(config.execution_config_path) if config.execution_config_path else None
+        )
+    return execution_config_cache[cache_key]
 
 
 def _build_multi_strategy_target_diagnostics(allocation_result) -> dict[str, Any]:
@@ -479,14 +513,7 @@ def _run_multi_strategy_config_stage(config: PipelineRunConfig, run_dir: Path, c
 
 def _run_portfolio_allocation_stage(config: PipelineRunConfig, run_dir: Path, context: dict[str, Any]) -> dict[str, Any]:
     output_dir = run_dir / "portfolio_allocation"
-    handoff = resolve_strategy_execution_handoff(
-        context["multi_strategy_config_path"],
-        config=StrategyExecutionHandoffConfig(
-            use_activated_portfolio_for_paper=config.use_activated_portfolio_for_paper,
-            fail_if_no_active_strategies=config.fail_if_no_active_strategies,
-            include_inactive_conditionals_in_reports=config.include_inactive_conditionals_in_reports,
-        ),
-    )
+    handoff = _get_cached_strategy_execution_handoff(config, context)
     handoff_summary_path = write_strategy_execution_handoff_summary(
         handoff=handoff,
         output_dir=output_dir,
@@ -519,14 +546,7 @@ def _run_portfolio_allocation_stage(config: PipelineRunConfig, run_dir: Path, co
 
 
 def _run_paper_stage(config: PipelineRunConfig, run_dir: Path, context: dict[str, Any]) -> dict[str, Any]:
-    handoff = resolve_strategy_execution_handoff(
-        context["multi_strategy_config_path"],
-        config=StrategyExecutionHandoffConfig(
-            use_activated_portfolio_for_paper=config.use_activated_portfolio_for_paper,
-            fail_if_no_active_strategies=config.fail_if_no_active_strategies,
-            include_inactive_conditionals_in_reports=config.include_inactive_conditionals_in_reports,
-        ),
-    )
+    handoff = _get_cached_strategy_execution_handoff(config, context)
     paper_output_dir = run_dir / "paper_trading"
     paper_output_dir.mkdir(parents=True, exist_ok=True)
     handoff_summary_path = write_strategy_execution_handoff_summary(
@@ -548,7 +568,7 @@ def _run_paper_stage(config: PipelineRunConfig, run_dir: Path, context: dict[str
         allocation_result,
         run_dir / "portfolio_allocation",
     )
-    execution_config = load_execution_config(config.execution_config_path) if config.execution_config_path else None
+    execution_config = _get_cached_execution_config(config, context)
     paper_config = _build_multi_strategy_paper_config(
         allocation_result,
         reserve_cash_pct=portfolio_config.cash_reserve_pct,
@@ -607,14 +627,7 @@ def _run_paper_stage(config: PipelineRunConfig, run_dir: Path, context: dict[str
 def _run_live_stage(config: PipelineRunConfig, run_dir: Path, context: dict[str, Any]) -> dict[str, Any]:
     live_output_dir = run_dir / "live_dry_run"
     live_output_dir.mkdir(parents=True, exist_ok=True)
-    handoff = resolve_strategy_execution_handoff(
-        context["multi_strategy_config_path"],
-        config=StrategyExecutionHandoffConfig(
-            use_activated_portfolio_for_paper=config.use_activated_portfolio_for_paper,
-            fail_if_no_active_strategies=config.fail_if_no_active_strategies,
-            include_inactive_conditionals_in_reports=config.include_inactive_conditionals_in_reports,
-        ),
-    )
+    handoff = _get_cached_strategy_execution_handoff(config, context)
     handoff_summary_path = write_strategy_execution_handoff_summary(
         handoff=handoff,
         output_dir=live_output_dir,
@@ -634,7 +647,7 @@ def _run_live_stage(config: PipelineRunConfig, run_dir: Path, context: dict[str,
         allocation_result,
         run_dir / "portfolio_allocation",
     )
-    execution_config = load_execution_config(config.execution_config_path) if config.execution_config_path else None
+    execution_config = _get_cached_execution_config(config, context)
     target_diagnostics = _build_multi_strategy_target_diagnostics(allocation_result) | {
         "strategy_execution_handoff": handoff.summary,
     }

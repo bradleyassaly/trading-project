@@ -67,6 +67,56 @@ def test_write_paper_trading_artifacts_writes_fills_and_equity_curve(tmp_path: P
         skipped_symbols=[],
         diagnostics={
             "ok": True,
+            "order_generation": {
+                "candidate_trade_rows": [
+                    {
+                        "date": "2025-01-04",
+                        "symbol": "AAPL",
+                        "strategy_id": "sma_cross",
+                        "signal_family": "trend",
+                        "candidate_status": "executed",
+                        "candidate_outcome": "executed",
+                        "candidate_stage": "execution",
+                        "action_reason": "passed_trade_checks",
+                        "current_weight": 0.0,
+                        "target_weight": 1.0,
+                        "ev_adjusted_target_weight": 1.0,
+                        "expected_horizon_days": 5,
+                        "predicted_return": 0.02,
+                        "probability_positive": 0.73,
+                        "ev_confidence": 0.7,
+                        "ev_reliability": 0.6,
+                        "residual_std_final": 0.11,
+                        "reliability_calibrated_score": 0.64,
+                    },
+                    {
+                        "date": "2025-01-04",
+                        "symbol": "MSFT",
+                        "strategy_id": "sma_cross",
+                        "signal_family": "trend",
+                        "candidate_status": "skipped",
+                        "candidate_outcome": "score_band_blocked",
+                        "candidate_stage": "score_band",
+                        "skip_reason": "blocked_below_entry_threshold",
+                        "action_reason": "filtered_by_score_band",
+                        "ev_model_fallback_reason": "regression_unavailable",
+                        "current_weight": 0.0,
+                        "target_weight": 0.0,
+                        "expected_horizon_days": 5,
+                        "predicted_return": -0.01,
+                        "ev_confidence": 0.25,
+                        "ev_reliability": 0.3,
+                    },
+                ],
+                "ev_prediction_rows": [
+                    {
+                        "symbol": "AAPL",
+                        "expected_gross_return": 0.03,
+                        "expected_cost": 0.01,
+                        "expected_net_return": 0.02,
+                    }
+                ],
+            },
             "accounting": {
                 "auto_apply_fills": True,
                 "fill_application_status": "fills_applied",
@@ -110,14 +160,30 @@ def test_write_paper_trading_artifacts_writes_fills_and_equity_curve(tmp_path: P
     assert paths["fills_path"].exists()
     assert paths["equity_snapshot_path"].exists()
     assert paths["candidate_snapshot_csv"].exists()
+    assert paths["trade_decision_contracts_v1_csv"].exists()
     assert paths["portfolio_performance_summary_path"].exists()
     assert paths["execution_summary_json_path"].exists()
     assert paths["strategy_contribution_summary_path"].exists()
+    assert paths["order_lifecycle_records_json_path"].exists()
+    assert paths["order_lifecycle_reconciliation_json_path"].exists()
+    assert paths["kpi_payload_json_path"].exists()
+    assert paths["trade_explorer_payload_json_path"].exists()
+    assert paths["strategy_health_payload_json_path"].exists()
+    assert paths["transaction_cost_report_json_path"].exists()
+    assert paths["realtime_kpi_monitoring_json_path"].exists()
 
     fills_df = pd.read_csv(paths["fills_path"])
     equity_df = pd.read_csv(paths["equity_snapshot_path"])
     positions_df = pd.read_csv(paths["positions_path"])
     candidate_df = pd.read_csv(paths["candidate_snapshot_csv"])
+    contract_df = pd.read_csv(paths["trade_decision_contracts_v1_csv"])
+    lifecycle_df = pd.read_csv(paths["order_lifecycle_records_csv_path"])
+    reconciliation_df = pd.read_csv(paths["order_lifecycle_reconciliation_mismatches_csv_path"])
+    kpi_df = pd.read_csv(paths["kpi_records_csv_path"])
+    trade_explorer_df = pd.read_csv(paths["trade_explorer_rows_csv_path"])
+    strategy_health_df = pd.read_csv(paths["strategy_health_payload_csv_path"])
+    transaction_cost_df = pd.read_csv(paths["transaction_cost_records_csv_path"])
+    realtime_monitoring_df = pd.read_csv(paths["realtime_kpi_monitoring_csv_path"])
 
     assert len(fills_df) == 1
     assert fills_df.iloc[0]["symbol"] == "AAPL"
@@ -136,6 +202,26 @@ def test_write_paper_trading_artifacts_writes_fills_and_equity_curve(tmp_path: P
         "portfolio_weight",
     ]
     assert candidate_df.iloc[0]["symbol"] == "AAPL"
+    assert list(contract_df["instrument"]) == ["AAPL", "MSFT"]
+    assert not bool(contract_df.iloc[0]["vetoed"])
+    assert bool(contract_df.iloc[1]["vetoed"])
+    assert float(contract_df.iloc[0]["probability_positive"]) == 0.73
+    assert float(contract_df.iloc[0]["uncertainty_score"]) == 0.11
+    assert float(contract_df.iloc[0]["calibration_score"]) == 0.64
+    assert contract_df.iloc[0]["rationale_labels"] == "executed|execution|passed_trade_checks"
+    assert "has_veto=False" in str(contract_df.iloc[0]["rationale_context"])
+    assert "ev_decomposition_status=explicit" in str(contract_df.iloc[0]["metadata"])
+    assert "uncertainty_score_source=candidate_row.residual_std_final" in str(contract_df.iloc[0]["metadata"])
+    assert "expected_value_gross_source=prediction_row.expected_gross_return" in str(contract_df.iloc[0]["metadata"])
+    assert "veto_reason_count=3" in str(contract_df.iloc[1]["rationale_context"])
+    assert "ev_decomposition_status=derived" in str(contract_df.iloc[1]["metadata"])
+    assert lifecycle_df.iloc[0]["final_status"] == "filled"
+    assert reconciliation_df.empty
+    assert "equity" in set(kpi_df["metric_name"])
+    assert list(trade_explorer_df["symbol"]) == ["AAPL", "MSFT"]
+    assert list(strategy_health_df["strategy_id"]) == ["sma_cross"]
+    assert set(transaction_cost_df["stage"]) == {"estimate", "realized"}
+    assert "drawdown" in set(realtime_monitoring_df["metric_name"])
     assert not any(key.startswith("metadata_") for key in paths)
 
 

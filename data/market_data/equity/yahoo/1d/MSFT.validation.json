@@ -1,0 +1,11 @@
+{
+  "row_count": 2,
+  "issue_count": 0,
+  "passed": true,
+  "issues": [],
+  "symbol": "MSFT",
+  "timeframe": "1d",
+  "provider": "yahoo",
+  "asset_class": "equity",
+  "schema_version": "market_data_validation_v1"
+}

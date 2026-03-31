@@ -8,8 +8,11 @@ import pytest
 
 from trading_platform.research.alpha_lab.automation import (
     AutomatedAlphaResearchConfig,
+    ResearchResourceAllocationConfig,
+    SignalSearchSpace,
     _load_symbol_feature_data,
     _resolve_symbols,
+    build_research_resource_allocation_plan,
     build_fallback_usage_report,
     build_feature_availability_report,
     build_near_miss_signals_report,
@@ -17,6 +20,7 @@ from trading_platform.research.alpha_lab.automation import (
     build_signal_family_summary,
     build_skipped_candidates_report,
     build_top_rejected_signals_report,
+    generate_candidate_configs,
     load_research_registry,
     run_automated_alpha_research_loop,
     select_untested_candidates,
@@ -100,6 +104,8 @@ def test_generate_candidate_signals_are_unique_across_families_and_parameters() 
 
     assert not candidates.empty
     assert candidates["candidate_id"].nunique() == len(candidates)
+    assert {"candidate_name", "variant_id", "signal_variant", "variant_parameters_json", "config_json"} <= set(candidates.columns)
+    assert set(candidates["signal_variant"]) == {"base"}
     assert {
         "momentum",
         "mean_reversion",
@@ -118,6 +124,56 @@ def test_generate_candidate_signals_are_unique_across_families_and_parameters() 
         "interaction_reversal_volume_spike",
         "feature_combo",
     } <= set(candidates["signal_name"])
+
+
+def test_generate_candidate_signals_supports_variant_sweeps_and_traceability() -> None:
+    candidates = generate_candidate_signals(
+        SignalGenerationConfig(
+            signal_families=("momentum", "volume_surprise"),
+            lookbacks=(5,),
+            vol_windows=(10,),
+            horizons=(1,),
+            candidate_grid_preset="broad_v1",
+            max_variants_per_family=3,
+        ),
+        feature_columns=["volume"],
+    )
+
+    momentum_variants = candidates.loc[candidates["signal_family"] == "momentum", "signal_variant"].tolist()
+    volume_variants = candidates.loc[candidates["signal_family"] == "volume_surprise", "signal_variant"].tolist()
+
+    assert momentum_variants == ["base", "smoothed", "risk_scaled"]
+    assert volume_variants == ["base", "zscored", "clipped"]
+    assert candidates["candidate_id"].nunique() == len(candidates)
+    assert candidates["variant_id"].tolist() == candidates["signal_variant"].tolist()
+    sample_config = json.loads(candidates.loc[candidates["signal_variant"] == "risk_scaled", "config_json"].iloc[0])
+    assert sample_config["variant_id"] == "risk_scaled"
+    assert sample_config["parameters"] == {"lookback": 5}
+    sample_variant = json.loads(candidates.loc[candidates["signal_variant"] == "smoothed", "variant_parameters_json"].iloc[0])
+    assert sample_variant["smoothing_window"] == 5
+
+
+def test_generate_candidate_configs_from_search_spaces_supports_named_variants() -> None:
+    candidates = generate_candidate_configs(
+        (
+            SignalSearchSpace(
+                signal_family="momentum",
+                lookbacks=(5,),
+                horizons=(1,),
+                candidate_grid_preset="broad_v1",
+                max_variants_per_family=3,
+            ),
+        ),
+    )
+
+    assert candidates["candidate_id"].nunique() == len(candidates)
+    assert candidates["signal_variant"].tolist() == ["base", "fast_trend", "relative_strength_focus"]
+    assert "candidate_name" in candidates.columns
+    assert "variant_parameters_json" in candidates.columns
+    assert json.loads(candidates.loc[candidates["signal_variant"] == "fast_trend", "variant_parameters_json"].iloc[0])[
+        "trend_weight"
+    ] == pytest.approx(1.2)
+
 
 
 def test_resolve_symbols_uses_named_universe_registry() -> None:
@@ -497,6 +553,44 @@ def test_build_generated_signal_supports_new_cross_sectional_feature_families() 
     assert interaction_reversal_volume_spike.notna().sum() > 0
 
 
+def test_build_generated_signal_applies_variant_transform_parameters() -> None:
+    df = pd.DataFrame(
+        {
+            "close": [100.0, 102.0, 104.0, 103.0, 107.0, 111.0, 115.0],
+            "volume": [100.0, 110.0, 115.0, 120.0, 180.0, 175.0, 170.0],
+        }
+    )
+
+    base_signal = build_generated_signal(
+        df,
+        pd.Series({"signal_name": "momentum", "lookback": 2, "variant_parameters_json": "{}"}),
+    )
+    smoothed_signal = build_generated_signal(
+        df,
+        pd.Series(
+            {
+                "signal_name": "momentum",
+                "lookback": 2,
+                "variant_parameters_json": json.dumps({"smoothing_window": 2}, sort_keys=True),
+            }
+        ),
+    )
+    zscored_signal = build_generated_signal(
+        df,
+        pd.Series(
+            {
+                "signal_name": "volume_surprise",
+                "window": 3,
+                "variant_parameters_json": json.dumps({"zscore_window": 3}, sort_keys=True),
+            }
+        ),
+    )
+
+    assert not base_signal.equals(smoothed_signal)
+    assert smoothed_signal.notna().sum() > 0
+    assert zscored_signal.notna().sum() > 0
+
+
 def test_apply_cross_sectional_transform_normalizes_by_date() -> None:
     panel = pd.DataFrame(
         {
@@ -565,6 +659,52 @@ def test_select_untested_candidates_skips_completed_registry_entries() -> None:
     assert pending["candidate_id"].tolist() == [candidates.iloc[1]["candidate_id"]]
 
 
+def test_build_research_resource_allocation_plan_prioritizes_families_and_caps_variants() -> None:
+    candidates = pd.DataFrame(
+        [
+            {"candidate_id": "mom_a", "candidate_name": "mom_a", "signal_family": "momentum", "variant_id": "base", "signal_variant": "base"},
+            {"candidate_id": "mom_b", "candidate_name": "mom_b", "signal_family": "momentum", "variant_id": "fast", "signal_variant": "fast"},
+            {"candidate_id": "rev_a", "candidate_name": "rev_a", "signal_family": "mean_reversion", "variant_id": "base", "signal_variant": "base"},
+        ]
+    )
+    registry = pd.DataFrame(
+        [
+            {
+                "candidate_id": "hist_mom",
+                "signal_family": "momentum",
+                "evaluation_status": "completed",
+                "promotion_status": "promote",
+                "mean_spearman_ic": 0.03,
+            },
+            {
+                "candidate_id": "hist_rev",
+                "signal_family": "mean_reversion",
+                "evaluation_status": "completed",
+                "promotion_status": "reject",
+                "mean_spearman_ic": -0.01,
+            },
+        ]
+    )
+
+    allocation = build_research_resource_allocation_plan(
+        candidates,
+        registry,
+        config=ResearchResourceAllocationConfig(
+            max_candidates_per_iteration=2,
+            max_variants_per_family=1,
+            prioritize_by_family_promise=True,
+        ),
+    )
+
+    assert allocation.loc[allocation["candidate_id"] == "mom_a", "allocation_status"].iloc[0] == "selected"
+    assert allocation.loc[allocation["candidate_id"] == "mom_b", "pruning_reason"].iloc[0] == "family_variant_cap"
+    assert allocation.loc[allocation["candidate_id"] == "rev_a", "allocation_status"].iloc[0] == "selected"
+    assert allocation.loc[allocation["candidate_id"] == "mom_a", "family_priority_score"].iloc[0] > allocation.loc[
+        allocation["candidate_id"] == "rev_a",
+        "family_priority_score",
+    ].iloc[0]
+
+
 def test_run_automated_alpha_research_loop_updates_registry_and_artifacts(
     tmp_path: Path,
 ) -> None:
@@ -586,6 +726,8 @@ def test_run_automated_alpha_research_loop_updates_registry_and_artifacts(
             combo_thresholds=(0.5,),
             combo_pairs=(("mom_20", "vol_20"),),
             horizons=(1,),
+            candidate_grid_preset="broad_v1",
+            max_variants_per_family=2,
         ),
         min_rows=60,
         top_quantile=0.34,
@@ -594,6 +736,11 @@ def test_run_automated_alpha_research_loop_updates_registry_and_artifacts(
         test_size=20,
         step_size=20,
         schedule_frequency="manual",
+        resource_allocation=ResearchResourceAllocationConfig(
+            max_candidates_per_iteration=4,
+            max_variants_per_family=1,
+            prioritize_by_family_promise=True,
+        ),
     )
 
     first_result = run_automated_alpha_research_loop(config=config)
@@ -614,11 +761,27 @@ def test_run_automated_alpha_research_loop_updates_registry_and_artifacts(
     promotion_threshold_diagnostics = json.loads(
         Path(first_result["promotion_threshold_diagnostics_path"]).read_text(encoding="utf-8")
     )
+    candidate_grid_df = pd.read_csv(first_result["candidate_grid_path"])
+    candidate_grid_manifest = json.loads(Path(first_result["candidate_grid_manifest_path"]).read_text(encoding="utf-8"))
+    allocation_plan_df = pd.read_csv(first_result["candidate_allocation_path"])
+    allocation_summary = json.loads(Path(first_result["allocation_summary_path"]).read_text(encoding="utf-8"))
+    deferred_df = pd.read_csv(first_result["deferred_candidates_path"])
+    run_summary = json.loads(Path(first_result["run_summary_path"]).read_text(encoding="utf-8"))
     composite_inputs = json.loads((output_dir / "composite_inputs.json").read_text(encoding="utf-8"))
 
     assert not registry_df.empty
     assert registry_df.equals(signal_registry_df)
-    assert {"signal_name", "parameters_json", "promotion_status", "rejection_reason"} <= set(registry_df.columns)
+    assert {
+        "signal_name",
+        "parameters_json",
+        "promotion_status",
+        "rejection_reason",
+        "candidate_name",
+        "variant_id",
+        "signal_variant",
+        "variant_parameters_json",
+        "config_json",
+    } <= set(registry_df.columns)
     assert len(history_df) == len(registry_df)
     assert len(promoted_df) + len(rejected_df) == len(registry_df)
     assert len(top_rejected_df) == len(rejected_df)
@@ -628,18 +791,30 @@ def test_run_automated_alpha_research_loop_updates_registry_and_artifacts(
     assert skipped_candidates_report_df.empty
     assert {"candidate_id", "universe", "rejection_reason", "distance_mean_rank_ic"} <= set(top_rejected_df.columns)
     assert {"candidate_id", "failing_threshold_count", "promotion_gap_score"} <= set(near_miss_df.columns)
-    assert {"signal_family", "candidate_count", "promotion_count"} <= set(signal_family_summary_df.columns)
+    assert {"signal_family", "candidate_count", "variant_count", "promotion_count"} <= set(signal_family_summary_df.columns)
     assert {"benchmark_data_availability_rate", "volume_availability_rate"} <= set(feature_availability_report_df.columns)
     assert {"fallback_type", "usage_count"} <= set(fallback_usage_report_df.columns)
     assert set(top_rejected_df["universe"]) == {"custom"}
     assert promotion_threshold_diagnostics["candidate_pool_summary"]["total_candidates"] == len(registry_df)
     assert "rejection_reason_counts" in promotion_threshold_diagnostics
+    assert candidate_grid_manifest["candidate_count"] == len(candidate_grid_df)
+    assert "momentum" in candidate_grid_manifest["family_variant_counts"]
+    assert len(allocation_plan_df) == run_summary["candidates_pending"]
+    assert allocation_summary["selected_count"] == run_summary["candidates_evaluated"]
+    assert allocation_summary["deferred_count"] == len(deferred_df)
+    assert {"allocation_score", "allocation_status", "pruning_reason"} <= set(allocation_plan_df.columns)
+    assert run_summary["candidates_generated"] == len(candidate_grid_df)
+    assert run_summary["registry_rows"] == len(registry_df)
+    assert run_summary["artifact_paths"]["promoted_signals_path"] == first_result["promoted_signals_path"]
+    assert Path(first_result["experiment_registry_path"]).exists()
     assert "horizons" in composite_inputs
-    assert first_schedule_payload["candidates_evaluated"] == len(registry_df)
+    assert first_schedule_payload["candidates_generated"] == len(candidate_grid_df)
+    assert first_schedule_payload["candidates_evaluated"] <= len(registry_df)
     assert first_result["iterations_completed"] == 1
 
     second_schedule = json.loads(Path(second_result["schedule_path"]).read_text(encoding="utf-8"))
-    assert second_schedule["candidates_evaluated"] == 0
+    assert second_schedule["candidates_pending"] == len(allocation_plan_df)
+    assert second_schedule["candidates_deferred"] == len(deferred_df)
     assert second_result["iterations_completed"] == 1
 
 

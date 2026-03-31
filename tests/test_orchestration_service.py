@@ -13,7 +13,10 @@ from trading_platform.orchestration.models import (
     OrchestrationStageToggles,
     PipelineRunConfig,
 )
-from trading_platform.orchestration.service import run_orchestration_pipeline
+from trading_platform.orchestration.service import (
+    _run_research_stage,
+    run_orchestration_pipeline,
+)
 from trading_platform.portfolio.strategy_execution_handoff import StrategyExecutionHandoff
 
 
@@ -626,6 +629,133 @@ def test_pipeline_passes_execution_config_to_paper_and_live(monkeypatch, tmp_pat
     assert captured["live_execution_config"] is execution_config
 
 
+def test_pipeline_caches_handoff_and_execution_config_within_run(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr("trading_platform.orchestration.service._now_utc", lambda: "2025-01-02T00:00:00Z")
+    monkeypatch.setattr("trading_platform.orchestration.service.perf_counter", lambda: 1.0)
+    calls = {"handoff": 0, "execution_config": 0}
+    execution_config = object()
+    config = _pipeline_config(
+        tmp_path,
+        execution_config_path=str(tmp_path / "execution.json"),
+        stages=OrchestrationStageToggles(
+            multi_strategy_config_generation=True,
+            portfolio_allocation=True,
+            paper_trading=True,
+            live_dry_run=True,
+            reporting=True,
+        ),
+        stage_order=[
+            "multi_strategy_config_generation",
+            "portfolio_allocation",
+            "paper_trading",
+            "live_dry_run",
+            "reporting",
+        ],
+    )
+    _write_governance_config(Path(config.governance_config_path))
+    _write_registry(tmp_path, status="approved")
+    monkeypatch.setattr("trading_platform.orchestration.service._union_symbols", lambda universes: ["AAPL"])
+    monkeypatch.setattr("trading_platform.orchestration.service.load_execution_config", lambda path: calls.__setitem__("execution_config", calls["execution_config"] + 1) or execution_config)
+
+    def fake_handoff(path, config=None):
+        calls["handoff"] += 1
+        return StrategyExecutionHandoff(
+            source_kind="multi_strategy_config",
+            source_path=str(path),
+            portfolio_config=type("PortfolioCfg", (), {"cash_reserve_pct": 0.0})(),
+            summary={"active_strategy_count": 1},
+            warnings=[],
+        )
+
+    monkeypatch.setattr("trading_platform.orchestration.service.resolve_strategy_execution_handoff", fake_handoff)
+    monkeypatch.setattr(
+        "trading_platform.orchestration.service.write_strategy_execution_handoff_summary",
+        lambda **kwargs: Path(kwargs["output_dir"]) / kwargs["artifact_name"],
+    )
+    allocation_result = type(
+        "AllocationResult",
+        (),
+        {
+            "as_of": "2025-01-02",
+            "combined_target_weights": {"AAPL": 1.0},
+            "latest_prices": {"AAPL": 100.0},
+            "sleeve_rows": [{"symbol": "AAPL"}],
+            "sleeve_bundles": [],
+            "summary": {
+                "enabled_sleeve_count": 1,
+                "gross_exposure_after_constraints": 1.0,
+                "turnover_estimate": 0.0,
+                "turnover_cap_binding": False,
+                "symbols_removed_or_clipped": [],
+            },
+        },
+    )()
+    monkeypatch.setattr("trading_platform.orchestration.service.allocate_multi_strategy_portfolio", lambda cfg: allocation_result)
+    monkeypatch.setattr(
+        "trading_platform.orchestration.service.write_multi_strategy_artifacts",
+        lambda result, output_dir: {"allocation_summary_json_path": Path(output_dir) / "allocation_summary.json"},
+    )
+    monkeypatch.setattr(
+        "trading_platform.orchestration.service.run_paper_trading_cycle_for_targets",
+        lambda **kwargs: type(
+            "PaperResult",
+            (),
+            {
+                "as_of": "2025-01-02",
+                "state": type("State", (), {"cash": 100000.0, "equity": 100000.0, "gross_market_value": 0.0, "positions": {}})(),
+                "orders": [],
+                "fills": [],
+                "latest_prices": kwargs["latest_prices"],
+                "latest_scores": {},
+                "latest_target_weights": kwargs["latest_effective_weights"],
+                "scheduled_target_weights": kwargs["latest_scheduled_weights"],
+                "skipped_symbols": [],
+                "diagnostics": {},
+            },
+        )(),
+    )
+    monkeypatch.setattr(
+        "trading_platform.orchestration.service.write_paper_trading_artifacts",
+        lambda **kwargs: {"summary_path": Path(kwargs["output_dir"]) / "paper_summary.json"},
+    )
+    monkeypatch.setattr(
+        "trading_platform.orchestration.service.persist_paper_run_outputs",
+        lambda **kwargs: (
+            {"paper_run_summary_latest_json_path": Path(kwargs["output_dir"]) / "paper_run_summary_latest.json"},
+            [],
+            {"current_equity": 100000.0, "gross_exposure": 1.0, "turnover_estimate": 0.0},
+        ),
+    )
+    monkeypatch.setattr(
+        "trading_platform.orchestration.service.register_experiment",
+        lambda record, tracker_dir: {"experiment_registry_path": str(tracker_dir / "experiment_registry.csv")},
+    )
+    monkeypatch.setattr(
+        "trading_platform.orchestration.service.build_paper_experiment_record",
+        lambda output_dir: {},
+    )
+    monkeypatch.setattr(
+        "trading_platform.orchestration.service.run_live_dry_run_preview_for_targets",
+        lambda **kwargs: type("LiveResult", (), {"config": kwargs["config"]})(),
+    )
+    monkeypatch.setattr(
+        "trading_platform.orchestration.service.write_live_dry_run_artifacts",
+        lambda result: {"summary_json_path": Path(result.config.output_dir) / "live_dry_run_summary.json"},
+    )
+    live_dir = Path(config.output_root_dir) / config.run_name / "2025-01-02T00-00-00Z" / "live_dry_run"
+    live_dir.mkdir(parents=True, exist_ok=True)
+    (live_dir / "live_dry_run_summary.json").write_text(
+        json.dumps({"adjusted_order_count": 0, "gross_exposure": 1.0}),
+        encoding="utf-8",
+    )
+
+    result, _artifact_paths = run_orchestration_pipeline(config)
+
+    assert result.status == "succeeded"
+    assert calls["handoff"] == 1
+    assert calls["execution_config"] == 1
+
+
 def test_pipeline_config_rejects_invalid_stage_ordering(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="must come before"):
         _pipeline_config(
@@ -636,3 +766,44 @@ def test_pipeline_config_rejects_invalid_stage_ordering(tmp_path: Path) -> None:
                 paper_trading=True,
             ),
         )
+
+
+def test_research_stage_emits_placeholder_artifact_for_unwired_xsec_strategy(tmp_path: Path) -> None:
+    config = _pipeline_config(
+        tmp_path,
+        research_strategy="xsec_momentum_topn",
+    )
+
+    outputs = _run_research_stage(
+        config,
+        tmp_path / "run",
+        {"symbols": ["AAPL", "MSFT"]},
+    )
+
+    assert outputs["implementation_mode"] == "placeholder"
+    placeholder_path = Path(outputs["placeholder_artifact_path"])
+    assert placeholder_path.exists()
+    payload = json.loads(placeholder_path.read_text(encoding="utf-8"))
+    assert payload == {
+        "implemented": False,
+        "reason": "xsec_momentum_topn orchestration research stage is not yet wired to a direct service-layer runner",
+        "strategy": "xsec_momentum_topn",
+        "symbols": ["AAPL", "MSFT"],
+    }
+
+
+def test_research_stage_placeholder_is_deterministic_for_same_inputs(tmp_path: Path) -> None:
+    config = _pipeline_config(
+        tmp_path,
+        research_strategy="xsec_momentum_topn",
+    )
+    run_dir = tmp_path / "run"
+    context = {"symbols": ["AAPL", "MSFT"]}
+
+    first = _run_research_stage(config, run_dir, context)
+    second = _run_research_stage(config, run_dir, context)
+
+    assert first == second
+    assert Path(first["placeholder_artifact_path"]).read_text(encoding="utf-8") == Path(
+        second["placeholder_artifact_path"]
+    ).read_text(encoding="utf-8")

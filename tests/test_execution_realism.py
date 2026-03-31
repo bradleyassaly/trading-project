@@ -13,7 +13,6 @@ from trading_platform.execution.models import (
     ExecutionSimulationResult,
     ExecutionSummary,
     LiquidityDiagnostic,
-    RejectedOrder,
 )
 from trading_platform.execution.realism import simulate_execution, write_execution_artifacts
 from trading_platform.execution.reconciliation import ReconciliationResult

@@ -10,14 +10,26 @@ def test_run_feature_build_delegates_to_build_features(monkeypatch) -> None:
     expected = "C:/tmp/aapl_features.parquet"
     captured: dict[str, object] = {}
 
-    def fake_build_features(*, symbol: str, feature_groups: list[str] | None = None):
+    def fake_build_features(
+        *,
+        symbol: str,
+        feature_groups: list[str] | None = None,
+        normalized_data_dir=None,
+        features_dir=None,
+    ):
         captured["symbol"] = symbol
         captured["feature_groups"] = feature_groups
+        captured["normalized_data_dir"] = normalized_data_dir
+        captured["features_dir"] = features_dir
         return expected
 
     monkeypatch.setattr(
         "trading_platform.services.feature_service.build_features",
         fake_build_features,
+    )
+    monkeypatch.setattr(
+        "trading_platform.services.feature_service.LocalFeatureStore.write_from_parquet",
+        lambda self, **kwargs: captured.setdefault("store_kwargs", kwargs),
     )
 
     config = FeatureConfig(
@@ -30,3 +42,5 @@ def test_run_feature_build_delegates_to_build_features(monkeypatch) -> None:
     assert out == Path(expected)
     assert captured["symbol"] == "AAPL"
     assert captured["feature_groups"] == ["trend", "momentum"]
+    assert captured["store_kwargs"]["symbol"] == "AAPL"
+    assert captured["store_kwargs"]["feature_groups"] == ["trend", "momentum"]

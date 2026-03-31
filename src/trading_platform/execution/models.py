@@ -45,6 +45,8 @@ class ExecutionConfig:
     missing_liquidity_behavior: str = "reject"
     stale_market_data_behavior: str = "reject"
     cash_buffer_bps: float = 0.0
+    submission_delay_seconds: float = 0.0
+    fill_delay_seconds: float = 0.0
     notes: str | None = None
     tags: list[str] = field(default_factory=list)
 
@@ -75,6 +77,8 @@ class ExecutionConfig:
         _validate_nonnegative(self.max_position_notional_change, "max_position_notional_change")
         _validate_nonnegative(self.max_short_gross_exposure, "max_short_gross_exposure")
         _validate_nonnegative(self.cash_buffer_bps, "cash_buffer_bps")
+        _validate_nonnegative(self.submission_delay_seconds, "submission_delay_seconds")
+        _validate_nonnegative(self.fill_delay_seconds, "fill_delay_seconds")
         if self.lot_size <= 0:
             raise ValueError("lot_size must be > 0")
 
@@ -132,6 +136,9 @@ class ExecutableOrder:
     participation_pct_adv: float | None
     filled_fraction: float
     status: str
+    spread_bps: float | None = None
+    submission_delay_seconds: float = 0.0
+    fill_delay_seconds: float = 0.0
     clipping_reason: str | None = None
     provenance: dict[str, Any] = field(default_factory=dict)
 
@@ -158,6 +165,9 @@ class RejectedOrder:
     filled_fraction: float
     status: str
     rejection_reason: str
+    spread_bps: float | None = None
+    submission_delay_seconds: float = 0.0
+    fill_delay_seconds: float = 0.0
     provenance: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -208,6 +218,9 @@ class ExecutionSummary:
     zero_executable_orders: bool
     max_participation_pct_adv: float
     estimated_cost_bps_on_executed_notional: float
+    partial_fill_order_count: int = 0
+    total_submission_delay_seconds: float = 0.0
+    total_fill_delay_seconds: float = 0.0
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

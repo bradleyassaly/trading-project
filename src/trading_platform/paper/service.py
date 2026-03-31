@@ -8,16 +8,22 @@ from typing import Any
 
 import pandas as pd
 
-import trading_platform.services.target_construction_service as target_construction_service
 from trading_platform.broker.base import BrokerFill, BrokerOrder
 from trading_platform.broker.paper_broker import PaperBroker, PaperBrokerConfig
 from trading_platform.cli.common import normalize_paper_weighting_scheme
 from trading_platform.construction.service import build_top_n_portfolio_weights
 from trading_platform.decision_journal.service import (
+    build_trade_decision_contracts,
     enrich_bundle_with_orders,
     write_decision_journal_artifacts,
+    write_trade_decision_contracts,
 )
 from trading_platform.decision_journal.models import DecisionJournalBundle
+from trading_platform.execution.order_lifecycle import build_paper_order_lifecycle_records
+from trading_platform.execution.costs import (
+    build_transaction_cost_report,
+    write_transaction_cost_artifacts,
+)
 from trading_platform.execution.realism import (
     ExecutableOrder,
     ExecutionSimulationResult,
@@ -30,13 +36,17 @@ from trading_platform.execution.realism import (
     simulate_execution,
     write_execution_artifacts,
 )
+from trading_platform.execution.reconciliation import build_order_lifecycle_reconciliation_skeleton
 from trading_platform.execution.policies import ExecutionPolicy
 from trading_platform.execution.transforms import build_executed_weights
 from trading_platform.metadata.groups import build_group_series
 from trading_platform.paper.models import (
     OrderGenerationResult,
+    PaperExecutionSimulationOrder,
+    PaperExecutionSimulationReport,
     PaperOrder,
     PaperExecutionPriceSnapshot,
+    PersistentPaperState,
     PaperPortfolioState,
     PaperPosition,
     PaperSignalSnapshot,
@@ -54,6 +64,18 @@ from trading_platform.reporting.pnl_attribution import (
 from trading_platform.reporting.ev_lifecycle import (
     build_trade_ev_lifecycle_rows,
     write_trade_ev_lifecycle_artifacts,
+)
+from trading_platform.reporting.dashboard_payloads import (
+    build_kpi_payload,
+    build_strategy_health_payload,
+    build_trade_explorer_payload,
+    write_kpi_payload_artifacts,
+    write_strategy_health_payload_artifacts,
+    write_trade_explorer_payload_artifacts,
+)
+from trading_platform.reporting.realtime_monitoring import (
+    build_realtime_monitoring_payload,
+    write_realtime_monitoring_artifacts,
 )
 from trading_platform.settings import METADATA_DIR
 from trading_platform.paper.slippage import apply_order_slippage, validate_slippage_config
@@ -84,7 +106,9 @@ from trading_platform.services.target_construction_service import (
     _compute_latest_xsec_target_weights as shared_compute_latest_xsec_target_weights,
     build_target_construction_result,
     compute_latest_target_weights as shared_compute_latest_target_weights,
+    configure_runtime_dependencies,
     load_signal_snapshot as shared_load_signal_snapshot,
+    TargetConstructionRuntimeDependencies,
 )
 from trading_platform.universe_provenance.models import UniverseBuildBundle
 from trading_platform.universe_provenance.service import write_universe_provenance_artifacts
@@ -97,51 +121,15 @@ class JsonPaperStateStore:
     def load(self) -> PaperPortfolioState:
         if not self.path.exists():
             return PaperPortfolioState(cash=0.0)
-
-        payload = json.loads(self.path.read_text(encoding="utf-8"))
-        positions = {
-            symbol: PaperPosition(**position_payload)
-            for symbol, position_payload in payload.get("positions", {}).items()
-        }
-        state = PaperPortfolioState(
-            as_of=payload.get("as_of"),
-            cash=float(payload.get("cash", 0.0)),
-            positions=positions,
-            last_targets={symbol: float(weight) for symbol, weight in payload.get("last_targets", {}).items()},
-            initial_cash_basis=float(payload.get("initial_cash_basis", 0.0) or 0.0),
-            cumulative_realized_pnl=float(payload.get("cumulative_realized_pnl", 0.0) or 0.0),
-            cumulative_gross_realized_pnl=float(payload.get("cumulative_gross_realized_pnl", 0.0) or 0.0),
-            cumulative_fees=float(payload.get("cumulative_fees", 0.0) or 0.0),
-            cumulative_slippage_cost=float(payload.get("cumulative_slippage_cost", 0.0) or 0.0),
-            cumulative_spread_cost=float(payload.get("cumulative_spread_cost", 0.0) or 0.0),
-            cumulative_execution_cost=float(payload.get("cumulative_execution_cost", 0.0) or 0.0),
-            open_lots={
-                symbol: [PaperTradeLot(**row) for row in rows]
-                for symbol, rows in dict(payload.get("open_lots", {})).items()
-            },
-            next_trade_id=int(payload.get("next_trade_id", 1) or 1),
-        )
-        if state.initial_cash_basis <= 0.0:
-            state.initial_cash_basis = float(state.cash + sum(position.cost_basis for position in positions.values()))
-        return state
+        try:
+            payload = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return PaperPortfolioState(cash=0.0)
+        return PersistentPaperState.from_dict(payload).to_portfolio_state()
 
     def save(self, state: PaperPortfolioState) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        payload = {
-            "as_of": state.as_of,
-            "cash": state.cash,
-            "positions": {symbol: asdict(position) for symbol, position in sorted(state.positions.items())},
-            "last_targets": state.last_targets,
-            "initial_cash_basis": state.initial_cash_basis,
-            "cumulative_realized_pnl": state.cumulative_realized_pnl,
-            "cumulative_gross_realized_pnl": state.cumulative_gross_realized_pnl,
-            "cumulative_fees": state.cumulative_fees,
-            "cumulative_slippage_cost": state.cumulative_slippage_cost,
-            "cumulative_spread_cost": state.cumulative_spread_cost,
-            "cumulative_execution_cost": state.cumulative_execution_cost,
-            "open_lots": {symbol: [asdict(lot) for lot in lots] for symbol, lots in sorted(state.open_lots.items())},
-            "next_trade_id": int(state.next_trade_id),
-        }
+        payload = PersistentPaperState.from_portfolio_state(state).to_dict()
         self.path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
@@ -194,10 +182,14 @@ def _compute_latest_xsec_target_weights(
     list[str],
     list[PaperExecutionPriceSnapshot],
 ]:
-    target_construction_service.load_feature_frame = load_feature_frame
-    target_construction_service.resolve_feature_frame_path = resolve_feature_frame_path
-    target_construction_service.run_xsec_momentum_topn = run_xsec_momentum_topn
-    target_construction_service.normalize_price_frame = normalize_price_frame
+    configure_runtime_dependencies(
+        dependencies=TargetConstructionRuntimeDependencies(
+            load_feature_frame_fn=load_feature_frame,
+            resolve_feature_frame_path_fn=resolve_feature_frame_path,
+            run_xsec_momentum_topn_fn=run_xsec_momentum_topn,
+            normalize_price_frame_fn=normalize_price_frame,
+        )
+    )
     return shared_compute_latest_xsec_target_weights(config=config)
 
 
@@ -271,8 +263,12 @@ def load_signal_snapshot(
     lookback: int | None = None,
     config: PaperTradingConfig | None = None,
 ) -> PaperSignalSnapshot:
-    target_construction_service.load_feature_frame = load_feature_frame
-    target_construction_service.SIGNAL_REGISTRY = SIGNAL_REGISTRY
+    configure_runtime_dependencies(
+        dependencies=TargetConstructionRuntimeDependencies(
+            load_feature_frame_fn=load_feature_frame,
+            signal_registry=SIGNAL_REGISTRY,
+        )
+    )
     return shared_load_signal_snapshot(
         symbols=symbols,
         strategy=strategy,
@@ -288,11 +284,15 @@ def compute_latest_target_weights(
     config: PaperTradingConfig,
     snapshot: PaperSignalSnapshot,
 ) -> tuple[str, dict[str, float], dict[str, float], dict[str, Any]]:
-    target_construction_service.build_group_series = build_group_series
-    target_construction_service.build_top_n_portfolio_weights = build_top_n_portfolio_weights
-    target_construction_service.normalize_paper_weighting_scheme = normalize_paper_weighting_scheme
-    target_construction_service.ExecutionPolicy = ExecutionPolicy
-    target_construction_service.build_executed_weights = build_executed_weights
+    configure_runtime_dependencies(
+        dependencies=TargetConstructionRuntimeDependencies(
+            build_group_series_fn=build_group_series,
+            build_top_n_portfolio_weights_fn=build_top_n_portfolio_weights,
+            normalize_paper_weighting_scheme_fn=normalize_paper_weighting_scheme,
+            execution_policy_cls=ExecutionPolicy,
+            build_executed_weights_fn=build_executed_weights,
+        )
+    )
     return shared_compute_latest_target_weights(config=config, snapshot=snapshot)
 
 
@@ -316,6 +316,37 @@ def _score_band_enabled(config: PaperTradingConfig) -> bool:
             config.exit_score_percentile,
         )
     )
+
+
+def _build_paper_decision_pipeline(
+    *,
+    as_of: str,
+    latest_effective_weights: dict[str, float],
+    state: PaperPortfolioState,
+    requested_orders: list[PaperOrder],
+    orders: list[PaperOrder],
+    fills: list[BrokerFill],
+    diagnostics: dict[str, Any],
+    execution_simulation_report: PaperExecutionSimulationReport | None = None,
+) -> tuple[list[Any], list[Any], Any]:
+    order_generation = dict(diagnostics.get("order_generation", {}))
+    trade_decision_contracts = build_trade_decision_contracts(
+        candidate_rows=list(order_generation.get("candidate_trade_rows") or []),
+        prediction_rows=list(order_generation.get("ev_prediction_rows") or []),
+    )
+    order_lifecycle_records = build_paper_order_lifecycle_records(
+        as_of=as_of,
+        orders=requested_orders or orders,
+        fills=fills,
+        simulation_report=execution_simulation_report,
+    )
+    reconciliation_result = build_order_lifecycle_reconciliation_skeleton(
+        as_of=as_of,
+        intended_target_weights=latest_effective_weights,
+        lifecycle_records=order_lifecycle_records,
+        realized_state=state,
+    )
+    return trade_decision_contracts, order_lifecycle_records, reconciliation_result
 
 
 def _score_rank_lookup(latest_scores: dict[str, float]) -> dict[str, dict[str, float]]:
@@ -2109,12 +2140,13 @@ def generate_rebalance_orders(
 
 def _simulate_execution_for_paper_orders(
     *,
+    as_of: str,
     orders: list[PaperOrder],
     execution_config: ExecutionConfig,
     latest_target_weights: dict[str, float],
     current_cash: float,
     current_equity: float,
-) -> tuple[list[PaperOrder], dict[str, Any]]:
+) -> tuple[list[PaperOrder], dict[str, Any], PaperExecutionSimulationReport]:
     requests = [
         ExecutionOrderRequest(
             symbol=order.symbol,
@@ -2153,9 +2185,106 @@ def _simulate_execution_for_paper_orders(
                 expected_fill_price=executable.estimated_fill_price,
                 expected_fees=executable.commission,
                 expected_slippage_bps=executable.slippage_bps,
+                expected_spread_bps=float(executable.spread_bps or 0.0),
                 provenance=dict(executable.provenance or original.provenance or {}),
             )
         )
+    simulation_rows = [
+        PaperExecutionSimulationOrder(
+            symbol=order.symbol,
+            side=order.side,
+            requested_quantity=int(order.quantity),
+            executable_quantity=int(order.quantity),
+            requested_notional=float(order.notional),
+            executable_notional=float(order.notional),
+            reference_price=float(order.reference_price),
+            estimated_fill_price=float(order.expected_fill_price or order.reference_price),
+            filled_fraction=1.0,
+            status="pending",
+            provenance=dict(order.provenance or {}),
+        )
+        for order in orders
+    ]
+    if simulation.requested_orders:
+        simulation_rows = []
+        for request in simulation.requested_orders:
+            match = next(
+                (
+                    row
+                    for row in simulation.executable_orders
+                    if row.symbol == request.symbol and row.side == request.side and row.requested_shares == request.requested_shares
+                ),
+                None,
+            )
+            rejected = next(
+                (
+                    row
+                    for row in simulation.rejected_orders
+                    if row.symbol == request.symbol and row.side == request.side and row.requested_shares == request.requested_shares
+                ),
+                None,
+            )
+            if match is not None:
+                simulation_rows.append(
+                    PaperExecutionSimulationOrder(
+                        symbol=request.symbol,
+                        side=request.side,
+                        requested_quantity=int(request.requested_shares),
+                        executable_quantity=int(match.adjusted_shares),
+                        requested_notional=float(request.requested_notional),
+                        executable_notional=float(match.adjusted_notional),
+                        reference_price=float(request.price),
+                        estimated_fill_price=float(match.estimated_fill_price),
+                        filled_fraction=float(match.filled_fraction),
+                        status=str(match.status),
+                        slippage_bps=float(match.slippage_bps),
+                        spread_bps=float(match.spread_bps) if match.spread_bps is not None else None,
+                        commission=float(match.commission),
+                        submission_delay_seconds=float(match.submission_delay_seconds),
+                        fill_delay_seconds=float(match.fill_delay_seconds),
+                        clipping_reason=match.clipping_reason,
+                        provenance=dict(match.provenance),
+                    )
+                )
+            elif rejected is not None:
+                simulation_rows.append(
+                    PaperExecutionSimulationOrder(
+                        symbol=request.symbol,
+                        side=request.side,
+                        requested_quantity=int(request.requested_shares),
+                        executable_quantity=0,
+                        requested_notional=float(request.requested_notional),
+                        executable_notional=0.0,
+                        reference_price=float(request.price),
+                        estimated_fill_price=float(rejected.estimated_fill_price),
+                        filled_fraction=0.0,
+                        status="rejected",
+                        slippage_bps=float(rejected.slippage_bps),
+                        spread_bps=float(rejected.spread_bps) if rejected.spread_bps is not None else None,
+                        commission=float(rejected.commission),
+                        submission_delay_seconds=float(rejected.submission_delay_seconds),
+                        fill_delay_seconds=float(rejected.fill_delay_seconds),
+                        rejection_reason=rejected.rejection_reason,
+                        provenance=dict(rejected.provenance),
+                    )
+                )
+            else:
+                simulation_rows.append(
+                    PaperExecutionSimulationOrder(
+                        symbol=request.symbol,
+                        side=request.side,
+                        requested_quantity=int(request.requested_shares),
+                        executable_quantity=0,
+                        requested_notional=float(request.requested_notional),
+                        executable_notional=0.0,
+                        reference_price=float(request.price),
+                        estimated_fill_price=float(request.price),
+                        filled_fraction=0.0,
+                        status="rejected",
+                        rejection_reason="not_executable",
+                        provenance=dict(request.provenance or {}),
+                    )
+                )
     diagnostics = {
         "execution_summary": simulation.summary.to_dict(),
         "requested_orders": [order.to_dict() for order in simulation.requested_orders],
@@ -2165,7 +2294,13 @@ def _simulate_execution_for_paper_orders(
         "turnover_summary": simulation.turnover_rows,
         "symbol_tradeability_report": simulation.symbol_tradeability_rows,
     }
-    return executable_orders, diagnostics
+    report = PaperExecutionSimulationReport(
+        as_of=as_of,
+        config=execution_config.to_dict(),
+        orders=sorted(simulation_rows, key=lambda row: (row.symbol, row.side, row.requested_quantity)),
+        summary=simulation.summary.to_dict(),
+    )
+    return executable_orders, diagnostics, report
 
 
 def apply_filled_orders(
@@ -2894,8 +3029,10 @@ def run_paper_trading_cycle_for_targets(
 
     execution_diagnostics: dict[str, Any] = {}
     executable_orders = order_result.orders
+    execution_simulation_report: PaperExecutionSimulationReport | None = None
     if execution_config is not None:
-        executable_orders, execution_diagnostics = _simulate_execution_for_paper_orders(
+        executable_orders, execution_diagnostics, execution_simulation_report = _simulate_execution_for_paper_orders(
+            as_of=as_of,
             orders=order_result.orders,
             execution_config=execution_config,
             latest_target_weights=latest_effective_weights,
@@ -2985,6 +3122,12 @@ def run_paper_trading_cycle_for_targets(
         reconciliation=attribution_reconciliation,
     )
     attribution_payload["summary"] = attribution_summary
+    transaction_cost_report = build_transaction_cost_report(
+        as_of=as_of,
+        config=config,
+        orders=executable_orders,
+        fills=fills,
+    )
 
     diagnostics = {
         "signal_source": config.signal_source,
@@ -3011,6 +3154,19 @@ def run_paper_trading_cycle_for_targets(
             "expected_spread_cost": slippage_diagnostics["expected_spread_cost"],
             "expected_commission_cost": slippage_diagnostics["expected_commission_cost"],
             "expected_total_execution_cost": slippage_diagnostics["expected_total_execution_cost"],
+            "execution_simulation_enabled": execution_simulation_report is not None,
+            "execution_simulation_partial_fill_count": int(
+                (execution_simulation_report.summary.get("partial_fill_order_count", 0) if execution_simulation_report is not None else 0) or 0
+            ),
+            "execution_simulation_total_submission_delay_seconds": float(
+                (execution_simulation_report.summary.get("total_submission_delay_seconds", 0.0) if execution_simulation_report is not None else 0.0)
+                or 0.0
+            ),
+            "execution_simulation_total_fill_delay_seconds": float(
+                (execution_simulation_report.summary.get("total_fill_delay_seconds", 0.0) if execution_simulation_report is not None else 0.0)
+                or 0.0
+            ),
+            "transaction_cost_report_summary": dict(transaction_cost_report.summary),
             "min_weight_change_to_trade": float(config.min_weight_change_to_trade),
             "score_band_enabled": bool(order_result.diagnostics.get("score_band_enabled", False)),
             "entry_threshold_used": order_result.diagnostics.get("entry_threshold_used"),
@@ -3284,6 +3440,16 @@ def run_paper_trading_cycle_for_targets(
         reserve_cash_pct=config.reserve_cash_pct,
         portfolio_equity=state.equity,
     )
+    trade_decision_contracts, order_lifecycle_records, reconciliation_result = _build_paper_decision_pipeline(
+        as_of=as_of,
+        latest_effective_weights=latest_effective_weights,
+        state=state,
+        requested_orders=order_result.orders,
+        orders=executable_orders,
+        fills=fills,
+        diagnostics=diagnostics,
+        execution_simulation_report=execution_simulation_report,
+    )
 
     return PaperTradingRunResult(
         as_of=as_of,
@@ -3293,13 +3459,19 @@ def run_paper_trading_cycle_for_targets(
         latest_target_weights=latest_effective_weights,
         scheduled_target_weights=latest_scheduled_weights,
         orders=executable_orders,
+        requested_orders=order_result.orders,
         fills=fills,
         skipped_symbols=skipped_symbols,
         diagnostics=diagnostics,
         price_snapshots=list(price_snapshots or []),
         decision_bundle=decision_bundle,
+        trade_decision_contracts=trade_decision_contracts,
+        order_lifecycle_records=order_lifecycle_records,
+        reconciliation_result=reconciliation_result,
         universe_bundle=universe_bundle,
         attribution=attribution_payload,
+        execution_simulation_report=execution_simulation_report,
+        transaction_cost_report=transaction_cost_report,
     )
 
 
@@ -3310,16 +3482,20 @@ def run_paper_trading_cycle(
     execution_config: ExecutionConfig | None = None,
     auto_apply_fills: bool = False,
 ) -> PaperTradingRunResult:
-    target_construction_service.load_feature_frame = load_feature_frame
-    target_construction_service.resolve_feature_frame_path = resolve_feature_frame_path
-    target_construction_service.run_xsec_momentum_topn = run_xsec_momentum_topn
-    target_construction_service.normalize_price_frame = normalize_price_frame
-    target_construction_service.SIGNAL_REGISTRY = SIGNAL_REGISTRY
-    target_construction_service.build_group_series = build_group_series
-    target_construction_service.build_top_n_portfolio_weights = build_top_n_portfolio_weights
-    target_construction_service.normalize_paper_weighting_scheme = normalize_paper_weighting_scheme
-    target_construction_service.ExecutionPolicy = ExecutionPolicy
-    target_construction_service.build_executed_weights = build_executed_weights
+    configure_runtime_dependencies(
+        dependencies=TargetConstructionRuntimeDependencies(
+            load_feature_frame_fn=load_feature_frame,
+            resolve_feature_frame_path_fn=resolve_feature_frame_path,
+            run_xsec_momentum_topn_fn=run_xsec_momentum_topn,
+            normalize_price_frame_fn=normalize_price_frame,
+            signal_registry=SIGNAL_REGISTRY,
+            build_group_series_fn=build_group_series,
+            build_top_n_portfolio_weights_fn=build_top_n_portfolio_weights,
+            normalize_paper_weighting_scheme_fn=normalize_paper_weighting_scheme,
+            execution_policy_cls=ExecutionPolicy,
+            build_executed_weights_fn=build_executed_weights,
+        )
+    )
     target_result = build_target_construction_result(config=config)
     return run_paper_trading_cycle_for_targets(
         config=config,
@@ -3348,6 +3524,51 @@ def write_paper_trading_artifacts(
 ) -> dict[str, Path]:
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
+    trade_decision_contracts = list(result.trade_decision_contracts)
+    order_lifecycle_records = list(result.order_lifecycle_records)
+    reconciliation_result = result.reconciliation_result
+    if not trade_decision_contracts or not order_lifecycle_records or reconciliation_result is None:
+        (
+            fallback_trade_decision_contracts,
+            fallback_order_lifecycle_records,
+            fallback_reconciliation_result,
+        ) = _build_paper_decision_pipeline(
+            as_of=result.as_of,
+            latest_effective_weights=result.latest_target_weights,
+            state=result.state,
+            requested_orders=result.requested_orders,
+            orders=result.orders,
+            fills=result.fills,
+            diagnostics=result.diagnostics,
+            execution_simulation_report=result.execution_simulation_report,
+        )
+        if not trade_decision_contracts:
+            trade_decision_contracts = fallback_trade_decision_contracts
+        if not order_lifecycle_records:
+            order_lifecycle_records = fallback_order_lifecycle_records
+        if reconciliation_result is None:
+            reconciliation_result = fallback_reconciliation_result
+    if not result.trade_decision_contracts:
+        result.trade_decision_contracts = trade_decision_contracts
+    if not result.order_lifecycle_records:
+        result.order_lifecycle_records = order_lifecycle_records
+    if result.reconciliation_result is None:
+        result.reconciliation_result = reconciliation_result
+    if result.transaction_cost_report is None:
+        inferred_symbols = sorted(
+            {
+                *result.latest_prices.keys(),
+                *result.latest_target_weights.keys(),
+                *(order.symbol for order in result.orders),
+                *(fill.symbol for fill in result.fills),
+            }
+        )
+        result.transaction_cost_report = build_transaction_cost_report(
+            as_of=result.as_of,
+            config=PaperTradingConfig(symbols=inferred_symbols or ["UNKNOWN"]),
+            orders=result.orders,
+            fills=result.fills,
+        )
 
     orders_path = output_path / "paper_orders.csv"
     fills_path = output_path / "paper_fills.csv"
@@ -3355,13 +3576,21 @@ def write_paper_trading_artifacts(
     positions_path = output_path / "paper_positions.csv"
     targets_path = output_path / "paper_target_weights.csv"
     execution_price_snapshot_path = output_path / "execution_price_snapshot.csv"
+    requested_orders_path = output_path / "paper_requested_orders.csv"
     summary_path = output_path / "paper_summary.json"
     portfolio_performance_summary_path = output_path / "portfolio_performance_summary.json"
     execution_summary_path = output_path / "execution_summary.json"
     strategy_contribution_summary_path = output_path / "strategy_contribution_summary.json"
     trades_path = output_path / "paper_trades.csv"
+    order_lifecycle_json_path = output_path / "order_lifecycle_records.json"
+    order_lifecycle_csv_path = output_path / "order_lifecycle_records.csv"
+    reconciliation_json_path = output_path / "order_lifecycle_reconciliation.json"
+    reconciliation_csv_path = output_path / "order_lifecycle_reconciliation_mismatches.csv"
+    execution_simulation_json_path = output_path / "paper_execution_simulation.json"
+    execution_simulation_csv_path = output_path / "paper_execution_simulation.csv"
 
     pd.DataFrame([asdict(order) for order in result.orders]).to_csv(orders_path, index=False)
+    pd.DataFrame([asdict(order) for order in result.requested_orders]).to_csv(requested_orders_path, index=False)
     pd.DataFrame(
         sorted(
             [
@@ -3623,9 +3852,40 @@ def write_paper_trading_artifacts(
         ),
         encoding="utf-8",
     )
+    if order_lifecycle_records:
+        order_lifecycle_json_path.write_text(
+            json.dumps([row.to_dict() for row in order_lifecycle_records], indent=2, default=str),
+            encoding="utf-8",
+        )
+        pd.DataFrame([row.to_dict() for row in order_lifecycle_records]).to_csv(
+            order_lifecycle_csv_path,
+            index=False,
+        )
+    if reconciliation_result is not None:
+        reconciliation_json_path.write_text(
+            json.dumps(reconciliation_result.to_dict(), indent=2, default=str),
+            encoding="utf-8",
+        )
+        pd.DataFrame(
+            [row.to_dict() for row in reconciliation_result.mismatches],
+            columns=["mismatch_type", "symbol", "expected", "actual", "reason_code", "severity", "metadata"],
+        ).to_csv(
+            reconciliation_csv_path,
+            index=False,
+        )
+    if result.execution_simulation_report is not None:
+        execution_simulation_json_path.write_text(
+            json.dumps(result.execution_simulation_report.to_dict(), indent=2, default=str),
+            encoding="utf-8",
+        )
+        pd.DataFrame([row.to_dict() for row in result.execution_simulation_report.orders]).to_csv(
+            execution_simulation_csv_path,
+            index=False,
+        )
 
     paths = {
         "orders_path": orders_path,
+        "requested_orders_path": requested_orders_path,
         "fills_path": fills_path,
         "equity_snapshot_path": equity_snapshot_path,
         "positions_path": positions_path,
@@ -3637,6 +3897,17 @@ def write_paper_trading_artifacts(
         "strategy_contribution_summary_path": strategy_contribution_summary_path,
         "paper_trades_path": trades_path,
     }
+    if order_lifecycle_records:
+        paths["order_lifecycle_records_json_path"] = order_lifecycle_json_path
+        paths["order_lifecycle_records_csv_path"] = order_lifecycle_csv_path
+    if reconciliation_result is not None:
+        paths["order_lifecycle_reconciliation_json_path"] = reconciliation_json_path
+        paths["order_lifecycle_reconciliation_mismatches_csv_path"] = reconciliation_csv_path
+    if result.execution_simulation_report is not None:
+        paths["paper_execution_simulation_json_path"] = execution_simulation_json_path
+        paths["paper_execution_simulation_csv_path"] = execution_simulation_csv_path
+    if result.transaction_cost_report is not None:
+        paths.update(write_transaction_cost_artifacts(output_dir=output_path, report=result.transaction_cost_report))
     execution_payload = result.diagnostics.get("execution", {})
     if execution_payload.get("execution_summary"):
         simulation_result = ExecutionSimulationResult(
@@ -3653,6 +3924,12 @@ def write_paper_trading_artifacts(
         execution_paths = write_execution_artifacts(simulation_result, output_path)
         paths.update(execution_paths)
     paths.update(write_decision_journal_artifacts(bundle=result.decision_bundle, output_dir=output_path))
+    paths.update(
+        write_trade_decision_contracts(
+            decisions=trade_decision_contracts,
+            output_dir=output_path,
+        )
+    )
     paths.update(write_pnl_attribution_artifacts(output_dir=output_path, attribution_payload=result.attribution))
     paths.update(
         write_trade_ev_lifecycle_artifacts(
@@ -3672,6 +3949,14 @@ def write_paper_trading_artifacts(
             calibration_summary=dict((result.diagnostics.get("order_generation") or {}).get("ev_calibration_summary") or {}),
         )
     )
+    kpi_payload = build_kpi_payload(result=result)
+    trade_explorer_payload = build_trade_explorer_payload(result=result)
+    strategy_health_payload = build_strategy_health_payload(result=result)
+    realtime_monitoring_payload = build_realtime_monitoring_payload(result=result)
+    paths.update(write_kpi_payload_artifacts(output_dir=output_path, payload=kpi_payload))
+    paths.update(write_trade_explorer_payload_artifacts(output_dir=output_path, payload=trade_explorer_payload))
+    paths.update(write_strategy_health_payload_artifacts(output_dir=output_path, payload=strategy_health_payload))
+    paths.update(write_realtime_monitoring_artifacts(output_dir=output_path, payload=realtime_monitoring_payload))
     paths.update(
         write_universe_provenance_artifacts(
             bundle=result.universe_bundle,

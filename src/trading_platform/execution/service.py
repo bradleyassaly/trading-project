@@ -216,6 +216,9 @@ def simulate_execution(
                 participation_pct_adv=None,
                 filled_fraction=1.0,
                 status="executable",
+                spread_bps=request.spread_bps,
+                submission_delay_seconds=float(config.submission_delay_seconds),
+                fill_delay_seconds=float(config.fill_delay_seconds),
                 provenance=request.provenance,
             )
             for request in sorted_requests
@@ -239,6 +242,9 @@ def simulate_execution(
             zero_executable_orders=len(executable) == 0 and len(sorted_requests) > 0,
             max_participation_pct_adv=0.0,
             estimated_cost_bps_on_executed_notional=0.0,
+            partial_fill_order_count=0,
+            total_submission_delay_seconds=float(len(executable) * config.submission_delay_seconds),
+            total_fill_delay_seconds=float(len(executable) * config.fill_delay_seconds),
         )
         return ExecutionSimulationResult(
             requested_orders=sorted_requests,
@@ -368,6 +374,9 @@ def simulate_execution(
                     filled_fraction=0.0,
                     status="rejected",
                     rejection_reason=rejection_reason,
+                    spread_bps=request.spread_bps,
+                    submission_delay_seconds=float(config.submission_delay_seconds),
+                    fill_delay_seconds=float(config.fill_delay_seconds),
                     provenance=request.provenance,
                 )
             )
@@ -419,6 +428,9 @@ def simulate_execution(
                             filled_fraction=0.0,
                             status="rejected",
                             rejection_reason="max_short_gross_exposure",
+                            spread_bps=row["request"].spread_bps,
+                            submission_delay_seconds=float(config.submission_delay_seconds),
+                            fill_delay_seconds=float(config.fill_delay_seconds),
                             provenance=row["request"].provenance,
                         )
                     )
@@ -459,6 +471,9 @@ def simulate_execution(
                             filled_fraction=0.0,
                             status="rejected",
                             rejection_reason="max_turnover_per_rebalance",
+                            spread_bps=row["request"].spread_bps,
+                            submission_delay_seconds=float(config.submission_delay_seconds),
+                            fill_delay_seconds=float(config.fill_delay_seconds),
                             provenance=row["request"].provenance,
                         )
                     )
@@ -497,6 +512,9 @@ def simulate_execution(
                         filled_fraction=0.0,
                         status="rejected",
                         rejection_reason="cash_buffer_or_affordability",
+                        spread_bps=request.spread_bps,
+                        submission_delay_seconds=float(config.submission_delay_seconds),
+                        fill_delay_seconds=float(config.fill_delay_seconds),
                         provenance=request.provenance,
                     )
                 )
@@ -547,6 +565,9 @@ def simulate_execution(
                     participation_pct_adv=participation_pct_adv,
                     filled_fraction=filled_fraction,
                     status=status,
+                    spread_bps=request.spread_bps,
+                    submission_delay_seconds=float(config.submission_delay_seconds),
+                    fill_delay_seconds=float(config.fill_delay_seconds),
                     clipping_reason=row["clipping_reason"],
                     provenance=request.provenance,
                 )
@@ -613,6 +634,9 @@ def simulate_execution(
         zero_executable_orders=(len(executable_orders) == 0 and len(sorted_requests) > 0),
         max_participation_pct_adv=max_participation_pct_adv,
         estimated_cost_bps_on_executed_notional=((commission_total + slippage_cost_total) / executed_notional * 10_000.0) if executed_notional > 0 else 0.0,
+        partial_fill_order_count=sum(1 for order in executable_orders if float(order.filled_fraction) < 1.0),
+        total_submission_delay_seconds=float(len(executable_orders) * config.submission_delay_seconds),
+        total_fill_delay_seconds=float(len(executable_orders) * config.fill_delay_seconds),
     )
     return ExecutionSimulationResult(
         requested_orders=sorted_requests,

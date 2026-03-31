@@ -1,0 +1,139 @@
+run_name: daily_governance
+schedule_type: daily
+universes:
+  - nasdaq100
+registry_path: artifacts/strategy_registry.json
+governance_config_path: configs/governance.yaml
+monitoring_config_path: configs/monitoring.yaml
+notification_config_path: configs/notifications.yaml
+execution_config_path: configs/execution.yaml
+multi_strategy_output_path: artifacts/generated_registry_multi_strategy.json
+use_activated_portfolio_for_paper: true
+fail_if_no_active_strategies: false
+include_inactive_conditionals_in_reports: true
+fail_if_no_usable_symbols: false
+fail_if_zero_targets_after_validation: false
+allow_latest_close_fallback: true
+min_usable_symbol_fraction:
+paper_state_path: artifacts/paper/multi_strategy_state.json
+output_root_dir: artifacts/orchestration
+fail_fast: false
+continue_on_stage_error: true
+max_parallel_jobs: 1
+stages:
+  promotion_evaluation: true
+  registry_mutation: false
+  multi_strategy_config_generation: true
+  portfolio_allocation: true
+  paper_trading: true
+  live_dry_run: true
+  reporting: true
+  monitoring: true
+
+daily_trading:
+  run:
+    run_name: run_current
+  mode:
+    strict_mode: true
+    best_effort_mode: false
+  stages:
+    refresh_inputs: false
+    research: false
+    promote: true
+    build_portfolio: true
+    activate_portfolio: true
+    export_bundle: true
+    paper_run: true
+    report: true
+  research:
+    mode: skip
+  configs:
+    promotion_policy_config: configs/promotion.yaml
+    strategy_portfolio_policy_config: configs/strategy_portfolio.yaml
+  paths:
+    output_root: artifacts/daily_trading
+    research_output_dir: artifacts/alpha_research/run_configured
+    registry_dir: artifacts/alpha_research/run_configured/research_registry
+    promoted_dir: artifacts/promoted/run_current
+    portfolio_dir: artifacts/strategy_portfolio/run_current
+    activated_dir: artifacts/strategy_portfolio/run_current/activated
+    export_dir: artifacts/strategy_portfolio/run_current/run_bundle_activated
+    paper_output_dir: artifacts/daily_trading/run_current/paper
+    paper_state_path: artifacts/daily_trading/run_current/paper_state.json
+    report_dir: artifacts/daily_trading/run_current/report
+  paper:
+    use_activated_portfolio_for_paper: true
+    fail_if_no_active_strategies: false
+    include_inactive_conditionals_in_reports: true
+    auto_apply_fills: true
+    fail_if_zero_targets_after_validation: false
+    execution:
+      min_weight_change_to_trade: 0.015
+      score_bands:
+        entry_score_threshold:
+        exit_score_threshold:
+        hold_score_band: true
+        use_percentile_thresholds: true
+        entry_score_percentile: 0.90
+        exit_score_percentile: 0.65
+        apply_bands_to_new_entries: true
+        apply_bands_to_reductions: true
+        apply_bands_to_full_exits: true
+      ev_gate:
+        enabled: true
+        mode: soft
+        model_type: bucketed_mean
+        horizon_days: 5
+        weight_multiplier: true
+        weight_scale: 10.0
+        extreme_negative_threshold: -0.02
+        min_expected_net_return: 0.001
+        min_probability_positive:
+        risk_penalty_lambda: 0.0
+        fallback_to_score_bands: true
+        training_root:
+        min_training_samples: 20
+      slippage:
+        enabled: true
+        model: fixed_bps
+        buy_bps: 10.0
+        sell_bps: 10.0
+      cost_model:
+        enabled: true
+        commission_bps: 10.0
+        minimum_commission: 1.0
+        spread_bps: 20.0
+  report:
+    enable_strategy_diagnostics: true
+  dashboard:
+    refresh_static_data: true
+    output_dir: artifacts/daily_trading/run_current/dashboard
+  tracking:
+    database_enabled: false
+    database_url:
+    database_schema:
+    write_candidates: true
+    write_metrics: true
+    write_promotions: true
+
+daily_replay:
+  run:
+    max_days:
+  paths:
+    output_dir: artifacts/daily_replay/run_current
+    initial_state_path:
+  dates:
+    start_date:
+    end_date:
+    dates_file:
+  error_handling:
+    stop_on_error: true
+    continue_on_error: false
+  replay:
+    relax_thresholds_for_testing: false
+    min_expected_trade_days:
+    min_expected_total_trades:
+    warn_if_all_days_no_op: true
+    warn_if_turnover_too_low:
+    override_max_weight_per_strategy:
+    override_min_signal_strength:

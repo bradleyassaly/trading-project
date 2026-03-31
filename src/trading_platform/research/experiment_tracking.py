@@ -69,6 +69,20 @@ def _json_dumps(payload: object) -> str:
     return json.dumps(payload, sort_keys=True, default=str)
 
 
+def _safe_float(value: object) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, str) and not value.strip():
+        return None
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    if pd.isna(numeric):
+        return None
+    return numeric
+
+
 def _stable_hash(payload: object) -> str:
     return hashlib.sha1(_json_dumps(payload).encode("utf-8")).hexdigest()
 
@@ -203,6 +217,90 @@ def build_alpha_experiment_record(artifact_dir: Path) -> dict[str, object]:
                 "portfolio_metrics": str(artifact_dir / "portfolio_metrics.csv"),
                 "robustness_report": str(artifact_dir / "robustness_report.csv"),
                 "implementability_report": str(artifact_dir / "implementability_report.csv"),
+            }
+        ),
+    }
+
+
+def build_automated_alpha_loop_experiment_record(artifact_dir: Path) -> dict[str, object]:
+    run_summary = _safe_read_json(artifact_dir / "research_loop_run_summary.json")
+    config = _safe_read_json(artifact_dir / "research_loop_config.json")
+    candidate_grid_manifest = _safe_read_json(artifact_dir / "candidate_grid_manifest.json")
+    allocation_summary = _safe_read_json(artifact_dir / "candidate_allocation_summary.json")
+    promotion_diagnostics = _safe_read_json(artifact_dir / "promotion_threshold_diagnostics.json")
+    promoted_df = _safe_read_csv(artifact_dir / "promoted_signals.csv")
+    rejected_df = _safe_read_csv(artifact_dir / "rejected_signals.csv")
+
+    run_id = str(run_summary.get("run_id") or _stable_hash({"artifact_dir": str(artifact_dir), "type": "automated_alpha_research_loop"})[:12])
+    timestamp = str(run_summary.get("artifact_paths", {}).get("last_run_at") or run_summary.get("last_run_at") or datetime.fromtimestamp(artifact_dir.stat().st_mtime, tz=UTC).isoformat())
+    signal_families = candidate_grid_manifest.get("candidate_families", [])
+    signal_family = (
+        str(signal_families[0])
+        if len(signal_families) == 1
+        else "multi_family"
+    )
+    config_payload = {
+        "generation_config": config.get("generation_config"),
+        "resource_allocation": config.get("resource_allocation"),
+        "schedule_frequency": config.get("schedule_frequency"),
+        "universe": config.get("universe"),
+        "search_spaces": config.get("search_spaces"),
+    }
+    promoted_signal_count = int(run_summary.get("promoted_candidates") or len(promoted_df))
+    rejected_signal_count = int(run_summary.get("rejected_candidates") or len(rejected_df))
+    mean_rank_ic = _safe_float(
+        promotion_diagnostics.get("mean_rank_ic_distribution", {}).get("mean")
+    )
+
+    return {
+        "experiment_id": _stable_hash({"artifact_dir": str(artifact_dir), "run_id": run_id, "type": "alpha_research_loop"}),
+        "experiment_type": "alpha_research_loop",
+        "run_id": run_id,
+        "timestamp": timestamp,
+        "artifact_dir": str(artifact_dir),
+        "config_fingerprint": _stable_hash(config_payload),
+        "duplicate_of": "",
+        "signal_family": signal_family,
+        "parameters_json": _json_dumps(
+            {
+                "signal_families": signal_families,
+                "candidate_count": candidate_grid_manifest.get("candidate_count"),
+                "resource_allocation": config.get("resource_allocation", {}),
+            }
+        ),
+        "promotion_status": "approved" if promoted_signal_count > 0 else "none_promoted",
+        "promoted_signal_count": promoted_signal_count,
+        "rejected_signal_count": rejected_signal_count,
+        "composite_config_json": _json_dumps(
+            {
+                "candidate_families": signal_families,
+                "allocation_summary": allocation_summary,
+            }
+        ),
+        "regime_config_json": _json_dumps({}),
+        "portfolio_weighting_scheme": "",
+        "portfolio_mode": "",
+        "portfolio_total_return": float("nan"),
+        "portfolio_sharpe": float("nan"),
+        "portfolio_max_drawdown": float("nan"),
+        "robustness_worst_fold_return": float("nan"),
+        "robustness_worst_fold_sharpe": float("nan"),
+        "implementability_return_drag": float("nan"),
+        "implementability_mean_capacity_multiple": float("nan"),
+        "paper_signal_source": "",
+        "paper_equity": float("nan"),
+        "paper_order_count": float("nan"),
+        "paper_fill_count": float("nan"),
+        "paper_vs_backtest_return_gap": float("nan"),
+        "artifacts_json": _json_dumps(
+            {
+                "run_summary": str(artifact_dir / "research_loop_run_summary.json"),
+                "config": str(artifact_dir / "research_loop_config.json"),
+                "candidate_grid_manifest": str(artifact_dir / "candidate_grid_manifest.json"),
+                "candidate_allocation_summary": str(artifact_dir / "candidate_allocation_summary.json"),
+                "promoted_signals": str(artifact_dir / "promoted_signals.csv"),
+                "rejected_signals": str(artifact_dir / "rejected_signals.csv"),
+                "mean_spearman_ic": mean_rank_ic,
             }
         ),
     }
