@@ -1,5 +1,6 @@
 from trading_platform.db.models.artifact import Artifact, RunArtifactLink
 from trading_platform.db.models.execution import Fill, Order, OrderEvent
+from trading_platform.db.models.kalshi import KalshiMarketRecord, KalshiOrderBookSnapshot, KalshiTradeRecord
 from trading_platform.db.models.portfolio import DecisionSignalContribution, PortfolioDecision, PositionSnapshot
 from trading_platform.db.models.provenance import CandidateEvaluation, UniverseFilterResult
 from trading_platform.db.models.reference import Symbol, Universe, UniverseMembership
@@ -12,6 +13,9 @@ __all__ = [
     "CandidateEvaluation",
     "DecisionSignalContribution",
     "Fill",
+    "KalshiMarketRecord",
+    "KalshiOrderBookSnapshot",
+    "KalshiTradeRecord",
     "Order",
     "OrderEvent",
     "PortfolioDecision",

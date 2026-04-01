@@ -1,0 +1,39 @@
+# Kalshi prediction market trading configuration
+# All credentials come from .env — never hardcode them here.
+
+environment:
+  demo: true  # Set to false for live trading
+
+ingestion:
+  # Markets to track for live orderbook polling and trade history
+  tracked_series: []       # e.g. ["PRES-24", "INFL-24"]
+  tracked_tickers: []      # e.g. ["PRES-24-D.TR", "HIGHNY-23DEC31-T40"]
+  default_market_status: "open"
+  orderbook_depth: 10      # price levels to fetch per side
+  orderbook_poll_interval_sec: 5
+
+  # Historical backfill settings
+  backfill_days: 30        # how many days back to ingest on first run
+
+risk:
+  max_drawdown_pct: 0.20   # kill switch triggers at 20% portfolio drawdown
+  max_position_contracts: 100
+  max_single_trade_contracts: 20
+  max_open_orders: 50
+
+execution:
+  default_time_in_force: "good_till_canceled"
+  post_only: false          # true = maker-only (no taker fees)
+
+strategy:
+  # Starting ideas to explore — see docs/kalshi_strategy_ideas.md
+  # - mean_reversion: fade extreme YES/NO prices near settlement
+  # - event_driven:   trade off news/data releases (e.g. CPI, FOMC)
+  # - arbitrage:      YES + NO should sum to ~$1.00; exploit deviations
+  # - liquidity:      provide quotes on illiquid markets for spread capture
+  active: []
+
+monitoring:
+  log_all_orders: true
+  log_all_fills: true
+  pnl_report_interval_sec: 60

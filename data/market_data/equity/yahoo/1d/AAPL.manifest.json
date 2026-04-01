@@ -3,16 +3,16 @@
   "timeframe": "1d",
   "provider": "yahoo",
   "asset_class": "equity",
-  "row_count": 2,
+  "row_count": 250,
   "schema_version": "market_data_v1",
   "start_timestamp": "2024-01-01T00:00:00",
-  "end_timestamp": "2024-01-02T00:00:00",
+  "end_timestamp": "2024-09-06T00:00:00",
   "raw_path": "C:\\Users\\bradl\\PycharmProjects\\trading_platform\\data\\market_data\\equity\\yahoo\\1d\\AAPL.raw.parquet",
   "normalized_path": "C:\\Users\\bradl\\PycharmProjects\\trading_platform\\data\\market_data\\equity\\yahoo\\1d\\AAPL.parquet",
   "manifest_path": "C:\\Users\\bradl\\PycharmProjects\\trading_platform\\data\\market_data\\equity\\yahoo\\1d\\AAPL.manifest.json",
   "validation_report_path": "C:\\Users\\bradl\\PycharmProjects\\trading_platform\\data\\market_data\\equity\\yahoo\\1d\\AAPL.validation.json",
   "metadata": {
-    "legacy_normalized_path": "C:\\Users\\bradl\\AppData\\Local\\Temp\\pytest-of-bradl\\pytest-713\\test_ingest_symbol_writes_norm0\\normalized\\AAPL.parquet",
-    "legacy_raw_path": "C:\\Users\\bradl\\AppData\\Local\\Temp\\pytest-of-bradl\\pytest-713\\test_ingest_symbol_writes_norm0\\raw\\AAPL.parquet"
+    "legacy_normalized_path": "C:\\Users\\bradl\\AppData\\Local\\Temp\\pytest-of-bradl\\pytest-781\\test_research_prep_pipeline_en0\\normalized\\AAPL.parquet",
+    "legacy_raw_path": "C:\\Users\\bradl\\AppData\\Local\\Temp\\pytest-of-bradl\\pytest-781\\test_research_prep_pipeline_en0\\raw\\AAPL.parquet"
   }
 }

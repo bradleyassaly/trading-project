@@ -2627,6 +2627,8 @@ def _apply_fill_to_state_with_attribution(
         quantity=closing_quantity,
         as_of=as_of,
     )
+    if closing_quantity > 0 and not trade_rows and current is not None:
+        realized_pnl = _estimate_order_realized_pnl(state=state, order=order, fill_price=fill_price)
     state.cash += -signed_qty * float(fill_price)
     new_quantity = prior_quantity + signed_qty
     if new_quantity == 0:

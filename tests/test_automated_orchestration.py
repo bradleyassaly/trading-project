@@ -164,9 +164,30 @@ def test_automated_orchestration_stage_sequencing_and_artifact_passing(monkeypat
         "trading_platform.orchestration.pipeline_runner.export_strategy_portfolio_run_config",
         lambda **kwargs: {"multi_strategy_config_path": str(Path(kwargs["output_dir"]) / "multi_strategy.json"), "pipeline_config_path": str(Path(kwargs["output_dir"]) / "pipeline.yaml"), "run_bundle_path": str(Path(kwargs["output_dir"]) / "bundle.json")},
     )
+    _fake_portfolio_cfg = type("Cfg", (), {
+        "cash_reserve_pct": 0.0,
+        "activation_applied": False,
+        "source_portfolio_path": None,
+        "fail_if_no_active_strategies": False,
+        "active_strategy_count": 1,
+        "active_unconditional_count": 1,
+        "active_conditional_count": 0,
+        "inactive_conditional_count": 0,
+    })()
+    _fake_handoff = type("Handoff", (), {
+        "source_kind": "multi_strategy_config",
+        "source_path": "fake",
+        "warnings": [],
+        "summary": {"activation_applied": False, "source_portfolio_path": None, "fail_if_no_active_strategies": False, "active_strategy_count": 1},
+        "portfolio_config": _fake_portfolio_cfg,
+    })()
     monkeypatch.setattr(
-        "trading_platform.config.loader.load_multi_strategy_portfolio_config",
-        lambda path: type("Cfg", (), {"cash_reserve_pct": 0.0})(),
+        "trading_platform.orchestration.pipeline_runner.resolve_strategy_execution_handoff",
+        lambda path_or_dir, config=None: _fake_handoff,
+    )
+    monkeypatch.setattr(
+        "trading_platform.orchestration.pipeline_runner.write_strategy_execution_handoff_summary",
+        lambda **kwargs: Path(kwargs["output_dir"]) / kwargs["artifact_name"],
     )
     allocation_result = type(
         "AllocationResult",

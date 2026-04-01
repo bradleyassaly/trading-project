@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from argparse import Namespace
+from datetime import UTC, datetime
 from pathlib import Path
 
 from trading_platform.cli.commands.adaptive_allocation_build import cmd_adaptive_allocation_build
@@ -60,7 +61,9 @@ def _write_strategy_portfolio(root: Path) -> Path:
     return root
 
 
-def _write_strategy_monitoring(root: Path, *, generated_at: str = "2026-03-22T00:00:00+00:00") -> Path:
+def _write_strategy_monitoring(root: Path, *, generated_at: str | None = None) -> Path:
+    if generated_at is None:
+        generated_at = datetime.now(UTC).isoformat()
     root.mkdir(parents=True, exist_ok=True)
     (root / "strategy_monitoring.json").write_text(
         json.dumps(
@@ -100,7 +103,9 @@ def _write_strategy_monitoring(root: Path, *, generated_at: str = "2026-03-22T00
     return root
 
 
-def _write_market_regime(root: Path, *, regime_label: str = "trend", generated_at: str = "2026-03-22T00:00:00+00:00") -> Path:
+def _write_market_regime(root: Path, *, regime_label: str = "trend", generated_at: str | None = None) -> Path:
+    if generated_at is None:
+        generated_at = datetime.now(UTC).isoformat()
     root.mkdir(parents=True, exist_ok=True)
     payload = {
         "generated_at": generated_at,

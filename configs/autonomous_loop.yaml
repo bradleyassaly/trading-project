@@ -1,0 +1,59 @@
+# Autonomous Orchestration Loop Configuration
+#
+# CLI: trading-cli ops autonomous-loop start --config configs/autonomous_loop.yaml
+#
+# Every decision the loop makes is written to decision_log_path as a JSON line.
+# Fields per entry: timestamp, iteration, loop_run_id, trigger, reasoning,
+#                   action_taken, outcome, details, orch_run_id, error
+
+# ── Inner orchestration config to delegate to ──────────────────────────────────
+orchestration_config_path: configs/orchestration.yaml
+
+# ── Schedule ───────────────────────────────────────────────────────────────────
+# 5-field cron expression (minute hour dom month dow). Evaluated in UTC.
+# Examples:
+#   "0 8 * * 1-5"   → 08:00 UTC, Monday–Friday
+#   "0 */4 * * *"   → every 4 hours
+#   "30 6 * * *"    → 06:30 UTC every day
+cron_schedule: "0 8 * * 1-5"
+
+# ── Decision log ───────────────────────────────────────────────────────────────
+decision_log_path: artifacts/autonomous_loop/decision_log.jsonl
+
+# ── Kill switch ────────────────────────────────────────────────────────────────
+# Touch this file to stop the loop cleanly at the next poll boundary.
+kill_switch_path: KILL_SWITCH
+
+# ── Artifact staleness thresholds (hours) ──────────────────────────────────────
+# If data or features are stale → full_research (re-run all stages)
+# If only research artifacts are stale → fast_refresh (skip research stages)
+data_staleness_threshold_hours: 26.0
+features_staleness_threshold_hours: 26.0
+research_staleness_threshold_hours: 168.0   # 1 week
+
+# ── Roots scanned for staleness ────────────────────────────────────────────────
+data_root: data/market_data
+features_root: data/feature_store
+research_root: artifacts
+
+# ── Circuit breaker ────────────────────────────────────────────────────────────
+# Halts the loop if paper equity drawdown from peak exceeds this fraction.
+circuit_breaker_enabled: true
+circuit_breaker_max_drawdown: 0.20     # 20% peak-to-trough
+paper_output_root: artifacts           # scanned recursively for paper_equity_curve.csv
+
+# ── Performance degradation detection ──────────────────────────────────────────
+# Scans strategy_monitoring.json files for "deactivate" recommendations.
+# If the fraction of strategies recommended for deactivation >= threshold,
+# a full_research run is triggered instead of a fast_refresh.
+degradation_detection_enabled: true
+degradation_monitoring_root: artifacts
+degradation_deactivate_fraction: 0.25  # 25% of strategies
+
+# ── Alerts ─────────────────────────────────────────────────────────────────────
+alert_log_path: artifacts/autonomous_loop/alerts.log
+# alert_webhook_url: https://hooks.example.com/services/your-webhook-path
+
+# ── Loop control ───────────────────────────────────────────────────────────────
+dry_run: false
+# max_iterations: null    # null = run forever until KILL_SWITCH or circuit breaker

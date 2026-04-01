@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import date
 from pathlib import Path
 
 import pandas as pd
@@ -11,12 +12,14 @@ from trading_platform.live.control import (
 )
 
 
-def _patch_simple_targets(monkeypatch, *, latest_timestamp: str = "2026-03-19", target_weight: float = 0.5) -> None:
+def _patch_simple_targets(monkeypatch, *, latest_timestamp: str | None = None, target_weight: float = 0.5) -> None:
+    _today = date.today().isoformat()
+    _ts = latest_timestamp if latest_timestamp is not None else _today
     monkeypatch.setattr(
         "trading_platform.live.control._build_targets",
         lambda config, symbols: (
-            "2026-03-19",
-            pd.Timestamp(latest_timestamp),
+            _today,
+            pd.Timestamp(_ts),
             {"AAPL": target_weight},
             {"AAPL": target_weight},
             {"AAPL": 100.0},

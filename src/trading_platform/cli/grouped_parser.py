@@ -31,6 +31,7 @@ from trading_platform.cli.commands.experiments_latest_model import cmd_experimen
 from trading_platform.cli.commands.experiments_list import cmd_experiments_list
 from trading_platform.cli.commands.export_universes import cmd_export_universes
 from trading_platform.cli.commands.features import cmd_features
+from trading_platform.cli.commands.kalshi_features import cmd_kalshi_features
 from trading_platform.cli.commands.fundamentals_features import cmd_fundamentals_features
 from trading_platform.cli.commands.fundamentals_ingest import cmd_fundamentals_ingest
 from trading_platform.cli.commands.fundamentals_snapshot_build import cmd_fundamentals_snapshot_build
@@ -53,6 +54,7 @@ from trading_platform.cli.commands.monitor_notify import cmd_monitor_notify
 from trading_platform.cli.commands.monitor_portfolio_health import cmd_monitor_portfolio_health
 from trading_platform.cli.commands.monitor_run_health import cmd_monitor_run_health
 from trading_platform.cli.commands.monitor_strategy_health import cmd_monitor_strategy_health
+from trading_platform.cli.commands.autonomous_loop import cmd_autonomous_loop_start
 from trading_platform.cli.commands.orchestrate_run import cmd_orchestrate_loop, cmd_orchestrate_run
 from trading_platform.cli.commands.orchestrate_show_run import cmd_orchestrate_show_run
 from trading_platform.cli.commands.paper_report import cmd_paper_report
@@ -85,6 +87,7 @@ from trading_platform.cli.commands.research_db import (
     cmd_research_db_promotions,
     cmd_research_db_top_candidates,
 )
+from trading_platform.cli.commands.kalshi_alpha_research import cmd_kalshi_alpha_research
 from trading_platform.cli.commands.research_leaderboard import cmd_research_leaderboard
 from trading_platform.cli.commands.research_monitor import cmd_research_monitor
 from trading_platform.cli.commands.research_promote import cmd_research_promote
@@ -1732,6 +1735,57 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional cap on raw FMP requests in one run.",
     )
     data_refresh_inputs.set_defaults(func=cmd_refresh_research_inputs)
+    data_kalshi = data_subparsers.add_parser(
+        "kalshi", help="Kalshi prediction-market data and feature generation commands"
+    )
+    data_kalshi_subparsers = data_kalshi.add_subparsers(dest="kalshi_command", required=True)
+    data_kalshi_features = data_kalshi_subparsers.add_parser(
+        "features",
+        help="Build Kalshi feature parquet files from ingested trade history.",
+    )
+    data_kalshi_features.add_argument(
+        "--config",
+        type=str,
+        default="configs/kalshi.yaml",
+        help="Path to kalshi.yaml config (default: configs/kalshi.yaml).",
+    )
+    data_kalshi_features.add_argument(
+        "--tickers",
+        nargs="*",
+        default=None,
+        help="One or more Kalshi market tickers to process. Overrides config tracked_tickers.",
+    )
+    data_kalshi_features.add_argument(
+        "--trades-dir",
+        type=str,
+        default="data/kalshi/trades",
+        help="Directory containing <TICKER>.parquet trade files (default: data/kalshi/trades).",
+    )
+    data_kalshi_features.add_argument(
+        "--output-dir",
+        type=str,
+        default="data/kalshi/features",
+        help="Directory to write <TICKER>.parquet feature files (default: data/kalshi/features).",
+    )
+    data_kalshi_features.add_argument(
+        "--period",
+        type=str,
+        default="1h",
+        help="Bar resampling period, e.g. '1h', '15m', '1d' (default: 1h).",
+    )
+    data_kalshi_features.add_argument(
+        "--feature-groups",
+        nargs="*",
+        default=None,
+        metavar="GROUP",
+        help=(
+            "Subset of feature groups to compute. "
+            "Choices: momentum trend volatility volume probability_calibration "
+            "volume_activity time_decay. Defaults to all groups."
+        ),
+    )
+    data_kalshi_features.set_defaults(func=cmd_kalshi_features)
+
     data_fundamentals = data_subparsers.add_parser(
         "fundamentals", help="Canonical fundamentals ingest and daily feature generation commands"
     )
@@ -2248,6 +2302,52 @@ def build_parser() -> argparse.ArgumentParser:
         help="Number of approved-signal additions/removals that triggers a churn alert.",
     )
     research_monitor.set_defaults(func=cmd_research_monitor)
+    research_kalshi_alpha = research_subparsers.add_parser(
+        "kalshi-alpha",
+        help="Run alpha research on Kalshi prediction market feature data",
+    )
+    research_kalshi_alpha.add_argument(
+        "--config",
+        type=str,
+        default="configs/kalshi_research.yaml",
+        help="Path to YAML research config (default: configs/kalshi_research.yaml).",
+    )
+    research_kalshi_alpha.add_argument(
+        "--feature-dir",
+        type=str,
+        default=None,
+        help="Directory containing Kalshi feature parquets. Overrides config.",
+    )
+    research_kalshi_alpha.add_argument(
+        "--output-dir",
+        type=str,
+        default=None,
+        help="Output artifact directory. Overrides config.",
+    )
+    research_kalshi_alpha.add_argument(
+        "--resolution-data",
+        type=str,
+        default=None,
+        help="CSV with ticker,resolution_price columns for backtesting.",
+    )
+    research_kalshi_alpha.add_argument(
+        "--backtest",
+        action="store_true",
+        help="Run the binary market backtester after alpha research.",
+    )
+    research_kalshi_alpha.add_argument(
+        "--forward-horizon",
+        type=int,
+        default=None,
+        help="Bars ahead for forward IC calculation (default: 10).",
+    )
+    research_kalshi_alpha.add_argument(
+        "--min-rows",
+        type=int,
+        default=None,
+        help="Minimum rows required per market parquet (default: 30).",
+    )
+    research_kalshi_alpha.set_defaults(func=cmd_kalshi_alpha_research)
     research_registry = research_subparsers.add_parser("registry", help="Research manifest registry commands")
     research_registry_subparsers = research_registry.add_subparsers(dest="research_registry_command", required=True)
     research_registry_build = research_registry_subparsers.add_parser(
@@ -3115,6 +3215,37 @@ def build_parser() -> argparse.ArgumentParser:
         "--max-iterations", type=int, default=None, help="Optional maximum iterations before the loop exits."
     )
     ops_orchestrate_loop.set_defaults(func=cmd_orchestrate_loop)
+
+    ops_autonomous_loop = ops_subparsers.add_parser(
+        "autonomous-loop",
+        help="Cron-scheduled autonomous orchestration loop with staleness checks, degradation detection, and circuit breaker",
+    )
+    ops_autonomous_loop_subparsers = ops_autonomous_loop.add_subparsers(
+        dest="ops_autonomous_loop_command", required=True
+    )
+    ops_autonomous_loop_start = ops_autonomous_loop_subparsers.add_parser(
+        "start",
+        help="Start the autonomous loop (runs until KILL_SWITCH file, circuit breaker, or --max-iterations)",
+    )
+    ops_autonomous_loop_start.add_argument(
+        "--config",
+        type=str,
+        required=True,
+        help="Path to autonomous_loop.yaml config file.",
+    )
+    ops_autonomous_loop_start.add_argument(
+        "--dry-run",
+        action="store_true",
+        default=False,
+        help="Evaluate decisions and log them without executing orchestration runs.",
+    )
+    ops_autonomous_loop_start.add_argument(
+        "--max-iterations",
+        type=int,
+        default=None,
+        help="Optional maximum iterations before the loop exits.",
+    )
+    ops_autonomous_loop_start.set_defaults(func=cmd_autonomous_loop_start)
 
     ops_system_eval = ops_subparsers.add_parser(
         "system-eval", help="Build and compare full-system evaluation artifacts across orchestration runs"

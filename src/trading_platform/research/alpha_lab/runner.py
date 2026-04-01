@@ -81,6 +81,25 @@ def _now_utc() -> str:
     return datetime.now(UTC).isoformat()
 
 
+def _sanitize_for_parquet(df: pd.DataFrame) -> pd.DataFrame:
+    """Convert object columns containing dicts or lists to JSON strings.
+
+    pyarrow cannot serialize struct types with no child fields (e.g. empty dicts {}).
+    This converts any object column whose first non-null value is a dict or list to
+    a JSON string column, avoiding ArrowNotImplementedError at write time.
+    """
+    result = df.copy()
+    for col in result.columns:
+        if result[col].dtype != object:
+            continue
+        sample = next((v for v in result[col] if v is not None), None)
+        if isinstance(sample, (dict, list)):
+            result[col] = result[col].apply(
+                lambda v: json.dumps(v, default=str) if isinstance(v, (dict, list)) else v
+            )
+    return result
+
+
 @dataclass(frozen=True)
 class RuntimeComputabilityConfig:
     require_runtime_computability_for_approval: bool = False
@@ -2555,41 +2574,41 @@ def run_alpha_research(
     implementability_report_df.to_csv(implementability_report_path_csv, index=False)
     liquidity_filtered_portfolio_metrics_df.to_csv(liquidity_filtered_metrics_path_csv, index=False)
     capacity_scenarios_df.to_csv(capacity_scenarios_path_csv, index=False)
-    detailed_df.to_parquet(detailed_path_parquet, index=False)
-    leaderboard_df.to_parquet(leaderboard_path_parquet, index=False)
-    promoted_signals_df.to_parquet(promoted_signals_path_parquet, index=False)
-    signal_family_summary_df.to_parquet(signal_family_summary_path_parquet, index=False)
-    candidate_runtime_computability_df.to_parquet(candidate_runtime_computability_path_parquet, index=False)
-    composite_member_runtime_validation_df.to_parquet(composite_member_runtime_validation_path_parquet, index=False)
-    composite_runtime_computability_df.to_parquet(composite_runtime_computability_path_parquet, index=False)
-    approved_composite_runtime_validation_df.to_parquet(approved_composite_runtime_validation_path_parquet, index=False)
-    fundamental_feature_ic_summary_df.to_parquet(fundamental_feature_ic_summary_path_parquet, index=False)
-    hybrid_component_summary_df.to_parquet(hybrid_component_summary_path_parquet, index=False)
-    redundancy_df.to_parquet(redundancy_report_path_parquet, index=False)
-    redundancy_df.to_parquet(redundancy_path_parquet, index=False)
-    composite_scores_df.to_parquet(composite_scores_path_parquet, index=False)
-    composite_leaderboard_df.to_parquet(composite_leaderboard_path_parquet, index=False)
-    ensemble_member_summary_df.to_parquet(ensemble_member_summary_path_parquet, index=False)
-    ensemble_signal_snapshot_df.to_parquet(ensemble_signal_snapshot_path_parquet, index=False)
-    dynamic_signal_weights_df.to_parquet(dynamic_signal_weights_path_parquet, index=False)
-    active_signals_by_date_df.to_parquet(active_signals_by_date_path_parquet, index=False)
-    deactivated_signals_df.to_parquet(deactivated_signals_path_parquet, index=False)
-    signal_lifecycle_report_df.to_parquet(signal_lifecycle_report_path_parquet, index=False)
-    regime_labels_df.to_parquet(regime_labels_by_date_path_parquet, index=False)
-    signal_performance_by_regime_df.to_parquet(signal_performance_by_regime_path_parquet, index=False)
-    signal_performance_by_sub_universe_df.to_parquet(signal_performance_by_sub_universe_path_parquet, index=False)
-    signal_performance_by_benchmark_context_df.to_parquet(signal_performance_by_benchmark_context_path_parquet, index=False)
-    regime_aware_signal_weights_df.to_parquet(regime_aware_signal_weights_path_parquet, index=False)
-    regime_selection_report_df.to_parquet(regime_selection_report_path_parquet, index=False)
-    composite_portfolio_returns_df.to_parquet(portfolio_returns_path_parquet, index=False)
-    composite_portfolio_metrics_df.to_parquet(portfolio_metrics_path_parquet, index=False)
-    composite_portfolio_weights_df.to_parquet(portfolio_weights_path_parquet, index=False)
-    robustness_report_df.to_parquet(robustness_report_path_parquet, index=False)
-    regime_performance_df.to_parquet(regime_performance_path_parquet, index=False)
-    stress_test_results_df.to_parquet(stress_test_results_path_parquet, index=False)
-    implementability_report_df.to_parquet(implementability_report_path_parquet, index=False)
-    liquidity_filtered_portfolio_metrics_df.to_parquet(liquidity_filtered_metrics_path_parquet, index=False)
-    capacity_scenarios_df.to_parquet(capacity_scenarios_path_parquet, index=False)
+    _sanitize_for_parquet(detailed_df).to_parquet(detailed_path_parquet, index=False)
+    _sanitize_for_parquet(leaderboard_df).to_parquet(leaderboard_path_parquet, index=False)
+    _sanitize_for_parquet(promoted_signals_df).to_parquet(promoted_signals_path_parquet, index=False)
+    _sanitize_for_parquet(signal_family_summary_df).to_parquet(signal_family_summary_path_parquet, index=False)
+    _sanitize_for_parquet(candidate_runtime_computability_df).to_parquet(candidate_runtime_computability_path_parquet, index=False)
+    _sanitize_for_parquet(composite_member_runtime_validation_df).to_parquet(composite_member_runtime_validation_path_parquet, index=False)
+    _sanitize_for_parquet(composite_runtime_computability_df).to_parquet(composite_runtime_computability_path_parquet, index=False)
+    _sanitize_for_parquet(approved_composite_runtime_validation_df).to_parquet(approved_composite_runtime_validation_path_parquet, index=False)
+    _sanitize_for_parquet(fundamental_feature_ic_summary_df).to_parquet(fundamental_feature_ic_summary_path_parquet, index=False)
+    _sanitize_for_parquet(hybrid_component_summary_df).to_parquet(hybrid_component_summary_path_parquet, index=False)
+    _sanitize_for_parquet(redundancy_df).to_parquet(redundancy_report_path_parquet, index=False)
+    _sanitize_for_parquet(redundancy_df).to_parquet(redundancy_path_parquet, index=False)
+    _sanitize_for_parquet(composite_scores_df).to_parquet(composite_scores_path_parquet, index=False)
+    _sanitize_for_parquet(composite_leaderboard_df).to_parquet(composite_leaderboard_path_parquet, index=False)
+    _sanitize_for_parquet(ensemble_member_summary_df).to_parquet(ensemble_member_summary_path_parquet, index=False)
+    _sanitize_for_parquet(ensemble_signal_snapshot_df).to_parquet(ensemble_signal_snapshot_path_parquet, index=False)
+    _sanitize_for_parquet(dynamic_signal_weights_df).to_parquet(dynamic_signal_weights_path_parquet, index=False)
+    _sanitize_for_parquet(active_signals_by_date_df).to_parquet(active_signals_by_date_path_parquet, index=False)
+    _sanitize_for_parquet(deactivated_signals_df).to_parquet(deactivated_signals_path_parquet, index=False)
+    _sanitize_for_parquet(signal_lifecycle_report_df).to_parquet(signal_lifecycle_report_path_parquet, index=False)
+    _sanitize_for_parquet(regime_labels_df).to_parquet(regime_labels_by_date_path_parquet, index=False)
+    _sanitize_for_parquet(signal_performance_by_regime_df).to_parquet(signal_performance_by_regime_path_parquet, index=False)
+    _sanitize_for_parquet(signal_performance_by_sub_universe_df).to_parquet(signal_performance_by_sub_universe_path_parquet, index=False)
+    _sanitize_for_parquet(signal_performance_by_benchmark_context_df).to_parquet(signal_performance_by_benchmark_context_path_parquet, index=False)
+    _sanitize_for_parquet(regime_aware_signal_weights_df).to_parquet(regime_aware_signal_weights_path_parquet, index=False)
+    _sanitize_for_parquet(regime_selection_report_df).to_parquet(regime_selection_report_path_parquet, index=False)
+    _sanitize_for_parquet(composite_portfolio_returns_df).to_parquet(portfolio_returns_path_parquet, index=False)
+    _sanitize_for_parquet(composite_portfolio_metrics_df).to_parquet(portfolio_metrics_path_parquet, index=False)
+    _sanitize_for_parquet(composite_portfolio_weights_df).to_parquet(portfolio_weights_path_parquet, index=False)
+    _sanitize_for_parquet(robustness_report_df).to_parquet(robustness_report_path_parquet, index=False)
+    _sanitize_for_parquet(regime_performance_df).to_parquet(regime_performance_path_parquet, index=False)
+    _sanitize_for_parquet(stress_test_results_df).to_parquet(stress_test_results_path_parquet, index=False)
+    _sanitize_for_parquet(implementability_report_df).to_parquet(implementability_report_path_parquet, index=False)
+    _sanitize_for_parquet(liquidity_filtered_portfolio_metrics_df).to_parquet(liquidity_filtered_metrics_path_parquet, index=False)
+    _sanitize_for_parquet(capacity_scenarios_df).to_parquet(capacity_scenarios_path_parquet, index=False)
     composite_diagnostics_path.write_text(json.dumps(composite_diagnostics, indent=2, default=str))
     ensemble_research_summary_path.write_text(
         json.dumps(ensemble_research_summary, indent=2, default=str),
@@ -3062,12 +3081,12 @@ def refresh_alpha_research_artifacts(
     approved_composite_runtime_validation_df.to_csv(approved_composite_runtime_validation_path_csv, index=False)
     research_composite_runtime_summary_df.to_csv(research_composite_runtime_summary_path_csv, index=False)
     if not skip_heavy_diagnostics:
-        leaderboard_df.to_parquet(leaderboard_path_parquet, index=False)
-        promoted_signals_df.to_parquet(output_dir / "promoted_signals.parquet", index=False)
-        candidate_runtime_computability_df.to_parquet(output_dir / "candidate_runtime_computability.parquet", index=False)
-        composite_member_runtime_validation_df.to_parquet(output_dir / "composite_member_runtime_validation.parquet", index=False)
-        composite_runtime_computability_df.to_parquet(output_dir / "composite_runtime_computability.parquet", index=False)
-        approved_composite_runtime_validation_df.to_parquet(output_dir / "approved_composite_runtime_validation.parquet", index=False)
+        _sanitize_for_parquet(leaderboard_df).to_parquet(leaderboard_path_parquet, index=False)
+        _sanitize_for_parquet(promoted_signals_df).to_parquet(output_dir / "promoted_signals.parquet", index=False)
+        _sanitize_for_parquet(candidate_runtime_computability_df).to_parquet(output_dir / "candidate_runtime_computability.parquet", index=False)
+        _sanitize_for_parquet(composite_member_runtime_validation_df).to_parquet(output_dir / "composite_member_runtime_validation.parquet", index=False)
+        _sanitize_for_parquet(composite_runtime_computability_df).to_parquet(output_dir / "composite_runtime_computability.parquet", index=False)
+        _sanitize_for_parquet(approved_composite_runtime_validation_df).to_parquet(output_dir / "approved_composite_runtime_validation.parquet", index=False)
 
     existing_diagnostics = _read_existing_alpha_research_json(diagnostics_path)
     existing_diagnostics.update(

@@ -21,7 +21,21 @@ NAV_ITEMS = [
     ("/runs", "Recent Runs"),
     ("/research", "Research"),
     ("/ops", "Ops"),
+    ("/control", "Control"),
+    ("/reasoning", "Reasoning"),
+    ("/kalshi", "Kalshi"),
 ]
+
+
+def _safe_read_json(path: Path | None) -> dict:
+    if path is None:
+        return {}
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
 
 
 def _json_response(payload: dict) -> tuple[str, list[tuple[str, str]], bytes]:
@@ -384,7 +398,29 @@ def _overview_page(service: DashboardDataService) -> bytes:
     blotter = service.trade_blotter_payload()
     discovery = service.discovery_payload()
     ops = service.ops_payload()
-    body = "<section class='hero'><div class='hero-grid'><div class='hero-summary'><div class='eyebrow'>Command Center</div><div class='hero-title'>Trade intelligence, portfolio state, and system health in one workspace.</div><div class='hero-copy'>Start with recent trades and positions, then drill directly into trade-level decision lineage and execution evidence.</div><div class='hero-actions'><a class='action-link' href='/trades'>Open Trades Blotter</a><a class='action-link secondary' href='/portfolio'>Portfolio & Risk</a><a class='action-link secondary' href='/ops'>Ops & Run Health</a></div></div>"
+    pnl_strip = (
+        "<div id='pnl-strip' style='background:rgba(255,255,255,.82);border:1px solid rgba(104,129,156,.18);"
+        "border-radius:16px;padding:12px 20px;margin-bottom:18px;display:flex;gap:28px;align-items:center;"
+        "font-size:.92rem;'>"
+        "<span><strong>Today P&amp;L:</strong> <span id='pnl-today'>\u2014</span></span>"
+        "<span><strong>Open Positions:</strong> <span id='pnl-positions'>\u2014</span></span>"
+        "<span><strong>Loop:</strong> <span id='pnl-loop'>\u2014</span></span>"
+        "<span style='margin-left:auto;color:#68829c;font-size:.78rem;' id='pnl-updated'></span>"
+        "</div>"
+        "<script>"
+        "function _refreshPnlStrip(){"
+        "fetch('/api/pnl-strip').then(function(r){return r.json();}).then(function(d){"
+        "document.getElementById('pnl-today').textContent=d.today_pnl!=null?d.today_pnl:'\u2014';"
+        "document.getElementById('pnl-positions').textContent=d.open_positions!=null?d.open_positions:'\u2014';"
+        "document.getElementById('pnl-loop').textContent=d.loop_status||'\u2014';"
+        "document.getElementById('pnl-updated').textContent='updated '+new Date().toLocaleTimeString();"
+        "}).catch(function(){});"
+        "}"
+        "_refreshPnlStrip();"
+        "setInterval(_refreshPnlStrip,30000);"
+        "</script>"
+    )
+    body = pnl_strip + "<section class='hero'><div class='hero-grid'><div class='hero-summary'><div class='eyebrow'>Command Center</div><div class='hero-title'>Trade intelligence, portfolio state, and system health in one workspace.</div><div class='hero-copy'>Start with recent trades and positions, then drill directly into trade-level decision lineage and execution evidence.</div><div class='hero-actions'><a class='action-link' href='/trades'>Open Trades Blotter</a><a class='action-link secondary' href='/portfolio'>Portfolio & Risk</a><a class='action-link secondary' href='/ops'>Ops & Run Health</a></div></div>"
     body += _info_cards(
         [
             (
@@ -1616,6 +1652,371 @@ def _symbol_detail_page(service: DashboardDataService, symbol: str, query: dict[
     return _page_shell(title=f"Symbol Detail: {symbol}", active_path="/trades", body=body)
 
 
+def _pnl_strip_payload(service: DashboardDataService) -> dict:
+    portfolio = service.portfolio_overview_payload()
+    orch = service.latest_automated_orchestration_payload()
+    blotter = service.trade_blotter_payload()
+    current_equity = portfolio.get("meta", {}).get("current_equity")
+    open_positions = len(portfolio.get("positions", []))
+    loop_status = orch.get("summary", {}).get("status") or "unknown"
+    return {
+        "today_pnl": _format_number(current_equity, money=True) if current_equity is not None else None,
+        "open_positions": open_positions,
+        "loop_status": loop_status,
+        "generated_at": datetime.now(UTC).isoformat(),
+    }
+
+
+def _control_status_payload(service: DashboardDataService) -> dict:
+    orch = service.latest_automated_orchestration_payload()
+    recent = service.recent_orchestration_runs(5)
+    control_file = service.artifacts_root / "loop_control.json"
+    control_state = _safe_read_json(control_file)
+    return {
+        "latest_run": orch.get("summary", {}),
+        "stage_records": orch.get("stage_records", []),
+        "recent_runs": recent,
+        "control_state": control_state,
+        "generated_at": datetime.now(UTC).isoformat(),
+    }
+
+
+def _control_page(service: DashboardDataService) -> bytes:
+    payload = _control_status_payload(service)
+    latest = payload.get("latest_run", {})
+    stage_records = payload.get("stage_records", [])
+    recent_runs = payload.get("recent_runs", [])
+    control_state = payload.get("control_state", {})
+    body = _metric_cards(
+        [
+            ("Run ID", latest.get("run_id") or "n/a", "Latest orchestration run"),
+            ("Status", _badge(latest.get("status") or "unknown"), ""),
+            ("Started", latest.get("started_at") or "n/a", ""),
+            ("Stages", len(stage_records), "Stage records in latest run"),
+        ]
+    )
+    body += _section(
+        "Loop Actions",
+        "<div style='display:flex;gap:12px;flex-wrap:wrap;padding:4px 0;'>"
+        "<button class='button-link' onclick=\"_ctrlAction('trigger')\">Trigger Run</button>"
+        "<button class='button-link secondary' onclick=\"_ctrlAction('pause')\">Pause Loop</button>"
+        "<button class='button-link secondary' onclick=\"_ctrlAction('resume')\">Resume Loop</button>"
+        "<span id='ctrl-msg' style='align-self:center;color:#68829c;font-size:.88rem;'></span>"
+        "</div>"
+        "<script>"
+        "function _ctrlAction(action){"
+        "var msg=document.getElementById('ctrl-msg');"
+        "msg.textContent='Sending...';"
+        "fetch('/api/control/action',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:action})})"
+        ".then(function(r){return r.json();})"
+        ".then(function(d){msg.textContent='Done: '+d.action+' at '+new Date().toLocaleTimeString();})"
+        ".catch(function(){msg.textContent='Error';});"
+        "}"
+        "</script>",
+    )
+    if control_state:
+        body += _section(
+            "Control File State",
+            _metric_cards([
+                ("Action", control_state.get("action") or "n/a", "Last requested action"),
+                ("Requested At", control_state.get("requested_at") or "n/a", ""),
+            ]),
+        )
+    body += _section(
+        "Stage Records",
+        _table(
+            ["stage_name", "status", "started_at", "ended_at"],
+            stage_records,
+            empty="No stage records for this run.",
+        ),
+    )
+    body += _section(
+        "Recent Runs",
+        _table(
+            ["run_id", "run_name", "status", "started_at", "ended_at", "failed_stage_count"],
+            recent_runs,
+            empty="No orchestration runs found.",
+        ),
+        subtitle="Last 5 orchestration runs",
+    )
+    body += (
+        "<script>"
+        "setInterval(function(){"
+        "fetch('/api/control/status').then(function(r){return r.json();}).then(function(d){"
+        "}).catch(function(){});"
+        "},10000);"
+        "</script>"
+    )
+    return _page_shell(title="Autonomous Loop Control", active_path="/control", body=body)
+
+
+def _stage_description(stage_name: str, outputs: dict) -> str:
+    name = stage_name or ""
+    if name == "research":
+        return f"Scanned {outputs.get('research_manifest_count', 0)} research artifacts."
+    if name == "registry":
+        return f"Built registry with {outputs.get('run_count', 0)} runs, {outputs.get('eligible_count', 0)} promotion candidates."
+    if name == "validation":
+        return f"Validated strategies: {outputs.get('pass_count', 0)} pass, {outputs.get('weak_count', 0)} weak, {outputs.get('fail_count', 0)} fail."
+    if name == "promotion":
+        return f"Promoted {outputs.get('selected_count', 0)} strategies."
+    if name == "portfolio":
+        return f"Portfolio: {outputs.get('selected_count', 0)} strategies selected."
+    if name == "allocation":
+        try:
+            gross = float(outputs.get("gross_exposure", 0))
+        except (TypeError, ValueError):
+            gross = 0.0
+        return f"Allocated {outputs.get('allocation_position_count', 0)} positions at {gross:.1%} gross exposure."
+    if name == "paper":
+        return f"Paper cycle complete. {outputs.get('paper_fill_count', 0)} fills."
+    if name == "monitoring":
+        return f"{outputs.get('warning_strategy_count', 0)} strategies in warning state, {outputs.get('deactivation_candidate_count', 0)} deactivation candidates."
+    if name == "regime":
+        try:
+            conf = float(outputs.get("confidence_score", 0))
+        except (TypeError, ValueError):
+            conf = 0.0
+        return f"Market regime: {outputs.get('regime_label', 'unknown')} (confidence: {conf:.0%})."
+    if name == "adaptive_allocation":
+        try:
+            delta = float(outputs.get("absolute_weight_change", 0))
+        except (TypeError, ValueError):
+            delta = 0.0
+        return f"Adaptive allocation: {outputs.get('selected_count', 0)} strategies, weight delta {delta:.1%}."
+    if name == "governance":
+        return f"Governance: {outputs.get('under_review_count', 0)} under review, {outputs.get('degraded_count', 0)} degraded, {outputs.get('demoted_count', 0)} demoted."
+    return f"Stage '{stage_name}' completed."
+
+
+def _reasoning_payload(service: DashboardDataService) -> dict:
+    orch = service.latest_automated_orchestration_payload()
+    stage_records = orch.get("stage_records", [])
+    run_summary = orch.get("summary", {})
+    chain = []
+    for rec in stage_records:
+        outputs = rec.get("outputs") or {}
+        started = rec.get("started_at")
+        ended = rec.get("ended_at")
+        duration = None
+        if started and ended:
+            try:
+                t0 = datetime.fromisoformat(str(started).replace("Z", "+00:00"))
+                t1 = datetime.fromisoformat(str(ended).replace("Z", "+00:00"))
+                duration = f"{(t1 - t0).total_seconds():.1f}s"
+            except Exception:
+                pass
+        chain.append({
+            "stage_name": rec.get("stage_name"),
+            "status": rec.get("status"),
+            "started_at": started,
+            "ended_at": ended,
+            "duration": duration,
+            "description": _stage_description(rec.get("stage_name") or "", outputs),
+        })
+    promotion_candidates_path = None
+    run_dir = orch.get("run_dir")
+    if run_dir:
+        cand_path = Path(run_dir) / "promotion_candidates.json"
+        if cand_path.exists():
+            promotion_candidates_path = str(cand_path)
+    candidates_raw = _safe_read_json(Path(promotion_candidates_path) if promotion_candidates_path else None)
+    candidates = candidates_raw.get("candidates", candidates_raw.get("rows", []))
+    if isinstance(candidates, list):
+        candidates = [
+            {"run_id": c.get("run_id"), "sharpe": c.get("sharpe"), "recommendation": c.get("recommendation")}
+            for c in candidates[:20]
+        ]
+    else:
+        candidates = []
+    return {
+        "run_id": run_summary.get("run_id"),
+        "status": run_summary.get("status"),
+        "started_at": run_summary.get("started_at"),
+        "decision_chain": chain,
+        "promotion_candidates": candidates,
+        "generated_at": datetime.now(UTC).isoformat(),
+    }
+
+
+def _reasoning_page(service: DashboardDataService) -> bytes:
+    payload = _reasoning_payload(service)
+    chain = payload.get("decision_chain", [])
+    candidates = payload.get("promotion_candidates", [])
+    chain_items = []
+    for step in chain:
+        chain_items.append(
+            "<div class='timeline-item'>"
+            f"<div class='timeline-title'><strong>{html.escape(str(step.get('stage_name') or 'stage'))}</strong>"
+            f"{_badge(step.get('status'))}"
+            f"<span class='subtle' style='margin-left:auto'>{html.escape(str(step.get('duration') or ''))}</span>"
+            "</div>"
+            f"<div class='metric-detail'>{html.escape(str(step.get('description') or ''))}</div>"
+            "</div>"
+        )
+    chain_html = (
+        "<section class='panel'><div class='timeline'>" + "".join(chain_items) + "</div></section>"
+        if chain_items
+        else "<section class='panel'><div class='empty'>No stage data available.</div></section>"
+    )
+    body = _metric_cards(
+        [
+            ("Run ID", payload.get("run_id") or "n/a", "Latest orchestration run"),
+            ("Status", _badge(payload.get("status") or "unknown"), ""),
+            ("Stages", len(chain), "Decision steps"),
+        ]
+    )
+    body += (
+        "<div style='margin:10px 0;'>"
+        "<button class='button-link secondary' onclick=\"fetch('/api/reasoning/latest').then(function(r){return r.json();}).then(function(d){window.location.reload();}).catch(function(){});\">Refresh</button>"
+        "</div>"
+    )
+    body += _section("Decision Chain", chain_html, subtitle="Plain-English summary of each orchestration stage")
+    if candidates:
+        body += _section(
+            "Promotion Candidates",
+            _table(["run_id", "sharpe", "recommendation"], candidates, empty="No candidates found."),
+        )
+    return _page_shell(title="Strategy Reasoning", active_path="/reasoning", body=body)
+
+
+def _kalshi_markets_payload(service: DashboardDataService) -> dict:
+    markets_path = service.artifacts_root / "kalshi_markets.json"
+    data = _safe_read_json(markets_path)
+    if not data:
+        return {
+            "markets": [],
+            "summary": {"count": 0},
+            "generated_at": datetime.now(UTC).isoformat(),
+            "source": "no_data",
+        }
+    markets = data.get("markets", [])
+    summary = data.get("summary", {})
+    if not summary:
+        yes_bids = [float(m["yes_bid"]) for m in markets if m.get("yes_bid") is not None]
+        volumes = [float(m["volume"]) for m in markets if m.get("volume") is not None]
+        summary = {
+            "count": len(markets),
+            "avg_yes_bid": sum(yes_bids) / len(yes_bids) if yes_bids else None,
+            "total_volume": sum(volumes) if volumes else 0,
+        }
+    return {
+        "markets": markets,
+        "summary": summary,
+        "generated_at": data.get("generated_at") or datetime.now(UTC).isoformat(),
+        "source": "kalshi_markets.json",
+    }
+
+
+def _kalshi_yes_bid_badge(yes_bid: object) -> str:
+    try:
+        val = float(yes_bid)
+    except (TypeError, ValueError):
+        return "<span class='badge'>n/a</span>"
+    if val > 0.7:
+        return f"<span class='badge succeeded'>high-prob</span> {html.escape(_format_number(val, pct=True))}"
+    if val >= 0.3:
+        return f"<span class='badge'>{html.escape(_format_number(val, pct=True))}</span>"
+    return f"<span class='badge failed'>low-prob</span> {html.escape(_format_number(val, pct=True))}"
+
+
+def _kalshi_signal_badge(score: object) -> str:
+    if score is None or score == "":
+        return "<span class='badge'>n/a</span>"
+    try:
+        val = float(score)
+    except (TypeError, ValueError):
+        return "<span class='badge'>n/a</span>"
+    if val > 0.7:
+        return "<span class='badge succeeded'>strong buy</span>"
+    if val > 0.5:
+        return "<span class='badge fresh'>buy</span>"
+    if val >= 0.3:
+        return "<span class='badge'>neutral</span>"
+    return "<span class='badge failed'>avoid</span>"
+
+
+def _kalshi_page(service: DashboardDataService, query: dict[str, list[str]]) -> bytes:
+    payload = _kalshi_markets_payload(service)
+    markets = payload.get("markets", [])
+    summary = payload.get("summary", {})
+    status_filter = _query_value(query, "status")
+    category_filter = _query_value(query, "category")
+    if status_filter:
+        markets = [m for m in markets if str(m.get("status", "")).lower() == status_filter.lower()]
+    if category_filter:
+        markets = [m for m in markets if str(m.get("category", "")).lower() == category_filter.lower()]
+    avg_yes_bid = summary.get("avg_yes_bid")
+    body = _metric_cards(
+        [
+            ("Market Count", summary.get("count", 0), "Total Kalshi markets"),
+            (
+                "Avg Yes Bid",
+                _format_number(avg_yes_bid, pct=True) if avg_yes_bid is not None else "n/a",
+                "Average yes bid across markets",
+            ),
+            ("Total Volume", _format_number(summary.get("total_volume"), digits=0), "Aggregate volume"),
+        ]
+    )
+    all_statuses = sorted({str(m.get("status", "")) for m in payload.get("markets", []) if m.get("status")})
+    all_categories = sorted({str(m.get("category", "")) for m in payload.get("markets", []) if m.get("category")})
+    filter_controls = (
+        "<section class='panel'>"
+        "<form class='page-filters' method='get'>"
+        "<label class='filter-control'><span>Status</span>"
+        "<select name='status'><option value=''>All</option>"
+        + "".join(
+            f"<option value='{html.escape(s)}'{' selected' if s == (status_filter or '') else ''}>{html.escape(s)}</option>"
+            for s in all_statuses
+        )
+        + "</select></label>"
+        "<label class='filter-control'><span>Category</span>"
+        "<select name='category'><option value=''>All</option>"
+        + "".join(
+            f"<option value='{html.escape(c)}'{' selected' if c == (category_filter or '') else ''}>{html.escape(c)}</option>"
+            for c in all_categories
+        )
+        + "</select></label>"
+        "<div class='filter-actions'><button class='button-link' type='submit'>Apply</button></div>"
+        "</form></section>"
+    )
+    body += filter_controls
+    table_rows_html = ""
+    if not markets:
+        table_rows_html = "<section class='panel'><div class='empty'>No markets match current filters.</div></section>"
+    else:
+        head_cols = ["ticker", "title", "yes_bid", "yes_ask", "volume", "status", "signal_score", "sparkline"]
+        head = "".join(f"<th>{html.escape(c.replace('_', ' '))}</th>" for c in head_cols)
+        rows_html = []
+        for m in markets:
+            rows_html.append(
+                "<tr>"
+                f"<td>{html.escape(str(m.get('ticker') or 'n/a'))}</td>"
+                f"<td>{html.escape(str(m.get('title') or 'n/a'))}</td>"
+                f"<td>{_kalshi_yes_bid_badge(m.get('yes_bid'))}</td>"
+                f"<td>{html.escape(_format_number(m.get('yes_ask'), pct=True))}</td>"
+                f"<td>{html.escape(_format_number(m.get('volume'), digits=0))}</td>"
+                f"<td>{_badge(m.get('status') or 'unknown')}</td>"
+                f"<td>{_kalshi_signal_badge(m.get('signal_score'))}</td>"
+                f"<td><span class='subtle'>—</span></td>"
+                "</tr>"
+            )
+        table_rows_html = (
+            "<section class='panel'><div class='table-wrap'>"
+            f"<table><thead><tr>{head}</tr></thead><tbody>{''.join(rows_html)}</tbody></table>"
+            "</div></section>"
+        )
+    body += _section("Markets", table_rows_html, subtitle=f"Showing {len(markets)} markets")
+    body += (
+        "<script>"
+        "setInterval(function(){"
+        "fetch('/api/kalshi/markets').then(function(r){return r.json();}).catch(function(){});"
+        "},60000);"
+        "</script>"
+    )
+    return _page_shell(title="Kalshi Markets", active_path="/kalshi", body=body)
+
+
 def create_dashboard_app(
     artifacts_root: str | Path,
     *,
@@ -1884,6 +2285,41 @@ def create_dashboard_app(
                     [("Content-Type", "text/html; charset=utf-8")],
                     _symbol_detail_page(service, symbol, query),
                 )
+            )
+        elif path == "/api/pnl-strip":
+            status, headers, body = _json_response(_pnl_strip_payload(service))
+        elif path == "/api/control/status":
+            status, headers, body = _json_response(_control_status_payload(service))
+        elif path == "/api/control/action":
+            content_length = int(environ.get("CONTENT_LENGTH") or 0)
+            raw_body = environ["wsgi.input"].read(content_length)
+            try:
+                payload = json.loads(raw_body.decode("utf-8"))
+            except Exception:
+                payload = {}
+            action = payload.get("action", "")
+            control_file = service.artifacts_root / "loop_control.json"
+            try:
+                control_file.write_text(
+                    json.dumps({"action": action, "requested_at": datetime.now(UTC).isoformat()}, indent=2),
+                    encoding="utf-8",
+                )
+            except Exception:
+                pass
+            status, headers, body = _json_response({"ok": True, "action": action})
+        elif path == "/api/reasoning/latest":
+            status, headers, body = _json_response(_reasoning_payload(service))
+        elif path == "/api/kalshi/markets":
+            status, headers, body = _json_response(_kalshi_markets_payload(service))
+        elif path == "/control":
+            status, headers, body = "200 OK", [("Content-Type", "text/html; charset=utf-8")], _control_page(service)
+        elif path == "/reasoning":
+            status, headers, body = "200 OK", [("Content-Type", "text/html; charset=utf-8")], _reasoning_page(service)
+        elif path == "/kalshi":
+            status, headers, body = (
+                "200 OK",
+                [("Content-Type", "text/html; charset=utf-8")],
+                _kalshi_page(service, query),
             )
         else:
             status, headers, body = _not_found()

@@ -1,0 +1,22 @@
+schema_version: 1
+
+# Kalshi prediction market alpha research configuration.
+# Feature parquets are produced by: trading-cli kalshi ingest (or synthetic data generator).
+
+paths:
+  feature_dir: data/kalshi/features
+  output_dir: artifacts/kalshi_research
+  resolution_data_path: null   # Path to CSV with ticker,resolution_price columns (optional)
+
+signals:
+  families:
+    - kalshi_calibration_drift
+    - kalshi_volume_spike
+    - kalshi_time_decay
+  forward_horizon_bars: 10     # Bars ahead to measure forward return for IC
+  min_rows: 30                 # Minimum bars required per market
+
+backtest:
+  enabled: false               # Set true when resolution data is available
+  entry_threshold: 0.5         # Minimum |signal| to enter a trade
+  long_only: false             # false = take both YES and NO positions
