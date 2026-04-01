@@ -431,6 +431,200 @@ def build_kpi_payload(*, result: "PaperTradingRunResult") -> KpiPayload:
             records.append(
                 KpiRecord(result.as_of, "trade", "trade_decisions", "mean_reliability_score", mean_reliability)
             )
+    if result.outcome_attribution_report is not None:
+        summary = dict(result.outcome_attribution_report.summary)
+        records.append(
+            KpiRecord(
+                result.as_of,
+                "trade_outcome",
+                "trade_outcomes",
+                "closed_trade_count",
+                float(summary.get("closed_trade_count", 0) or 0.0),
+                unit="count",
+            )
+        )
+        for metric_name in (
+            "mean_predicted_net_return",
+            "mean_realized_net_return",
+            "mean_forecast_gap",
+            "mean_alpha_error",
+            "mean_cost_error",
+        ):
+            metric_value = _safe_float(summary.get(metric_name))
+            if metric_value is None:
+                continue
+            records.append(
+                KpiRecord(
+                    result.as_of,
+                    "trade_outcome",
+                    "trade_outcomes",
+                    metric_name,
+                    metric_value,
+                    unit="ratio",
+                )
+            )
+    if result.risk_control_report is not None:
+        risk_summary = dict(result.risk_control_report.summary)
+        state_value = {"healthy": 0.0, "restricted": 1.0, "halted": 2.0}.get(
+            str(result.risk_control_report.operating_state), 0.0
+        )
+        records.append(
+            KpiRecord(
+                result.as_of,
+                "risk_control",
+                "paper_risk_controls",
+                "operating_state_code",
+                state_value,
+                unit="state_code",
+            )
+        )
+        for metric_name in ("trigger_count", "action_count", "event_count", "portfolio_drawdown"):
+            metric_value = _safe_float(risk_summary.get(metric_name))
+            if metric_value is None:
+                continue
+            records.append(
+                KpiRecord(
+                    result.as_of,
+                    "risk_control",
+                    "paper_risk_controls",
+                    metric_name,
+                    metric_value,
+                    unit="count" if metric_name.endswith("count") else "ratio",
+                )
+            )
+    if result.drift_report is not None:
+        drift_summary = dict(result.drift_report.summary)
+        records.append(
+            KpiRecord(
+                result.as_of,
+                "drift",
+                "drift_detection",
+                "signal_count",
+                float(drift_summary.get("signal_count", 0) or 0.0),
+                unit="count",
+            )
+        )
+        severity_rank = {"info": 1.0, "watch": 2.0, "warning": 3.0, "critical": 4.0}
+        highest_severity = str(drift_summary.get("highest_severity") or "")
+        if highest_severity in severity_rank:
+            records.append(
+                KpiRecord(
+                    result.as_of,
+                    "drift",
+                    "drift_detection",
+                    "highest_severity_code",
+                    severity_rank[highest_severity],
+                    unit="state_code",
+                )
+            )
+        for metric_name in ("snapshot_count",):
+            metric_value = _safe_float(drift_summary.get(metric_name))
+            if metric_value is None:
+                continue
+            records.append(
+                KpiRecord(
+                    result.as_of,
+                    "drift",
+                    "drift_detection",
+                    metric_name,
+                    metric_value,
+                    unit="count",
+                )
+            )
+    if result.calibration_report is not None:
+        calibration_summary = dict(result.calibration_report.summary)
+        records.append(
+            KpiRecord(
+                result.as_of,
+                "calibration",
+                "calibration_pipeline",
+                "record_count",
+                float(calibration_summary.get("record_count", 0) or 0.0),
+                unit="count",
+            )
+        )
+        for metric_name in (
+            "bucket_count",
+            "sufficient_scope_count",
+            "mean_raw_confidence_error",
+            "mean_calibrated_confidence_error",
+            "mean_raw_expected_value_error",
+            "mean_calibrated_expected_value_error",
+        ):
+            metric_value = _safe_float(calibration_summary.get(metric_name))
+            if metric_value is None:
+                continue
+            records.append(
+                KpiRecord(
+                    result.as_of,
+                    "calibration",
+                    "calibration_pipeline",
+                    metric_name,
+                    metric_value,
+                    unit="count" if metric_name.endswith("count") else "ratio",
+                )
+            )
+    if result.strategy_decay_report is not None:
+        decay_summary = dict(result.strategy_decay_report.summary)
+        records.append(
+            KpiRecord(
+                result.as_of,
+                "strategy_decay",
+                "strategy_decay",
+                "strategy_count",
+                float(decay_summary.get("strategy_count", 0) or 0.0),
+                unit="count",
+            )
+        )
+        for metric_name in ("signal_count", "critical_count", "warning_count", "watch_count", "portfolio_decay_score"):
+            metric_value = _safe_float(decay_summary.get(metric_name))
+            if metric_value is None:
+                continue
+            records.append(
+                KpiRecord(
+                    result.as_of,
+                    "strategy_decay",
+                    "strategy_decay",
+                    metric_name,
+                    metric_value,
+                    unit="count" if metric_name.endswith("count") else "ratio",
+                )
+            )
+    if result.strategy_lifecycle_report is not None:
+        lifecycle_summary = dict(result.strategy_lifecycle_report.summary)
+        records.append(
+            KpiRecord(
+                result.as_of,
+                "strategy_lifecycle",
+                "strategy_lifecycle",
+                "strategy_count",
+                float(lifecycle_summary.get("strategy_count", 0) or 0.0),
+                unit="count",
+            )
+        )
+        for metric_name in (
+            "action_count",
+            "transition_count",
+            "demotion_count",
+            "retraining_trigger_count",
+            "watch_count",
+            "constrained_count",
+            "demoted_count",
+            "suppressed_action_count",
+        ):
+            metric_value = _safe_float(lifecycle_summary.get(metric_name))
+            if metric_value is None:
+                continue
+            records.append(
+                KpiRecord(
+                    result.as_of,
+                    "strategy_lifecycle",
+                    "strategy_lifecycle",
+                    metric_name,
+                    metric_value,
+                    unit="count",
+                )
+            )
     for row in list(result.attribution.get("strategy_rows", [])):
         strategy_id = str(row.get("strategy_id") or "").strip()
         if not strategy_id:

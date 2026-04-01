@@ -11,14 +11,19 @@ from trading_platform.execution.reconciliation import build_order_lifecycle_reco
 from trading_platform.paper.models import PaperOrder, PaperPortfolioState, PaperPosition, PaperTradingRunResult
 from trading_platform.reporting.dashboard_payloads import (
     KpiPayload,
-    TradeExplorerPayload,
     StrategyHealthPayload,
+    TradeExplorerPayload,
     build_kpi_payload,
     build_strategy_health_payload,
     build_trade_explorer_payload,
     write_kpi_payload_artifacts,
     write_strategy_health_payload_artifacts,
     write_trade_explorer_payload_artifacts,
+)
+from trading_platform.reporting.system_health import (
+    SystemHealthPayload,
+    build_system_health_payload,
+    write_system_health_artifacts,
 )
 
 
@@ -128,10 +133,12 @@ def test_reporting_payload_contracts_round_trip() -> None:
     kpi_payload = build_kpi_payload(result=result)
     trade_explorer_payload = build_trade_explorer_payload(result=result)
     strategy_health_payload = build_strategy_health_payload(result=result)
+    system_health_payload = build_system_health_payload(result=result, artifact_paths={})
 
     assert KpiPayload.from_dict(kpi_payload.to_dict()) == kpi_payload
     assert TradeExplorerPayload.from_dict(trade_explorer_payload.to_dict()) == trade_explorer_payload
     assert StrategyHealthPayload.from_dict(strategy_health_payload.to_dict()) == strategy_health_payload
+    assert SystemHealthPayload.from_dict(system_health_payload.to_dict()) == system_health_payload
 
 
 def test_reporting_payload_writers_emit_dashboard_ready_artifacts(tmp_path: Path) -> None:
@@ -146,16 +153,64 @@ def test_reporting_payload_writers_emit_dashboard_ready_artifacts(tmp_path: Path
         output_dir=tmp_path,
         payload=build_strategy_health_payload(result=result),
     )
+    system_health_paths = write_system_health_artifacts(
+        output_dir=tmp_path,
+        payload=build_system_health_payload(
+            result=result,
+            artifact_paths={
+                "summary_path": tmp_path / "paper_summary.json",
+                "portfolio_performance_summary_path": tmp_path / "portfolio_performance_summary.json",
+                "execution_summary_json_path": tmp_path / "execution_summary.json",
+                "kpi_payload_json_path": kpi_paths["kpi_payload_json_path"],
+                "trade_explorer_payload_json_path": trade_paths["trade_explorer_payload_json_path"],
+                "strategy_health_payload_json_path": health_paths["strategy_health_payload_json_path"],
+                "realtime_kpi_monitoring_json_path": tmp_path / "realtime_kpi_monitoring.json",
+            },
+        ),
+    )
 
     assert kpi_paths["kpi_payload_json_path"].exists()
     assert trade_paths["trade_explorer_payload_json_path"].exists()
     assert health_paths["strategy_health_payload_json_path"].exists()
+    assert system_health_paths["system_health_payload_json_path"].exists()
 
     kpi_df = pd.read_csv(kpi_paths["kpi_records_csv_path"])
     trade_df = pd.read_csv(trade_paths["trade_explorer_rows_csv_path"])
     health_df = pd.read_csv(health_paths["strategy_health_payload_csv_path"])
+    system_health_df = pd.read_csv(system_health_paths["system_health_checks_csv_path"])
 
     assert "equity" in set(kpi_df["metric_name"])
     assert trade_df.iloc[0]["symbol"] == "AAPL"
     assert trade_df.iloc[0]["reconciliation_status"] == "reconciled"
     assert health_df.iloc[0]["strategy_id"] == "sma_cross"
+    assert "artifact_presence" in set(system_health_df["check_name"])
+
+
+def test_system_health_payload_surfaces_stale_data_and_missing_artifacts() -> None:
+    result = _build_result()
+    result.price_snapshots = []
+    result.latest_scores = {}
+    result.latest_target_weights = {"AAPL": 0.5}
+    result.diagnostics["paper_execution"] = {
+        "latest_data_stale": True,
+        "latest_bar_age_seconds": 7200.0,
+        "stale_symbol_count": 1,
+        "snapshot_symbol_count": 1,
+        "latest_data_source": "yfinance",
+        "latest_data_fallback_used": True,
+    }
+    result.decision_bundle = None
+
+    payload = build_system_health_payload(
+        result=result,
+        artifact_paths={
+            "summary_path": Path("missing_summary.json"),
+        },
+    )
+
+    checks = {row.check_name: row for row in payload.checks}
+    assert checks["data_freshness"].status == "warn"
+    assert checks["stale_signals"].status == "fail"
+    assert checks["artifact_presence"].status == "fail"
+    assert checks["pipeline_integrity"].status == "fail"
+    assert payload.summary["failure_count"] >= 1

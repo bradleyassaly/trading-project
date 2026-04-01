@@ -32,6 +32,7 @@ from trading_platform.cli.commands.experiments_list import cmd_experiments_list
 from trading_platform.cli.commands.export_universes import cmd_export_universes
 from trading_platform.cli.commands.features import cmd_features
 from trading_platform.cli.commands.kalshi_features import cmd_kalshi_features
+from trading_platform.cli.commands.kalshi_historical_ingest import cmd_kalshi_historical_ingest
 from trading_platform.cli.commands.fundamentals_features import cmd_fundamentals_features
 from trading_platform.cli.commands.fundamentals_ingest import cmd_fundamentals_ingest
 from trading_platform.cli.commands.fundamentals_snapshot_build import cmd_fundamentals_snapshot_build
@@ -88,6 +89,7 @@ from trading_platform.cli.commands.research_db import (
     cmd_research_db_top_candidates,
 )
 from trading_platform.cli.commands.kalshi_alpha_research import cmd_kalshi_alpha_research
+from trading_platform.cli.commands.kalshi_full_backtest import cmd_kalshi_full_backtest
 from trading_platform.cli.commands.research_leaderboard import cmd_research_leaderboard
 from trading_platform.cli.commands.research_monitor import cmd_research_monitor
 from trading_platform.cli.commands.research_promote import cmd_research_promote
@@ -1786,6 +1788,60 @@ def build_parser() -> argparse.ArgumentParser:
     )
     data_kalshi_features.set_defaults(func=cmd_kalshi_features)
 
+    data_kalshi_historical_ingest = data_kalshi_subparsers.add_parser(
+        "historical-ingest",
+        help="Download resolved Kalshi markets from the past year and build feature parquets.",
+    )
+    data_kalshi_historical_ingest.add_argument(
+        "--config",
+        type=str,
+        default="configs/kalshi.yaml",
+        help="Path to kalshi.yaml config (default: configs/kalshi.yaml).",
+    )
+    data_kalshi_historical_ingest.add_argument(
+        "--lookback-days",
+        type=int,
+        default=None,
+        help="Number of days to look back for resolved markets (default: 365).",
+    )
+    data_kalshi_historical_ingest.add_argument(
+        "--period",
+        type=str,
+        default=None,
+        help="Bar resampling period, e.g. '1h', '1d' (default: 1h).",
+    )
+    data_kalshi_historical_ingest.add_argument(
+        "--sleep",
+        type=float,
+        default=None,
+        help="Sleep seconds between API requests (default: 0.2 = 5 req/sec).",
+    )
+    data_kalshi_historical_ingest.add_argument(
+        "--output-dir",
+        type=str,
+        default=None,
+        help="Directory to write feature parquets (default: data/kalshi/features).",
+    )
+    data_kalshi_historical_ingest.add_argument(
+        "--tickers",
+        nargs="*",
+        default=None,
+        help="Optional list of specific tickers to ingest. Defaults to all resolved markets.",
+    )
+    data_kalshi_historical_ingest.add_argument(
+        "--no-base-rate",
+        action="store_true",
+        default=False,
+        help="Disable base rate feature enrichment.",
+    )
+    data_kalshi_historical_ingest.add_argument(
+        "--metaculus",
+        action="store_true",
+        default=False,
+        help="Enable Metaculus divergence feature enrichment (requires pre-built matches).",
+    )
+    data_kalshi_historical_ingest.set_defaults(func=cmd_kalshi_historical_ingest)
+
     data_fundamentals = data_subparsers.add_parser(
         "fundamentals", help="Canonical fundamentals ingest and daily feature generation commands"
     )
@@ -2348,6 +2404,49 @@ def build_parser() -> argparse.ArgumentParser:
         help="Minimum rows required per market parquet (default: 30).",
     )
     research_kalshi_alpha.set_defaults(func=cmd_kalshi_alpha_research)
+
+    research_kalshi_full_backtest = research_subparsers.add_parser(
+        "kalshi-full-backtest",
+        help="Run backtest across all 5 Kalshi signal families on real historical data.",
+    )
+    research_kalshi_full_backtest.add_argument(
+        "--config",
+        type=str,
+        default=None,
+        help="Optional YAML config path.",
+    )
+    research_kalshi_full_backtest.add_argument(
+        "--feature-dir",
+        type=str,
+        default=None,
+        help="Directory containing Kalshi feature parquets (default: data/kalshi/features).",
+    )
+    research_kalshi_full_backtest.add_argument(
+        "--resolution-data",
+        type=str,
+        default=None,
+        help="Path to resolution CSV (default: data/kalshi/raw/resolution.csv).",
+    )
+    research_kalshi_full_backtest.add_argument(
+        "--output-dir",
+        type=str,
+        default=None,
+        help="Output directory for backtest artifacts (default: artifacts/kalshi_research).",
+    )
+    research_kalshi_full_backtest.add_argument(
+        "--entry-threshold",
+        type=float,
+        default=None,
+        help="Minimum |signal| to enter a trade (default: 0.5).",
+    )
+    research_kalshi_full_backtest.add_argument(
+        "--long-only",
+        action="store_true",
+        default=False,
+        help="Only take YES positions (skip NO trades).",
+    )
+    research_kalshi_full_backtest.set_defaults(func=cmd_kalshi_full_backtest)
+
     research_registry = research_subparsers.add_parser("registry", help="Research manifest registry commands")
     research_registry_subparsers = research_registry.add_subparsers(dest="research_registry_command", required=True)
     research_registry_build = research_registry_subparsers.add_parser(

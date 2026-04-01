@@ -77,6 +77,35 @@ from trading_platform.reporting.realtime_monitoring import (
     build_realtime_monitoring_payload,
     write_realtime_monitoring_artifacts,
 )
+from trading_platform.reporting.calibration import (
+    build_calibration_summary_report,
+    write_calibration_artifacts,
+)
+from trading_platform.reporting.drift_detection import (
+    build_drift_summary_report,
+    write_drift_detection_artifacts,
+)
+from trading_platform.reporting.strategy_decay import (
+    build_strategy_decay_summary_report,
+    write_strategy_decay_artifacts,
+)
+from trading_platform.governance.lifecycle import (
+    build_strategy_lifecycle_summary_report,
+    write_strategy_lifecycle_artifacts,
+)
+from trading_platform.reporting.outcome_attribution import (
+    build_trade_outcome_attribution_report,
+    write_trade_outcome_attribution_artifacts,
+)
+from trading_platform.reporting.system_health import (
+    build_system_health_payload,
+    write_system_health_artifacts,
+)
+from trading_platform.risk.controls import (
+    apply_pretrade_risk_controls,
+    build_paper_risk_control_report,
+    write_paper_risk_control_artifacts,
+)
 from trading_platform.settings import METADATA_DIR
 from trading_platform.paper.slippage import apply_order_slippage, validate_slippage_config
 from trading_platform.risk.pre_trade_checks import validate_orders
@@ -515,8 +544,16 @@ def _apply_score_band_to_target(
 
 
 def _dominant_strategy_id(provenance: dict[str, Any] | None) -> str | None:
-    strategy_rows = list((provenance or {}).get("strategy_rows") or [])
+    payload = dict(provenance or {})
+    strategy_rows = list(payload.get("strategy_rows") or [])
     if not strategy_rows:
+        strategy_id = payload.get("strategy_id")
+        if strategy_id:
+            return str(strategy_id)
+        ownership = dict(payload.get("strategy_ownership") or {})
+        if ownership:
+            dominant = max(ownership.items(), key=lambda item: (abs(float(item[1] or 0.0)), str(item[0])))
+            return str(dominant[0])
         return None
     ordered = sorted(
         strategy_rows,
@@ -1938,9 +1975,17 @@ def generate_rebalance_orders(
                     "exit_threshold": band_row.get("exit_threshold"),
                     "band_decision": band_row.get("band_decision"),
                     "action_reason": band_row.get("action_reason"),
+                    "decision_timestamp": as_of,
+                    "decision_id": _entry_decision_id(
+                        entry_date=as_of,
+                        strategy_id=_dominant_strategy_id(effective_request.provenance),
+                        symbol=effective_request.symbol,
+                    ),
                     "expected_gross_return": (ev_prediction or {}).get("expected_gross_return"),
                     "expected_net_return": (ev_prediction or {}).get("expected_net_return"),
+                    "expected_cost": estimated_cost_pct,
                     "probability_positive": (ev_prediction or {}).get("probability_positive"),
+                    "predicted_return": (ev_prediction or {}).get("predicted_return"),
                     "raw_ev_score": (ev_prediction or {}).get("raw_ev_score"),
                     "normalized_ev_score": (ev_prediction or {}).get("normalized_ev_score"),
                     "ev_score_post_clip": (ev_prediction or {}).get("ev_score_post_clip"),
@@ -1965,6 +2010,11 @@ def generate_rebalance_orders(
                     "ev_model_type_requested": requested_ev_model_type,
                     "ev_model_type_used": ev_model_type_used,
                     "ev_model_fallback_reason": local_ev_fallback_reason,
+                    "calibration_score": (ev_prediction or {}).get("probability_positive"),
+                    "regime_label": candidate_row_by_symbol.get(effective_request.symbol, {}).get("regime_label"),
+                    "expected_horizon_days": candidate_row_by_symbol.get(effective_request.symbol, {}).get(
+                        "expected_horizon_days"
+                    ),
                     "regression_raw_ev_score": (regression_prediction or {}).get("regression_raw_ev_score"),
                     "regression_normalized_ev_score": (regression_prediction or {}).get(
                         "regression_normalized_ev_score"
@@ -2382,6 +2432,12 @@ def _next_trade_id(state: PaperPortfolioState) -> str:
     return trade_id
 
 
+def _entry_decision_id(*, entry_date: str | None, strategy_id: str | None, symbol: str) -> str | None:
+    if not entry_date or not strategy_id:
+        return None
+    return f"trade_decision_contract_v1|{entry_date}|{symbol}|{strategy_id}"
+
+
 def _allocated_order_metrics(order: PaperOrder, quantity: int) -> dict[str, dict[str, float]]:
     ownership = _normalized_order_ownership(order)
     allocated_qty = allocate_integer_quantities(quantity, ownership)
@@ -2476,10 +2532,23 @@ def _append_open_lots(
                 metadata={
                     "order_reason": order.reason,
                     "target_weight": (order.provenance or {}).get("target_weight"),
+                    "requested_target_weight": (order.provenance or {}).get("requested_target_weight"),
                     "ev_entry": (order.provenance or {}).get("raw_ev_score"),
                     "score_entry": (order.provenance or {}).get("score_value"),
                     "score_percentile_entry": (order.provenance or {}).get("score_percentile"),
                     "entry_reason": (order.provenance or {}).get("action_reason"),
+                    "entry_decision_id": (order.provenance or {}).get("decision_id"),
+                    "entry_decision_timestamp": (order.provenance or {}).get("decision_timestamp"),
+                    "predicted_return": (order.provenance or {}).get("predicted_return"),
+                    "predicted_gross_return": (order.provenance or {}).get("expected_gross_return"),
+                    "predicted_cost": (order.provenance or {}).get("expected_cost"),
+                    "predicted_net_return": (order.provenance or {}).get("expected_net_return"),
+                    "probability_positive": (order.provenance or {}).get("probability_positive"),
+                    "confidence_score": (order.provenance or {}).get("ev_confidence"),
+                    "reliability_score": (order.provenance or {}).get("ev_reliability"),
+                    "calibration_score": (order.provenance or {}).get("calibration_score"),
+                    "regime_label": (order.provenance or {}).get("regime_label"),
+                    "expected_horizon_days": (order.provenance or {}).get("expected_horizon_days"),
                 },
             )
         )
@@ -2562,10 +2631,25 @@ def _close_open_lots(
                     "score_entry": lot.metadata.get("score_entry"),
                     "score_percentile_entry": lot.metadata.get("score_percentile_entry"),
                     "entry_reason": lot.metadata.get("entry_reason"),
+                    "entry_decision_id": lot.metadata.get("entry_decision_id"),
+                    "entry_decision_timestamp": lot.metadata.get("entry_decision_timestamp"),
+                    "predicted_return": lot.metadata.get("predicted_return"),
+                    "predicted_gross_return": lot.metadata.get("predicted_gross_return"),
+                    "predicted_cost": lot.metadata.get("predicted_cost"),
+                    "predicted_net_return": lot.metadata.get("predicted_net_return"),
+                    "probability_positive": lot.metadata.get("probability_positive"),
+                    "confidence_score": lot.metadata.get("confidence_score"),
+                    "reliability_score": lot.metadata.get("reliability_score"),
+                    "calibration_score": lot.metadata.get("calibration_score"),
+                    "regime_label": lot.metadata.get("regime_label"),
+                    "expected_horizon_days": lot.metadata.get("expected_horizon_days"),
+                    "target_weight_entry": lot.metadata.get("target_weight"),
                     "ev_exit": (order.provenance or {}).get("raw_ev_score"),
                     "score_exit": (order.provenance or {}).get("score_value"),
                     "score_percentile_exit": (order.provenance or {}).get("score_percentile"),
                     "exit_reason": (order.provenance or {}).get("action_reason") or order.reason,
+                    "target_weight_exit": (order.provenance or {}).get("target_weight"),
+                    "exit_regime_label": (order.provenance or {}).get("regime_label"),
                 }
             )
             fill_rows.append(
@@ -3045,6 +3129,18 @@ def run_paper_trading_cycle_for_targets(
         orders=executable_orders,
         config=config,
     )
+    (
+        executable_orders,
+        risk_pretrade_triggers,
+        risk_pretrade_actions,
+        risk_pretrade_events,
+        risk_pretrade_state,
+    ) = apply_pretrade_risk_controls(
+        as_of=as_of,
+        orders=executable_orders,
+        state=starting_state,
+        config=config,
+    )
 
     broker_orders = [
         BrokerOrder(
@@ -3420,6 +3516,13 @@ def run_paper_trading_cycle_for_targets(
             "latest_bar_age_seconds": target_diagnostics.get("latest_bar_age_seconds"),
             "latest_data_stale": target_diagnostics.get("latest_data_stale"),
         },
+        "risk_controls_pretrade": {
+            "enabled": bool(config.risk_controls_enabled),
+            "operating_state": risk_pretrade_state,
+            "trigger_count": len(risk_pretrade_triggers),
+            "action_count": len(risk_pretrade_actions),
+            "event_count": len(risk_pretrade_events),
+        },
         "accounting": accounting_summary,
         "pnl_attribution": attribution_payload,
     }
@@ -3453,7 +3556,7 @@ def run_paper_trading_cycle_for_targets(
         execution_simulation_report=execution_simulation_report,
     )
 
-    return PaperTradingRunResult(
+    result = PaperTradingRunResult(
         as_of=as_of,
         state=state,
         latest_prices=latest_prices,
@@ -3475,6 +3578,21 @@ def run_paper_trading_cycle_for_targets(
         execution_simulation_report=execution_simulation_report,
         transaction_cost_report=transaction_cost_report,
     )
+    result.outcome_attribution_report = build_trade_outcome_attribution_report(result=result)
+    result.calibration_report = build_calibration_summary_report(result=result)
+    result.drift_report = build_drift_summary_report(result=result)
+    result.risk_control_report = build_paper_risk_control_report(
+        result=result,
+        config=config,
+        starting_state=starting_state,
+        pretrade_triggers=risk_pretrade_triggers,
+        pretrade_actions=risk_pretrade_actions,
+        pretrade_events=risk_pretrade_events,
+        pretrade_state=risk_pretrade_state,
+    )
+    result.strategy_decay_report = build_strategy_decay_summary_report(result=result)
+    result.strategy_lifecycle_report = build_strategy_lifecycle_summary_report(result=result)
+    return result
 
 
 def run_paper_trading_cycle(
@@ -3910,6 +4028,45 @@ def write_paper_trading_artifacts(
         paths["paper_execution_simulation_csv_path"] = execution_simulation_csv_path
     if result.transaction_cost_report is not None:
         paths.update(write_transaction_cost_artifacts(output_dir=output_path, report=result.transaction_cost_report))
+    if result.outcome_attribution_report is None:
+        result.outcome_attribution_report = build_trade_outcome_attribution_report(result=result)
+    if result.outcome_attribution_report is not None:
+        paths.update(
+            write_trade_outcome_attribution_artifacts(
+                output_dir=output_path,
+                report=result.outcome_attribution_report,
+            )
+        )
+    if result.calibration_report is None:
+        result.calibration_report = build_calibration_summary_report(result=result)
+    if result.calibration_report is not None:
+        paths.update(write_calibration_artifacts(output_dir=output_path, report=result.calibration_report))
+    if result.drift_report is None:
+        result.drift_report = build_drift_summary_report(result=result)
+    if result.drift_report is not None:
+        paths.update(write_drift_detection_artifacts(output_dir=output_path, report=result.drift_report))
+    if result.strategy_decay_report is None:
+        result.strategy_decay_report = build_strategy_decay_summary_report(result=result)
+    if result.strategy_decay_report is not None:
+        paths.update(write_strategy_decay_artifacts(output_dir=output_path, report=result.strategy_decay_report))
+    if result.risk_control_report is None:
+        inferred_symbols = sorted(
+            {
+                *result.latest_prices.keys(),
+                *result.latest_target_weights.keys(),
+                *(order.symbol for order in result.orders),
+            }
+        )
+        result.risk_control_report = build_paper_risk_control_report(
+            result=result,
+            config=PaperTradingConfig(symbols=inferred_symbols or ["UNKNOWN"]),
+        )
+    if result.risk_control_report is not None:
+        paths.update(write_paper_risk_control_artifacts(output_dir=output_path, report=result.risk_control_report))
+    if result.strategy_lifecycle_report is None:
+        result.strategy_lifecycle_report = build_strategy_lifecycle_summary_report(result=result)
+    if result.strategy_lifecycle_report is not None:
+        paths.update(write_strategy_lifecycle_artifacts(output_dir=output_path, report=result.strategy_lifecycle_report))
     execution_payload = result.diagnostics.get("execution", {})
     if execution_payload.get("execution_summary"):
         simulation_result = ExecutionSimulationResult(
@@ -3967,4 +4124,6 @@ def write_paper_trading_artifacts(
         )
     )
     paths.update(extra_paths)
+    system_health_payload = build_system_health_payload(result=result, artifact_paths=paths)
+    paths.update(write_system_health_artifacts(output_dir=output_path, payload=system_health_payload))
     return paths

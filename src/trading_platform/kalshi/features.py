@@ -43,7 +43,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any  # noqa: F401 — used in build_kalshi_features signature
 
 import polars as pl
 
@@ -60,6 +60,9 @@ KALSHI_FEATURE_GROUPS: list[str] = [
     "probability_calibration",
     "volume_activity",
     "time_decay",
+    "base_rate",
+    "metaculus",
+    "informed_flow",
 ]
 
 
@@ -285,21 +288,32 @@ def build_kalshi_features(
     timestamp_col: str = "traded_at",
     price_col: str = "yes_price",
     count_col: str = "count",
+    extra_scalar_features: dict[str, float] | None = None,
+    market_context: dict[str, Any] | None = None,
 ) -> pl.DataFrame:
     """
     Full feature pipeline: resample trades → canonical bars → all feature groups.
 
-    :param trades:         Raw trades DataFrame (one row per trade).
-    :param ticker:         Kalshi market ticker; injected as ``symbol`` column.
-    :param period:         Resampling period (default ``"1h"``).
-    :param close_time:     Optional market resolution time for time-decay features.
-    :param feature_groups: Subset of :data:`KALSHI_FEATURE_GROUPS` to compute.
-                           Defaults to all groups.
-    :param timestamp_col:  Datetime column name in ``trades``.
-    :param price_col:      Yes-price column name in ``trades``.
-    :param count_col:      Contract-count column name in ``trades``.
-    :returns:              Feature DataFrame with ``symbol`` column set to ``ticker``.
-    :raises ValueError:    If ``trades`` is empty after resampling.
+    :param trades:               Raw trades DataFrame (one row per trade).
+    :param ticker:               Kalshi market ticker; injected as ``symbol`` column.
+    :param period:               Resampling period (default ``"1h"``).
+    :param close_time:           Optional market resolution time for time-decay features.
+    :param feature_groups:       Subset of :data:`KALSHI_FEATURE_GROUPS` to compute.
+                                 Defaults to all groups.
+    :param timestamp_col:        Datetime column name in ``trades``.
+    :param price_col:            Yes-price column name in ``trades``.
+    :param count_col:            Contract-count column name in ``trades``.
+    :param extra_scalar_features: Optional dict mapping column name → scalar float value.
+                                 Each entry is broadcast as a constant column across all
+                                 bars. Used for market-level signals (base rate, Metaculus)
+                                 that are scalars rather than time series.
+    :param market_context:       Optional dict with keys ``title``, ``series_ticker``,
+                                 ``base_rate_db_path``, and ``side_col`` forwarded to
+                                 the informed flow feature builder.  Required for the
+                                 ``"informed_flow"`` feature group; silently ignored
+                                 when that group is not requested.
+    :returns:                    Feature DataFrame with ``symbol`` column set to ``ticker``.
+    :raises ValueError:          If ``trades`` is empty after resampling.
     """
     groups = set(feature_groups or KALSHI_FEATURE_GROUPS)
 
@@ -335,6 +349,34 @@ def build_kalshi_features(
         if "vol_10" not in df.columns:
             df = _add_volatility(df)
         df = _add_time_decay(df, close_time)
+
+    if "informed_flow" in groups:
+        try:
+            from trading_platform.kalshi.signals_informed_flow import build_informed_flow_features
+            ctx = market_context or {}
+            df = build_informed_flow_features(
+                df,
+                trades,
+                period=period,
+                market_title=ctx.get("title"),
+                series_ticker=ctx.get("series_ticker"),
+                base_rate_db_path=ctx.get("base_rate_db_path"),
+                timestamp_col=timestamp_col,
+                price_col=price_col,
+                side_col=ctx.get("side_col", "side"),
+                count_col=count_col,
+            )
+        except Exception as exc:
+            logger.warning("Informed flow feature build failed for %s: %s", ticker, exc)
+
+    # Broadcast any extra scalar features (e.g. base_rate_prior, metaculus_probability)
+    # as constant columns across all rows. These are market-level signals computed
+    # externally and injected here so they land in the same parquet as time-series features.
+    if extra_scalar_features:
+        df = df.with_columns([
+            pl.lit(v).cast(pl.Float64).alias(k)
+            for k, v in extra_scalar_features.items()
+        ])
 
     return df
 

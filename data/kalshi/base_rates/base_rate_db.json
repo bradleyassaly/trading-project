@@ -1,0 +1,153 @@
+{
+  "_meta": {
+    "description": "Historical base rates for Kalshi prediction market categories. All priors are in the 0-100 scale (matching Kalshi yes-price convention). Sources: FOMC historical records, BLS/BEA data, NOAA climate normals, sports historical outcomes.",
+    "version": "1.0",
+    "last_updated": "2026-04"
+  },
+  "categories": {
+    "fed_rate_hike": {
+      "prior": 12.0,
+      "description": "Fed funds rate hike at any given FOMC meeting (post-2009 era). Historically rare outside of tightening cycles.",
+      "keywords": ["fed hike", "rate hike", "raise rates", "increase rates", "fomc hike", "fed funds rate higher", "25 bps higher", "50 bps higher", "75 bps higher"],
+      "series_patterns": ["FOMC", "FED-RATE", "FEDRATE"],
+      "context_notes": "Conditional on tightening cycle: ~30-40%. Neutral/easing cycle: ~2-5%. This prior is the unconditional long-run average.",
+      "sample_size": 120
+    },
+    "fed_rate_hold": {
+      "prior": 63.0,
+      "description": "Fed funds rate held unchanged at any given FOMC meeting (post-2009 era). Most common outcome.",
+      "keywords": ["fed hold", "hold rates", "unchanged", "no change", "rate pause", "pause", "fomc hold", "fomc unchanged", "fed funds rate same"],
+      "series_patterns": ["FOMC", "FED-RATE", "FEDRATE"],
+      "context_notes": "Dominant outcome in most regimes. Near-zero floor era (2009-2015, 2020-2022): ~90%.",
+      "sample_size": 120
+    },
+    "fed_rate_cut": {
+      "prior": 25.0,
+      "description": "Fed funds rate cut at any given FOMC meeting (post-2009 era). More common than hikes in crisis/easing periods.",
+      "keywords": ["fed cut", "rate cut", "lower rates", "reduce rates", "ease rates", "fomc cut", "fed funds rate lower", "rate reduction"],
+      "series_patterns": ["FOMC", "FED-RATE", "FEDRATE"],
+      "context_notes": "Conditional on easing cycle: ~50-70%. This prior is the unconditional average.",
+      "sample_size": 120
+    },
+    "cpi_above_consensus": {
+      "prior": 52.0,
+      "description": "CPI (headline or core) comes in above Bloomberg consensus estimate. Roughly a coin flip but with slight upward bias since 2021.",
+      "keywords": ["cpi above", "cpi higher", "cpi beat", "inflation above", "cpi exceed", "hot cpi", "cpi surprise up"],
+      "series_patterns": ["CPI", "INFLATION", "INFL"],
+      "context_notes": "2015-2019: ~48%. 2021-2024: ~55% due to sustained inflationary pressures.",
+      "sample_size": 96
+    },
+    "cpi_below_consensus": {
+      "prior": 48.0,
+      "description": "CPI (headline or core) comes in below Bloomberg consensus estimate.",
+      "keywords": ["cpi below", "cpi lower", "cpi miss", "inflation below", "cpi under", "cool cpi", "cpi surprise down"],
+      "series_patterns": ["CPI", "INFLATION", "INFL"],
+      "context_notes": "Complement of cpi_above_consensus.",
+      "sample_size": 96
+    },
+    "nfp_above_consensus": {
+      "prior": 54.0,
+      "description": "Non-farm payrolls (NFP) comes in above consensus estimate. Slight historical upward bias due to positive revision culture.",
+      "keywords": ["nfp above", "jobs above", "payrolls beat", "jobs beat", "employment above", "nfp beat", "jobs report higher"],
+      "series_patterns": ["NFP", "JOBS", "PAYROLL", "EMPLOYMENT"],
+      "context_notes": "2010-2024: ~54%. BLS frequently revises initial prints upward.",
+      "sample_size": 84
+    },
+    "nfp_below_consensus": {
+      "prior": 46.0,
+      "description": "Non-farm payrolls (NFP) comes in below consensus estimate.",
+      "keywords": ["nfp below", "jobs below", "payrolls miss", "jobs miss", "employment below", "nfp miss", "jobs report lower"],
+      "series_patterns": ["NFP", "JOBS", "PAYROLL", "EMPLOYMENT"],
+      "context_notes": "Complement of nfp_above_consensus.",
+      "sample_size": 84
+    },
+    "gdp_above_consensus": {
+      "prior": 51.0,
+      "description": "GDP (advance or revision) comes in above consensus estimate. Near coin flip historically.",
+      "keywords": ["gdp above", "gdp beat", "gdp higher", "gdp growth above", "economic growth beat"],
+      "series_patterns": ["GDP"],
+      "context_notes": "Advance GDP estimates have wide consensus dispersion; beat/miss near 50/50.",
+      "sample_size": 60
+    },
+    "weather_extreme_heat": {
+      "prior": 20.0,
+      "description": "Temperature exceeds a high threshold (e.g. above 100F or +2 SD above seasonal mean) on a given day/week. Summer prior for hot cities.",
+      "keywords": ["temperature above", "high temp", "heat record", "above normal temperature", "warmer than", "exceeds degrees", "high of"],
+      "series_patterns": ["WEATHER", "TEMP", "HIGHTEMP"],
+      "context_notes": "Highly location- and season-dependent. This is a generic summer prior for warm-climate US cities (Phoenix, Miami). Northern cities in summer: ~10%.",
+      "sample_size": 200
+    },
+    "weather_extreme_cold": {
+      "prior": 18.0,
+      "description": "Temperature falls below a low threshold on a given day/week. Winter prior for cold cities.",
+      "keywords": ["temperature below", "low temp", "cold record", "below normal temperature", "colder than", "low of"],
+      "series_patterns": ["WEATHER", "TEMP", "LOWTEMP"],
+      "context_notes": "Winter prior for northern US cities (Chicago, Minneapolis). Southern cities in winter: ~5%.",
+      "sample_size": 200
+    },
+    "presidential_incumbent_win": {
+      "prior": 56.0,
+      "description": "Incumbent party wins presidential election or primary. Historical incumbency advantage.",
+      "keywords": ["incumbent wins", "president wins reelection", "incumbent party wins", "president reelected"],
+      "series_patterns": ["PRES", "ELECTION"],
+      "context_notes": "Post-WWII US: incumbent party wins ~56% of general elections. Primary incumbency: ~85%.",
+      "sample_size": 20
+    },
+    "sports_home_team_win": {
+      "prior": 57.0,
+      "description": "Home team wins in major US sports. Home field advantage varies by sport.",
+      "keywords": ["home team wins", "home wins", "host wins"],
+      "series_patterns": ["NBA", "NFL", "MLB", "NHL", "SPORTS"],
+      "context_notes": "NFL: ~57%. NBA: ~60%. MLB: ~54%. NHL: ~55%. Using NFL/general average.",
+      "sample_size": 500
+    },
+    "sports_favorite_win": {
+      "prior": 62.0,
+      "description": "Betting favorite wins the game/match. Generic prior when favorite is identified.",
+      "keywords": ["favorite wins", "favored team wins", "projected winner"],
+      "series_patterns": ["NBA", "NFL", "MLB", "NHL", "SPORTS"],
+      "context_notes": "Vegas favorites win roughly 60-65% of games across major sports.",
+      "sample_size": 500
+    },
+    "debt_ceiling_raised": {
+      "prior": 92.0,
+      "description": "US debt ceiling is raised/suspended before default. Has always been raised historically.",
+      "keywords": ["debt ceiling raised", "debt limit raised", "debt ceiling lifted", "debt ceiling increase"],
+      "series_patterns": ["DEBT", "DEBTCEILING"],
+      "context_notes": "Never actually defaulted. Last-minute deals are the norm. Very high prior.",
+      "sample_size": 25
+    },
+    "government_shutdown": {
+      "prior": 22.0,
+      "description": "US federal government shuts down at a funding deadline.",
+      "keywords": ["government shutdown", "shutdown", "continuing resolution fails", "budget impasse"],
+      "series_patterns": ["SHUTDOWN", "GOVT", "BUDGET"],
+      "context_notes": "Shutdowns happen but are not the modal outcome at any given deadline. ~20-25% of funding deadlines result in a shutdown.",
+      "sample_size": 30
+    },
+    "bill_passes_congress": {
+      "prior": 12.0,
+      "description": "A specific bill passes both chambers and is signed into law. Most bills die in committee.",
+      "keywords": ["passes congress", "signed into law", "bill passes", "legislation passes", "act passes"],
+      "series_patterns": ["CONGRESS", "SENATE", "HOUSE"],
+      "context_notes": "Only ~4-6% of introduced bills become law. Bills with momentum: ~20-30%.",
+      "sample_size": 200
+    },
+    "pce_above_consensus": {
+      "prior": 51.0,
+      "description": "PCE inflation (Fed preferred measure) comes in above consensus.",
+      "keywords": ["pce above", "pce beat", "pce higher", "personal consumption expenditure above"],
+      "series_patterns": ["PCE"],
+      "context_notes": "Similar to CPI beat rate. Slight correlation with CPI surprises.",
+      "sample_size": 60
+    },
+    "unemployment_above_consensus": {
+      "prior": 45.0,
+      "description": "Unemployment rate comes in above consensus estimate (higher unemployment = miss for labor market).",
+      "keywords": ["unemployment above", "unemployment higher", "jobless rate above", "unemployment rate exceeds"],
+      "series_patterns": ["UNEMPLOYMENT", "JOBLESS"],
+      "context_notes": "Unemployment is a lagging indicator. Near coin flip. Slightly lower prior (labor market tends to be stronger than expected in recoveries).",
+      "sample_size": 72
+    }
+  }
+}

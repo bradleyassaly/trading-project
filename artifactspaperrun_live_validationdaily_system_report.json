@@ -1,0 +1,110 @@
+{
+  "artifact_dir": "artifactspaperrun_live_validation",
+  "report_date": null,
+  "warnings": [
+    "missing required artifact: trade_outcome_attribution_report.json",
+    "missing required artifact: calibration_summary_report.json",
+    "missing required artifact: drift_detection_report.json",
+    "missing required artifact: strategy_decay_report.json",
+    "missing required artifact: strategy_lifecycle_report.json",
+    "missing required artifact: paper_risk_controls.json",
+    "missing optional artifact: strategy_health_payload.json",
+    "missing optional artifact: realtime_kpi_monitoring.json",
+    "missing optional artifact: paper_equity_snapshot.csv",
+    "missing optional artifact: paper_positions.csv"
+  ],
+  "portfolio_summary": {
+    "report_date": null,
+    "trade_count": 0,
+    "active_strategy_count": 0,
+    "total_expected_value_net": null,
+    "total_realized_net_return": null,
+    "expected_vs_realized_gap": null,
+    "total_realized_pnl": null,
+    "max_drawdown_or_latest_drawdown": null,
+    "exposure_summary": null
+  },
+  "trade_quality": {
+    "average_predicted_return": null,
+    "average_expected_value_net": null,
+    "average_realized_net_return": null,
+    "win_rate": null,
+    "average_expected_cost": null,
+    "average_realized_cost": null,
+    "attribution_gap_summary": {
+      "mean_forecast_gap": null,
+      "mean_alpha_error": null,
+      "mean_cost_error": null,
+      "mean_execution_error": null,
+      "regime_mismatch_count": 0
+    }
+  },
+  "calibration_summary": {
+    "number_of_calibrated_trades": 0,
+    "confidence_bucket_overview": [],
+    "raw_vs_calibrated_confidence": {
+      "mean_raw_confidence_error": null,
+      "mean_calibrated_confidence_error": null
+    },
+    "raw_vs_calibrated_expected_net": {
+      "mean_raw_expected_value_error": null,
+      "mean_calibrated_expected_value_error": null
+    },
+    "top_level_metrics": {
+      "bucket_count": 0,
+      "adjustment_count": 0,
+      "sufficient_scope_count": 0,
+      "confidence_noop_count": 0,
+      "expected_value_noop_count": 0
+    }
+  },
+  "drift_summary": {
+    "total_drift_signal_count": 0,
+    "severity_breakdown": {},
+    "drift_by_type": {
+      "performance": 0,
+      "decision": 0,
+      "execution": 0
+    },
+    "most_important_triggered_signals": []
+  },
+  "decay_summary": {
+    "severity_counts": {
+      "healthy": 0,
+      "watch": 0,
+      "warning": 0,
+      "critical": 0
+    },
+    "top_decaying_strategies": [],
+    "recommended_lifecycle_actions": {}
+  },
+  "lifecycle_summary": {
+    "action_type_counts": {
+      "watch": 0,
+      "constrain": 0,
+      "demote": 0,
+      "retrain": 0
+    },
+    "state_transition_count": 0,
+    "retraining_trigger_count": 0,
+    "demotion_count": 0,
+    "top_affected_strategies": []
+  },
+  "risk_summary": {
+    "risk_control_state": "unknown",
+    "triggered_risk_events_count": 0,
+    "risk_recommendation_count": 0,
+    "halted_signal_count": 0,
+    "restricted_signal_count": 0,
+    "drawdown_breach_count": 0,
+    "anomaly_counts": {}
+  },
+  "evaluation_flags": {
+    "ev_alignment_flag": "healthy",
+    "calibration_signal_flag": "mixed",
+    "drift_noise_flag": "healthy",
+    "decay_churn_flag": "healthy",
+    "lifecycle_churn_flag": "healthy",
+    "overall_status": "mixed"
+  }
+}

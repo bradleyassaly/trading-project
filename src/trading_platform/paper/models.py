@@ -10,10 +10,16 @@ from trading_platform.decision_journal.models import DecisionJournalBundle
 from trading_platform.universe_provenance.models import UniverseBuildBundle
 
 if TYPE_CHECKING:
+    from trading_platform.reporting.calibration import CalibrationSummaryReport
+    from trading_platform.governance.lifecycle import StrategyLifecycleSummaryReport
+    from trading_platform.reporting.strategy_decay import StrategyDecaySummaryReport
     from trading_platform.decision_journal.models import TradeDecision
     from trading_platform.execution.costs import TransactionCostReport
     from trading_platform.execution.order_lifecycle import OrderLifecycleRecord
     from trading_platform.execution.reconciliation import OrderLifecycleReconciliationResult
+    from trading_platform.reporting.drift_detection import DriftSummaryReport
+    from trading_platform.reporting.outcome_attribution import TradeOutcomeAttributionReport
+    from trading_platform.risk.controls import PaperRiskControlReport
 
 
 @dataclass(frozen=True)
@@ -155,6 +161,17 @@ class PaperTradingConfig:
     market_regime_path: str | None = None
     data_sources: dict[str, Any] = field(default_factory=dict)
     replay_as_of_date: str | None = None
+    risk_controls_enabled: bool = False
+    risk_restrict_drawdown: float | None = None
+    risk_halt_drawdown: float | None = None
+    risk_restrict_forecast_gap: float | None = None
+    risk_halt_forecast_gap: float | None = None
+    risk_restrict_rejected_order_ratio: float | None = None
+    risk_halt_rejected_order_ratio: float | None = None
+    risk_restrict_execution_shortfall: float | None = None
+    risk_halt_execution_shortfall: float | None = None
+    risk_halt_on_system_health_failure: bool = False
+    risk_restricted_order_quantity_scale: float = 0.5
 
 
 @dataclass
@@ -468,6 +485,12 @@ class PaperTradingRunResult:
     attribution: dict[str, Any] = field(default_factory=dict)
     execution_simulation_report: "PaperExecutionSimulationReport | None" = None
     transaction_cost_report: "TransactionCostReport | None" = None
+    outcome_attribution_report: "TradeOutcomeAttributionReport | None" = None
+    calibration_report: "CalibrationSummaryReport | None" = None
+    risk_control_report: "PaperRiskControlReport | None" = None
+    drift_report: "DriftSummaryReport | None" = None
+    strategy_decay_report: "StrategyDecaySummaryReport | None" = None
+    strategy_lifecycle_report: "StrategyLifecycleSummaryReport | None" = None
 
 
 @dataclass

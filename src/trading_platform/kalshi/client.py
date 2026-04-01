@@ -34,6 +34,7 @@ logger = logging.getLogger(__name__)
 _DEFAULT_TIMEOUT = 15  # seconds
 _READ_SLEEP = 0.072    # ~14 req/sec  (Basic tier limit: 20/sec)
 _WRITE_SLEEP = 0.11    # ~9 req/sec   (Basic tier limit: 10/sec)
+_HIST_SLEEP = 0.2      # 5 req/sec for historical endpoints (public, conservative limit)
 
 
 # ── Parsers ───────────────────────────────────────────────────────────────────
@@ -115,6 +116,18 @@ class KalshiClient:
                 full_path = f"{path}?{urlencode(cleaned)}"
         headers = self._auth("GET", full_path)
         resp = self._session.get(self._url(full_path), headers=headers, timeout=_DEFAULT_TIMEOUT)
+        resp.raise_for_status()
+        return resp.json()
+
+    def _get_public(self, path: str, params: dict[str, Any] | None = None, *, sleep: float = _HIST_SLEEP) -> Any:
+        """GET without auth headers — for public historical endpoints."""
+        time.sleep(sleep)
+        full_path = path
+        if params:
+            cleaned = {k: v for k, v in params.items() if v is not None}
+            if cleaned:
+                full_path = f"{path}?{urlencode(cleaned)}"
+        resp = self._session.get(self._url(full_path), timeout=_DEFAULT_TIMEOUT)
         resp.raise_for_status()
         return resp.json()
 
@@ -233,6 +246,109 @@ class KalshiClient:
         while True:
             trades, cursor = self.get_trades(
                 ticker=ticker, min_ts=min_ts, max_ts=max_ts, limit=1000, cursor=cursor
+            )
+            all_trades.extend(trades)
+            if not cursor:
+                break
+        return all_trades
+
+    # ── Historical Market Data (no auth required) ────────────────────────────
+
+    def get_historical_markets(
+        self,
+        limit: int = 200,
+        cursor: str | None = None,
+        min_close_ts: int | None = None,
+        max_close_ts: int | None = None,
+    ) -> tuple[list[dict[str, Any]], str | None]:
+        """
+        Fetch one page of resolved historical markets.
+
+        Returns raw dicts (not parsed KalshiMarket) so that the ``result``
+        field and other historical-only fields are preserved.
+
+        :param limit:         Page size (max 200).
+        :param cursor:        Pagination cursor from a previous call.
+        :param min_close_ts:  Lower bound on close_time (Unix seconds).
+        :param max_close_ts:  Upper bound on close_time (Unix seconds).
+        :returns:             Tuple of (list of raw market dicts, next cursor or None).
+        """
+        data = self._get_public("/historical/markets", {
+            "limit": limit,
+            "cursor": cursor,
+            "min_close_ts": min_close_ts,
+            "max_close_ts": max_close_ts,
+        })
+        return data.get("markets", []), data.get("cursor")
+
+    def get_all_historical_markets(
+        self,
+        min_close_ts: int | None = None,
+        max_close_ts: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """Paginate through all resolved historical markets in the given time range."""
+        all_markets: list[dict[str, Any]] = []
+        cursor: str | None = None
+        while True:
+            markets, cursor = self.get_historical_markets(
+                limit=200,
+                cursor=cursor,
+                min_close_ts=min_close_ts,
+                max_close_ts=max_close_ts,
+            )
+            all_markets.extend(markets)
+            if not cursor:
+                break
+        return all_markets
+
+    def get_historical_market(self, ticker: str) -> dict[str, Any]:
+        """
+        Fetch a single resolved market by ticker.
+
+        The response includes a ``result`` field (``"yes"`` or ``"no"``)
+        indicating the market outcome.
+        """
+        data = self._get_public(f"/historical/markets/{ticker}")
+        return data.get("market", data)
+
+    def get_historical_trades(
+        self,
+        ticker: str,
+        limit: int = 1000,
+        cursor: str | None = None,
+        min_ts: int | None = None,
+        max_ts: int | None = None,
+    ) -> tuple[list[dict[str, Any]], str | None]:
+        """
+        Fetch one page of historical trades for a ticker.
+
+        :returns: Tuple of (list of raw trade dicts, next cursor or None).
+        """
+        data = self._get_public("/historical/trades", {
+            "ticker": ticker,
+            "limit": limit,
+            "cursor": cursor,
+            "min_ts": min_ts,
+            "max_ts": max_ts,
+        })
+        return data.get("trades", []), data.get("cursor")
+
+    def get_all_historical_trades(
+        self,
+        ticker: str,
+        min_ts: int | None = None,
+        max_ts: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """Paginate through all historical trades for a ticker."""
+        all_trades: list[dict[str, Any]] = []
+        cursor: str | None = None
+        while True:
+            trades, cursor = self.get_historical_trades(
+                ticker=ticker,
+                limit=1000,
+                cursor=cursor,
+                min_ts=min_ts,
+                max_ts=max_ts,
             )
             all_trades.extend(trades)
             if not cursor:

@@ -1295,4 +1295,514 @@ The payload is intentionally observational. Metric semantics are explicit in-fie
 - `drawdown` is currently a current-state proxy based on paper baseline equity, not a historical max-drawdown curve.
 
 #### Recommended Next Milestone
-- I-03 - Introduce broker/exchange abstraction layer
+- J-02 - Add system health monitoring
+
+### J-02 - Add system health monitoring
+Date: 2026-04-01
+Status: DONE
+
+#### Summary
+Added a typed system-health payload for paper-run reporting. The new contract emits structured checks for data freshness, stale signals, missing reporting artifacts, and core pipeline integrity, and writes dedicated JSON/CSV health artifacts alongside the existing KPI and dashboard payloads.
+
+#### Why
+The repository already had broader monitoring utilities, but the paper-run artifact set did not expose a focused, dashboard-friendly system-health surface inside the reporting layer. This milestone makes run health observable in the same artifact bundle without introducing alerting or kill-switch behavior.
+
+#### Files Changed
+- `src/trading_platform/reporting/system_health.py`
+- `src/trading_platform/paper/service.py`
+- `tests/test_reporting_dashboard_payloads.py`
+- `tests/test_paper_artifacts_with_fills.py`
+- `MILESTONES.md`
+- `DOCUMENTATION.md`
+
+#### Tests Run
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\python.exe -m ruff check src\trading_platform\reporting\system_health.py src\trading_platform\paper\service.py tests\test_reporting_dashboard_payloads.py tests\test_paper_artifacts_with_fills.py`
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\pytest.exe tests/test_reporting_dashboard_payloads.py tests/test_paper_artifacts_with_fills.py`
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\pytest.exe tests/test_realtime_monitoring.py tests/test_paper_execution_realism.py`
+
+#### Verification Commands
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\python.exe -m ruff check src\trading_platform\reporting\system_health.py src\trading_platform\paper\service.py tests\test_reporting_dashboard_payloads.py tests\test_paper_artifacts_with_fills.py`
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\pytest.exe tests/test_reporting_dashboard_payloads.py tests/test_paper_artifacts_with_fills.py`
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\pytest.exe tests/test_realtime_monitoring.py tests/test_paper_execution_realism.py`
+
+#### Design Notes
+The health payload is additive and observational. It derives check results from existing paper-run diagnostics and artifact availability, so current trading behavior remains unchanged unless future milestones choose to consume these checks for gating.
+
+#### Known Issues / Limitations
+- The payload is scoped to the paper-run artifact bundle and does not yet aggregate rolling health history across runs by itself.
+- Stale-signal detection currently uses paper-run freshness diagnostics and score availability rather than a separate signal-age registry.
+
+#### Recommended Next Milestone
+- J-03 - Add risk controls / kill switch
+
+### J-03 - Add risk controls / kill switch
+Date: 2026-04-01
+Status: DONE
+
+#### Summary
+Added a typed paper risk-control contract and artifact set, plus optional pre-trade drawdown throttling/halting in the paper execution path. Paper runs now emit structured risk triggers, lifecycle events, and actions across portfolio, strategy, and instrument scopes, and expose the resulting operating state through artifacts and KPI records.
+
+#### Why
+Phase 1 needs explicit, inspectable safeguards before the platform can act as a governed closed-loop system. This milestone introduces default-off controls that can constrain or halt paper trading when configured, while preserving existing behavior unless the new risk settings are enabled.
+
+#### Files Changed
+- `src/trading_platform/risk/controls.py`
+- `src/trading_platform/paper/models.py`
+- `src/trading_platform/paper/service.py`
+- `src/trading_platform/reporting/dashboard_payloads.py`
+- `tests/test_risk_controls.py`
+- `tests/test_paper_artifacts_with_fills.py`
+- `MILESTONES.md`
+- `DOCUMENTATION.md`
+
+#### Tests Run
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\python.exe -m ruff check src\trading_platform\risk\controls.py src\trading_platform\paper\models.py src\trading_platform\paper\service.py src\trading_platform\reporting\dashboard_payloads.py tests\test_risk_controls.py tests\test_paper_artifacts_with_fills.py tests\test_trade_outcome_attribution.py tests\test_pnl_attribution.py`
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\pytest.exe tests/test_risk_controls.py tests/test_paper_artifacts_with_fills.py tests/test_trade_outcome_attribution.py tests/test_pnl_attribution.py`
+
+#### Verification Commands
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\python.exe -m ruff check src\trading_platform\risk\controls.py src\trading_platform\paper\models.py src\trading_platform\paper\service.py src\trading_platform\reporting\dashboard_payloads.py tests\test_risk_controls.py tests\test_paper_artifacts_with_fills.py tests\test_trade_outcome_attribution.py tests\test_pnl_attribution.py`
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\pytest.exe tests/test_risk_controls.py tests/test_paper_artifacts_with_fills.py tests/test_trade_outcome_attribution.py tests/test_pnl_attribution.py`
+
+#### Design Notes
+`PaperRiskControlReport` is the new additive contract. Pre-trade integration is intentionally conservative: when enabled, the current paper path can throttle or halt orders on drawdown before fill application, while post-run reporting adds structured expected-vs-realized divergence and execution-anomaly triggers by strategy and instrument. The artifact bundle now includes `paper_risk_controls.json` plus CSVs for triggers, actions, and events.
+
+#### Known Issues / Limitations
+- Current active gating is limited to portfolio drawdown so the paper path stays backward-compatible and avoids speculative state persistence; strategy/instrument divergence and execution anomalies are logged immediately but act as structured recommendations for now.
+- Drawdown is measured against the paper baseline equity currently available in state, not a fully persisted rolling peak-equity registry.
+
+#### Recommended Next Milestone
+- J-04 - Add drift detection
+
+### J-04 - Add drift detection
+Date: 2026-04-01
+Status: DONE
+
+#### Summary
+Added a typed drift-detection layer for the paper path. Paper runs now compute deterministic drift metric snapshots and triggered drift signals across performance, decision, and execution categories, write dedicated JSON/CSV artifacts, and expose top-level drift metrics through the KPI payload.
+
+#### Why
+With trade outcome attribution and risk controls in place, the next missing Phase 1 capability was an inspectable way to detect behavioral decay before automatically routing anything into controls. This milestone adds explicit drift diagnostics without changing default trading behavior.
+
+#### Files Changed
+- `src/trading_platform/reporting/drift_detection.py`
+- `src/trading_platform/paper/models.py`
+- `src/trading_platform/paper/service.py`
+- `src/trading_platform/reporting/dashboard_payloads.py`
+- `tests/test_drift_detection.py`
+- `tests/test_paper_artifacts_with_fills.py`
+- `MILESTONES.md`
+- `DOCUMENTATION.md`
+
+#### Tests Run
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\python.exe -m ruff check src\trading_platform\reporting\drift_detection.py src\trading_platform\paper\models.py src\trading_platform\paper\service.py src\trading_platform\reporting\dashboard_payloads.py tests\test_drift_detection.py tests\test_paper_artifacts_with_fills.py tests\test_trade_outcome_attribution.py tests\test_risk_controls.py tests\test_pnl_attribution.py`
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\pytest.exe tests/test_drift_detection.py tests/test_paper_artifacts_with_fills.py tests/test_trade_outcome_attribution.py tests/test_risk_controls.py tests/test_pnl_attribution.py`
+
+#### Verification Commands
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\python.exe -m ruff check src\trading_platform\reporting\drift_detection.py src\trading_platform\paper\models.py src\trading_platform\paper\service.py src\trading_platform\reporting\dashboard_payloads.py tests\test_drift_detection.py tests\test_paper_artifacts_with_fills.py tests\test_trade_outcome_attribution.py tests\test_risk_controls.py tests\test_pnl_attribution.py`
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\pytest.exe tests/test_drift_detection.py tests/test_paper_artifacts_with_fills.py tests/test_trade_outcome_attribution.py tests/test_risk_controls.py tests/test_pnl_attribution.py`
+
+#### Design Notes
+`DriftMetricSnapshot`, `DriftSignal`, and `DriftSummaryReport` are the additive typed contracts. The current implementation compares recent outcome windows against either a baseline half-window or explicit expected references when history is too short, and covers forecast-gap/win-rate performance drift, confidence and regime-mix decision drift, and cost/fill-quality execution drift. Recommended actions are advisory only; no routing into `J-03` risk controls is enabled by default.
+
+#### Known Issues / Limitations
+- Recent-vs-baseline comparisons are currently scoped to the outcomes available inside the current paper artifact bundle rather than a persisted long-horizon drift registry.
+- Decision drift is centered on executed trade outcomes and execution-linked observations; broader candidate-universe drift can be layered later without changing this contract.
+
+#### Recommended Next Milestone
+- K-02 - Add calibration pipeline
+
+### K-02 - Add calibration pipeline
+Date: 2026-04-01
+Status: DONE
+
+#### Summary
+Added a typed calibration layer for paper-run trade outcomes. The platform now derives conservative bucket-based confidence and expected-value adjustments from realized outcomes, preserves both raw and calibrated values per trade, and writes deterministic calibration records, bucket summaries, adjustment tables, and scope summaries for portfolio, strategy, and regime views when sample thresholds are met.
+
+#### Why
+Phase 1 needed a reusable, inspectable calibration surface between attribution/drift and any future decision-time weighting logic. This milestone adds that layer without changing default execution, ranking, or promotion behavior.
+
+#### Files Changed
+- `src/trading_platform/reporting/calibration.py`
+- `src/trading_platform/paper/models.py`
+- `src/trading_platform/paper/service.py`
+- `src/trading_platform/reporting/dashboard_payloads.py`
+- `tests/test_calibration_pipeline.py`
+- `tests/test_paper_artifacts_with_fills.py`
+- `MILESTONES.md`
+- `DOCUMENTATION.md`
+
+#### Tests Run
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\python.exe -m ruff check src\trading_platform\reporting\calibration.py src\trading_platform\paper\models.py src\trading_platform\paper\service.py src\trading_platform\reporting\dashboard_payloads.py tests\test_calibration_pipeline.py tests\test_paper_artifacts_with_fills.py tests\test_trade_outcome_attribution.py tests\test_drift_detection.py tests\test_risk_controls.py tests\test_pnl_attribution.py`
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\pytest.exe tests/test_calibration_pipeline.py tests/test_paper_artifacts_with_fills.py tests/test_trade_outcome_attribution.py tests/test_drift_detection.py tests/test_risk_controls.py tests/test_pnl_attribution.py`
+
+#### Verification Commands
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\python.exe -m ruff check src\trading_platform\reporting\calibration.py src\trading_platform\paper\models.py src\trading_platform\paper\service.py src\trading_platform\reporting\dashboard_payloads.py tests\test_calibration_pipeline.py tests\test_paper_artifacts_with_fills.py tests\test_trade_outcome_attribution.py tests\test_drift_detection.py tests\test_risk_controls.py tests\test_pnl_attribution.py`
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\pytest.exe tests/test_calibration_pipeline.py tests/test_paper_artifacts_with_fills.py tests/test_trade_outcome_attribution.py tests/test_drift_detection.py tests/test_risk_controls.py tests/test_pnl_attribution.py`
+
+#### Design Notes
+`CalibrationBucket`, `CalibratedPredictionAdjustment`, `CalibrationRecord`, `CalibrationScopeSummary`, and `CalibrationSummaryReport` are the new additive contracts. The current implementation uses deterministic fixed buckets plus sample-threshold and shrinkage rules, applies adjustments only when there is enough evidence, and stores both raw and calibrated confidence / expected-net-return values per realized trade. KPI output now includes top-level calibration counts and calibration-error metrics.
+
+#### Known Issues / Limitations
+- Calibration is currently derived from the outcomes available in the current paper artifact bundle rather than a longer rolling calibration registry, so this is intentionally conservative and local.
+- The adjustments are advisory outputs only; they are not wired into trade selection, sizing, or EV gating by default.
+
+#### Recommended Next Milestone
+- K-03 - Add strategy decay detection
+
+### K-03 - Add strategy decay detection
+Date: 2026-04-01
+Status: DONE
+
+#### Summary
+Added a typed strategy decay detection layer that combines attribution gaps, drift pressure, calibration quality, realized instability, and risk-context signals into conservative per-strategy decay records, triggered decay signals, and lifecycle recommendations. Paper runs now emit deterministic JSON/CSV decay artifacts and expose top-level decay KPIs.
+
+#### Why
+With attribution, drift, calibration, and risk controls already in place, the next Phase 1 step was to synthesize them into an explicit strategy-health judgment. This milestone adds that diagnosis layer without automatically demoting, retraining, or changing default trading behavior.
+
+#### Files Changed
+- `src/trading_platform/reporting/strategy_decay.py`
+- `src/trading_platform/paper/models.py`
+- `src/trading_platform/paper/service.py`
+- `src/trading_platform/reporting/dashboard_payloads.py`
+- `tests/test_strategy_decay.py`
+- `tests/test_paper_artifacts_with_fills.py`
+- `MILESTONES.md`
+- `DOCUMENTATION.md`
+
+#### Tests Run
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\python.exe -m ruff check src\trading_platform\reporting\strategy_decay.py src\trading_platform\paper\models.py src\trading_platform\paper\service.py src\trading_platform\reporting\dashboard_payloads.py tests\test_strategy_decay.py tests\test_paper_artifacts_with_fills.py tests\test_calibration_pipeline.py tests\test_drift_detection.py tests\test_risk_controls.py tests\test_trade_outcome_attribution.py tests\test_pnl_attribution.py`
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\pytest.exe tests/test_strategy_decay.py tests/test_paper_artifacts_with_fills.py tests/test_calibration_pipeline.py tests/test_drift_detection.py tests/test_risk_controls.py tests/test_trade_outcome_attribution.py tests/test_pnl_attribution.py`
+
+#### Verification Commands
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\python.exe -m ruff check src\trading_platform\reporting\strategy_decay.py src\trading_platform\paper\models.py src\trading_platform\paper\service.py src\trading_platform\reporting\dashboard_payloads.py tests\test_strategy_decay.py tests\test_paper_artifacts_with_fills.py tests\test_calibration_pipeline.py tests\test_drift_detection.py tests\test_risk_controls.py tests\test_trade_outcome_attribution.py tests\test_pnl_attribution.py`
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\pytest.exe tests/test_strategy_decay.py tests/test_paper_artifacts_with_fills.py tests/test_calibration_pipeline.py tests/test_drift_detection.py tests/test_risk_controls.py tests/test_trade_outcome_attribution.py tests/test_pnl_attribution.py`
+
+#### Design Notes
+`StrategyDecayRecord`, `StrategyDecaySignal`, `StrategyLifecycleRecommendation`, and `StrategyDecaySummaryReport` are the new additive contracts. The current implementation computes a conservative weighted decay score only when trade-count thresholds are met, explicitly emits insufficient-data states otherwise, and keeps all outputs advisory: recommended actions can reach `demote_candidate`, but no demotion or retraining is executed in this milestone.
+
+#### Known Issues / Limitations
+- Decay scoring currently uses the current paper artifact bundle rather than a persisted long-window registry, so the diagnosis is intentionally local and conservative.
+- The current output is strategy-centric; regime context is captured in metadata and contributing evidence rather than as a separate first-class decay record type.
+
+#### Recommended Next Milestone
+- K-04 - Add auto-demotion / retraining loop
+
+### K-01 - Introduce trade outcome attribution
+Date: 2026-04-01
+Status: DONE
+
+#### Summary
+Added first-class trade outcome and attribution contracts for the paper path. Closed paper trades now emit deterministic expected-vs-realized outcome records, forecast-gap decomposition fields, grouped attribution aggregates, and dedicated JSON/CSV artifacts that can be consumed by KPI and reporting workflows.
+
+#### Why
+The repository already tracked realized PnL attribution, but it did not expose a stable contract for comparing predicted trade outcomes against realized outcomes. This milestone creates that bridge without changing existing trading or promotion semantics by default.
+
+#### Files Changed
+- `src/trading_platform/reporting/outcome_attribution.py`
+- `src/trading_platform/paper/models.py`
+- `src/trading_platform/paper/service.py`
+- `src/trading_platform/reporting/dashboard_payloads.py`
+- `tests/test_trade_outcome_attribution.py`
+- `tests/test_pnl_attribution.py`
+- `MILESTONES.md`
+- `DOCUMENTATION.md`
+
+#### Tests Run
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\python.exe -m ruff check src\trading_platform\paper\service.py tests\test_pnl_attribution.py tests\test_trade_outcome_attribution.py src\trading_platform\reporting\outcome_attribution.py src\trading_platform\paper\models.py src\trading_platform\reporting\dashboard_payloads.py`
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\pytest.exe tests/test_trade_outcome_attribution.py tests/test_pnl_attribution.py`
+
+#### Verification Commands
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\python.exe -m ruff check src\trading_platform\paper\service.py tests\test_pnl_attribution.py tests\test_trade_outcome_attribution.py src\trading_platform\reporting\outcome_attribution.py src\trading_platform\paper\models.py src\trading_platform\reporting\dashboard_payloads.py`
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\pytest.exe tests/test_trade_outcome_attribution.py tests/test_pnl_attribution.py`
+
+#### Design Notes
+`TradeOutcome`, `TradeAttribution`, `TradeAttributionAggregate`, and `TradeOutcomeAttributionReport` are additive typed contracts owned by the platform. The paper service now persists enough decision-time metadata on open lots to connect later exits back to expected returns, costs, confidence, horizon, and regime fields, and writes `trade_outcomes.csv`, `trade_outcome_attribution.csv`, `trade_outcome_aggregates.csv`, and JSON summaries alongside existing paper artifacts.
+
+#### Known Issues / Limitations
+- The current decomposition is intentionally conservative and heuristic for fields such as timing error, sizing error, and regime mismatch because the legacy paper path does not yet preserve a richer execution-clock or regime-history contract.
+- Predicted gross/net returns are only populated when the upstream EV gate or decision provenance already provides them; the attribution layer does not invent alpha forecasts when no prediction artifact exists.
+
+#### Recommended Next Milestone
+- J-03 - Add risk controls / kill switch
+
+### K-04 - Add auto-demotion / retraining loop
+Date: 2026-04-01
+Status: DONE
+
+#### Summary
+Added a typed strategy lifecycle policy layer that converts `K-03` decay recommendations and `J-03` risk context into explicit, auditable lifecycle actions. Paper runs now emit deterministic lifecycle state, action, transition, demotion, and retraining-trigger artifacts, and the governance layer can apply those outputs to the strategy registry conservatively.
+
+#### Why
+Phase 1 needed a governed bridge from diagnosis to action. This milestone adds that control layer without silently changing default trading behavior or bypassing promotion governance for retrained strategies.
+
+#### Files Changed
+- `src/trading_platform/governance/lifecycle.py`
+- `src/trading_platform/governance/__init__.py`
+- `src/trading_platform/paper/models.py`
+- `src/trading_platform/paper/service.py`
+- `src/trading_platform/reporting/dashboard_payloads.py`
+- `tests/test_strategy_lifecycle.py`
+- `tests/test_paper_artifacts_with_fills.py`
+- `MILESTONES.md`
+- `DOCUMENTATION.md`
+
+#### Tests Run
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\python.exe -m ruff check src\trading_platform\governance\lifecycle.py src\trading_platform\governance\__init__.py src\trading_platform\paper\models.py src\trading_platform\paper\service.py src\trading_platform\reporting\dashboard_payloads.py tests\test_strategy_lifecycle.py tests\test_paper_artifacts_with_fills.py tests\test_strategy_decay.py tests\test_calibration_pipeline.py tests\test_drift_detection.py tests\test_risk_controls.py tests\test_trade_outcome_attribution.py tests\test_pnl_attribution.py tests\test_governance_registry.py`
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\pytest.exe tests/test_strategy_lifecycle.py tests/test_paper_artifacts_with_fills.py tests/test_strategy_decay.py tests/test_calibration_pipeline.py tests/test_drift_detection.py tests/test_risk_controls.py tests/test_trade_outcome_attribution.py tests/test_pnl_attribution.py tests/test_governance_registry.py`
+
+#### Verification Commands
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\python.exe -m ruff check src\trading_platform\governance\lifecycle.py src\trading_platform\governance\__init__.py src\trading_platform\paper\models.py src\trading_platform\paper\service.py src\trading_platform\reporting\dashboard_payloads.py tests\test_strategy_lifecycle.py tests\test_paper_artifacts_with_fills.py tests\test_strategy_decay.py tests\test_calibration_pipeline.py tests\test_drift_detection.py tests\test_risk_controls.py tests\test_trade_outcome_attribution.py tests\test_pnl_attribution.py tests\test_governance_registry.py`
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\pytest.exe tests/test_strategy_lifecycle.py tests/test_paper_artifacts_with_fills.py tests/test_strategy_decay.py tests/test_calibration_pipeline.py tests/test_drift_detection.py tests/test_risk_controls.py tests/test_trade_outcome_attribution.py tests/test_pnl_attribution.py tests/test_governance_registry.py`
+
+#### Design Notes
+`StrategyLifecycleState`, `StrategyLifecycleAction`, `LifecycleTransitionRecord`, `DemotionDecision`, `RetrainingTrigger`, and `StrategyLifecycleSummaryReport` are the new platform-owned contracts. The current policy uses `K-03` decay recommendations as the primary trigger source, upgrades actions when strategy-scoped risk context exists, and supports cooldown/dedup suppression to avoid repeated action thrashing. Demotion is the only lifecycle action that mutates registry status directly; watch, constrain, and retrain are recorded in artifacts and registry metadata/audit trails.
+
+Retraining is intentionally implemented as a structured trigger and governance handoff rather than an automatic replacement workflow. The handoff explicitly records that any retrained candidate must re-enter the normal research and promotion flow before it can become active again.
+
+#### Known Issues / Limitations
+- The paper artifact flow emits lifecycle actions and state transitions, but it does not automatically mutate a registry unless a caller explicitly applies the report through the governance helper.
+- `constrain` currently remains advisory for allocation/execution behavior; it is logged as lifecycle state and KPI output, but it does not automatically rescale positions by default.
+- Cooldown behavior is supported when prior lifecycle state is available, but the paper artifact flow currently evaluates a single run in isolation unless an external caller passes prior state back in.
+
+#### Recommended Next Milestone
+- Phase 1 re-evaluation checkpoint
+
+### Phase 1.5 Utility - Daily System Report
+Date: 2026-04-01
+Status: DONE
+
+#### Summary
+Added a compact validation utility at `scripts/daily_system_report.py` that reads a paper-trading artifact bundle and emits a deterministic daily JSON report, with an optional markdown summary, for Phase 1.5 closed-loop validation.
+
+#### Why
+Phase 1 is complete, but the platform still needs a single operator-friendly checkpoint artifact to evaluate whether attribution, calibration, drift, decay, lifecycle, and risk outputs are behaving usefully during extended paper trading. This utility is for validation and review, not dashboard serving.
+
+#### Files Changed
+- `src/trading_platform/reporting/daily_system_report.py`
+- `scripts/daily_system_report.py`
+- `tests/test_daily_system_report.py`
+- `DOCUMENTATION.md`
+
+#### Tests Run
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\python.exe -m ruff check src\trading_platform\reporting\daily_system_report.py scripts\daily_system_report.py tests\test_daily_system_report.py`
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\pytest.exe tests/test_daily_system_report.py`
+
+#### Verification Commands
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\python.exe -m ruff check src\trading_platform\reporting\daily_system_report.py scripts\daily_system_report.py tests\test_daily_system_report.py`
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\pytest.exe tests/test_daily_system_report.py`
+
+#### Design Notes
+The utility reads existing structured artifacts first instead of recomputing attribution, calibration, drift, decay, lifecycle, or risk logic. It supports `--artifact-dir`, `--output-json`, optional `--output-md`, and `--strict` for required-artifact enforcement. Missing optional artifacts degrade gracefully into warnings so the report can still be generated during incomplete validation runs.
+
+Example command:
+- `python scripts/daily_system_report.py --artifact-dir artifacts\paper\run_live_validation --output-json artifacts\paper\run_live_validation\daily_system_report.json --output-md artifacts\paper\run_live_validation\daily_system_report.md`
+
+#### Known Issues / Limitations
+- The utility is intentionally a read-only validation tool; it does not serve data over an API and does not change trading behavior.
+- Evaluation flags are deterministic heuristics for Phase 1.5 review, not a replacement for the underlying calibration, drift, or lifecycle contracts.
+- The report quality depends on the quality and completeness of the artifact bundle passed in.
+
+#### Recommended Next Milestone
+- Phase 1.5 re-evaluation checkpoint execution and review
+
+### Phase 1.5 Utility - Validation Window Reviewer
+Date: 2026-04-01
+Status: DONE
+
+#### Summary
+Added a compact multi-run validation reviewer at `scripts/review_validation_window.py` with reusable aggregation logic in `src/trading_platform/reporting/validation_window_review.py`. It scans a validation root containing timestamped daily-validation runs, loads each run's `daily_validation_run_summary.json` and `daily_system_report.json`, and emits a deterministic checkpoint review in JSON with optional markdown.
+
+#### Why
+The daily validation runner and daily system report make single runs inspectable, but the Phase 1.5 checkpoint requires a windowed judgment about whether the closed-loop system is behaving meaningfully over time. This utility provides that review layer without recomputing attribution, calibration, drift, decay, lifecycle, or risk logic.
+
+#### Files Changed
+- `src/trading_platform/reporting/validation_window_review.py`
+- `scripts/review_validation_window.py`
+- `tests/test_validation_window_review.py`
+- `DOCUMENTATION.md`
+
+#### Tests Run
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\python.exe -m ruff check src\trading_platform\reporting\validation_window_review.py scripts\review_validation_window.py tests\test_validation_window_review.py`
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\pytest.exe tests/test_validation_window_review.py`
+
+#### Verification Commands
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\python.exe -m ruff check src\trading_platform\reporting\validation_window_review.py scripts\review_validation_window.py tests\test_validation_window_review.py`
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\pytest.exe tests/test_validation_window_review.py`
+
+#### Design Notes
+The reviewer intentionally consumes only existing validation artifacts first, especially `daily_system_report.json` and `daily_validation_run_summary.json`. It supports optional `--days`, `--max-runs`, `--min-valid-runs`, and `--strict`, skips incomplete runs with warnings by default, and emits deterministic checkpoint statuses for EV alignment, calibration usefulness, drift signal quality, decay signal quality, lifecycle churn, risk control behavior, and an overall validation status.
+
+Example command:
+- `python scripts/review_validation_window.py --validation-root artifacts\paper\run_live_validation --output-json artifacts\paper\run_live_validation\validation_window_review.json --output-md artifacts\paper\run_live_validation\validation_window_review.md`
+- `python scripts/review_validation_window.py --validation-root artifacts\paper\run_live_validation --output-json artifacts\paper\run_live_validation\validation_window_review.json --days 14 --min-valid-runs 5`
+
+#### Known Issues / Limitations
+- This is a compact Phase 1.5 review utility, not a dashboard service, notebook workflow, or persistent monitoring process.
+- The checkpoint heuristics intentionally summarize existing per-run artifacts; they do not recompute or replace the underlying attribution, calibration, drift, decay, lifecycle, or risk models.
+- Strict mode fails on malformed or incomplete run folders; non-strict mode skips them and records warnings in the window summary.
+
+#### Recommended Next Milestone
+- Phase 1.5 checkpoint review and human go/no-go decision
+
+### Phase 1.5 Utility - Validation Email Alerting
+Date: 2026-04-01
+Status: DONE
+
+#### Summary
+Added SMTP-based validation alerting in `src/trading_platform/reporting/validation_alerting.py` with a thin CLI wrapper at `scripts/send_validation_alert.py`. The utility evaluates existing validation artifacts, decides whether a validation alert should be triggered, supports dry-run and no-send modes, and uses a small dedupe registry to avoid resending the same alert for the same artifact/status signature.
+
+#### Why
+Daily validation and window review artifacts are now accumulating, but the operator still needs a compact way to be notified when a scheduled validation run fails or when validation outputs become concerning. This utility adds that operational support without changing trading behavior or broadening into a larger notification platform.
+
+#### Files Changed
+- `src/trading_platform/reporting/validation_alerting.py`
+- `scripts/send_validation_alert.py`
+- `tests/test_validation_alerting.py`
+- `DOCUMENTATION.md`
+
+#### Tests Run
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\python.exe -m ruff check src\trading_platform\reporting\validation_alerting.py scripts\send_validation_alert.py tests\test_validation_alerting.py`
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\pytest.exe tests/test_validation_alerting.py`
+
+#### Verification Commands
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\python.exe -m ruff check src\trading_platform\reporting\validation_alerting.py scripts\send_validation_alert.py tests\test_validation_alerting.py`
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\pytest.exe tests/test_validation_alerting.py`
+
+#### Design Notes
+The utility reads existing artifacts first:
+- `daily_validation_run_summary.json`
+- `daily_system_report.json`
+- `validation_window_review.json`
+
+It currently supports three deterministic alert types:
+- `run_failure`
+- `daily_concerning_status`
+- `window_concerning_status`
+
+SMTP settings can be supplied by CLI args or environment variables. Supported environment variables:
+- `TP_ALERT_SMTP_HOST`
+- `TP_ALERT_SMTP_PORT`
+- `TP_ALERT_SMTP_USERNAME`
+- `TP_ALERT_SMTP_PASSWORD`
+- `TP_ALERT_SMTP_USE_TLS`
+- `TP_ALERT_FROM`
+- `TP_ALERT_TO`
+- `TP_ALERT_SUBJECT_PREFIX`
+
+Resolution precedence:
+- CLI arguments override environment variables
+- environment variables are used when the corresponding CLI arguments are omitted
+- if required SMTP fields are still missing, the command fails with a clear error naming the missing fields
+
+Environment setup examples:
+- Windows PowerShell:
+  `setx TP_ALERT_SMTP_HOST smtp.example.com`
+  `setx TP_ALERT_SMTP_PORT 587`
+  `setx TP_ALERT_SMTP_USERNAME alerts@example.com`
+  `setx TP_ALERT_SMTP_PASSWORD your-secret`
+  `setx TP_ALERT_SMTP_USE_TLS true`
+  `setx TP_ALERT_FROM alerts@example.com`
+  `setx TP_ALERT_TO ops@example.com,backup@example.com`
+- Bash:
+  `export TP_ALERT_SMTP_HOST=smtp.example.com`
+  `export TP_ALERT_SMTP_PORT=587`
+  `export TP_ALERT_SMTP_USERNAME=alerts@example.com`
+  `export TP_ALERT_SMTP_PASSWORD=your-secret`
+  `export TP_ALERT_SMTP_USE_TLS=true`
+  `export TP_ALERT_FROM=alerts@example.com`
+  `export TP_ALERT_TO=ops@example.com,backup@example.com`
+
+Example commands:
+- `python scripts/send_validation_alert.py --daily-run-summary artifacts\paper\run_live_validation\2026-04-01T09-30-00\daily_validation_run_summary.json --daily-report artifacts\paper\run_live_validation\2026-04-01T09-30-00\daily_system_report.json --dry-run`
+- `python scripts/send_validation_alert.py --validation-root artifacts\paper\run_live_validation --latest-successful-run --dry-run`
+- `python scripts/send_validation_alert.py --window-review artifacts\paper\run_live_validation\validation_window_review.json --smtp-host smtp.gmail.com --smtp-port 587 --smtp-username you@example.com --smtp-password %TP_ALERT_SMTP_PASSWORD% --smtp-use-tls --from you@example.com --to you@example.com`
+
+Latest-successful-run resolution rules:
+- scan timestamped child folders under the validation root
+- require `daily_validation_run_summary.json`
+- require `daily_system_report.json`
+- require parseable JSON
+- when `--latest-successful-run` is used, require non-failure run summary status with zero paper/report exit codes
+
+#### Known Issues / Limitations
+- This utility is Phase 1.5 validation alerting only; it is not intended to replace broader production alert infrastructure.
+- Dedupe is local and file-based. If the registry is deleted or a status signature changes, the alert may be sent again.
+- The email body is intentionally compact and text-only; it summarizes top-level statuses and reasons rather than embedding full artifact payloads.
+
+#### Recommended Next Milestone
+- Phase 1.5 checkpoint review and human go/no-go decision
+
+### Phase 1.5 Utility - Daily Validation Runner
+Date: 2026-04-01
+Status: DONE
+
+#### Summary
+Added a compact orchestration utility at `scripts/run_daily_validation.py` that runs one paper-trading validation cycle and then immediately generates the Phase 1.5 daily system report against that exact artifact bundle. The runner also writes a deterministic `daily_validation_run_summary.json` artifact for scheduled-run auditability.
+
+#### Why
+Phase 1.5 needs a repeatable daily validation workflow, not just a read-only report builder. This utility makes scheduled paper-validation runs consistent and inspectable without duplicating paper or reporting business logic and without expanding into a scheduler or service.
+
+#### Files Changed
+- `src/trading_platform/reporting/daily_validation_runner.py`
+- `scripts/run_daily_validation.py`
+- `tests/test_daily_validation_runner.py`
+- `DOCUMENTATION.md`
+
+#### Tests Run
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\python.exe -m ruff check src\trading_platform\reporting\daily_validation_runner.py scripts\run_daily_validation.py tests\test_daily_validation_runner.py`
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\pytest.exe tests/test_daily_validation_runner.py`
+
+#### Verification Commands
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\python.exe -m ruff check src\trading_platform\reporting\daily_validation_runner.py scripts\run_daily_validation.py tests\test_daily_validation_runner.py`
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\pytest.exe tests/test_daily_validation_runner.py`
+
+#### Design Notes
+The runner is intentionally thin and reuses existing entry points through subprocess orchestration rather than reimplementing the paper pipeline or the daily report logic. It now routes config inputs explicitly before launching the paper subprocess:
+- activated strategy-portfolio inputs such as `activated_strategy_portfolio.json`, or JSON payloads with `active_strategies` / `strategies` / `sleeves`, are executed through `paper run-multi-strategy`
+- workflow-style paper configs with `symbols`, `universe`, or `preset` are executed through `paper run`
+
+The run summary artifact now records `config_type`, `paper_command_used`, and `execution_mode` so scheduled validation runs are auditable. The runner also supports optional `--timestamp-run-dir` to isolate repeated runs under a stable root while updating a small latest-run pointer file.
+
+Integrated alerting is optional and reuses `src/trading_platform/reporting/validation_alerting.py` directly rather than reimplementing SMTP or alert decision logic. New flags:
+- `--send-alerts`
+- `--alert-dry-run`
+- `--alert-no-send`
+- `--alert-registry-path`
+- `--alert-decision-output`
+- `--alert-subject-prefix`
+
+When alerting is enabled, the runner evaluates alerts against the exact current-run artifacts:
+- `daily_validation_run_summary.json`
+- `daily_system_report.json` when present
+
+The summary artifact now includes an `alerting` section with:
+- whether alerting was enabled
+- whether alerts were evaluated
+- whether an alert triggered
+- alert types
+- send mode and sent status
+- decision artifact path
+- any alerting error
+
+Example command:
+- `python scripts/run_daily_validation.py --config artifacts\strategy_portfolio\run_current\activated\activated_strategy_portfolio.json --state-path artifacts\paper\validation_state.json --output-dir artifacts\paper\run_live_validation --report-json daily_system_report.json --report-md daily_system_report.md --strict-report`
+- `python scripts/run_daily_validation.py --config artifacts\strategy_portfolio\run_current\activated\activated_strategy_portfolio.json --state-path artifacts\paper\validation_state.json --output-dir artifacts\paper\run_live_validation --report-json daily_system_report.json --timestamp-run-dir`
+- `python scripts/run_daily_validation.py --config artifacts\strategy_portfolio\run_current\activated\activated_strategy_portfolio.json --state-path artifacts\paper\validation_state.json --output-dir artifacts\paper\run_live_validation --report-json daily_system_report.json --timestamp-run-dir --send-alerts --alert-subject-prefix [VALIDATION]`
+- `python scripts/run_daily_validation.py --config artifacts\strategy_portfolio\run_current\activated\activated_strategy_portfolio.json --state-path artifacts\paper\validation_state.json --output-dir artifacts\paper\run_live_validation --report-json daily_system_report.json --timestamp-run-dir --send-alerts`
+
+If SMTP environment variables are already set for `send_validation_alert.py`, the runner can send alerts without repeating SMTP CLI flags.
+
+Exit-code policy:
+- `0` when paper/report succeed and alerting succeeds or is disabled
+- `1` when config detection fails, the paper run fails, or the report fails in strict mode
+- `2` when paper/report succeed but the integrated alerting step fails
+
+#### Known Issues / Limitations
+- The runner is an orchestration utility for scheduled Phase 1.5 validation runs; it is not a scheduler, daemon, or monitoring service.
+- In `--timestamp-run-dir` mode, relative report paths are resolved under the timestamped artifact directory; absolute report paths are respected as provided.
+- Relative `--alert-decision-output` paths are also resolved under the current artifact directory so each timestamped run keeps its own alert decision artifact.
+- Config routing is intentionally conservative and currently recognizes multi-strategy validation inputs primarily through activated-portfolio filenames and stable JSON keys. Ambiguous configs fail fast instead of falling back to the wrong paper command.
+- The summary artifact records exit status, warnings, and alerting state, but it does not capture subprocess stdout/stderr payloads.
+
+#### Recommended Next Milestone
+- Phase 1.5 re-evaluation checkpoint execution and review

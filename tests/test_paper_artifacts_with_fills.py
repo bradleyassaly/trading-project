@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pandas as pd
@@ -171,19 +172,34 @@ def test_write_paper_trading_artifacts_writes_fills_and_equity_curve(tmp_path: P
     assert paths["strategy_health_payload_json_path"].exists()
     assert paths["transaction_cost_report_json_path"].exists()
     assert paths["realtime_kpi_monitoring_json_path"].exists()
+    assert paths["system_health_payload_json_path"].exists()
+    assert paths["paper_risk_controls_json_path"].exists()
+    assert paths["drift_detection_report_json_path"].exists()
+    assert paths["calibration_summary_report_json_path"].exists()
+    assert paths["strategy_decay_report_json_path"].exists()
+    assert paths["strategy_lifecycle_report_json_path"].exists()
 
     fills_df = pd.read_csv(paths["fills_path"])
     equity_df = pd.read_csv(paths["equity_snapshot_path"])
     positions_df = pd.read_csv(paths["positions_path"])
     candidate_df = pd.read_csv(paths["candidate_snapshot_csv"])
     contract_df = pd.read_csv(paths["trade_decision_contracts_v1_csv"])
-    lifecycle_df = pd.read_csv(paths["order_lifecycle_records_csv_path"])
+    order_lifecycle_df = pd.read_csv(paths["order_lifecycle_records_csv_path"])
     reconciliation_df = pd.read_csv(paths["order_lifecycle_reconciliation_mismatches_csv_path"])
     kpi_df = pd.read_csv(paths["kpi_records_csv_path"])
     trade_explorer_df = pd.read_csv(paths["trade_explorer_rows_csv_path"])
     strategy_health_df = pd.read_csv(paths["strategy_health_payload_csv_path"])
     transaction_cost_df = pd.read_csv(paths["transaction_cost_records_csv_path"])
     realtime_monitoring_df = pd.read_csv(paths["realtime_kpi_monitoring_csv_path"])
+    system_health_df = pd.read_csv(paths["system_health_checks_csv_path"])
+    drift_df = pd.read_csv(paths["drift_metric_snapshots_csv_path"])
+    drift_summary = json.loads(paths["drift_detection_summary_json_path"].read_text(encoding="utf-8"))
+    calibration_df = pd.read_csv(paths["calibration_records_csv_path"])
+    calibration_summary = json.loads(paths["calibration_summary_json_path"].read_text(encoding="utf-8"))
+    decay_df = pd.read_csv(paths["strategy_decay_records_csv_path"])
+    decay_summary = json.loads(paths["strategy_decay_summary_json_path"].read_text(encoding="utf-8"))
+    strategy_lifecycle_df = pd.read_csv(paths["strategy_lifecycle_actions_csv_path"])
+    lifecycle_summary = json.loads(paths["strategy_lifecycle_summary_json_path"].read_text(encoding="utf-8"))
 
     assert len(fills_df) == 1
     assert fills_df.iloc[0]["symbol"] == "AAPL"
@@ -215,13 +231,27 @@ def test_write_paper_trading_artifacts_writes_fills_and_equity_curve(tmp_path: P
     assert "expected_value_gross_source=prediction_row.expected_gross_return" in str(contract_df.iloc[0]["metadata"])
     assert "veto_reason_count=3" in str(contract_df.iloc[1]["rationale_context"])
     assert "ev_decomposition_status=derived" in str(contract_df.iloc[1]["metadata"])
-    assert lifecycle_df.iloc[0]["final_status"] == "filled"
+    assert order_lifecycle_df.iloc[0]["final_status"] == "filled"
     assert reconciliation_df.empty
     assert "equity" in set(kpi_df["metric_name"])
     assert list(trade_explorer_df["symbol"]) == ["AAPL", "MSFT"]
     assert list(strategy_health_df["strategy_id"]) == ["sma_cross"]
     assert set(transaction_cost_df["stage"]) == {"estimate", "realized"}
     assert "drawdown" in set(realtime_monitoring_df["metric_name"])
+    assert "operating_state_code" in set(kpi_df["metric_name"])
+    assert "signal_count" in set(kpi_df["metric_name"])
+    assert "record_count" in set(kpi_df["metric_name"])
+    assert "strategy_count" in set(kpi_df["metric_name"])
+    assert "action_count" in set(kpi_df["metric_name"])
+    assert "pipeline_integrity" in set(system_health_df["check_name"])
+    assert "metric_name" in set(drift_df.columns)
+    assert drift_summary["snapshot_count"] >= 0
+    assert "raw_confidence_value" in set(calibration_df.columns)
+    assert calibration_summary["record_count"] >= 0
+    assert "strategy_id" in set(decay_df.columns)
+    assert decay_summary["strategy_count"] >= 0
+    assert "action_type" in set(strategy_lifecycle_df.columns)
+    assert lifecycle_summary["strategy_count"] >= 0
     assert not any(key.startswith("metadata_") for key in paths)
 
 

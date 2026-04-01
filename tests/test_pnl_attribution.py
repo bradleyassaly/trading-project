@@ -90,6 +90,7 @@ def test_single_strategy_realized_attribution_reconciles(tmp_path: Path) -> None
     assert strategy_rows[0]["unrealized_pnl"] == 0.0
     assert len(trade_rows) == 1
     assert trade_rows[0]["realized_pnl"] == 100.0
+    assert trade_rows[0]["entry_decision_id"] == "trade_decision_contract_v1|2025-01-02|AAPL|alpha"
     assert summary["reconciliation"]["strategy_reconciled"] is True
     assert summary["reconciliation"]["symbol_reconciled"] is True
 
@@ -367,6 +368,48 @@ def test_attribution_artifacts_and_dashboard_payloads(tmp_path: Path) -> None:
     assert strategy_payload["rows"][0]["strategy_id"] == "alpha"
     assert symbol_payload["rows"][0]["symbol"] == "AAPL"
     assert attribution_payload["summary"]["attribution_method"] == "target_weight_proportional"
+
+
+def test_closed_trade_emits_trade_outcome_attribution_artifacts(tmp_path: Path) -> None:
+    state_path = tmp_path / "state.json"
+    provenance = {
+        "AAPL": {
+            "strategy_id": "alpha",
+            "strategy_ownership": {"alpha": 1.0},
+            "signal_source": "legacy",
+        }
+    }
+    _run_cycle(
+        state_path=state_path,
+        as_of="2025-01-02",
+        latest_price=100.0,
+        target_weight=1.0,
+        provenance=provenance,
+        config_overrides={"ev_gate_enabled": True},
+    )
+    result = _run_cycle(
+        state_path=state_path,
+        as_of="2025-01-03",
+        latest_price=110.0,
+        target_weight=0.0,
+        provenance=provenance,
+        config_overrides={"ev_gate_enabled": True},
+    )
+    paper_dir = tmp_path / "paper"
+    paths = write_paper_trading_artifacts(result=result, output_dir=paper_dir)
+
+    outcome_df = pd.read_csv(paths["trade_outcomes_csv_path"])
+    attribution_df = pd.read_csv(paths["trade_outcome_attribution_csv_path"])
+    aggregate_df = pd.read_csv(paths["trade_outcome_aggregates_csv_path"])
+    summary = json.loads(paths["trade_outcome_attribution_summary_json_path"].read_text(encoding="utf-8"))
+
+    assert outcome_df.iloc[0]["instrument"] == "AAPL"
+    assert outcome_df.iloc[0]["strategy_id"] == "alpha"
+    assert outcome_df.iloc[0]["decision_id"] == "trade_decision_contract_v1|2025-01-02|AAPL|alpha"
+    assert float(outcome_df.iloc[0]["realized_net_return"]) == 0.1
+    assert "forecast_gap" in set(attribution_df.columns)
+    assert {"strategy", "instrument", "confidence_bucket", "horizon"} <= set(aggregate_df["group_type"])
+    assert summary["closed_trade_count"] == 1
 
 
 def test_replay_attribution_aggregation(tmp_path: Path) -> None:
