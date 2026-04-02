@@ -40,7 +40,12 @@ dependencies = [
   # Kalshi prediction markets
   "requests>=2.31",
   "websockets>=10.0",
-  "cryptography>=41.0"
+  "cryptography>=41.0",
+  # Trading GUI API
+  "fastapi>=0.110",
+  "uvicorn[standard]>=0.28",
+  "python-multipart>=0.0.9",
+  "httpx>=0.27"
 ]
 
 [project.urls]

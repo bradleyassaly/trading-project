@@ -73,3 +73,5 @@ artifacts/experiments/*.json
 .cache/
 .python-version
 .act/
+data/
+artifacts/

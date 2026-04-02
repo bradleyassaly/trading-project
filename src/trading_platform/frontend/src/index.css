@@ -1,0 +1,55 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    background-color: #0f1117;
+    color: #e2e8f0;
+  }
+
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  ::-webkit-scrollbar-track {
+    background: #1a1d27;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: #2a2d3e;
+    border-radius: 3px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: #3a3d4e;
+  }
+}
+
+@layer components {
+  .card {
+    @apply bg-surface-card border border-surface-border rounded-lg p-4;
+  }
+  .btn {
+    @apply px-4 py-2 rounded-md text-sm font-medium transition-colors duration-150 cursor-pointer;
+  }
+  .btn-primary {
+    @apply btn bg-accent-blue hover:bg-blue-500 text-white;
+  }
+  .btn-danger {
+    @apply btn bg-accent-red hover:bg-red-500 text-white;
+  }
+  .btn-success {
+    @apply btn bg-accent-green hover:bg-green-400 text-black;
+  }
+  .btn-ghost {
+    @apply btn bg-surface-border hover:bg-surface-hover text-gray-300;
+  }
+  .tag-green {
+    @apply text-xs px-2 py-0.5 rounded bg-green-900/40 text-accent-green border border-green-800/40;
+  }
+  .tag-red {
+    @apply text-xs px-2 py-0.5 rounded bg-red-900/40 text-accent-red border border-red-800/40;
+  }
+  .tag-gray {
+    @apply text-xs px-2 py-0.5 rounded bg-gray-800 text-gray-400 border border-gray-700;
+  }
+}

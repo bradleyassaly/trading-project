@@ -1242,6 +1242,266 @@ Dependencies:
 - K-01
 - K-02
 
+Kalshi / Prediction Markets Expansion
+Objective
+
+Extend the platform to support event-driven prediction markets (starting with Kalshi and later Polymarket), enabling research, backtesting, paper trading, and eventually live trading of event-based strategies.
+
+K-00 - Kalshi Ingest Validation and Data-Quality Reporting
+
+Status: DONE
+
+Add a post-ingest validation layer for real Kalshi datasets so normalized market, trade, candle, resolution, and ingest-metadata artifacts are audited before research, backtesting, or paper trading consumes them.
+
+Requirements:
+
+Inspect normalized artifacts such as:
+- data/kalshi/normalized/markets.parquet
+- data/kalshi/normalized/trades/*
+- data/kalshi/normalized/candles/*
+- data/kalshi/normalized/resolution.csv
+- ingest_summary.json / ingest_manifest.json / ingest_checkpoint.json
+
+Report at minimum:
+- total markets, trades, candles, and resolved markets
+- resolution/trade/candle coverage rates
+- duplicate ticker and market-id diagnostics
+- invalid timestamps, missing categories, and category distribution
+- date-range coverage and cross-layer schema mismatches
+- filtered vs retained market diagnostics with effective filter config
+- synthetic-marker detection in real-data defaults
+
+Artifacts:
+- kalshi_data_validation_summary.json
+- kalshi_data_validation_details.json
+- kalshi_data_validation_report.md
+
+Acceptance criteria:
+- validation can run independently from the CLI and programmatically
+- findings are classified as PASS / WARNING / FAIL with actionable reasons
+- threshold policy is configurable
+- Kalshi historical ingest emits enough filter diagnostics for the validator to explain market exclusions
+- backtest and paper paths can optionally require a passing validation summary
+
+Tier 1 - Core System (Must Complete First)
+K-01 - Kalshi Resolved-Market Backtest Framework
+
+Status: DONE
+
+Build a production-grade research/backtest runner for Kalshi markets using resolved historical data.
+
+Requirements:
+
+Load historical market + trade data from local artifacts
+Restrict evaluation to resolved markets only
+Support configurable:
+entry timing rules
+holding periods
+execution assumptions (fill price, slippage, latency)
+Output structured artifacts:
+kalshi_backtest_summary.json
+kalshi_signal_diagnostics.json
+kalshi_trade_log.jsonl
+kalshi_backtest_report.md
+
+Metrics:
+
+Win rate
+Average predicted edge
+Realized return
+Calibration (Brier score or equivalent)
+Performance by:
+category
+confidence bucket
+signal type
+
+Goal:
+Establish a reliable research/evaluation loop for event-market strategies.
+
+K-02 — Informed Flow Signal Family
+
+Status: DONE
+
+Implement microstructure-based signals using Kalshi trade/order flow data.
+
+Signals:
+
+Taker imbalance (buy vs sell pressure)
+Large aggressive trade detection
+Unexplained short-horizon price movement
+(Optional extension) Flow persistence / repeated directional sweeps
+
+Requirements:
+
+Fully configurable thresholds
+Clean signal output schema (confidence, direction, supporting features)
+Plug directly into K-01 backtest framework
+
+Goal:
+Create differentiated alpha signals not based on simple price history.
+
+K-03 — Kalshi Paper Trading Integration
+
+Status: DONE
+
+Enable live paper trading on real Kalshi markets using the existing execution framework.
+
+Requirements:
+
+Integrate KalshiBroker into paper trading engine
+Real-time market polling / snapshotting
+Order simulation or paper execution path
+Persistent state (positions, P&L, history)
+Daily validation/report generation
+
+Risk Controls:
+
+Max exposure per market
+Max exposure per category
+Drawdown limits (reuse global risk engine)
+No-trade conditions for low liquidity or near settlement
+
+Goal:
+Close the loop: signal → trade → outcome → evaluation.
+
+Tier 2 — Alpha Expansion (After Core is Working)
+K-04 — Cross-Market Arbitrage Monitor
+
+Status: DONE
+
+Detect pricing discrepancies between Kalshi and Polymarket.
+
+Requirements:
+
+Normalize market definitions across platforms
+Fuzzy-match equivalent markets
+Compute spread and implied probabilities
+Log opportunities and persistence over time
+
+Outputs:
+
+cross_market_opportunities.jsonl
+Opportunity summary report
+
+Goal:
+Validate whether cross-market inefficiencies produce real, persistent edge.
+
+K-05 — Signal Ensemble & Portfolio Construction
+
+Status: TODO
+
+Combine multiple Kalshi signals into a unified decision layer.
+
+Features:
+
+Weight signals by:
+historical performance (IC / win rate)
+confidence
+category reliability
+Handle conflicting signals
+Portfolio-level exposure management
+
+Goal:
+Move from single-signal trades to robust multi-signal strategies.
+
+K-06 — Automated Market Categorization
+
+Status: TODO
+
+Improve classification of markets into categories (economic, political, weather, etc.).
+
+Approach:
+
+Replace keyword rules with:
+lightweight LLM classification or
+local ML classifier
+Store category + confidence
+
+Goal:
+Improve base-rate modeling and signal conditioning.
+
+Tier 3 — Advanced Capabilities (After Edge is Proven)
+K-07 — Polymarket Integration
+
+Status: TODO
+
+Build full data + execution adapter for Polymarket.
+
+Features:
+
+On-chain data ingestion (Polygon)
+Wallet-level behavior tracking
+Trade + liquidity data normalization
+
+Goal:
+Expand data surface and enable cross-market strategies.
+
+K-08 — News & Event Reaction Signals
+
+Status: TODO
+
+Incorporate real-time news to detect lag in market repricing.
+
+Sources:
+
+Public news APIs (e.g., NewsAPI, GDELT)
+
+Features:
+
+Event detection
+Mapping to active markets
+Time-to-repricing analysis
+
+Goal:
+Capture edge from faster reaction to public information.
+
+K-09 — Autonomous Strategy Discovery (Prediction Markets)
+
+Status: TODO
+
+Extend the existing autonomous research loop to Kalshi strategies.
+
+Features:
+
+Periodic re-training / evaluation on fresh data
+Automatic proposal of new signals
+Promotion via governance layer
+
+Goal:
+Continuously discover new edge without manual intervention.
+
+K-10 — Live Trading Deployment
+
+Status: TODO
+
+Deploy real capital on Kalshi once paper trading proves positive expectation.
+
+Constraints:
+
+Minimum sample size (e.g., 50+ resolved trades)
+Strict position sizing ($10–$25 initial trades)
+Conservative risk limits
+
+Goal:
+Transition from research system → real trading system safely.
+
+Success Criteria for Kalshi Expansion
+
+The system is considered successful when:
+
+Backtests show stable edge across multiple market categories
+Paper trading produces consistent positive expected value
+Signal diagnostics show calibration (confidence aligns with outcomes)
+Execution system operates without failures over extended runs
+Cross-market opportunities demonstrate measurable persistence
+Notes
+All Kalshi functionality should follow existing platform principles:
+platform-owned abstractions
+structured artifacts
+reproducible research
+governance before promotion
+Avoid premature optimization or overbuilding before validating edge in K-01 and K-02.
+
 ---
 
 ## Re-evaluation checkpoint criteria
@@ -1271,3 +1531,11 @@ A milestone is not complete until:
 
 ### Review policy
 Any milestone that changes trading behavior, promotion logic, portfolio allocation, calibration behavior, drift detection, kill-switch behavior, or strategy lifecycle transitions should be reviewed carefully before merge.
+
+### Maintenance Notes
+- 2026-04-01: Kalshi historical ingest was audited and hardened so real-data research defaults now point to `data/kalshi/features/real` and `data/kalshi/normalized/resolution.csv`, while synthetic fixture generation was segregated under `data/kalshi/synthetic/...`. The ingest path is now cutoff-aware, checkpointed, and emits raw plus normalized summary artifacts suitable for audit and reproducible backtests.
+- 2026-04-01: Kalshi auth loading now supports `private_key_pem` or `private_key_path` with explicit precedence, clearer validation, and YAML auth overrides for historical ingest and related Kalshi CLI workflows.
+- 2026-04-02: Kalshi historical ingest now applies category / excluded-series / min-volume filtering inside each paginated market fetch before raw-market writes. Retained markets can begin downstream normalization immediately while irrelevant markets are discarded in-flight, and ingest summaries now report page-level fetch/retain/discard diagnostics plus retained ticker samples.
+- 2026-04-02: Kalshi authenticated live-bridge reads during historical ingest now retry `429 Too Many Requests` responses with `Retry-After` support, bounded exponential backoff plus jitter, and distinct `live/authenticated` operator logging. Historical ingest YAML now exposes separate authenticated throttling settings so recent-settled market bridging can continue through transient rate limits without changing public historical retry behavior.
+- 2026-04-02: Kalshi live-bridge ingest now stops paginating once settled live pages fall entirely outside the lookback window, logs retained and discarded ticker samples per page, persists raw markets only when processing actually starts, and fails fast when retained-market fetch volume grows without any processing progress. This prevents the prior runaway behavior where the live `/markets?status=settled` cursor could traverse the wider settled universe indefinitely while top-level normalization waited for download completion.
+- 2026-04-02: Kalshi historical ingest now emits structured run and stage status artifacts under `artifacts/kalshi_ingest/<run_id>/` with heartbeat-updated `ingest_status.json` plus final `ingest_run_summary.json`. Operators can now see whether the run is in initialization, checkpointing, cutoff discovery, market-universe fetch, retained-market processing, normalization, or final summary, along with page counts, retained-market progress, stop reasons, and fail-fast outcomes.

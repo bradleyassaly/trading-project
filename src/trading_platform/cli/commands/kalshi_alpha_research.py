@@ -39,7 +39,7 @@ def cmd_kalshi_alpha_research(args: argparse.Namespace) -> None:
     signals_cfg = raw.get("signals", {})
     backtest_cfg = raw.get("backtest", {})
 
-    feature_dir = getattr(args, "feature_dir", None) or paths_cfg.get("feature_dir", "data/kalshi/features")
+    feature_dir = getattr(args, "feature_dir", None) or paths_cfg.get("feature_dir", "data/kalshi/features/real")
     output_dir = getattr(args, "output_dir", None) or paths_cfg.get("output_dir", "artifacts/kalshi_research")
     resolution_data_path = getattr(args, "resolution_data", None) or paths_cfg.get("resolution_data_path")
     run_backtest = getattr(args, "backtest", False) or backtest_cfg.get("enabled", False)
@@ -67,7 +67,7 @@ def cmd_kalshi_alpha_research(args: argparse.Namespace) -> None:
     print(f"\nRun ID: {result.run_id}")
     print(f"Output: {result.output_dir}")
     print(f"Markets analyzed: {result.signal_summary[0]['n_markets'] if result.signal_summary else 0}")
-    print(f"\nSignal leaderboard:")
+    print("\nSignal leaderboard:")
     for row in result.leaderboard:
         ic_str = f"{row['ic']:.4f}" if row['ic'] == row['ic'] else "n/a"
         wr_str = f"{row['win_rate']:.1%}" if row['win_rate'] == row['win_rate'] else "n/a"

@@ -4,19 +4,78 @@ schema_version: 1
 # Feature parquets are produced by: trading-cli kalshi ingest (or synthetic data generator).
 
 paths:
-  feature_dir: data/kalshi/features
+  feature_dir: data/kalshi/features/real
   output_dir: artifacts/kalshi_research
-  resolution_data_path: null   # Path to CSV with ticker,resolution_price columns (optional)
+  resolution_data_path: data/kalshi/normalized/resolution.csv
 
 signals:
   families:
     - kalshi_calibration_drift
     - kalshi_volume_spike
     - kalshi_time_decay
+    - kalshi_base_rate
+    - kalshi_taker_imbalance
+    - kalshi_large_order
+    - kalshi_unexplained_move
   forward_horizon_bars: 10     # Bars ahead to measure forward return for IC
   min_rows: 30                 # Minimum bars required per market
+  informed_flow:
+    signal_score_scale: 3.0
+    taker_imbalance_entry_z: 1.0
+    taker_raw_imbalance_threshold: 0.25
+    taker_min_total_volume: 15.0
+    large_order_min_count: 1
+    large_order_min_volume_ratio: 0.20
+    large_order_min_direction: 0.25
+    unexplained_move_entry_z: 1.25
+    unexplained_move_min_abs_move: 2.0
+    unexplained_move_catalyst_penalty: 0.35
 
 backtest:
   enabled: false               # Set true when resolution data is available
   entry_threshold: 0.5         # Minimum |signal| to enter a trade
   long_only: false             # false = take both YES and NO positions
+
+paper:
+  initial_cash: 1000.0
+  state_path: artifacts/kalshi_paper/state.json
+  output_dir: artifacts/kalshi_paper
+  poll_interval_seconds: 30
+  max_iterations: 1
+  base_rate_db_path: data/kalshi/base_rates/base_rate_db.json
+  execution:
+    signal_lookback_hours: 48
+    feature_period: 1h
+    min_recent_trades: 20
+    stale_trade_seconds: 900
+    min_market_volume: 25
+    min_market_liquidity_dollars: 50.0
+    max_spread: 0.08
+    max_contracts_per_trade: 10
+    max_fraction_top_level_liquidity: 0.5
+    max_fraction_market_volume: 0.05
+    min_confidence: 0.10
+    entry_threshold: 0.5
+    exit_threshold: 0.5
+    no_entry_before_close_minutes: 60
+    max_holding_hours: 24
+    fill_penalty_factor: 0.5
+    max_markets_per_run: 50
+  risk:
+    max_exposure_per_market: 100.0
+    max_exposure_per_category: 250.0
+    max_simultaneous_positions: 5
+    max_drawdown_pct: 0.20
+
+cross_market_monitor:
+  output_dir: artifacts/cross_market
+  request_sleep_sec: 0.05
+  kalshi_max_markets: 250
+  polymarket_max_markets: 250
+  min_probability_spread: 0.03
+  match_threshold: 0.84
+  ambiguity_margin: 0.03
+  max_expiration_diff_hours: 24.0
+  min_title_similarity: 0.72
+  min_token_overlap: 0.60
+  append_history: true

@@ -29,7 +29,7 @@ from trading_platform.kalshi.signals import (
 
 @dataclass(frozen=True)
 class KalshiResearchConfig:
-    feature_dir: str = "data/kalshi/features"
+    feature_dir: str = "data/kalshi/features/real"
     output_dir: str = "artifacts/kalshi_research"
     signal_families: tuple[str, ...] = KALSHI_SIGNAL_FAMILY_NAMES
     resolution_data_path: str | None = None

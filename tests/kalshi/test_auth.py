@@ -57,6 +57,68 @@ def test_kalshi_config_from_env_missing_key_material(monkeypatch):
         KalshiConfig.from_env()
 
 
+def test_kalshi_config_from_mapping_accepts_raw_pem(test_pem):
+    config = KalshiConfig.from_mapping(
+        {
+            "api_key_id": "my-key-id",
+            "private_key_pem": test_pem.replace("\n", "\\n"),
+        },
+        demo=False,
+        source_label="test mapping",
+    )
+    assert config is not None
+    assert config.api_key_id == "my-key-id"
+    assert "BEGIN RSA PRIVATE KEY" in config.private_key_pem
+    assert config.demo is False
+
+
+def test_kalshi_config_from_mapping_accepts_private_key_path(tmp_path, test_pem):
+    key_path = tmp_path / "kalshi.pem"
+    key_path.write_text(test_pem, encoding="utf-8")
+
+    config = KalshiConfig.from_mapping(
+        {
+            "api_key_id": "my-key-id",
+            "private_key_path": str(key_path),
+        },
+        source_label="test mapping",
+    )
+    assert config is not None
+    assert config.private_key_path == str(key_path)
+    assert config.private_key_pem == test_pem
+
+
+def test_build_auth_headers_malformed_pem_fails_clearly():
+    config = KalshiConfig(api_key_id="my-key-id", private_key_pem="not-a-valid-pem", demo=False)
+    with pytest.raises(ValueError, match="Unable to load Kalshi private key"):
+        build_auth_headers(config, "GET", "/markets")
+
+
+def test_kalshi_config_rejects_file_path_in_private_key_pem(tmp_path):
+    key_path = tmp_path / "kalshi.pem"
+    key_path.write_text("dummy", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="private_key_pem looks like a file path"):
+        KalshiConfig.from_mapping(
+            {
+                "api_key_id": "my-key-id",
+                "private_key_pem": str(key_path),
+            },
+            source_label="test mapping",
+        )
+
+
+def test_kalshi_config_from_env_rejects_file_path_in_private_key_pem(tmp_path, monkeypatch):
+    key_path = tmp_path / "kalshi.pem"
+    key_path.write_text("dummy", encoding="utf-8")
+    monkeypatch.setenv("KALSHI_API_KEY_ID", "env-key-id")
+    monkeypatch.setenv("KALSHI_PRIVATE_KEY_PEM", str(key_path))
+    monkeypatch.delenv("KALSHI_PRIVATE_KEY_PATH", raising=False)
+
+    with pytest.raises(ValueError, match="private_key_pem looks like a file path"):
+        KalshiConfig.from_env()
+
+
 def test_build_auth_headers_structure(test_pem):
     config = KalshiConfig(api_key_id="my-key-id", private_key_pem=test_pem, demo=True)
     headers = build_auth_headers(config, "GET", "/trade-api/v2/markets?status=open")

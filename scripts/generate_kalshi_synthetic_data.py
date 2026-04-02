@@ -140,7 +140,7 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
 
 def main() -> None:
     root = Path(__file__).parent.parent
-    feature_dir = root / "data" / "kalshi" / "features"
+    feature_dir = root / "data" / "kalshi" / "synthetic" / "features"
     feature_dir.mkdir(parents=True, exist_ok=True)
 
     resolution_rows = []
@@ -162,7 +162,7 @@ def main() -> None:
         resolution_rows.append({"ticker": ticker, "resolution_price": resolution_price, "resolves_yes": resolves_yes})
 
     resolution_df = pd.DataFrame(resolution_rows)
-    resolution_path = root / "data" / "kalshi" / "resolution.csv"
+    resolution_path = root / "data" / "kalshi" / "synthetic" / "resolution.csv"
     resolution_df.to_csv(resolution_path, index=False)
 
     print(f"Generated {N_MARKETS} synthetic markets -> {feature_dir}")

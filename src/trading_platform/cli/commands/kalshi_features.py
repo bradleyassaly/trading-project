@@ -2,8 +2,8 @@
 CLI command: trading-cli data kalshi features
 
 Reads tracked tickers from the Kalshi config YAML, loads trade history
-from ``data/kalshi/trades/<TICKER>.parquet``, computes features, and
-writes output to ``data/kalshi/features/<TICKER>.parquet``.
+from ``data/kalshi/normalized/trades/<TICKER>.parquet``, computes features,
+and writes output to ``data/kalshi/features/real/<TICKER>.parquet``.
 
 Usage
 -----
@@ -11,7 +11,7 @@ Usage
     trading-cli data kalshi features --config configs/kalshi.yaml \\
         --tickers SOME-TICKER-24 OTHER-TICKER-24 \\
         --period 1h \\
-        --output-dir data/kalshi/features
+        --output-dir data/kalshi/features/real
 
 If no tickers are provided on the command line, the command reads
 ``ingestion.tracked_tickers`` from the YAML config.
@@ -27,7 +27,6 @@ from typing import Any
 import yaml
 
 from trading_platform.kalshi.features import (
-    KALSHI_FEATURE_GROUPS,
     build_kalshi_features,
     load_trades_parquet,
     write_feature_parquet,

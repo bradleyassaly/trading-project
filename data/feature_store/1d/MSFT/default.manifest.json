@@ -4,11 +4,11 @@
   "feature_set_id": "default",
   "feature_groups": [],
   "schema_version": "feature_store_v1",
-  "row_count": 90,
+  "row_count": 80,
   "data_path": "C:\\Users\\bradl\\PycharmProjects\\trading_platform\\data\\feature_store\\1d\\MSFT\\default.parquet",
   "manifest_path": "C:\\Users\\bradl\\PycharmProjects\\trading_platform\\data\\feature_store\\1d\\MSFT\\default.manifest.json",
   "start_timestamp": "2024-01-01T00:00:00",
-  "end_timestamp": "2024-03-30T00:00:00",
+  "end_timestamp": "2024-03-20T00:00:00",
   "feature_columns": [
     "dist_sma_200",
     "mom_20",
@@ -25,6 +25,6 @@
     "vol_ratio_20"
   ],
   "metadata": {
-    "source_feature_path": "C:\\Users\\bradl\\AppData\\Local\\Temp\\pytest-of-bradl\\pytest-824\\test_canonical_bundle_experime1\\case_a\\data\\features\\MSFT.parquet"
+    "source_feature_path": "C:\\Users\\bradl\\AppData\\Local\\Temp\\pytest-of-bradl\\pytest-875\\test_refresh_research_inputs_b0\\data\\features\\MSFT.parquet"
   }
 }

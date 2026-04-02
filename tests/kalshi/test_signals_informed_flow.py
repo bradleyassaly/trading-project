@@ -4,7 +4,6 @@ Tests for signals_informed_flow.py — taker imbalance, large order, unexplained
 from __future__ import annotations
 
 import json
-import math
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -14,11 +13,16 @@ import pytest
 
 from trading_platform.kalshi.signals_informed_flow import (
     ALL_INFORMED_FLOW_SIGNAL_FAMILIES,
+    DEFAULT_INFORMED_FLOW_CONFIG,
+    InformedFlowSignalConfig,
     KALSHI_LARGE_ORDER,
     KALSHI_TAKER_IMBALANCE,
     KALSHI_UNEXPLAINED_MOVE,
     _add_large_order,
     _add_taker_imbalance,
+    _build_large_order_signal_frame,
+    _build_taker_imbalance_signal_frame,
+    _build_unexplained_move_signal_frame,
     _add_unexplained_move,
     _classify_catalyst,
     _compute_large_order_bars,
@@ -26,6 +30,8 @@ from trading_platform.kalshi.signals_informed_flow import (
     _flag_large_orders,
     _resolve_side_col,
     build_informed_flow_features,
+    build_informed_flow_signal_observations,
+    make_informed_flow_signal_families,
 )
 
 
@@ -673,6 +679,83 @@ class TestInformedFlowSignalFamilies:
         assert "kalshi_taker_imbalance" in names
         assert "kalshi_large_order" in names
         assert "kalshi_unexplained_move" in names
+
+    def test_taker_signal_frame_outputs_typed_fields(self):
+        df = pd.DataFrame({
+            "taker_buy_vol": [40.0],
+            "taker_sell_vol": [10.0],
+            "taker_imbalance": [0.60],
+            "imbalance_z": [2.0],
+            "taker_conviction": [2.2],
+        })
+        frame = _build_taker_imbalance_signal_frame(df, DEFAULT_INFORMED_FLOW_CONFIG)
+        assert {"signal_family", "direction", "confidence", "signal_probability", "signal_value"} <= set(frame.columns)
+        assert frame.loc[0, "signal_family"] == "kalshi_taker_imbalance"
+        assert frame.loc[0, "direction"] == pytest.approx(1.0)
+        assert 0.0 < frame.loc[0, "confidence"] <= 1.0
+        assert frame.loc[0, "signal_probability"] > 0.5
+
+    def test_large_order_signal_frame_respects_thresholds(self):
+        df = pd.DataFrame({
+            "large_order_direction": [0.20, 0.85],
+            "large_order_conviction": [0.10, 0.90],
+            "large_order_count": [1, 3],
+            "large_order_volume_ratio": [0.05, 0.45],
+        })
+        frame = _build_large_order_signal_frame(df, DEFAULT_INFORMED_FLOW_CONFIG)
+        assert frame.loc[0, "confidence"] == pytest.approx(0.0)
+        assert frame.loc[0, "signal_value"] == pytest.approx(0.0)
+        assert frame.loc[1, "confidence"] > 0.0
+        assert frame.loc[1, "signal_value"] > 0.0
+
+    def test_unexplained_move_signal_penalizes_scheduled_catalysts(self):
+        df = pd.DataFrame({
+            "unexplained_move": [4.0, 4.0],
+            "unexplained_move_z": [2.0, 2.0],
+            "has_scheduled_catalyst": [0.0, 1.0],
+            "catalyst_type": ["none", "fed_rate_hold"],
+        })
+        frame = _build_unexplained_move_signal_frame(df, DEFAULT_INFORMED_FLOW_CONFIG)
+        assert frame.loc[0, "confidence"] > frame.loc[1, "confidence"]
+        assert frame.loc[0, "signal_probability"] > frame.loc[1, "signal_probability"]
+
+    def test_build_informed_flow_signal_observations_returns_all_families(self):
+        df = pd.DataFrame({
+            "taker_buy_vol": [50.0],
+            "taker_sell_vol": [10.0],
+            "taker_imbalance": [0.66],
+            "imbalance_z": [1.8],
+            "taker_conviction": [2.0],
+            "large_order_direction": [0.8],
+            "large_order_conviction": [0.9],
+            "large_order_count": [2],
+            "large_order_volume_ratio": [0.4],
+            "unexplained_move": [3.0],
+            "unexplained_move_z": [1.8],
+            "has_scheduled_catalyst": [0.0],
+            "catalyst_type": ["none"],
+        })
+        observations = build_informed_flow_signal_observations(df)
+        assert set(observations) == {
+            "kalshi_taker_imbalance",
+            "kalshi_large_order",
+            "kalshi_unexplained_move",
+        }
+        assert all("signal_value" in frame.columns for frame in observations.values())
+
+    def test_make_informed_flow_signal_families_applies_custom_config(self):
+        families = {family.name: family for family in make_informed_flow_signal_families(
+            InformedFlowSignalConfig(taker_imbalance_entry_z=3.0)
+        )}
+        df = pd.DataFrame({
+            "taker_buy_vol": [50.0],
+            "taker_sell_vol": [10.0],
+            "taker_imbalance": [0.66],
+            "imbalance_z": [2.0],
+            "taker_conviction": [2.0],
+        })
+        signal = families["kalshi_taker_imbalance"].build_signal_frame(df)
+        assert signal.loc[0, "signal_value"] == pytest.approx(0.0)
 
 
 # ── Existing signals.py invariant preserved ───────────────────────────────────

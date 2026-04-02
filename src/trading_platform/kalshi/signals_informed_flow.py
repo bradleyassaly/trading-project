@@ -61,9 +61,11 @@ from __future__ import annotations
 
 import logging
 import math
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import pandas as pd
 import polars as pl
 
 from trading_platform.kalshi.signals import KalshiSignalFamily
@@ -77,6 +79,266 @@ _LARGE_ORDER_WINDOW: int = 20          # rolling window for median size (trade-c
 _IMBALANCE_Z_WINDOW: int = 30          # rolling window for imbalance z-score (bars)
 _UNEXPLAINED_MOVE_WINDOW: int = 20     # rolling window for move z-score (bars)
 _EPSILON: float = 1e-9                 # avoids divide-by-zero
+
+
+@dataclass(frozen=True)
+class InformedFlowSignalConfig:
+    signal_score_scale: float = 3.0
+    taker_imbalance_entry_z: float = 1.0
+    taker_raw_imbalance_threshold: float = 0.25
+    taker_min_total_volume: float = 15.0
+    taker_conviction_norm: float = 2.5
+    taker_volume_norm: float = 50.0
+    large_order_min_count: int = 1
+    large_order_min_volume_ratio: float = 0.20
+    large_order_min_direction: float = 0.25
+    large_order_count_norm: float = 3.0
+    unexplained_move_entry_z: float = 1.25
+    unexplained_move_min_abs_move: float = 2.0
+    unexplained_move_catalyst_penalty: float = 0.35
+
+    def __post_init__(self) -> None:
+        if self.signal_score_scale <= 0:
+            raise ValueError("signal_score_scale must be > 0.")
+        if self.taker_imbalance_entry_z < 0 or self.taker_raw_imbalance_threshold < 0:
+            raise ValueError("Taker imbalance thresholds must be >= 0.")
+        if self.taker_min_total_volume < 0 or self.taker_conviction_norm <= 0 or self.taker_volume_norm <= 0:
+            raise ValueError("Taker normalization values must be positive.")
+        if self.large_order_min_count < 0 or self.large_order_min_volume_ratio < 0 or self.large_order_min_direction < 0:
+            raise ValueError("Large-order thresholds must be >= 0.")
+        if self.large_order_count_norm <= 0:
+            raise ValueError("large_order_count_norm must be > 0.")
+        if self.unexplained_move_entry_z < 0 or self.unexplained_move_min_abs_move < 0:
+            raise ValueError("Unexplained-move thresholds must be >= 0.")
+        if not 0.0 <= self.unexplained_move_catalyst_penalty <= 1.0:
+            raise ValueError("unexplained_move_catalyst_penalty must be between 0 and 1.")
+
+
+@dataclass(frozen=True)
+class InformedFlowSignalObservation:
+    signal_family: str
+    direction: int
+    confidence: float
+    probability: float
+    signal_value: float
+    supporting_features: dict[str, float | str | None]
+
+
+DEFAULT_INFORMED_FLOW_CONFIG = InformedFlowSignalConfig()
+
+
+def _clip01(series: pd.Series) -> pd.Series:
+    return pd.to_numeric(series, errors="coerce").clip(lower=0.0, upper=1.0)
+
+
+def _signed_probability(direction: pd.Series, confidence: pd.Series) -> pd.Series:
+    safe_direction = pd.to_numeric(direction, errors="coerce").fillna(0.0).clip(lower=-1.0, upper=1.0)
+    safe_confidence = _clip01(confidence)
+    return 0.5 + safe_direction * safe_confidence * 0.49
+
+
+def _series_from_df(df: pd.DataFrame, column: str, default: float | str = 0.0) -> pd.Series:
+    if column in df.columns:
+        return df[column]
+    return pd.Series([default] * len(df), index=df.index)
+
+
+def _signal_frame_from_components(
+    *,
+    signal_family: str,
+    direction: pd.Series,
+    confidence: pd.Series,
+    config: InformedFlowSignalConfig,
+    features: dict[str, pd.Series],
+) -> pd.DataFrame:
+    safe_direction = pd.to_numeric(direction, errors="coerce").fillna(0.0).clip(lower=-1.0, upper=1.0)
+    safe_confidence = _clip01(confidence)
+    signal_value = safe_direction * safe_confidence * config.signal_score_scale
+
+    frame = pd.DataFrame(index=safe_direction.index)
+    frame["signal_family"] = signal_family
+    frame["direction"] = safe_direction
+    frame["confidence"] = safe_confidence
+    frame["signal_probability"] = _signed_probability(safe_direction, safe_confidence)
+    frame["signal_value"] = signal_value
+    for key, value in features.items():
+        frame[key] = value
+    return frame
+
+
+def _build_taker_imbalance_signal_frame(
+    df: pd.DataFrame,
+    config: InformedFlowSignalConfig,
+) -> pd.DataFrame:
+    buy = pd.to_numeric(_series_from_df(df, "taker_buy_vol"), errors="coerce").fillna(0.0)
+    sell = pd.to_numeric(_series_from_df(df, "taker_sell_vol"), errors="coerce").fillna(0.0)
+    imbalance = pd.to_numeric(_series_from_df(df, "taker_imbalance"), errors="coerce")
+    imbalance_z = pd.to_numeric(_series_from_df(df, "imbalance_z"), errors="coerce")
+    conviction = pd.to_numeric(_series_from_df(df, "taker_conviction"), errors="coerce").fillna(0.0)
+    total_volume = buy + sell
+
+    fallback_direction = imbalance.apply(
+        lambda value: 1.0 if pd.notna(value) and value > 0 else (-1.0 if pd.notna(value) and value < 0 else 0.0)
+    )
+    z_direction = imbalance_z.apply(
+        lambda value: 1.0 if pd.notna(value) and value > 0 else (-1.0 if pd.notna(value) and value < 0 else 0.0)
+    )
+    direction = z_direction.where(z_direction != 0.0, fallback_direction)
+
+    z_strength = ((imbalance_z.abs() - config.taker_imbalance_entry_z) / max(config.taker_imbalance_entry_z, 1.0)).clip(lower=0.0)
+    raw_strength = ((imbalance.abs() - config.taker_raw_imbalance_threshold) / max(config.taker_raw_imbalance_threshold, 0.01)).clip(lower=0.0)
+    volume_strength = (total_volume / config.taker_volume_norm).clip(lower=0.0, upper=1.0)
+    conviction_strength = (conviction / config.taker_conviction_norm).clip(lower=0.0, upper=1.0)
+    confidence = _clip01((0.45 * z_strength) + (0.30 * raw_strength) + (0.15 * volume_strength) + (0.10 * conviction_strength))
+
+    has_z = imbalance_z.notna()
+    eligible = (total_volume >= config.taker_min_total_volume) & (
+        ((has_z) & (imbalance_z.abs() >= config.taker_imbalance_entry_z))
+        | ((~has_z) & (imbalance.abs() >= config.taker_raw_imbalance_threshold))
+    )
+    confidence = confidence.where(eligible, 0.0)
+
+    return _signal_frame_from_components(
+        signal_family="kalshi_taker_imbalance",
+        direction=direction.where(eligible, 0.0),
+        confidence=confidence,
+        config=config,
+        features={
+            "taker_buy_vol": buy,
+            "taker_sell_vol": sell,
+            "taker_imbalance": imbalance,
+            "imbalance_z": imbalance_z,
+            "taker_conviction": conviction,
+            "taker_total_volume": total_volume,
+        },
+    )
+
+
+def _build_large_order_signal_frame(
+    df: pd.DataFrame,
+    config: InformedFlowSignalConfig,
+) -> pd.DataFrame:
+    direction = pd.to_numeric(_series_from_df(df, "large_order_direction"), errors="coerce").fillna(0.0)
+    conviction = pd.to_numeric(_series_from_df(df, "large_order_conviction"), errors="coerce").fillna(0.0)
+    count = pd.to_numeric(_series_from_df(df, "large_order_count"), errors="coerce").fillna(0.0)
+    volume_ratio = pd.to_numeric(_series_from_df(df, "large_order_volume_ratio"), errors="coerce").fillna(0.0)
+
+    count_strength = (count / config.large_order_count_norm).clip(lower=0.0, upper=1.0)
+    ratio_strength = (volume_ratio / max(config.large_order_min_volume_ratio, 0.01)).clip(lower=0.0, upper=1.0)
+    direction_strength = (direction.abs() / max(config.large_order_min_direction, 0.01)).clip(lower=0.0, upper=1.0)
+    confidence = _clip01((0.35 * conviction) + (0.30 * ratio_strength) + (0.20 * count_strength) + (0.15 * direction_strength))
+
+    eligible = (
+        (count >= config.large_order_min_count)
+        & (volume_ratio >= config.large_order_min_volume_ratio)
+        & (direction.abs() >= config.large_order_min_direction)
+    )
+    confidence = confidence.where(eligible, 0.0)
+
+    return _signal_frame_from_components(
+        signal_family="kalshi_large_order",
+        direction=direction.apply(lambda value: 1.0 if value > 0 else (-1.0 if value < 0 else 0.0)).where(eligible, 0.0),
+        confidence=confidence,
+        config=config,
+        features={
+            "large_order_direction": direction,
+            "large_order_conviction": conviction,
+            "large_order_count": count,
+            "large_order_volume_ratio": volume_ratio,
+        },
+    )
+
+
+def _build_unexplained_move_signal_frame(
+    df: pd.DataFrame,
+    config: InformedFlowSignalConfig,
+) -> pd.DataFrame:
+    move = pd.to_numeric(_series_from_df(df, "unexplained_move"), errors="coerce")
+    move_z = pd.to_numeric(_series_from_df(df, "unexplained_move_z"), errors="coerce")
+    has_catalyst = pd.to_numeric(_series_from_df(df, "has_scheduled_catalyst"), errors="coerce").fillna(0.0)
+    catalyst_type = _series_from_df(df, "catalyst_type", default="none").fillna("none")
+
+    direction = move_z.apply(
+        lambda value: 1.0 if pd.notna(value) and value > 0 else (-1.0 if pd.notna(value) and value < 0 else 0.0)
+    )
+    fallback_direction = move.apply(
+        lambda value: 1.0 if pd.notna(value) and value > 0 else (-1.0 if pd.notna(value) and value < 0 else 0.0)
+    )
+    direction = direction.where(direction != 0.0, fallback_direction)
+
+    z_strength = ((move_z.abs() - config.unexplained_move_entry_z) / max(config.unexplained_move_entry_z, 1.0)).clip(lower=0.0)
+    move_strength = (move.abs() / max(config.unexplained_move_min_abs_move, 0.01)).clip(lower=0.0, upper=1.0)
+    base_confidence = _clip01((0.65 * z_strength) + (0.35 * move_strength))
+    catalyst_penalty = 1.0 - (has_catalyst.clip(lower=0.0, upper=1.0) * (1.0 - config.unexplained_move_catalyst_penalty))
+    confidence = _clip01(base_confidence * catalyst_penalty)
+
+    eligible = (
+        (move.abs() >= config.unexplained_move_min_abs_move)
+        & (move_z.abs() >= config.unexplained_move_entry_z)
+    )
+    confidence = confidence.where(eligible, 0.0)
+
+    return _signal_frame_from_components(
+        signal_family="kalshi_unexplained_move",
+        direction=direction.where(eligible, 0.0),
+        confidence=confidence,
+        config=config,
+        features={
+            "unexplained_move": move,
+            "unexplained_move_z": move_z,
+            "has_scheduled_catalyst": has_catalyst,
+            "catalyst_penalty": catalyst_penalty,
+            "catalyst_type": catalyst_type,
+        },
+    )
+
+
+def build_informed_flow_signal_observations(
+    df: pd.DataFrame,
+    *,
+    config: InformedFlowSignalConfig | None = None,
+) -> dict[str, pd.DataFrame]:
+    resolved_config = config or DEFAULT_INFORMED_FLOW_CONFIG
+    return {
+        "kalshi_taker_imbalance": _build_taker_imbalance_signal_frame(df, resolved_config),
+        "kalshi_large_order": _build_large_order_signal_frame(df, resolved_config),
+        "kalshi_unexplained_move": _build_unexplained_move_signal_frame(df, resolved_config),
+    }
+
+
+def make_informed_flow_signal_families(
+    config: InformedFlowSignalConfig | None = None,
+) -> list[KalshiSignalFamily]:
+    resolved_config = config or DEFAULT_INFORMED_FLOW_CONFIG
+    return [
+        KalshiSignalFamily(
+            name="kalshi_taker_imbalance",
+            feature_col="imbalance_z",
+            alt_feature_cols=("taker_imbalance",),
+            direction=1,
+            description=(
+                "Taker imbalance: sustained directional imbalance in taker-initiated volume. "
+                "Positive imbalance and high conviction indicate informed YES accumulation."
+            ),
+            signal_frame_builder=lambda df, cfg=resolved_config: _build_taker_imbalance_signal_frame(df, cfg),
+        ),
+        KalshiSignalFamily(
+            name="kalshi_large_order",
+            feature_col="large_order_direction",
+            alt_feature_cols=("large_order_conviction",),
+            direction=1,
+            description="Large aggressive trade footprint: oversized directional trades relative to normal market size.",
+            signal_frame_builder=lambda df, cfg=resolved_config: _build_large_order_signal_frame(df, cfg),
+        ),
+        KalshiSignalFamily(
+            name="kalshi_unexplained_move",
+            feature_col="unexplained_move_z",
+            alt_feature_cols=("unexplained_move",),
+            direction=1,
+            description="Unexplained short-horizon move: anomalous price move outside the usual structured catalyst profile.",
+            signal_frame_builder=lambda df, cfg=resolved_config: _build_unexplained_move_signal_frame(df, cfg),
+        ),
+    ]
 
 
 # ── Taker imbalance ───────────────────────────────────────────────────────────
@@ -565,3 +827,8 @@ ALL_INFORMED_FLOW_SIGNAL_FAMILIES = [
     KALSHI_LARGE_ORDER,
     KALSHI_UNEXPLAINED_MOVE,
 ]
+
+# Override the legacy constant-style signal family definitions with richer
+# typed signal-frame builders while preserving the original import surface.
+KALSHI_TAKER_IMBALANCE, KALSHI_LARGE_ORDER, KALSHI_UNEXPLAINED_MOVE = make_informed_flow_signal_families()
+ALL_INFORMED_FLOW_SIGNAL_FAMILIES = make_informed_flow_signal_families()

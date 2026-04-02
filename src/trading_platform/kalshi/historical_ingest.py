@@ -1,59 +1,53 @@
 """
 Kalshi historical data ingestion pipeline.
 
-Downloads all resolved markets from the past year via the Kalshi public
-historical API (no auth required) and builds a local research dataset:
+The ingest is intentionally split into:
 
-    data/kalshi/raw/markets/<ticker>.json    — raw market JSON from API
-    data/kalshi/raw/trades/<ticker>.json     — raw trade list JSON from API
-    data/kalshi/trades/<ticker>.parquet      — trade DataFrame for feature gen
-    data/kalshi/features/<ticker>.parquet    — feature parquet (all groups)
-    data/kalshi/raw/resolution.csv           — ticker → resolution_price (0/100)
-    data/kalshi/raw/ingest_manifest.json     — run summary
+    data/kalshi/raw/...         source-of-truth API payloads
+    data/kalshi/normalized/...  reproducible normalized research inputs
+    data/kalshi/features/...    derived feature artifacts
 
-Rate limiting
--------------
-Historical endpoints are public but conservative rate limiting is applied:
-``request_sleep_sec`` (default 0.2 → 5 req/sec) is applied between every
-paginated API call.  This can be overridden per-run via config or CLI.
-
-Graceful degradation
---------------------
-If a market has no trade history (thin/illiquid market), it is skipped and
-counted in ``skipped_no_trades``.  The pipeline never raises on individual
-market failures — it logs and continues.
-
-Resolution encoding
--------------------
-``result == "yes"``  → ``resolution_price = 100``
-``result == "no"``   → ``resolution_price = 0``
-Any other value      → skipped (not included in resolution.csv)
-
-Base rate and Metaculus integration
-------------------------------------
-When ``run_base_rate=True``, the pipeline loads the base rate database and
-injects ``base_rate_prior``, ``base_rate_edge``, and ``base_rate_confidence``
-as extra scalar columns into each feature parquet.
-
-When ``run_metaculus=True``, the pipeline loads pre-computed Metaculus
-matches (from ``metaculus_matches_path``) and injects those features too.
-Metaculus matches are NOT fetched live during ingest (that is done by the
-separate ``kalshi-full-backtest`` CLI command which can optionally refresh
-them first).
+The pipeline is cutoff-aware. It fetches archived settled markets through
+``/historical/*`` endpoints and combines them with post-cutoff settled data
+still available on the live endpoints so a lookback window remains complete
+as Kalshi advances the historical boundary.
 """
 from __future__ import annotations
 
+import csv
 import json
 import logging
-import time
+import re
+from collections.abc import Callable
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 import polars as pl
+from trading_platform.ingest.status import IngestStatusTracker
 
 logger = logging.getLogger(__name__)
+
+KALSHI_INGEST_STAGE_NAMES = [
+    "initialization",
+    "checkpoint_load",
+    "cutoff_discovery",
+    "market_universe_fetch",
+    "retained_market_processing",
+    "normalization",
+    "checkpoint_write",
+    "final_summary",
+]
+
+
+class KalshiIngestFailFastError(RuntimeError):
+    """Raised when ingest stops deliberately to avoid unbounded live-bridge churn."""
+
+    def __init__(self, reason: str, message: str) -> None:
+        super().__init__(message)
+        self.reason = reason
 
 # ── Resolution helpers ────────────────────────────────────────────────────────
 
@@ -63,6 +57,24 @@ def _result_to_price(result: str | None) -> float | None:
         return 100.0
     if result == "no":
         return 0.0
+    return None
+
+
+def _resolution_price_from_market(raw_market: dict[str, Any]) -> float | None:
+    result_price = _result_to_price(raw_market.get("result"))
+    if result_price is not None:
+        return result_price
+    for price_field in ("settlement_value_dollars", "resolution_price", "yes_settlement_value_dollars"):
+        value = raw_market.get(price_field)
+        if value is None:
+            continue
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            continue
+        if parsed <= 1.0:
+            parsed *= 100.0
+        return parsed
     return None
 
 
@@ -87,13 +99,19 @@ def _parse_trade_row(raw: dict[str, Any]) -> dict[str, Any]:
         except ValueError:
             traded_at = None
 
+    count_raw = raw.get("count_fp", raw.get("count", 0))
+    try:
+        count = float(count_raw)
+    except (TypeError, ValueError):
+        count = 0.0
+
     return {
         "trade_id": raw.get("trade_id", ""),
         "ticker": raw.get("ticker", ""),
         "side": raw.get("taker_side", raw.get("side", "")),
         "yes_price": yes_price,
         "no_price": no_price,
-        "count": int(raw.get("count", 0)),
+        "count": count,
         "traded_at": traded_at,
     }
 
@@ -107,16 +125,161 @@ def _trades_to_dataframe(raw_trades: list[dict[str, Any]]) -> pl.DataFrame:
             "side": pl.Utf8,
             "yes_price": pl.Float64,
             "no_price": pl.Float64,
-            "count": pl.Int64,
+            "count": pl.Float64,
             "traded_at": pl.Datetime,
         })
     rows = [_parse_trade_row(t) for t in raw_trades]
     return pl.from_dicts(rows, schema_overrides={
         "yes_price": pl.Float64,
         "no_price": pl.Float64,
-        "count": pl.Int64,
+        "count": pl.Float64,
         "traded_at": pl.Datetime(time_zone="UTC"),
     })
+
+
+def _parse_iso_ts(value: Any) -> datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.astimezone(UTC) if value.tzinfo else value.replace(tzinfo=UTC)
+    raw = str(value).strip()
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed.astimezone(UTC) if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+
+
+def _market_close_time_in_range(
+    market: dict[str, Any],
+    *,
+    min_close_ts: int | None = None,
+    max_close_ts: int | None = None,
+) -> bool:
+    close_time = _parse_iso_ts(_market_key(market, "close_time", "expiration_time"))
+    if close_time is None:
+        return False
+    close_ts = int(close_time.timestamp())
+    if min_close_ts is not None and close_ts < min_close_ts:
+        return False
+    if max_close_ts is not None and close_ts > max_close_ts:
+        return False
+    return True
+
+
+def _is_synthetic_ticker(ticker: str | None) -> bool:
+    return str(ticker or "").startswith("SYNTH-")
+
+
+def _safe_volume(market: dict[str, Any]) -> float:
+    """Return the market volume as a float; 0.0 when missing or non-numeric."""
+    v = market.get("volume")
+    if v is None:
+        return 0.0
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _market_key(market: dict[str, Any], *keys: str) -> Any:
+    for key in keys:
+        if key in market and market.get(key) is not None:
+            return market.get(key)
+    return None
+
+
+def _normalise_market_row(raw_market: dict[str, Any]) -> dict[str, Any]:
+    resolution_price = _resolution_price_from_market(raw_market)
+    return {
+        "ticker": _market_key(raw_market, "ticker", "market_ticker") or "",
+        "title": raw_market.get("title", ""),
+        "subtitle": raw_market.get("subtitle"),
+        "series_ticker": _market_key(raw_market, "series_ticker", "seriesTicker"),
+        "event_ticker": _market_key(raw_market, "event_ticker", "eventTicker"),
+        "status": raw_market.get("status"),
+        "category": _market_key(raw_market, "category", "market_category"),
+        "close_time": _market_key(raw_market, "close_time", "expiration_time"),
+        "result": raw_market.get("result"),
+        "resolution_price": resolution_price,
+        "settlement_value_dollars": raw_market.get("settlement_value_dollars"),
+        "volume": raw_market.get("volume"),
+        "liquidity_dollars": raw_market.get("liquidity_dollars") or raw_market.get("liquidity"),
+        "source_tier": raw_market.get("source_tier"),
+        "ingested_at": raw_market.get("ingested_at"),
+    }
+
+
+def _normalise_candlestick_rows(raw_candles: list[dict[str, Any]]) -> pl.DataFrame:
+    rows: list[dict[str, Any]] = []
+    for raw in raw_candles:
+        timestamp = (
+            _parse_iso_ts(raw.get("end_period_ts"))
+            or _parse_iso_ts(raw.get("end_ts"))
+            or _parse_iso_ts(raw.get("period_end"))
+            or _parse_iso_ts(raw.get("timestamp"))
+            or _parse_iso_ts(raw.get("start_period_ts"))
+        )
+        if timestamp is None:
+            continue
+
+        def _float_from(*keys: str) -> float | None:
+            for key in keys:
+                value = raw.get(key)
+                if value is None:
+                    continue
+                try:
+                    parsed = float(value)
+                except (TypeError, ValueError):
+                    continue
+                if parsed <= 1.0:
+                    parsed *= 100.0
+                return parsed
+            return None
+
+        open_price = _float_from("open_price_dollars", "open_price", "open")
+        high_price = _float_from("high_price_dollars", "high_price", "high")
+        low_price = _float_from("low_price_dollars", "low_price", "low")
+        close_price = _float_from("close_price_dollars", "close_price", "close")
+        if open_price is None or high_price is None or low_price is None or close_price is None:
+            continue
+
+        volume_value = raw.get("volume")
+        if volume_value is None:
+            volume_value = raw.get("count")
+        if volume_value is None:
+            volume_value = raw.get("count_fp")
+        try:
+            volume = float(volume_value) if volume_value is not None else 0.0
+        except (TypeError, ValueError):
+            volume = 0.0
+
+        rows.append(
+            {
+                "timestamp": timestamp,
+                "open": open_price,
+                "high": high_price,
+                "low": low_price,
+                "close": close_price,
+                "volume": volume,
+                "dollar_volume": close_price * volume,
+            }
+        )
+    if not rows:
+        return pl.DataFrame(
+            schema={
+                "timestamp": pl.Datetime(time_zone="UTC"),
+                "open": pl.Float64,
+                "high": pl.Float64,
+                "low": pl.Float64,
+                "close": pl.Float64,
+                "volume": pl.Float64,
+                "dollar_volume": pl.Float64,
+            }
+        )
+    return pl.from_dicts(rows, schema_overrides={"timestamp": pl.Datetime(time_zone="UTC")}).sort("timestamp")
 
 
 # ── Config ────────────────────────────────────────────────────────────────────
@@ -128,10 +291,18 @@ class HistoricalIngestConfig:
     # Output directories
     raw_markets_dir: str = "data/kalshi/raw/markets"
     raw_trades_dir: str = "data/kalshi/raw/trades"
-    trades_parquet_dir: str = "data/kalshi/trades"
-    features_dir: str = "data/kalshi/features"
-    resolution_csv_path: str = "data/kalshi/raw/resolution.csv"
+    raw_candles_dir: str = "data/kalshi/raw/candles"
+    trades_parquet_dir: str = "data/kalshi/normalized/trades"
+    normalized_candles_dir: str = "data/kalshi/normalized/candles"
+    normalized_markets_path: str = "data/kalshi/normalized/markets.parquet"
+    features_dir: str = "data/kalshi/features/real"
+    resolution_csv_path: str = "data/kalshi/normalized/resolution.csv"
+    legacy_resolution_csv_path: str = "data/kalshi/resolution.csv"
     manifest_path: str = "data/kalshi/raw/ingest_manifest.json"
+    checkpoint_path: str = "data/kalshi/raw/ingest_checkpoint.json"
+    summary_path: str = "data/kalshi/raw/ingest_summary.json"
+    status_artifacts_root: str = "artifacts/kalshi_ingest"
+    checkpoint_backup_path: str | None = None
 
     # Lookback window
     lookback_days: int = 365
@@ -139,9 +310,17 @@ class HistoricalIngestConfig:
     # Feature generation
     feature_period: str = "1h"
     min_trades: int = 5    # skip markets with fewer trades than this
+    candle_period_interval: int | None = None
 
     # Rate limiting
-    request_sleep_sec: float = 0.2   # 5 req/sec
+    request_sleep_sec: float = 0.05   # 20 req/sec
+    authenticated_request_sleep_sec: float = 0.072
+    authenticated_rate_limit_max_retries: int = 5
+    authenticated_rate_limit_backoff_base_sec: float = 0.5
+    authenticated_rate_limit_backoff_max_sec: float = 8.0
+    authenticated_rate_limit_jitter_max_sec: float = 0.25
+    max_live_pages_without_retained_markets: int = 25
+    max_raw_markets_without_processing: int = 2000
 
     # Optional signal enrichment
     run_base_rate: bool = True
@@ -152,11 +331,36 @@ class HistoricalIngestConfig:
     metaculus_min_confidence: float = 0.70
 
     # Pagination
-    market_page_size: int = 200
+    market_page_size: int = 1000
     trade_page_size: int = 1000
 
     # Optional ticker filter (empty = all)
     ticker_filter: list[str] = field(default_factory=list)
+    resume: bool = True
+    resume_mode: str = "latest"
+    resume_checkpoint_path: str | None = None
+
+    # ── Market filtering ──────────────────────────────────────────────────────
+    # Defaults are all "disabled" (empty/zero) so the pipeline runs without
+    # any filtering unless explicitly configured via YAML or CLI.
+
+    # Regex patterns matched against series_ticker (or ticker when series is absent).
+    # Any market whose series matches at least one pattern is excluded.
+    # Example: ["KXBTC", "KXETH"] removes Bitcoin and Ethereum price-bracket series.
+    excluded_series_patterns: list[str] = field(default_factory=list)
+
+    # Skip any event_ticker that appears more than this many times.
+    # Bracket markets (e.g. BTC at every $250 increment) produce hundreds of
+    # markets per event; setting this to 5 removes them.  0 = disabled.
+    max_markets_per_event: int = 0
+
+    # Skip markets whose total traded volume is below this threshold.
+    # Illiquid / untraded markets add noise to the feature store.  0 = disabled.
+    min_volume: float = 0.0
+
+    # Allowlist of category strings (case-insensitive).  When non-empty only
+    # markets in these categories are processed.  Example: ["Economics", "Politics"].
+    preferred_categories: list[str] = field(default_factory=list)
 
 
 # ── Result ────────────────────────────────────────────────────────────────────
@@ -169,11 +373,16 @@ class HistoricalIngestResult:
     markets_skipped_no_trades: int
     markets_failed: int
     total_trades: int
+    total_candlesticks: int
     resolution_count: int
     date_range_start: str | None
     date_range_end: str | None
     feature_files_written: int
+    normalized_markets_written: int
     manifest_path: Path
+    summary_path: Path
+    status_artifact_path: Path | None = None
+    run_summary_artifact_path: Path | None = None
 
 
 # ── Pipeline ──────────────────────────────────────────────────────────────────
@@ -189,10 +398,220 @@ class HistoricalIngestPipeline:
     def __init__(self, client: Any, config: HistoricalIngestConfig | None = None) -> None:
         self.client = client
         self.config = config or HistoricalIngestConfig()
+        self._processing_started_logged = False
+        self._checkpoint_write_count = 0
 
         # Lazy-load signal helpers
         self._base_rate_signal: Any = None
         self._metaculus_signal: Any = None
+
+    def _build_status_tracker(self) -> IngestStatusTracker:
+        run_id = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+        return IngestStatusTracker(
+            run_id=run_id,
+            pipeline_name="kalshi_historical_ingest",
+            mode="historical_streaming",
+            lookback_days=self.config.lookback_days,
+            stage_names=KALSHI_INGEST_STAGE_NAMES,
+            output_root=Path(self.config.status_artifacts_root) / run_id,
+            log_prefix="kalshi_historical_ingest",
+        )
+
+    def _checkpoint_file_path(self) -> Path:
+        if self.config.resume_checkpoint_path:
+            return Path(self.config.resume_checkpoint_path)
+        return Path(self.config.checkpoint_path)
+
+    def _checkpoint_backup_file_path(self) -> Path:
+        if self.config.checkpoint_backup_path:
+            return Path(self.config.checkpoint_backup_path)
+        checkpoint_path = self._checkpoint_file_path()
+        return checkpoint_path.with_name(f"{checkpoint_path.stem}.bak{checkpoint_path.suffix}")
+
+    @staticmethod
+    def _default_checkpoint_state() -> dict[str, Any]:
+        return {
+            "schema_version": 2,
+            "run_id": None,
+            "resumed_from_run_id": None,
+            "last_completed_stage": None,
+            "current_stage": None,
+            "historical_market_cursor": None,
+            "live_market_cursor": None,
+            "market_download_complete": False,
+            "processed_tickers": [],
+            "pending_retained_markets": [],
+            "failed_tickers": {},
+            "stage_counters": {},
+            "resume_counters": {
+                "replayed_work_skipped": 0,
+                "replayed_work_replayed": 0,
+            },
+            "pagination_stop_reason": None,
+            "current_market_ticker": None,
+            "updated_at": None,
+        }
+
+    def _normalise_checkpoint(self, checkpoint: dict[str, Any]) -> dict[str, Any]:
+        normalized = self._default_checkpoint_state()
+        normalized.update(checkpoint)
+        normalized["processed_tickers"] = sorted({str(ticker) for ticker in checkpoint.get("processed_tickers", [])})
+        pending = []
+        seen_pending: set[str] = set()
+        for market in checkpoint.get("pending_retained_markets", []):
+            if not isinstance(market, dict):
+                continue
+            ticker = str(_market_key(market, "ticker", "market_ticker") or "")
+            if not ticker or ticker in normalized["processed_tickers"] or ticker in seen_pending:
+                continue
+            seen_pending.add(ticker)
+            pending.append(market)
+        normalized["pending_retained_markets"] = pending
+        failed_tickers = checkpoint.get("failed_tickers", {})
+        normalized["failed_tickers"] = failed_tickers if isinstance(failed_tickers, dict) else {}
+        resume_counters = checkpoint.get("resume_counters", {})
+        if not isinstance(resume_counters, dict):
+            resume_counters = {}
+        normalized["resume_counters"] = {
+            "replayed_work_skipped": int(resume_counters.get("replayed_work_skipped", 0) or 0),
+            "replayed_work_replayed": int(resume_counters.get("replayed_work_replayed", 0) or 0),
+        }
+        stage_counters = checkpoint.get("stage_counters", {})
+        normalized["stage_counters"] = stage_counters if isinstance(stage_counters, dict) else {}
+        return normalized
+
+    def _update_checkpoint_progress(
+        self,
+        checkpoint: dict[str, Any],
+        *,
+        current_stage: str | None = None,
+        last_completed_stage: str | None = None,
+        current_market_ticker: str | None = None,
+        pagination_stop_reason: str | None = None,
+        stage_counters: dict[str, Any] | None = None,
+    ) -> None:
+        if current_stage is not None:
+            checkpoint["current_stage"] = current_stage
+        if last_completed_stage is not None:
+            checkpoint["last_completed_stage"] = last_completed_stage
+        if current_market_ticker is not None or current_market_ticker is None:
+            checkpoint["current_market_ticker"] = current_market_ticker
+        if pagination_stop_reason is not None:
+            checkpoint["pagination_stop_reason"] = pagination_stop_reason
+        if stage_counters:
+            checkpoint["stage_counters"].update(stage_counters)
+        checkpoint["updated_at"] = datetime.now(UTC).isoformat()
+
+    @staticmethod
+    def _market_exists_in_pending(checkpoint: dict[str, Any], ticker: str) -> bool:
+        return any(str(_market_key(market, "ticker", "market_ticker") or "") == ticker for market in checkpoint.get("pending_retained_markets", []))
+
+    def _enqueue_retained_market(self, checkpoint: dict[str, Any], market: dict[str, Any]) -> bool:
+        ticker = str(_market_key(market, "ticker", "market_ticker") or "")
+        if not ticker:
+            return False
+        if ticker in checkpoint.get("processed_tickers", []) or self._market_exists_in_pending(checkpoint, ticker):
+            return False
+        checkpoint["pending_retained_markets"].append(market)
+        return True
+
+    def _remove_pending_market(self, checkpoint: dict[str, Any], ticker: str) -> None:
+        checkpoint["pending_retained_markets"] = [
+            market for market in checkpoint.get("pending_retained_markets", [])
+            if str(_market_key(market, "ticker", "market_ticker") or "") != ticker
+        ]
+
+    @staticmethod
+    def _log_stage_progress(stage_name: str, status: str, **fields: Any) -> str:
+        parts = [f"[kalshi_historical_ingest] stage={stage_name} status={status}"]
+        for key, value in fields.items():
+            if value is None:
+                continue
+            parts.append(f"{key}={value}")
+        return " ".join(parts)
+
+    def _update_checkpoint_status(
+        self,
+        tracker: IngestStatusTracker | None,
+        checkpoint: dict[str, Any],
+        *,
+        message: str,
+    ) -> None:
+        if tracker is None:
+            return
+        self._checkpoint_write_count += 1
+        tracker.update_stage(
+            "checkpoint_write",
+            current_stage=False,
+            item_count_completed=self._checkpoint_write_count,
+            message=message,
+            counters={
+                "checkpoint_path": self.config.checkpoint_path,
+                "market_download_complete": bool(checkpoint.get("market_download_complete")),
+                "processed_ticker_count": len(checkpoint.get("processed_tickers", [])),
+                "historical_market_cursor": checkpoint.get("historical_market_cursor"),
+                "live_market_cursor": checkpoint.get("live_market_cursor"),
+            },
+        )
+
+    @staticmethod
+    def _top_error_categories(skipped_or_failed_tickers: list[dict[str, Any]]) -> dict[str, int]:
+        counts: Counter[str] = Counter()
+        for item in skipped_or_failed_tickers:
+            stage = str(item.get("stage") or "unknown")
+            counts[stage] += 1
+        return dict(counts.most_common(5))
+
+    def _drain_pending_retained_markets(
+        self,
+        *,
+        checkpoint: dict[str, Any],
+        tracker: IngestStatusTracker | None,
+        cutoff_ts: dict[str, datetime | None],
+        start_dt: datetime,
+        end_dt: datetime,
+        raw_trades_dir: Path,
+        raw_candles_dir: Path,
+        trades_parquet_dir: Path,
+        normalized_candles_dir: Path,
+        features_dir: Path,
+        processed_tickers: set[str],
+        skipped_or_failed_tickers: list[dict[str, Any]],
+        all_close_times: list[datetime],
+        metrics: dict[str, int],
+    ) -> None:
+        for market in list(checkpoint.get("pending_retained_markets", [])):
+            ticker = str(_market_key(market, "ticker", "market_ticker") or "")
+            if not ticker:
+                continue
+            if ticker in processed_tickers:
+                self._remove_pending_market(checkpoint, ticker)
+                checkpoint["resume_counters"]["replayed_work_skipped"] += 1
+                self._update_checkpoint_progress(
+                    checkpoint,
+                    current_stage="retained_market_processing",
+                    current_market_ticker=None,
+                )
+                self._save_checkpoint(checkpoint, tracker=tracker, message=f"removed already-processed pending market: {ticker}")
+                continue
+            checkpoint["resume_counters"]["replayed_work_replayed"] += 1
+            self._process_market_artifacts(
+                market,
+                checkpoint=checkpoint,
+                cutoff_ts=cutoff_ts,
+                start_dt=start_dt,
+                end_dt=end_dt,
+                raw_trades_dir=raw_trades_dir,
+                raw_candles_dir=raw_candles_dir,
+                trades_parquet_dir=trades_parquet_dir,
+                normalized_candles_dir=normalized_candles_dir,
+                features_dir=features_dir,
+                processed_tickers=processed_tickers,
+                skipped_or_failed_tickers=skipped_or_failed_tickers,
+                all_close_times=all_close_times,
+                metrics=metrics,
+                tracker=tracker,
+            )
 
     def _init_signals(self) -> None:
         """Initialise optional signal helpers (lazy, so import errors are silent)."""
@@ -219,10 +638,115 @@ class HistoricalIngestPipeline:
         for d in [
             cfg.raw_markets_dir,
             cfg.raw_trades_dir,
+            cfg.raw_candles_dir,
             cfg.trades_parquet_dir,
+            cfg.normalized_candles_dir,
             cfg.features_dir,
+            str(Path(cfg.normalized_markets_path).parent),
+            str(Path(cfg.resolution_csv_path).parent),
+            str(Path(cfg.legacy_resolution_csv_path).parent),
+            str(Path(cfg.checkpoint_path).parent),
+            str(Path(cfg.summary_path).parent),
+            cfg.status_artifacts_root,
+            str(self._checkpoint_backup_file_path().parent),
         ]:
             Path(d).mkdir(parents=True, exist_ok=True)
+
+    def _load_checkpoint(self) -> dict[str, Any]:
+        checkpoint_path = self._checkpoint_file_path()
+        backup_path = self._checkpoint_backup_file_path()
+        if not self.config.resume or self.config.resume_mode == "fresh":
+            return self._default_checkpoint_state()
+        for candidate in (checkpoint_path, backup_path):
+            if not candidate.exists():
+                continue
+            try:
+                return self._normalise_checkpoint(json.loads(candidate.read_text(encoding="utf-8")))
+            except (OSError, json.JSONDecodeError) as exc:
+                logger.warning("Could not load checkpoint %s: %s", candidate, exc)
+        return self._default_checkpoint_state()
+
+    def _save_checkpoint(
+        self,
+        checkpoint: dict[str, Any],
+        *,
+        tracker: IngestStatusTracker | None = None,
+        message: str = "checkpoint updated",
+    ) -> None:
+        checkpoint_path = self._checkpoint_file_path()
+        backup_path = self._checkpoint_backup_file_path()
+        checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+        backup_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = json.dumps(self._normalise_checkpoint(checkpoint), indent=2, default=str)
+        tmp_path = checkpoint_path.with_name(f"{checkpoint_path.name}.tmp")
+        tmp_path.write_text(payload, encoding="utf-8")
+        tmp_path.replace(checkpoint_path)
+        backup_path.write_text(payload, encoding="utf-8")
+        self._update_checkpoint_status(tracker, checkpoint, message=message)
+
+    def _write_raw_market(self, market: dict[str, Any]) -> None:
+        ticker = str(_market_key(market, "ticker", "market_ticker") or "")
+        if not ticker:
+            return
+        path = Path(self.config.raw_markets_dir) / f"{ticker}.json"
+        path.write_text(json.dumps(market, indent=2, default=str), encoding="utf-8")
+
+    def _iter_downloaded_markets(self) -> list[dict[str, Any]]:
+        markets: list[dict[str, Any]] = []
+        for path in sorted(Path(self.config.raw_markets_dir).glob("*.json")):
+            try:
+                markets.append(json.loads(path.read_text(encoding="utf-8")))
+            except json.JSONDecodeError as exc:
+                logger.warning("Skipping unreadable raw market file %s: %s", path, exc)
+        if self.config.ticker_filter:
+            tickers = set(self.config.ticker_filter)
+            markets = [market for market in markets if market.get("ticker", "") in tickers]
+        return markets
+
+    def _write_market_indexes(self, markets: list[dict[str, Any]]) -> tuple[int, int]:
+        rows = [_normalise_market_row(market) for market in markets if market.get("ticker")]
+        market_frame = pl.from_dicts(rows) if rows else pl.DataFrame()
+        market_path = Path(self.config.normalized_markets_path)
+        market_path.parent.mkdir(parents=True, exist_ok=True)
+        market_frame.write_parquet(market_path)
+
+        resolution_rows = [
+            {
+                "ticker": row["ticker"],
+                "resolution_price": row["resolution_price"],
+                "result": row["result"],
+                "close_time": row["close_time"],
+                "source_tier": row["source_tier"],
+            }
+            for row in rows
+            if row["resolution_price"] is not None
+        ]
+        for resolution_path in (Path(self.config.resolution_csv_path), Path(self.config.legacy_resolution_csv_path)):
+            resolution_path.parent.mkdir(parents=True, exist_ok=True)
+            with resolution_path.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(
+                    handle,
+                    fieldnames=["ticker", "resolution_price", "result", "close_time", "source_tier"],
+                )
+                writer.writeheader()
+                writer.writerows(resolution_rows)
+        return len(rows), len(resolution_rows)
+
+    def _fetch_cutoff_timestamps(self) -> dict[str, datetime | None]:
+        try:
+            payload = self.client.get_historical_cutoff()
+        except Exception as exc:
+            logger.warning("Could not fetch historical cutoff timestamps: %s", exc)
+            return {
+                "market_settled_ts": None,
+                "trades_created_ts": None,
+                "orders_updated_ts": None,
+            }
+        return {
+            "market_settled_ts": _parse_iso_ts(payload.get("market_settled_ts")),
+            "trades_created_ts": _parse_iso_ts(payload.get("trades_created_ts")),
+            "orders_updated_ts": _parse_iso_ts(payload.get("orders_updated_ts")),
+        }
 
     def _compute_extra_features(
         self,
@@ -251,138 +775,1290 @@ class HistoricalIngestPipeline:
 
         return extra
 
+    def _early_filter_reason(self, market: dict[str, Any]) -> str | None:
+        cfg = self.config
+        if _is_synthetic_ticker(_market_key(market, "ticker", "market_ticker")):
+            return "synthetic"
+        if cfg.preferred_categories:
+            allowed = {c.lower() for c in cfg.preferred_categories}
+            category = str(_market_key(market, "category", "market_category") or "").lower()
+            if category not in allowed:
+                return "category"
+        if cfg.excluded_series_patterns:
+            series_key = str(_market_key(market, "series_ticker", "seriesTicker", "ticker", "market_ticker") or "")
+            compiled = [re.compile(pattern, re.IGNORECASE) for pattern in cfg.excluded_series_patterns]
+            if any(pattern.search(series_key) for pattern in compiled):
+                return "series_pattern"
+        if cfg.min_volume > 0 and _safe_volume(market) < cfg.min_volume:
+            return "min_volume"
+        return None
+
+    def _filter_markets_for_ingest_page(
+        self,
+        markets: list[dict[str, Any]],
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        retained: list[dict[str, Any]] = []
+        discarded_by_reason: Counter[str] = Counter()
+        retained_sample_tickers: list[str] = []
+        discarded_samples: list[dict[str, str]] = []
+        for market in markets:
+            reason = self._early_filter_reason(market)
+            if reason is not None:
+                discarded_by_reason[reason] += 1
+                if len(discarded_samples) < 5:
+                    discarded_samples.append(
+                        {
+                            "ticker": str(_market_key(market, "ticker", "market_ticker") or "<missing>"),
+                            "reason": reason,
+                        }
+                    )
+                continue
+            retained.append(market)
+            if len(retained_sample_tickers) < 5:
+                retained_sample_tickers.append(str(_market_key(market, "ticker", "market_ticker") or "<missing>"))
+        diagnostics = {
+            "fetched": len(markets),
+            "retained": len(retained),
+            "discarded": len(markets) - len(retained),
+            "discarded_by_reason": {
+                "category": discarded_by_reason.get("category", 0),
+                "series_pattern": discarded_by_reason.get("series_pattern", 0),
+                "min_volume": discarded_by_reason.get("min_volume", 0),
+                "synthetic": discarded_by_reason.get("synthetic", 0),
+            },
+            "retained_sample_tickers": retained_sample_tickers,
+            "discarded_samples": discarded_samples,
+        }
+        return retained, diagnostics
+
+    def _log_market_fetch_progress(
+        self,
+        *,
+        source: str,
+        page_number: int,
+        cursor: str | None,
+        page_diagnostics: dict[str, Any],
+        total_fetched: int,
+        total_retained: int,
+        progress_log_interval_pages: int,
+        retained_sample: list[str],
+        tracker: IngestStatusTracker | None = None,
+        pages_with_retained_markets: int = 0,
+        pages_without_retained_markets: int = 0,
+        stop_reason_hint: str | None = None,
+    ) -> None:
+        if page_number == 1 or page_number % progress_log_interval_pages == 0 or not cursor:
+            log_line = self._log_stage_progress(
+                "market_universe_fetch",
+                "running",
+                source=source,
+                page=page_number,
+                pages_seen=page_number,
+                page_fetched=page_diagnostics["fetched"],
+                page_retained=page_diagnostics["retained"],
+                page_discarded=page_diagnostics["discarded"],
+                pages_with_retained=pages_with_retained_markets,
+                pages_without_retained=pages_without_retained_markets,
+                retained_markets_seen=total_retained,
+                fetched_total=total_fetched,
+                cursor=cursor or "<end>",
+                stop_hint=stop_reason_hint,
+                retained_sample=(page_diagnostics.get("retained_sample_tickers") or retained_sample[:5] or ["<none>"]),
+                discarded_sample=(page_diagnostics.get("discarded_samples") or ["<none>"]),
+            )
+            logger.info("%s discard_reasons=%s", log_line, page_diagnostics["discarded_by_reason"])
+        if tracker is not None:
+            tracker.update_stage(
+                "market_universe_fetch",
+                item_count_completed=total_fetched,
+                message=f"{source} page {page_number} processed",
+                counters={
+                    "source": source,
+                    "current_cursor": cursor,
+                    "last_page_number": page_number,
+                    "page_retained": page_diagnostics["retained"],
+                    "page_discarded": page_diagnostics["discarded"],
+                    "discard_reasons": page_diagnostics["discarded_by_reason"],
+                    "retained_sample_tickers": page_diagnostics.get("retained_sample_tickers") or retained_sample[:5],
+                    "discarded_samples": page_diagnostics.get("discarded_samples") or [],
+                },
+                run_counters={
+                    "pages_seen": pages_with_retained_markets + pages_without_retained_markets,
+                    "pages_with_retained_markets": pages_with_retained_markets,
+                    "pages_without_retained_markets": pages_without_retained_markets,
+                    "retained_markets_seen": total_retained,
+                },
+                log_line=None,
+            )
+
+    def _download_market_universe(
+        self,
+        *,
+        checkpoint: dict[str, Any],
+        start_dt: datetime,
+        end_dt: datetime,
+        cutoff_ts: dict[str, datetime | None],
+        on_retained_market: Callable[[dict[str, Any]], None] | None = None,
+        tracker: IngestStatusTracker | None = None,
+    ) -> dict[str, Any]:
+        cfg = self.config
+        min_close_ts = int(start_dt.timestamp())
+        max_close_ts = int(end_dt.timestamp())
+        progress_log_interval_pages = 10
+        diagnostics: dict[str, Any] = {
+            "pages_fetched": 0,
+            "total_markets_fetched": 0,
+            "total_markets_retained": 0,
+            "total_markets_discarded": 0,
+            "discarded_by_category": 0,
+            "discarded_by_series_pattern": 0,
+            "discarded_by_min_volume": 0,
+            "discarded_synthetic": 0,
+            "retained_sample_tickers": [],
+            "last_cursor": None,
+            "pages_with_retained_markets": 0,
+            "pages_without_retained_markets": 0,
+            "pagination_stop_reason": None,
+            "first_retained_processing_ticker": None,
+            "first_retained_processing_source": None,
+            "first_retained_processing_page": None,
+        }
+        consecutive_live_zero_retained_pages = 0
+        if checkpoint.get("market_download_complete"):
+            diagnostics["pagination_stop_reason"] = "checkpoint_complete"
+            return diagnostics
+
+        historical_max_close_ts = max_close_ts
+        if cutoff_ts["market_settled_ts"] is not None:
+            historical_max_close_ts = min(max_close_ts, int(cutoff_ts["market_settled_ts"].timestamp()) - 1)
+
+        cursor = checkpoint.get("historical_market_cursor")
+        historical_pages = 0
+        if historical_max_close_ts >= min_close_ts:
+            while True:
+                markets, cursor = self.client.get_historical_markets(
+                    limit=cfg.market_page_size,
+                    cursor=cursor,
+                    min_close_ts=min_close_ts,
+                    max_close_ts=historical_max_close_ts,
+                    sleep=cfg.request_sleep_sec,
+                )
+                historical_pages += 1
+                diagnostics["pages_fetched"] += 1
+                page_markets = []
+                for market in markets:
+                    market["source_tier"] = "historical"
+                    market["ingested_at"] = end_dt.isoformat()
+                    page_markets.append(market)
+                retained_markets, page_diagnostics = self._filter_markets_for_ingest_page(page_markets)
+                diagnostics["total_markets_fetched"] += page_diagnostics["fetched"]
+                diagnostics["total_markets_retained"] += page_diagnostics["retained"]
+                diagnostics["total_markets_discarded"] += page_diagnostics["discarded"]
+                diagnostics["discarded_by_category"] += page_diagnostics["discarded_by_reason"]["category"]
+                diagnostics["discarded_by_series_pattern"] += page_diagnostics["discarded_by_reason"]["series_pattern"]
+                diagnostics["discarded_by_min_volume"] += page_diagnostics["discarded_by_reason"]["min_volume"]
+                diagnostics["discarded_synthetic"] += page_diagnostics["discarded_by_reason"]["synthetic"]
+                diagnostics["last_cursor"] = cursor
+                if page_diagnostics["retained"] > 0:
+                    diagnostics["pages_with_retained_markets"] += 1
+                else:
+                    diagnostics["pages_without_retained_markets"] += 1
+                for market in retained_markets:
+                    if len(diagnostics["retained_sample_tickers"]) < 5:
+                        diagnostics["retained_sample_tickers"].append(market.get("ticker", ""))
+                    if on_retained_market is not None:
+                        if diagnostics["first_retained_processing_ticker"] is None:
+                            diagnostics["first_retained_processing_ticker"] = market.get("ticker", "")
+                            diagnostics["first_retained_processing_source"] = "historical"
+                            diagnostics["first_retained_processing_page"] = historical_pages
+                        on_retained_market(market)
+                self._log_market_fetch_progress(
+                    source="historical",
+                    page_number=historical_pages,
+                    cursor=cursor,
+                    page_diagnostics=page_diagnostics,
+                    total_fetched=diagnostics["total_markets_fetched"],
+                    total_retained=diagnostics["total_markets_retained"],
+                    progress_log_interval_pages=progress_log_interval_pages,
+                    retained_sample=diagnostics["retained_sample_tickers"],
+                    tracker=tracker,
+                    pages_with_retained_markets=diagnostics["pages_with_retained_markets"],
+                    pages_without_retained_markets=diagnostics["pages_without_retained_markets"],
+                )
+                checkpoint["historical_market_cursor"] = cursor
+                self._save_checkpoint(checkpoint, tracker=tracker, message="historical market cursor updated")
+                if not cursor:
+                    break
+        else:
+            checkpoint["historical_market_cursor"] = None
+            self._save_checkpoint(checkpoint, tracker=tracker, message="historical market cursor skipped")
+
+        live_start_dt = start_dt
+        if cutoff_ts["market_settled_ts"] is not None:
+            live_start_dt = max(start_dt, cutoff_ts["market_settled_ts"])
+
+        cursor = checkpoint.get("live_market_cursor")
+        live_pages = 0
+        while True:
+            raw_markets, cursor = self.client.get_markets_raw(
+                status="settled",
+                limit=200,
+                cursor=cursor,
+            )
+            live_pages += 1
+            diagnostics["pages_fetched"] += 1
+            page_close_times = [
+                close_time
+                for close_time in (_parse_iso_ts(_market_key(market, "close_time", "expiration_time")) for market in raw_markets)
+                if close_time is not None
+            ]
+            oldest_page_close_time = min(page_close_times) if page_close_times else None
+            newest_page_close_time = max(page_close_times) if page_close_times else None
+            range_filtered_markets = [
+                market
+                for market in raw_markets
+                if _market_close_time_in_range(
+                    market,
+                    min_close_ts=int(live_start_dt.timestamp()),
+                    max_close_ts=max_close_ts,
+                )
+            ]
+            page_markets = []
+            for market in range_filtered_markets:
+                market["source_tier"] = "live"
+                market["ingested_at"] = end_dt.isoformat()
+                page_markets.append(market)
+            retained_markets, page_diagnostics = self._filter_markets_for_ingest_page(page_markets)
+            diagnostics["total_markets_fetched"] += page_diagnostics["fetched"]
+            diagnostics["total_markets_retained"] += page_diagnostics["retained"]
+            diagnostics["total_markets_discarded"] += page_diagnostics["discarded"]
+            diagnostics["discarded_by_category"] += page_diagnostics["discarded_by_reason"]["category"]
+            diagnostics["discarded_by_series_pattern"] += page_diagnostics["discarded_by_reason"]["series_pattern"]
+            diagnostics["discarded_by_min_volume"] += page_diagnostics["discarded_by_reason"]["min_volume"]
+            diagnostics["discarded_synthetic"] += page_diagnostics["discarded_by_reason"]["synthetic"]
+            diagnostics["last_cursor"] = cursor
+            if page_diagnostics["retained"] > 0:
+                diagnostics["pages_with_retained_markets"] += 1
+            else:
+                diagnostics["pages_without_retained_markets"] += 1
+            for market in retained_markets:
+                if len(diagnostics["retained_sample_tickers"]) < 5:
+                    diagnostics["retained_sample_tickers"].append(market.get("ticker", ""))
+                if on_retained_market is not None:
+                    if diagnostics["first_retained_processing_ticker"] is None:
+                        diagnostics["first_retained_processing_ticker"] = market.get("ticker", "")
+                        diagnostics["first_retained_processing_source"] = "live"
+                        diagnostics["first_retained_processing_page"] = live_pages
+                    on_retained_market(market)
+            processed_after_page = len(checkpoint.get("processed_tickers", []))
+            if page_diagnostics["retained"] == 0:
+                consecutive_live_zero_retained_pages += 1
+            else:
+                consecutive_live_zero_retained_pages = 0
+            self._log_market_fetch_progress(
+                source="live",
+                page_number=live_pages,
+                cursor=cursor,
+                page_diagnostics=page_diagnostics,
+                total_fetched=diagnostics["total_markets_fetched"],
+                total_retained=diagnostics["total_markets_retained"],
+                progress_log_interval_pages=progress_log_interval_pages,
+                retained_sample=diagnostics["retained_sample_tickers"],
+                tracker=tracker,
+                pages_with_retained_markets=diagnostics["pages_with_retained_markets"],
+                pages_without_retained_markets=diagnostics["pages_without_retained_markets"],
+            )
+            checkpoint["live_market_cursor"] = cursor
+            self._save_checkpoint(checkpoint, tracker=tracker, message="live market cursor updated")
+            if oldest_page_close_time is not None and oldest_page_close_time < live_start_dt and not range_filtered_markets:
+                diagnostics["pagination_stop_reason"] = "aged_out_pages"
+                logger.info(
+                    "Stopping live settled-market pagination after page %d because page close-time range %s -> %s is older than ingest window start %s.",
+                    live_pages,
+                    oldest_page_close_time.isoformat(),
+                    newest_page_close_time.isoformat() if newest_page_close_time is not None else "<unknown>",
+                    live_start_dt.isoformat(),
+                )
+                checkpoint["live_market_cursor"] = None
+                self._save_checkpoint(checkpoint, tracker=tracker, message="live market cursor aged out")
+                break
+            if (
+                consecutive_live_zero_retained_pages >= cfg.max_live_pages_without_retained_markets
+                and processed_after_page == 0
+            ):
+                diagnostics["pagination_stop_reason"] = "fail_fast_zero_retained_pages"
+                error = KalshiIngestFailFastError(
+                    "zero_retained_pages",
+                    "Kalshi live bridge fetched "
+                    f"{live_pages} live pages without any retained markets entering processing. "
+                    "Check preferred_categories / excluded_series_patterns / min_volume against the live /markets payload.",
+                )
+                error.diagnostics = dict(diagnostics)
+                raise error
+            if diagnostics["total_markets_retained"] > cfg.max_raw_markets_without_processing and processed_after_page == 0:
+                diagnostics["pagination_stop_reason"] = "fail_fast_retained_without_processing"
+                error = KalshiIngestFailFastError(
+                    "retained_without_processing",
+                    "Kalshi ingest fail-fast: retained raw-market attempts exceeded "
+                    f"{cfg.max_raw_markets_without_processing} before any market finished processing. "
+                    "This usually means live settled pagination is traversing too much of the universe or retained markets are never reaching normalization.",
+                )
+                error.diagnostics = dict(diagnostics)
+                raise error
+            if not cursor:
+                diagnostics["pagination_stop_reason"] = "cursor_exhausted"
+                break
+
+        checkpoint["market_download_complete"] = True
+        self._save_checkpoint(checkpoint, tracker=tracker, message="market universe fetch complete")
+        logger.info(
+            "Kalshi market-universe fetch complete: pages=%d fetched=%d retained=%d discarded=%d sample=%s",
+            diagnostics["pages_fetched"],
+            diagnostics["total_markets_fetched"],
+            diagnostics["total_markets_retained"],
+            diagnostics["total_markets_discarded"],
+            diagnostics["retained_sample_tickers"] or ["<none>"],
+        )
+        return diagnostics
+
+    def _fetch_market_trades(self, market: dict[str, Any], cutoff_ts: dict[str, datetime | None]) -> list[dict[str, Any]]:
+        ticker = market.get("ticker", "")
+        if not ticker:
+            return []
+        cfg = self.config
+        trades: list[dict[str, Any]] = []
+        trade_cutoff = cutoff_ts.get("trades_created_ts")
+        if trade_cutoff is None:
+            source_tier = str(market.get("source_tier", "historical"))
+            if source_tier == "live":
+                live_trades = self.client.get_all_trades_raw(ticker, limit=cfg.trade_page_size)
+                for trade in live_trades:
+                    trade["source_tier"] = "live"
+                return live_trades
+            historical_trades = self.client.get_all_historical_trades(
+                ticker=ticker,
+                limit=cfg.trade_page_size,
+                sleep=cfg.request_sleep_sec,
+            )
+            for trade in historical_trades:
+                trade["source_tier"] = "historical"
+            return historical_trades
+
+        historical_trades = self.client.get_all_historical_trades(
+            ticker=ticker,
+            limit=cfg.trade_page_size,
+            max_ts=int(trade_cutoff.timestamp()) - 1,
+            sleep=cfg.request_sleep_sec,
+        )
+        for trade in historical_trades:
+            trade["source_tier"] = "historical"
+        trades.extend(historical_trades)
+
+        live_trades = self.client.get_all_trades_raw(
+            ticker=ticker,
+            min_ts=int(trade_cutoff.timestamp()),
+            limit=cfg.trade_page_size,
+        )
+        for trade in live_trades:
+            trade["source_tier"] = "live"
+        trades.extend(live_trades)
+
+        deduped: dict[str, dict[str, Any]] = {}
+        for trade in trades:
+            trade_id = str(trade.get("trade_id") or f"{trade.get('ticker')}::{trade.get('created_time')}::{trade.get('yes_price_dollars')}")
+            deduped[trade_id] = trade
+        return list(deduped.values())
+
+    def _fetch_market_candles(
+        self,
+        market: dict[str, Any],
+        cutoff_ts: dict[str, datetime | None],
+        *,
+        start_dt: datetime,
+        end_dt: datetime,
+    ) -> list[dict[str, Any]]:
+        ticker = market.get("ticker", "")
+        if not ticker:
+            return []
+        params = {
+            "start_ts": int(start_dt.timestamp()),
+            "end_ts": int(end_dt.timestamp()),
+            "period_interval": self.config.candle_period_interval,
+        }
+        close_time = _parse_iso_ts(market.get("close_time"))
+        use_historical = bool(
+            cutoff_ts.get("market_settled_ts") is None
+            or (close_time is not None and cutoff_ts["market_settled_ts"] is not None and close_time < cutoff_ts["market_settled_ts"])
+            or str(market.get("source_tier")) == "historical"
+        )
+        if use_historical:
+            candles = self.client.get_historical_market_candlesticks_raw(
+                ticker,
+                start_ts=params["start_ts"],
+                end_ts=params["end_ts"],
+                period_interval=params["period_interval"],
+                sleep=self.config.request_sleep_sec,
+            )
+            for candle in candles:
+                candle["source_tier"] = "historical"
+            return candles
+        candles = self.client.get_market_candlesticks_raw(
+            ticker,
+            start_ts=params["start_ts"],
+            end_ts=params["end_ts"],
+            period_interval=params["period_interval"],
+        )
+        for candle in candles:
+            candle["source_tier"] = "live"
+        return candles
+
+    def _apply_market_filters_with_diagnostics(self, markets: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        """
+        Apply configured filters to the raw market list.
+
+        Filters are applied in this order:
+        1. preferred_categories allowlist (when non-empty)
+        2. excluded_series_patterns regex exclusions
+        3. min_volume threshold
+        4. max_markets_per_event bracket detection
+
+        A summary line is always logged so the operator knows what was dropped.
+        """
+        cfg = self.config
+        total = len(markets)
+        filtered = list(markets)
+        diagnostics: dict[str, Any] = {
+            "total_markets_before_filters": total,
+            "excluded_by_category": 0,
+            "excluded_by_series_pattern": 0,
+            "excluded_by_min_volume": 0,
+            "excluded_by_bracket": 0,
+            "retained_markets": total,
+            "excluded_markets_total": 0,
+            "effective_filter_config": {
+                "preferred_categories": list(cfg.preferred_categories),
+                "excluded_series_patterns": list(cfg.excluded_series_patterns),
+                "min_volume": cfg.min_volume,
+                "max_markets_per_event": cfg.max_markets_per_event,
+            },
+        }
+
+        # 1. Category allowlist
+        if cfg.preferred_categories:
+            allowed = {c.lower() for c in cfg.preferred_categories}
+            before = len(filtered)
+            filtered = [
+                m for m in filtered
+                if str(m.get("category") or "").lower() in allowed
+            ]
+            diagnostics["excluded_by_category"] = before - len(filtered)
+            logger.debug(
+                "After preferred_categories filter (%s): %d → %d markets",
+                cfg.preferred_categories,
+                before,
+                len(filtered),
+            )
+
+        # 2. Excluded series patterns
+        if cfg.excluded_series_patterns:
+            compiled = [re.compile(p, re.IGNORECASE) for p in cfg.excluded_series_patterns]
+
+            def _series_key(m: dict[str, Any]) -> str:
+                return str(m.get("series_ticker") or m.get("ticker") or "")
+
+            before = len(filtered)
+            filtered = [
+                m for m in filtered
+                if not any(pat.search(_series_key(m)) for pat in compiled)
+            ]
+            diagnostics["excluded_by_series_pattern"] = before - len(filtered)
+            logger.debug(
+                "After excluded_series_patterns filter: %d → %d markets",
+                before,
+                len(filtered),
+            )
+
+        # 3. Minimum volume
+        if cfg.min_volume > 0:
+            before = len(filtered)
+            filtered = [m for m in filtered if _safe_volume(m) >= cfg.min_volume]
+            diagnostics["excluded_by_min_volume"] = before - len(filtered)
+            logger.debug(
+                "After min_volume filter (>= %.0f): %d → %d markets",
+                cfg.min_volume,
+                before,
+                len(filtered),
+            )
+
+        # 4. Max markets per event (bracket detection)
+        if cfg.max_markets_per_event > 0:
+            event_counts: Counter[str] = Counter(
+                str(m.get("event_ticker") or m.get("series_ticker") or m.get("ticker") or "")
+                for m in filtered
+            )
+            bracket_events = {
+                event for event, count in event_counts.items()
+                if count > cfg.max_markets_per_event
+            }
+            if bracket_events:
+                before = len(filtered)
+                filtered = [
+                    m for m in filtered
+                    if str(m.get("event_ticker") or m.get("series_ticker") or m.get("ticker") or "")
+                    not in bracket_events
+                ]
+                diagnostics["excluded_by_bracket"] = before - len(filtered)
+                logger.debug(
+                    "After max_markets_per_event filter (<= %d): removed %d bracket events, %d → %d markets",
+                    cfg.max_markets_per_event,
+                    len(bracket_events),
+                    before,
+                    len(filtered),
+                )
+
+        diagnostics["retained_markets"] = len(filtered)
+        diagnostics["excluded_markets_total"] = total - len(filtered)
+
+        logger.info(
+            "Market filter summary: Found %d total markets, filtering to %d after exclusions "
+            "(preferred_categories=%s, excluded_series=%s, min_volume=%.0f, max_markets_per_event=%d)",
+            total,
+            len(filtered),
+            cfg.preferred_categories or "all",
+            cfg.excluded_series_patterns or "none",
+            cfg.min_volume,
+            cfg.max_markets_per_event,
+        )
+        return filtered, diagnostics
+
+    def _apply_market_filters(self, markets: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        filtered, _ = self._apply_market_filters_with_diagnostics(markets)
+        return filtered
+
+    def _process_market_artifacts(
+        self,
+        market: dict[str, Any],
+        *,
+        checkpoint: dict[str, Any],
+        cutoff_ts: dict[str, datetime | None],
+        start_dt: datetime,
+        end_dt: datetime,
+        raw_trades_dir: Path,
+        raw_candles_dir: Path,
+        trades_parquet_dir: Path,
+        normalized_candles_dir: Path,
+        features_dir: Path,
+        processed_tickers: set[str],
+        skipped_or_failed_tickers: list[dict[str, Any]],
+        all_close_times: list[datetime],
+        metrics: dict[str, int],
+        tracker: IngestStatusTracker | None = None,
+    ) -> str:
+        from trading_platform.kalshi.features import build_kalshi_features, write_feature_parquet
+
+        cfg = self.config
+        ticker = market.get("ticker", "")
+        if not ticker:
+            return "skipped"
+        if ticker in processed_tickers:
+            logger.info("Skipping already-processed market %s from checkpoint.", ticker)
+            return "skipped"
+        if tracker is not None:
+            retained_started = tracker.run.retained_markets_started + 1
+            tracker.update_stage(
+                "retained_market_processing",
+                item_count_completed=metrics["markets_with_trades"],
+                item_count_failed=metrics["markets_failed"],
+                message=f"starting market {ticker}",
+                counters={
+                    "active_ticker": ticker,
+                    "min_trades": cfg.min_trades,
+                },
+                run_counters={
+                    "retained_markets_started": retained_started,
+                    "processed_ticker_count": len(processed_tickers),
+                },
+                log_line=self._log_stage_progress(
+                    "retained_market_processing",
+                    "running",
+                    started=retained_started,
+                    completed=metrics["markets_with_trades"],
+                    failed=metrics["markets_failed"],
+                    raw_written=tracker.run.raw_market_files_written,
+                    normalized_written=tracker.run.normalized_outputs_written,
+                    ticker=ticker,
+                ),
+            )
+        if not self._processing_started_logged:
+            logger.info("Kalshi retained-market processing started with %s.", ticker)
+            self._processing_started_logged = True
+            if tracker is not None:
+                tracker.update_stage(
+                    "retained_market_processing",
+                    message=f"first retained market processing started with {ticker}",
+                    counters={"first_processing_ticker": ticker},
+                    run_counters={"first_retained_processing_ticker": ticker},
+                    current_stage=True,
+                )
+        self._write_raw_market(market)
+        if tracker is not None:
+            tracker.increment_run_counters(raw_market_files_written=1)
+
+        close_time_str = _market_key(market, "close_time", "expiration_time") or ""
+        close_time = _parse_iso_ts(close_time_str)
+        if close_time is not None:
+            all_close_times.append(close_time)
+
+        logger.info("Processing Kalshi market %s (%s)", ticker, market.get("title", ""))
+        try:
+            raw_trades = self._fetch_market_trades(market, cutoff_ts)
+        except Exception as exc:
+            logger.warning("Failed to fetch trades for %s: %s", ticker, exc)
+            metrics["markets_failed"] += 1
+            skipped_or_failed_tickers.append({"ticker": ticker, "stage": "trades", "error": str(exc)})
+            if tracker is not None:
+                tracker.update_stage(
+                    "retained_market_processing",
+                    item_count_completed=metrics["markets_with_trades"],
+                    item_count_failed=metrics["markets_failed"],
+                    message=f"trade fetch failed for {ticker}",
+                    counters={"last_failed_ticker": ticker, "last_failure_stage": "trades"},
+                    run_counters={
+                        "markets_failed": metrics["markets_failed"],
+                        "processed_ticker_count": len(processed_tickers),
+                    },
+                )
+            return "failed"
+
+        if len(raw_trades) < cfg.min_trades:
+            logger.debug("Skipping %s: only %d trades (min %d).", ticker, len(raw_trades), cfg.min_trades)
+            metrics["markets_skipped"] += 1
+            skipped_or_failed_tickers.append(
+                {"ticker": ticker, "stage": "min_trades", "trade_count": len(raw_trades), "min_trades": cfg.min_trades}
+            )
+            if tracker is not None:
+                tracker.update_stage(
+                    "retained_market_processing",
+                    item_count_completed=metrics["markets_with_trades"],
+                    item_count_failed=metrics["markets_failed"],
+                    message=f"skipped {ticker} for min_trades",
+                    counters={"last_skipped_ticker": ticker, "last_skip_reason": "min_trades"},
+                    run_counters={"processed_ticker_count": len(processed_tickers)},
+                )
+            return "skipped"
+
+        metrics["markets_with_trades"] += 1
+        metrics["total_trades"] += len(raw_trades)
+        (raw_trades_dir / f"{ticker}.json").write_text(json.dumps(raw_trades, indent=2, default=str), encoding="utf-8")
+
+        try:
+            trades_df = _trades_to_dataframe(raw_trades)
+            trades_df.write_parquet(trades_parquet_dir / f"{ticker}.parquet")
+            if tracker is not None:
+                tracker.increment_run_counters(normalized_outputs_written=1)
+        except Exception as exc:
+            logger.warning("Trade parquet write failed for %s: %s", ticker, exc)
+            metrics["markets_failed"] += 1
+            skipped_or_failed_tickers.append({"ticker": ticker, "stage": "trade_parquet", "error": str(exc)})
+            if tracker is not None:
+                tracker.update_stage(
+                    "retained_market_processing",
+                    item_count_completed=metrics["markets_with_trades"],
+                    item_count_failed=metrics["markets_failed"],
+                    message=f"trade parquet failed for {ticker}",
+                    counters={"last_failed_ticker": ticker, "last_failure_stage": "trade_parquet"},
+                    run_counters={
+                        "markets_failed": metrics["markets_failed"],
+                        "processed_ticker_count": len(processed_tickers),
+                    },
+                )
+            return "failed"
+
+        try:
+            raw_candles = self._fetch_market_candles(
+                market,
+                cutoff_ts,
+                start_dt=start_dt,
+                end_dt=end_dt,
+            )
+            (raw_candles_dir / f"{ticker}.json").write_text(json.dumps(raw_candles, indent=2, default=str), encoding="utf-8")
+            candles_df = _normalise_candlestick_rows(raw_candles)
+            candles_df.write_parquet(normalized_candles_dir / f"{ticker}.parquet")
+            metrics["total_candlesticks"] += len(candles_df)
+            if tracker is not None:
+                tracker.increment_run_counters(normalized_outputs_written=1)
+        except Exception as exc:
+            logger.warning("Candlestick fetch/write failed for %s: %s", ticker, exc)
+            skipped_or_failed_tickers.append({"ticker": ticker, "stage": "candles", "error": str(exc)})
+
+        try:
+            yes_prices = trades_df.get_column("yes_price").drop_nulls()
+            last_yes_price = float(yes_prices[-1]) if len(yes_prices) > 0 else 50.0
+            if last_yes_price <= 1.0:
+                last_yes_price *= 100.0
+
+            extra_features = self._compute_extra_features(market, last_yes_price)
+            feat_df = build_kalshi_features(
+                trades_df,
+                ticker=ticker,
+                period=cfg.feature_period,
+                close_time=close_time,
+                timestamp_col="traded_at",
+                price_col="yes_price",
+                count_col="count",
+                extra_scalar_features=extra_features if extra_features else None,
+                market_context={
+                    "title": market.get("title"),
+                    "series_ticker": market.get("series_ticker"),
+                    "base_rate_db_path": cfg.base_rate_db_path,
+                    "side_col": "side",
+                },
+            )
+            write_feature_parquet(feat_df, features_dir, ticker)
+            metrics["feature_files_written"] += 1
+            if tracker is not None:
+                tracker.increment_run_counters(normalized_outputs_written=1)
+        except Exception as exc:
+            logger.warning("Feature build failed for %s: %s", ticker, exc)
+            skipped_or_failed_tickers.append({"ticker": ticker, "stage": "features", "error": str(exc)})
+
+        processed_tickers.add(ticker)
+        checkpoint["processed_tickers"] = sorted(processed_tickers)
+        self._save_checkpoint(checkpoint, tracker=tracker, message=f"processed ticker checkpointed: {ticker}")
+        if tracker is not None:
+            tracker.update_stage(
+                "retained_market_processing",
+                item_count_completed=metrics["markets_with_trades"],
+                item_count_failed=metrics["markets_failed"],
+                message=f"completed market {ticker}",
+                counters={
+                    "last_completed_ticker": ticker,
+                    "markets_skipped": metrics["markets_skipped"],
+                    "total_trades": metrics["total_trades"],
+                    "total_candlesticks": metrics["total_candlesticks"],
+                    "feature_files_written": metrics["feature_files_written"],
+                },
+                run_counters={
+                    "markets_completed": len(processed_tickers),
+                    "processed_ticker_count": len(processed_tickers),
+                    "markets_failed": metrics["markets_failed"],
+                },
+                log_line=self._log_stage_progress(
+                    "retained_market_processing",
+                    "running",
+                    started=tracker.run.retained_markets_started,
+                    completed=len(processed_tickers),
+                    failed=metrics["markets_failed"],
+                    raw_written=tracker.run.raw_market_files_written,
+                    normalized_written=tracker.run.normalized_outputs_written,
+                    ticker=ticker,
+                ),
+            )
+        return "completed"
+
+    def _build_run_summary(
+        self,
+        *,
+        tracker: IngestStatusTracker,
+        now_utc: datetime,
+        cutoff_ts: dict[str, datetime | None],
+        download_diagnostics: dict[str, Any],
+        filter_diagnostics: dict[str, Any],
+        normalized_markets_written: int,
+        resolution_count: int,
+        metrics: dict[str, int],
+        date_range_start: str | None,
+        date_range_end: str | None,
+        skipped_or_failed_tickers: list[dict[str, Any]],
+        checkpoint: dict[str, Any],
+        fail_fast_triggered: bool,
+        fail_fast_reason: str | None,
+        stop_reason: str | None = None,
+    ) -> dict[str, Any]:
+        cfg = self.config
+        effective_stop_reason = stop_reason or download_diagnostics.get("pagination_stop_reason") or "completed"
+        return {
+            "generated_at": now_utc.isoformat(),
+            "run_id": tracker.run.run_id,
+            "pipeline_name": tracker.run.pipeline_name,
+            "lookback_days": cfg.lookback_days,
+            "request_sleep_sec": cfg.request_sleep_sec,
+            "authenticated_request_sleep_sec": cfg.authenticated_request_sleep_sec,
+            "authenticated_rate_limit": {
+                "max_retries": cfg.authenticated_rate_limit_max_retries,
+                "backoff_base_sec": cfg.authenticated_rate_limit_backoff_base_sec,
+                "backoff_max_sec": cfg.authenticated_rate_limit_backoff_max_sec,
+                "jitter_max_sec": cfg.authenticated_rate_limit_jitter_max_sec,
+            },
+            "streaming_fail_fast": {
+                "max_live_pages_without_retained_markets": cfg.max_live_pages_without_retained_markets,
+                "max_raw_markets_without_processing": cfg.max_raw_markets_without_processing,
+            },
+            "feature_period": cfg.feature_period,
+            "market_page_size": cfg.market_page_size,
+            "trade_page_size": cfg.trade_page_size,
+            "output_layout": {
+                "raw_markets_dir": cfg.raw_markets_dir,
+                "raw_trades_dir": cfg.raw_trades_dir,
+                "raw_candles_dir": cfg.raw_candles_dir,
+                "normalized_trades_dir": cfg.trades_parquet_dir,
+                "normalized_candles_dir": cfg.normalized_candles_dir,
+                "normalized_markets_path": cfg.normalized_markets_path,
+                "features_dir": cfg.features_dir,
+                "resolution_csv_path": cfg.resolution_csv_path,
+                "legacy_resolution_csv_path": cfg.legacy_resolution_csv_path,
+                "checkpoint_path": cfg.checkpoint_path,
+                "status_artifacts_root": cfg.status_artifacts_root,
+            },
+            "cutoff_timestamps": {
+                key: value.isoformat() if isinstance(value, datetime) else None
+                for key, value in cutoff_ts.items()
+            },
+            "markets_downloaded": download_diagnostics.get("total_markets_fetched", 0),
+            "markets_after_filters": filter_diagnostics.get("retained_markets", 0),
+            "markets_excluded_by_filters": download_diagnostics.get("total_markets_discarded", 0),
+            "filter_config": {
+                "preferred_categories": cfg.preferred_categories,
+                "excluded_series_patterns": cfg.excluded_series_patterns,
+                "min_volume": cfg.min_volume,
+                "max_markets_per_event": cfg.max_markets_per_event,
+            },
+            "filter_diagnostics": filter_diagnostics,
+            "page_diagnostics_summary": download_diagnostics,
+            "normalized_markets_written": normalized_markets_written,
+            "markets_with_trades": metrics["markets_with_trades"],
+            "markets_skipped_no_trades": metrics["markets_skipped"],
+            "markets_failed": metrics["markets_failed"],
+            "total_trades": metrics["total_trades"],
+            "total_candlesticks": metrics["total_candlesticks"],
+            "resolution_count": resolution_count,
+            "date_range_start": date_range_start,
+            "date_range_end": date_range_end,
+            "feature_files_written": metrics["feature_files_written"],
+            "pages_seen": tracker.run.pages_seen,
+            "pages_with_retained_markets": tracker.run.pages_with_retained_markets,
+            "pages_without_retained_markets": tracker.run.pages_without_retained_markets,
+            "retained_markets_seen": tracker.run.retained_markets_seen,
+            "retained_markets_started": tracker.run.retained_markets_started,
+            "markets_completed": tracker.run.markets_completed,
+            "processed_ticker_count": tracker.run.processed_ticker_count,
+            "raw_market_files_written": tracker.run.raw_market_files_written,
+            "normalized_outputs_written": tracker.run.normalized_outputs_written,
+            "fail_fast_triggered": fail_fast_triggered,
+            "fail_fast_reason": fail_fast_reason,
+            "stop_reason": effective_stop_reason,
+            "first_retained_processing_milestone": {
+                "ticker": download_diagnostics.get("first_retained_processing_ticker"),
+                "source": download_diagnostics.get("first_retained_processing_source"),
+                "page": download_diagnostics.get("first_retained_processing_page"),
+            },
+            "checkpoint_summary": {
+                "checkpoint_writes": self._checkpoint_write_count,
+                "processed_tickers": checkpoint.get("processed_tickers", []),
+                "market_download_complete": bool(checkpoint.get("market_download_complete")),
+            },
+            "top_error_categories": self._top_error_categories(skipped_or_failed_tickers),
+            "skipped_or_failed": skipped_or_failed_tickers,
+            "status_artifact_path": str(tracker.status_path),
+            "run_summary_artifact_path": str(tracker.summary_path),
+        }
+
+    def _run_streaming(self) -> HistoricalIngestResult:
+        cfg = self.config
+        now_utc = datetime.now(UTC)
+        start_dt = now_utc - timedelta(days=cfg.lookback_days)
+        tracker = self._build_status_tracker()
+        raw_trades_dir = Path(cfg.raw_trades_dir)
+        raw_candles_dir = Path(cfg.raw_candles_dir)
+        trades_parquet_dir = Path(cfg.trades_parquet_dir)
+        normalized_candles_dir = Path(cfg.normalized_candles_dir)
+        features_dir = Path(cfg.features_dir)
+        checkpoint: dict[str, Any] = {}
+        skipped_or_failed_tickers: list[dict[str, Any]] = []
+        processed_tickers: set[str] = set()
+        all_close_times: list[datetime] = []
+        cutoff_ts: dict[str, datetime | None] = {
+            "market_settled_ts": None,
+            "trades_created_ts": None,
+            "orders_updated_ts": None,
+        }
+        download_diagnostics: dict[str, Any] = {"pagination_stop_reason": None}
+        filter_diagnostics: dict[str, Any] = {}
+        normalized_markets_written = 0
+        resolution_count = 0
+        date_range_start: str | None = None
+        date_range_end: str | None = None
+        self._checkpoint_write_count = 0
+
+        metrics = {
+            "markets_with_trades": 0,
+            "markets_skipped": 0,
+            "markets_failed": 0,
+            "total_trades": 0,
+            "total_candlesticks": 0,
+            "feature_files_written": 0,
+        }
+        tracker.start_run(current_stage="initialization")
+        tracker.start_stage("initialization", message="initializing Kalshi historical ingest")
+        try:
+            self._make_dirs()
+            self._init_signals()
+            tracker.complete_stage("initialization", message="directories and signals initialized")
+
+            tracker.start_stage("checkpoint_load", message="loading checkpoint state")
+            checkpoint = self._load_checkpoint()
+            processed_tickers = set(str(ticker) for ticker in checkpoint.get("processed_tickers", []))
+            tracker.complete_stage(
+                "checkpoint_load",
+                message="checkpoint loaded",
+                counters={"processed_ticker_count": len(processed_tickers), "market_download_complete": bool(checkpoint.get("market_download_complete"))},
+            )
+            tracker.start_stage("checkpoint_write", current_stage=False, message="checkpoint tracking initialized")
+
+            tracker.start_stage("cutoff_discovery", message="fetching cutoff timestamps")
+            cutoff_ts = self._fetch_cutoff_timestamps()
+            tracker.complete_stage(
+                "cutoff_discovery",
+                message="cutoff timestamps loaded",
+                counters={key: value.isoformat() if isinstance(value, datetime) else None for key, value in cutoff_ts.items()},
+            )
+
+            logger.info(
+                "Starting Kalshi historical ingest: lookback_days=%d raw_markets_dir=%s raw_trades_dir=%s raw_candles_dir=%s normalized_trades_dir=%s normalized_candles_dir=%s features_dir=%s",
+                cfg.lookback_days,
+                cfg.raw_markets_dir,
+                cfg.raw_trades_dir,
+                cfg.raw_candles_dir,
+                cfg.trades_parquet_dir,
+                cfg.normalized_candles_dir,
+                cfg.features_dir,
+            )
+            logger.info("Fetching settled Kalshi markets closed between %s and %s", start_dt.date(), now_utc.date())
+
+            tracker.start_stage("market_universe_fetch", message="fetching and filtering market universe")
+            tracker.start_stage("retained_market_processing", message="waiting for first retained market")
+            checkpoint_complete_before_run = bool(checkpoint.get("market_download_complete"))
+            download_diagnostics = self._download_market_universe(
+                checkpoint=checkpoint,
+                start_dt=start_dt,
+                end_dt=now_utc,
+                cutoff_ts=cutoff_ts,
+                tracker=tracker,
+                on_retained_market=(
+                    None
+                    if checkpoint_complete_before_run
+                    else lambda market: self._process_market_artifacts(
+                        market,
+                        checkpoint=checkpoint,
+                        cutoff_ts=cutoff_ts,
+                        start_dt=start_dt,
+                        end_dt=now_utc,
+                        raw_trades_dir=raw_trades_dir,
+                        raw_candles_dir=raw_candles_dir,
+                        trades_parquet_dir=trades_parquet_dir,
+                        normalized_candles_dir=normalized_candles_dir,
+                        features_dir=features_dir,
+                        processed_tickers=processed_tickers,
+                        skipped_or_failed_tickers=skipped_or_failed_tickers,
+                        all_close_times=all_close_times,
+                        metrics=metrics,
+                        tracker=tracker,
+                    )
+                ),
+            )
+            tracker.complete_stage(
+                "market_universe_fetch",
+                message=f"market universe fetch stopped via {download_diagnostics.get('pagination_stop_reason') or 'unknown'}",
+                counters=download_diagnostics,
+            )
+
+            tracker.start_stage("normalization", message="writing normalized market indexes")
+            all_markets = [market for market in self._iter_downloaded_markets() if not _is_synthetic_ticker(market.get("ticker"))]
+            normalized_markets_written, resolution_count = self._write_market_indexes(all_markets)
+            tracker.increment_run_counters(normalized_outputs_written=3)
+            markets_to_process, late_filter_diagnostics = self._apply_market_filters_with_diagnostics(all_markets)
+            filter_diagnostics = {
+                "total_markets_before_filters": download_diagnostics.get("total_markets_fetched", len(all_markets)),
+                "retained_markets": len(markets_to_process),
+                "excluded_markets_total": download_diagnostics.get("total_markets_discarded", 0),
+                "excluded_by_category": download_diagnostics.get("discarded_by_category", 0),
+                "excluded_by_series_pattern": download_diagnostics.get("discarded_by_series_pattern", 0),
+                "excluded_by_min_volume": download_diagnostics.get("discarded_by_min_volume", 0),
+                "excluded_by_bracket": late_filter_diagnostics.get("excluded_by_bracket", 0),
+                "effective_filter_config": late_filter_diagnostics.get("effective_filter_config", {}),
+                "pages_fetched": download_diagnostics.get("pages_fetched", 0),
+                "pages_with_retained_markets": download_diagnostics.get("pages_with_retained_markets", 0),
+                "pages_without_retained_markets": download_diagnostics.get("pages_without_retained_markets", 0),
+                "retained_sample_tickers": download_diagnostics.get("retained_sample_tickers", []),
+                "last_cursor": download_diagnostics.get("last_cursor"),
+                "pagination_stop_reason": download_diagnostics.get("pagination_stop_reason"),
+                "first_retained_processing_ticker": download_diagnostics.get("first_retained_processing_ticker"),
+                "first_retained_processing_source": download_diagnostics.get("first_retained_processing_source"),
+                "first_retained_processing_page": download_diagnostics.get("first_retained_processing_page"),
+            }
+            tracker.complete_stage("normalization", message="normalized market indexes written", counters={"normalized_markets_written": normalized_markets_written, "resolution_count": resolution_count})
+
+            if not all_markets:
+                logger.warning("No Kalshi markets matched early ingest filters after %d fetched markets. Exiting cleanly.", download_diagnostics.get("total_markets_fetched", 0))
+
+            if checkpoint_complete_before_run:
+                for market in markets_to_process:
+                    self._process_market_artifacts(
+                        market,
+                        checkpoint=checkpoint,
+                        cutoff_ts=cutoff_ts,
+                        start_dt=start_dt,
+                        end_dt=now_utc,
+                        raw_trades_dir=raw_trades_dir,
+                        raw_candles_dir=raw_candles_dir,
+                        trades_parquet_dir=trades_parquet_dir,
+                        normalized_candles_dir=normalized_candles_dir,
+                        features_dir=features_dir,
+                        processed_tickers=processed_tickers,
+                        skipped_or_failed_tickers=skipped_or_failed_tickers,
+                        all_close_times=all_close_times,
+                        metrics=metrics,
+                        tracker=tracker,
+                    )
+
+            tracker.complete_stage(
+                "retained_market_processing",
+                message="retained market processing complete" if tracker.run.retained_markets_started else "no retained markets entered processing",
+                counters={"markets_skipped": metrics["markets_skipped"], "feature_files_written": metrics["feature_files_written"]},
+            )
+            tracker.complete_stage("checkpoint_write", current_stage=False, message="checkpoint writes complete", counters={"checkpoint_writes": self._checkpoint_write_count})
+
+            if all_close_times:
+                date_range_start = min(all_close_times).date().isoformat()
+                date_range_end = max(all_close_times).date().isoformat()
+
+            summary = self._build_run_summary(
+                tracker=tracker,
+                now_utc=now_utc,
+                cutoff_ts=cutoff_ts,
+                download_diagnostics=download_diagnostics,
+                filter_diagnostics=filter_diagnostics,
+                normalized_markets_written=normalized_markets_written,
+                resolution_count=resolution_count,
+                metrics=metrics,
+                date_range_start=date_range_start,
+                date_range_end=date_range_end,
+                skipped_or_failed_tickers=skipped_or_failed_tickers,
+                checkpoint=checkpoint,
+                fail_fast_triggered=False,
+                fail_fast_reason=None,
+            )
+            tracker.start_stage("final_summary", message="writing final summary artifacts")
+            manifest_path = Path(cfg.manifest_path)
+            summary_path = Path(cfg.summary_path)
+            manifest_path.parent.mkdir(parents=True, exist_ok=True)
+            summary_path.parent.mkdir(parents=True, exist_ok=True)
+            manifest_path.write_text(json.dumps(summary, indent=2, default=str), encoding="utf-8")
+            summary_path.write_text(json.dumps(summary, indent=2, default=str), encoding="utf-8")
+            logger.info("Manifest written to %s", manifest_path)
+            logger.info("Summary written to %s", summary_path)
+            tracker.complete_stage("final_summary", message="final summary written", counters={"manifest_path": str(manifest_path), "summary_path": str(summary_path)})
+            tracker.complete_run(stop_reason=summary["stop_reason"], extra_summary=summary)
+            return HistoricalIngestResult(
+                markets_downloaded=download_diagnostics.get("total_markets_fetched", len(all_markets)),
+                markets_with_trades=metrics["markets_with_trades"],
+                markets_skipped_no_trades=metrics["markets_skipped"],
+                markets_failed=metrics["markets_failed"],
+                total_trades=metrics["total_trades"],
+                total_candlesticks=metrics["total_candlesticks"],
+                resolution_count=resolution_count,
+                date_range_start=date_range_start,
+                date_range_end=date_range_end,
+                feature_files_written=metrics["feature_files_written"],
+                normalized_markets_written=normalized_markets_written,
+                manifest_path=manifest_path,
+                summary_path=summary_path,
+                status_artifact_path=tracker.status_path,
+                run_summary_artifact_path=tracker.summary_path,
+            )
+        except KalshiIngestFailFastError as exc:
+            download_diagnostics = getattr(exc, "diagnostics", download_diagnostics)
+            tracker.fail_stage("market_universe_fetch", error_summary=str(exc), message=f"market universe fetch failed fast: {exc.reason}")
+            tracker.fail_run(
+                current_stage="market_universe_fetch",
+                error_summary=str(exc),
+                stop_reason=download_diagnostics.get("pagination_stop_reason") or exc.reason,
+                fail_fast_reason=exc.reason,
+                extra_summary=self._build_run_summary(
+                    tracker=tracker,
+                    now_utc=now_utc,
+                    cutoff_ts=cutoff_ts,
+                    download_diagnostics=download_diagnostics,
+                    filter_diagnostics=filter_diagnostics,
+                    normalized_markets_written=normalized_markets_written,
+                    resolution_count=resolution_count,
+                    metrics=metrics,
+                    date_range_start=date_range_start,
+                    date_range_end=date_range_end,
+                    skipped_or_failed_tickers=skipped_or_failed_tickers,
+                    checkpoint=checkpoint,
+                    fail_fast_triggered=True,
+                    fail_fast_reason=exc.reason,
+                ),
+            )
+            raise
+        except Exception as exc:
+            tracker.fail_stage(tracker.run.current_stage or "initialization", error_summary=str(exc), message=f"run failed in {tracker.run.current_stage or 'initialization'}")
+            tracker.fail_run(
+                current_stage=tracker.run.current_stage,
+                error_summary=str(exc),
+                stop_reason="failed",
+                extra_summary=self._build_run_summary(
+                    tracker=tracker,
+                    now_utc=now_utc,
+                    cutoff_ts=cutoff_ts,
+                    download_diagnostics=download_diagnostics,
+                    filter_diagnostics=filter_diagnostics,
+                    normalized_markets_written=normalized_markets_written,
+                    resolution_count=resolution_count,
+                    metrics=metrics,
+                    date_range_start=date_range_start,
+                    date_range_end=date_range_end,
+                    skipped_or_failed_tickers=skipped_or_failed_tickers,
+                    checkpoint=checkpoint,
+                    fail_fast_triggered=False,
+                    fail_fast_reason=None,
+                    stop_reason="failed",
+                ),
+            )
+            raise
+
     def run(self) -> HistoricalIngestResult:
         """
         Execute the full historical ingest pipeline.
 
         :returns: :class:`HistoricalIngestResult` with run summary.
         """
+        return self._run_streaming()
+
         from trading_platform.kalshi.features import build_kalshi_features, write_feature_parquet
 
         cfg = self.config
         self._make_dirs()
         self._init_signals()
 
-        # Compute lookback window
+        checkpoint = self._load_checkpoint()
         now_utc = datetime.now(UTC)
         start_dt = now_utc - timedelta(days=cfg.lookback_days)
-        min_close_ts = int(start_dt.timestamp())
-        max_close_ts = int(now_utc.timestamp())
+        raw_trades_dir = Path(cfg.raw_trades_dir)
+        raw_candles_dir = Path(cfg.raw_candles_dir)
+        trades_parquet_dir = Path(cfg.trades_parquet_dir)
+        normalized_candles_dir = Path(cfg.normalized_candles_dir)
+        features_dir = Path(cfg.features_dir)
 
         logger.info(
-            "Fetching historical markets closed between %s and %s",
-            start_dt.date(), now_utc.date()
+            "Starting Kalshi historical ingest: lookback_days=%d raw_markets_dir=%s raw_trades_dir=%s raw_candles_dir=%s normalized_trades_dir=%s normalized_candles_dir=%s features_dir=%s",
+            cfg.lookback_days,
+            cfg.raw_markets_dir,
+            cfg.raw_trades_dir,
+            cfg.raw_candles_dir,
+            cfg.trades_parquet_dir,
+            cfg.normalized_candles_dir,
+            cfg.features_dir,
         )
+        logger.info("Fetching settled Kalshi markets closed between %s and %s", start_dt.date(), now_utc.date())
 
         # ── Step 1: Download all resolved markets ────────────────────────────
-        all_markets: list[dict[str, Any]] = self.client.get_all_historical_markets(
-            min_close_ts=min_close_ts,
-            max_close_ts=max_close_ts,
+        cutoff_ts = self._fetch_cutoff_timestamps()
+        self._download_market_universe(
+            checkpoint=checkpoint,
+            start_dt=start_dt,
+            end_dt=now_utc,
+            cutoff_ts=cutoff_ts,
         )
+        all_markets = [market for market in self._iter_downloaded_markets() if not _is_synthetic_ticker(market.get("ticker"))]
+        normalized_markets_written, resolution_count = self._write_market_indexes(all_markets)
 
-        # Apply optional ticker filter
-        if cfg.ticker_filter:
-            filter_set = set(cfg.ticker_filter)
-            all_markets = [m for m in all_markets if m.get("ticker", "") in filter_set]
+        # ── Step 2: Apply market filters ─────────────────────────────────────
+        # Filtering happens AFTER market indexes are written so the resolution
+        # CSV and normalized markets parquet remain complete.  Only the expensive
+        # trade / feature processing step (step 4) is restricted to filtered markets.
+        markets_to_process, filter_diagnostics = self._apply_market_filters_with_diagnostics(all_markets)
 
-        logger.info("Downloaded %d resolved markets.", len(all_markets))
-
-        # ── Step 2: Save raw market JSONs + collect resolution data ──────────
-        resolution_rows: list[dict[str, Any]] = []
-        raw_markets_dir = Path(cfg.raw_markets_dir)
-
-        for market in all_markets:
-            ticker = market.get("ticker", "")
-            if not ticker:
-                continue
-            # Save raw JSON
-            market_path = raw_markets_dir / f"{ticker}.json"
-            market_path.write_text(json.dumps(market, indent=2, default=str), encoding="utf-8")
-
-            result = market.get("result")
-            resolution_price = _result_to_price(result)
-            if resolution_price is not None:
-                resolution_rows.append({
-                    "ticker": ticker,
-                    "resolution_price": resolution_price,
-                    "result": result,
-                    "close_time": market.get("close_time", ""),
-                })
+        skipped_or_failed_tickers: list[dict[str, Any]] = []
+        processed_tickers = set(str(ticker) for ticker in checkpoint.get("processed_tickers", []))
 
         # ── Step 3: Write resolution CSV ────────────────────────────────────
-        import csv
-        resolution_path = Path(cfg.resolution_csv_path)
-        resolution_path.parent.mkdir(parents=True, exist_ok=True)
-        if resolution_rows:
-            with open(resolution_path, "w", newline="", encoding="utf-8") as f:
-                writer = csv.DictWriter(f, fieldnames=["ticker", "resolution_price", "result", "close_time"])
-                writer.writeheader()
-                writer.writerows(resolution_rows)
-        logger.info("Wrote %d resolution records to %s.", len(resolution_rows), resolution_path)
+        markets_with_trades = 0
 
         # ── Step 4: Download trades + build features ─────────────────────────
         markets_with_trades = 0
         markets_skipped = 0
         markets_failed = 0
         total_trades = 0
+        total_candlesticks = 0
         feature_files_written = 0
         all_close_times: list[datetime] = []
 
-        raw_trades_dir = Path(cfg.raw_trades_dir)
-        trades_parquet_dir = Path(cfg.trades_parquet_dir)
-        features_dir = Path(cfg.features_dir)
-
-        for market in all_markets:
+        for market in markets_to_process:
             ticker = market.get("ticker", "")
             if not ticker:
+                continue
+            if ticker in processed_tickers:
+                logger.info("Skipping already-processed market %s from checkpoint.", ticker)
                 continue
 
             # Collect close time for date range reporting
             close_time_str = market.get("close_time", "")
-            close_time: datetime | None = None
-            if close_time_str:
-                try:
-                    close_time = datetime.fromisoformat(close_time_str.replace("Z", "+00:00"))
-                    all_close_times.append(close_time)
-                except ValueError:
-                    pass
+            close_time = _parse_iso_ts(close_time_str)
+            if close_time is not None:
+                all_close_times.append(close_time)
 
             # ── Fetch trades ─────────────────────────────────────────────────
+            logger.info("Processing Kalshi market %s (%s)", ticker, market.get("title", ""))
             try:
-                time.sleep(cfg.request_sleep_sec)
-                raw_trades = self.client.get_all_historical_trades(ticker=ticker)
+                raw_trades = self._fetch_market_trades(market, cutoff_ts)
             except Exception as exc:
                 logger.warning("Failed to fetch trades for %s: %s", ticker, exc)
                 markets_failed += 1
+                skipped_or_failed_tickers.append({"ticker": ticker, "stage": "trades", "error": str(exc)})
                 continue
 
             if len(raw_trades) < cfg.min_trades:
                 logger.debug("Skipping %s: only %d trades (min %d).", ticker, len(raw_trades), cfg.min_trades)
                 markets_skipped += 1
+                skipped_or_failed_tickers.append(
+                    {"ticker": ticker, "stage": "min_trades", "trade_count": len(raw_trades), "min_trades": cfg.min_trades}
+                )
                 continue
 
             markets_with_trades += 1
             total_trades += len(raw_trades)
 
-            # Save raw trades JSON
-            trades_json_path = raw_trades_dir / f"{ticker}.json"
-            trades_json_path.write_text(
-                json.dumps(raw_trades, indent=2, default=str), encoding="utf-8"
-            )
+            (raw_trades_dir / f"{ticker}.json").write_text(json.dumps(raw_trades, indent=2, default=str), encoding="utf-8")
 
             # ── Convert to parquet ────────────────────────────────────────────
             try:
                 trades_df = _trades_to_dataframe(raw_trades)
-                trades_parquet_path = trades_parquet_dir / f"{ticker}.parquet"
-                trades_df.write_parquet(trades_parquet_path)
+                trades_df.write_parquet(trades_parquet_dir / f"{ticker}.parquet")
             except Exception as exc:
                 logger.warning("Trade parquet write failed for %s: %s", ticker, exc)
                 markets_failed += 1
+                skipped_or_failed_tickers.append({"ticker": ticker, "stage": "trade_parquet", "error": str(exc)})
                 continue
 
             # ── Build features ────────────────────────────────────────────────
             try:
-                # Determine last yes-price for scalar signal computation
+                raw_candles = self._fetch_market_candles(
+                    market,
+                    cutoff_ts,
+                    start_dt=start_dt,
+                    end_dt=now_utc,
+                )
+                (raw_candles_dir / f"{ticker}.json").write_text(json.dumps(raw_candles, indent=2, default=str), encoding="utf-8")
+                candles_df = _normalise_candlestick_rows(raw_candles)
+                candles_df.write_parquet(normalized_candles_dir / f"{ticker}.parquet")
+                total_candlesticks += len(candles_df)
+            except Exception as exc:
+                logger.warning("Candlestick fetch/write failed for %s: %s", ticker, exc)
+                skipped_or_failed_tickers.append({"ticker": ticker, "stage": "candles", "error": str(exc)})
+
+            try:
                 yes_prices = trades_df.get_column("yes_price").drop_nulls()
                 last_yes_price = float(yes_prices[-1]) if len(yes_prices) > 0 else 50.0
                 if last_yes_price <= 1.0:
@@ -399,39 +2075,93 @@ class HistoricalIngestPipeline:
                     price_col="yes_price",
                     count_col="count",
                     extra_scalar_features=extra_features if extra_features else None,
+                    market_context={
+                        "title": market.get("title"),
+                        "series_ticker": market.get("series_ticker"),
+                        "base_rate_db_path": cfg.base_rate_db_path,
+                        "side_col": "side",
+                    },
                 )
                 write_feature_parquet(feat_df, features_dir, ticker)
                 feature_files_written += 1
             except Exception as exc:
                 logger.warning("Feature build failed for %s: %s", ticker, exc)
-                # Don't count as failed — trades were saved successfully
+                skipped_or_failed_tickers.append({"ticker": ticker, "stage": "features", "error": str(exc)})
 
-        # ── Step 5: Write manifest ────────────────────────────────────────────
+            processed_tickers.add(ticker)
+            checkpoint["processed_tickers"] = sorted(processed_tickers)
+            self._save_checkpoint(checkpoint)
+
         date_range_start: str | None = None
         date_range_end: str | None = None
         if all_close_times:
             date_range_start = min(all_close_times).date().isoformat()
             date_range_end = max(all_close_times).date().isoformat()
 
-        manifest = {
+        summary = {
             "generated_at": now_utc.isoformat(),
             "lookback_days": cfg.lookback_days,
+            "request_sleep_sec": cfg.request_sleep_sec,
+            "authenticated_request_sleep_sec": cfg.authenticated_request_sleep_sec,
+            "authenticated_rate_limit": {
+                "max_retries": cfg.authenticated_rate_limit_max_retries,
+                "backoff_base_sec": cfg.authenticated_rate_limit_backoff_base_sec,
+                "backoff_max_sec": cfg.authenticated_rate_limit_backoff_max_sec,
+                "jitter_max_sec": cfg.authenticated_rate_limit_jitter_max_sec,
+            },
+            "streaming_fail_fast": {
+                "max_live_pages_without_retained_markets": cfg.max_live_pages_without_retained_markets,
+                "max_raw_markets_without_processing": cfg.max_raw_markets_without_processing,
+            },
+            "feature_period": cfg.feature_period,
+            "market_page_size": cfg.market_page_size,
+            "trade_page_size": cfg.trade_page_size,
+            "output_layout": {
+                "raw_markets_dir": cfg.raw_markets_dir,
+                "raw_trades_dir": cfg.raw_trades_dir,
+                "raw_candles_dir": cfg.raw_candles_dir,
+                "normalized_trades_dir": cfg.trades_parquet_dir,
+                "normalized_candles_dir": cfg.normalized_candles_dir,
+                "normalized_markets_path": cfg.normalized_markets_path,
+                "features_dir": cfg.features_dir,
+                "resolution_csv_path": cfg.resolution_csv_path,
+                "legacy_resolution_csv_path": cfg.legacy_resolution_csv_path,
+                "checkpoint_path": cfg.checkpoint_path,
+            },
+            "cutoff_timestamps": {
+                key: value.isoformat() if isinstance(value, datetime) else None
+                for key, value in cutoff_ts.items()
+            },
             "markets_downloaded": len(all_markets),
+            "markets_after_filters": len(markets_to_process),
+            "markets_excluded_by_filters": len(all_markets) - len(markets_to_process),
+            "filter_config": {
+                "preferred_categories": cfg.preferred_categories,
+                "excluded_series_patterns": cfg.excluded_series_patterns,
+                "min_volume": cfg.min_volume,
+                "max_markets_per_event": cfg.max_markets_per_event,
+            },
+            "filter_diagnostics": filter_diagnostics,
+            "normalized_markets_written": normalized_markets_written,
             "markets_with_trades": markets_with_trades,
             "markets_skipped_no_trades": markets_skipped,
             "markets_failed": markets_failed,
             "total_trades": total_trades,
-            "resolution_count": len(resolution_rows),
+            "total_candlesticks": total_candlesticks,
+            "resolution_count": resolution_count,
             "date_range_start": date_range_start,
             "date_range_end": date_range_end,
             "feature_files_written": feature_files_written,
-            "feature_period": cfg.feature_period,
-            "request_sleep_sec": cfg.request_sleep_sec,
+            "skipped_or_failed": skipped_or_failed_tickers,
         }
         manifest_path = Path(cfg.manifest_path)
+        summary_path = Path(cfg.summary_path)
         manifest_path.parent.mkdir(parents=True, exist_ok=True)
-        manifest_path.write_text(json.dumps(manifest, indent=2, default=str), encoding="utf-8")
+        summary_path.parent.mkdir(parents=True, exist_ok=True)
+        manifest_path.write_text(json.dumps(summary, indent=2, default=str), encoding="utf-8")
+        summary_path.write_text(json.dumps(summary, indent=2, default=str), encoding="utf-8")
         logger.info("Manifest written to %s", manifest_path)
+        logger.info("Summary written to %s", summary_path)
 
         return HistoricalIngestResult(
             markets_downloaded=len(all_markets),
@@ -439,9 +2169,12 @@ class HistoricalIngestPipeline:
             markets_skipped_no_trades=markets_skipped,
             markets_failed=markets_failed,
             total_trades=total_trades,
-            resolution_count=len(resolution_rows),
+            total_candlesticks=total_candlesticks,
+            resolution_count=resolution_count,
             date_range_start=date_range_start,
             date_range_end=date_range_end,
             feature_files_written=feature_files_written,
+            normalized_markets_written=normalized_markets_written,
             manifest_path=manifest_path,
+            summary_path=summary_path,
         )

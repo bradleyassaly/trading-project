@@ -324,6 +324,77 @@ def test_grouped_research_validate_backtester_command_parses() -> None:
     assert args.output_dir == "artifacts/validation/vectorbt"
 
 
+def test_grouped_research_kalshi_full_backtest_command_parses() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "research",
+            "kalshi-full-backtest",
+            "--config",
+            "configs/kalshi_research.yaml",
+            "--raw-markets-dir",
+            "data/kalshi/raw/markets",
+            "--entry-timing-mode",
+            "hours_before_close",
+            "--entry-offset-hours",
+            "12",
+            "--holding-window-hours",
+            "6",
+            "--entry-slippage-points",
+            "1.5",
+            "--exit-slippage-points",
+            "2.0",
+            "--signal-probability-scale",
+            "6.0",
+        ]
+    )
+
+    assert args.research_command == "kalshi-full-backtest"
+    assert args.config == "configs/kalshi_research.yaml"
+    assert args.raw_markets_dir == "data/kalshi/raw/markets"
+    assert args.entry_timing_mode == "hours_before_close"
+    assert args.entry_offset_hours == 12.0
+    assert args.holding_window_hours == 6.0
+    assert args.entry_slippage_points == 1.5
+    assert args.exit_slippage_points == 2.0
+    assert args.signal_probability_scale == 6.0
+
+
+def test_grouped_research_cross_market_monitor_command_parses() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "research",
+            "cross-market-monitor",
+            "--config",
+            "configs/kalshi_research.yaml",
+            "--kalshi-config",
+            "configs/kalshi.yaml",
+            "--kalshi-max-markets",
+            "75",
+            "--polymarket-max-markets",
+            "90",
+            "--min-probability-spread",
+            "0.04",
+            "--match-threshold",
+            "0.88",
+            "--snapshot-tag",
+            "am-check",
+            "--overwrite-history",
+        ]
+    )
+
+    assert args.research_command == "cross-market-monitor"
+    assert args.config == "configs/kalshi_research.yaml"
+    assert args.kalshi_config == "configs/kalshi.yaml"
+    assert args.kalshi_max_markets == 75
+    assert args.polymarket_max_markets == 90
+    assert args.min_probability_spread == 0.04
+    assert args.match_threshold == 0.88
+    assert args.snapshot_tag == "am-check"
+    assert args.append_history is False
+
+
 def test_grouped_research_db_commands_parse() -> None:
     parser = build_parser()
     init_args = parser.parse_args(
@@ -1462,7 +1533,32 @@ def test_grouped_paper_run_command_parses() -> None:
 
     assert args.command_family == "paper"
     assert args.paper_command == "run"
-    assert args.top_n == 1
+
+
+def test_grouped_kalshi_paper_run_command_parses() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "paper",
+            "kalshi-run",
+            "--config",
+            "configs/kalshi.yaml",
+            "--research-config",
+            "configs/kalshi_research.yaml",
+            "--tracked-tickers",
+            "KTEST-1",
+            "KTEST-2",
+            "--max-iterations",
+            "3",
+        ]
+    )
+
+    assert args.command_family == "paper"
+    assert args.paper_command == "kalshi-run"
+    assert args.config == "configs/kalshi.yaml"
+    assert args.research_config == "configs/kalshi_research.yaml"
+    assert args.tracked_tickers == ["KTEST-1", "KTEST-2"]
+    assert args.max_iterations == 3
 
 
 def test_grouped_paper_run_command_parses_execution_config() -> None:

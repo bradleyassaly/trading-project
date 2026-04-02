@@ -1,8 +1,17 @@
 # Kalshi prediction market trading configuration
 # All credentials come from .env — never hardcode them here.
+#
+# Optional auth override example if you prefer file-based local config wiring:
+auth:
+   api_key_id: "66dd61a1-acf6-41ee-b75c-4732ddacbf75"
+   private_key_path: "C:/Users/bradl/PycharmProjects/trading_platform/.kalshi/private_key.pem"
+  #   # private_key_pem: "-----BEGIN RSA PRIVATE KEY-----\n...\n-----END RSA PRIVATE KEY-----"
+# `private_key_pem` takes precedence over `private_key_path` when both are set.
 
 environment:
-  demo: true  # Set to false for live trading
+  demo: false  # Historical data reads always use production endpoints; demo only affects order placement.
+
+
 
 ingestion:
   # Markets to track for live orderbook polling and trade history
@@ -14,6 +23,77 @@ ingestion:
 
   # Historical backfill settings
   backfill_days: 30        # how many days back to ingest on first run
+
+historical_ingest:
+  feature_period: "1h"
+  status_artifacts_root: "artifacts/kalshi_ingest"
+  authenticated_request_sleep_sec: 0.15
+  authenticated_rate_limit_max_retries: 6
+  authenticated_rate_limit_backoff_base_sec: 1.0
+  authenticated_rate_limit_backoff_max_sec: 20.0
+  authenticated_rate_limit_jitter_max_sec: 0.5
+  max_live_pages_without_retained_markets: 12
+  max_raw_markets_without_processing: 500
+
+  # ── Market filtering ───────────────────────────────────────────────────────
+  # Kalshi creates hundreds of bracket markets per event (e.g. BTC price at
+  # every $250 increment, NBA scores at every point).  These settings prevent
+  # the ingest from downloading millions of useless files.
+
+  # Skip any series whose ticker prefix matches one of these patterns.
+  # Uses Python re.search (case-insensitive), so "KXBTC" matches
+  # "KXBTC-25MAR21-T95000" and any other KXBTC bracket.
+  excluded_series_patterns:
+    - "KXBTC"     # Bitcoin price brackets
+    - "KXETH"     # Ethereum price brackets
+    - "KXSOL"     # Solana price brackets
+    - "KXSPY"     # S&P 500 / SPY price brackets
+    - "KXNBA"     # NBA game score brackets
+    - "KXNFL"     # NFL game score brackets
+
+  # Skip events that contain more than this many markets.
+  # Legitimate single-question events have 1–3 markets; bracket
+  # events have 50–500.  Set to 0 to disable.
+  max_markets_per_event: 5
+
+  # Skip markets traded fewer than this many contracts total.
+  # Illiquid / untraded markets add noise without signal.  Set to 0 to disable.
+  min_volume: 100
+
+  # Only download markets in these categories.  Leave empty to allow all.
+  # Kalshi category strings (case-insensitive):
+  #   Economics, Politics, Climate, Sports, Finance, Entertainment, Science
+  preferred_categories:
+    - "Economics"   # CPI, Fed rate decisions, GDP, jobs reports
+    - "Politics"    # Elections, legislation, executive actions
+    - "Climate"     # Weather events, temperature records
+
+data_validation:
+  output_dir: "data/kalshi/validation"
+  normalized_markets_path: "data/kalshi/normalized/markets.parquet"
+  normalized_trades_path: "data/kalshi/normalized/trades"
+  normalized_candles_path: "data/kalshi/normalized/candles"
+  resolution_csv_path: "data/kalshi/normalized/resolution.csv"
+  ingest_summary_path: "data/kalshi/raw/ingest_summary.json"
+  ingest_manifest_path: "data/kalshi/raw/ingest_manifest.json"
+  ingest_checkpoint_path: "data/kalshi/raw/ingest_checkpoint.json"
+  features_dir: "data/kalshi/features/real"
+  thresholds:
+    min_resolution_coverage_warn_pct: 0.90
+    min_resolution_coverage_fail_pct: 0.75
+    min_trade_coverage_warn_pct: 0.80
+    min_trade_coverage_fail_pct: 0.60
+    min_candle_coverage_warn_pct: 0.80
+    min_candle_coverage_fail_pct: 0.60
+    max_duplicate_ticker_warn_rate: 0.00
+    max_duplicate_ticker_fail_rate: 0.01
+    max_duplicate_market_id_warn_rate: 0.00
+    max_duplicate_market_id_fail_rate: 0.01
+    allowed_missing_category_warn_rate: 0.05
+    allowed_missing_category_fail_rate: 0.10
+    max_invalid_timestamp_warn_rate: 0.01
+    max_invalid_timestamp_fail_rate: 0.05
+    synthetic_markers_hard_fail: true
 
 risk:
   max_drawdown_pct: 0.20   # kill switch triggers at 20% portfolio drawdown

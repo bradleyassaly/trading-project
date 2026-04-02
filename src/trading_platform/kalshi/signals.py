@@ -13,6 +13,7 @@ After applying direction the returned signal is always "buy if positive, avoid i
 """
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import pandas as pd
@@ -31,13 +32,48 @@ class KalshiSignalFamily:
     alt_feature_cols: tuple[str, ...] = ()
     direction: int = 1
     description: str = ""
+    signal_frame_builder: Callable[[pd.DataFrame], pd.DataFrame] | None = None
 
-    def score(self, df: pd.DataFrame) -> pd.Series:
+    def _score_from_columns(self, df: pd.DataFrame) -> pd.Series:
         for col in (self.feature_col, *self.alt_feature_cols):
             if col in df.columns:
                 raw = pd.to_numeric(df[col], errors="coerce")
                 return raw * self.direction
         return pd.Series(dtype=float, index=df.index, name=self.name)
+
+    def build_signal_frame(self, df: pd.DataFrame) -> pd.DataFrame:
+        if self.signal_frame_builder is not None:
+            frame = self.signal_frame_builder(df.copy())
+            if "signal_value" not in frame.columns:
+                raise ValueError(f"{self.name} signal_frame_builder must return a 'signal_value' column.")
+            built = frame.copy()
+        else:
+            signal = self._score_from_columns(df)
+            built = pd.DataFrame(index=df.index)
+            built["signal_value"] = signal
+            built["direction"] = signal.apply(
+                lambda value: 1.0 if pd.notna(value) and value > 0 else (-1.0 if pd.notna(value) and value < 0 else 0.0)
+            )
+            built["confidence"] = signal.abs()
+            built["signal_probability"] = 0.5 + built["direction"] * built["confidence"].clip(upper=1.0) * 0.49
+
+        if "direction" not in built.columns:
+            signal = pd.to_numeric(built["signal_value"], errors="coerce")
+            built["direction"] = signal.apply(
+                lambda value: 1.0 if pd.notna(value) and value > 0 else (-1.0 if pd.notna(value) and value < 0 else 0.0)
+            )
+        if "confidence" not in built.columns:
+            built["confidence"] = pd.to_numeric(built["signal_value"], errors="coerce").abs()
+        if "signal_probability" not in built.columns:
+            direction = pd.to_numeric(built["direction"], errors="coerce").fillna(0.0)
+            confidence = pd.to_numeric(built["confidence"], errors="coerce").clip(lower=0.0, upper=1.0)
+            built["signal_probability"] = 0.5 + direction * confidence * 0.49
+
+        built["signal_family"] = self.name
+        return built
+
+    def score(self, df: pd.DataFrame) -> pd.Series:
+        return self._score_from_columns(df)
 
 
 KALSHI_CALIBRATION_DRIFT = KalshiSignalFamily(

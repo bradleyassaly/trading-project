@@ -9,9 +9,13 @@ We default to ~14 req/sec to stay safely under the read limit.
 """
 from __future__ import annotations
 
+import random
 import logging
 import time
 import uuid
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 from typing import Any
 from urllib.parse import urlencode
 
@@ -34,7 +38,43 @@ logger = logging.getLogger(__name__)
 _DEFAULT_TIMEOUT = 15  # seconds
 _READ_SLEEP = 0.072    # ~14 req/sec  (Basic tier limit: 20/sec)
 _WRITE_SLEEP = 0.11    # ~9 req/sec   (Basic tier limit: 10/sec)
-_HIST_SLEEP = 0.2      # 5 req/sec for historical endpoints (public, conservative limit)
+_DEFAULT_HIST_SLEEP = 0.1   # 20 req/sec for historical endpoints (free tier read limit)
+_PUBLIC_429_MAX_RETRIES = 5
+_PUBLIC_429_BACKOFF_BASE_SEC = 0.5
+_PUBLIC_429_BACKOFF_MAX_SEC = 8.0
+_PUBLIC_429_JITTER_MAX_SEC = 0.25
+
+
+@dataclass(frozen=True)
+class KalshiGetRetryPolicy:
+    max_retries: int
+    backoff_base_sec: float
+    backoff_max_sec: float
+    jitter_max_sec: float
+
+    def __post_init__(self) -> None:
+        if self.max_retries < 0:
+            raise ValueError("max_retries must be >= 0")
+        if self.backoff_base_sec < 0:
+            raise ValueError("backoff_base_sec must be >= 0")
+        if self.backoff_max_sec < 0:
+            raise ValueError("backoff_max_sec must be >= 0")
+        if self.jitter_max_sec < 0:
+            raise ValueError("jitter_max_sec must be >= 0")
+
+
+_DEFAULT_AUTHENTICATED_RETRY_POLICY = KalshiGetRetryPolicy(
+    max_retries=_PUBLIC_429_MAX_RETRIES,
+    backoff_base_sec=_PUBLIC_429_BACKOFF_BASE_SEC,
+    backoff_max_sec=_PUBLIC_429_BACKOFF_MAX_SEC,
+    jitter_max_sec=_PUBLIC_429_JITTER_MAX_SEC,
+)
+_DEFAULT_PUBLIC_RETRY_POLICY = KalshiGetRetryPolicy(
+    max_retries=_PUBLIC_429_MAX_RETRIES,
+    backoff_base_sec=_PUBLIC_429_BACKOFF_BASE_SEC,
+    backoff_max_sec=_PUBLIC_429_BACKOFF_MAX_SEC,
+    jitter_max_sec=_PUBLIC_429_JITTER_MAX_SEC,
+)
 
 
 # ── Parsers ───────────────────────────────────────────────────────────────────
@@ -80,6 +120,46 @@ def _parse_order_status(raw: dict[str, Any]) -> KalshiOrderStatus:
     )
 
 
+def _parse_retry_after_seconds(retry_after: str | None) -> float | None:
+    if not retry_after:
+        return None
+    value = retry_after.strip()
+    try:
+        return max(0.0, float(value))
+    except ValueError:
+        pass
+    try:
+        retry_at = parsedate_to_datetime(value)
+    except (TypeError, ValueError, IndexError, OverflowError):
+        return None
+    if retry_at.tzinfo is None:
+        retry_at = retry_at.replace(tzinfo=UTC)
+    return max(0.0, (retry_at - datetime.now(UTC)).total_seconds())
+
+
+def _market_close_time_in_range(
+    market: dict[str, Any],
+    *,
+    min_close_ts: int | None = None,
+    max_close_ts: int | None = None,
+) -> bool:
+    if min_close_ts is None and max_close_ts is None:
+        return True
+    close_time_raw = market.get("close_time")
+    if not close_time_raw:
+        return False
+    try:
+        close_time = datetime.fromisoformat(str(close_time_raw).replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    close_ts = int(close_time.timestamp())
+    if min_close_ts is not None and close_ts < min_close_ts:
+        return False
+    if max_close_ts is not None and close_ts > max_close_ts:
+        return False
+    return True
+
+
 # ── Client ────────────────────────────────────────────────────────────────────
 
 class KalshiClient:
@@ -96,8 +176,20 @@ class KalshiClient:
         balance = client.get_balance()
     """
 
-    def __init__(self, config: KalshiConfig) -> None:
+    def __init__(
+        self,
+        config: KalshiConfig,
+        *,
+        historical_sleep_sec: float = _DEFAULT_HIST_SLEEP,
+        authenticated_sleep_sec: float = _READ_SLEEP,
+        authenticated_retry_policy: KalshiGetRetryPolicy | None = None,
+        public_retry_policy: KalshiGetRetryPolicy | None = None,
+    ) -> None:
         self.config = config
+        self.historical_sleep_sec = historical_sleep_sec
+        self.authenticated_sleep_sec = authenticated_sleep_sec
+        self.authenticated_retry_policy = authenticated_retry_policy or _DEFAULT_AUTHENTICATED_RETRY_POLICY
+        self.public_retry_policy = public_retry_policy or _DEFAULT_PUBLIC_RETRY_POLICY
         self._session = requests.Session()
         self._session.headers.update({"Content-Type": "application/json"})
 
@@ -107,29 +199,113 @@ class KalshiClient:
     def _auth(self, method: str, path: str) -> dict[str, str]:
         return build_auth_headers(self.config, method, path)
 
-    def _get(self, path: str, params: dict[str, Any] | None = None) -> Any:
-        time.sleep(_READ_SLEEP)
-        full_path = path
-        if params:
-            cleaned = {k: v for k, v in params.items() if v is not None}
-            if cleaned:
-                full_path = f"{path}?{urlencode(cleaned)}"
-        headers = self._auth("GET", full_path)
-        resp = self._session.get(self._url(full_path), headers=headers, timeout=_DEFAULT_TIMEOUT)
-        resp.raise_for_status()
-        return resp.json()
+    def _raise_http_error(
+        self,
+        resp: requests.Response,
+        *,
+        full_path: str,
+        retries_exhausted: bool = False,
+        max_retries: int | None = None,
+    ) -> None:
+        try:
+            resp.raise_for_status()
+        except requests.HTTPError as exc:
+            status = getattr(resp, "status_code", "unknown")
+            details = f"Kalshi GET {full_path} failed with status {status}"
+            if retries_exhausted:
+                details += f" after {max_retries if max_retries is not None else _PUBLIC_429_MAX_RETRIES} retries"
+            if hasattr(exc, "add_note"):
+                exc.add_note(details)
+            logger.warning(details)
+            raise
 
-    def _get_public(self, path: str, params: dict[str, Any] | None = None, *, sleep: float = _HIST_SLEEP) -> Any:
-        """GET without auth headers — for public historical endpoints."""
-        time.sleep(sleep)
+    def _build_rate_limit_delay(
+        self,
+        resp: requests.Response,
+        *,
+        attempt_number: int,
+        retry_policy: KalshiGetRetryPolicy,
+    ) -> float:
+        retry_after = _parse_retry_after_seconds(resp.headers.get("Retry-After"))
+        if retry_after is not None:
+            return retry_after
+        exponential_delay = min(
+            retry_policy.backoff_base_sec * (2 ** max(attempt_number - 1, 0)),
+            retry_policy.backoff_max_sec,
+        )
+        return exponential_delay + random.uniform(0.0, retry_policy.jitter_max_sec)
+
+    def _get_json_with_retry(
+        self,
+        path: str,
+        params: dict[str, Any] | None = None,
+        *,
+        use_auth: bool,
+        sleep_sec: float,
+        retry_policy: KalshiGetRetryPolicy,
+        rate_limit_label: str,
+    ) -> Any:
+        time.sleep(sleep_sec)
         full_path = path
         if params:
             cleaned = {k: v for k, v in params.items() if v is not None}
             if cleaned:
                 full_path = f"{path}?{urlencode(cleaned)}"
-        resp = self._session.get(self._url(full_path), timeout=_DEFAULT_TIMEOUT)
-        resp.raise_for_status()
-        return resp.json()
+        headers = self._auth("GET", full_path) if use_auth else None
+        for attempt_number in range(1, retry_policy.max_retries + 2):
+            resp = self._session.get(self._url(full_path), headers=headers, timeout=_DEFAULT_TIMEOUT)
+            if resp.status_code != 429:
+                self._raise_http_error(
+                    resp,
+                    full_path=full_path,
+                    max_retries=retry_policy.max_retries,
+                )
+                return resp.json()
+
+            if attempt_number > retry_policy.max_retries:
+                self._raise_http_error(
+                    resp,
+                    full_path=full_path,
+                    retries_exhausted=True,
+                    max_retries=retry_policy.max_retries,
+                )
+
+            retry_after = self._build_rate_limit_delay(
+                resp,
+                attempt_number=attempt_number,
+                retry_policy=retry_policy,
+            )
+            logger.warning(
+                "Kalshi %s GET rate limited for %s; retrying in %.2fs (attempt %d/%d).",
+                rate_limit_label,
+                full_path,
+                retry_after,
+                attempt_number,
+                retry_policy.max_retries,
+            )
+            time.sleep(retry_after)
+        raise RuntimeError(f"Kalshi GET retry loop ended unexpectedly for {full_path}")
+
+    def _get(self, path: str, params: dict[str, Any] | None = None) -> Any:
+        return self._get_json_with_retry(
+            path,
+            params,
+            use_auth=True,
+            sleep_sec=self.authenticated_sleep_sec,
+            retry_policy=self.authenticated_retry_policy,
+            rate_limit_label="live/authenticated",
+        )
+
+    def _get_public(self, path: str, params: dict[str, Any] | None = None, *, sleep: float | None = None) -> Any:
+        """GET without auth headers — for public historical endpoints."""
+        return self._get_json_with_retry(
+            path,
+            params,
+            use_auth=False,
+            sleep_sec=self.historical_sleep_sec if sleep is None else sleep,
+            retry_policy=self.public_retry_policy,
+            rate_limit_label="public historical",
+        )
 
     def _post(self, path: str, body: dict[str, Any]) -> Any:
         time.sleep(_WRITE_SLEEP)
@@ -170,6 +346,26 @@ class KalshiClient:
         })
         return [_parse_market(m) for m in data.get("markets", [])], data.get("cursor")
 
+    def get_markets_raw(
+        self,
+        status: str | None = None,
+        series_ticker: str | None = None,
+        event_ticker: str | None = None,
+        limit: int = 200,
+        cursor: str | None = None,
+        tickers: list[str] | None = None,
+    ) -> tuple[list[dict[str, Any]], str | None]:
+        """Fetch one page of raw market payloads from the live endpoint."""
+        data = self._get("/markets", {
+            "limit": limit,
+            "status": status,
+            "series_ticker": series_ticker,
+            "event_ticker": event_ticker,
+            "tickers": ",".join(tickers) if tickers else None,
+            "cursor": cursor,
+        })
+        return data.get("markets", []), data.get("cursor")
+
     def get_all_markets(
         self,
         status: str | None = None,
@@ -181,6 +377,31 @@ class KalshiClient:
         while True:
             markets, cursor = self.get_markets(
                 status=status, series_ticker=series_ticker, limit=200, cursor=cursor
+            )
+            all_markets.extend(markets)
+            if not cursor:
+                break
+        return all_markets
+
+    def get_all_markets_raw(
+        self,
+        status: str | None = None,
+        series_ticker: str | None = None,
+        event_ticker: str | None = None,
+        limit: int = 200,
+        tickers: list[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Paginate through raw live markets while preserving settlement fields."""
+        all_markets: list[dict[str, Any]] = []
+        cursor: str | None = None
+        while True:
+            markets, cursor = self.get_markets_raw(
+                status=status,
+                series_ticker=series_ticker,
+                event_ticker=event_ticker,
+                limit=limit,
+                tickers=tickers,
+                cursor=cursor,
             )
             all_markets.extend(markets)
             if not cursor:
@@ -234,6 +455,24 @@ class KalshiClient:
         ]
         return trades, data.get("cursor")
 
+    def get_trades_raw(
+        self,
+        ticker: str | None = None,
+        min_ts: int | None = None,
+        max_ts: int | None = None,
+        limit: int = 1000,
+        cursor: str | None = None,
+    ) -> tuple[list[dict[str, Any]], str | None]:
+        """Fetch one page of raw live trades."""
+        data = self._get("/markets/trades", {
+            "ticker": ticker,
+            "min_ts": min_ts,
+            "max_ts": max_ts,
+            "limit": limit,
+            "cursor": cursor,
+        })
+        return data.get("trades", []), data.get("cursor")
+
     def get_all_trades(
         self,
         ticker: str,
@@ -252,6 +491,29 @@ class KalshiClient:
                 break
         return all_trades
 
+    def get_all_trades_raw(
+        self,
+        ticker: str,
+        min_ts: int | None = None,
+        max_ts: int | None = None,
+        limit: int = 1000,
+    ) -> list[dict[str, Any]]:
+        """Paginate through raw live trades for a ticker."""
+        all_trades: list[dict[str, Any]] = []
+        cursor: str | None = None
+        while True:
+            trades, cursor = self.get_trades_raw(
+                ticker=ticker,
+                min_ts=min_ts,
+                max_ts=max_ts,
+                limit=limit,
+                cursor=cursor,
+            )
+            all_trades.extend(trades)
+            if not cursor:
+                break
+        return all_trades
+
     # ── Historical Market Data (no auth required) ────────────────────────────
 
     def get_historical_markets(
@@ -260,12 +522,16 @@ class KalshiClient:
         cursor: str | None = None,
         min_close_ts: int | None = None,
         max_close_ts: int | None = None,
+        sleep: float | None = None,
     ) -> tuple[list[dict[str, Any]], str | None]:
         """
         Fetch one page of resolved historical markets.
 
         Returns raw dicts (not parsed KalshiMarket) so that the ``result``
-        field and other historical-only fields are preserved.
+        field and other historical-only fields are preserved. Kalshi's
+        endpoint paginates by cursor but does not expose close-time query
+        filters, so ``min_close_ts`` / ``max_close_ts`` are applied
+        client-side to the returned page.
 
         :param limit:         Page size (max 200).
         :param cursor:        Pagination cursor from a previous call.
@@ -273,33 +539,51 @@ class KalshiClient:
         :param max_close_ts:  Upper bound on close_time (Unix seconds).
         :returns:             Tuple of (list of raw market dicts, next cursor or None).
         """
-        data = self._get_public("/historical/markets", {
-            "limit": limit,
-            "cursor": cursor,
-            "min_close_ts": min_close_ts,
-            "max_close_ts": max_close_ts,
-        })
-        return data.get("markets", []), data.get("cursor")
+        data = self._get_public(
+            "/historical/markets",
+            {
+                "limit": limit,
+                "cursor": cursor,
+            },
+            sleep=sleep,
+        )
+        markets = [
+            market
+            for market in data.get("markets", [])
+            if _market_close_time_in_range(
+                market,
+                min_close_ts=min_close_ts,
+                max_close_ts=max_close_ts,
+            )
+        ]
+        return markets, data.get("cursor")
 
     def get_all_historical_markets(
         self,
+        limit: int = 200,
         min_close_ts: int | None = None,
         max_close_ts: int | None = None,
+        sleep: float | None = None,
     ) -> list[dict[str, Any]]:
         """Paginate through all resolved historical markets in the given time range."""
         all_markets: list[dict[str, Any]] = []
         cursor: str | None = None
         while True:
             markets, cursor = self.get_historical_markets(
-                limit=200,
+                limit=limit,
                 cursor=cursor,
                 min_close_ts=min_close_ts,
                 max_close_ts=max_close_ts,
+                sleep=sleep,
             )
             all_markets.extend(markets)
             if not cursor:
                 break
         return all_markets
+
+    def get_historical_cutoff(self) -> dict[str, Any]:
+        """Fetch the live/historical boundary timestamps."""
+        return self._get_public("/historical/cutoff")
 
     def get_historical_market(self, ticker: str) -> dict[str, Any]:
         """
@@ -318,26 +602,33 @@ class KalshiClient:
         cursor: str | None = None,
         min_ts: int | None = None,
         max_ts: int | None = None,
+        sleep: float | None = None,
     ) -> tuple[list[dict[str, Any]], str | None]:
         """
         Fetch one page of historical trades for a ticker.
 
         :returns: Tuple of (list of raw trade dicts, next cursor or None).
         """
-        data = self._get_public("/historical/trades", {
-            "ticker": ticker,
-            "limit": limit,
-            "cursor": cursor,
-            "min_ts": min_ts,
-            "max_ts": max_ts,
-        })
+        data = self._get_public(
+            "/historical/trades",
+            {
+                "ticker": ticker,
+                "limit": limit,
+                "cursor": cursor,
+                "min_ts": min_ts,
+                "max_ts": max_ts,
+            },
+            sleep=sleep,
+        )
         return data.get("trades", []), data.get("cursor")
 
     def get_all_historical_trades(
         self,
         ticker: str,
+        limit: int = 1000,
         min_ts: int | None = None,
         max_ts: int | None = None,
+        sleep: float | None = None,
     ) -> list[dict[str, Any]]:
         """Paginate through all historical trades for a ticker."""
         all_trades: list[dict[str, Any]] = []
@@ -345,15 +636,60 @@ class KalshiClient:
         while True:
             trades, cursor = self.get_historical_trades(
                 ticker=ticker,
-                limit=1000,
+                limit=limit,
                 cursor=cursor,
                 min_ts=min_ts,
                 max_ts=max_ts,
+                sleep=sleep,
             )
             all_trades.extend(trades)
             if not cursor:
                 break
         return all_trades
+
+    def get_market_candlesticks_raw(
+        self,
+        ticker: str,
+        *,
+        start_ts: int | None = None,
+        end_ts: int | None = None,
+        period_interval: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """
+        Fetch raw live candlestick payloads for a market.
+
+        The endpoint is used only for markets that settled after the historical cutoff.
+        """
+        data = self._get(
+            f"/markets/{ticker}/candlesticks",
+            {
+                "start_ts": start_ts,
+                "end_ts": end_ts,
+                "period_interval": period_interval,
+            },
+        )
+        return data.get("candlesticks", data.get("market_candlesticks", []))
+
+    def get_historical_market_candlesticks_raw(
+        self,
+        ticker: str,
+        *,
+        start_ts: int | None = None,
+        end_ts: int | None = None,
+        period_interval: int | None = None,
+        sleep: float | None = None,
+    ) -> list[dict[str, Any]]:
+        """Fetch raw historical candlestick payloads for an archived market."""
+        data = self._get_public(
+            f"/historical/markets/{ticker}/candlesticks",
+            {
+                "start_ts": start_ts,
+                "end_ts": end_ts,
+                "period_interval": period_interval,
+            },
+            sleep=sleep,
+        )
+        return data.get("candlesticks", data.get("market_candlesticks", []))
 
     # ── Portfolio (authenticated) ─────────────────────────────────────────────
 

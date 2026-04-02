@@ -13,6 +13,7 @@ from trading_platform.cli.commands.approved_config_diff import cmd_approved_conf
 from trading_platform.cli.commands.broker_cancel_all import cmd_broker_cancel_all
 from trading_platform.cli.commands.broker_health import cmd_broker_health
 from trading_platform.cli.commands.compare_xsec_construction import cmd_compare_xsec_construction
+from trading_platform.cli.commands.cross_market_monitor import cmd_cross_market_monitor
 from trading_platform.cli.commands.daily_paper_job import cmd_daily_paper_job
 from trading_platform.cli.commands.dashboard_build_static_data import cmd_dashboard_build_static_data
 from trading_platform.cli.commands.data_build_classifications import cmd_data_build_classifications
@@ -33,6 +34,7 @@ from trading_platform.cli.commands.export_universes import cmd_export_universes
 from trading_platform.cli.commands.features import cmd_features
 from trading_platform.cli.commands.kalshi_features import cmd_kalshi_features
 from trading_platform.cli.commands.kalshi_historical_ingest import cmd_kalshi_historical_ingest
+from trading_platform.cli.commands.kalshi_validate_dataset import cmd_kalshi_validate_dataset
 from trading_platform.cli.commands.fundamentals_features import cmd_fundamentals_features
 from trading_platform.cli.commands.fundamentals_ingest import cmd_fundamentals_ingest
 from trading_platform.cli.commands.fundamentals_snapshot_build import cmd_fundamentals_snapshot_build
@@ -90,6 +92,7 @@ from trading_platform.cli.commands.research_db import (
 )
 from trading_platform.cli.commands.kalshi_alpha_research import cmd_kalshi_alpha_research
 from trading_platform.cli.commands.kalshi_full_backtest import cmd_kalshi_full_backtest
+from trading_platform.cli.commands.kalshi_paper_run import cmd_kalshi_paper_run
 from trading_platform.cli.commands.research_leaderboard import cmd_research_leaderboard
 from trading_platform.cli.commands.research_monitor import cmd_research_monitor
 from trading_platform.cli.commands.research_promote import cmd_research_promote
@@ -210,6 +213,7 @@ _RESEARCH_GROUP_COMMANDS = {
     "pipeline",
     "strategies",
     "validate-backtester",
+    "cross-market-monitor",
 }
 _PORTFOLIO_GROUP_COMMANDS = {
     "backtest",
@@ -1760,14 +1764,14 @@ def build_parser() -> argparse.ArgumentParser:
     data_kalshi_features.add_argument(
         "--trades-dir",
         type=str,
-        default="data/kalshi/trades",
-        help="Directory containing <TICKER>.parquet trade files (default: data/kalshi/trades).",
+        default="data/kalshi/normalized/trades",
+        help="Directory containing <TICKER>.parquet trade files (default: data/kalshi/normalized/trades).",
     )
     data_kalshi_features.add_argument(
         "--output-dir",
         type=str,
-        default="data/kalshi/features",
-        help="Directory to write <TICKER>.parquet feature files (default: data/kalshi/features).",
+        default="data/kalshi/features/real",
+        help="Directory to write <TICKER>.parquet feature files (default: data/kalshi/features/real).",
     )
     data_kalshi_features.add_argument(
         "--period",
@@ -1814,13 +1818,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--sleep",
         type=float,
         default=None,
-        help="Sleep seconds between API requests (default: 0.2 = 5 req/sec).",
+        help="Sleep seconds between API requests (default: 0.05 = 20 req/sec).",
     )
     data_kalshi_historical_ingest.add_argument(
         "--output-dir",
         type=str,
         default=None,
-        help="Directory to write feature parquets (default: data/kalshi/features).",
+        help="Directory to write feature parquets (default: data/kalshi/features/real).",
     )
     data_kalshi_historical_ingest.add_argument(
         "--tickers",
@@ -1840,7 +1844,78 @@ def build_parser() -> argparse.ArgumentParser:
         default=False,
         help="Enable Metaculus divergence feature enrichment (requires pre-built matches).",
     )
+    data_kalshi_historical_ingest.add_argument(
+        "--skip-validation",
+        action="store_true",
+        default=False,
+        help="Skip the post-ingest Kalshi dataset validation pass.",
+    )
     data_kalshi_historical_ingest.set_defaults(func=cmd_kalshi_historical_ingest)
+    data_kalshi_validate = data_kalshi_subparsers.add_parser(
+        "validate-dataset",
+        help="Audit normalized Kalshi ingest artifacts and emit structured data-quality reports.",
+    )
+    data_kalshi_validate.add_argument(
+        "--config",
+        type=str,
+        default="configs/kalshi.yaml",
+        help="Path to kalshi.yaml config (default: configs/kalshi.yaml).",
+    )
+    data_kalshi_validate.add_argument(
+        "--markets-path",
+        type=str,
+        default=None,
+        help="Optional override for data/kalshi/normalized/markets.parquet.",
+    )
+    data_kalshi_validate.add_argument(
+        "--trades-path",
+        type=str,
+        default=None,
+        help="Optional override for the normalized Kalshi trades parquet file or directory.",
+    )
+    data_kalshi_validate.add_argument(
+        "--candles-path",
+        type=str,
+        default=None,
+        help="Optional override for the normalized Kalshi candles parquet file or directory.",
+    )
+    data_kalshi_validate.add_argument(
+        "--resolution-path",
+        type=str,
+        default=None,
+        help="Optional override for data/kalshi/normalized/resolution.csv.",
+    )
+    data_kalshi_validate.add_argument(
+        "--ingest-summary-path",
+        type=str,
+        default=None,
+        help="Optional override for data/kalshi/raw/ingest_summary.json.",
+    )
+    data_kalshi_validate.add_argument(
+        "--ingest-manifest-path",
+        type=str,
+        default=None,
+        help="Optional override for data/kalshi/raw/ingest_manifest.json.",
+    )
+    data_kalshi_validate.add_argument(
+        "--ingest-checkpoint-path",
+        type=str,
+        default=None,
+        help="Optional override for data/kalshi/raw/ingest_checkpoint.json.",
+    )
+    data_kalshi_validate.add_argument(
+        "--features-dir",
+        type=str,
+        default=None,
+        help="Optional override for the real-data Kalshi feature directory.",
+    )
+    data_kalshi_validate.add_argument(
+        "--output-dir",
+        type=str,
+        default=None,
+        help="Directory where validation artifacts will be written (default: data/kalshi/validation).",
+    )
+    data_kalshi_validate.set_defaults(func=cmd_kalshi_validate_dataset)
 
     data_fundamentals = data_subparsers.add_parser(
         "fundamentals", help="Canonical fundamentals ingest and daily feature generation commands"
@@ -2407,7 +2482,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     research_kalshi_full_backtest = research_subparsers.add_parser(
         "kalshi-full-backtest",
-        help="Run backtest across all 5 Kalshi signal families on real historical data.",
+        help="Run the resolved-market Kalshi backtest framework on local historical artifacts.",
     )
     research_kalshi_full_backtest.add_argument(
         "--config",
@@ -2419,13 +2494,19 @@ def build_parser() -> argparse.ArgumentParser:
         "--feature-dir",
         type=str,
         default=None,
-        help="Directory containing Kalshi feature parquets (default: data/kalshi/features).",
+        help="Directory containing Kalshi feature parquets (default: data/kalshi/features/real).",
     )
     research_kalshi_full_backtest.add_argument(
         "--resolution-data",
         type=str,
         default=None,
-        help="Path to resolution CSV (default: data/kalshi/raw/resolution.csv).",
+        help="Path to resolution CSV (default: data/kalshi/normalized/resolution.csv).",
+    )
+    research_kalshi_full_backtest.add_argument(
+        "--raw-markets-dir",
+        type=str,
+        default=None,
+        help="Directory containing raw historical market JSON files (default: data/kalshi/raw/markets).",
     )
     research_kalshi_full_backtest.add_argument(
         "--output-dir",
@@ -2445,7 +2526,147 @@ def build_parser() -> argparse.ArgumentParser:
         default=False,
         help="Only take YES positions (skip NO trades).",
     )
+    research_kalshi_full_backtest.add_argument(
+        "--entry-timing-mode",
+        type=str,
+        default=None,
+        choices=["hours_before_close", "last_bar"],
+        help="How to choose the entry bar: relative to close time or last available bar.",
+    )
+    research_kalshi_full_backtest.add_argument(
+        "--entry-offset-hours",
+        type=float,
+        default=None,
+        help="When entry-timing-mode=hours_before_close, enter this many hours before close.",
+    )
+    research_kalshi_full_backtest.add_argument(
+        "--holding-window-hours",
+        type=float,
+        default=None,
+        help="Optional holding window in hours; omit to hold to final resolution.",
+    )
+    research_kalshi_full_backtest.add_argument(
+        "--entry-slippage-points",
+        type=float,
+        default=None,
+        help="Entry slippage on the yes-price scale (0-100 points).",
+    )
+    research_kalshi_full_backtest.add_argument(
+        "--exit-slippage-points",
+        type=float,
+        default=None,
+        help="Exit slippage on the yes-price scale (0-100 points).",
+    )
+    research_kalshi_full_backtest.add_argument(
+        "--signal-probability-scale",
+        type=float,
+        default=None,
+        help="Scale used to map raw signal scores into predicted probabilities for calibration metrics.",
+    )
+    research_kalshi_full_backtest.add_argument(
+        "--validation-summary",
+        type=str,
+        default=None,
+        help="Optional Kalshi validation summary JSON path used when validation gating is enabled.",
+    )
+    research_kalshi_full_backtest.add_argument(
+        "--require-validation-pass",
+        action="store_true",
+        default=False,
+        help="Require a passing Kalshi dataset validation summary before running the backtest.",
+    )
     research_kalshi_full_backtest.set_defaults(func=cmd_kalshi_full_backtest)
+
+    research_cross_market_monitor = research_subparsers.add_parser(
+        "cross-market-monitor",
+        help="Monitor Kalshi and Polymarket for conservative cross-market dislocations.",
+    )
+    research_cross_market_monitor.add_argument(
+        "--config",
+        type=str,
+        default="configs/kalshi_research.yaml",
+        help="Path to YAML research config (default: configs/kalshi_research.yaml).",
+    )
+    research_cross_market_monitor.add_argument(
+        "--kalshi-config",
+        type=str,
+        default="configs/kalshi.yaml",
+        help="Path to Kalshi trading config used for environment/auth selection.",
+    )
+    research_cross_market_monitor.add_argument(
+        "--output-dir",
+        type=str,
+        default=None,
+        help="Optional override for the cross-market artifact directory.",
+    )
+    research_cross_market_monitor.add_argument(
+        "--kalshi-max-markets",
+        type=int,
+        default=None,
+        help="Optional cap on open Kalshi markets scanned.",
+    )
+    research_cross_market_monitor.add_argument(
+        "--polymarket-max-markets",
+        type=int,
+        default=None,
+        help="Optional cap on active Polymarket markets scanned.",
+    )
+    research_cross_market_monitor.add_argument(
+        "--min-probability-spread",
+        type=float,
+        default=None,
+        help="Minimum absolute YES probability spread required to log an opportunity.",
+    )
+    research_cross_market_monitor.add_argument(
+        "--match-threshold",
+        type=float,
+        default=None,
+        help="Minimum conservative match score required to accept a cross-venue pair.",
+    )
+    research_cross_market_monitor.add_argument(
+        "--ambiguity-margin",
+        type=float,
+        default=None,
+        help="Score margin under which a near-tied second candidate marks the match as ambiguous.",
+    )
+    research_cross_market_monitor.add_argument(
+        "--max-expiration-diff-hours",
+        type=float,
+        default=None,
+        help="Maximum expiry mismatch allowed between venues before rejecting a match.",
+    )
+    research_cross_market_monitor.add_argument(
+        "--min-title-similarity",
+        type=float,
+        default=None,
+        help="Minimum normalized title similarity required before accepting a match.",
+    )
+    research_cross_market_monitor.add_argument(
+        "--min-token-overlap",
+        type=float,
+        default=None,
+        help="Minimum token-overlap score required before accepting a match.",
+    )
+    research_cross_market_monitor.add_argument(
+        "--snapshot-tag",
+        type=str,
+        default=None,
+        help="Optional human-readable tag attached to this monitor snapshot.",
+    )
+    research_cross_market_monitor.add_argument(
+        "--append-history",
+        dest="append_history",
+        action="store_true",
+        default=None,
+        help="Append matches and opportunities to existing JSONL logs.",
+    )
+    research_cross_market_monitor.add_argument(
+        "--overwrite-history",
+        dest="append_history",
+        action="store_false",
+        help="Overwrite JSONL logs for this run instead of appending.",
+    )
+    research_cross_market_monitor.set_defaults(func=cmd_cross_market_monitor)
 
     research_registry = research_subparsers.add_parser("registry", help="Research manifest registry commands")
     research_registry_subparsers = research_registry.add_subparsers(dest="research_registry_command", required=True)
@@ -2847,6 +3068,83 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional directory where QuantStats report artifacts should be written.",
     )
     paper_report.set_defaults(func=cmd_paper_report)
+    paper_kalshi_run = paper_subparsers.add_parser(
+        "kalshi-run",
+        help="Run the Kalshi paper trading loop using live market snapshots and paper-only execution.",
+    )
+    paper_kalshi_run.add_argument(
+        "--config",
+        type=str,
+        default="configs/kalshi.yaml",
+        help="Path to Kalshi trading config (default: configs/kalshi.yaml).",
+    )
+    paper_kalshi_run.add_argument(
+        "--research-config",
+        type=str,
+        default="configs/kalshi_research.yaml",
+        help="Path to Kalshi research config (default: configs/kalshi_research.yaml).",
+    )
+    paper_kalshi_run.add_argument(
+        "--state-path",
+        type=str,
+        default=None,
+        help="Optional override for the persistent Kalshi paper state JSON path.",
+    )
+    paper_kalshi_run.add_argument(
+        "--output-dir",
+        type=str,
+        default=None,
+        help="Optional override for the Kalshi paper artifact directory.",
+    )
+    paper_kalshi_run.add_argument(
+        "--tracked-series",
+        nargs="+",
+        default=None,
+        help="Optional tracked series override. Defaults to configs/kalshi.yaml ingestion.tracked_series.",
+    )
+    paper_kalshi_run.add_argument(
+        "--tracked-tickers",
+        nargs="+",
+        default=None,
+        help="Optional tracked ticker override. Defaults to configs/kalshi.yaml ingestion.tracked_tickers.",
+    )
+    paper_kalshi_run.add_argument(
+        "--entry-threshold",
+        type=float,
+        default=None,
+        help="Optional override for the minimum absolute signal value required to enter a paper trade.",
+    )
+    paper_kalshi_run.add_argument(
+        "--orderbook-depth",
+        type=int,
+        default=None,
+        help="Optional override for Kalshi orderbook depth used by the liquidity model.",
+    )
+    paper_kalshi_run.add_argument(
+        "--poll-interval-seconds",
+        type=float,
+        default=None,
+        help="Optional override for the loop sleep interval between Kalshi paper sessions.",
+    )
+    paper_kalshi_run.add_argument(
+        "--max-iterations",
+        type=int,
+        default=None,
+        help="Optional override for the number of consecutive Kalshi paper sessions to run.",
+    )
+    paper_kalshi_run.add_argument(
+        "--validation-summary",
+        type=str,
+        default=None,
+        help="Optional Kalshi validation summary JSON path used when validation gating is enabled.",
+    )
+    paper_kalshi_run.add_argument(
+        "--require-validation-pass",
+        action="store_true",
+        default=False,
+        help="Require a passing Kalshi dataset validation summary before running paper trading.",
+    )
+    paper_kalshi_run.set_defaults(func=cmd_kalshi_paper_run)
 
     live_parser = subparsers.add_parser("live", help="Broker preview, validation, and guarded execution commands")
     live_subparsers = live_parser.add_subparsers(dest="live_command", required=True)

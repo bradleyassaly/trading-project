@@ -23,6 +23,8 @@ import base64
 import os
 import time
 from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Mapping
 
 try:
     from cryptography.hazmat.primitives import hashes, serialization
@@ -42,8 +44,9 @@ DEMO_WS_BASE = "wss://demo-api.kalshi.co"
 @dataclass(frozen=True)
 class KalshiConfig:
     api_key_id: str
-    private_key_pem: str  # PEM-encoded RSA private key (the full -----BEGIN... block)
+    private_key_pem: str | None = None  # PEM-encoded RSA private key (the full -----BEGIN... block)
     demo: bool = True
+    private_key_path: str | None = None
 
     @property
     def base_url(self) -> str:
@@ -52,6 +55,56 @@ class KalshiConfig:
     @property
     def ws_base(self) -> str:
         return DEMO_WS_BASE if self.demo else LIVE_WS_BASE
+
+    def resolved_private_key_pem(self) -> str:
+        return _resolve_private_key_pem(
+            private_key_pem=self.private_key_pem,
+            private_key_path=self.private_key_path,
+            source_label="KalshiConfig",
+        )
+
+    @classmethod
+    def from_mapping(
+        cls,
+        mapping: Mapping[str, Any] | None,
+        *,
+        env_fallback: bool = False,
+        demo: bool | None = None,
+        allow_missing: bool = False,
+        source_label: str = "Kalshi config",
+    ) -> "KalshiConfig | None":
+        raw = dict(mapping or {})
+        env_demo_val = os.getenv("KALSHI_DEMO", "true").strip().lower()
+        env_demo = env_demo_val in {"1", "true", "yes", "y"}
+
+        api_key_id = raw.get("api_key_id")
+        private_key_pem = raw.get("private_key_pem")
+        private_key_path = raw.get("private_key_path")
+
+        if env_fallback:
+            api_key_id = api_key_id or os.getenv("KALSHI_API_KEY_ID")
+            private_key_pem = private_key_pem or os.getenv("KALSHI_PRIVATE_KEY_PEM")
+            private_key_path = private_key_path or os.getenv("KALSHI_PRIVATE_KEY_PATH")
+
+        if not api_key_id and not private_key_pem and not private_key_path:
+            if allow_missing:
+                return None
+            raise ValueError(f"{source_label}: missing Kalshi auth. Set api_key_id and either private_key_pem or private_key_path.")
+
+        if not api_key_id:
+            raise ValueError(f"{source_label}: missing Kalshi api_key_id / KALSHI_API_KEY_ID.")
+
+        resolved_demo = env_demo if demo is None else demo
+        return cls(
+            api_key_id=str(api_key_id),
+            private_key_pem=_resolve_private_key_pem(
+                private_key_pem=private_key_pem,
+                private_key_path=private_key_path,
+                source_label=source_label,
+            ),
+            demo=bool(resolved_demo),
+            private_key_path=str(private_key_path) if private_key_path else None,
+        )
 
     @classmethod
     def from_env(cls) -> "KalshiConfig":
@@ -66,22 +119,60 @@ class KalshiConfig:
         private_key_pem = os.getenv("KALSHI_PRIVATE_KEY_PEM")
         private_key_path = os.getenv("KALSHI_PRIVATE_KEY_PATH")
         demo_val = os.getenv("KALSHI_DEMO", "true").strip().lower()
-
+        demo = demo_val in {"1", "true", "yes", "y"}
         if not api_key_id:
             raise ValueError("Missing required env var: KALSHI_API_KEY_ID")
-
-        if private_key_pem:
-            pem = private_key_pem.replace("\\n", "\n")
-        elif private_key_path:
-            with open(private_key_path) as f:
-                pem = f.read()
-        else:
+        if not private_key_pem and not private_key_path:
             raise ValueError(
                 "Set KALSHI_PRIVATE_KEY_PEM (inline PEM) or KALSHI_PRIVATE_KEY_PATH (file path)."
             )
+        config = cls.from_mapping(
+            {
+                "api_key_id": api_key_id,
+                "private_key_pem": private_key_pem,
+                "private_key_path": private_key_path,
+            },
+            demo=demo,
+            source_label="Environment",
+        )
+        if config is None:
+            raise ValueError(
+                "Environment: missing Kalshi auth. Set KALSHI_API_KEY_ID and either KALSHI_PRIVATE_KEY_PEM or KALSHI_PRIVATE_KEY_PATH."
+            )
+        return config
 
-        demo = demo_val in {"1", "true", "yes", "y"}
-        return cls(api_key_id=api_key_id, private_key_pem=pem, demo=demo)
+
+def _resolve_private_key_pem(
+    *,
+    private_key_pem: Any,
+    private_key_path: Any,
+    source_label: str,
+) -> str:
+    pem_text = str(private_key_pem).strip() if private_key_pem is not None else ""
+    path_text = str(private_key_path).strip() if private_key_path is not None else ""
+
+    if pem_text:
+        if "BEGIN " not in pem_text and ("\n" not in pem_text and "\r" not in pem_text):
+            candidate_path = Path(pem_text).expanduser()
+            if candidate_path.exists() or candidate_path.suffix.lower() in {".pem", ".key"}:
+                raise ValueError(
+                    f"{source_label}: private_key_pem looks like a file path ({candidate_path}). "
+                    "Use private_key_path for file-based keys."
+                )
+        return pem_text.replace("\\n", "\n")
+
+    if path_text:
+        key_path = Path(path_text).expanduser()
+        if not key_path.exists():
+            raise ValueError(f"{source_label}: private_key_path does not exist: {key_path}")
+        try:
+            return key_path.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise ValueError(f"{source_label}: could not read private_key_path {key_path}: {exc}") from exc
+
+    raise ValueError(
+        f"{source_label}: missing private key material. Provide private_key_pem or private_key_path."
+    )
 
 
 def _load_private_key(pem: str):
@@ -90,7 +181,13 @@ def _load_private_key(pem: str):
             "The 'cryptography' package is required for Kalshi auth.\n"
             "Install it: pip install cryptography"
         )
-    return serialization.load_pem_private_key(pem.encode(), password=None)
+    try:
+        return serialization.load_pem_private_key(pem.encode(), password=None)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "Unable to load Kalshi private key. Ensure private_key_pem contains the full PEM text "
+            "including BEGIN/END lines, or use private_key_path for a PEM file path."
+        ) from exc
 
 
 def build_auth_headers(config: KalshiConfig, method: str, path: str) -> dict[str, str]:
@@ -111,7 +208,7 @@ def build_auth_headers(config: KalshiConfig, method: str, path: str) -> dict[str
     path_no_query = path.split("?")[0]
     message = f"{timestamp_ms}{method.upper()}{path_no_query}".encode()
 
-    private_key = _load_private_key(config.private_key_pem)
+    private_key = _load_private_key(config.resolved_private_key_pem())
     signature_bytes = private_key.sign(
         message,
         padding.PSS(

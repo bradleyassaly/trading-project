@@ -1,317 +1,204 @@
 """
 CLI command: trading-cli research kalshi-full-backtest
 
-Runs the Kalshi backtester across all eight signal families on real historical
-data downloaded by ``trading-cli data kalshi historical-ingest``.
-
-Signals evaluated
------------------
-From signals.py (original three):
-  kalshi_calibration_drift   — probability mean-reversion on log-odds
-  kalshi_volume_spike        — volume spike at extreme probability levels
-  kalshi_time_decay          — fading high tension near resolution
-
-From signals_base_rate.py / signals_metaculus.py:
-  kalshi_base_rate           — base rate mean-reversion vs historical priors
-  kalshi_metaculus_divergence — Metaculus community vs market price divergence
-
-From signals_informed_flow.py (new):
-  kalshi_taker_imbalance     — sustained directional taker-side volume imbalance
-  kalshi_large_order         — large-order footprint (>5× median size)
-  kalshi_unexplained_move    — anomalous moves outside scheduled event windows
-
-Outputs
--------
-  artifacts/kalshi_research/full_backtest_results.csv
-  artifacts/kalshi_research/full_backtest_summary.md
-
-Usage
------
-    trading-cli research kalshi-full-backtest
-    trading-cli research kalshi-full-backtest --config configs/kalshi_research.yaml
-    trading-cli research kalshi-full-backtest \\
-        --feature-dir data/kalshi/features \\
-        --resolution-data data/kalshi/raw/resolution.csv \\
-        --output-dir artifacts/kalshi_research
+Runs the resolved-market Kalshi backtest framework on locally ingested
+historical artifacts and writes structured research outputs.
 """
 from __future__ import annotations
 
 import argparse
+import json
 import math
-from datetime import UTC, datetime
+import shutil
 from pathlib import Path
+from typing import Any
 
+import pandas as pd
+import yaml
+
+from trading_platform.kalshi.signal_registry import known_kalshi_signal_families
+from trading_platform.kalshi.validation import load_kalshi_validation_summary
+
+
+def _load_yaml(path: str | None) -> dict[str, Any]:
+    if not path:
+        return {}
+    cfg_path = Path(path)
+    if not cfg_path.exists():
+        return {}
+    with cfg_path.open(encoding="utf-8") as handle:
+        return yaml.safe_load(handle) or {}
+
+
+def _validation_summary_path(raw_cfg: dict[str, Any], override: str | None) -> Path:
+    if override:
+        return Path(override)
+    validation_cfg = raw_cfg.get("data_validation", {})
+    output_dir = Path(validation_cfg.get("output_dir", "data/kalshi/validation"))
+    output_dir = output_dir if output_dir.is_absolute() else Path.cwd() / output_dir
+    return output_dir / "kalshi_data_validation_summary.json"
 
 def cmd_kalshi_full_backtest(args: argparse.Namespace) -> None:
-    import pandas as pd
-
     from trading_platform.kalshi.backtest import KalshiBacktester
-    from trading_platform.kalshi.signals import (
-        KALSHI_CALIBRATION_DRIFT,
-        KALSHI_TIME_DECAY,
-        KALSHI_VOLUME_SPIKE,
-    )
-    from trading_platform.kalshi.signals_base_rate import KALSHI_BASE_RATE
-    from trading_platform.kalshi.signals_metaculus import KALSHI_METACULUS_DIVERGENCE
-    from trading_platform.kalshi.signals_informed_flow import (
-        KALSHI_LARGE_ORDER,
-        KALSHI_TAKER_IMBALANCE,
-        KALSHI_UNEXPLAINED_MOVE,
-    )
 
-    # ── Resolve paths ────────────────────────────────────────────────────────
-    feature_dir = Path(getattr(args, "feature_dir", None) or "data/kalshi/features")
+    raw_cfg = _load_yaml(getattr(args, "config", None))
+    paths_cfg = raw_cfg.get("paths", {})
+    signals_cfg = raw_cfg.get("signals", {})
+    backtest_cfg = raw_cfg.get("backtest", {})
+    informed_flow_cfg = signals_cfg.get("informed_flow", {})
+
+    feature_dir = Path(getattr(args, "feature_dir", None) or paths_cfg.get("feature_dir", "data/kalshi/features/real"))
     resolution_path = Path(
-        getattr(args, "resolution_data", None) or "data/kalshi/raw/resolution.csv"
+        getattr(args, "resolution_data", None)
+        or paths_cfg.get("resolution_data_path")
+        or "data/kalshi/resolution.csv"
     )
-    output_dir = Path(getattr(args, "output_dir", None) or "artifacts/kalshi_research")
+    output_dir = Path(getattr(args, "output_dir", None) or paths_cfg.get("output_dir", "artifacts/kalshi_research"))
+    raw_markets_dir = Path(
+        getattr(args, "raw_markets_dir", None) or paths_cfg.get("raw_markets_dir", "data/kalshi/raw/markets")
+    )
+    validation_summary_path = _validation_summary_path(raw_cfg, getattr(args, "validation_summary", None))
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    entry_threshold = float(getattr(args, "entry_threshold", None) or 0.5)
-    long_only = bool(getattr(args, "long_only", False))
+    all_families = known_kalshi_signal_families(informed_flow_config=informed_flow_cfg)
+    configured_family_names = tuple(signals_cfg.get("families", ())) or tuple(all_families)
+    signal_families = [all_families[name] for name in configured_family_names if name in all_families]
+    if not signal_families:
+        signal_families = list(all_families.values())
 
-    print("Kalshi Full Backtest")
-    print(f"  feature dir       : {feature_dir}")
-    print(f"  resolution data   : {resolution_path}")
-    print(f"  output dir        : {output_dir}")
-    print(f"  entry threshold   : {entry_threshold}")
-    print(f"  long only         : {long_only}")
+    entry_threshold = float(getattr(args, "entry_threshold", None) or backtest_cfg.get("entry_threshold", 0.5))
+    long_only = bool(getattr(args, "long_only", False) or backtest_cfg.get("long_only", False))
+    entry_timing_mode = str(
+        getattr(args, "entry_timing_mode", None) or backtest_cfg.get("entry_timing_mode", "hours_before_close")
+    )
+    entry_offset_hours = float(
+        getattr(args, "entry_offset_hours", None) or backtest_cfg.get("entry_offset_hours", 24.0)
+    )
+    holding_window_raw = getattr(args, "holding_window_hours", None)
+    if holding_window_raw is None:
+        holding_window_raw = backtest_cfg.get("holding_window_hours")
+    holding_window_hours = float(holding_window_raw) if holding_window_raw is not None else None
+    entry_slippage_points = float(
+        getattr(args, "entry_slippage_points", None) or backtest_cfg.get("entry_slippage_points", 0.0)
+    )
+    exit_slippage_points = float(
+        getattr(args, "exit_slippage_points", None) or backtest_cfg.get("exit_slippage_points", 0.0)
+    )
+    signal_probability_scale = float(
+        getattr(args, "signal_probability_scale", None) or backtest_cfg.get("signal_probability_scale", 8.0)
+    )
 
-    # ── Load resolution data ──────────────────────────────────────────────────
-    resolution_data = pd.DataFrame()
-    if resolution_path.exists():
-        try:
-            resolution_data = pd.read_csv(resolution_path)
-            print(f"  resolution records: {len(resolution_data)}")
-        except Exception as exc:
-            print(f"  [WARN] Could not load resolution data: {exc}")
-    else:
-        print(f"  [WARN] Resolution data not found at {resolution_path}. Run historical-ingest first.")
+    print("Kalshi Resolved-Market Backtest")
+    print(f"  feature dir             : {feature_dir}")
+    print(f"  resolution data         : {resolution_path}")
+    print(f"  raw markets dir         : {raw_markets_dir}")
+    print(f"  output dir              : {output_dir}")
+    print(f"  signal families         : {', '.join(family.name for family in signal_families)}")
+    print(f"  entry threshold         : {entry_threshold}")
+    print(f"  long only               : {long_only}")
+    print(f"  entry timing mode       : {entry_timing_mode}")
+    print(f"  entry offset hours      : {entry_offset_hours}")
+    print(f"  holding window hours    : {holding_window_hours if holding_window_hours is not None else 'resolution'}")
+    print(f"  entry slippage points   : {entry_slippage_points}")
+    print(f"  exit slippage points    : {exit_slippage_points}")
+    print(f"  signal prob scale       : {signal_probability_scale}")
+    if getattr(args, "require_validation_pass", False):
+        print(f"  validation summary      : {validation_summary_path}")
 
-    # ── Check feature directory ───────────────────────────────────────────────
     if not feature_dir.exists():
         print(f"\n[ERROR] Feature directory not found: {feature_dir}")
         print("Run 'trading-cli data kalshi historical-ingest' first.")
         return
 
-    feature_files = list(feature_dir.glob("*.parquet"))
-    print(f"  feature files     : {len(feature_files)}")
-
-    if not feature_files:
-        print("\n[ERROR] No feature parquet files found. Run historical-ingest first.")
+    resolution_data = pd.DataFrame()
+    if resolution_path.exists():
+        resolution_data = pd.read_csv(resolution_path)
+    else:
+        print(f"\n[ERROR] Resolution data not found: {resolution_path}")
+        print("Run 'trading-cli data kalshi historical-ingest' first.")
         return
-
-    # ── Run backtest across all 5 signals ────────────────────────────────────
-    all_families = [
-        KALSHI_CALIBRATION_DRIFT,
-        KALSHI_VOLUME_SPIKE,
-        KALSHI_TIME_DECAY,
-        KALSHI_BASE_RATE,
-        KALSHI_METACULUS_DIVERGENCE,
-        KALSHI_TAKER_IMBALANCE,
-        KALSHI_LARGE_ORDER,
-        KALSHI_UNEXPLAINED_MOVE,
-    ]
+    if getattr(args, "require_validation_pass", False):
+        try:
+            validation_summary = load_kalshi_validation_summary(validation_summary_path)
+        except FileNotFoundError:
+            print(f"\n[ERROR] Validation summary not found: {validation_summary_path}")
+            print("Run 'trading-cli data kalshi validate-dataset' first.")
+            return
+        if not bool(validation_summary.get("passed")):
+            print(
+                f"\n[ERROR] Kalshi dataset validation is not passing "
+                f"(status={validation_summary.get('status', 'unknown')})."
+            )
+            print(f"Review: {validation_summary_path}")
+            return
 
     backtester = KalshiBacktester(
         entry_threshold=entry_threshold,
         long_only=long_only,
+        entry_timing_mode=entry_timing_mode,
+        entry_offset_hours=entry_offset_hours,
+        holding_window_hours=holding_window_hours,
+        entry_slippage_points=entry_slippage_points,
+        exit_slippage_points=exit_slippage_points,
+        signal_probability_scale=signal_probability_scale,
     )
 
-    print("\nRunning backtest...")
-    results = backtester.run(
+    family_results = backtester.run(
         feature_dir=feature_dir,
         resolution_data=resolution_data,
-        signal_families=all_families,
+        signal_families=signal_families,
         output_dir=output_dir,
+        raw_markets_dir=raw_markets_dir,
     )
 
-    # The backtester writes backtest_results.csv; rename/copy to full_backtest_results.csv
-    std_path = output_dir / "backtest_results.csv"
-    full_path = output_dir / "full_backtest_results.csv"
-    if std_path.exists() and std_path != full_path:
-        import shutil
-        shutil.copy(std_path, full_path)
+    summary_path = output_dir / "kalshi_backtest_summary.json"
+    diagnostics_path = output_dir / "kalshi_signal_diagnostics.json"
+    trade_log_path = output_dir / "kalshi_trade_log.jsonl"
+    report_path = output_dir / "kalshi_backtest_report.md"
 
-    # ── Build summary markdown ────────────────────────────────────────────────
-    rows_df = pd.read_csv(full_path) if full_path.exists() else pd.DataFrame(
-        [{"signal_family": r.signal_family, "n_trades": r.n_trades,
-          "win_rate": r.win_rate, "mean_edge": r.mean_edge,
-          "sharpe": r.sharpe, "max_drawdown": r.max_drawdown, "ic": r.ic}
-         for r in results]
-    )
+    compatibility_csv = output_dir / "full_backtest_results.csv"
+    compatibility_md = output_dir / "full_backtest_summary.md"
+    if (output_dir / "backtest_results.csv").exists():
+        shutil.copy(output_dir / "backtest_results.csv", compatibility_csv)
+    if report_path.exists():
+        shutil.copy(report_path, compatibility_md)
 
-    summary_path = output_dir / "full_backtest_summary.md"
-    _write_summary_markdown(rows_df, summary_path, feature_dir, resolution_path)
+    summary_payload = json.loads(summary_path.read_text(encoding="utf-8")) if summary_path.exists() else {}
 
-    # ── Print results table ───────────────────────────────────────────────────
-    print("\n" + "=" * 80)
-    print("BACKTEST RESULTS — ALL 5 SIGNALS")
-    print("=" * 80)
-    _fmt = "{:<35}  {:>8}  {:>8}  {:>10}  {:>8}  {:>10}  {:>7}"
-    print(_fmt.format("Signal", "n_trades", "IC", "win_rate", "mean_edge", "max_dd", "sharpe"))
-    print("-" * 80)
-    for result in sorted(results, key=lambda r: _sort_key(r.sharpe)):
-        print(_fmt.format(
-            result.signal_family,
-            result.n_trades,
-            _f(result.ic, ".4f"),
-            _f(result.win_rate, ".1%"),
-            _f(result.mean_edge, ".3f"),
-            _f(result.max_drawdown, ".3f"),
-            _f(result.sharpe, ".2f"),
-        ))
-    print("=" * 80)
-    print(f"\nArtifacts written:")
-    print(f"  CSV     : {full_path}")
-    print(f"  Summary : {summary_path}")
-
-
-def _sort_key(val: float) -> float:
-    """Sort by sharpe descending, NaN last."""
-    if math.isnan(val):
-        return float("-inf")
-    return val
-
-
-def _f(val: float, fmt: str) -> str:
-    """Format a float, returning 'n/a' for NaN."""
-    if val != val:  # NaN check
-        return "n/a"
-    return format(val, fmt)
-
-
-def _write_summary_markdown(
-    df: "pd.DataFrame",
-    path: Path,
-    feature_dir: Path,
-    resolution_path: Path,
-) -> None:
-    """Write a structured summary markdown file."""
-    import pandas as pd
-
-    now = datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC")
-    n_markets = len(list(feature_dir.glob("*.parquet"))) if feature_dir.exists() else 0
-    n_resolved = len(pd.read_csv(resolution_path)) if resolution_path.exists() else 0
-
-    lines = [
-        "# Kalshi Full Backtest Summary",
-        "",
-        f"Generated: {now}",
-        f"Feature files: {n_markets}",
-        f"Resolved markets: {n_resolved}",
-        "",
-        "## Per-Signal Results",
-        "",
-        "| Signal | n_trades | IC | Win Rate | Mean Edge | Sharpe | Max Drawdown |",
-        "| --- | --- | --- | --- | --- | --- | --- |",
-    ]
-
-    # Sort by Sharpe descending (NaN last)
-    if not df.empty:
-        df_sorted = df.copy()
-        df_sorted["_sharpe_sort"] = df_sorted["sharpe"].apply(
-            lambda x: x if (x == x and not math.isnan(float(x))) else float("-inf")
+    print("\nBacktest complete.")
+    print(f"  Markets evaluated        : {summary_payload.get('total_markets_evaluated', 0)}")
+    print(f"  Candidate signals        : {summary_payload.get('total_candidate_signals', 0)}")
+    print(f"  Executed trades          : {summary_payload.get('total_executed_trades', 0)}")
+    print(f"  Win rate                 : {_format_metric(summary_payload.get('win_rate'), '.1%')}")
+    print(f"  Average predicted edge   : {_format_metric(summary_payload.get('average_predicted_edge'), '.4f')}")
+    print(f"  Average confidence       : {_format_metric(summary_payload.get('average_confidence'), '.4f')}")
+    print(f"  Realized average return  : {_format_metric(summary_payload.get('realized_average_return'), '.4f')}")
+    print(f"  Brier score              : {_format_metric(summary_payload.get('brier_score'), '.4f')}")
+    print("\nPer-family results:")
+    for result in family_results:
+        print(
+            f"  - {result.signal_family}: trades={result.n_trades}, "
+            f"win_rate={_format_metric(result.win_rate, '.1%')}, "
+            f"avg_return={_format_metric(result.realized_avg_return, '.4f')}, "
+            f"brier={_format_metric(result.brier_score, '.4f')}"
         )
-        df_sorted = df_sorted.sort_values("_sharpe_sort", ascending=False)
 
-        for _, row in df_sorted.iterrows():
-            def _fv(val, fmt):
-                try:
-                    v = float(val)
-                    if math.isnan(v):
-                        return "n/a"
-                    return format(v, fmt)
-                except (TypeError, ValueError):
-                    return "n/a"
-
-            lines.append(
-                f"| {row['signal_family']} "
-                f"| {int(row['n_trades']) if row['n_trades'] == row['n_trades'] else 0} "
-                f"| {_fv(row['ic'], '.4f')} "
-                f"| {_fv(row['win_rate'], '.1%')} "
-                f"| {_fv(row['mean_edge'], '.3f')} "
-                f"| {_fv(row['sharpe'], '.2f')} "
-                f"| {_fv(row['max_drawdown'], '.3f')} |"
-            )
-
-    lines += [
-        "",
-        "## Honest Assessment",
-        "",
-        _build_honest_assessment(df),
-        "",
-        "## Signal Rankings (by risk-adjusted edge)",
-        "",
-        _build_rankings(df),
-        "",
-        "## Data Notes",
-        "",
-        "- `base_rate_edge` and `metaculus_divergence` columns require the historical ingest",
-        "  pipeline to have run with `run_base_rate=true` / `run_metaculus=true`.",
-        "  Markets without these columns will show n/a for those signals.",
-        "- IC (Information Coefficient) is the Pearson correlation between signal value",
-        "  and forward resolution edge.  A meaningful IC is typically |IC| > 0.02.",
-        "- Win rate and mean edge are computed on trades where |signal| > entry_threshold.",
-        "- Sample sizes < 30 should be treated as noise, not signal.",
-    ]
-
-    path.write_text("\n".join(lines), encoding="utf-8")
+    print("\nArtifacts written:")
+    print(f"  Summary     : {summary_path}")
+    print(f"  Diagnostics : {diagnostics_path}")
+    print(f"  Trade Log   : {trade_log_path}")
+    print(f"  Report      : {report_path}")
+    if compatibility_csv.exists():
+        print(f"  Compat CSV  : {compatibility_csv}")
+    if compatibility_md.exists():
+        print(f"  Compat MD   : {compatibility_md}")
 
 
-def _build_honest_assessment(df: "pd.DataFrame") -> str:
-    """Build an honest, data-driven assessment of signal quality."""
-    import pandas as pd
-
-    if df.empty:
-        return "No data available — run historical-ingest first to populate feature parquets."
-
-    lines = []
-    for _, row in df.iterrows():
-        name = row.get("signal_family", "")
-        n = int(row.get("n_trades", 0) or 0)
-        try:
-            ic = float(row.get("ic", float("nan")))
-            sharpe = float(row.get("sharpe", float("nan")))
-            mean_edge = float(row.get("mean_edge", float("nan")))
-        except (TypeError, ValueError):
-            ic = sharpe = mean_edge = float("nan")
-
-        if n < 10:
-            verdict = f"**{name}**: INSUFFICIENT DATA ({n} trades) — cannot draw conclusions."
-        elif math.isnan(ic):
-            verdict = f"**{name}**: No IC computed — check that required feature columns exist in parquets."
-        elif abs(ic) < 0.02:
-            verdict = f"**{name}**: NO EDGE detected (IC={ic:.4f}, n={n}). Signal is indistinguishable from noise."
-        elif abs(ic) < 0.05:
-            verdict = f"**{name}**: WEAK EDGE (IC={ic:.4f}, Sharpe={sharpe:.2f}, n={n}). Marginal — needs larger sample."
-        else:
-            direction = "positive" if ic > 0 else "negative"
-            verdict = (
-                f"**{name}**: EDGE DETECTED (IC={ic:.4f}, Sharpe={sharpe:.2f}, mean_edge={mean_edge:.3f}, n={n}). "
-                f"Signal shows {direction} predictive power. Worth further investigation."
-            )
-        lines.append(f"- {verdict}")
-
-    return "\n".join(lines) if lines else "No signals to assess."
-
-
-def _build_rankings(df: "pd.DataFrame") -> str:
-    """Build a ranked list of signals by Sharpe ratio."""
-    if df.empty:
-        return "No data."
-
-    ranked = []
-    for _, row in df.iterrows():
-        try:
-            sharpe = float(row.get("sharpe", float("nan")))
-        except (TypeError, ValueError):
-            sharpe = float("nan")
-        ranked.append((row.get("signal_family", ""), sharpe))
-
-    ranked.sort(key=lambda x: x[1] if not math.isnan(x[1]) else float("-inf"), reverse=True)
-    lines = []
-    for i, (name, sharpe) in enumerate(ranked, 1):
-        s_str = f"{sharpe:.2f}" if not math.isnan(sharpe) else "n/a"
-        lines.append(f"{i}. **{name}** — Sharpe: {s_str}")
-    return "\n".join(lines)
+def _format_metric(value: Any, spec: str) -> str:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return "n/a"
+    if math.isnan(number):
+        return "n/a"
+    return format(number, spec)
