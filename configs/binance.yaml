@@ -1,0 +1,83 @@
+crypto:
+  binance:
+    provider:
+      symbols:
+        - BTCUSDT
+        - ETHUSDT
+      intervals:
+        - 1m
+        - 5m
+      request_sleep_sec: 0.1
+      max_retries: 5
+      backoff_base_sec: 0.5
+      backoff_max_sec: 8.0
+    historical_ingest:
+      start: "2024-01-01T00:00:00Z"
+      end: null
+      kline_limit: 1000
+      agg_trade_limit: 1000
+      capture_book_ticker: true
+      normalize_after_ingest: true
+    websocket:
+      enabled: false
+      stream_families:
+        - kline
+        - agg_trade
+        - book_ticker
+      combined_stream: true
+      base_url: wss://data-stream.binance.vision
+      max_streams_per_connection: 1024
+      ping_interval_sec: 20.0
+      ping_timeout_sec: 20.0
+      receive_timeout_sec: 30.0
+      reconnect_backoff_base_sec: 1.0
+      reconnect_backoff_max_sec: 30.0
+      max_reconnect_attempts: 10
+      max_runtime_seconds: null
+      max_messages: null
+      refresh_projection_after_ingest: true
+    features:
+      features_root: data/binance/features
+      feature_store_root: data/feature_store
+      summary_path: data/binance/features/feature_refresh_summary.json
+      return_horizons:
+        - 1
+        - 5
+        - 15
+      volatility_windows:
+        - 5
+        - 15
+        - 30
+      volume_windows:
+        - 5
+        - 15
+        - 30
+      order_book_windows:
+        - 5
+        - 15
+      trade_intensity_windows:
+        - 5
+        - 15
+      rebuild_lookback_rows: 5000
+      incremental_refresh: true
+    sync:
+      symbols: []
+      intervals: []
+      stream_families: []
+      max_runtime_seconds: 60
+      max_messages: 250
+      skip_projection: false
+      skip_features: false
+      full_feature_rebuild: false
+      summary_path: data/binance/sync/sync_summary.json
+    outputs:
+      raw_root: data/binance/raw
+      normalized_root: data/binance/normalized
+      checkpoint_path: data/binance/raw/ingest_checkpoint.json
+      summary_path: data/binance/raw/ingest_summary.json
+      exchange_info_path: data/binance/raw/exchange_info.json
+      raw_incremental_root: data/binance/raw/websocket
+      normalized_incremental_root: data/binance/normalized/incremental
+      websocket_checkpoint_path: data/binance/raw/websocket_checkpoint.json
+      websocket_summary_path: data/binance/raw/websocket_summary.json
+      projection_output_root: data/binance/projections

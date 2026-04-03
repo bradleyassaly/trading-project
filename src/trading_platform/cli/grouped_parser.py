@@ -10,6 +10,12 @@ from trading_platform.cli.commands.adaptive_allocation_export_run_config import 
 )
 from trading_platform.cli.commands.adaptive_allocation_show import cmd_adaptive_allocation_show
 from trading_platform.cli.commands.approved_config_diff import cmd_approved_config_diff
+from trading_platform.cli.commands.binance_crypto_historical_ingest import cmd_binance_crypto_historical_ingest
+from trading_platform.cli.commands.binance_crypto_features import cmd_binance_crypto_features
+from trading_platform.cli.commands.binance_crypto_normalize import cmd_binance_crypto_normalize
+from trading_platform.cli.commands.binance_crypto_project import cmd_binance_crypto_project
+from trading_platform.cli.commands.binance_crypto_sync import cmd_binance_crypto_sync
+from trading_platform.cli.commands.binance_crypto_websocket_ingest import cmd_binance_crypto_websocket_ingest
 from trading_platform.cli.commands.broker_cancel_all import cmd_broker_cancel_all
 from trading_platform.cli.commands.broker_health import cmd_broker_health
 from trading_platform.cli.commands.compare_xsec_construction import cmd_compare_xsec_construction
@@ -34,6 +40,7 @@ from trading_platform.cli.commands.export_universes import cmd_export_universes
 from trading_platform.cli.commands.features import cmd_features
 from trading_platform.cli.commands.kalshi_features import cmd_kalshi_features
 from trading_platform.cli.commands.kalshi_historical_ingest import cmd_kalshi_historical_ingest
+from trading_platform.cli.commands.kalshi_recent_ingest import cmd_kalshi_recent_ingest
 from trading_platform.cli.commands.kalshi_validate_dataset import cmd_kalshi_validate_dataset
 from trading_platform.cli.commands.fundamentals_features import cmd_fundamentals_features
 from trading_platform.cli.commands.fundamentals_ingest import cmd_fundamentals_ingest
@@ -92,6 +99,8 @@ from trading_platform.cli.commands.research_db import (
 )
 from trading_platform.cli.commands.kalshi_alpha_research import cmd_kalshi_alpha_research
 from trading_platform.cli.commands.kalshi_full_backtest import cmd_kalshi_full_backtest
+from trading_platform.cli.commands.polymarket_ingest import cmd_polymarket_ingest
+from trading_platform.cli.commands.polymarket_live import cmd_polymarket_live_collect
 from trading_platform.cli.commands.kalshi_paper_run import cmd_kalshi_paper_run
 from trading_platform.cli.commands.research_leaderboard import cmd_research_leaderboard
 from trading_platform.cli.commands.research_monitor import cmd_research_monitor
@@ -1741,6 +1750,335 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional cap on raw FMP requests in one run.",
     )
     data_refresh_inputs.set_defaults(func=cmd_refresh_research_inputs)
+    data_crypto = data_subparsers.add_parser("crypto", help="Crypto market-data ingestion commands")
+    data_crypto_subparsers = data_crypto.add_subparsers(dest="crypto_command", required=True)
+    data_crypto_binance = data_crypto_subparsers.add_parser("binance", help="Binance public crypto data commands")
+    data_crypto_binance_subparsers = data_crypto_binance.add_subparsers(dest="crypto_provider_command", required=True)
+    data_crypto_binance_historical = data_crypto_binance_subparsers.add_parser(
+        "historical-ingest",
+        help="Fetch Binance public market-data history and optional normalized artifacts.",
+    )
+    data_crypto_binance_historical.add_argument(
+        "--config",
+        type=str,
+        default="configs/binance.yaml",
+        help="Path to Binance crypto YAML config (default: configs/binance.yaml).",
+    )
+    data_crypto_binance_historical.add_argument("--symbols", nargs="*", default=None, help="Optional symbol override.")
+    data_crypto_binance_historical.add_argument(
+        "--intervals", nargs="*", default=None, help="Optional kline interval override."
+    )
+    data_crypto_binance_historical.add_argument("--start", type=str, default=None, help="Override historical start.")
+    data_crypto_binance_historical.add_argument("--end", type=str, default=None, help="Override historical end.")
+    data_crypto_binance_historical.add_argument(
+        "--kline-limit", type=int, default=None, help="Maximum klines returned per REST request."
+    )
+    data_crypto_binance_historical.add_argument(
+        "--agg-trade-limit", type=int, default=None, help="Maximum aggregate trades returned per REST request."
+    )
+    data_crypto_binance_historical.add_argument(
+        "--request-sleep-sec", type=float, default=None, help="Throttle delay between Binance REST requests."
+    )
+    data_crypto_binance_historical.add_argument(
+        "--max-retries", type=int, default=None, help="Maximum retry attempts for 429/transient failures."
+    )
+    data_crypto_binance_historical.add_argument(
+        "--backoff-base-sec", type=float, default=None, help="Base retry backoff in seconds."
+    )
+    data_crypto_binance_historical.add_argument(
+        "--backoff-max-sec", type=float, default=None, help="Maximum retry backoff in seconds."
+    )
+    data_crypto_binance_historical.add_argument(
+        "--capture-book-ticker",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Enable or disable current book ticker snapshots at the end of each symbol ingest.",
+    )
+    data_crypto_binance_historical.add_argument(
+        "--skip-normalize",
+        action="store_true",
+        default=False,
+        help="Fetch raw artifacts only and skip the post-ingest normalization pass.",
+    )
+    data_crypto_binance_historical.add_argument(
+        "--raw-root", type=str, default=None, help="Optional raw output root override."
+    )
+    data_crypto_binance_historical.add_argument(
+        "--normalized-root", type=str, default=None, help="Optional normalized output root override."
+    )
+    data_crypto_binance_historical.add_argument(
+        "--checkpoint-path", type=str, default=None, help="Optional checkpoint JSON path override."
+    )
+    data_crypto_binance_historical.add_argument(
+        "--summary-path", type=str, default=None, help="Optional ingest summary JSON path override."
+    )
+    data_crypto_binance_historical.add_argument(
+        "--exchange-info-path", type=str, default=None, help="Optional exchangeInfo JSON path override."
+    )
+    data_crypto_binance_historical.set_defaults(func=cmd_binance_crypto_historical_ingest)
+    data_crypto_binance_normalize = data_crypto_binance_subparsers.add_parser(
+        "normalize",
+        help="Normalize raw Binance crypto artifacts into research-ready parquet datasets.",
+    )
+    data_crypto_binance_normalize.add_argument(
+        "--config",
+        type=str,
+        default="configs/binance.yaml",
+        help="Path to Binance crypto YAML config (default: configs/binance.yaml).",
+    )
+    data_crypto_binance_normalize.add_argument("--symbols", nargs="*", default=None, help="Optional symbol filter.")
+    data_crypto_binance_normalize.add_argument(
+        "--intervals", nargs="*", default=None, help="Optional interval filter for kline normalization."
+    )
+    data_crypto_binance_normalize.add_argument(
+        "--raw-root", type=str, default=None, help="Optional raw input root override."
+    )
+    data_crypto_binance_normalize.add_argument(
+        "--normalized-root", type=str, default=None, help="Optional normalized output root override."
+    )
+    data_crypto_binance_normalize.add_argument(
+        "--summary-path", type=str, default=None, help="Optional normalization summary JSON path override."
+    )
+    data_crypto_binance_normalize.set_defaults(func=cmd_binance_crypto_normalize)
+    data_crypto_binance_websocket = data_crypto_binance_subparsers.add_parser(
+        "websocket-ingest",
+        help="Run bounded Binance public websocket ingestion and incremental normalization.",
+    )
+    data_crypto_binance_websocket.add_argument(
+        "--config",
+        type=str,
+        default="configs/binance.yaml",
+        help="Path to Binance crypto YAML config (default: configs/binance.yaml).",
+    )
+    data_crypto_binance_websocket.add_argument("--symbols", nargs="*", default=None, help="Optional symbol override.")
+    data_crypto_binance_websocket.add_argument(
+        "--intervals", nargs="*", default=None, help="Optional kline interval override."
+    )
+    data_crypto_binance_websocket.add_argument(
+        "--stream-families",
+        nargs="*",
+        default=None,
+        choices=["kline", "agg_trade", "book_ticker"],
+        help="Subset of websocket stream families to ingest.",
+    )
+    data_crypto_binance_websocket.add_argument(
+        "--combined-stream",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Enable or disable combined-stream websocket mode.",
+    )
+    data_crypto_binance_websocket.add_argument(
+        "--max-runtime-seconds",
+        type=int,
+        default=None,
+        help="Optional runtime cap for bounded local websocket test runs.",
+    )
+    data_crypto_binance_websocket.add_argument(
+        "--max-messages",
+        type=int,
+        default=None,
+        help="Optional message cap for bounded local websocket test runs.",
+    )
+    data_crypto_binance_websocket.add_argument(
+        "--reconnect-backoff-base-sec", type=float, default=None, help="Base reconnect backoff in seconds."
+    )
+    data_crypto_binance_websocket.add_argument(
+        "--reconnect-backoff-max-sec", type=float, default=None, help="Maximum reconnect backoff in seconds."
+    )
+    data_crypto_binance_websocket.add_argument(
+        "--max-reconnect-attempts", type=int, default=None, help="Maximum reconnect attempts before exit."
+    )
+    data_crypto_binance_websocket.add_argument(
+        "--receive-timeout-sec", type=float, default=None, help="Receive timeout used to trigger reconnects."
+    )
+    data_crypto_binance_websocket.add_argument(
+        "--raw-incremental-root", type=str, default=None, help="Optional raw websocket JSONL root override."
+    )
+    data_crypto_binance_websocket.add_argument(
+        "--normalized-incremental-root",
+        type=str,
+        default=None,
+        help="Optional normalized incremental parquet root override.",
+    )
+    data_crypto_binance_websocket.add_argument(
+        "--checkpoint-path", type=str, default=None, help="Optional websocket checkpoint JSON path override."
+    )
+    data_crypto_binance_websocket.add_argument(
+        "--summary-path", type=str, default=None, help="Optional websocket summary JSON path override."
+    )
+    data_crypto_binance_websocket.add_argument(
+        "--projection-output-root", type=str, default=None, help="Optional projection output root override."
+    )
+    data_crypto_binance_websocket.set_defaults(func=cmd_binance_crypto_websocket_ingest)
+    data_crypto_binance_project = data_crypto_binance_subparsers.add_parser(
+        "project",
+        help="Build unified crypto market-data projections from Binance historical and incremental artifacts.",
+    )
+    data_crypto_binance_project.add_argument(
+        "--config",
+        type=str,
+        default="configs/binance.yaml",
+        help="Path to Binance crypto YAML config (default: configs/binance.yaml).",
+    )
+    data_crypto_binance_project.add_argument("--symbols", nargs="*", default=None, help="Optional symbol filter.")
+    data_crypto_binance_project.add_argument(
+        "--intervals", nargs="*", default=None, help="Optional interval filter for bar projections."
+    )
+    data_crypto_binance_project.add_argument(
+        "--historical-normalized-root",
+        type=str,
+        default=None,
+        help="Optional historical normalized Binance root override.",
+    )
+    data_crypto_binance_project.add_argument(
+        "--incremental-normalized-root",
+        type=str,
+        default=None,
+        help="Optional incremental normalized Binance root override.",
+    )
+    data_crypto_binance_project.add_argument(
+        "--output-root", type=str, default=None, help="Optional projection output root override."
+    )
+    data_crypto_binance_project.add_argument(
+        "--summary-path", type=str, default=None, help="Optional projection summary JSON path override."
+    )
+    data_crypto_binance_project.set_defaults(func=cmd_binance_crypto_project)
+    data_crypto_binance_features = data_crypto_binance_subparsers.add_parser(
+        "features",
+        help="Build crypto market features from Binance projected datasets and publish feature-store artifacts.",
+    )
+    data_crypto_binance_features.add_argument(
+        "--config",
+        type=str,
+        default="configs/binance.yaml",
+        help="Path to Binance crypto YAML config (default: configs/binance.yaml).",
+    )
+    data_crypto_binance_features.add_argument("--symbols", nargs="*", default=None, help="Optional symbol filter.")
+    data_crypto_binance_features.add_argument(
+        "--intervals", nargs="*", default=None, help="Optional interval filter for bar-based features."
+    )
+    data_crypto_binance_features.add_argument(
+        "--projection-root", type=str, default=None, help="Optional projection dataset root override."
+    )
+    data_crypto_binance_features.add_argument(
+        "--features-root", type=str, default=None, help="Optional feature dataset output root override."
+    )
+    data_crypto_binance_features.add_argument(
+        "--feature-store-root", type=str, default=None, help="Optional feature-store root override."
+    )
+    data_crypto_binance_features.add_argument(
+        "--summary-path", type=str, default=None, help="Optional feature summary JSON path override."
+    )
+    data_crypto_binance_features.add_argument(
+        "--incremental-refresh",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Enable or disable incremental feature refresh behavior.",
+    )
+    data_crypto_binance_features.add_argument(
+        "--full-rebuild",
+        action="store_true",
+        default=False,
+        help="Rebuild the selected feature slices from scratch instead of incremental tail refresh.",
+    )
+    data_crypto_binance_features.set_defaults(func=cmd_binance_crypto_features)
+    data_crypto_binance_sync = data_crypto_binance_subparsers.add_parser(
+        "sync",
+        help="Run bounded Binance websocket ingest, projection refresh, and feature refresh as one sync cycle.",
+    )
+    data_crypto_binance_sync.add_argument(
+        "--config",
+        type=str,
+        default="configs/binance.yaml",
+        help="Path to Binance crypto YAML config (default: configs/binance.yaml).",
+    )
+    data_crypto_binance_sync.add_argument("--symbols", nargs="*", default=None, help="Optional symbol override.")
+    data_crypto_binance_sync.add_argument(
+        "--intervals", nargs="*", default=None, help="Optional kline interval override."
+    )
+    data_crypto_binance_sync.add_argument(
+        "--stream-families",
+        nargs="*",
+        default=None,
+        choices=["kline", "agg_trade", "book_ticker"],
+        help="Subset of websocket stream families to ingest.",
+    )
+    data_crypto_binance_sync.add_argument(
+        "--max-runtime-seconds",
+        type=int,
+        default=None,
+        help="Optional runtime cap for the websocket step inside the sync cycle.",
+    )
+    data_crypto_binance_sync.add_argument(
+        "--max-messages",
+        type=int,
+        default=None,
+        help="Optional message cap for the websocket step inside the sync cycle.",
+    )
+    data_crypto_binance_sync.add_argument(
+        "--skip-projection",
+        action="store_true",
+        default=False,
+        help="Skip projection refresh after websocket ingest.",
+    )
+    data_crypto_binance_sync.add_argument(
+        "--skip-features",
+        action="store_true",
+        default=False,
+        help="Skip feature refresh after projection.",
+    )
+    data_crypto_binance_sync.add_argument(
+        "--full-feature-rebuild",
+        action="store_true",
+        default=False,
+        help="Force a full projected-feature rebuild instead of incremental tail refresh.",
+    )
+    data_crypto_binance_sync.add_argument(
+        "--incremental-refresh",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Enable or disable incremental feature refresh behavior.",
+    )
+    data_crypto_binance_sync.add_argument(
+        "--raw-incremental-root", type=str, default=None, help="Optional raw websocket JSONL root override."
+    )
+    data_crypto_binance_sync.add_argument(
+        "--normalized-incremental-root",
+        type=str,
+        default=None,
+        help="Optional normalized incremental parquet root override.",
+    )
+    data_crypto_binance_sync.add_argument(
+        "--checkpoint-path", type=str, default=None, help="Optional websocket checkpoint JSON path override."
+    )
+    data_crypto_binance_sync.add_argument(
+        "--websocket-summary-path", type=str, default=None, help="Optional websocket summary JSON path override."
+    )
+    data_crypto_binance_sync.add_argument(
+        "--historical-normalized-root",
+        type=str,
+        default=None,
+        help="Optional historical normalized Binance root override.",
+    )
+    data_crypto_binance_sync.add_argument(
+        "--projection-output-root", type=str, default=None, help="Optional projection output root override."
+    )
+    data_crypto_binance_sync.add_argument(
+        "--projection-summary-path", type=str, default=None, help="Optional projection summary JSON path override."
+    )
+    data_crypto_binance_sync.add_argument(
+        "--features-root", type=str, default=None, help="Optional feature dataset output root override."
+    )
+    data_crypto_binance_sync.add_argument(
+        "--feature-store-root", type=str, default=None, help="Optional feature-store root override."
+    )
+    data_crypto_binance_sync.add_argument(
+        "--feature-summary-path", type=str, default=None, help="Optional feature summary JSON path override."
+    )
+    data_crypto_binance_sync.add_argument(
+        "--sync-summary-path", type=str, default=None, help="Optional sync summary JSON path override."
+    )
+    data_crypto_binance_sync.set_defaults(func=cmd_binance_crypto_sync)
     data_kalshi = data_subparsers.add_parser(
         "kalshi", help="Kalshi prediction-market data and feature generation commands"
     )
@@ -1850,7 +2188,133 @@ def build_parser() -> argparse.ArgumentParser:
         default=False,
         help="Skip the post-ingest Kalshi dataset validation pass.",
     )
+    data_kalshi_historical_ingest.add_argument(
+        "--resume-from-checkpoint",
+        type=str,
+        default=None,
+        help="Resume from an explicit Kalshi historical-ingest checkpoint JSON path.",
+    )
+    data_kalshi_historical_ingest.add_argument(
+        "--fresh-run",
+        action="store_true",
+        default=False,
+        help="Ignore prior checkpoint state and start a fresh ingest run.",
+    )
+    data_kalshi_historical_ingest.add_argument(
+        "--resume-recovery-mode",
+        type=str,
+        default=None,
+        choices=["automatic", "backup_only", "cursor_reset_only", "fail_fast"],
+        help="How resume should recover from a poisoned saved live pagination cursor.",
+    )
     data_kalshi_historical_ingest.set_defaults(func=cmd_kalshi_historical_ingest)
+    data_kalshi_recent_ingest = data_kalshi_subparsers.add_parser(
+        "recent-ingest",
+        help="Fetch recent filtered Kalshi markets from the live /markets endpoint and optional direct historical tickers.",
+    )
+    data_kalshi_recent_ingest.add_argument(
+        "--config",
+        type=str,
+        default="configs/kalshi.yaml",
+        help="Path to kalshi.yaml config (default: configs/kalshi.yaml).",
+    )
+    data_kalshi_recent_ingest.add_argument(
+        "--lookback-days",
+        type=int,
+        default=None,
+        help="Optional lookback window for trade/candle feature generation.",
+    )
+    data_kalshi_recent_ingest.add_argument(
+        "--status",
+        nargs="*",
+        default=None,
+        help="One or more live /markets status filters, e.g. settled open.",
+    )
+    data_kalshi_recent_ingest.add_argument(
+        "--category",
+        nargs="*",
+        default=None,
+        help="One or more Kalshi categories for live recent ingestion.",
+    )
+    data_kalshi_recent_ingest.add_argument(
+        "--series",
+        nargs="*",
+        default=None,
+        help="Optional series_ticker filters for live recent ingestion.",
+    )
+    data_kalshi_recent_ingest.add_argument(
+        "--event",
+        nargs="*",
+        default=None,
+        help="Optional event_ticker filters for live recent ingestion.",
+    )
+    data_kalshi_recent_ingest.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="Maximum number of live /markets records to fetch across pagination before stopping.",
+    )
+    data_kalshi_recent_ingest.add_argument(
+        "--min-volume",
+        type=float,
+        default=None,
+        help="Optional minimum market volume required for recent-ingest retention.",
+    )
+    data_kalshi_recent_ingest.add_argument(
+        "--disable-market-type-filter",
+        action="store_true",
+        default=False,
+        help="Disable recent-ingest ticker-pattern exclusions such as CROSSCATEGORY and EXTENDED.",
+    )
+    data_kalshi_recent_ingest.add_argument(
+        "--direct-historical-tickers",
+        nargs="*",
+        default=None,
+        help="Optional older Kalshi tickers to fetch directly from /historical/markets/{ticker}.",
+    )
+    data_kalshi_recent_ingest.add_argument(
+        "--period",
+        type=str,
+        default=None,
+        help="Bar resampling period, e.g. '1h', '1d' (default: 1h).",
+    )
+    data_kalshi_recent_ingest.add_argument(
+        "--sleep",
+        type=float,
+        default=None,
+        help="Sleep seconds between historical requests such as direct ticker lookups.",
+    )
+    data_kalshi_recent_ingest.add_argument(
+        "--output-dir",
+        type=str,
+        default=None,
+        help="Directory to write feature parquets (default: data/kalshi/features/real).",
+    )
+    data_kalshi_recent_ingest.add_argument(
+        "--no-base-rate",
+        action="store_true",
+        default=False,
+        help="Disable base rate feature enrichment.",
+    )
+    data_kalshi_recent_ingest.add_argument(
+        "--metaculus",
+        action="store_true",
+        default=False,
+        help="Enable Metaculus divergence feature enrichment (requires pre-built matches).",
+    )
+    data_kalshi_recent_ingest.add_argument(
+        "--skip-validation",
+        action="store_true",
+        default=False,
+        help="Skip the post-ingest Kalshi dataset validation pass.",
+    )
+    data_kalshi_recent_ingest.add_argument(
+        "--resume",
+        action="store_true",
+        default=False,
+        help="Reuse the recent-ingest checkpoint to skip already-processed retained tickers.",
+    )
+    data_kalshi_recent_ingest.set_defaults(func=cmd_kalshi_recent_ingest)
     data_kalshi_validate = data_kalshi_subparsers.add_parser(
         "validate-dataset",
         help="Audit normalized Kalshi ingest artifacts and emit structured data-quality reports.",
@@ -1916,6 +2380,72 @@ def build_parser() -> argparse.ArgumentParser:
         help="Directory where validation artifacts will be written (default: data/kalshi/validation).",
     )
     data_kalshi_validate.set_defaults(func=cmd_kalshi_validate_dataset)
+
+    # ── Polymarket data commands ──────────────────────────────────────────────
+    data_polymarket = data_subparsers.add_parser(
+        "polymarket", help="Polymarket prediction market data ingestion commands"
+    )
+    data_polymarket_subparsers = data_polymarket.add_subparsers(dest="polymarket_command", required=True)
+    data_polymarket_ingest = data_polymarket_subparsers.add_parser(
+        "ingest",
+        help="Download closed/resolved Polymarket markets and generate feature parquets.",
+    )
+    data_polymarket_ingest.add_argument(
+        "--config",
+        type=str,
+        default="configs/polymarket.yaml",
+        help="Path to polymarket YAML config (default: configs/polymarket.yaml).",
+    )
+    data_polymarket_ingest.add_argument(
+        "--lookback-days",
+        type=int,
+        default=None,
+        help="Number of days back to ingest (overrides config).",
+    )
+    data_polymarket_ingest.add_argument(
+        "--min-volume",
+        type=float,
+        default=None,
+        help="Minimum lifetime volume to include a market (overrides config).",
+    )
+    data_polymarket_ingest.add_argument(
+        "--output-dir",
+        type=str,
+        default=None,
+        help="Override features output directory.",
+    )
+    data_polymarket_ingest.add_argument(
+        "--sleep",
+        type=float,
+        default=None,
+        help="Sleep between API requests in seconds (overrides config).",
+    )
+    data_polymarket_ingest.add_argument(
+        "--sort-newest-first",
+        type=lambda v: v.lower() in ("true", "1", "yes"),
+        default=None,
+        metavar="BOOL",
+        help="Sort markets newest-first to avoid paging through old data (default: true).",
+    )
+    data_polymarket_ingest.set_defaults(func=cmd_polymarket_ingest)
+
+    data_polymarket_live = data_polymarket_subparsers.add_parser(
+        "live-collect",
+        help="Start live WebSocket price collector for open Polymarket markets.",
+    )
+    data_polymarket_live.add_argument(
+        "--config",
+        type=str,
+        default="configs/polymarket.yaml",
+        help="Path to polymarket YAML config (default: configs/polymarket.yaml).",
+    )
+    data_polymarket_live.add_argument(
+        "--max-markets",
+        type=int,
+        default=None,
+        help="Maximum number of markets to collect (default: 100).",
+    )
+    data_polymarket_live.set_defaults(func=cmd_polymarket_live_collect)
 
     data_fundamentals = data_subparsers.add_parser(
         "fundamentals", help="Canonical fundamentals ingest and daily feature generation commands"
@@ -2574,6 +3104,27 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         default=False,
         help="Require a passing Kalshi dataset validation summary before running the backtest.",
+    )
+    research_kalshi_full_backtest.add_argument(
+        "--include-polymarket",
+        action="store_true",
+        default=False,
+        help=(
+            "Also run the backtest on Polymarket feature parquets and write "
+            "artifacts/kalshi_research/polymarket_backtest_results.csv."
+        ),
+    )
+    research_kalshi_full_backtest.add_argument(
+        "--polymarket-feature-dir",
+        type=str,
+        default=None,
+        help="Directory containing Polymarket feature parquets (default: data/polymarket/features).",
+    )
+    research_kalshi_full_backtest.add_argument(
+        "--polymarket-resolution-data",
+        type=str,
+        default=None,
+        help="Path to Polymarket resolution CSV (default: data/polymarket/resolution.csv).",
     )
     research_kalshi_full_backtest.set_defaults(func=cmd_kalshi_full_backtest)
 

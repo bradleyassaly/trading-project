@@ -965,6 +965,113 @@ G-01 introduced a shared market-data contract, but it still needed a machine-rea
 #### Recommended Next Milestone
 - G-02 - Add multi-frequency time alignment layer
 
+### G-05 - Add Binance crypto public market-data ingestion
+Date: 2026-04-03
+Status: DONE
+
+#### Summary
+Added a first milestone Binance public-market-data pipeline with checkpointed REST ingestion, explicit crypto normalization, and grouped CLI commands. The new implementation fetches `exchangeInfo`, `klines`, `aggTrades`, and optional `bookTicker` snapshots into provider-specific raw artifacts, then normalizes them into research-ready parquet datasets with per-row raw-artifact provenance.
+
+#### Why
+G-01 left crypto ingestion at a scaffold-only normalization layer. This milestone turns Binance into a first-class source for later crypto research without introducing trading, account, or secrets-based exchange behavior before the public market-data foundation is stable.
+
+#### Files Changed
+- `configs/binance.yaml`
+- `src/trading_platform/binance/__init__.py`
+- `src/trading_platform/binance/client.py`
+- `src/trading_platform/binance/historical_ingest.py`
+- `src/trading_platform/binance/models.py`
+- `src/trading_platform/binance/normalize.py`
+- `src/trading_platform/cli/commands/binance_crypto_historical_ingest.py`
+- `src/trading_platform/cli/commands/binance_crypto_normalize.py`
+- `src/trading_platform/cli/grouped_parser.py`
+- `tests/binance/test_client.py`
+- `tests/binance/test_cli.py`
+- `tests/binance/test_historical_ingest.py`
+- `tests/binance/test_binance_normalization.py`
+- `tests/test_cli_grouping.py`
+- `MILESTONES.md`
+- `DOCUMENTATION.md`
+
+#### Tests Run
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\pytest.exe tests/binance/test_client.py tests/binance/test_historical_ingest.py tests/binance/test_binance_normalization.py tests/binance/test_cli.py tests/test_cli_grouping.py -q`
+
+#### Verification Commands
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\pytest.exe tests/binance/test_client.py tests/binance/test_historical_ingest.py tests/binance/test_binance_normalization.py tests/binance/test_cli.py tests/test_cli_grouping.py -q`
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\pytest.exe -q`
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\python.exe -m trading_platform.cli data crypto binance historical-ingest --config configs/binance.yaml --symbols BTCUSDT --intervals 1m --start 2024-01-01T00:00:00Z --end 2024-01-01T01:00:00Z`
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\python.exe -m trading_platform.cli data crypto binance normalize --config configs/binance.yaml --symbols BTCUSDT --intervals 1m`
+
+#### Design Notes
+The Binance REST client centralizes throttling, retry, and response handling instead of scattering exchange calls through CLI code. Historical ingestion is checkpointed by symbol plus dataset type so reruns can resume `klines`, `aggTrades`, and `bookTicker` progress independently, while raw artifact filenames are deterministic enough to keep repeated fetches idempotent. Normalization intentionally uses explicit crypto schemas instead of overloading the legacy bar-only market-data contract because aggregate trades and book-ticker snapshots need source-specific fields and provenance.
+
+The CLI shape follows the grouped parser convention: `data crypto binance historical-ingest` for raw + optional normalize, and `data crypto binance normalize` for raw-to-normalized rebuilds. `configs/binance.yaml` defines the first typed config surface for symbols, intervals, bounded historical windows, pagination, retry/backoff controls, output roots, and a deferred websocket toggle.
+
+#### Known Issues / Limitations
+- This milestone only covers public REST market data. No order placement, account endpoints, listen keys, or authenticated user-data streams were added.
+- Websocket incremental support is intentionally deferred. The config surface includes an `enabled` toggle, but connection management and incremental append logic are not implemented yet.
+- `bookTicker` support is snapshot-based rather than historical because Binance exposes it as current public top-of-book state, not a built-in historical archive.
+- The normalized crypto outputs are provider-specific parquet datasets under `data/binance/normalized/...`; this milestone does not yet project Binance klines into the older unified `data/market_data/...` artifact tree.
+
+#### Recommended Next Milestone
+- G-06 - Add Binance websocket incremental append and unified crypto market-data projections
+
+### G-06 - Add Binance websocket incremental append and unified crypto market-data projections
+Date: 2026-04-03
+Status: DONE
+
+#### Summary
+Extended the Binance crypto source with bounded public websocket incremental ingestion, checkpointed append-safe normalized outputs, and stable mixed-source projections. The repo now supports `data crypto binance websocket-ingest` for incremental `kline`, `aggTrade`, and `bookTicker` streams and `data crypto binance project` for rebuilding unified `crypto_ohlcv_bars`, `crypto_agg_trades`, and `crypto_top_of_book` datasets from historical REST plus websocket incremental normalized inputs.
+
+#### Why
+G-05 established Binance REST ingestion and explicit normalized crypto artifacts, but downstream research still lacked an operational incremental refresh path and a stable mixed-source projection layer. This milestone closes that gap without introducing trading, accounts, or user-data streams, keeping the Binance integration public-market-data-only and research-first.
+
+#### Files Changed
+- `configs/binance.yaml`
+- `src/trading_platform/binance/__init__.py`
+- `src/trading_platform/binance/models.py`
+- `src/trading_platform/binance/normalize.py`
+- `src/trading_platform/binance/projection.py`
+- `src/trading_platform/binance/websocket.py`
+- `src/trading_platform/cli/commands/binance_crypto_project.py`
+- `src/trading_platform/cli/commands/binance_crypto_websocket_ingest.py`
+- `src/trading_platform/cli/grouped_parser.py`
+- `tests/binance/test_cli.py`
+- `tests/binance/test_projection.py`
+- `tests/binance/test_websocket_incremental.py`
+- `tests/test_cli_grouping.py`
+- `MILESTONES.md`
+- `DOCUMENTATION.md`
+
+#### Tests Run
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\pytest.exe tests/binance/test_client.py tests/binance/test_historical_ingest.py tests/binance/test_binance_normalization.py tests/binance/test_websocket_incremental.py tests/binance/test_projection.py tests/binance/test_cli.py tests/test_cli_grouping.py -q`
+- `Remove-Item Env:TP_ALERT_SMTP_HOST -ErrorAction SilentlyContinue; Remove-Item Env:TP_ALERT_SMTP_PORT -ErrorAction SilentlyContinue; Remove-Item Env:TP_ALERT_SMTP_USERNAME -ErrorAction SilentlyContinue; Remove-Item Env:TP_ALERT_SMTP_PASSWORD -ErrorAction SilentlyContinue; Remove-Item Env:TP_ALERT_SMTP_USE_TLS -ErrorAction SilentlyContinue; Remove-Item Env:TP_ALERT_FROM -ErrorAction SilentlyContinue; Remove-Item Env:TP_ALERT_TO -ErrorAction SilentlyContinue; Remove-Item Env:TP_ALERT_SUBJECT_PREFIX -ErrorAction SilentlyContinue; C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\pytest.exe -q`
+
+#### Verification Commands
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\pytest.exe tests/binance/test_client.py tests/binance/test_historical_ingest.py tests/binance/test_binance_normalization.py tests/binance/test_websocket_incremental.py tests/binance/test_projection.py tests/binance/test_cli.py tests/test_cli_grouping.py -q`
+- `Remove-Item Env:TP_ALERT_SMTP_HOST -ErrorAction SilentlyContinue; Remove-Item Env:TP_ALERT_SMTP_PORT -ErrorAction SilentlyContinue; Remove-Item Env:TP_ALERT_SMTP_USERNAME -ErrorAction SilentlyContinue; Remove-Item Env:TP_ALERT_SMTP_PASSWORD -ErrorAction SilentlyContinue; Remove-Item Env:TP_ALERT_SMTP_USE_TLS -ErrorAction SilentlyContinue; Remove-Item Env:TP_ALERT_FROM -ErrorAction SilentlyContinue; Remove-Item Env:TP_ALERT_TO -ErrorAction SilentlyContinue; Remove-Item Env:TP_ALERT_SUBJECT_PREFIX -ErrorAction SilentlyContinue; C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\pytest.exe -q`
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\python.exe -m trading_platform.cli data crypto binance websocket-ingest --config configs/binance.yaml --symbols BTCUSDT --stream-families kline agg_trade --intervals 1m --max-messages 100 --max-runtime-seconds 60`
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\python.exe -m trading_platform.cli data crypto binance project --config configs/binance.yaml --symbols BTCUSDT --intervals 1m`
+
+#### Design Notes
+The websocket layer is intentionally thin and explicit. `BinanceWebsocketIngestService` uses one combined-stream connection by default against `wss://data-stream.binance.vision`, tracks per-stream ordering keys in a checkpoint JSON, and treats reconnect overlap as an operational duplicate case instead of a fatal error. Accepted websocket messages are persisted immediately to provider-specific raw JSONL under `data/binance/raw/websocket/<stream_family>/...` and normalized incrementally into append-safe parquet files under `data/binance/normalized/incremental/...`. The service also finalizes cleanly on operator interrupt by writing a websocket summary and refreshing projections from whatever was safely persisted before shutdown.
+
+Historical REST normalization was extended additively with `event_time`, `ingested_at`, and `dedupe_key` fields so historical and websocket normalized outputs can feed the same projection builder without ad hoc downstream reconciliation. `project_binance_market_data()` now creates three explicit downstream datasets:
+- `crypto_ohlcv_bars.parquet` with uniqueness on `symbol`, `interval`, `timestamp`
+- `crypto_agg_trades.parquet` with uniqueness on `symbol`, `aggregate_trade_id`
+- `crypto_top_of_book.parquet` with uniqueness on `symbol`, `dedupe_key`
+
+These projected tables include source-mode metadata (`historical_rest` vs `websocket_incremental`) and deterministic ordering assumptions recorded in `projection_summary.json`, which keeps schema intent machine-readable for later research and monitoring consumers.
+
+#### Known Issues / Limitations
+- The websocket milestone uses bounded operator-controlled runs (`--max-messages`, `--max-runtime-seconds`) and reconnect/backoff handling, but it is not yet a long-running daemon or scheduler-managed service.
+- `bookTicker` remains a current-state incremental stream plus snapshot projection; Binance does not expose an equivalent built-in historical archive through the existing REST path.
+- The projection layer currently rebuilds parquet datasets by concatenating historical and incremental normalized inputs and deduping in-process. That is acceptable for milestone scale but not yet optimized for very large retained histories.
+- The implementation assumes per-stream ordering by event/update key for restart dedupe. Extremely pathological out-of-order websocket delivery is tolerated conservatively by dropping older-or-equal checkpointed events rather than attempting deep replay reconciliation.
+
+#### Recommended Next Milestone
+- G-07 - Add scheduled Binance incremental sync orchestration and feature-store consumers for projected crypto datasets
+
 ### G-02 - Add multi-frequency time alignment layer
 Date: 2026-03-30
 Status: DONE
@@ -2257,6 +2364,632 @@ Running the new validator against the repository's current on-disk Kalshi datase
 - The validator currently treats missing/empty normalized layers as coverage failures but does not yet distinguish "ingest never completed" from "ingest completed badly" with separate status codes.
 - Cross-layer schema checks focus on ticker presence and required-column availability; they do not yet validate deeper semantic invariants such as candle monotonicity or trade-side/value consistency.
 - The current workspace Kalshi dataset is incomplete, so threshold tuning based on real observed coverage distributions is still preliminary.
+
+#### Recommended Next Milestone
+- K-05 - Signal Ensemble & Portfolio Construction
+
+### K-00 - Historical Ingest Events-Only Pagination Guard
+Date: 2026-04-02
+Status: DONE
+
+#### Summary
+Adjusted Kalshi historical-ingest market discovery so events-based category filtering can operate without any `/historical/markets` fallback scan. The pipeline now fetches events first, returns immediately when `skip_historical_pagination=True`, and also forces events-only discovery whenever `use_events_for_category_filter=True` and `use_direct_series_fetch=False`.
+
+#### Why
+The existing ingest could correctly discover Economics and Politics markets through the events path, then still fall back into archive pagination and crawl large sports-heavy historical ranges. This change keeps the intended category-filtered path bounded and prevents the sports cursor runaway reported from the checkpoint.
+
+#### Files Changed
+- `src/trading_platform/kalshi/historical_ingest.py`
+- `src/trading_platform/cli/commands/kalshi_historical_ingest.py`
+- `configs/kalshi.yaml`
+- `tests/kalshi/test_historical_ingest.py`
+- `tests/kalshi/test_historical_ingest_cli.py`
+- `MILESTONES.md`
+- `DOCUMENTATION.md`
+
+#### Tests Run
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\pytest.exe tests/kalshi/test_historical_ingest.py -k "events_only_mode or skip_historical_pagination or direct_series_fetch"`
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\pytest.exe tests/kalshi/test_historical_ingest_cli.py -k "skip_historical_pagination or direct_series_fetch"`
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\pytest.exe tests/kalshi/test_historical_ingest.py -k "run_writes_real_raw_normalized_and_feature_artifacts or run_respects_excluded_series_filter or run_respects_min_volume_filter or run_summary_includes_filter_counts or run_exits_cleanly_when_no_markets_match_filters or run_filters_each_page_before_writing_raw_files"`
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\pytest.exe`
+
+#### Verification Commands
+- `Remove-Item -LiteralPath data/kalshi/raw/ingest_checkpoint.json`
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\python.exe -m trading_platform.cli data kalshi historical-ingest --config configs/kalshi.yaml --skip-validation --no-base-rate`
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\python.exe -m trading_platform.cli data kalshi historical-ingest --config configs/kalshi.yaml --skip-validation --no-base-rate --fresh-run`
+- `$env:TP_ALERT_SMTP_HOST=$null; $env:TP_ALERT_SMTP_PORT=$null; $env:TP_ALERT_FROM=$null; $env:TP_ALERT_TO=$null; $env:TP_ALERT_SMTP_USERNAME=$null; $env:TP_ALERT_SMTP_PASSWORD=$null; $env:TP_ALERT_SMTP_USE_TLS=$null; $env:TP_ALERT_SUBJECT_PREFIX=$null; C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\pytest.exe`
+
+#### Design Notes
+The control-flow change is intentionally narrow:
+- `_download_market_universe()` now performs events discovery before any historical pagination branch.
+- `skip_historical_pagination` now defaults to `True` in the config model and CLI loader.
+- The checked-in Kalshi YAML now matches the intended events-only research mode: `skip_historical_pagination: true`, `use_direct_series_fetch: false`, and `use_events_for_category_filter: true`.
+- Regression coverage now asserts that `get_historical_markets()` is never called in events-only mode even when the explicit skip flag is disabled.
+
+#### Known Issues / Limitations
+- The live `--fresh-run` smoke command timed out in this session before the first events-page status heartbeat advanced, so I could not produce a clean real-API artifact set proving Economics-only tickers end-to-end from this environment.
+- The non-fresh smoke command resumed prior local state through the checkpoint/recovery path, so its zero-page summary was not a valid verification of the new discovery flow.
+- Full-suite success required clearing local `TP_ALERT_*` SMTP environment variables because `tests/test_validation_alerting.py` expects no ambient SMTP configuration.
+
+#### Recommended Next Milestone
+- K-05 - Signal Ensemble & Portfolio Construction
+
+### Maintenance - Kalshi Recent-Ingest Configurable Market-Type Filter
+Date: 2026-04-02
+Status: DONE
+
+#### Summary
+Made Kalshi `recent-ingest` market-type exclusions configurable instead of always-on. Recent-ingest now reads `exclude_market_type_patterns` from `recent_ingest` config, supports `--disable-market-type-filter` to bypass those exclusions entirely, logs whether the market-type filter is enabled or disabled at startup, and emits a warning when every fetched market was removed by the market-type filter.
+
+#### Why
+The recent high-signal tightening hard-coded ticker exclusions for `CROSSCATEGORY`, `SPORTSMULTIGAME`, and `EXTENDED`. That was useful as a default, but it removed operator control and made it harder to run exploratory ingestion against those market types. This change preserves the safer default while making the filter explicit, configurable, and optionally disableable from the CLI.
+
+#### Files Changed
+- `configs/kalshi.yaml`
+- `src/trading_platform/kalshi/recent_ingest.py`
+- `src/trading_platform/cli/commands/kalshi_recent_ingest.py`
+- `src/trading_platform/cli/grouped_parser.py`
+- `tests/kalshi/test_recent_ingest.py`
+- `tests/kalshi/test_recent_ingest_cli.py`
+- `MILESTONES.md`
+- `DOCUMENTATION.md`
+
+#### Tests Run
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\python.exe -m ruff check src\trading_platform\kalshi\recent_ingest.py src\trading_platform\cli\commands\kalshi_recent_ingest.py src\trading_platform\cli\grouped_parser.py tests\kalshi\test_recent_ingest.py tests\kalshi\test_recent_ingest_cli.py`
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\python.exe -m pytest tests/kalshi/test_recent_ingest.py tests/kalshi/test_recent_ingest_cli.py tests/test_cli_grouping.py tests/kalshi/test_validation.py tests/kalshi/test_historical_ingest.py tests/kalshi/test_historical_ingest_cli.py tests/kalshi/test_client.py`
+
+#### Verification Commands
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\python.exe -m ruff check src\trading_platform\kalshi\recent_ingest.py src\trading_platform\cli\commands\kalshi_recent_ingest.py src\trading_platform\cli\grouped_parser.py tests\kalshi\test_recent_ingest.py tests\kalshi\test_recent_ingest_cli.py`
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\python.exe -m pytest tests/kalshi/test_recent_ingest.py tests/kalshi/test_recent_ingest_cli.py tests/test_cli_grouping.py tests/kalshi/test_validation.py tests/kalshi/test_historical_ingest.py tests/kalshi/test_historical_ingest_cli.py tests/kalshi/test_client.py`
+
+#### Design Notes
+Recent-ingest now treats market-type filtering as data, not code:
+- config key:
+  - `recent_ingest.exclude_market_type_patterns`
+- CLI override:
+  - `--disable-market-type-filter`
+
+Behavior:
+- when the disable flag is not used, recent-ingest applies substring checks from the configured pattern list
+- when the disable flag is used, recent-ingest skips market-type exclusions entirely
+- startup logs now record whether the filter is enabled plus the active pattern list
+- final warnings now highlight the case where `excluded_by_market_type == total_markets_fetched`
+
+Machine-readable outputs now consistently expose:
+- `recent_ingest.market_type_filter_enabled`
+- `recent_ingest.exclude_market_type_patterns`
+- `filter_diagnostics.excluded_by_market_type`
+
+#### Known Issues / Limitations
+- The filter still uses simple case-insensitive ticker substring matching rather than a richer type taxonomy.
+- The `--disable-market-type-filter` override is intentionally scoped to recent-ingest and does not affect historical-ingest behavior.
+- The all-excluded warning is based on fetched-record counts, so it will not fire on zero-fetch runs.
+
+#### Recommended Next Milestone
+- K-05 - Signal Ensemble & Portfolio Construction
+
+### Maintenance - Kalshi Recent-Ingest High-Signal Market Prioritization
+Date: 2026-04-02
+Status: DONE
+
+#### Summary
+Tightened Kalshi `recent-ingest` so it prioritizes higher-signal markets with real trading activity. Recent-ingest now supports a recent-specific minimum-volume threshold, excludes known low-signal ticker types containing `CROSSCATEGORY`, `SPORTSMULTIGAME`, or `EXTENDED`, logs exclusion reason plus market volume during early filtering, and skips feature generation when a retained market has fewer than `min_trades` trades.
+
+#### Why
+The recent live-ingest path was still willing to retain and featureize thin or structurally noisy markets. That made short research runs spend time on low-value rows and increased the chance of weak features from markets with little actual trading activity. This change keeps the market-level artifact layout intact while biasing the retained recent dataset toward liquidity and cleaner signal structure.
+
+#### Files Changed
+- `configs/kalshi.yaml`
+- `src/trading_platform/kalshi/recent_ingest.py`
+- `src/trading_platform/cli/commands/kalshi_recent_ingest.py`
+- `src/trading_platform/cli/grouped_parser.py`
+- `tests/kalshi/test_recent_ingest.py`
+- `tests/kalshi/test_recent_ingest_cli.py`
+- `MILESTONES.md`
+- `DOCUMENTATION.md`
+
+#### Tests Run
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\python.exe -m ruff check src\trading_platform\kalshi\recent_ingest.py src\trading_platform\cli\commands\kalshi_recent_ingest.py src\trading_platform\cli\grouped_parser.py tests\kalshi\test_recent_ingest.py tests\kalshi\test_recent_ingest_cli.py`
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\python.exe -m pytest tests/kalshi/test_recent_ingest.py tests/kalshi/test_recent_ingest_cli.py tests/test_cli_grouping.py tests/kalshi/test_validation.py tests/kalshi/test_historical_ingest.py tests/kalshi/test_historical_ingest_cli.py tests/kalshi/test_client.py`
+
+#### Verification Commands
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\python.exe -m ruff check src\trading_platform\kalshi\recent_ingest.py src\trading_platform\cli\commands\kalshi_recent_ingest.py src\trading_platform\cli\grouped_parser.py tests\kalshi\test_recent_ingest.py tests\kalshi\test_recent_ingest_cli.py`
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\python.exe -m pytest tests/kalshi/test_recent_ingest.py tests/kalshi/test_recent_ingest_cli.py tests/test_cli_grouping.py tests/kalshi/test_validation.py tests/kalshi/test_historical_ingest.py tests/kalshi/test_historical_ingest_cli.py tests/kalshi/test_client.py`
+
+#### Design Notes
+Recent-ingest now has a recent-specific high-signal bias:
+- `--min-volume` can override the recent YAML setting from the CLI
+- `recent_ingest.min_volume` is now available in `configs/kalshi.yaml`
+- early filtering logs `ticker`, `reason`, and `volume` for each excluded recent market
+- recent-only market-type exclusions remove tickers containing:
+  - `CROSSCATEGORY`
+  - `SPORTSMULTIGAME`
+  - `EXTENDED`
+
+Feature behavior changed more narrowly than retention behavior:
+- retained markets still write raw and normalized market/trade/candle artifacts
+- feature generation is skipped when `len(raw_trades) < min_trades`
+- this applies only to feature generation in `RecentIngestPipeline`; it does not reintroduce a hard market-retention requirement for trades
+
+Machine-readable summary artifacts now include the additional recent exclusion count:
+- `filter_diagnostics.excluded_by_market_type`
+
+#### Known Issues / Limitations
+- The new market-type exclusions are intentionally simple substring checks against ticker text; they do not yet use a richer Kalshi market taxonomy.
+- `recent_ingest.min_volume` defaults to `100` in YAML for a more signal-focused recent research path; operators can still set it to `0` to disable the liquidity filter.
+- Historical ingest behavior is unchanged; the tighter market-type exclusions are scoped to `RecentIngestPipeline`.
+
+#### Recommended Next Milestone
+- K-05 - Signal Ensemble & Portfolio Construction
+
+### Maintenance - Kalshi Recent-Ingest Total Fetch Limit Semantics
+Date: 2026-04-02
+Status: DONE
+
+#### Summary
+Changed Kalshi `recent-ingest` so `--limit` and `recent_ingest_limit` now cap the total number of live `/markets` records fetched across pagination rather than acting like a per-page fetch size. The live fetch loop now tracks total fetched records, shrinks the request page size to the remaining budget, slices any oversized page defensively, and logs page number, records fetched, cumulative total, and stop reason for each recent-ingest page.
+
+#### Why
+Small research test runs were still slow and prone to unnecessary rate limiting because the old implementation passed the configured limit straight through as the page size, then stopped only after enough retained records had been queued. That meant a nominal `--limit 5` run could still fetch much more than five live records. The new behavior makes limit-driven smoke tests predictable and keeps small runs fast without changing unlimited behavior when the cap is disabled.
+
+#### Files Changed
+- `configs/kalshi.yaml`
+- `src/trading_platform/kalshi/recent_ingest.py`
+- `tests/kalshi/test_recent_ingest.py`
+- `MILESTONES.md`
+- `DOCUMENTATION.md`
+
+#### Tests Run
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\python.exe -m ruff check src\trading_platform\kalshi\recent_ingest.py tests\kalshi\test_recent_ingest.py`
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\python.exe -m pytest tests/kalshi/test_recent_ingest.py tests/kalshi/test_recent_ingest_cli.py tests/test_cli_grouping.py tests/kalshi/test_validation.py tests/kalshi/test_historical_ingest.py tests/kalshi/test_historical_ingest_cli.py tests/kalshi/test_client.py`
+
+#### Verification Commands
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\python.exe -m ruff check src\trading_platform\kalshi\recent_ingest.py tests\kalshi\test_recent_ingest.py`
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\python.exe -m pytest tests/kalshi/test_recent_ingest.py tests/kalshi/test_recent_ingest_cli.py tests/test_cli_grouping.py tests/kalshi/test_validation.py tests/kalshi/test_historical_ingest.py tests/kalshi/test_historical_ingest_cli.py tests/kalshi/test_client.py`
+
+#### Design Notes
+The live recent-ingest loop now uses two distinct concepts:
+- `market_page_size`: normal per-request page size
+- `recent_ingest_limit`: total live records budget across all paginated `/markets` calls
+
+Behavior:
+- if `recent_ingest_limit > 0`, each request uses `min(market_page_size, remaining_budget)`
+- fetched page payloads are defensively sliced to the remaining budget before filtering and normalization
+- pagination stops with `pagination_stop_reason = recent_limit_reached` once the total fetched count reaches the budget
+- if `recent_ingest_limit <= 0`, the total-cap logic is disabled and the prior uncapped pagination behavior remains in place
+
+#### Known Issues / Limitations
+- The total-record cap applies to live `/markets` pagination. Explicit `direct_historical_tickers` are still fetched separately because they are operator-supplied point lookups.
+- The defensive page slicing protects the ingest contract even if an upstream client or mock returns more rows than requested, but a real API that ignores request limits could still transfer more bytes over the network than the remaining budget.
+
+#### Recommended Next Milestone
+- K-05 - Signal Ensemble & Portfolio Construction
+
+### Maintenance - Kalshi Recent-Ingest Category and Series Filter Resolution
+Date: 2026-04-02
+Status: DONE
+
+#### Summary
+Fixed the `recent-ingest` filter planner so category-only research runs no longer accidentally fall into series-driven queries when no explicit `series_tickers` are provided. Recent-ingest now defaults to category-first behavior for Economics and Politics research, validates or infers category compatibility when series filters are supplied, records filter-conflict diagnostics in the run summary, and supports grouped `economics_series` / `politics_series` config lists for safer series-driven runs.
+
+#### Why
+The earlier filter-resolution change introduced a regression where an empty `recent_ingest_series_tickers` list was normalized through a placeholder and treated like a real series value. That forced live `/markets` queries into invalid category/series combinations and produced empty datasets even when valid category-filtered markets existed. The fix restores the intended operator behavior:
+- no explicit series: query by category only
+- explicit series: infer or validate compatible category
+- conflicting category + series: ignore the incompatible category and surface the conflict clearly
+
+#### Files Changed
+- `configs/kalshi.yaml`
+- `src/trading_platform/kalshi/recent_ingest.py`
+- `src/trading_platform/cli/commands/kalshi_recent_ingest.py`
+- `tests/kalshi/test_recent_ingest.py`
+- `tests/kalshi/test_recent_ingest_cli.py`
+- `MILESTONES.md`
+- `DOCUMENTATION.md`
+
+#### Tests Run
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\python.exe -m ruff check src\trading_platform\kalshi\recent_ingest.py src\trading_platform\cli\commands\kalshi_recent_ingest.py tests\kalshi\test_recent_ingest.py tests\kalshi\test_recent_ingest_cli.py`
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\python.exe -m pytest tests/kalshi/test_recent_ingest.py tests/kalshi/test_recent_ingest_cli.py tests/test_cli_grouping.py tests/kalshi/test_validation.py tests/kalshi/test_historical_ingest.py tests/kalshi/test_historical_ingest_cli.py tests/kalshi/test_client.py`
+
+#### Verification Commands
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\python.exe -m ruff check src\trading_platform\kalshi\recent_ingest.py src\trading_platform\cli\commands\kalshi_recent_ingest.py tests\kalshi\test_recent_ingest.py tests\kalshi\test_recent_ingest_cli.py`
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\python.exe -m pytest tests/kalshi/test_recent_ingest.py tests/kalshi/test_recent_ingest_cli.py tests/test_cli_grouping.py tests/kalshi/test_validation.py tests/kalshi/test_historical_ingest.py tests/kalshi/test_historical_ingest_cli.py tests/kalshi/test_client.py`
+
+#### Design Notes
+The planner now normalizes only real configured series and event values instead of coercing placeholder `None` entries into the literal string `"None"`. That preserves the intended branch behavior:
+- category-only mode when `recent_ingest_series_tickers` is empty
+- series-driven mode only when real series tickers are supplied
+- inferred category mapping from `economics_series` / `politics_series`
+- machine-readable conflict reporting through `recent_ingest.filter_resolution`
+
+#### Known Issues / Limitations
+- Category inference depends on the configured `economics_series` and `politics_series` lists; unknown series still run without a category filter rather than attempting remote taxonomy discovery.
+- Conflict detection is currently advisory plus auto-correcting for recent-ingest. It does not hard-fail the command unless the downstream dataset is empty.
+- This session validated the planner through unit/integration coverage only; no live Kalshi API run was executed here.
+
+#### Recommended Next Milestone
+- K-05 - Signal Ensemble & Portfolio Construction
+
+### Maintenance - Kalshi Recent Ingest Flexible Live Schema Support
+Date: 2026-04-02
+Status: DONE
+
+#### Summary
+Relaxed Kalshi `recent-ingest` core-field validation so real live `/markets` payloads are accepted even when category or canonical time keys are absent. The recent pipeline now requires only `ticker` and `status` as core fields, treats category and time metadata as optional, and maps alternate time keys such as `close_date`, `expiration_time`, `expiration_ts`, and `end_date` into normalized `close_time` when present.
+
+#### Why
+The first recent-ingest validation pass still assumed the live API would always expose `close_time` or `expiration_time`. Real `/markets` responses are less stable than that, so otherwise valid markets were all being excluded as `missing core fields`. This change aligns the ingest contract with the actual live schema without weakening the artifact layout or recent market-state use case.
+
+#### Files Changed
+- `src/trading_platform/kalshi/historical_ingest.py`
+- `src/trading_platform/kalshi/recent_ingest.py`
+- `src/trading_platform/kalshi/validation.py`
+- `tests/kalshi/test_recent_ingest.py`
+- `tests/kalshi/test_validation.py`
+- `MILESTONES.md`
+- `DOCUMENTATION.md`
+
+#### Tests Run
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\python.exe -m ruff check src\trading_platform\kalshi\recent_ingest.py src\trading_platform\kalshi\historical_ingest.py src\trading_platform\kalshi\validation.py tests\kalshi\test_recent_ingest.py tests\kalshi\test_validation.py`
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\pytest.exe tests/kalshi/test_recent_ingest.py tests/kalshi/test_recent_ingest_cli.py tests/kalshi/test_validation.py tests/test_cli_grouping.py tests/kalshi/test_historical_ingest.py tests/kalshi/test_historical_ingest_cli.py tests/kalshi/test_client.py`
+
+#### Verification Commands
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\python.exe -m ruff check src\trading_platform\kalshi\recent_ingest.py src\trading_platform\kalshi\historical_ingest.py src\trading_platform\kalshi\validation.py tests\kalshi\test_recent_ingest.py tests\kalshi\test_validation.py`
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\pytest.exe tests/kalshi/test_recent_ingest.py tests/kalshi/test_recent_ingest_cli.py tests/kalshi/test_validation.py tests/test_cli_grouping.py tests/kalshi/test_historical_ingest.py tests/kalshi/test_historical_ingest_cli.py tests/kalshi/test_client.py`
+
+#### Design Notes
+The main schema changes are:
+- recent-ingest core validity now requires only:
+  - `ticker`
+  - `status`
+- optional market metadata:
+  - `category`
+  - time fields
+  - settlement/result fields
+  - quote/pricing fields
+
+Flexible time extraction now checks these keys in order:
+- `close_time`
+- `close_date`
+- `expiration_time`
+- `expiration_ts`
+- `end_date`
+
+When one of those keys is present, its value is mapped into normalized `close_time`. When none is present, normalized `close_time` remains `null` and the market is still retained. Recent-ingest also no longer treats missing time metadata as a lookback exclusion; lookback filtering is applied only when a parseable time field is actually present.
+
+Validation was updated to match:
+- market core-field validity now checks only `ticker` and `status`
+- missing time fields do not fail validation
+- market date-range reporting uses alternate time keys when available
+
+#### Known Issues / Limitations
+- The normalized layout still uses `close_time` as the canonical output field even when the source key was `close_date`, `expiration_ts`, or `end_date`; the original raw field remains available only in the raw market JSON.
+- Lookback filtering for time-less recent markets is intentionally permissive because the live payload does not always expose a reliable time field.
+
+#### Recommended Next Milestone
+- K-05 - Signal Ensemble & Portfolio Construction
+
+### Maintenance - Kalshi Recent Ingest Market-Only Dataset Support
+Date: 2026-04-02
+Status: DONE
+
+#### Summary
+Adjusted `trading-cli data kalshi recent-ingest` so valid Kalshi markets are retained and normalized even when they have no trade history or candlestick history. The recent pipeline now treats market-level metadata, settlement fields, and pricing snapshots as sufficient for retention, writes empty trade/candle artifacts where appropriate, and emits explicit exclusion counters for missing core fields, category/series filters, lookback exclusions, and no-trade-data exclusions.
+
+#### Why
+The first recent-ingest redesign still inherited the historical pipeline’s `min_trades` assumption. That is appropriate for archive-oriented feature-building, but not for Kalshi recent market-state ingestion where many markets only have quote snapshots and final settlement data. The old behavior incorrectly filtered out otherwise valid prediction-market rows and could make a market-only recent dataset look empty or invalid.
+
+#### Files Changed
+- `src/trading_platform/kalshi/recent_ingest.py`
+- `src/trading_platform/kalshi/historical_ingest.py`
+- `src/trading_platform/kalshi/validation.py`
+- `src/trading_platform/cli/commands/kalshi_recent_ingest.py`
+- `tests/kalshi/test_recent_ingest.py`
+- `tests/kalshi/test_validation.py`
+- `MILESTONES.md`
+- `DOCUMENTATION.md`
+
+#### Tests Run
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\python.exe -m ruff check src\trading_platform\kalshi\recent_ingest.py src\trading_platform\kalshi\validation.py src\trading_platform\cli\commands\kalshi_recent_ingest.py src\trading_platform\kalshi\historical_ingest.py tests\kalshi\test_recent_ingest.py tests\kalshi\test_validation.py`
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\pytest.exe tests/kalshi/test_recent_ingest.py tests/kalshi/test_recent_ingest_cli.py tests/kalshi/test_validation.py tests/test_cli_grouping.py tests/kalshi/test_historical_ingest.py tests/kalshi/test_historical_ingest_cli.py tests/kalshi/test_client.py`
+
+#### Verification Commands
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\python.exe -m ruff check src\trading_platform\kalshi\recent_ingest.py src\trading_platform\kalshi\validation.py src\trading_platform\cli\commands\kalshi_recent_ingest.py src\trading_platform\kalshi\historical_ingest.py tests\kalshi\test_recent_ingest.py tests\kalshi\test_validation.py`
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\pytest.exe tests/kalshi/test_recent_ingest.py tests/kalshi/test_recent_ingest_cli.py tests/kalshi/test_validation.py tests/test_cli_grouping.py tests/kalshi/test_historical_ingest.py tests/kalshi/test_historical_ingest_cli.py tests/kalshi/test_client.py`
+
+#### Design Notes
+This change is scoped to `RecentIngestPipeline`; archive-oriented `HistoricalIngestPipeline` behavior is preserved. The recent pipeline now:
+- validates core market fields during live/direct discovery
+- excludes recent rows only when core fields are missing, category/series filters reject them, or their close/expiration time falls outside the lookback window
+- processes retained markets even when `raw_trades` and `raw_candles` are empty
+- writes empty normalized trade/candle parquet files for those market-only rows so the artifact layout stays stable and idempotent
+- skips feature generation when no trades exist rather than failing or dropping the market
+
+Recent summary and console output now surface:
+- `excluded_no_trade_data`
+- `excluded_missing_core_fields`
+- `excluded_by_series`
+- `excluded_by_category`
+- `excluded_by_lookback`
+
+Validation now computes market core-field validity explicitly. When a dataset is clearly a recent market-only ingest (`source_mode` values are `live_recent_filtered` and/or `direct_historical_ticker`) and all retained markets have valid core fields, zero trade coverage and zero candle coverage no longer fail validation.
+
+#### Known Issues / Limitations
+- Market-only recent datasets can pass validation, but they still produce no feature parquet for no-trade markets because feature generation remains trade-driven.
+- The `excluded_no_trade_data` counter is currently expected to remain zero because recent-ingest no longer excludes markets solely for missing trade history; it is emitted for audit consistency.
+- Historical ingest still enforces its existing trade-oriented processing rules by design.
+
+#### Recommended Next Milestone
+- K-05 - Signal Ensemble & Portfolio Construction
+
+### Maintenance - Kalshi Recent Live-Filtered Ingest Redesign
+Date: 2026-04-02
+Status: DONE
+
+#### Summary
+Added a dedicated Kalshi recent-ingest path that treats the authenticated live `/markets` endpoint as the primary discovery source for recent filtered research markets. The new `trading-cli data kalshi recent-ingest` command supports status, category, series, event, and live-market limit filters, can optionally fetch explicitly named older contracts through `/historical/markets/{ticker}`, and writes those markets into the existing raw, normalized, and feature artifact layout with explicit `source_endpoint` and `source_mode` metadata.
+
+#### Why
+The historical archive cursor scan is a poor default for Economics and Politics research because `/historical/markets` paginates the raw archive and does not provide the server-side filtering needed for category-specific backfills. That made category-focused research depend on broad archive crawling even when the live `/markets` endpoint could answer the recent-filtered query directly. This redesign makes the live filtered endpoint the operator-facing default for recent research ingestion while preserving archive scan behavior for explicit generic crawl use.
+
+#### Files Changed
+- `configs/kalshi.yaml`
+- `src/trading_platform/kalshi/client.py`
+- `src/trading_platform/kalshi/historical_ingest.py`
+- `src/trading_platform/kalshi/recent_ingest.py`
+- `src/trading_platform/cli/commands/kalshi_recent_ingest.py`
+- `src/trading_platform/cli/grouped_parser.py`
+- `tests/kalshi/test_recent_ingest.py`
+- `tests/kalshi/test_recent_ingest_cli.py`
+- `tests/test_cli_grouping.py`
+- `MILESTONES.md`
+- `DOCUMENTATION.md`
+
+#### Tests Run
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\python.exe -m ruff check src\trading_platform\kalshi\client.py src\trading_platform\kalshi\historical_ingest.py src\trading_platform\kalshi\recent_ingest.py src\trading_platform\cli\commands\kalshi_recent_ingest.py src\trading_platform\cli\grouped_parser.py tests\kalshi\test_recent_ingest.py tests\kalshi\test_recent_ingest_cli.py tests\test_cli_grouping.py`
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\pytest.exe tests/kalshi/test_recent_ingest.py tests/kalshi/test_recent_ingest_cli.py tests/test_cli_grouping.py tests/kalshi/test_historical_ingest.py tests/kalshi/test_historical_ingest_cli.py tests/kalshi/test_client.py`
+
+#### Verification Commands
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\python.exe -m ruff check src\trading_platform\kalshi\client.py src\trading_platform\kalshi\historical_ingest.py src\trading_platform\kalshi\recent_ingest.py src\trading_platform\cli\commands\kalshi_recent_ingest.py src\trading_platform\cli\grouped_parser.py tests\kalshi\test_recent_ingest.py tests\kalshi\test_recent_ingest_cli.py tests\test_cli_grouping.py`
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\pytest.exe tests/kalshi/test_recent_ingest.py tests/kalshi/test_recent_ingest_cli.py tests/test_cli_grouping.py tests/kalshi/test_historical_ingest.py tests/kalshi/test_historical_ingest_cli.py tests/kalshi/test_client.py`
+
+#### Design Notes
+The redesign is additive. `HistoricalIngestPipeline` remains the archive-oriented path, but `RecentIngestPipeline` subclasses the existing artifact-processing flow so trade fetches, candlestick normalization, feature generation, checkpoints, and run-status artifacts stay aligned with the established Kalshi research dataset contract.
+
+The new market-discovery behavior is:
+- live recent discovery via authenticated `/markets`
+- server-side filters for `status`, `category`, `series_ticker`, and `event_ticker`
+- optional direct historical fetches via `/historical/markets/{ticker}` for known older contracts
+- ticker-level deduplication before retained-market processing
+
+Raw market payloads now carry `source_endpoint` and `source_mode`, and normalized `markets.parquet` now includes:
+- `source_endpoint`
+- `source_mode`
+- `expiration_time`
+- `settlement_time`
+- `yes_bid` / `yes_ask` / `no_bid` / `no_ask`
+- `last_price`
+- `yes_price` / `no_price`
+- `open_interest`
+
+This makes it obvious whether a market came from:
+- `live_recent_filtered`
+- `direct_historical_ticker`
+- `archive_scan`
+
+Operator-facing config now has a separate `recent_ingest:` section with:
+- `recent_ingest_enabled`
+- `recent_ingest_statuses`
+- `recent_ingest_categories`
+- `recent_ingest_limit`
+- `preferred_research_ingest_mode`
+- `direct_historical_tickers`
+
+For Economics research, the intended workflow is now:
+- `python -m trading_platform.cli data kalshi recent-ingest --config configs/kalshi.yaml --category Economics --status settled`
+
+`historical-ingest` remains available for explicit archive crawling and broader operator use, but the config comments and default operator guidance now point category-focused research at `recent-ingest`.
+
+#### Known Issues / Limitations
+- The recent-ingest checkpoint currently focuses on safe reruns and retained-market skip behavior, not mid-query cursor resume across every filter combination.
+- The live recent limit applies to live-filtered market discovery only; explicit direct historical tickers are always attempted.
+- This redesign keeps the existing raw/normalized file layout intentionally, so running recent and historical ingest modes in the same workspace overwrites per-ticker market files when the same ticker is refreshed.
+
+#### Recommended Next Milestone
+- K-05 - Signal Ensemble & Portfolio Construction
+
+### Maintenance - Kalshi Resume Cursor Recovery for Poisoned Live Pagination
+Date: 2026-04-02
+Status: DONE
+
+#### Summary
+Hardened Kalshi historical-ingest resume behavior so saved live `/markets?status=settled` cursors that repeatedly fail with retryable server-side errors or transport timeouts no longer permanently brick resumed runs. Resume now attempts bounded retry/backoff first, can fall back to the backup checkpoint state when it carries an older cursor, and can finally clear only the poisoned saved live cursor while preserving processed and queued work. Status and final summary artifacts now expose the saved resume cursor, retry count, last HTTP status, chosen recovery action, and whether recovery used the backup checkpoint or a cursor reset.
+
+#### Why
+The earlier resume framework could correctly restart from saved checkpoint state, but a poisoned saved live-pagination cursor could still cause every resumed run to die at the same place with no forward recovery path. This maintenance change makes resume operationally recoverable without reprocessing completed markets or corrupting deterministic checkpoint state.
+
+#### Files Changed
+- `configs/kalshi.yaml`
+- `src/trading_platform/ingest/status.py`
+- `src/trading_platform/kalshi/historical_ingest.py`
+- `src/trading_platform/cli/commands/kalshi_historical_ingest.py`
+- `tests/kalshi/test_historical_ingest.py`
+- `MILESTONES.md`
+- `DOCUMENTATION.md`
+
+#### Tests Run
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\python.exe -m ruff check src\trading_platform\ingest\status.py src\trading_platform\kalshi\historical_ingest.py src\trading_platform\cli\commands\kalshi_historical_ingest.py src\trading_platform\cli\grouped_parser.py tests\kalshi\test_historical_ingest.py tests\kalshi\test_historical_ingest_cli.py`
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\pytest.exe tests/kalshi/test_historical_ingest.py tests/kalshi/test_historical_ingest_cli.py tests/test_cli_grouping.py tests/kalshi/test_client.py tests/kalshi/test_kalshi_paper_cli.py tests/test_cross_market_monitor_cli.py`
+
+#### Verification Commands
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\python.exe -m ruff check src\trading_platform\ingest\status.py src\trading_platform\kalshi\historical_ingest.py src\trading_platform\cli\commands\kalshi_historical_ingest.py src\trading_platform\cli\grouped_parser.py tests\kalshi\test_historical_ingest.py tests\kalshi\test_historical_ingest_cli.py`
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\pytest.exe tests/kalshi/test_historical_ingest.py tests/kalshi/test_historical_ingest_cli.py tests/test_cli_grouping.py tests/kalshi/test_client.py tests/kalshi/test_kalshi_paper_cli.py tests/test_cross_market_monitor_cli.py`
+
+#### Design Notes
+The recovery order is:
+1. bounded exponential retry with jitter for retryable saved-cursor errors
+2. backup-checkpoint cursor fallback when the backup carries a different older cursor
+3. saved live-cursor reset while preserving:
+   - `processed_tickers`
+   - `pending_retained_markets`
+   - failed ticker metadata
+   - replay counters
+
+The live resume-cursor recovery currently treats these errors as retryable:
+- HTTP `502`
+- HTTP `503`
+- HTTP `504`
+- `requests.Timeout`
+- `requests.ConnectionError`
+
+Final failure messages now include:
+- failing endpoint
+- failing cursor
+- retry-attempt count
+- last HTTP status when present
+- recovery actions attempted
+
+Artifacts now add:
+- `resume_cursor`
+- `resume_cursor_retry_count`
+- `resume_cursor_last_http_status`
+- `resume_recovery_action`
+- `resumed_from_backup_checkpoint`
+- `resumed_with_cursor_reset`
+
+This path is intentionally scoped to the saved resume cursor on the live settled-market bridge. Normal non-resume market-fetch failures still use the existing ingest failure handling.
+
+#### Known Issues / Limitations
+- Backup checkpoint fallback is only useful when the backup actually contains an older different live cursor; if both checkpoint files were already advanced to the same poisoned cursor, recovery will move on to cursor reset.
+- Cursor reset recovery may cause the live settled fetch to revisit earlier pages, but idempotent processed-ticker and pending-queue handling prevents duplicate market processing.
+- The resume-cursor recovery logic is currently implemented in the Kalshi ingest pipeline rather than as a shared pagination-recovery abstraction for all ingest adapters.
+
+#### Recommended Next Milestone
+- K-05 - Signal Ensemble & Portfolio Construction
+
+### Maintenance - Kalshi Operator-Selectable Resume Recovery Modes
+Date: 2026-04-02
+Status: DONE
+
+#### Summary
+Consolidated Kalshi historical-ingest resume recovery into a single explicit `resume_recovery_mode` contract. Operators can now choose `automatic`, `backup_only`, `cursor_reset_only`, or `fail_fast` through YAML config or the historical-ingest CLI, and the ingest runtime records both the configured mode and the actual recovery action taken in structured status and final summary artifacts.
+
+#### Why
+The earlier poisoned-cursor hardening added multiple recovery behaviors, but operators still needed clearer control over which recovery path was allowed in production runs. This maintenance change makes resume recovery behavior explicit, non-conflicting, and machine-readable without changing normal ingest semantics.
+
+#### Files Changed
+- `configs/kalshi.yaml`
+- `src/trading_platform/ingest/status.py`
+- `src/trading_platform/kalshi/historical_ingest.py`
+- `src/trading_platform/cli/commands/kalshi_historical_ingest.py`
+- `src/trading_platform/cli/grouped_parser.py`
+- `tests/kalshi/test_historical_ingest.py`
+- `tests/kalshi/test_historical_ingest_cli.py`
+- `MILESTONES.md`
+- `DOCUMENTATION.md`
+
+#### Tests Run
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\python.exe -m ruff check src\trading_platform\ingest\status.py src\trading_platform\kalshi\historical_ingest.py src\trading_platform\cli\commands\kalshi_historical_ingest.py src\trading_platform\cli\grouped_parser.py tests\kalshi\test_historical_ingest.py tests\kalshi\test_historical_ingest_cli.py`
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\pytest.exe tests/kalshi/test_historical_ingest.py tests/kalshi/test_historical_ingest_cli.py tests/test_cli_grouping.py tests/kalshi/test_client.py tests/kalshi/test_kalshi_paper_cli.py tests/test_cross_market_monitor_cli.py`
+
+#### Verification Commands
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\python.exe -m ruff check src\trading_platform\ingest\status.py src\trading_platform\kalshi\historical_ingest.py src\trading_platform\cli\commands\kalshi_historical_ingest.py src\trading_platform\cli\grouped_parser.py tests\kalshi\test_historical_ingest.py tests\kalshi\test_historical_ingest_cli.py`
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\pytest.exe tests/kalshi/test_historical_ingest.py tests/kalshi/test_historical_ingest_cli.py tests/test_cli_grouping.py tests/kalshi/test_client.py tests/kalshi/test_kalshi_paper_cli.py tests/test_cross_market_monitor_cli.py`
+
+#### Design Notes
+`resume_recovery_mode` supports:
+- `automatic`: retry, then try backup checkpoint recovery, then clear only the poisoned saved live cursor if needed
+- `backup_only`: retry, then only try backup checkpoint recovery
+- `cursor_reset_only`: retry, then only clear the poisoned saved live cursor
+- `fail_fast`: retry, then fail without any secondary recovery action
+
+Structured status and final summary artifacts now always record:
+- `configured_resume_recovery_mode`
+- `resume_recovery_action`
+- `backup_checkpoint_recovery_attempted`
+- `cursor_reset_recovery_attempted`
+- `resumed_from_backup_checkpoint`
+- `resumed_with_cursor_reset`
+
+Recovery attempts preserve:
+- `processed_tickers`
+- `pending_retained_markets`
+- failed ticker metadata
+- replay counters
+
+That keeps downstream processing idempotent even when a cursor reset revisits earlier live pages.
+
+#### Known Issues / Limitations
+- `automatic` remains the default because it matches the prior behavior, but operators should choose `fail_fast` when they need strict recovery control for debugging.
+- Backup-checkpoint recovery only helps when the backup has a different older saved cursor.
+- Cursor-reset recovery can revisit previously seen live pages, but downstream deduplication and processed-ticker checks prevent duplicate retained-market work.
+
+#### Recommended Next Milestone
+- K-05 - Signal Ensemble & Portfolio Construction
+
+### Maintenance - Kalshi Historical Ingest Robust Resume and Checkpoint Recovery
+Date: 2026-04-02
+Status: DONE
+
+#### Summary
+Extended the Kalshi historical-ingest checkpoint contract so interrupted runs can resume safely at fetch and retained-market-processing granularity. The checkpoint now records current and completed stage state, retained markets already discovered but not yet processed, processed tickers, failed ticker retry metadata, pagination cursors, and replay counters. The CLI now supports resuming the latest run, resuming from an explicit checkpoint path, or forcing a fresh run that ignores prior checkpoint state.
+
+#### Why
+The new structured status artifacts made long-running Kalshi ingests observable, but recovery still depended on a minimal cursor-plus-processed-ticker checkpoint. That was not enough to resume cleanly after crashes during retained-market processing or a corrupt checkpoint write. This maintenance change closes that gap without changing ingest semantics or output layout.
+
+#### Files Changed
+- `configs/kalshi.yaml`
+- `src/trading_platform/ingest/status.py`
+- `src/trading_platform/kalshi/historical_ingest.py`
+- `src/trading_platform/cli/commands/kalshi_historical_ingest.py`
+- `src/trading_platform/cli/grouped_parser.py`
+- `tests/kalshi/test_historical_ingest.py`
+- `tests/kalshi/test_historical_ingest_cli.py`
+- `MILESTONES.md`
+- `DOCUMENTATION.md`
+
+#### Tests Run
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\python.exe -m ruff check src\trading_platform\ingest\status.py src\trading_platform\kalshi\historical_ingest.py src\trading_platform\cli\commands\kalshi_historical_ingest.py src\trading_platform\cli\grouped_parser.py tests\kalshi\test_historical_ingest.py tests\kalshi\test_historical_ingest_cli.py`
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\pytest.exe tests/kalshi/test_historical_ingest.py tests/kalshi/test_historical_ingest_cli.py`
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\pytest.exe tests/test_cli_grouping.py tests/kalshi/test_client.py tests/kalshi/test_kalshi_paper_cli.py tests/test_cross_market_monitor_cli.py`
+
+#### Verification Commands
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\python.exe -m ruff check src\trading_platform\ingest\status.py src\trading_platform\kalshi\historical_ingest.py src\trading_platform\cli\commands\kalshi_historical_ingest.py src\trading_platform\cli\grouped_parser.py tests\kalshi\test_historical_ingest.py tests\kalshi\test_historical_ingest_cli.py`
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\pytest.exe tests/kalshi/test_historical_ingest.py tests/kalshi/test_historical_ingest_cli.py`
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\pytest.exe tests/test_cli_grouping.py tests/kalshi/test_client.py tests/kalshi/test_kalshi_paper_cli.py tests/test_cross_market_monitor_cli.py`
+
+#### Design Notes
+The resume model is intentionally queue-based:
+- each retained market is checkpointed into `pending_retained_markets` before processing starts
+- completed markets are tracked in `processed_tickers`
+- real processing failures are tracked in `failed_tickers` with attempts, last stage, and last error
+- the run can drain any pending retained queue before resuming pagination
+
+This means the pipeline can now recover cleanly from:
+- interruption after page fetch but before queued retained markets finish processing
+- interruption during retained-market processing
+- re-entry with stale pending markets that were already completed
+- corrupt primary checkpoint JSON, via fallback to `ingest_checkpoint.bak.json`
+
+Resume controls:
+- default behavior remains resume-latest via the configured checkpoint path
+- `--resume-from-checkpoint PATH` resumes from an explicit checkpoint file
+- `--fresh-run` ignores prior checkpoint state and starts over
+
+Status artifacts now expose:
+- `resumed_from_run_id`
+- `resumed_from_checkpoint`
+- `resumed_stage`
+- `resumed_processed_ticker_count`
+- `replayed_work_skipped`
+- `replayed_work_replayed`
+
+The checkpoint writer now writes the normalized payload through a temporary file and replaces the primary checkpoint atomically before updating the backup checkpoint. This keeps resumed runs deterministic and reduces the chance of a torn write leaving the pipeline unrecoverable.
+
+#### Known Issues / Limitations
+- The resume contract is specific to the Kalshi historical ingest path; other ingest pipelines do not yet share this queue-based recovery model.
+- Failed tickers are recorded with retry metadata for audit and debugging, but there is not yet a separate CLI flag to retry only failed tickers while skipping all other work.
+- The checkpoint payload stores retained market dicts directly so the queue is lossless; that is correct for resumability but can make the checkpoint file larger on runs with many retained markets in-flight.
 
 #### Recommended Next Milestone
 - K-05 - Signal Ensemble & Portfolio Construction

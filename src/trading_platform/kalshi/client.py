@@ -331,6 +331,7 @@ class KalshiClient:
     def get_markets(
         self,
         status: str | None = None,
+        category: str | None = None,
         series_ticker: str | None = None,
         event_ticker: str | None = None,
         limit: int = 200,
@@ -340,6 +341,7 @@ class KalshiClient:
         data = self._get("/markets", {
             "limit": limit,
             "status": status,
+            "category": category,
             "series_ticker": series_ticker,
             "event_ticker": event_ticker,
             "cursor": cursor,
@@ -349,6 +351,7 @@ class KalshiClient:
     def get_markets_raw(
         self,
         status: str | None = None,
+        category: str | None = None,
         series_ticker: str | None = None,
         event_ticker: str | None = None,
         limit: int = 200,
@@ -359,6 +362,7 @@ class KalshiClient:
         data = self._get("/markets", {
             "limit": limit,
             "status": status,
+            "category": category,
             "series_ticker": series_ticker,
             "event_ticker": event_ticker,
             "tickers": ",".join(tickers) if tickers else None,
@@ -366,9 +370,85 @@ class KalshiClient:
         })
         return data.get("markets", []), data.get("cursor")
 
+    def get_events_raw(
+        self,
+        category: str | None = None,
+        status: str | None = None,
+        with_nested_markets: bool = False,
+        limit: int = 200,
+        cursor: str | None = None,
+    ) -> tuple[list[dict[str, Any]], str | None]:
+        """Fetch one page of raw event payloads from the live endpoint.
+
+        Unlike ``/markets``, the ``/events`` endpoint correctly filters by
+        ``category`` server-side, making it the efficient path when a category
+        allowlist is configured.
+
+        :param category:             Optional category filter (server-side, exact match).
+        :param status:               Optional event status filter.
+        :param with_nested_markets:  When True, each event includes a ``markets`` list.
+        :param limit:                Page size (max 200).
+        :param cursor:               Pagination cursor from a previous call.
+        :returns:                    Tuple of (list of raw event dicts, next cursor or None).
+        """
+        data = self._get("/events", {
+            "limit": limit,
+            "category": category,
+            "status": status,
+            "with_nested_markets": "true" if with_nested_markets else "false",
+            "cursor": cursor,
+        })
+        return data.get("events", []), data.get("cursor")
+
+    def get_all_events_raw(
+        self,
+        category: str | None = None,
+        status: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Paginate through all events matching the given filters."""
+        all_events: list[dict[str, Any]] = []
+        cursor: str | None = None
+        while True:
+            events, cursor = self.get_events_raw(
+                category=category,
+                status=status,
+                limit=200,
+                cursor=cursor,
+            )
+            all_events.extend(events)
+            if not cursor:
+                break
+        return all_events
+
+    def get_settled_markets(
+        self,
+        category: str | None = None,
+        series_ticker: str | None = None,
+        limit: int = 200,
+        cursor: str | None = None,
+    ) -> tuple[list[dict[str, Any]], str | None]:
+        """Fetch one page of settled markets from the live endpoint with optional filters.
+
+        Unlike ``/historical/markets``, the live ``/markets`` endpoint properly
+        filters by ``category`` and ``series_ticker`` server-side, making it
+        the efficient way to retrieve Economics/Politics markets without
+        scanning through millions of sports markets.
+
+        Requires authentication (uses ``_get``).
+        """
+        data = self._get("/markets", {
+            "status": "settled",
+            "category": category,
+            "series_ticker": series_ticker,
+            "limit": limit,
+            "cursor": cursor,
+        })
+        return data.get("markets", []), data.get("cursor")
+
     def get_all_markets(
         self,
         status: str | None = None,
+        category: str | None = None,
         series_ticker: str | None = None,
     ) -> list[KalshiMarket]:
         """Paginate through all markets matching the given filters."""
@@ -376,7 +456,7 @@ class KalshiClient:
         cursor: str | None = None
         while True:
             markets, cursor = self.get_markets(
-                status=status, series_ticker=series_ticker, limit=200, cursor=cursor
+                status=status, category=category, series_ticker=series_ticker, limit=200, cursor=cursor
             )
             all_markets.extend(markets)
             if not cursor:
@@ -386,6 +466,7 @@ class KalshiClient:
     def get_all_markets_raw(
         self,
         status: str | None = None,
+        category: str | None = None,
         series_ticker: str | None = None,
         event_ticker: str | None = None,
         limit: int = 200,
@@ -397,6 +478,7 @@ class KalshiClient:
         while True:
             markets, cursor = self.get_markets_raw(
                 status=status,
+                category=category,
                 series_ticker=series_ticker,
                 event_ticker=event_ticker,
                 limit=limit,
@@ -523,6 +605,7 @@ class KalshiClient:
         min_close_ts: int | None = None,
         max_close_ts: int | None = None,
         sleep: float | None = None,
+        series_ticker: str | None = None,
     ) -> tuple[list[dict[str, Any]], str | None]:
         """
         Fetch one page of resolved historical markets.
@@ -537,14 +620,18 @@ class KalshiClient:
         :param cursor:        Pagination cursor from a previous call.
         :param min_close_ts:  Lower bound on close_time (Unix seconds).
         :param max_close_ts:  Upper bound on close_time (Unix seconds).
+        :param series_ticker: When provided, fetch only markets for this series.
         :returns:             Tuple of (list of raw market dicts, next cursor or None).
         """
+        params: dict[str, Any] = {
+            "limit": limit,
+            "cursor": cursor,
+        }
+        if series_ticker is not None:
+            params["series_ticker"] = series_ticker
         data = self._get_public(
             "/historical/markets",
-            {
-                "limit": limit,
-                "cursor": cursor,
-            },
+            params,
             sleep=sleep,
         )
         markets = [

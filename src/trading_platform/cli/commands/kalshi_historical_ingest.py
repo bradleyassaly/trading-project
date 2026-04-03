@@ -112,6 +112,7 @@ def cmd_kalshi_historical_ingest(args: argparse.Namespace) -> None:
         checkpoint_path=str(_project_path("data", "kalshi", "raw", "ingest_checkpoint.json")),
         summary_path=str(_project_path("data", "kalshi", "raw", "ingest_summary.json")),
         status_artifacts_root=str(_project_relative_path(hist_cfg.get("status_artifacts_root", "artifacts/kalshi_ingest"))),
+        checkpoint_backup_path=str(_project_path("data", "kalshi", "raw", "ingest_checkpoint.bak.json")),
         lookback_days=int(getattr(args, "lookback_days", None) or ingestion_cfg.get("backfill_days", 365)),
         feature_period=getattr(args, "period", None) or hist_cfg.get("feature_period", "1h"),
         min_trades=5,
@@ -123,6 +124,11 @@ def cmd_kalshi_historical_ingest(args: argparse.Namespace) -> None:
         authenticated_rate_limit_jitter_max_sec=float(hist_cfg.get("authenticated_rate_limit_jitter_max_sec", 0.25)),
         max_live_pages_without_retained_markets=int(hist_cfg.get("max_live_pages_without_retained_markets", 25)),
         max_raw_markets_without_processing=int(hist_cfg.get("max_raw_markets_without_processing", 2000)),
+        resume_cursor_max_retries=int(hist_cfg.get("resume_cursor_max_retries", 3)),
+        resume_cursor_backoff_base_sec=float(hist_cfg.get("resume_cursor_backoff_base_sec", 1.0)),
+        resume_cursor_backoff_max_sec=float(hist_cfg.get("resume_cursor_backoff_max_sec", 10.0)),
+        resume_cursor_jitter_max_sec=float(hist_cfg.get("resume_cursor_jitter_max_sec", 0.5)),
+        resume_recovery_mode=str(getattr(args, "resume_recovery_mode", None) or hist_cfg.get("resume_recovery_mode", "automatic")),
         run_base_rate=not getattr(args, "no_base_rate", False),
         base_rate_db_path=str(_project_path("data", "kalshi", "base_rates", "base_rate_db.json")),
         run_metaculus=getattr(args, "metaculus", False),
@@ -131,10 +137,25 @@ def cmd_kalshi_historical_ingest(args: argparse.Namespace) -> None:
         market_page_size=1000,
         trade_page_size=1000,
         ticker_filter=list(getattr(args, "tickers", None) or []),
+        resume=not getattr(args, "fresh_run", False),
+        resume_mode=(
+            "fresh"
+            if getattr(args, "fresh_run", False)
+            else ("explicit" if getattr(args, "resume_from_checkpoint", None) else "latest")
+        ),
+        resume_checkpoint_path=(
+            str(_project_relative_path(getattr(args, "resume_from_checkpoint")))
+            if getattr(args, "resume_from_checkpoint", None)
+            else None
+        ),
         excluded_series_patterns=list(hist_cfg.get("excluded_series_patterns") or []),
         max_markets_per_event=int(hist_cfg.get("max_markets_per_event") or 0),
         min_volume=float(hist_cfg.get("min_volume") or 0.0),
         preferred_categories=list(hist_cfg.get("preferred_categories") or []),
+        use_events_for_category_filter=bool(hist_cfg.get("use_events_for_category_filter", True)),
+        skip_historical_pagination=bool(hist_cfg.get("skip_historical_pagination", True)),
+        use_direct_series_fetch=bool(hist_cfg.get("use_direct_series_fetch", True)),
+        direct_series_tickers=list(hist_cfg.get("direct_series_tickers") or []),
     )
     _prepare_output_paths(config)
 
@@ -146,12 +167,17 @@ def cmd_kalshi_historical_ingest(args: argparse.Namespace) -> None:
     print(f"  live retries: {config.authenticated_rate_limit_max_retries}")
     print(f"  fail-fast pages: {config.max_live_pages_without_retained_markets}")
     print(f"  fail-fast retained/raw: {config.max_raw_markets_without_processing}")
+    print(f"  resume cursor retries: {config.resume_cursor_max_retries}")
+    print(f"  resume recovery: {config.resume_recovery_mode}")
     print(f"  base rate: {'enabled' if config.run_base_rate else 'disabled'}")
     print(f"  metaculus: {'enabled' if config.run_metaculus else 'disabled'}")
     print(f"  raw      : {config.raw_markets_dir}")
     print(f"  normalized: {config.trades_parquet_dir}")
     print(f"  features : {config.features_dir}")
     print(f"  status   : {config.status_artifacts_root}")
+    print(f"  resume   : {config.resume_mode}")
+    if config.resume_checkpoint_path:
+        print(f"  resume checkpoint: {config.resume_checkpoint_path}")
     if config.ticker_filter:
         print(f"  tickers  : {', '.join(config.ticker_filter)}")
     if config.preferred_categories:

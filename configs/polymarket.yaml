@@ -1,0 +1,16 @@
+tag_slugs:
+  - politics
+  - economics
+  - science
+  - world
+
+lookback_days: 90
+min_volume: 1000
+max_markets_per_tag: 500
+
+require_order_book: true
+raw_markets_dir: data/polymarket/raw/markets
+raw_prices_dir: data/polymarket/raw/prices
+features_dir: data/polymarket/features
+resolution_csv_path: data/polymarket/resolution.csv
+manifest_path: data/polymarket/raw/ingest_manifest.json

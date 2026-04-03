@@ -100,6 +100,11 @@ def kalshi_markets() -> dict[str, Any]:
     return reader.read_kalshi_markets()
 
 
+@app.get("/api/polymarket/live-markets")
+def polymarket_live_markets() -> dict[str, Any]:
+    return reader.read_polymarket_live_markets()
+
+
 @app.get("/api/kalshi/market/{ticker}/history")
 def kalshi_market_history(ticker: str) -> dict[str, Any]:
     # Sanitize ticker to prevent path traversal

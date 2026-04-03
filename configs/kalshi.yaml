@@ -22,7 +22,41 @@ ingestion:
   orderbook_poll_interval_sec: 5
 
   # Historical backfill settings
-  backfill_days: 30        # how many days back to ingest on first run
+  backfill_days: 365       # how many days back to ingest on first run
+
+recent_ingest:
+  recent_ingest_enabled: true
+  recent_ingest_statuses:
+    - "settled"
+  recent_ingest_categories: []
+  recent_ingest_limit: 200  # Total live /markets records to fetch across pagination; set <= 0 to disable the cap.
+  min_volume: 0
+  exclude_market_type_patterns:
+    - "CROSSCATEGORY"
+    - "SPORTSMULTIGAME"
+    - "EXTENDED"
+  preferred_research_ingest_mode: "live_recent_filtered"
+  direct_historical_tickers: []
+  # Leave empty for the default research path so recent-ingest runs category-first.
+  # When explicit series are supplied, recent-ingest infers a compatible category
+  # from the groups below and ignores conflicting category filters.
+  recent_ingest_series_tickers: []
+  economics_series:
+    - "KXINFL"
+    - "KXFED"
+    - "KXGDP"
+    - "KXJOBS"
+    - "KXPCE"
+    - "KXCPI"
+  politics_series:
+    - "KXPRESAPPROVAL"
+    - "KXSENATE"
+  recent_ingest_event_tickers: []
+  authenticated_request_sleep_sec: 0.15
+  authenticated_rate_limit_max_retries: 6
+  authenticated_rate_limit_backoff_base_sec: 1.0
+  authenticated_rate_limit_backoff_max_sec: 20.0
+  authenticated_rate_limit_jitter_max_sec: 0.5
 
 historical_ingest:
   feature_period: "1h"
@@ -32,8 +66,13 @@ historical_ingest:
   authenticated_rate_limit_backoff_base_sec: 1.0
   authenticated_rate_limit_backoff_max_sec: 20.0
   authenticated_rate_limit_jitter_max_sec: 0.5
-  max_live_pages_without_retained_markets: 12
+  max_live_pages_without_retained_markets: 60
   max_raw_markets_without_processing: 500
+  resume_cursor_max_retries: 3
+  resume_cursor_backoff_base_sec: 1.0
+  resume_cursor_backoff_max_sec: 10.0
+  resume_cursor_jitter_max_sec: 0.5
+  resume_recovery_mode: automatic
 
   # ── Market filtering ───────────────────────────────────────────────────────
   # Kalshi creates hundreds of bracket markets per event (e.g. BTC price at
@@ -58,15 +97,43 @@ historical_ingest:
 
   # Skip markets traded fewer than this many contracts total.
   # Illiquid / untraded markets add noise without signal.  Set to 0 to disable.
-  min_volume: 100
+  min_volume: 0
 
-  # Only download markets in these categories.  Leave empty to allow all.
-  # Kalshi category strings (case-insensitive):
-  #   Economics, Politics, Climate, Sports, Finance, Entertainment, Science
+  # Only download markets in these categories during explicit archive scans.
+  # Recent Economics / Politics research should prefer `data kalshi recent-ingest`.
+  # Kalshi category strings (verified via GET /events?limit=200, 2026-04-02):
+  #   Economics, Financials, Politics, Elections, Climate and Weather,
+  #   Entertainment, Sports, Companies, Science and Technology, Health,
+  #   Social, World, Crypto, Transportation
   preferred_categories:
-    - "Economics"   # CPI, Fed rate decisions, GDP, jobs reports
-    - "Politics"    # Elections, legislation, executive actions
-    - "Climate"     # Weather events, temperature records
+    - "Economics"          # CPI, Fed rate decisions, GDP, jobs reports
+   # - "Financials"         # IPO / company financial events
+    #- "Politics"           # Executive actions, legislation, approval ratings
+    #- "Elections"          # Electoral contests at all levels
+   # - "Climate and Weather"  # Weather events, temperature records
+
+  # When true, skip /historical/markets pagination entirely.
+  # Use with use_events_for_category_filter=true so market discovery
+  # goes through /events?category=X only — no historical archive scan.
+  skip_historical_pagination: true
+  use_events_for_category_filter: true
+
+  # Fetch these series directly via series_ticker API param (fast path).
+  # Falls back to full pagination (capped at 50 pages) if fewer than 20
+  # markets are returned.
+  # NOTE: The Kalshi /events?category=X and /markets?category=X endpoints
+  # do NOT filter server-side — category is ignored in API responses.
+  # The direct series approach is the only reliable way to target Economics/Politics.
+  use_direct_series_fetch: false
+  direct_series_tickers:
+    - KXINFL
+    - KXFED
+    - KXGDP
+    - KXJOBS
+    - KXPCE
+    - KXCPI
+    - KXPRESAPPROVAL
+    - KXSENATE
 
 data_validation:
   output_dir: "data/kalshi/validation"

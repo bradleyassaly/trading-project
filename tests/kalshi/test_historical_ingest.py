@@ -3,10 +3,17 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import polars as pl
 import pytest
+import yaml
+from argparse import Namespace
+import requests
 
+from trading_platform.kalshi.auth import KalshiConfig
+from trading_platform.cli.commands import kalshi_historical_ingest as cli_module
 from trading_platform.kalshi.historical_ingest import (
     HistoricalIngestConfig,
     HistoricalIngestPipeline,
@@ -15,6 +22,15 @@ from trading_platform.kalshi.historical_ingest import (
     _safe_volume,
     _trades_to_dataframe,
 )
+
+
+DUMMY_PEM = "-----BEGIN RSA PRIVATE KEY-----\ndummy\n-----END RSA PRIVATE KEY-----"
+
+
+def _make_http_error(status_code: int) -> requests.HTTPError:
+    response = requests.Response()
+    response.status_code = status_code
+    return requests.HTTPError(f"{status_code} error", response=response)
 
 
 def _make_config(tmp_path: Path, **overrides: object) -> HistoricalIngestConfig:
@@ -30,6 +46,7 @@ def _make_config(tmp_path: Path, **overrides: object) -> HistoricalIngestConfig:
         legacy_resolution_csv_path=str(tmp_path / "data/kalshi/resolution.csv"),
         manifest_path=str(tmp_path / "data/kalshi/raw/ingest_manifest.json"),
         checkpoint_path=str(tmp_path / "data/kalshi/raw/ingest_checkpoint.json"),
+        checkpoint_backup_path=str(tmp_path / "data/kalshi/raw/ingest_checkpoint.bak.json"),
         summary_path=str(tmp_path / "data/kalshi/raw/ingest_summary.json"),
         status_artifacts_root=str(tmp_path / "artifacts/kalshi_ingest"),
         lookback_days=30,
@@ -37,6 +54,9 @@ def _make_config(tmp_path: Path, **overrides: object) -> HistoricalIngestConfig:
         request_sleep_sec=0.0,
         run_base_rate=False,
         run_metaculus=False,
+        resume_mode="latest",
+        resume_recovery_mode="automatic",
+        skip_historical_pagination=False,
     )
     for key, value in overrides.items():
         setattr(base, key, value)
@@ -127,6 +147,9 @@ class FakeKalshiClient:
 
     def get_historical_market_candlesticks_raw(self, ticker: str, **_: object) -> list[dict[str, object]]:
         return list(self.historical_candles.get(ticker, []))
+
+    def get_events_raw(self, **_: object) -> tuple[list[dict[str, object]], str | None]:
+        return [], None
 
     def get_market_candlesticks_raw(self, ticker: str, **_: object) -> list[dict[str, object]]:
         return list(self.live_candles.get(ticker, []))
@@ -943,3 +966,960 @@ def test_live_bridge_fail_fast_on_retained_market_explosion_without_processing(t
     assert run_summary_payload["fail_fast_triggered"] is True
     assert run_summary_payload["fail_fast_reason"] == "retained_without_processing"
     assert run_summary_payload["run_summary"]["stop_reason"] == "fail_fast_retained_without_processing"
+
+
+def test_resume_after_interruption_during_retained_market_processing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    now = datetime.now(UTC)
+    market = _market("FED-RESUME-001", close_time=now - timedelta(days=2), source_tier="live")
+    market["volume"] = 500
+    client = FakeKalshiClient(
+        historical_markets=[([], None)],
+        live_markets=[([market], None)],
+        historical_trades={"FED-RESUME-001": []},
+        live_trades={"FED-RESUME-001": [_trade("FED-RESUME-001", "t1", now - timedelta(days=2)), _trade("FED-RESUME-001", "t2", now - timedelta(days=2, hours=-1))]},
+        historical_candles={},
+        live_candles={"FED-RESUME-001": _candles()},
+        cutoff={
+            "market_settled_ts": (now - timedelta(days=5)).isoformat(),
+            "trades_created_ts": (now - timedelta(days=5)).isoformat(),
+            "orders_updated_ts": (now - timedelta(days=5)).isoformat(),
+        },
+    )
+    monkeypatch.setattr(
+        "trading_platform.kalshi.features.build_kalshi_features",
+        lambda *_, ticker, **__: pl.DataFrame({"timestamp": [now], "close": [55.0], "symbol": [ticker]}),
+    )
+    original_process = HistoricalIngestPipeline._process_market_artifacts
+    state = {"raised": False}
+
+    def _interrupt_once(self, market, **kwargs):
+        if not state["raised"]:
+            state["raised"] = True
+            raise RuntimeError("simulated interruption")
+        return original_process(self, market, **kwargs)
+
+    monkeypatch.setattr(HistoricalIngestPipeline, "_process_market_artifacts", _interrupt_once)
+    pipeline = HistoricalIngestPipeline(client, _make_config(tmp_path, min_trades=1))
+    with pytest.raises(RuntimeError, match="simulated interruption"):
+        pipeline.run()
+
+    checkpoint_payload = json.loads(Path(pipeline.config.checkpoint_path).read_text(encoding="utf-8"))
+    assert checkpoint_payload["pending_retained_markets"]
+    assert checkpoint_payload["live_market_cursor"] is None
+
+    monkeypatch.setattr(HistoricalIngestPipeline, "_process_market_artifacts", original_process)
+    result = HistoricalIngestPipeline(client, pipeline.config).run()
+    assert result.markets_with_trades == 1
+    summary = json.loads(result.run_summary_artifact_path.read_text(encoding="utf-8"))
+    assert summary["run_summary"]["resumed_processed_ticker_count"] == 0
+    assert summary["run_summary"]["replayed_work_replayed"] >= 1
+    assert summary["run_summary"]["checkpoint_summary"]["pending_retained_markets"] == []
+
+
+def test_resume_after_interruption_during_fetch_uses_saved_cursor(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    now = datetime.now(UTC)
+    first_market = _market("FED-FETCH-001", close_time=now - timedelta(days=2), source_tier="live")
+    first_market["volume"] = 500
+    second_market = _market("CPI-FETCH-002", close_time=now - timedelta(days=1), source_tier="live")
+    second_market["volume"] = 500
+
+    class CursorAwareClient(FakeKalshiClient):
+        def __init__(self, *, interrupt_on_second_call: bool):
+            super().__init__(
+                historical_markets=[([], None)],
+                live_markets=[],
+                historical_trades={"FED-FETCH-001": [], "CPI-FETCH-002": []},
+                live_trades={
+                    "FED-FETCH-001": [_trade("FED-FETCH-001", "f1", now - timedelta(days=2)), _trade("FED-FETCH-001", "f2", now - timedelta(days=2, hours=-1))],
+                    "CPI-FETCH-002": [_trade("CPI-FETCH-002", "c1", now - timedelta(days=1)), _trade("CPI-FETCH-002", "c2", now - timedelta(days=1, hours=-1))],
+                },
+                historical_candles={},
+                live_candles={"FED-FETCH-001": _candles(), "CPI-FETCH-002": _candles()},
+                cutoff={
+                    "market_settled_ts": (now - timedelta(days=5)).isoformat(),
+                    "trades_created_ts": (now - timedelta(days=5)).isoformat(),
+                    "orders_updated_ts": (now - timedelta(days=5)).isoformat(),
+                },
+            )
+            self.interrupt_on_second_call = interrupt_on_second_call
+            self.cursor_history: list[str | None] = []
+
+        def get_markets_raw(self, **kwargs):
+            cursor = kwargs.get("cursor")
+            self.cursor_history.append(cursor)
+            if cursor is None:
+                self.live_market_calls += 1
+                return [first_market], "cursor-2"
+            if self.interrupt_on_second_call:
+                raise RuntimeError("simulated fetch interruption")
+            self.live_market_calls += 1
+            return [second_market], None
+
+    monkeypatch.setattr(
+        "trading_platform.kalshi.features.build_kalshi_features",
+        lambda *_, ticker, **__: pl.DataFrame({"timestamp": [now], "close": [55.0], "symbol": [ticker]}),
+    )
+    config = _make_config(tmp_path, min_trades=1)
+    first_client = CursorAwareClient(interrupt_on_second_call=True)
+    with pytest.raises(RuntimeError, match="simulated fetch interruption"):
+        HistoricalIngestPipeline(first_client, config).run()
+
+    checkpoint_payload = json.loads(Path(config.checkpoint_path).read_text(encoding="utf-8"))
+    assert checkpoint_payload["live_market_cursor"] == "cursor-2"
+    assert checkpoint_payload["market_download_complete"] is False
+
+    second_client = CursorAwareClient(interrupt_on_second_call=False)
+    result = HistoricalIngestPipeline(second_client, config).run()
+    assert second_client.cursor_history[0] == "cursor-2"
+    assert result.markets_with_trades >= 1
+
+
+def test_bad_saved_cursor_recovers_from_backup_checkpoint(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    now = datetime.now(UTC)
+    config = _make_config(tmp_path, min_trades=1, resume_recovery_mode="backup_only")
+    primary_checkpoint = {
+        "schema_version": 2,
+        "run_id": "primary-run",
+        "live_market_cursor": "bad-cursor",
+        "historical_market_cursor": None,
+        "market_download_complete": False,
+        "processed_tickers": ["FED-DONE-001"],
+        "pending_retained_markets": [],
+        "failed_tickers": {},
+        "stage_counters": {},
+        "resume_counters": {"replayed_work_skipped": 0, "replayed_work_replayed": 0},
+        "current_stage": "market_universe_fetch",
+        "last_completed_stage": "retained_market_processing",
+    }
+    backup_checkpoint = {
+        **primary_checkpoint,
+        "run_id": "backup-run",
+        "live_market_cursor": "good-cursor",
+    }
+    Path(config.checkpoint_path).parent.mkdir(parents=True, exist_ok=True)
+    Path(config.checkpoint_path).write_text(json.dumps(primary_checkpoint, indent=2), encoding="utf-8")
+    Path(config.checkpoint_backup_path).write_text(json.dumps(backup_checkpoint, indent=2), encoding="utf-8")
+    market = _market("FED-RECOVER-001", close_time=now - timedelta(days=1), source_tier="live")
+    market["volume"] = 500
+
+    class RecoveryClient(FakeKalshiClient):
+        def __init__(self):
+            super().__init__(
+                historical_markets=[([], None)],
+                live_markets=[],
+                historical_trades={"FED-RECOVER-001": []},
+                live_trades={"FED-RECOVER-001": [_trade("FED-RECOVER-001", "t1", now - timedelta(days=1)), _trade("FED-RECOVER-001", "t2", now - timedelta(days=1, hours=-1))]},
+                historical_candles={},
+                live_candles={"FED-RECOVER-001": _candles()},
+                cutoff={
+                    "market_settled_ts": (now - timedelta(days=5)).isoformat(),
+                    "trades_created_ts": (now - timedelta(days=5)).isoformat(),
+                    "orders_updated_ts": (now - timedelta(days=5)).isoformat(),
+                },
+            )
+            self.seen_cursors: list[str | None] = []
+
+        def get_markets_raw(self, **kwargs):
+            cursor = kwargs.get("cursor")
+            self.seen_cursors.append(cursor)
+            if cursor == "bad-cursor":
+                raise _make_http_error(504)
+            return [market], None
+
+    monkeypatch.setattr("trading_platform.kalshi.historical_ingest.time.sleep", lambda _: None)
+    monkeypatch.setattr("trading_platform.kalshi.historical_ingest.random.uniform", lambda _a, _b: 0.0)
+    monkeypatch.setattr(
+        "trading_platform.kalshi.features.build_kalshi_features",
+        lambda *_, ticker, **__: pl.DataFrame({"timestamp": [now], "close": [55.0], "symbol": [ticker]}),
+    )
+    result = HistoricalIngestPipeline(RecoveryClient(), config).run()
+    summary = json.loads(result.run_summary_artifact_path.read_text(encoding="utf-8"))
+    assert summary["run_summary"]["resumed_from_backup_checkpoint"] is True
+    assert summary["run_summary"]["resume_recovery_action"] == "backup_checkpoint_fallback"
+    assert summary["run_summary"]["resume_cursor_last_http_status"] == 504
+
+
+def test_bad_saved_cursor_recovers_via_cursor_reset_without_duplicate_processing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    now = datetime.now(UTC)
+    config = _make_config(tmp_path, min_trades=1, resume_recovery_mode="cursor_reset_only")
+    checkpoint_payload = {
+        "schema_version": 2,
+        "run_id": "old-run",
+        "live_market_cursor": "bad-cursor",
+        "historical_market_cursor": None,
+        "market_download_complete": False,
+        "processed_tickers": ["FED-DONE-001"],
+        "pending_retained_markets": [],
+        "failed_tickers": {},
+        "stage_counters": {},
+        "resume_counters": {"replayed_work_skipped": 0, "replayed_work_replayed": 0},
+        "current_stage": "market_universe_fetch",
+        "last_completed_stage": "retained_market_processing",
+    }
+    Path(config.checkpoint_path).parent.mkdir(parents=True, exist_ok=True)
+    Path(config.checkpoint_path).write_text(json.dumps(checkpoint_payload, indent=2), encoding="utf-8")
+    Path(config.checkpoint_backup_path).write_text(json.dumps(checkpoint_payload, indent=2), encoding="utf-8")
+    processed_market = _market("FED-DONE-001", close_time=now - timedelta(days=2), source_tier="live")
+    processed_market["volume"] = 500
+    new_market = _market("CPI-NEW-001", close_time=now - timedelta(days=1), source_tier="live")
+    new_market["volume"] = 500
+
+    class ResetClient(FakeKalshiClient):
+        def __init__(self):
+            super().__init__(
+                historical_markets=[([], None)],
+                live_markets=[],
+                historical_trades={"FED-DONE-001": [], "CPI-NEW-001": []},
+                live_trades={
+                    "CPI-NEW-001": [_trade("CPI-NEW-001", "t1", now - timedelta(days=1)), _trade("CPI-NEW-001", "t2", now - timedelta(days=1, hours=-1))],
+                },
+                historical_candles={},
+                live_candles={"CPI-NEW-001": _candles()},
+                cutoff={
+                    "market_settled_ts": (now - timedelta(days=5)).isoformat(),
+                    "trades_created_ts": (now - timedelta(days=5)).isoformat(),
+                    "orders_updated_ts": (now - timedelta(days=5)).isoformat(),
+                },
+            )
+            self.calls = 0
+            self.trade_requests: list[str] = []
+
+        def get_markets_raw(self, **kwargs):
+            cursor = kwargs.get("cursor")
+            self.calls += 1
+            if cursor == "bad-cursor":
+                raise _make_http_error(504)
+            return [processed_market, new_market], None
+
+        def get_all_trades_raw(self, ticker: str, **kwargs):
+            self.trade_requests.append(ticker)
+            return super().get_all_trades_raw(ticker, **kwargs)
+
+    monkeypatch.setattr("trading_platform.kalshi.historical_ingest.time.sleep", lambda _: None)
+    monkeypatch.setattr("trading_platform.kalshi.historical_ingest.random.uniform", lambda _a, _b: 0.0)
+    monkeypatch.setattr(
+        "trading_platform.kalshi.features.build_kalshi_features",
+        lambda *_, ticker, **__: pl.DataFrame({"timestamp": [now], "close": [55.0], "symbol": [ticker]}),
+    )
+    client = ResetClient()
+    result = HistoricalIngestPipeline(client, config).run()
+    summary = json.loads(result.run_summary_artifact_path.read_text(encoding="utf-8"))
+    assert summary["run_summary"]["resumed_with_cursor_reset"] is True
+    assert summary["run_summary"]["resume_recovery_action"] == "cursor_reset"
+    assert "FED-DONE-001" not in client.trade_requests
+    assert "CPI-NEW-001" in client.trade_requests
+
+
+def test_repeated_504_resume_cursor_exhaustion_reports_clear_details(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    now = datetime.now(UTC)
+    config = _make_config(
+        tmp_path,
+        min_trades=1,
+        resume_cursor_max_retries=2,
+        resume_recovery_mode="fail_fast",
+    )
+    checkpoint_payload = {
+        "schema_version": 2,
+        "run_id": "old-run",
+        "live_market_cursor": "poisoned-cursor",
+        "historical_market_cursor": None,
+        "market_download_complete": False,
+        "processed_tickers": [],
+        "pending_retained_markets": [],
+        "failed_tickers": {},
+        "stage_counters": {},
+        "resume_counters": {"replayed_work_skipped": 0, "replayed_work_replayed": 0},
+        "current_stage": "market_universe_fetch",
+        "last_completed_stage": "checkpoint_load",
+    }
+    Path(config.checkpoint_path).parent.mkdir(parents=True, exist_ok=True)
+    Path(config.checkpoint_path).write_text(json.dumps(checkpoint_payload, indent=2), encoding="utf-8")
+    if Path(config.checkpoint_backup_path).exists():
+        Path(config.checkpoint_backup_path).unlink()
+
+    class FailingCursorClient(FakeKalshiClient):
+        def __init__(self):
+            super().__init__(
+                historical_markets=[([], None)],
+                live_markets=[],
+                historical_trades={},
+                live_trades={},
+                historical_candles={},
+                live_candles={},
+                cutoff={
+                    "market_settled_ts": (now - timedelta(days=5)).isoformat(),
+                    "trades_created_ts": (now - timedelta(days=5)).isoformat(),
+                    "orders_updated_ts": (now - timedelta(days=5)).isoformat(),
+                },
+            )
+
+        def get_markets_raw(self, **kwargs):
+            raise _make_http_error(504)
+
+    monkeypatch.setattr("trading_platform.kalshi.historical_ingest.time.sleep", lambda _: None)
+    monkeypatch.setattr("trading_platform.kalshi.historical_ingest.random.uniform", lambda _a, _b: 0.0)
+    with pytest.raises(Exception, match=r"/markets\?status=settled.*poisoned-cursor.*after 3 attempts.*504"):
+        HistoricalIngestPipeline(FailingCursorClient(), config).run()
+
+    run_dirs = sorted(Path(config.status_artifacts_root).glob("*"))
+    assert run_dirs
+    run_summary = json.loads((run_dirs[-1] / "ingest_run_summary.json").read_text(encoding="utf-8"))
+    assert run_summary["overall_status"] == "failed"
+    assert run_summary["run_summary"]["stop_reason"] == "resume_cursor_recovery_failed"
+    assert run_summary["run_summary"]["resume_cursor_last_http_status"] == 504
+
+
+def test_automatic_mode_resets_cursor_when_backup_unavailable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    now = datetime.now(UTC)
+    config = _make_config(tmp_path, min_trades=1, resume_recovery_mode="automatic")
+    checkpoint_payload = {
+        "schema_version": 2,
+        "run_id": "old-run",
+        "live_market_cursor": "bad-cursor",
+        "historical_market_cursor": None,
+        "market_download_complete": False,
+        "processed_tickers": [],
+        "pending_retained_markets": [],
+        "failed_tickers": {},
+        "stage_counters": {},
+        "resume_counters": {"replayed_work_skipped": 0, "replayed_work_replayed": 0},
+        "current_stage": "market_universe_fetch",
+        "last_completed_stage": "checkpoint_load",
+    }
+    Path(config.checkpoint_path).parent.mkdir(parents=True, exist_ok=True)
+    Path(config.checkpoint_path).write_text(json.dumps(checkpoint_payload, indent=2), encoding="utf-8")
+    if Path(config.checkpoint_backup_path).exists():
+        Path(config.checkpoint_backup_path).unlink()
+    market = _market("AUTO-RESET-001", close_time=now - timedelta(days=1), source_tier="live")
+    market["volume"] = 500
+
+    class Client(FakeKalshiClient):
+        def __init__(self):
+            super().__init__(
+                historical_markets=[([], None)],
+                live_markets=[],
+                historical_trades={"AUTO-RESET-001": []},
+                live_trades={"AUTO-RESET-001": [_trade("AUTO-RESET-001", "t1", now - timedelta(days=1)), _trade("AUTO-RESET-001", "t2", now - timedelta(days=1, hours=-1))]},
+                historical_candles={},
+                live_candles={"AUTO-RESET-001": _candles()},
+                cutoff={
+                    "market_settled_ts": (now - timedelta(days=5)).isoformat(),
+                    "trades_created_ts": (now - timedelta(days=5)).isoformat(),
+                    "orders_updated_ts": (now - timedelta(days=5)).isoformat(),
+                },
+            )
+
+        def get_markets_raw(self, **kwargs):
+            if kwargs.get("cursor") == "bad-cursor":
+                raise _make_http_error(504)
+            return [market], None
+
+    monkeypatch.setattr("trading_platform.kalshi.historical_ingest.time.sleep", lambda _: None)
+    monkeypatch.setattr("trading_platform.kalshi.historical_ingest.random.uniform", lambda _a, _b: 0.0)
+    monkeypatch.setattr(
+        "trading_platform.kalshi.features.build_kalshi_features",
+        lambda *_, ticker, **__: pl.DataFrame({"timestamp": [now], "close": [55.0], "symbol": [ticker]}),
+    )
+    result = HistoricalIngestPipeline(Client(), config).run()
+    summary = json.loads(result.run_summary_artifact_path.read_text(encoding="utf-8"))
+    assert summary["run_summary"]["resume_recovery_action"] == "cursor_reset"
+    assert summary["run_summary"]["backup_checkpoint_recovery_attempted"] is True
+    assert summary["run_summary"]["cursor_reset_recovery_attempted"] is True
+
+
+def test_backup_only_mode_fails_when_backup_cursor_matches_poisoned_cursor(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    now = datetime.now(UTC)
+    config = _make_config(tmp_path, min_trades=1, resume_recovery_mode="backup_only", resume_cursor_max_retries=1)
+    checkpoint_payload = {
+        "schema_version": 2,
+        "run_id": "old-run",
+        "live_market_cursor": "same-cursor",
+        "historical_market_cursor": None,
+        "market_download_complete": False,
+        "processed_tickers": [],
+        "pending_retained_markets": [],
+        "failed_tickers": {},
+        "stage_counters": {},
+        "resume_counters": {"replayed_work_skipped": 0, "replayed_work_replayed": 0},
+        "current_stage": "market_universe_fetch",
+        "last_completed_stage": "checkpoint_load",
+    }
+    Path(config.checkpoint_path).parent.mkdir(parents=True, exist_ok=True)
+    Path(config.checkpoint_path).write_text(json.dumps(checkpoint_payload, indent=2), encoding="utf-8")
+    Path(config.checkpoint_backup_path).write_text(json.dumps(checkpoint_payload, indent=2), encoding="utf-8")
+
+    class Client(FakeKalshiClient):
+        def __init__(self):
+            super().__init__(
+                historical_markets=[([], None)],
+                live_markets=[],
+                historical_trades={},
+                live_trades={},
+                historical_candles={},
+                live_candles={},
+                cutoff={
+                    "market_settled_ts": (now - timedelta(days=5)).isoformat(),
+                    "trades_created_ts": (now - timedelta(days=5)).isoformat(),
+                    "orders_updated_ts": (now - timedelta(days=5)).isoformat(),
+                },
+            )
+
+        def get_markets_raw(self, **kwargs):
+            raise _make_http_error(504)
+
+    monkeypatch.setattr("trading_platform.kalshi.historical_ingest.time.sleep", lambda _: None)
+    monkeypatch.setattr("trading_platform.kalshi.historical_ingest.random.uniform", lambda _a, _b: 0.0)
+    with pytest.raises(Exception, match="recovery_actions_attempted=backup_checkpoint_unavailable_or_same_cursor"):
+        HistoricalIngestPipeline(Client(), config).run()
+
+
+def test_cursor_reset_mode_recovers_timeout_resume_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    now = datetime.now(UTC)
+    config = _make_config(tmp_path, min_trades=1, resume_recovery_mode="cursor_reset_only")
+    checkpoint_payload = {
+        "schema_version": 2,
+        "run_id": "old-run",
+        "live_market_cursor": "timeout-cursor",
+        "historical_market_cursor": None,
+        "market_download_complete": False,
+        "processed_tickers": [],
+        "pending_retained_markets": [],
+        "failed_tickers": {},
+        "stage_counters": {},
+        "resume_counters": {"replayed_work_skipped": 0, "replayed_work_replayed": 0},
+        "current_stage": "market_universe_fetch",
+        "last_completed_stage": "checkpoint_load",
+    }
+    Path(config.checkpoint_path).parent.mkdir(parents=True, exist_ok=True)
+    Path(config.checkpoint_path).write_text(json.dumps(checkpoint_payload, indent=2), encoding="utf-8")
+    Path(config.checkpoint_backup_path).write_text(json.dumps(checkpoint_payload, indent=2), encoding="utf-8")
+    market = _market("TIMEOUT-001", close_time=now - timedelta(days=1), source_tier="live")
+    market["volume"] = 500
+
+    class Client(FakeKalshiClient):
+        def __init__(self):
+            super().__init__(
+                historical_markets=[([], None)],
+                live_markets=[],
+                historical_trades={"TIMEOUT-001": []},
+                live_trades={"TIMEOUT-001": [_trade("TIMEOUT-001", "t1", now - timedelta(days=1)), _trade("TIMEOUT-001", "t2", now - timedelta(days=1, hours=-1))]},
+                historical_candles={},
+                live_candles={"TIMEOUT-001": _candles()},
+                cutoff={
+                    "market_settled_ts": (now - timedelta(days=5)).isoformat(),
+                    "trades_created_ts": (now - timedelta(days=5)).isoformat(),
+                    "orders_updated_ts": (now - timedelta(days=5)).isoformat(),
+                },
+            )
+
+        def get_markets_raw(self, **kwargs):
+            if kwargs.get("cursor") == "timeout-cursor":
+                raise requests.Timeout("timed out")
+            return [market], None
+
+    monkeypatch.setattr("trading_platform.kalshi.historical_ingest.time.sleep", lambda _: None)
+    monkeypatch.setattr("trading_platform.kalshi.historical_ingest.random.uniform", lambda _a, _b: 0.0)
+    monkeypatch.setattr(
+        "trading_platform.kalshi.features.build_kalshi_features",
+        lambda *_, ticker, **__: pl.DataFrame({"timestamp": [now], "close": [55.0], "symbol": [ticker]}),
+    )
+    result = HistoricalIngestPipeline(Client(), config).run()
+    summary = json.loads(result.run_summary_artifact_path.read_text(encoding="utf-8"))
+    assert summary["run_summary"]["resume_recovery_action"] == "cursor_reset"
+    assert summary["run_summary"]["resume_cursor_last_http_status"] is None
+
+
+def test_fail_fast_mode_reports_connection_error_resume_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    now = datetime.now(UTC)
+    config = _make_config(
+        tmp_path,
+        min_trades=1,
+        resume_recovery_mode="fail_fast",
+        resume_cursor_max_retries=1,
+    )
+    checkpoint_payload = {
+        "schema_version": 2,
+        "run_id": "old-run",
+        "live_market_cursor": "connection-cursor",
+        "historical_market_cursor": None,
+        "market_download_complete": False,
+        "processed_tickers": [],
+        "pending_retained_markets": [],
+        "failed_tickers": {},
+        "stage_counters": {},
+        "resume_counters": {"replayed_work_skipped": 0, "replayed_work_replayed": 0},
+        "current_stage": "market_universe_fetch",
+        "last_completed_stage": "checkpoint_load",
+    }
+    Path(config.checkpoint_path).parent.mkdir(parents=True, exist_ok=True)
+    Path(config.checkpoint_path).write_text(json.dumps(checkpoint_payload, indent=2), encoding="utf-8")
+    if Path(config.checkpoint_backup_path).exists():
+        Path(config.checkpoint_backup_path).unlink()
+
+    class Client(FakeKalshiClient):
+        def __init__(self):
+            super().__init__(
+                historical_markets=[([], None)],
+                live_markets=[],
+                historical_trades={},
+                live_trades={},
+                historical_candles={},
+                live_candles={},
+                cutoff={
+                    "market_settled_ts": (now - timedelta(days=5)).isoformat(),
+                    "trades_created_ts": (now - timedelta(days=5)).isoformat(),
+                    "orders_updated_ts": (now - timedelta(days=5)).isoformat(),
+                },
+            )
+
+        def get_markets_raw(self, **kwargs):
+            raise requests.ConnectionError("connection dropped during resume")
+
+    monkeypatch.setattr("trading_platform.kalshi.historical_ingest.time.sleep", lambda _: None)
+    pipeline = HistoricalIngestPipeline(Client(), config)
+
+    with pytest.raises(
+        RuntimeError,
+        match=r"endpoint /markets\?status=settled cursor=connection-cursor after 2 attempts; last_http_status=None; recovery_actions_attempted=none",
+    ):
+        pipeline.run()
+
+    run_dirs = sorted(Path(config.status_artifacts_root).glob("*"))
+    assert run_dirs
+    run_summary_path = run_dirs[-1] / "ingest_run_summary.json"
+    assert run_summary_path.exists()
+    summary = json.loads(run_summary_path.read_text(encoding="utf-8"))
+    assert summary["run_summary"]["stop_reason"] == "resume_cursor_recovery_failed"
+    assert summary["run_summary"]["configured_resume_recovery_mode"] == "fail_fast"
+    assert summary["run_summary"]["resume_cursor"] == "connection-cursor"
+    assert summary["run_summary"]["resume_cursor_retry_count"] == 2
+    assert summary["run_summary"]["resume_cursor_last_http_status"] is None
+    assert summary["run_summary"]["resume_recovery_action"] is None
+    assert summary["run_summary"]["backup_checkpoint_recovery_attempted"] is False
+    assert summary["run_summary"]["cursor_reset_recovery_attempted"] is False
+
+
+def test_resume_uses_checkpoint_backup_when_primary_is_corrupt(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    now = datetime.now(UTC)
+    market = _market("FED-BACKUP-001", close_time=now - timedelta(days=2), source_tier="live")
+    market["volume"] = 500
+    client = FakeKalshiClient(
+        historical_markets=[([], None)],
+        live_markets=[([market], None)],
+        historical_trades={"FED-BACKUP-001": []},
+        live_trades={"FED-BACKUP-001": [_trade("FED-BACKUP-001", "t1", now - timedelta(days=2)), _trade("FED-BACKUP-001", "t2", now - timedelta(days=2, hours=-1))]},
+        historical_candles={},
+        live_candles={"FED-BACKUP-001": _candles()},
+        cutoff={
+            "market_settled_ts": (now - timedelta(days=5)).isoformat(),
+            "trades_created_ts": (now - timedelta(days=5)).isoformat(),
+            "orders_updated_ts": (now - timedelta(days=5)).isoformat(),
+        },
+    )
+    monkeypatch.setattr(
+        "trading_platform.kalshi.features.build_kalshi_features",
+        lambda *_, ticker, **__: pl.DataFrame({"timestamp": [now], "close": [55.0], "symbol": [ticker]}),
+    )
+    config = _make_config(tmp_path, min_trades=1)
+    result = HistoricalIngestPipeline(client, config).run()
+    assert result.markets_with_trades == 1
+    original_checkpoint = json.loads(Path(config.checkpoint_backup_path).read_text(encoding="utf-8"))
+    Path(config.checkpoint_path).write_text("{bad json", encoding="utf-8")
+
+    rerun_result = HistoricalIngestPipeline(client, config).run()
+    assert rerun_result.markets_with_trades == 0
+    rerun_summary = json.loads(rerun_result.run_summary_artifact_path.read_text(encoding="utf-8"))
+    assert rerun_summary["run_summary"]["resumed_from_run_id"] == original_checkpoint["run_id"]
+
+
+def test_resume_skips_already_completed_pending_markets(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    now = datetime.now(UTC)
+    config = _make_config(tmp_path, min_trades=1)
+    checkpoint_payload = {
+        "schema_version": 2,
+        "run_id": "old-run",
+        "current_stage": "retained_market_processing",
+        "last_completed_stage": "market_universe_fetch",
+        "historical_market_cursor": None,
+        "live_market_cursor": None,
+        "market_download_complete": True,
+        "processed_tickers": ["FED-DONE-001"],
+        "pending_retained_markets": [_market("FED-DONE-001", close_time=now - timedelta(days=2), source_tier="live")],
+        "failed_tickers": {},
+        "stage_counters": {},
+        "resume_counters": {"replayed_work_skipped": 0, "replayed_work_replayed": 0},
+        "pagination_stop_reason": "checkpoint_complete",
+        "current_market_ticker": "FED-DONE-001",
+        "updated_at": now.isoformat(),
+    }
+    Path(config.checkpoint_path).parent.mkdir(parents=True, exist_ok=True)
+    Path(config.checkpoint_path).write_text(json.dumps(checkpoint_payload, indent=2), encoding="utf-8")
+    Path(config.checkpoint_backup_path).write_text(json.dumps(checkpoint_payload, indent=2), encoding="utf-8")
+    client = FakeKalshiClient(
+        historical_markets=[],
+        live_markets=[],
+        historical_trades={},
+        live_trades={},
+        historical_candles={},
+        live_candles={},
+        cutoff={
+            "market_settled_ts": (now - timedelta(days=5)).isoformat(),
+            "trades_created_ts": (now - timedelta(days=5)).isoformat(),
+            "orders_updated_ts": (now - timedelta(days=5)).isoformat(),
+        },
+    )
+    monkeypatch.setattr(
+        "trading_platform.kalshi.features.build_kalshi_features",
+        lambda *_, ticker, **__: pl.DataFrame({"timestamp": [now], "close": [55.0], "symbol": [ticker]}),
+    )
+    result = HistoricalIngestPipeline(client, config).run()
+    status_payload = json.loads(result.status_artifact_path.read_text(encoding="utf-8"))
+    assert status_payload["replayed_work_skipped"] >= 1
+    checkpoint_after = json.loads(Path(config.checkpoint_path).read_text(encoding="utf-8"))
+    assert checkpoint_after["pending_retained_markets"] == []
+
+
+def test_cli_resume_modes_are_wired(tmp_path, capsys):
+    config_path = tmp_path / "kalshi.yaml"
+    config_path.write_text(yaml.safe_dump({"ingestion": {"backfill_days": 30}}), encoding="utf-8")
+    explicit_checkpoint = tmp_path / "explicit_checkpoint.json"
+    explicit_checkpoint.write_text("{}", encoding="utf-8")
+    args = Namespace(
+        config=str(config_path),
+        lookback_days=None,
+        period=None,
+        sleep=None,
+        output_dir=None,
+        tickers=None,
+        no_base_rate=False,
+        metaculus=False,
+        skip_validation=True,
+        resume_from_checkpoint=str(explicit_checkpoint),
+        fresh_run=False,
+    )
+    captured: dict[str, object] = {}
+
+    class FakePipeline:
+        def __init__(self, client, config):
+            captured["config"] = config
+
+        def run(self):
+            config = captured["config"]
+            return SimpleNamespace(
+                markets_downloaded=0,
+                markets_with_trades=0,
+                markets_skipped_no_trades=0,
+                markets_failed=0,
+                total_trades=0,
+                total_candlesticks=0,
+                resolution_count=0,
+                feature_files_written=0,
+                normalized_markets_written=0,
+                date_range_start=None,
+                date_range_end=None,
+                manifest_path=Path(config.manifest_path),
+                summary_path=Path(config.summary_path),
+                status_artifact_path=None,
+                run_summary_artifact_path=None,
+            )
+
+    with patch("trading_platform.kalshi.auth.KalshiConfig.from_env", return_value=KalshiConfig("id", DUMMY_PEM, False)), \
+         patch("trading_platform.kalshi.client.KalshiClient"), \
+         patch("trading_platform.kalshi.historical_ingest.HistoricalIngestPipeline", FakePipeline):
+        with patch.object(cli_module, "PROJECT_ROOT", tmp_path):
+            cli_module.cmd_kalshi_historical_ingest(args)
+
+    output = capsys.readouterr().out
+    config = captured["config"]
+    assert config.resume_mode == "explicit"
+    assert config.resume_checkpoint_path == str(explicit_checkpoint)
+    assert "resume   : explicit" in output
+
+
+# ── Direct series fetch tests ─────────────────────────────────────────────────
+
+
+class _SeriesTrackingFakeClient(FakeKalshiClient):
+    """FakeKalshiClient that records series_ticker values passed to get_historical_markets."""
+
+    def __init__(self, **kwargs: object) -> None:
+        super().__init__(**kwargs)
+        self.series_ticker_calls: list[str | None] = []
+
+    def get_historical_markets(self, **kw: object) -> tuple[list[dict[str, object]], str | None]:
+        self.series_ticker_calls.append(kw.get("series_ticker"))
+        return super().get_historical_markets(**kw)
+
+
+def _econ_market(ticker: str, *, close_time: datetime) -> dict[str, object]:
+    """Market helper with Economics category so it passes preferred_categories filter."""
+    m = _market(ticker, close_time=close_time)
+    m["category"] = "economics"
+    return m
+
+
+def test_direct_series_fetch_calls_series_ticker_param(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """_fetch_markets_by_series passes series_ticker to get_historical_markets for each series."""
+    now = datetime.now(UTC)
+    cutoff = now - timedelta(days=7)
+    kxfed_markets = [_econ_market(f"KXFED-{i:03d}", close_time=now - timedelta(days=20)) for i in range(25)]
+
+    client = _SeriesTrackingFakeClient(
+        historical_markets=[(kxfed_markets, None)],
+        live_markets=[([], None)],
+        historical_trades={},
+        live_trades={},
+        historical_candles={},
+        live_candles={},
+        cutoff={
+            "market_settled_ts": cutoff.isoformat(),
+            "trades_created_ts": cutoff.isoformat(),
+            "orders_updated_ts": cutoff.isoformat(),
+        },
+    )
+    monkeypatch.setattr(
+        "trading_platform.kalshi.features.build_kalshi_features",
+        lambda *_, ticker, **__: pl.DataFrame({"timestamp": [now], "close": [55.0], "symbol": [ticker]}),
+    )
+    config = _make_config(tmp_path, use_direct_series_fetch=True, direct_series_tickers=["KXFED"])
+    HistoricalIngestPipeline(client, config).run()
+
+    assert "KXFED" in client.series_ticker_calls, (
+        "Expected get_historical_markets to be called with series_ticker='KXFED'"
+    )
+
+
+def test_direct_series_fetch_skips_historical_pagination_when_sufficient(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When direct series fetch returns >= 20 markets, historical pagination is not run."""
+    now = datetime.now(UTC)
+    cutoff = now - timedelta(days=7)
+    kxfed_markets = [_econ_market(f"KXFED-{i:03d}", close_time=now - timedelta(days=20)) for i in range(25)]
+    _series_pages: list[tuple[list[dict[str, object]], str | None]] = [(kxfed_markets, None)]
+
+    def _fake_get_historical(**kw: object) -> tuple[list[dict[str, object]], str | None]:
+        if kw.get("series_ticker") == "KXFED":
+            return _series_pages.pop(0) if _series_pages else ([], None)
+        return ([_econ_market("PAGINATION-001", close_time=now - timedelta(days=20))], None)
+
+    client = _SeriesTrackingFakeClient(
+        historical_markets=[],
+        live_markets=[([], None)],
+        historical_trades={},
+        live_trades={},
+        historical_candles={},
+        live_candles={},
+        cutoff={
+            "market_settled_ts": cutoff.isoformat(),
+            "trades_created_ts": cutoff.isoformat(),
+            "orders_updated_ts": cutoff.isoformat(),
+        },
+    )
+    client.get_historical_markets = _fake_get_historical  # type: ignore[method-assign]
+
+    monkeypatch.setattr(
+        "trading_platform.kalshi.features.build_kalshi_features",
+        lambda *_, ticker, **__: pl.DataFrame({"timestamp": [now], "close": [55.0], "symbol": [ticker]}),
+    )
+    config = _make_config(
+        tmp_path,
+        use_direct_series_fetch=True,
+        direct_series_tickers=["KXFED"],
+        preferred_categories=["Economics"],
+        skip_historical_pagination=False,
+        use_events_for_category_filter=False,
+    )
+    result = HistoricalIngestPipeline(client, config).run()
+
+    assert result.markets_downloaded >= 25
+    checkpoint = json.loads(Path(config.checkpoint_path).read_text(encoding="utf-8"))
+    all_tickers = list(checkpoint.get("processed_tickers", []))
+    assert not any("PAGINATION" in t for t in all_tickers), (
+        "Historical pagination ran even though direct fetch returned >= 20 markets"
+    )
+
+
+def test_direct_series_fetch_falls_back_when_insufficient(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When direct series fetch returns < 20 markets, historical pagination still runs."""
+    now = datetime.now(UTC)
+    cutoff = now - timedelta(days=7)
+    few_markets = [_econ_market(f"KXFED-{i:03d}", close_time=now - timedelta(days=20)) for i in range(3)]
+    pagination_market = _econ_market("PAGINATION-001", close_time=now - timedelta(days=20))
+    _series_pages: list[tuple[list[dict[str, object]], str | None]] = [(few_markets, None)]
+    _pag_pages: list[tuple[list[dict[str, object]], str | None]] = [([pagination_market], None)]
+    pagination_calls: list[int] = []
+
+    def _fake_get_historical(**kw: object) -> tuple[list[dict[str, object]], str | None]:
+        if kw.get("series_ticker") == "KXFED":
+            return _series_pages.pop(0) if _series_pages else ([], None)
+        pagination_calls.append(1)
+        return _pag_pages.pop(0) if _pag_pages else ([], None)
+
+    client = _SeriesTrackingFakeClient(
+        historical_markets=[],
+        live_markets=[([], None)],
+        historical_trades={},
+        live_trades={},
+        historical_candles={},
+        live_candles={},
+        cutoff={
+            "market_settled_ts": cutoff.isoformat(),
+            "trades_created_ts": cutoff.isoformat(),
+            "orders_updated_ts": cutoff.isoformat(),
+        },
+    )
+    client.get_historical_markets = _fake_get_historical  # type: ignore[method-assign]
+
+    monkeypatch.setattr(
+        "trading_platform.kalshi.features.build_kalshi_features",
+        lambda *_, ticker, **__: pl.DataFrame({"timestamp": [now], "close": [55.0], "symbol": [ticker]}),
+    )
+    config = _make_config(
+        tmp_path,
+        use_direct_series_fetch=True,
+        direct_series_tickers=["KXFED"],
+        preferred_categories=["Economics"],
+        skip_historical_pagination=False,
+        use_events_for_category_filter=False,
+    )
+    HistoricalIngestPipeline(client, config).run()
+
+    assert pagination_calls, (
+        "Expected historical pagination to run as fallback when direct fetch returned < 20 markets"
+    )
+
+
+def test_direct_series_fetch_disabled_uses_normal_pagination(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When use_direct_series_fetch=False, series_ticker param is never sent."""
+    now = datetime.now(UTC)
+    cutoff = now - timedelta(days=7)
+    market = _econ_market("PAGINATION-001", close_time=now - timedelta(days=20))
+
+    client = _SeriesTrackingFakeClient(
+        historical_markets=[([market], None)],
+        live_markets=[([], None)],
+        historical_trades={},
+        live_trades={},
+        historical_candles={},
+        live_candles={},
+        cutoff={
+            "market_settled_ts": cutoff.isoformat(),
+            "trades_created_ts": cutoff.isoformat(),
+            "orders_updated_ts": cutoff.isoformat(),
+        },
+    )
+    monkeypatch.setattr(
+        "trading_platform.kalshi.features.build_kalshi_features",
+        lambda *_, ticker, **__: pl.DataFrame({"timestamp": [now], "close": [55.0], "symbol": [ticker]}),
+    )
+    config = _make_config(tmp_path, use_direct_series_fetch=False, direct_series_tickers=["KXFED"])
+    HistoricalIngestPipeline(client, config).run()
+
+    assert all(st is None for st in client.series_ticker_calls), (
+        "Expected no series_ticker params when use_direct_series_fetch=False"
+    )
+
+
+def test_skip_historical_pagination_never_calls_get_historical_markets(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When skip_historical_pagination=True, historical pagination must not run."""
+    now = datetime.now(UTC)
+    historical_market = _econ_market("HIST-001", close_time=now - timedelta(days=20))
+
+    client = FakeKalshiClient(
+        historical_markets=[([historical_market], None)],
+        live_markets=[([], None)],
+        historical_trades={},
+        live_trades={},
+        historical_candles={},
+        live_candles={},
+        cutoff={
+            "market_settled_ts": (now - timedelta(days=7)).isoformat(),
+            "trades_created_ts": (now - timedelta(days=7)).isoformat(),
+            "orders_updated_ts": (now - timedelta(days=7)).isoformat(),
+        },
+    )
+    monkeypatch.setattr(
+        "trading_platform.kalshi.features.build_kalshi_features",
+        lambda *_, ticker, **__: pl.DataFrame({"timestamp": [now], "close": [55.0], "symbol": [ticker]}),
+    )
+    config = _make_config(tmp_path, skip_historical_pagination=True, use_direct_series_fetch=False)
+    HistoricalIngestPipeline(client, config).run()
+
+    # The historical_markets_pages list was never consumed — get_historical_markets
+    # was never called.
+    assert len(client.historical_markets_pages) == 1, (
+        "get_historical_markets should not be called when skip_historical_pagination=True"
+    )
+
+
+def test_events_only_mode_skips_historical_pagination_even_when_skip_flag_disabled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    now = datetime.now(UTC)
+    cutoff = now - timedelta(days=7)
+    economics_market = _econ_market("KXECON-001", close_time=now - timedelta(days=2))
+    historical_calls: list[dict[str, object]] = []
+
+    client = FakeKalshiClient(
+        historical_markets=[([_econ_market("HIST-001", close_time=now - timedelta(days=20))], None)],
+        live_markets=[],
+        historical_trades={
+            "KXECON-001": [
+                _trade("KXECON-001", "e1", now - timedelta(days=2, hours=1)),
+                _trade("KXECON-001", "e2", now - timedelta(days=2)),
+            ],
+        },
+        live_trades={},
+        historical_candles={},
+        live_candles={"KXECON-001": _candles()},
+        cutoff={
+            "market_settled_ts": cutoff.isoformat(),
+            "trades_created_ts": cutoff.isoformat(),
+            "orders_updated_ts": cutoff.isoformat(),
+        },
+    )
+
+    def _fake_get_historical_markets(**kw: object) -> tuple[list[dict[str, object]], str | None]:
+        historical_calls.append(dict(kw))
+        return client.historical_markets_pages.pop(0) if client.historical_markets_pages else ([], None)
+
+    def _fake_get_events_raw(**_: object) -> tuple[list[dict[str, object]], str | None]:
+        return ([{"event_ticker": "EV-ECON-1"}], None)
+
+    def _fake_get_markets_raw(**kw: object) -> tuple[list[dict[str, object]], str | None]:
+        assert kw.get("event_ticker") == "EV-ECON-1"
+        return ([economics_market], None)
+
+    client.get_historical_markets = _fake_get_historical_markets  # type: ignore[method-assign]
+    client.get_events_raw = _fake_get_events_raw  # type: ignore[method-assign]
+    client.get_markets_raw = _fake_get_markets_raw  # type: ignore[method-assign]
+
+    monkeypatch.setattr(
+        "trading_platform.kalshi.features.build_kalshi_features",
+        lambda *_, ticker, **__: pl.DataFrame({"timestamp": [now], "close": [55.0], "symbol": [ticker]}),
+    )
+
+    config = _make_config(
+        tmp_path,
+        preferred_categories=["Economics"],
+        use_events_for_category_filter=True,
+        use_direct_series_fetch=False,
+        skip_historical_pagination=False,
+        min_trades=1,
+    )
+    result = HistoricalIngestPipeline(client, config).run()
+
+    assert historical_calls == []
+    assert result.markets_downloaded == 1
+    assert result.total_trades == 2
+    normalized_markets = pl.read_parquet(config.normalized_markets_path)
+    assert normalized_markets.get_column("ticker").to_list() == ["KXECON-001"]

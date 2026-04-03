@@ -36,6 +36,8 @@ def test_cli_builds_historical_ingest_config_from_yaml_and_project_root(tmp_path
         no_base_rate=False,
         metaculus=False,
         skip_validation=True,
+        resume_from_checkpoint=None,
+        fresh_run=False,
     )
 
     captured: dict[str, object] = {}
@@ -97,6 +99,11 @@ def test_cli_builds_historical_ingest_config_from_yaml_and_project_root(tmp_path
     assert config.summary_path == str(project_root / "data/kalshi/raw/ingest_summary.json")
     assert config.base_rate_db_path == str(project_root / "data/kalshi/base_rates/base_rate_db.json")
     assert config.status_artifacts_root == str(project_root / "artifacts/kalshi_ingest")
+    assert config.checkpoint_backup_path == str(project_root / "data/kalshi/raw/ingest_checkpoint.bak.json")
+    assert config.resume is True
+    assert config.resume_mode == "latest"
+    assert config.resume_checkpoint_path is None
+    assert config.resume_recovery_mode == "automatic"
     assert config.lookback_days == 123
     assert config.min_trades == 5
     assert config.run_base_rate is True
@@ -144,6 +151,7 @@ def test_cli_builds_historical_ingest_config_from_yaml_and_project_root(tmp_path
     assert f"normalized: {project_root / 'data/kalshi/normalized/trades'}" in output
     assert f"features : {project_root / 'data/kalshi/features/real'}" in output
     assert f"status   : {project_root / 'artifacts/kalshi_ingest'}" in output
+    assert "resume recovery: automatic" in output
     assert "Starting download... (this may take several minutes for 123 days of data)" in output
 
 
@@ -161,6 +169,8 @@ def test_cli_allows_flag_overrides_for_sleep_and_feature_toggles(tmp_path):
         no_base_rate=True,
         metaculus=True,
         skip_validation=True,
+        resume_from_checkpoint=None,
+        fresh_run=False,
     )
 
     captured: dict[str, object] = {}
@@ -234,6 +244,8 @@ def test_cli_reads_authenticated_live_retry_config_from_yaml(tmp_path):
         no_base_rate=False,
         metaculus=False,
         skip_validation=True,
+        resume_from_checkpoint=None,
+        fresh_run=False,
     )
 
     captured: dict[str, object] = {}
@@ -309,6 +321,8 @@ def test_cli_uses_yaml_auth_private_key_path_for_live_bridge(tmp_path, monkeypat
         no_base_rate=False,
         metaculus=False,
         skip_validation=True,
+        resume_from_checkpoint=None,
+        fresh_run=False,
     )
 
     class FakePipeline:
@@ -344,3 +358,252 @@ def test_cli_uses_yaml_auth_private_key_path_for_live_bridge(tmp_path, monkeypat
     assert client_config.api_key_id == "yaml-key-id"
     assert client_config.private_key_path == str(key_path)
     assert "BEGIN RSA PRIVATE KEY" in client_config.private_key_pem
+
+
+def test_cli_supports_fresh_run_mode(tmp_path, capsys):
+    config_path = tmp_path / "kalshi.yaml"
+    config_path.write_text(yaml.safe_dump({"ingestion": {"backfill_days": 30}}), encoding="utf-8")
+
+    args = Namespace(
+        config=str(config_path),
+        lookback_days=None,
+        period=None,
+        sleep=None,
+        output_dir=None,
+        tickers=None,
+        no_base_rate=False,
+        metaculus=False,
+        skip_validation=True,
+        resume_from_checkpoint=None,
+        fresh_run=True,
+    )
+
+    captured: dict[str, object] = {}
+
+    class FakePipeline:
+        def __init__(self, client, config):
+            captured["config"] = config
+
+        def run(self):
+            config = captured["config"]
+            return SimpleNamespace(
+                markets_downloaded=0,
+                markets_with_trades=0,
+                markets_skipped_no_trades=0,
+                markets_failed=0,
+                total_trades=0,
+                total_candlesticks=0,
+                resolution_count=0,
+                feature_files_written=0,
+                normalized_markets_written=0,
+                date_range_start=None,
+                date_range_end=None,
+                manifest_path=Path(config.manifest_path),
+                summary_path=Path(config.summary_path),
+                status_artifact_path=None,
+                run_summary_artifact_path=None,
+            )
+
+    with patch("trading_platform.kalshi.auth.KalshiConfig.from_env", return_value=KalshiConfig("id", DUMMY_PEM, False)), \
+         patch("trading_platform.kalshi.client.KalshiClient"), \
+         patch("trading_platform.kalshi.historical_ingest.HistoricalIngestPipeline", FakePipeline):
+        with patch.object(cli_module, "PROJECT_ROOT", tmp_path):
+            cli_module.cmd_kalshi_historical_ingest(args)
+
+    output = capsys.readouterr().out
+    config = captured["config"]
+    assert config.resume is False
+    assert config.resume_mode == "fresh"
+    assert "resume   : fresh" in output
+
+
+def test_cli_supports_explicit_resume_recovery_mode(tmp_path, capsys):
+    config_path = tmp_path / "kalshi.yaml"
+    config_path.write_text(yaml.safe_dump({"ingestion": {"backfill_days": 30}}), encoding="utf-8")
+
+    args = Namespace(
+        config=str(config_path),
+        lookback_days=None,
+        period=None,
+        sleep=None,
+        output_dir=None,
+        tickers=None,
+        no_base_rate=False,
+        metaculus=False,
+        skip_validation=True,
+        resume_from_checkpoint=None,
+        fresh_run=False,
+        resume_recovery_mode="fail_fast",
+    )
+
+    captured: dict[str, object] = {}
+
+    class FakePipeline:
+        def __init__(self, client, config):
+            captured["config"] = config
+
+        def run(self):
+            config = captured["config"]
+            return SimpleNamespace(
+                markets_downloaded=0,
+                markets_with_trades=0,
+                markets_skipped_no_trades=0,
+                markets_failed=0,
+                total_trades=0,
+                total_candlesticks=0,
+                resolution_count=0,
+                feature_files_written=0,
+                normalized_markets_written=0,
+                date_range_start=None,
+                date_range_end=None,
+                manifest_path=Path(config.manifest_path),
+                summary_path=Path(config.summary_path),
+                status_artifact_path=None,
+                run_summary_artifact_path=None,
+            )
+
+    with patch("trading_platform.kalshi.auth.KalshiConfig.from_env", return_value=KalshiConfig("id", DUMMY_PEM, False)), \
+         patch("trading_platform.kalshi.client.KalshiClient"), \
+         patch("trading_platform.kalshi.historical_ingest.HistoricalIngestPipeline", FakePipeline):
+        with patch.object(cli_module, "PROJECT_ROOT", tmp_path):
+            cli_module.cmd_kalshi_historical_ingest(args)
+
+    output = capsys.readouterr().out
+    assert captured["config"].resume_recovery_mode == "fail_fast"
+
+
+def test_cli_direct_series_fetch_config_wired_from_yaml(tmp_path, capsys):
+    """use_direct_series_fetch and direct_series_tickers are read from YAML and passed to config."""
+    config_path = tmp_path / "kalshi.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "environment": {"demo": False},
+                "ingestion": {"backfill_days": 30},
+                "historical_ingest": {
+                    "use_direct_series_fetch": True,
+                    "direct_series_tickers": ["KXINFL", "KXFED"],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    args = Namespace(
+        config=str(config_path),
+        lookback_days=None,
+        period=None,
+        sleep=None,
+        output_dir=None,
+        tickers=None,
+        no_base_rate=False,
+        metaculus=False,
+        skip_validation=True,
+        resume_from_checkpoint=None,
+        fresh_run=False,
+    )
+    captured: dict[str, object] = {}
+
+    class FakePipeline:
+        def __init__(self, client, config):
+            captured["config"] = config
+
+        def run(self):
+            config = captured["config"]
+            return SimpleNamespace(
+                markets_downloaded=0,
+                markets_with_trades=0,
+                markets_skipped_no_trades=0,
+                markets_failed=0,
+                total_trades=0,
+                total_candlesticks=0,
+                resolution_count=0,
+                feature_files_written=0,
+                normalized_markets_written=0,
+                date_range_start=None,
+                date_range_end=None,
+                manifest_path=Path(config.manifest_path),
+                summary_path=Path(config.summary_path),
+                status_artifact_path=None,
+                run_summary_artifact_path=None,
+            )
+
+    fake_kalshi_config = KalshiConfig(api_key_id="public-only", private_key_pem=DUMMY_PEM, demo=True)
+    with patch("trading_platform.kalshi.auth.KalshiConfig.from_env", side_effect=ValueError("missing")), \
+         patch(
+             "trading_platform.cli.commands.kalshi_historical_ingest._build_public_only_config",
+             return_value=fake_kalshi_config,
+         ), \
+         patch("trading_platform.kalshi.client.KalshiClient"), \
+         patch("trading_platform.kalshi.historical_ingest.HistoricalIngestPipeline", FakePipeline):
+        with patch.object(cli_module, "PROJECT_ROOT", tmp_path):
+            cli_module.cmd_kalshi_historical_ingest(args)
+
+    config = captured["config"]
+    assert config.use_direct_series_fetch is True
+    assert config.direct_series_tickers == ["KXINFL", "KXFED"]
+
+
+def test_cli_skip_historical_pagination_defaults_true(tmp_path, capsys):
+    config_path = tmp_path / "kalshi.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "environment": {"demo": False},
+                "ingestion": {"backfill_days": 30},
+                "historical_ingest": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    args = Namespace(
+        config=str(config_path),
+        lookback_days=None,
+        period=None,
+        sleep=None,
+        output_dir=None,
+        tickers=None,
+        no_base_rate=False,
+        metaculus=False,
+        skip_validation=True,
+        resume_from_checkpoint=None,
+        fresh_run=False,
+    )
+    captured: dict[str, object] = {}
+
+    class FakePipeline:
+        def __init__(self, client, config):
+            captured["config"] = config
+
+        def run(self):
+            config = captured["config"]
+            return SimpleNamespace(
+                markets_downloaded=0,
+                markets_with_trades=0,
+                markets_skipped_no_trades=0,
+                markets_failed=0,
+                total_trades=0,
+                total_candlesticks=0,
+                resolution_count=0,
+                feature_files_written=0,
+                normalized_markets_written=0,
+                date_range_start=None,
+                date_range_end=None,
+                manifest_path=Path(config.manifest_path),
+                summary_path=Path(config.summary_path),
+                status_artifact_path=None,
+                run_summary_artifact_path=None,
+            )
+
+    fake_kalshi_config = KalshiConfig(api_key_id="public-only", private_key_pem=DUMMY_PEM, demo=True)
+    with patch("trading_platform.kalshi.auth.KalshiConfig.from_env", side_effect=ValueError("missing")), \
+         patch(
+             "trading_platform.cli.commands.kalshi_historical_ingest._build_public_only_config",
+             return_value=fake_kalshi_config,
+         ), \
+         patch("trading_platform.kalshi.client.KalshiClient"), \
+         patch("trading_platform.kalshi.historical_ingest.HistoricalIngestPipeline", FakePipeline):
+        with patch.object(cli_module, "PROJECT_ROOT", tmp_path):
+            cli_module.cmd_kalshi_historical_ingest(args)
+
+    config = captured["config"]
+    assert config.skip_historical_pagination is True

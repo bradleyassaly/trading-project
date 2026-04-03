@@ -396,3 +396,34 @@ def read_loop_decisions() -> dict[str, Any]:
 
     safe_entries = [_safe_row(e) for e in entries[-20:]]
     return {"available": True, "data": safe_entries}
+
+
+def read_polymarket_live_markets() -> dict[str, Any]:
+    db_path = DATA_ROOT / "polymarket" / "live" / "prices.db"
+    if not db_path.exists():
+        return {"available": False, "reason": "Live collector not running", "data": [], "count": 0}
+    try:
+        import sqlite3
+        conn = sqlite3.connect(str(db_path), check_same_thread=False)
+        conn.execute("PRAGMA journal_mode=WAL")
+        rows = conn.execute("""
+            SELECT market_id, price, timestamp
+            FROM ticks
+            WHERE id IN (
+                SELECT MAX(id) FROM ticks GROUP BY market_id
+            )
+        """).fetchall()
+        conn.close()
+    except Exception:
+        return {"available": False, "reason": "Failed to read live DB", "data": [], "count": 0}
+
+    markets = [
+        {
+            "market_id": market_id,
+            "yes_price": round(price * 100, 2),
+            "last_tick_at": ts,
+            "live": True,
+        }
+        for market_id, price, ts in rows
+    ]
+    return {"available": True, "data": markets, "count": len(markets)}

@@ -17,7 +17,9 @@ from __future__ import annotations
 import csv
 import json
 import logging
+import random
 import re
+import time
 from collections.abc import Callable
 from collections import Counter
 from dataclasses import dataclass, field
@@ -26,6 +28,7 @@ from pathlib import Path
 from typing import Any
 
 import polars as pl
+import requests
 from trading_platform.ingest.status import IngestStatusTracker
 
 logger = logging.getLogger(__name__)
@@ -40,6 +43,7 @@ KALSHI_INGEST_STAGE_NAMES = [
     "checkpoint_write",
     "final_summary",
 ]
+KALSHI_RESUME_RECOVERY_MODES = {"automatic", "backup_only", "cursor_reset_only", "fail_fast"}
 
 
 class KalshiIngestFailFastError(RuntimeError):
@@ -48,6 +52,27 @@ class KalshiIngestFailFastError(RuntimeError):
     def __init__(self, reason: str, message: str) -> None:
         super().__init__(message)
         self.reason = reason
+
+
+class KalshiResumeCursorRecoveryError(RuntimeError):
+    """Raised when a saved resume cursor cannot be recovered safely."""
+
+    def __init__(
+        self,
+        *,
+        endpoint: str,
+        cursor: str,
+        attempts: int,
+        recovery_actions: list[str],
+        last_http_status: int | None,
+        message: str,
+    ) -> None:
+        super().__init__(message)
+        self.endpoint = endpoint
+        self.cursor = cursor
+        self.attempts = attempts
+        self.recovery_actions = recovery_actions
+        self.last_http_status = last_http_status
 
 # ── Resolution helpers ────────────────────────────────────────────────────────
 
@@ -158,7 +183,7 @@ def _market_close_time_in_range(
     min_close_ts: int | None = None,
     max_close_ts: int | None = None,
 ) -> bool:
-    close_time = _parse_iso_ts(_market_key(market, "close_time", "expiration_time"))
+    close_time = _market_time_value(market)
     if close_time is None:
         return False
     close_ts = int(close_time.timestamp())
@@ -191,8 +216,24 @@ def _market_key(market: dict[str, Any], *keys: str) -> Any:
     return None
 
 
+def _market_time_raw(market: dict[str, Any]) -> Any:
+    return _market_key(
+        market,
+        "close_time",
+        "close_date",
+        "expiration_time",
+        "expiration_ts",
+        "end_date",
+    )
+
+
+def _market_time_value(market: dict[str, Any]) -> datetime | None:
+    return _parse_iso_ts(_market_time_raw(market))
+
+
 def _normalise_market_row(raw_market: dict[str, Any]) -> dict[str, Any]:
     resolution_price = _resolution_price_from_market(raw_market)
+    mapped_time = _market_time_raw(raw_market)
     return {
         "ticker": _market_key(raw_market, "ticker", "market_ticker") or "",
         "title": raw_market.get("title", ""),
@@ -201,12 +242,24 @@ def _normalise_market_row(raw_market: dict[str, Any]) -> dict[str, Any]:
         "event_ticker": _market_key(raw_market, "event_ticker", "eventTicker"),
         "status": raw_market.get("status"),
         "category": _market_key(raw_market, "category", "market_category"),
-        "close_time": _market_key(raw_market, "close_time", "expiration_time"),
+        "close_time": mapped_time,
+        "expiration_time": _market_key(raw_market, "expiration_time", "expiration_ts"),
+        "settlement_time": _market_key(raw_market, "settlement_time", "settled_time"),
         "result": raw_market.get("result"),
         "resolution_price": resolution_price,
         "settlement_value_dollars": raw_market.get("settlement_value_dollars"),
+        "yes_bid": _market_key(raw_market, "yes_bid_dollars", "yes_bid"),
+        "yes_ask": _market_key(raw_market, "yes_ask_dollars", "yes_ask"),
+        "no_bid": _market_key(raw_market, "no_bid_dollars", "no_bid"),
+        "no_ask": _market_key(raw_market, "no_ask_dollars", "no_ask"),
+        "last_price": _market_key(raw_market, "last_price_dollars", "last_price"),
+        "yes_price": _market_key(raw_market, "yes_price_dollars", "yes_price"),
+        "no_price": _market_key(raw_market, "no_price_dollars", "no_price"),
         "volume": raw_market.get("volume"),
+        "open_interest": raw_market.get("open_interest"),
         "liquidity_dollars": raw_market.get("liquidity_dollars") or raw_market.get("liquidity"),
+        "source_endpoint": raw_market.get("source_endpoint"),
+        "source_mode": raw_market.get("source_mode"),
         "source_tier": raw_market.get("source_tier"),
         "ingested_at": raw_market.get("ingested_at"),
     }
@@ -321,6 +374,11 @@ class HistoricalIngestConfig:
     authenticated_rate_limit_jitter_max_sec: float = 0.25
     max_live_pages_without_retained_markets: int = 25
     max_raw_markets_without_processing: int = 2000
+    resume_cursor_max_retries: int = 3
+    resume_cursor_backoff_base_sec: float = 1.0
+    resume_cursor_backoff_max_sec: float = 10.0
+    resume_cursor_jitter_max_sec: float = 0.5
+    resume_recovery_mode: str = "automatic"
 
     # Optional signal enrichment
     run_base_rate: bool = True
@@ -362,6 +420,32 @@ class HistoricalIngestConfig:
     # markets in these categories are processed.  Example: ["Economics", "Politics"].
     preferred_categories: list[str] = field(default_factory=list)
 
+    # When True (default) and preferred_categories is non-empty, use the
+    # /events endpoint to discover matching events by category, then fetch
+    # markets per event via /markets?event_ticker=X.  This replaces the
+    # cursor-based /markets?status=settled live bridge which does NOT filter
+    # by category server-side.  Set to False to revert to the old blind
+    # pagination approach.
+    use_events_for_category_filter: bool = True
+
+    # When True, skip /historical/markets pagination entirely.
+    # Use alongside use_events_for_category_filter=True so the pipeline
+    # discovers markets only via /events?category=X, with no historical
+    # archive scan.
+    skip_historical_pagination: bool = True
+
+    # When True (default), use the live /markets endpoint with category/series
+    # filters (and individual /historical/markets/{ticker} lookups) instead of
+    # blind pagination through /historical/markets.  Falls back to paginated
+    # scanning (capped at 50 pages) if fewer than 20 markets are returned.
+    use_direct_series_fetch: bool = True
+    direct_series_tickers: list[str] = field(default_factory=list)
+
+    # Specific market tickers to fetch individually via /historical/markets/{ticker}.
+    # Used for older markets that predate the live API's settled-market window.
+    # Example: ["KXINFL-25DEC", "KXFED-25DEC"]
+    known_tickers: list[str] = field(default_factory=list)
+
 
 # ── Result ────────────────────────────────────────────────────────────────────
 
@@ -400,6 +484,7 @@ class HistoricalIngestPipeline:
         self.config = config or HistoricalIngestConfig()
         self._processing_started_logged = False
         self._checkpoint_write_count = 0
+        self._loaded_backup_checkpoint: dict[str, Any] | None = None
 
         # Lazy-load signal helpers
         self._base_rate_signal: Any = None
@@ -447,6 +532,13 @@ class HistoricalIngestPipeline:
                 "replayed_work_skipped": 0,
                 "replayed_work_replayed": 0,
             },
+            "resume_cursor_retry_count": 0,
+            "resume_cursor_last_http_status": None,
+            "resume_recovery_action": None,
+            "resumed_from_backup_checkpoint": False,
+            "resumed_with_cursor_reset": False,
+            "backup_checkpoint_recovery_attempted": False,
+            "cursor_reset_recovery_attempted": False,
             "pagination_stop_reason": None,
             "current_market_ticker": None,
             "updated_at": None,
@@ -456,13 +548,16 @@ class HistoricalIngestPipeline:
         normalized = self._default_checkpoint_state()
         normalized.update(checkpoint)
         normalized["processed_tickers"] = sorted({str(ticker) for ticker in checkpoint.get("processed_tickers", [])})
+        removed_pending_count = 0
         pending = []
         seen_pending: set[str] = set()
         for market in checkpoint.get("pending_retained_markets", []):
             if not isinstance(market, dict):
+                removed_pending_count += 1
                 continue
             ticker = str(_market_key(market, "ticker", "market_ticker") or "")
             if not ticker or ticker in normalized["processed_tickers"] or ticker in seen_pending:
+                removed_pending_count += 1
                 continue
             seen_pending.add(ticker)
             pending.append(market)
@@ -473,9 +568,16 @@ class HistoricalIngestPipeline:
         if not isinstance(resume_counters, dict):
             resume_counters = {}
         normalized["resume_counters"] = {
-            "replayed_work_skipped": int(resume_counters.get("replayed_work_skipped", 0) or 0),
+            "replayed_work_skipped": int(resume_counters.get("replayed_work_skipped", 0) or 0) + removed_pending_count,
             "replayed_work_replayed": int(resume_counters.get("replayed_work_replayed", 0) or 0),
         }
+        normalized["resume_cursor_retry_count"] = int(checkpoint.get("resume_cursor_retry_count", 0) or 0)
+        normalized["resume_cursor_last_http_status"] = checkpoint.get("resume_cursor_last_http_status")
+        normalized["resume_recovery_action"] = checkpoint.get("resume_recovery_action")
+        normalized["resumed_from_backup_checkpoint"] = bool(checkpoint.get("resumed_from_backup_checkpoint", False))
+        normalized["resumed_with_cursor_reset"] = bool(checkpoint.get("resumed_with_cursor_reset", False))
+        normalized["backup_checkpoint_recovery_attempted"] = bool(checkpoint.get("backup_checkpoint_recovery_attempted", False))
+        normalized["cursor_reset_recovery_attempted"] = bool(checkpoint.get("cursor_reset_recovery_attempted", False))
         stage_counters = checkpoint.get("stage_counters", {})
         normalized["stage_counters"] = stage_counters if isinstance(stage_counters, dict) else {}
         return normalized
@@ -520,6 +622,214 @@ class HistoricalIngestPipeline:
             market for market in checkpoint.get("pending_retained_markets", [])
             if str(_market_key(market, "ticker", "market_ticker") or "") != ticker
         ]
+
+    @staticmethod
+    def _http_status_from_exception(exc: Exception) -> int | None:
+        response = getattr(exc, "response", None)
+        if response is None:
+            return None
+        return getattr(response, "status_code", None)
+
+    def _is_retryable_resume_cursor_error(self, exc: Exception) -> bool:
+        if isinstance(exc, (requests.Timeout, requests.ConnectionError)):
+            return True
+        status_code = self._http_status_from_exception(exc)
+        return status_code in {502, 503, 504}
+
+    def _validate_resume_recovery_mode(self) -> str:
+        mode = str(self.config.resume_recovery_mode or "automatic").strip().lower()
+        if mode not in KALSHI_RESUME_RECOVERY_MODES:
+            raise ValueError(
+                f"Unsupported resume_recovery_mode={self.config.resume_recovery_mode!r}; "
+                f"expected one of {sorted(KALSHI_RESUME_RECOVERY_MODES)}"
+            )
+        return mode
+
+    def _resume_cursor_delay(self, attempt: int) -> float:
+        exponential_delay = min(
+            self.config.resume_cursor_backoff_base_sec * (2 ** max(attempt - 1, 0)),
+            self.config.resume_cursor_backoff_max_sec,
+        )
+        return exponential_delay + random.uniform(0.0, self.config.resume_cursor_jitter_max_sec)
+
+    def _merge_checkpoints_for_resume(
+        self,
+        primary: dict[str, Any],
+        backup: dict[str, Any],
+    ) -> dict[str, Any]:
+        merged = self._normalise_checkpoint(backup)
+        merged["processed_tickers"] = sorted(
+            set(merged.get("processed_tickers", [])) | set(primary.get("processed_tickers", []))
+        )
+        merged_pending = list(merged.get("pending_retained_markets", []))
+        merged_seen = {
+            str(_market_key(market, "ticker", "market_ticker") or "")
+            for market in merged_pending
+        }
+        for market in primary.get("pending_retained_markets", []):
+            ticker = str(_market_key(market, "ticker", "market_ticker") or "")
+            if not ticker or ticker in merged["processed_tickers"] or ticker in merged_seen:
+                continue
+            merged_pending.append(market)
+            merged_seen.add(ticker)
+        merged["pending_retained_markets"] = merged_pending
+        merged_failed = dict(merged.get("failed_tickers", {}))
+        for ticker, details in primary.get("failed_tickers", {}).items():
+            merged_failed[ticker] = details
+        merged["failed_tickers"] = merged_failed
+        merged["resume_counters"] = {
+            "replayed_work_skipped": max(
+                int(primary.get("resume_counters", {}).get("replayed_work_skipped", 0) or 0),
+                int(merged.get("resume_counters", {}).get("replayed_work_skipped", 0) or 0),
+            ),
+            "replayed_work_replayed": max(
+                int(primary.get("resume_counters", {}).get("replayed_work_replayed", 0) or 0),
+                int(merged.get("resume_counters", {}).get("replayed_work_replayed", 0) or 0),
+            ),
+        }
+        return merged
+
+    def _load_backup_checkpoint(self) -> dict[str, Any] | None:
+        if self._loaded_backup_checkpoint is not None:
+            return self._normalise_checkpoint(self._loaded_backup_checkpoint)
+        backup_path = self._checkpoint_backup_file_path()
+        if not backup_path.exists():
+            return None
+        try:
+            return self._normalise_checkpoint(json.loads(backup_path.read_text(encoding="utf-8")))
+        except (OSError, json.JSONDecodeError) as exc:
+            logger.warning("Could not load backup checkpoint %s: %s", backup_path, exc)
+            return None
+
+    def _fetch_live_page_with_resume_recovery(
+        self,
+        *,
+        checkpoint: dict[str, Any],
+        tracker: IngestStatusTracker | None,
+    ) -> tuple[list[dict[str, Any]], str | None]:
+        resume_recovery_mode = self._validate_resume_recovery_mode()
+        cursor = checkpoint.get("live_market_cursor")
+        is_resume_cursor = bool(cursor)
+        attempts = 0
+        last_http_status: int | None = None
+        recovery_actions: list[str] = []
+        while True:
+            try:
+                raw_markets, next_cursor = self.client.get_markets_raw(
+                    status="settled",
+                    limit=200,
+                    cursor=cursor,
+                )
+                checkpoint["resume_cursor_retry_count"] = attempts
+                if last_http_status is not None:
+                    checkpoint["resume_cursor_last_http_status"] = last_http_status
+                if tracker is not None:
+                    tracker.set_run_counters(
+                        resume_cursor=cursor,
+                        resume_cursor_retry_count=attempts,
+                        resume_cursor_last_http_status=checkpoint.get("resume_cursor_last_http_status"),
+                        resume_recovery_action=recovery_actions[-1] if recovery_actions else None,
+                        resumed_from_backup_checkpoint=bool(checkpoint.get("resumed_from_backup_checkpoint", False)),
+                        resumed_with_cursor_reset=bool(checkpoint.get("resumed_with_cursor_reset", False)),
+                        backup_checkpoint_recovery_attempted=bool(checkpoint.get("backup_checkpoint_recovery_attempted", False)),
+                        cursor_reset_recovery_attempted=bool(checkpoint.get("cursor_reset_recovery_attempted", False)),
+                    )
+                return raw_markets, next_cursor
+            except Exception as exc:
+                if not is_resume_cursor or not self._is_retryable_resume_cursor_error(exc):
+                    raise
+                attempts += 1
+                last_http_status = self._http_status_from_exception(exc)
+                checkpoint["resume_cursor_retry_count"] = attempts
+                checkpoint["resume_cursor_last_http_status"] = last_http_status
+                if tracker is not None:
+                    tracker.set_run_counters(
+                        resume_cursor=cursor,
+                        resume_cursor_retry_count=attempts,
+                        resume_cursor_last_http_status=last_http_status,
+                        backup_checkpoint_recovery_attempted=bool(checkpoint.get("backup_checkpoint_recovery_attempted", False)),
+                        cursor_reset_recovery_attempted=bool(checkpoint.get("cursor_reset_recovery_attempted", False)),
+                    )
+                if attempts <= self.config.resume_cursor_max_retries:
+                    delay = self._resume_cursor_delay(attempts)
+                    logger.warning(
+                        "Kalshi live resume cursor fetch failed for /markets cursor=%s status=%s; retrying in %.2fs (attempt %d/%d).",
+                        cursor,
+                        last_http_status or "timeout",
+                        delay,
+                        attempts,
+                        self.config.resume_cursor_max_retries,
+                    )
+                    time.sleep(delay)
+                    continue
+                backup_allowed = resume_recovery_mode in {"automatic", "backup_only"}
+                cursor_reset_allowed = resume_recovery_mode in {"automatic", "cursor_reset_only"}
+                if backup_allowed:
+                    checkpoint["backup_checkpoint_recovery_attempted"] = True
+                    backup_checkpoint = self._load_backup_checkpoint()
+                    if backup_checkpoint is not None and backup_checkpoint.get("live_market_cursor") != cursor:
+                        merged = self._merge_checkpoints_for_resume(checkpoint, backup_checkpoint)
+                        merged["resumed_from_backup_checkpoint"] = True
+                        merged["resume_recovery_action"] = "backup_checkpoint_fallback"
+                        merged["resume_cursor_retry_count"] = attempts
+                        merged["resume_cursor_last_http_status"] = last_http_status
+                        checkpoint.clear()
+                        checkpoint.update(merged)
+                        cursor = checkpoint.get("live_market_cursor")
+                        is_resume_cursor = bool(cursor)
+                        recovery_actions.append("backup_checkpoint_fallback")
+                        self._save_checkpoint(checkpoint, tracker=tracker, message="resume cursor recovered via backup checkpoint")
+                        if tracker is not None:
+                            tracker.set_run_counters(
+                                resume_cursor=cursor,
+                                resume_cursor_retry_count=attempts,
+                                resume_cursor_last_http_status=last_http_status,
+                                resume_recovery_action="backup_checkpoint_fallback",
+                                resumed_from_backup_checkpoint=True,
+                                backup_checkpoint_recovery_attempted=True,
+                            )
+                        attempts = 0
+                        continue
+                    recovery_actions.append(
+                        "backup_checkpoint_unavailable_or_same_cursor"
+                        if backup_checkpoint is None or backup_checkpoint.get("live_market_cursor") == cursor
+                        else "backup_checkpoint_attempted"
+                    )
+                if cursor_reset_allowed:
+                    checkpoint["cursor_reset_recovery_attempted"] = True
+                    checkpoint["live_market_cursor"] = None
+                    checkpoint["resumed_with_cursor_reset"] = True
+                    checkpoint["resume_recovery_action"] = "cursor_reset"
+                    checkpoint["resume_cursor_retry_count"] = attempts
+                    checkpoint["resume_cursor_last_http_status"] = last_http_status
+                    recovery_actions.append("cursor_reset")
+                    self._save_checkpoint(checkpoint, tracker=tracker, message="resume cursor cleared after repeated failures")
+                    if tracker is not None:
+                        tracker.set_run_counters(
+                            resume_cursor=None,
+                            resume_cursor_retry_count=attempts,
+                            resume_cursor_last_http_status=last_http_status,
+                            resume_recovery_action="cursor_reset",
+                            resumed_with_cursor_reset=True,
+                            backup_checkpoint_recovery_attempted=bool(checkpoint.get("backup_checkpoint_recovery_attempted", False)),
+                            cursor_reset_recovery_attempted=True,
+                        )
+                    cursor = None
+                    is_resume_cursor = False
+                    continue
+                recovery_actions_text = ", ".join(recovery_actions) if recovery_actions else "none"
+                raise KalshiResumeCursorRecoveryError(
+                    endpoint="/markets?status=settled",
+                    cursor=str(cursor),
+                    attempts=attempts,
+                    recovery_actions=recovery_actions,
+                    last_http_status=last_http_status,
+                    message=(
+                        "Kalshi resume cursor recovery failed for endpoint /markets?status=settled "
+                        f"cursor={cursor} after {attempts} attempts; last_http_status={last_http_status}; "
+                        f"recovery_actions_attempted={recovery_actions_text}"
+                    ),
+                ) from exc
 
     @staticmethod
     def _log_stage_progress(stage_name: str, status: str, **fields: Any) -> str:
@@ -655,8 +965,14 @@ class HistoricalIngestPipeline:
     def _load_checkpoint(self) -> dict[str, Any]:
         checkpoint_path = self._checkpoint_file_path()
         backup_path = self._checkpoint_backup_file_path()
+        self._loaded_backup_checkpoint = None
         if not self.config.resume or self.config.resume_mode == "fresh":
             return self._default_checkpoint_state()
+        if backup_path.exists():
+            try:
+                self._loaded_backup_checkpoint = self._normalise_checkpoint(json.loads(backup_path.read_text(encoding="utf-8")))
+            except (OSError, json.JSONDecodeError) as exc:
+                logger.warning("Could not load checkpoint %s: %s", backup_path, exc)
         for candidate in (checkpoint_path, backup_path):
             if not candidate.exists():
                 continue
@@ -891,6 +1207,154 @@ class HistoricalIngestPipeline:
                 log_line=None,
             )
 
+    def _fetch_live_markets_by_events(
+        self,
+        *,
+        start_dt: datetime,
+        end_dt: datetime,
+        cutoff_ts: dict[str, datetime | None],
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        """Fetch post-cutoff settled markets via the /events endpoint.
+
+        NOTE: The Kalshi ``/events`` endpoint does not actually filter by ``category``
+        server-side (the parameter is silently ignored).  This method is therefore
+        best used with ``preferred_categories`` as a client-side allowlist: it
+        paginates through all events and applies the category check per market in
+        ``_filter_markets_for_ingest_page``.  For known Economics/Politics series,
+        prefer ``use_direct_series_fetch=True`` + ``direct_series_tickers`` which
+        avoids scanning the full event universe.
+
+        Returns a flat list of retained markets and a diagnostics dict.
+        """
+        cfg = self.config
+        live_start_ts = int(start_dt.timestamp())
+        live_end_ts = int(end_dt.timestamp())
+        if cutoff_ts.get("market_settled_ts") is not None:
+            live_start_ts = max(live_start_ts, int(cutoff_ts["market_settled_ts"].timestamp()))
+
+        all_retained: list[dict[str, Any]] = []
+        total_fetched = 0
+        total_retained = 0
+        event_count = 0
+        pages_fetched = 0
+
+        for category in cfg.preferred_categories:
+            cursor: str | None = None
+            while True:
+                events, cursor = self.client.get_events_raw(
+                    category=category,
+                    with_nested_markets=False,
+                    limit=200,
+                    cursor=cursor,
+                )
+                pages_fetched += 1
+                event_count += len(events)
+                for event in events:
+                    event_ticker = event.get("event_ticker") or event.get("ticker")
+                    if not event_ticker:
+                        continue
+                    markets_page, _ = self.client.get_markets_raw(
+                        status="settled",
+                        event_ticker=event_ticker,
+                        limit=200,
+                    )
+                    page_markets = []
+                    for market in markets_page:
+                        if not _market_close_time_in_range(
+                            market,
+                            min_close_ts=live_start_ts,
+                            max_close_ts=live_end_ts,
+                        ):
+                            continue
+                        market["source_tier"] = "live"
+                        market["ingested_at"] = end_dt.isoformat()
+                        page_markets.append(market)
+                    total_fetched += len(page_markets)
+                    retained, _ = self._filter_markets_for_ingest_page(page_markets)
+                    all_retained.extend(retained)
+                    total_retained += len(retained)
+                if not cursor:
+                    break
+
+        logger.info(
+            "Events-based category fetch complete: categories=%s pages=%d events=%d fetched=%d retained=%d",
+            cfg.preferred_categories,
+            pages_fetched,
+            event_count,
+            total_fetched,
+            total_retained,
+        )
+        return all_retained, {
+            "total_markets_fetched": total_fetched,
+            "total_markets_retained": total_retained,
+            "event_count": event_count,
+            "pages_fetched": pages_fetched,
+        }
+
+    def _fetch_markets_by_series(
+        self,
+        *,
+        start_dt: datetime,
+        end_dt: datetime,
+        cutoff_ts: dict[str, datetime | None],
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        """Fetch markets for each known series ticker directly via series_ticker param.
+
+        Returns a flat list of all retained markets and a diagnostics dict.
+        """
+        cfg = self.config
+        min_close_ts = int(start_dt.timestamp())
+        max_close_ts = int(end_dt.timestamp())
+        historical_max_close_ts = max_close_ts
+        if cutoff_ts["market_settled_ts"] is not None:
+            historical_max_close_ts = min(max_close_ts, int(cutoff_ts["market_settled_ts"].timestamp()) - 1)
+
+        all_retained: list[dict[str, Any]] = []
+        total_fetched = 0
+        total_retained = 0
+        for series in cfg.direct_series_tickers:
+            cursor: str | None = None
+            while True:
+                markets, cursor = self.client.get_historical_markets(
+                    limit=100,
+                    cursor=cursor,
+                    min_close_ts=min_close_ts,
+                    max_close_ts=historical_max_close_ts,
+                    sleep=cfg.request_sleep_sec,
+                    series_ticker=series,
+                )
+                page_markets = []
+                for market in markets:
+                    market["source_tier"] = "historical"
+                    market["ingested_at"] = end_dt.isoformat()
+                    page_markets.append(market)
+                total_fetched += len(page_markets)
+                retained_markets, _ = self._filter_markets_for_ingest_page(page_markets)
+                all_retained.extend(retained_markets)
+                total_retained += len(retained_markets)
+                logger.debug(
+                    "Direct series fetch %s: page fetched=%d retained=%d cursor=%s",
+                    series,
+                    len(page_markets),
+                    len(retained_markets),
+                    bool(cursor),
+                )
+                if not cursor:
+                    break
+
+        diagnostics: dict[str, Any] = {
+            "total_markets_fetched": total_fetched,
+            "total_markets_retained": total_retained,
+            "series_count": len(cfg.direct_series_tickers),
+        }
+        logger.info(
+            "Direct series fetch complete: %d series, %d fetched, %d retained",
+            len(cfg.direct_series_tickers),
+            total_fetched,
+            total_retained,
+        )
+        return all_retained, diagnostics
+
     def _download_market_universe(
         self,
         *,
@@ -927,14 +1391,143 @@ class HistoricalIngestPipeline:
         if checkpoint.get("market_download_complete"):
             diagnostics["pagination_stop_reason"] = "checkpoint_complete"
             return diagnostics
+        self._update_checkpoint_progress(checkpoint, current_stage="market_universe_fetch")
 
         historical_max_close_ts = max_close_ts
         if cutoff_ts["market_settled_ts"] is not None:
             historical_max_close_ts = min(max_close_ts, int(cutoff_ts["market_settled_ts"].timestamp()) - 1)
 
+        # ── Direct series fetch (fast path) ──────────────────────────────────
+        # Fetch known Economics/Politics series tickers directly instead of
+        # scanning all markets page by page.  Falls back to full pagination
+        # (capped at 50 pages) when direct fetch returns fewer than 20 markets.
+        live_start_dt = start_dt
+        if cutoff_ts["market_settled_ts"] is not None:
+            live_start_dt = max(start_dt, cutoff_ts["market_settled_ts"])
+
+        def _queue_retained_markets(
+            markets: list[dict[str, Any]],
+            *,
+            source_name: str,
+            page_number: int,
+        ) -> None:
+            for market in markets:
+                if len(diagnostics["retained_sample_tickers"]) < 5:
+                    diagnostics["retained_sample_tickers"].append(market.get("ticker", ""))
+                self._enqueue_retained_market(checkpoint, market)
+                self._update_checkpoint_progress(
+                    checkpoint,
+                    current_stage="market_universe_fetch",
+                    stage_counters={
+                        "pages_fetched": diagnostics["pages_fetched"],
+                        "total_markets_retained": diagnostics["total_markets_retained"],
+                    },
+                )
+                self._save_checkpoint(checkpoint, tracker=tracker, message=f"retained market queued: {market.get('ticker', '')}")
+                if on_retained_market is not None:
+                    if diagnostics["first_retained_processing_ticker"] is None:
+                        diagnostics["first_retained_processing_ticker"] = market.get("ticker", "")
+                        diagnostics["first_retained_processing_source"] = source_name
+                        diagnostics["first_retained_processing_page"] = page_number
+                    on_retained_market(market)
+
+        events_mode_enabled = bool(cfg.preferred_categories and cfg.use_events_for_category_filter)
+        events_only_mode = events_mode_enabled and not cfg.use_direct_series_fetch
+        if events_mode_enabled:
+            events_markets, events_diag = self._fetch_live_markets_by_events(
+                start_dt=live_start_dt,
+                end_dt=end_dt,
+                cutoff_ts=cutoff_ts,
+            )
+            diagnostics["pages_fetched"] += events_diag.get("pages_fetched", 0)
+            diagnostics["total_markets_fetched"] += events_diag["total_markets_fetched"]
+            diagnostics["total_markets_retained"] += events_diag["total_markets_retained"]
+            if events_diag.get("pages_fetched", 0) > 0:
+                if events_diag["total_markets_retained"] > 0:
+                    diagnostics["pages_with_retained_markets"] += events_diag["pages_fetched"]
+                else:
+                    diagnostics["pages_without_retained_markets"] += events_diag["pages_fetched"]
+            _queue_retained_markets(
+                events_markets,
+                source_name="live_events",
+                page_number=0,
+            )
+            checkpoint["live_market_cursor"] = None
+            if cfg.skip_historical_pagination or events_only_mode:
+                checkpoint["historical_market_cursor"] = None
+                diagnostics["pagination_stop_reason"] = (
+                    "events_only_mode"
+                    if events_only_mode
+                    else "events_fetch_skip_historical_pagination"
+                )
+                checkpoint["market_download_complete"] = True
+                self._update_checkpoint_progress(
+                    checkpoint,
+                    current_stage="market_universe_fetch",
+                    last_completed_stage="market_universe_fetch",
+                    current_market_ticker=None,
+                    pagination_stop_reason=diagnostics["pagination_stop_reason"],
+                )
+                self._save_checkpoint(
+                    checkpoint,
+                    tracker=tracker,
+                    message=(
+                        "market universe fetch complete (events-only discovery)"
+                        if events_only_mode
+                        else "market universe fetch complete (skip_historical_pagination=True)"
+                    ),
+                )
+                logger.info(
+                    "Kalshi market-universe fetch complete: pages=%d fetched=%d retained=%d discarded=%d sample=%s",
+                    diagnostics["pages_fetched"],
+                    diagnostics["total_markets_fetched"],
+                    diagnostics["total_markets_retained"],
+                    diagnostics["total_markets_discarded"],
+                    diagnostics["retained_sample_tickers"] or ["<none>"],
+                )
+                return diagnostics
+
+        direct_fetch_done = False
+        max_historical_fallback_pages = 50
+        if cfg.use_direct_series_fetch and cfg.direct_series_tickers:
+            direct_markets, direct_diag = self._fetch_markets_by_series(
+                start_dt=start_dt,
+                end_dt=end_dt,
+                cutoff_ts=cutoff_ts,
+            )
+            diagnostics["total_markets_fetched"] += direct_diag["total_markets_fetched"]
+            diagnostics["total_markets_retained"] += direct_diag["total_markets_retained"]
+            _queue_retained_markets(
+                direct_markets,
+                source_name="direct_series",
+                page_number=0,
+            )
+            if direct_diag["total_markets_retained"] >= 20:
+                # Sufficient markets found via direct fetch — skip historical pagination.
+                direct_fetch_done = True
+                checkpoint["historical_market_cursor"] = None
+                self._update_checkpoint_progress(checkpoint, current_stage="market_universe_fetch")
+                self._save_checkpoint(checkpoint, tracker=tracker, message="historical pagination skipped (direct series fetch sufficient)")
+                logger.info(
+                    "Direct series fetch returned %d markets (>= 20); skipping full historical pagination.",
+                    direct_diag["total_markets_retained"],
+                )
+            else:
+                logger.info(
+                    "Direct series fetch returned only %d markets (< 20); falling back to historical pagination (max %d pages).",
+                    direct_diag["total_markets_retained"],
+                    max_historical_fallback_pages,
+                )
+
         cursor = checkpoint.get("historical_market_cursor")
         historical_pages = 0
-        if historical_max_close_ts >= min_close_ts:
+        if cfg.skip_historical_pagination:
+            # Skip /historical/markets scan entirely — the events-based live
+            # fetch (or direct-series fetch) is the sole discovery mechanism.
+            checkpoint["historical_market_cursor"] = None
+            self._update_checkpoint_progress(checkpoint, current_stage="market_universe_fetch")
+            self._save_checkpoint(checkpoint, tracker=tracker, message="historical pagination skipped (skip_historical_pagination=True)")
+        elif not direct_fetch_done and historical_max_close_ts >= min_close_ts:
             while True:
                 markets, cursor = self.client.get_historical_markets(
                     limit=cfg.market_page_size,
@@ -963,15 +1556,11 @@ class HistoricalIngestPipeline:
                     diagnostics["pages_with_retained_markets"] += 1
                 else:
                     diagnostics["pages_without_retained_markets"] += 1
-                for market in retained_markets:
-                    if len(diagnostics["retained_sample_tickers"]) < 5:
-                        diagnostics["retained_sample_tickers"].append(market.get("ticker", ""))
-                    if on_retained_market is not None:
-                        if diagnostics["first_retained_processing_ticker"] is None:
-                            diagnostics["first_retained_processing_ticker"] = market.get("ticker", "")
-                            diagnostics["first_retained_processing_source"] = "historical"
-                            diagnostics["first_retained_processing_page"] = historical_pages
-                        on_retained_market(market)
+                _queue_retained_markets(
+                    retained_markets,
+                    source_name="historical",
+                    page_number=historical_pages,
+                )
                 self._log_market_fetch_progress(
                     source="historical",
                     page_number=historical_pages,
@@ -986,130 +1575,174 @@ class HistoricalIngestPipeline:
                     pages_without_retained_markets=diagnostics["pages_without_retained_markets"],
                 )
                 checkpoint["historical_market_cursor"] = cursor
+                self._update_checkpoint_progress(
+                    checkpoint,
+                    current_stage="market_universe_fetch",
+                    stage_counters={"pages_fetched": diagnostics["pages_fetched"]},
+                )
                 self._save_checkpoint(checkpoint, tracker=tracker, message="historical market cursor updated")
                 if not cursor:
                     break
-        else:
+                if cfg.use_direct_series_fetch and historical_pages >= max_historical_fallback_pages:
+                    logger.info(
+                        "Historical pagination fallback cap reached (%d pages); stopping historical scan.",
+                        max_historical_fallback_pages,
+                    )
+                    break
+        elif not direct_fetch_done:
             checkpoint["historical_market_cursor"] = None
+            self._update_checkpoint_progress(checkpoint, current_stage="market_universe_fetch")
             self._save_checkpoint(checkpoint, tracker=tracker, message="historical market cursor skipped")
 
         live_start_dt = start_dt
         if cutoff_ts["market_settled_ts"] is not None:
             live_start_dt = max(start_dt, cutoff_ts["market_settled_ts"])
 
-        cursor = checkpoint.get("live_market_cursor")
-        live_pages = 0
-        while True:
-            raw_markets, cursor = self.client.get_markets_raw(
-                status="settled",
-                limit=200,
-                cursor=cursor,
-            )
-            live_pages += 1
-            diagnostics["pages_fetched"] += 1
-            page_close_times = [
-                close_time
-                for close_time in (_parse_iso_ts(_market_key(market, "close_time", "expiration_time")) for market in raw_markets)
-                if close_time is not None
-            ]
-            oldest_page_close_time = min(page_close_times) if page_close_times else None
-            newest_page_close_time = max(page_close_times) if page_close_times else None
-            range_filtered_markets = [
-                market
-                for market in raw_markets
-                if _market_close_time_in_range(
-                    market,
-                    min_close_ts=int(live_start_dt.timestamp()),
-                    max_close_ts=max_close_ts,
+        # ── Live market fetch: events-based (category-filtered) or cursor pagination ──
+        # When preferred_categories is set and use_events_for_category_filter is True,
+        # use /events?category=X to discover matching events, then fetch each event's
+        # settled markets.  This replaces blind cursor pagination through /markets which
+        # does NOT filter by category server-side.
+        if events_mode_enabled:
+            checkpoint["live_market_cursor"] = None
+            diagnostics["pagination_stop_reason"] = "events_based_fetch_complete"
+        else:
+            cursor = checkpoint.get("live_market_cursor")
+            live_pages = 0
+            while True:
+                checkpoint["live_market_cursor"] = cursor
+                raw_markets, cursor = self._fetch_live_page_with_resume_recovery(
+                    checkpoint=checkpoint,
+                    tracker=tracker,
                 )
-            ]
-            page_markets = []
-            for market in range_filtered_markets:
-                market["source_tier"] = "live"
-                market["ingested_at"] = end_dt.isoformat()
-                page_markets.append(market)
-            retained_markets, page_diagnostics = self._filter_markets_for_ingest_page(page_markets)
-            diagnostics["total_markets_fetched"] += page_diagnostics["fetched"]
-            diagnostics["total_markets_retained"] += page_diagnostics["retained"]
-            diagnostics["total_markets_discarded"] += page_diagnostics["discarded"]
-            diagnostics["discarded_by_category"] += page_diagnostics["discarded_by_reason"]["category"]
-            diagnostics["discarded_by_series_pattern"] += page_diagnostics["discarded_by_reason"]["series_pattern"]
-            diagnostics["discarded_by_min_volume"] += page_diagnostics["discarded_by_reason"]["min_volume"]
-            diagnostics["discarded_synthetic"] += page_diagnostics["discarded_by_reason"]["synthetic"]
-            diagnostics["last_cursor"] = cursor
-            if page_diagnostics["retained"] > 0:
-                diagnostics["pages_with_retained_markets"] += 1
-            else:
-                diagnostics["pages_without_retained_markets"] += 1
-            for market in retained_markets:
-                if len(diagnostics["retained_sample_tickers"]) < 5:
-                    diagnostics["retained_sample_tickers"].append(market.get("ticker", ""))
-                if on_retained_market is not None:
-                    if diagnostics["first_retained_processing_ticker"] is None:
-                        diagnostics["first_retained_processing_ticker"] = market.get("ticker", "")
-                        diagnostics["first_retained_processing_source"] = "live"
-                        diagnostics["first_retained_processing_page"] = live_pages
-                    on_retained_market(market)
-            processed_after_page = len(checkpoint.get("processed_tickers", []))
-            if page_diagnostics["retained"] == 0:
-                consecutive_live_zero_retained_pages += 1
-            else:
-                consecutive_live_zero_retained_pages = 0
-            self._log_market_fetch_progress(
-                source="live",
-                page_number=live_pages,
-                cursor=cursor,
-                page_diagnostics=page_diagnostics,
-                total_fetched=diagnostics["total_markets_fetched"],
-                total_retained=diagnostics["total_markets_retained"],
-                progress_log_interval_pages=progress_log_interval_pages,
-                retained_sample=diagnostics["retained_sample_tickers"],
-                tracker=tracker,
-                pages_with_retained_markets=diagnostics["pages_with_retained_markets"],
-                pages_without_retained_markets=diagnostics["pages_without_retained_markets"],
-            )
-            checkpoint["live_market_cursor"] = cursor
-            self._save_checkpoint(checkpoint, tracker=tracker, message="live market cursor updated")
-            if oldest_page_close_time is not None and oldest_page_close_time < live_start_dt and not range_filtered_markets:
-                diagnostics["pagination_stop_reason"] = "aged_out_pages"
-                logger.info(
-                    "Stopping live settled-market pagination after page %d because page close-time range %s -> %s is older than ingest window start %s.",
-                    live_pages,
-                    oldest_page_close_time.isoformat(),
-                    newest_page_close_time.isoformat() if newest_page_close_time is not None else "<unknown>",
-                    live_start_dt.isoformat(),
+                live_pages += 1
+                diagnostics["pages_fetched"] += 1
+                page_close_times = [
+                    close_time
+                    for close_time in (_parse_iso_ts(_market_key(market, "close_time", "expiration_time")) for market in raw_markets)
+                    if close_time is not None
+                ]
+                oldest_page_close_time = min(page_close_times) if page_close_times else None
+                newest_page_close_time = max(page_close_times) if page_close_times else None
+                range_filtered_markets = [
+                    market
+                    for market in raw_markets
+                    if _market_close_time_in_range(
+                        market,
+                        min_close_ts=int(live_start_dt.timestamp()),
+                        max_close_ts=max_close_ts,
+                    )
+                ]
+                page_markets = []
+                for market in range_filtered_markets:
+                    market["source_tier"] = "live"
+                    market["ingested_at"] = end_dt.isoformat()
+                    page_markets.append(market)
+                retained_markets, page_diagnostics = self._filter_markets_for_ingest_page(page_markets)
+                diagnostics["total_markets_fetched"] += page_diagnostics["fetched"]
+                diagnostics["total_markets_retained"] += page_diagnostics["retained"]
+                diagnostics["total_markets_discarded"] += page_diagnostics["discarded"]
+                diagnostics["discarded_by_category"] += page_diagnostics["discarded_by_reason"]["category"]
+                diagnostics["discarded_by_series_pattern"] += page_diagnostics["discarded_by_reason"]["series_pattern"]
+                diagnostics["discarded_by_min_volume"] += page_diagnostics["discarded_by_reason"]["min_volume"]
+                diagnostics["discarded_synthetic"] += page_diagnostics["discarded_by_reason"]["synthetic"]
+                diagnostics["last_cursor"] = cursor
+                if page_diagnostics["retained"] > 0:
+                    diagnostics["pages_with_retained_markets"] += 1
+                else:
+                    diagnostics["pages_without_retained_markets"] += 1
+                for market in retained_markets:
+                    if len(diagnostics["retained_sample_tickers"]) < 5:
+                        diagnostics["retained_sample_tickers"].append(market.get("ticker", ""))
+                    self._enqueue_retained_market(checkpoint, market)
+                    self._update_checkpoint_progress(
+                        checkpoint,
+                        current_stage="market_universe_fetch",
+                        stage_counters={
+                            "pages_fetched": diagnostics["pages_fetched"],
+                            "total_markets_retained": diagnostics["total_markets_retained"],
+                        },
+                    )
+                    self._save_checkpoint(checkpoint, tracker=tracker, message=f"retained market queued: {market.get('ticker', '')}")
+                    if on_retained_market is not None:
+                        if diagnostics["first_retained_processing_ticker"] is None:
+                            diagnostics["first_retained_processing_ticker"] = market.get("ticker", "")
+                            diagnostics["first_retained_processing_source"] = "live"
+                            diagnostics["first_retained_processing_page"] = live_pages
+                        on_retained_market(market)
+                processed_after_page = len(checkpoint.get("processed_tickers", []))
+                if page_diagnostics["retained"] == 0:
+                    consecutive_live_zero_retained_pages += 1
+                else:
+                    consecutive_live_zero_retained_pages = 0
+                self._log_market_fetch_progress(
+                    source="live",
+                    page_number=live_pages,
+                    cursor=cursor,
+                    page_diagnostics=page_diagnostics,
+                    total_fetched=diagnostics["total_markets_fetched"],
+                    total_retained=diagnostics["total_markets_retained"],
+                    progress_log_interval_pages=progress_log_interval_pages,
+                    retained_sample=diagnostics["retained_sample_tickers"],
+                    tracker=tracker,
+                    pages_with_retained_markets=diagnostics["pages_with_retained_markets"],
+                    pages_without_retained_markets=diagnostics["pages_without_retained_markets"],
                 )
-                checkpoint["live_market_cursor"] = None
-                self._save_checkpoint(checkpoint, tracker=tracker, message="live market cursor aged out")
-                break
-            if (
-                consecutive_live_zero_retained_pages >= cfg.max_live_pages_without_retained_markets
-                and processed_after_page == 0
-            ):
-                diagnostics["pagination_stop_reason"] = "fail_fast_zero_retained_pages"
-                error = KalshiIngestFailFastError(
-                    "zero_retained_pages",
-                    "Kalshi live bridge fetched "
-                    f"{live_pages} live pages without any retained markets entering processing. "
-                    "Check preferred_categories / excluded_series_patterns / min_volume against the live /markets payload.",
+                checkpoint["live_market_cursor"] = cursor
+                self._update_checkpoint_progress(
+                    checkpoint,
+                    current_stage="market_universe_fetch",
+                    stage_counters={"pages_fetched": diagnostics["pages_fetched"]},
                 )
-                error.diagnostics = dict(diagnostics)
-                raise error
-            if diagnostics["total_markets_retained"] > cfg.max_raw_markets_without_processing and processed_after_page == 0:
-                diagnostics["pagination_stop_reason"] = "fail_fast_retained_without_processing"
-                error = KalshiIngestFailFastError(
-                    "retained_without_processing",
-                    "Kalshi ingest fail-fast: retained raw-market attempts exceeded "
-                    f"{cfg.max_raw_markets_without_processing} before any market finished processing. "
-                    "This usually means live settled pagination is traversing too much of the universe or retained markets are never reaching normalization.",
-                )
-                error.diagnostics = dict(diagnostics)
-                raise error
-            if not cursor:
-                diagnostics["pagination_stop_reason"] = "cursor_exhausted"
-                break
+                self._save_checkpoint(checkpoint, tracker=tracker, message="live market cursor updated")
+                if oldest_page_close_time is not None and oldest_page_close_time < live_start_dt and not range_filtered_markets:
+                    diagnostics["pagination_stop_reason"] = "aged_out_pages"
+                    logger.info(
+                        "Stopping live settled-market pagination after page %d because page close-time range %s -> %s is older than ingest window start %s.",
+                        live_pages,
+                        oldest_page_close_time.isoformat(),
+                        newest_page_close_time.isoformat() if newest_page_close_time is not None else "<unknown>",
+                        live_start_dt.isoformat(),
+                    )
+                    checkpoint["live_market_cursor"] = None
+                    self._update_checkpoint_progress(checkpoint, current_stage="market_universe_fetch", pagination_stop_reason="aged_out_pages")
+                    self._save_checkpoint(checkpoint, tracker=tracker, message="live market cursor aged out")
+                    break
+                if (
+                    consecutive_live_zero_retained_pages >= cfg.max_live_pages_without_retained_markets
+                    and processed_after_page == 0
+                ):
+                    diagnostics["pagination_stop_reason"] = "fail_fast_zero_retained_pages"
+                    error = KalshiIngestFailFastError(
+                        "zero_retained_pages",
+                        "Kalshi live bridge fetched "
+                        f"{live_pages} live pages without any retained markets entering processing. "
+                        "Check preferred_categories / excluded_series_patterns / min_volume against the live /markets payload.",
+                    )
+                    error.diagnostics = dict(diagnostics)
+                    raise error
+                if diagnostics["total_markets_retained"] > cfg.max_raw_markets_without_processing and processed_after_page == 0:
+                    diagnostics["pagination_stop_reason"] = "fail_fast_retained_without_processing"
+                    error = KalshiIngestFailFastError(
+                        "retained_without_processing",
+                        "Kalshi ingest fail-fast: retained raw-market attempts exceeded "
+                        f"{cfg.max_raw_markets_without_processing} before any market finished processing. "
+                        "This usually means live settled pagination is traversing too much of the universe or retained markets are never reaching normalization.",
+                    )
+                    error.diagnostics = dict(diagnostics)
+                    raise error
+                if not cursor:
+                    diagnostics["pagination_stop_reason"] = "cursor_exhausted"
+                    break
 
         checkpoint["market_download_complete"] = True
+        self._update_checkpoint_progress(
+            checkpoint,
+            current_stage="market_universe_fetch",
+            last_completed_stage="market_universe_fetch",
+            current_market_ticker=None,
+            pagination_stop_reason=diagnostics.get("pagination_stop_reason"),
+        )
         self._save_checkpoint(checkpoint, tracker=tracker, message="market universe fetch complete")
         logger.info(
             "Kalshi market-universe fetch complete: pages=%d fetched=%d retained=%d discarded=%d sample=%s",
@@ -1362,7 +1995,14 @@ class HistoricalIngestPipeline:
             return "skipped"
         if ticker in processed_tickers:
             logger.info("Skipping already-processed market %s from checkpoint.", ticker)
+            self._remove_pending_market(checkpoint, ticker)
             return "skipped"
+        self._update_checkpoint_progress(
+            checkpoint,
+            current_stage="retained_market_processing",
+            current_market_ticker=ticker,
+        )
+        self._save_checkpoint(checkpoint, tracker=tracker, message=f"started retained market processing: {ticker}")
         if tracker is not None:
             retained_started = tracker.run.retained_markets_started + 1
             tracker.update_stage(
@@ -1416,6 +2056,19 @@ class HistoricalIngestPipeline:
             logger.warning("Failed to fetch trades for %s: %s", ticker, exc)
             metrics["markets_failed"] += 1
             skipped_or_failed_tickers.append({"ticker": ticker, "stage": "trades", "error": str(exc)})
+            checkpoint["failed_tickers"][ticker] = {
+                "attempts": int(checkpoint["failed_tickers"].get(ticker, {}).get("attempts", 0)) + 1,
+                "last_error": str(exc),
+                "last_stage": "trades",
+                "updated_at": datetime.now(UTC).isoformat(),
+            }
+            self._remove_pending_market(checkpoint, ticker)
+            self._update_checkpoint_progress(
+                checkpoint,
+                current_stage="retained_market_processing",
+                current_market_ticker=None,
+            )
+            self._save_checkpoint(checkpoint, tracker=tracker, message=f"failed retained market processing: {ticker}")
             if tracker is not None:
                 tracker.update_stage(
                     "retained_market_processing",
@@ -1436,6 +2089,14 @@ class HistoricalIngestPipeline:
             skipped_or_failed_tickers.append(
                 {"ticker": ticker, "stage": "min_trades", "trade_count": len(raw_trades), "min_trades": cfg.min_trades}
             )
+            self._remove_pending_market(checkpoint, ticker)
+            checkpoint["failed_tickers"].pop(ticker, None)
+            self._update_checkpoint_progress(
+                checkpoint,
+                current_stage="retained_market_processing",
+                current_market_ticker=None,
+            )
+            self._save_checkpoint(checkpoint, tracker=tracker, message=f"skipped retained market: {ticker}")
             if tracker is not None:
                 tracker.update_stage(
                     "retained_market_processing",
@@ -1460,6 +2121,19 @@ class HistoricalIngestPipeline:
             logger.warning("Trade parquet write failed for %s: %s", ticker, exc)
             metrics["markets_failed"] += 1
             skipped_or_failed_tickers.append({"ticker": ticker, "stage": "trade_parquet", "error": str(exc)})
+            checkpoint["failed_tickers"][ticker] = {
+                "attempts": int(checkpoint["failed_tickers"].get(ticker, {}).get("attempts", 0)) + 1,
+                "last_error": str(exc),
+                "last_stage": "trade_parquet",
+                "updated_at": datetime.now(UTC).isoformat(),
+            }
+            self._remove_pending_market(checkpoint, ticker)
+            self._update_checkpoint_progress(
+                checkpoint,
+                current_stage="retained_market_processing",
+                current_market_ticker=None,
+            )
+            self._save_checkpoint(checkpoint, tracker=tracker, message=f"failed retained market processing: {ticker}")
             if tracker is not None:
                 tracker.update_stage(
                     "retained_market_processing",
@@ -1524,6 +2198,14 @@ class HistoricalIngestPipeline:
 
         processed_tickers.add(ticker)
         checkpoint["processed_tickers"] = sorted(processed_tickers)
+        checkpoint["failed_tickers"].pop(ticker, None)
+        self._remove_pending_market(checkpoint, ticker)
+        self._update_checkpoint_progress(
+            checkpoint,
+            current_stage="retained_market_processing",
+            last_completed_stage="retained_market_processing",
+            current_market_ticker=None,
+        )
         self._save_checkpoint(checkpoint, tracker=tracker, message=f"processed ticker checkpointed: {ticker}")
         if tracker is not None:
             tracker.update_stage(
@@ -1647,6 +2329,21 @@ class HistoricalIngestPipeline:
             "fail_fast_triggered": fail_fast_triggered,
             "fail_fast_reason": fail_fast_reason,
             "stop_reason": effective_stop_reason,
+            "resumed_from_run_id": tracker.run.resumed_from_run_id,
+            "resumed_from_checkpoint": tracker.run.resumed_from_checkpoint,
+            "resumed_stage": tracker.run.resumed_stage,
+            "resumed_processed_ticker_count": tracker.run.resumed_processed_ticker_count,
+            "replayed_work_skipped": tracker.run.replayed_work_skipped,
+            "replayed_work_replayed": tracker.run.replayed_work_replayed,
+            "configured_resume_recovery_mode": tracker.run.configured_resume_recovery_mode,
+            "resume_cursor": tracker.run.resume_cursor,
+            "resume_cursor_retry_count": tracker.run.resume_cursor_retry_count,
+            "resume_cursor_last_http_status": tracker.run.resume_cursor_last_http_status,
+            "resume_recovery_action": tracker.run.resume_recovery_action,
+            "resumed_from_backup_checkpoint": tracker.run.resumed_from_backup_checkpoint,
+            "resumed_with_cursor_reset": tracker.run.resumed_with_cursor_reset,
+            "backup_checkpoint_recovery_attempted": tracker.run.backup_checkpoint_recovery_attempted,
+            "cursor_reset_recovery_attempted": tracker.run.cursor_reset_recovery_attempted,
             "first_retained_processing_milestone": {
                 "ticker": download_diagnostics.get("first_retained_processing_ticker"),
                 "source": download_diagnostics.get("first_retained_processing_source"),
@@ -1656,6 +2353,11 @@ class HistoricalIngestPipeline:
                 "checkpoint_writes": self._checkpoint_write_count,
                 "processed_tickers": checkpoint.get("processed_tickers", []),
                 "market_download_complete": bool(checkpoint.get("market_download_complete")),
+                "pending_retained_markets": [
+                    str(_market_key(market, "ticker", "market_ticker") or "")
+                    for market in checkpoint.get("pending_retained_markets", [])
+                ],
+                "failed_tickers": checkpoint.get("failed_tickers", {}),
             },
             "top_error_categories": self._top_error_categories(skipped_or_failed_tickers),
             "skipped_or_failed": skipped_or_failed_tickers,
@@ -1699,6 +2401,7 @@ class HistoricalIngestPipeline:
             "feature_files_written": 0,
         }
         tracker.start_run(current_stage="initialization")
+        tracker.set_run_counters(configured_resume_recovery_mode=self._validate_resume_recovery_mode())
         tracker.start_stage("initialization", message="initializing Kalshi historical ingest")
         try:
             self._make_dirs()
@@ -1708,12 +2411,40 @@ class HistoricalIngestPipeline:
             tracker.start_stage("checkpoint_load", message="loading checkpoint state")
             checkpoint = self._load_checkpoint()
             processed_tickers = set(str(ticker) for ticker in checkpoint.get("processed_tickers", []))
+            resumed_from_run_id = checkpoint.get("run_id")
+            checkpoint["resumed_from_run_id"] = resumed_from_run_id
+            checkpoint["run_id"] = tracker.run.run_id
+            tracker.set_run_counters(
+                resumed_from_run_id=resumed_from_run_id,
+                resumed_from_checkpoint=str(self._checkpoint_file_path()) if self.config.resume and self.config.resume_mode != "fresh" else None,
+                resumed_stage=checkpoint.get("current_stage") or checkpoint.get("last_completed_stage"),
+                resumed_processed_ticker_count=len(processed_tickers),
+                replayed_work_skipped=int(checkpoint.get("resume_counters", {}).get("replayed_work_skipped", 0)),
+                replayed_work_replayed=int(checkpoint.get("resume_counters", {}).get("replayed_work_replayed", 0)),
+                processed_ticker_count=len(processed_tickers),
+                markets_completed=len(processed_tickers),
+                resume_cursor=checkpoint.get("live_market_cursor"),
+                resume_cursor_retry_count=int(checkpoint.get("resume_cursor_retry_count", 0) or 0),
+                resume_cursor_last_http_status=checkpoint.get("resume_cursor_last_http_status"),
+                resume_recovery_action=checkpoint.get("resume_recovery_action"),
+                resumed_from_backup_checkpoint=bool(checkpoint.get("resumed_from_backup_checkpoint", False)),
+                resumed_with_cursor_reset=bool(checkpoint.get("resumed_with_cursor_reset", False)),
+                configured_resume_recovery_mode=self._validate_resume_recovery_mode(),
+                backup_checkpoint_recovery_attempted=bool(checkpoint.get("backup_checkpoint_recovery_attempted", False)),
+                cursor_reset_recovery_attempted=bool(checkpoint.get("cursor_reset_recovery_attempted", False)),
+            )
             tracker.complete_stage(
                 "checkpoint_load",
                 message="checkpoint loaded",
-                counters={"processed_ticker_count": len(processed_tickers), "market_download_complete": bool(checkpoint.get("market_download_complete"))},
+                counters={
+                    "processed_ticker_count": len(processed_tickers),
+                    "market_download_complete": bool(checkpoint.get("market_download_complete")),
+                    "pending_retained_markets": len(checkpoint.get("pending_retained_markets", [])),
+                    "resume_mode": self.config.resume_mode,
+                },
             )
             tracker.start_stage("checkpoint_write", current_stage=False, message="checkpoint tracking initialized")
+            self._save_checkpoint(checkpoint, tracker=tracker, message="checkpoint normalized for resume")
 
             tracker.start_stage("cutoff_discovery", message="fetching cutoff timestamps")
             cutoff_ts = self._fetch_cutoff_timestamps()
@@ -1737,6 +2468,28 @@ class HistoricalIngestPipeline:
 
             tracker.start_stage("market_universe_fetch", message="fetching and filtering market universe")
             tracker.start_stage("retained_market_processing", message="waiting for first retained market")
+            self._drain_pending_retained_markets(
+                checkpoint=checkpoint,
+                tracker=tracker,
+                cutoff_ts=cutoff_ts,
+                start_dt=start_dt,
+                end_dt=now_utc,
+                raw_trades_dir=raw_trades_dir,
+                raw_candles_dir=raw_candles_dir,
+                trades_parquet_dir=trades_parquet_dir,
+                normalized_candles_dir=normalized_candles_dir,
+                features_dir=features_dir,
+                processed_tickers=processed_tickers,
+                skipped_or_failed_tickers=skipped_or_failed_tickers,
+                all_close_times=all_close_times,
+                metrics=metrics,
+            )
+            tracker.set_run_counters(
+                replayed_work_skipped=int(checkpoint.get("resume_counters", {}).get("replayed_work_skipped", 0)),
+                replayed_work_replayed=int(checkpoint.get("resume_counters", {}).get("replayed_work_replayed", 0)),
+                processed_ticker_count=len(processed_tickers),
+                markets_completed=len(processed_tickers),
+            )
             checkpoint_complete_before_run = bool(checkpoint.get("market_download_complete"))
             download_diagnostics = self._download_market_universe(
                 checkpoint=checkpoint,
@@ -1783,8 +2536,12 @@ class HistoricalIngestPipeline:
                 "excluded_markets_total": download_diagnostics.get("total_markets_discarded", 0),
                 "excluded_by_category": download_diagnostics.get("discarded_by_category", 0),
                 "excluded_by_series_pattern": download_diagnostics.get("discarded_by_series_pattern", 0),
+                "excluded_by_series": download_diagnostics.get("excluded_by_series", download_diagnostics.get("discarded_by_series_pattern", 0)),
                 "excluded_by_min_volume": download_diagnostics.get("discarded_by_min_volume", 0),
                 "excluded_by_bracket": late_filter_diagnostics.get("excluded_by_bracket", 0),
+                "excluded_no_trade_data": download_diagnostics.get("excluded_no_trade_data", 0),
+                "excluded_missing_core_fields": download_diagnostics.get("excluded_missing_core_fields", 0),
+                "excluded_by_lookback": download_diagnostics.get("excluded_by_lookback", 0),
                 "effective_filter_config": late_filter_diagnostics.get("effective_filter_config", {}),
                 "pages_fetched": download_diagnostics.get("pages_fetched", 0),
                 "pages_with_retained_markets": download_diagnostics.get("pages_with_retained_markets", 0),
@@ -1899,6 +2656,31 @@ class HistoricalIngestPipeline:
                     checkpoint=checkpoint,
                     fail_fast_triggered=True,
                     fail_fast_reason=exc.reason,
+                ),
+            )
+            raise
+        except KalshiResumeCursorRecoveryError as exc:
+            tracker.fail_stage("market_universe_fetch", error_summary=str(exc), message="resume cursor recovery failed")
+            tracker.fail_run(
+                current_stage="market_universe_fetch",
+                error_summary=str(exc),
+                stop_reason="resume_cursor_recovery_failed",
+                extra_summary=self._build_run_summary(
+                    tracker=tracker,
+                    now_utc=now_utc,
+                    cutoff_ts=cutoff_ts,
+                    download_diagnostics=download_diagnostics,
+                    filter_diagnostics=filter_diagnostics,
+                    normalized_markets_written=normalized_markets_written,
+                    resolution_count=resolution_count,
+                    metrics=metrics,
+                    date_range_start=date_range_start,
+                    date_range_end=date_range_end,
+                    skipped_or_failed_tickers=skipped_or_failed_tickers,
+                    checkpoint=checkpoint,
+                    fail_fast_triggered=False,
+                    fail_fast_reason=None,
+                    stop_reason="resume_cursor_recovery_failed",
                 ),
             )
             raise

@@ -137,6 +137,7 @@ def _market_rows(*tickers: str) -> list[dict]:
                 "market_id": f"m-{index}",
                 "title": f"{ticker} title",
                 "category": "Economics",
+                "status": "settled",
                 "close_time": f"2026-01-0{index}T00:00:00Z",
                 "result": "yes" if index % 2 else "no",
                 "source_tier": "historical",
@@ -173,6 +174,7 @@ def test_validation_duplicate_markets_trigger_warning_and_failure(tmp_path: Path
             "market_id": "m-duplicate",
             "title": "duplicate",
             "category": "Economics",
+            "status": "settled",
             "close_time": "2026-01-03T00:00:00Z",
             "result": "yes",
             "source_tier": "historical",
@@ -278,3 +280,78 @@ def test_validation_reports_filter_breakdown(tmp_path: Path) -> None:
     assert diagnostics["excluded_by_series_pattern"] == 2
     assert diagnostics["excluded_by_min_volume"] == 1
     assert diagnostics["excluded_by_bracket"] == 2
+
+
+def test_validation_allows_recent_market_only_dataset_with_zero_trades(tmp_path: Path) -> None:
+    rows = _market_rows("REAL-RECENT-001", "REAL-RECENT-002")
+    for row in rows:
+        row["status"] = "settled"
+        row["source_mode"] = "live_recent_filtered"
+        row["expiration_time"] = row["close_time"]
+        row["yes_bid"] = 55.0
+        row["yes_ask"] = 57.0
+    config = _write_dataset(
+        tmp_path,
+        market_rows=rows,
+        trade_tickers=[],
+        candle_tickers=[],
+        filter_diagnostics={
+            "total_markets_before_filters": 4,
+            "retained_markets": 2,
+            "excluded_markets_total": 2,
+            "excluded_by_category": 1,
+            "excluded_by_series_pattern": 0,
+            "excluded_by_series": 0,
+            "excluded_by_min_volume": 0,
+            "excluded_by_bracket": 0,
+            "excluded_missing_core_fields": 0,
+            "excluded_by_lookback": 1,
+            "excluded_no_trade_data": 0,
+            "effective_filter_config": {"preferred_categories": ["Economics"]},
+        },
+    )
+
+    result = run_kalshi_data_validation(config)
+
+    assert result.status == PASS
+    assert result.summary_payload["recent_market_only_dataset"] is True
+    finding_by_code = {finding["code"]: finding for finding in result.details_payload["findings"]}
+    assert finding_by_code["trade_coverage"]["severity"] == PASS
+    assert finding_by_code["candle_coverage"]["severity"] == PASS
+    assert result.summary_payload["coverage"]["trade_pct"] == 0.0
+    assert result.summary_payload["coverage"]["market_core_fields_pct"] == 1.0
+
+
+def test_validation_allows_recent_markets_without_time_fields(tmp_path: Path) -> None:
+    rows = _market_rows("REAL-NOTIME-001", "REAL-NOTIME-002")
+    for row in rows:
+        row["source_mode"] = "live_recent_filtered"
+        row.pop("close_time", None)
+    config = _write_dataset(
+        tmp_path,
+        market_rows=rows,
+        trade_tickers=[],
+        candle_tickers=[],
+    )
+
+    result = run_kalshi_data_validation(config)
+
+    assert result.status == PASS
+    assert result.summary_payload["coverage"]["market_core_fields_pct"] == 1.0
+
+
+def test_validation_uses_alternative_market_time_keys_for_date_range(tmp_path: Path) -> None:
+    rows = _market_rows("REAL-ALTDATE-001")
+    rows[0].pop("close_time", None)
+    rows[0]["end_date"] = "2026-01-09T00:00:00Z"
+    rows[0]["source_mode"] = "live_recent_filtered"
+    config = _write_dataset(
+        tmp_path,
+        market_rows=rows,
+        trade_tickers=[],
+        candle_tickers=[],
+    )
+
+    result = run_kalshi_data_validation(config)
+
+    assert result.details_payload["date_ranges"]["markets_close_time"]["start"] == "2026-01-09T00:00:00+00:00"

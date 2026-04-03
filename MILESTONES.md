@@ -600,6 +600,85 @@ Dependencies:
 
 ---
 
+## G-05 — Add Binance crypto public market-data ingestion
+Status: DONE
+
+Objective:
+Bring Binance public crypto market data into the system as a first-class research input with resumable REST ingestion, explicit crypto normalization, and grouped CLI workflows.
+
+Expected scope:
+- add a Binance provider package with centralized REST client, retry/backoff handling, and exchange-driven symbol validation
+- ingest public `exchangeInfo`, `klines`, `aggTrades`, and optional `bookTicker` snapshots
+- persist provider-specific raw artifacts plus resumable checkpoints and structured ingest summaries
+- normalize raw Binance artifacts into explicit crypto parquet outputs suitable for research consumption
+- add grouped CLI commands under `data crypto binance ...`
+- document the milestone and add focused mocked tests
+
+Acceptance criteria:
+- Binance symbols and intervals are config-driven and validated from exchange metadata
+- historical ingestion is resumable and idempotent across checkpoints and raw artifact writes
+- normalized outputs include explicit crypto fields and provenance back to raw artifacts
+- CLI commands support bounded local test runs and emit machine-readable summaries
+- tests cover config parsing, pagination, resumability, normalization, and CLI wiring
+
+Dependencies:
+- G-01
+- G-04
+
+---
+
+## G-06 — Add Binance websocket incremental append and unified crypto market-data projections
+Status: DONE
+
+Objective:
+Extend the Binance crypto source with production-style public websocket ingestion, incremental append safety, and stable projected crypto market-data datasets for downstream research use.
+
+Expected scope:
+- add a centralized Binance websocket ingestion service for `kline`, `aggTrade`, and `bookTicker` public streams
+- support bounded runs, reconnect/backoff handling, duplicate tolerance, and checkpointed restart safety
+- persist provider-specific raw incremental websocket artifacts and normalized incremental parquet datasets
+- build explicit mixed-source projected datasets from historical REST and websocket incremental normalized inputs
+- add grouped CLI commands for websocket ingest and projection rebuilds
+- document schema intent, artifact layout, and operational limits, and add focused mocked tests
+
+Acceptance criteria:
+- websocket runs can ingest bounded public market-data sessions without live account/auth dependencies
+- repeated websocket runs can restart safely from checkpoint state without duplicate normalized appends
+- historical REST and websocket incremental normalized outputs feed shared projected datasets
+- projected datasets have explicit schema intent, uniqueness rules, and source/provenance metadata
+- tests cover parsing, reconnects, checkpoint/resume, duplicate handling, projections, and CLI wiring
+
+Dependencies:
+- G-05
+
+---
+
+## G-07 — Add scheduled Binance incremental sync orchestration and feature-store consumers for projected crypto datasets
+Status: DONE
+
+Objective:
+Add a bounded restart-safe Binance sync runner that composes websocket incremental ingest, projection refresh, and projected-dataset feature refresh into one operational workflow, while publishing explicit crypto feature artifacts for research consumers.
+
+Expected scope:
+- add a Binance sync runner that wraps existing websocket ingest and projection steps without duplicating their core logic
+- support bounded sync runs with optional projection and feature refresh steps plus structured step-level summaries
+- add grouped CLI commands for one-command sync and direct projected-feature refresh workflows
+- build explicit projected-dataset feature consumers for returns, volatility, volume, trade-intensity, and top-of-book microstructure features
+- publish feature outputs to both provider-specific parquet artifacts and the repo's local feature-store convention
+- extend the Binance config surface and add focused mocked tests plus docs
+
+Acceptance criteria:
+- `data crypto binance sync` can run a bounded incremental cycle with restart-safe websocket state reuse and a machine-readable sync summary
+- projected Binance datasets feed an explicit crypto feature dataset without falling back to raw provider artifacts
+- feature refreshes are deterministic and idempotent for selected symbol and interval slices, with documented uniqueness rules
+- feature-store manifests are written for refreshed Binance feature slices
+- tests cover sync step ordering, failure handling, feature refresh behavior, CLI wiring, and config parsing
+
+Dependencies:
+- G-06
+
+---
+
 ## H-01 — Expand candidate grid generation
 Status: DONE
 
@@ -1539,3 +1618,16 @@ Any milestone that changes trading behavior, promotion logic, portfolio allocati
 - 2026-04-02: Kalshi authenticated live-bridge reads during historical ingest now retry `429 Too Many Requests` responses with `Retry-After` support, bounded exponential backoff plus jitter, and distinct `live/authenticated` operator logging. Historical ingest YAML now exposes separate authenticated throttling settings so recent-settled market bridging can continue through transient rate limits without changing public historical retry behavior.
 - 2026-04-02: Kalshi live-bridge ingest now stops paginating once settled live pages fall entirely outside the lookback window, logs retained and discarded ticker samples per page, persists raw markets only when processing actually starts, and fails fast when retained-market fetch volume grows without any processing progress. This prevents the prior runaway behavior where the live `/markets?status=settled` cursor could traverse the wider settled universe indefinitely while top-level normalization waited for download completion.
 - 2026-04-02: Kalshi historical ingest now emits structured run and stage status artifacts under `artifacts/kalshi_ingest/<run_id>/` with heartbeat-updated `ingest_status.json` plus final `ingest_run_summary.json`. Operators can now see whether the run is in initialization, checkpointing, cutoff discovery, market-universe fetch, retained-market processing, normalization, or final summary, along with page counts, retained-market progress, stop reasons, and fail-fast outcomes.
+- 2026-04-02: Kalshi historical ingest checkpoints now support robust resume semantics. The checkpoint captures last completed/current stage, queued retained markets, processed tickers, failed-ticker retry metadata, pagination state, and resume counters. Operators can resume the latest interrupted run, resume from an explicit checkpoint path, or force a fresh run, and checkpoint writes now use a backup file so a corrupt primary checkpoint can still be recovered safely.
+- 2026-04-02: Kalshi historical-ingest resume now hardens poisoned saved live-pagination cursors. Retryable resume-time `502/503/504` and transport failures on `/markets?status=settled&cursor=...` now use bounded retry/backoff first, then can fall back to the in-memory loaded backup checkpoint, and finally can clear only the saved live cursor while preserving processed and queued work. Status artifacts now record cursor retry counts, last HTTP status, and whether backup or cursor-reset recovery was used.
+- 2026-04-02: Kalshi historical-ingest resume recovery is now operator-selectable through a single `resume_recovery_mode` contract with `automatic`, `backup_only`, `cursor_reset_only`, and `fail_fast`. CLI, YAML config, runtime ingest logic, and structured status/summary artifacts now consistently record the configured mode, attempted backup/cursor-reset recoveries, and the actual recovery action taken.
+- 2026-04-02: Kalshi category-specific research ingest now has a dedicated live-filtered path. `data kalshi recent-ingest` uses the authenticated `/markets` endpoint as the primary discovery source for recent filtered markets, persists `source_endpoint` and `source_mode` into raw plus normalized artifacts, supports direct `/historical/markets/{ticker}` fetches for explicitly named older contracts, and leaves `historical-ingest` available for explicit archive crawling instead of as the default Economics/Politics research path.
+- 2026-04-02: Kalshi `recent-ingest` no longer requires trade or candlestick history for a market to be retained. Valid market-only rows with core metadata plus settlement and/or pricing snapshots now write raw and normalized artifacts even when trade and candle payloads are empty, and validation treats those recent market-only datasets as passing when core fields are complete. Recent-ingest summaries now expose structured exclusion counts for missing core fields, category/series filters, lookback exclusions, and no-trade-data exclusions.
+- 2026-04-02: Kalshi `recent-ingest` core-field validation now matches live `/markets` schema variability. Only `ticker` and `status` are required core fields, category and time fields are optional, and recent normalization now maps alternate time keys such as `close_date`, `expiration_ts`, and `end_date` into the normalized `close_time` field when present.
+- 2026-04-02: Kalshi `recent-ingest` filter planning now defaults back to category-first research behavior when no explicit `recent_ingest_series_tickers` are configured. Series-driven runs only activate for real series values, infer compatible categories from `economics_series` / `politics_series`, ignore incompatible category filters when needed, and emit machine-readable filter-conflict diagnostics so zero-result runs are easier to explain.
+- 2026-04-02: Kalshi `recent-ingest` now treats `recent_ingest_limit` as a total live `/markets` fetch budget across pagination instead of a per-page size. The fetch loop shrinks each request to the remaining budget, logs page number plus cumulative fetched counts, and stops with `recent_limit_reached` once the total fetched-record cap is hit.
+- 2026-04-02: Kalshi `recent-ingest` now prioritizes higher-signal markets by supporting a recent-specific `min_volume` threshold, excluding low-signal ticker types containing `CROSSCATEGORY`, `SPORTSMULTIGAME`, or `EXTENDED`, logging exclusion reason plus volume for filtered markets, and skipping feature generation when retained markets have fewer than `min_trades` trades.
+- 2026-04-02: Kalshi `recent-ingest` market-type exclusions are now configurable under `recent_ingest.exclude_market_type_patterns` and can be disabled per run with `--disable-market-type-filter`. Recent-ingest now logs whether the filter is enabled, reports `excluded_by_market_type`, and warns when all fetched markets were removed by the type filter.
+- 2026-04-02: Kalshi historical-ingest category-filtered discovery now treats `/events` as the primary path. When `use_events_for_category_filter=true` and `use_direct_series_fetch=false`, the ingest skips `/historical/markets` entirely, and the new `skip_historical_pagination` flag now defaults to true in code, CLI config loading, and the checked-in Kalshi YAML.
+- 2026-04-03: Binance public crypto ingestion now has a first milestone implementation under `data crypto binance ...`. The repo now supports checkpointed REST ingestion of `exchangeInfo`, `klines`, `aggTrades`, and optional `bookTicker` snapshots, plus explicit normalized crypto parquet outputs with raw-artifact provenance and grouped CLI/config coverage. Websocket incremental mode remains intentionally deferred to the next milestone.
+- 2026-04-03: Binance crypto ingestion now supports bounded public websocket incremental append runs plus mixed-source projections. `data crypto binance websocket-ingest` writes checkpointed raw JSONL, deduped incremental parquet outputs, reconnect/duplicate telemetry, and automatic projection refreshes, while `data crypto binance project` rebuilds stable `crypto_ohlcv_bars`, `crypto_agg_trades`, and `crypto_top_of_book` datasets from historical REST plus websocket incremental normalized inputs.

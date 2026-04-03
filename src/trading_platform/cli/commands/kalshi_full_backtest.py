@@ -193,6 +193,71 @@ def cmd_kalshi_full_backtest(args: argparse.Namespace) -> None:
     if compatibility_md.exists():
         print(f"  Compat MD   : {compatibility_md}")
 
+    if getattr(args, "include_polymarket", False):
+        _run_polymarket_backtest(args, signal_families, backtester, output_dir)
+
+
+def _run_polymarket_backtest(
+    args: argparse.Namespace,
+    signal_families: list,
+    backtester: Any,
+    output_dir: Path,
+) -> None:
+    """Run the same backtest against Polymarket feature parquets."""
+    pm_feature_dir = Path(
+        getattr(args, "polymarket_feature_dir", None) or "data/polymarket/features"
+    )
+    pm_resolution_path = Path(
+        getattr(args, "polymarket_resolution_data", None) or "data/polymarket/resolution.csv"
+    )
+
+    if not pm_feature_dir.exists():
+        print(f"\n[WARN] Polymarket feature directory not found: {pm_feature_dir}")
+        print("Run 'trading-cli data polymarket ingest' first.")
+        return
+
+    if not pm_resolution_path.exists():
+        print(f"\n[WARN] Polymarket resolution CSV not found: {pm_resolution_path}")
+        print("Run 'trading-cli data polymarket ingest' first.")
+        return
+
+    pm_resolution_data = pd.read_csv(pm_resolution_path)
+
+    print(f"\nRunning Polymarket backtest:")
+    print(f"  feature dir  : {pm_feature_dir}")
+    print(f"  resolution   : {pm_resolution_path}")
+
+    pm_results = backtester.run(
+        feature_dir=pm_feature_dir,
+        resolution_data=pm_resolution_data,
+        signal_families=signal_families,
+        output_dir=output_dir,
+    )
+
+    # Write Polymarket-specific results CSV
+    pm_results_csv = output_dir / "polymarket_backtest_results.csv"
+    rows = []
+    for r in pm_results:
+        rows.append({
+            "signal_family": r.signal_family,
+            "n_trades": r.n_trades,
+            "win_rate": r.win_rate,
+            "realized_avg_return": r.realized_avg_return,
+            "brier_score": r.brier_score,
+        })
+    if rows:
+        pd.DataFrame(rows).to_csv(pm_results_csv, index=False)
+
+    print(f"\nPolymarket backtest complete.")
+    print(f"  Results CSV  : {pm_results_csv}")
+    for r in pm_results:
+        print(
+            f"  - {r.signal_family}: trades={r.n_trades}, "
+            f"win_rate={_format_metric(r.win_rate, '.1%')}, "
+            f"avg_return={_format_metric(r.realized_avg_return, '.4f')}, "
+            f"brier={_format_metric(r.brier_score, '.4f')}"
+        )
+
 
 def _format_metric(value: Any, spec: str) -> str:
     try:

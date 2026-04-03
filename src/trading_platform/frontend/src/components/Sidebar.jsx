@@ -1,14 +1,15 @@
 import { useState } from 'react'
 import { NavLink } from 'react-router-dom'
-import { LayoutGrid, BarChart2, Globe, Lightbulb, Settings, ChevronLeft, ChevronRight } from 'lucide-react'
+import { LayoutGrid, BarChart2, Globe, TrendingUp, Lightbulb, Settings, ChevronLeft, ChevronRight } from 'lucide-react'
 import { useApi } from '../hooks/useApi'
 import { api } from '../api/client'
 
 const NAV = [
   { to: '/dashboard', label: 'Command Center',  Icon: LayoutGrid },
   { to: '/signals',   label: 'Signal Research', Icon: BarChart2  },
-  { to: '/markets',   label: 'Kalshi Markets',  Icon: Globe      },
-  { to: '/reasoning', label: 'Trade Reasoning', Icon: Lightbulb  },
+  { to: '/markets',     label: 'Kalshi Markets',   Icon: Globe       },
+  { to: '/polymarket',  label: 'Polymarket Live',  Icon: TrendingUp  },
+  { to: '/reasoning',   label: 'Trade Reasoning',  Icon: Lightbulb   },
   { to: '/control',   label: 'Loop Control',    Icon: Settings   },
 ]
 

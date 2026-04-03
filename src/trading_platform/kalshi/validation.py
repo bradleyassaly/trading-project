@@ -335,6 +335,25 @@ def _path_payload(config: KalshiDataValidationConfig) -> dict[str, str]:
     }
 
 
+def _market_has_core_fields(row: dict[str, Any]) -> tuple[bool, list[str]]:
+    missing: list[str] = []
+    if not str(row.get("ticker") or "").strip():
+        missing.append("ticker")
+    if not str(row.get("status") or "").strip():
+        missing.append("status")
+    return len(missing) == 0, missing
+
+
+def _market_time_candidate(row: dict[str, Any]) -> Any:
+    return (
+        row.get("close_time")
+        or row.get("close_date")
+        or row.get("expiration_time")
+        or row.get("expiration_ts")
+        or row.get("end_date")
+    )
+
+
 def run_kalshi_data_validation(config: KalshiDataValidationConfig | None = None) -> KalshiDataValidationResult:
     cfg = config or KalshiDataValidationConfig()
     thresholds = cfg.thresholds
@@ -370,8 +389,12 @@ def run_kalshi_data_validation(config: KalshiDataValidationConfig | None = None)
     invalid_market_timestamp_count = 0
     market_date_range = {"start": None, "end": None}
     category_distribution: dict[str, int] = {}
+    valid_core_market_count = 0
+    invalid_core_markets: list[dict[str, Any]] = []
+    market_source_modes: list[str] = []
 
     if not markets_frame.is_empty():
+        market_rows_dicts = markets_frame.to_dicts()
         if "ticker" in markets_frame.columns:
             market_tickers = [str(value or "").strip() for value in markets_frame.get_column("ticker").to_list()]
             duplicate_tickers = _duplicates_from_series(market_tickers)
@@ -383,14 +406,31 @@ def run_kalshi_data_validation(config: KalshiDataValidationConfig | None = None)
             categories = [_normalize_category(value) for value in markets_frame.get_column("category").to_list()]
             missing_category_count = sum(1 for value in categories if value == "missing")
             category_distribution = dict(sorted(Counter(categories).items()))
-        if "close_time" in markets_frame.columns:
-            timestamps = [_parse_timestamp(value) for value in markets_frame.get_column("close_time").to_list()]
-            invalid_market_timestamp_count = sum(
-                1
-                for raw, parsed in zip(markets_frame.get_column("close_time").to_list(), timestamps, strict=False)
-                if raw is not None and str(raw).strip() and parsed is None
-            )
-            market_date_range = _date_range(timestamps)
+        if "source_mode" in markets_frame.columns:
+            market_source_modes = [
+                str(value or "").strip()
+                for value in markets_frame.get_column("source_mode").to_list()
+                if str(value or "").strip()
+            ]
+        for row in market_rows_dicts:
+            valid_core, missing_fields = _market_has_core_fields(row)
+            if valid_core:
+                valid_core_market_count += 1
+            else:
+                invalid_core_markets.append(
+                    {
+                        "ticker": str(row.get("ticker") or ""),
+                        "missing_fields": missing_fields,
+                    }
+                )
+        market_time_values = [_market_time_candidate(row) for row in market_rows_dicts]
+        timestamps = [_parse_timestamp(value) for value in market_time_values]
+        invalid_market_timestamp_count = sum(
+            1
+            for raw, parsed in zip(market_time_values, timestamps, strict=False)
+            if raw is not None and str(raw).strip() and parsed is None
+        )
+        market_date_range = _date_range(timestamps)
 
     market_ticker_set = set(value for value in market_tickers if value)
     resolution_ticker_set = set()
@@ -419,6 +459,11 @@ def run_kalshi_data_validation(config: KalshiDataValidationConfig | None = None)
     )
     invalid_timestamp_denominator = market_rows + total_trades + total_candles
     invalid_timestamp_rate = _safe_rate(invalid_timestamp_count, invalid_timestamp_denominator)
+    market_core_validity_pct = _safe_rate(valid_core_market_count, market_rows)
+    recent_market_only_dataset = bool(market_rows) and bool(market_source_modes) and all(
+        mode in {"live_recent_filtered", "direct_historical_ticker"}
+        for mode in market_source_modes
+    ) and valid_core_market_count == market_rows
 
     schema_mismatches = {
         "trade_tickers_missing_from_markets": sorted(trade_ticker_set - market_ticker_set),
@@ -443,8 +488,12 @@ def run_kalshi_data_validation(config: KalshiDataValidationConfig | None = None)
             or 0,
             "excluded_by_category": None,
             "excluded_by_series_pattern": None,
+            "excluded_by_series": None,
             "excluded_by_min_volume": None,
             "excluded_by_bracket": None,
+            "excluded_no_trade_data": None,
+            "excluded_missing_core_fields": None,
+            "excluded_by_lookback": None,
             "effective_filter_config": ingest_summary.get("filter_config")
             or ingest_manifest.get("filter_config")
             or {},
@@ -462,6 +511,48 @@ def run_kalshi_data_validation(config: KalshiDataValidationConfig | None = None)
         + [str(value) for value in (ingest_manifest.get("output_layout") or {}).values()]
     )
 
+    trade_finding = _coverage_finding(
+        code="trade_coverage",
+        label="Trade",
+        coverage_pct=trade_coverage_pct,
+        warn_threshold=thresholds.min_trade_coverage_warn_pct,
+        fail_threshold=thresholds.min_trade_coverage_fail_pct,
+        numerator=len(market_ticker_set & trade_ticker_set),
+        denominator=len(market_ticker_set),
+    )
+    candle_finding = _coverage_finding(
+        code="candle_coverage",
+        label="Candle",
+        coverage_pct=candle_coverage_pct,
+        warn_threshold=thresholds.min_candle_coverage_warn_pct,
+        fail_threshold=thresholds.min_candle_coverage_fail_pct,
+        numerator=len(market_ticker_set & candle_ticker_set),
+        denominator=len(market_ticker_set),
+    )
+    if recent_market_only_dataset:
+        trade_finding = KalshiValidationFinding(
+            severity=PASS,
+            code="trade_coverage",
+            message=(
+                f"Trade coverage is {trade_coverage_pct:.1%} ({len(market_ticker_set & trade_ticker_set)} of {len(market_ticker_set)} markets), "
+                "but market-only recent-ingest datasets are allowed when core market fields are valid."
+            ),
+            observed=trade_coverage_pct,
+            threshold=0,
+            context={"covered_markets": len(market_ticker_set & trade_ticker_set), "total_markets": len(market_ticker_set), "market_only_recent_dataset": True},
+        )
+        candle_finding = KalshiValidationFinding(
+            severity=PASS,
+            code="candle_coverage",
+            message=(
+                f"Candle coverage is {candle_coverage_pct:.1%} ({len(market_ticker_set & candle_ticker_set)} of {len(market_ticker_set)} markets), "
+                "but market-only recent-ingest datasets are allowed when core market fields are valid."
+            ),
+            observed=candle_coverage_pct,
+            threshold=0,
+            context={"covered_markets": len(market_ticker_set & candle_ticker_set), "total_markets": len(market_ticker_set), "market_only_recent_dataset": True},
+        )
+
     findings = [
         _coverage_finding(
             code="resolution_coverage",
@@ -472,24 +563,8 @@ def run_kalshi_data_validation(config: KalshiDataValidationConfig | None = None)
             numerator=len(market_ticker_set & resolution_ticker_set),
             denominator=len(market_ticker_set),
         ),
-        _coverage_finding(
-            code="trade_coverage",
-            label="Trade",
-            coverage_pct=trade_coverage_pct,
-            warn_threshold=thresholds.min_trade_coverage_warn_pct,
-            fail_threshold=thresholds.min_trade_coverage_fail_pct,
-            numerator=len(market_ticker_set & trade_ticker_set),
-            denominator=len(market_ticker_set),
-        ),
-        _coverage_finding(
-            code="candle_coverage",
-            label="Candle",
-            coverage_pct=candle_coverage_pct,
-            warn_threshold=thresholds.min_candle_coverage_warn_pct,
-            fail_threshold=thresholds.min_candle_coverage_fail_pct,
-            numerator=len(market_ticker_set & candle_ticker_set),
-            denominator=len(market_ticker_set),
-        ),
+        trade_finding,
+        candle_finding,
         _rate_finding(
             code="duplicate_tickers",
             label="Duplicate ticker rate",
@@ -527,6 +602,15 @@ def run_kalshi_data_validation(config: KalshiDataValidationConfig | None = None)
             fail_threshold=thresholds.max_invalid_timestamp_fail_rate,
             observed_count=invalid_timestamp_count,
             denominator=invalid_timestamp_denominator,
+        ),
+        _coverage_finding(
+            code="market_core_fields",
+            label="Market core field validity",
+            coverage_pct=market_core_validity_pct,
+            warn_threshold=1.0,
+            fail_threshold=0.999999,
+            numerator=valid_core_market_count,
+            denominator=market_rows,
         ),
     ]
 
@@ -597,6 +681,7 @@ def run_kalshi_data_validation(config: KalshiDataValidationConfig | None = None)
             "resolution_pct": resolution_coverage_pct,
             "trade_pct": trade_coverage_pct,
             "candle_pct": candle_coverage_pct,
+            "market_core_fields_pct": market_core_validity_pct,
         },
         "quality_rates": {
             "duplicate_ticker_rate": duplicate_ticker_rate,
@@ -606,6 +691,7 @@ def run_kalshi_data_validation(config: KalshiDataValidationConfig | None = None)
         },
         "filter_diagnostics": filter_diagnostics,
         "severity_counts": severity_counts,
+        "recent_market_only_dataset": recent_market_only_dataset,
     }
 
     details_payload = {
@@ -618,6 +704,12 @@ def run_kalshi_data_validation(config: KalshiDataValidationConfig | None = None)
             "candles": candles_layout["date_range"],
         },
         "category_distribution": category_distribution,
+        "market_core_fields": {
+            "valid_market_count": valid_core_market_count,
+            "invalid_market_count": len(invalid_core_markets),
+            "invalid_markets": invalid_core_markets[:50],
+            "source_modes": sorted(set(market_source_modes)),
+        },
         "duplicates": {
             "duplicate_tickers": duplicate_tickers,
             "duplicate_market_ids": duplicate_market_ids,
@@ -706,6 +798,7 @@ def _build_markdown_report(
         f"- Resolution coverage: {coverage['resolution_pct']:.1%}",
         f"- Trade coverage: {coverage['trade_pct']:.1%}",
         f"- Candle coverage: {coverage['candle_pct']:.1%}",
+        f"- Market core-field validity: {coverage.get('market_core_fields_pct', 0.0):.1%}",
         f"- Missing-category rate: {quality_rates['missing_category_rate']:.1%}",
         f"- Invalid-timestamp rate: {quality_rates['invalid_timestamp_rate']:.1%}",
         "",
@@ -724,9 +817,12 @@ def _build_markdown_report(
         f"- Markets before filters: {filter_diagnostics.get('total_markets_before_filters', 'n/a')}",
         f"- Markets after filters: {filter_diagnostics.get('retained_markets', 'n/a')}",
         f"- Excluded by category: {filter_diagnostics.get('excluded_by_category', 'n/a')}",
-        f"- Excluded by series pattern: {filter_diagnostics.get('excluded_by_series_pattern', 'n/a')}",
+        f"- Excluded by series pattern: {filter_diagnostics.get('excluded_by_series_pattern', filter_diagnostics.get('excluded_by_series', 'n/a'))}",
         f"- Excluded by min_volume: {filter_diagnostics.get('excluded_by_min_volume', 'n/a')}",
         f"- Excluded by bracket/max_markets_per_event: {filter_diagnostics.get('excluded_by_bracket', 'n/a')}",
+        f"- Excluded missing core fields: {filter_diagnostics.get('excluded_missing_core_fields', 'n/a')}",
+        f"- Excluded by lookback: {filter_diagnostics.get('excluded_by_lookback', 'n/a')}",
+        f"- Excluded no trade data: {filter_diagnostics.get('excluded_no_trade_data', 'n/a')}",
         f"- Effective filter config: `{json.dumps(filter_diagnostics.get('effective_filter_config', {}), sort_keys=True)}`",
         "",
         "## Category Distribution",
@@ -772,6 +868,8 @@ def _build_markdown_report(
             lines.append("- Remove synthetic artifacts from real-data defaults and re-run ingest validation.")
         elif finding.code == "missing_categories":
             lines.append("- Backfill market categories so category-conditioned research and risk limits remain reliable.")
+        elif finding.code == "market_core_fields":
+            lines.append("- Ensure each retained market carries ticker and status before downstream research joins; category and time fields are optional metadata.")
     if not any(finding.severity != PASS for finding in findings):
         lines.append("- No blocking or warning-level issues were detected.")
     return "\n".join(lines)

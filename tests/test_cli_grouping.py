@@ -504,6 +504,176 @@ def test_grouped_data_refresh_research_inputs_command_parses_config() -> None:
     assert args.config == "configs/research_input_refresh.yaml"
 
 
+def test_grouped_data_crypto_binance_historical_ingest_command_parses() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "data",
+            "crypto",
+            "binance",
+            "historical-ingest",
+            "--config",
+            "configs/binance.yaml",
+            "--symbols",
+            "BTCUSDT",
+            "ETHUSDT",
+            "--intervals",
+            "1m",
+            "5m",
+            "--start",
+            "2024-01-01T00:00:00Z",
+            "--end",
+            "2024-01-02T00:00:00Z",
+            "--skip-normalize",
+        ]
+    )
+
+    assert args.command_family == "data"
+    assert args.data_command == "crypto"
+    assert args.crypto_command == "binance"
+    assert args.crypto_provider_command == "historical-ingest"
+    assert args.config == "configs/binance.yaml"
+    assert args.symbols == ["BTCUSDT", "ETHUSDT"]
+    assert args.intervals == ["1m", "5m"]
+    assert args.skip_normalize is True
+
+
+def test_grouped_data_crypto_binance_normalize_command_parses() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "data",
+            "crypto",
+            "binance",
+            "normalize",
+            "--config",
+            "configs/binance.yaml",
+            "--symbols",
+            "BTCUSDT",
+            "--intervals",
+            "1m",
+        ]
+    )
+
+    assert args.data_command == "crypto"
+    assert args.crypto_command == "binance"
+    assert args.crypto_provider_command == "normalize"
+    assert args.symbols == ["BTCUSDT"]
+    assert args.intervals == ["1m"]
+
+
+def test_grouped_data_crypto_binance_websocket_ingest_command_parses() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "data",
+            "crypto",
+            "binance",
+            "websocket-ingest",
+            "--config",
+            "configs/binance.yaml",
+            "--symbols",
+            "BTCUSDT",
+            "--stream-families",
+            "kline",
+            "agg_trade",
+            "--max-messages",
+            "25",
+            "--max-runtime-seconds",
+            "60",
+        ]
+    )
+
+    assert args.data_command == "crypto"
+    assert args.crypto_command == "binance"
+    assert args.crypto_provider_command == "websocket-ingest"
+    assert args.stream_families == ["kline", "agg_trade"]
+    assert args.max_messages == 25
+    assert args.max_runtime_seconds == 60
+
+
+def test_grouped_data_crypto_binance_project_command_parses() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "data",
+            "crypto",
+            "binance",
+            "project",
+            "--config",
+            "configs/binance.yaml",
+            "--symbols",
+            "BTCUSDT",
+            "--intervals",
+            "1m",
+        ]
+    )
+
+    assert args.data_command == "crypto"
+    assert args.crypto_command == "binance"
+    assert args.crypto_provider_command == "project"
+    assert args.symbols == ["BTCUSDT"]
+    assert args.intervals == ["1m"]
+
+
+def test_grouped_data_crypto_binance_features_command_parses() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "data",
+            "crypto",
+            "binance",
+            "features",
+            "--config",
+            "configs/binance.yaml",
+            "--symbols",
+            "BTCUSDT",
+            "--intervals",
+            "1m",
+            "--full-rebuild",
+        ]
+    )
+
+    assert args.data_command == "crypto"
+    assert args.crypto_command == "binance"
+    assert args.crypto_provider_command == "features"
+    assert args.symbols == ["BTCUSDT"]
+    assert args.intervals == ["1m"]
+    assert args.full_rebuild is True
+
+
+def test_grouped_data_crypto_binance_sync_command_parses() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "data",
+            "crypto",
+            "binance",
+            "sync",
+            "--config",
+            "configs/binance.yaml",
+            "--symbols",
+            "BTCUSDT",
+            "--stream-families",
+            "kline",
+            "agg_trade",
+            "--max-runtime-seconds",
+            "60",
+            "--max-messages",
+            "100",
+            "--skip-features",
+        ]
+    )
+
+    assert args.data_command == "crypto"
+    assert args.crypto_command == "binance"
+    assert args.crypto_provider_command == "sync"
+    assert args.stream_families == ["kline", "agg_trade"]
+    assert args.max_runtime_seconds == 60
+    assert args.max_messages == 100
+    assert args.skip_features is True
+
+
 def test_grouped_data_build_classifications_command_parses() -> None:
     parser = build_parser()
     args = parser.parse_args(
@@ -1559,6 +1729,46 @@ def test_grouped_kalshi_paper_run_command_parses() -> None:
     assert args.research_config == "configs/kalshi_research.yaml"
     assert args.tracked_tickers == ["KTEST-1", "KTEST-2"]
     assert args.max_iterations == 3
+
+
+def test_grouped_kalshi_recent_ingest_command_parses() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "data",
+            "kalshi",
+            "recent-ingest",
+            "--config",
+            "configs/kalshi.yaml",
+            "--status",
+            "settled",
+            "open",
+            "--category",
+            "Economics",
+            "Politics",
+            "--series",
+            "KXINFL",
+            "--event",
+            "KXINFL-2026",
+            "--limit",
+            "50",
+            "--direct-historical-tickers",
+            "OLD-1",
+            "OLD-2",
+            "--resume",
+        ]
+    )
+
+    assert args.command_family == "data"
+    assert args.kalshi_command == "recent-ingest"
+    assert args.config == "configs/kalshi.yaml"
+    assert args.status == ["settled", "open"]
+    assert args.category == ["Economics", "Politics"]
+    assert args.series == ["KXINFL"]
+    assert args.event == ["KXINFL-2026"]
+    assert args.limit == 50
+    assert args.direct_historical_tickers == ["OLD-1", "OLD-2"]
+    assert args.resume is True
 
 
 def test_grouped_paper_run_command_parses_execution_config() -> None:

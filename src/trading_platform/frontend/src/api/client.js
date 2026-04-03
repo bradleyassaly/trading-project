@@ -38,4 +38,5 @@ export const api = {
   loopControl: (action) => post('/loop/control', { action }),
   researchRun: () => post('/research/run'),
   researchStatus: (jobId) => get(`/research/status/${encodeURIComponent(jobId)}`),
+  polymarketLiveMarkets: () => get('/polymarket/live-markets'),
 }
