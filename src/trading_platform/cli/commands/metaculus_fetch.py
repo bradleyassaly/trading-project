@@ -37,7 +37,8 @@ def cmd_metaculus_fetch(args: argparse.Namespace) -> None:
     print(f"  min forecasts  : {min_forecasts}")
     print()
 
-    parser = MetaculusParser()
+    api_token = getattr(args, "api_token", None)
+    parser = MetaculusParser(api_token=api_token)
     result = parser.fetch_resolved(output_dir, limit=limit, min_forecasts=min_forecasts)
 
     print("[DONE] Metaculus fetch complete.")

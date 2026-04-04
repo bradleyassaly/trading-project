@@ -52,11 +52,23 @@ class MetaculusFetchResult:
 class MetaculusParser:
     """Fetch and parse Metaculus resolved binary questions."""
 
-    def __init__(self, *, base_url: str = _BASE_URL, sleep_sec: float = _REQUEST_SLEEP) -> None:
+    def __init__(
+        self,
+        *,
+        base_url: str = _BASE_URL,
+        sleep_sec: float = _REQUEST_SLEEP,
+        api_token: str | None = None,
+    ) -> None:
         self._base_url = base_url.rstrip("/")
         self._sleep_sec = sleep_sec
         self._session = requests.Session()
         self._session.headers.update({"Accept": "application/json"})
+        # Auth token (free registration at metaculus.com)
+        if api_token is None:
+            import os
+            api_token = os.environ.get("METACULUS_API_TOKEN")
+        if api_token:
+            self._session.headers["Authorization"] = f"Token {api_token}"
 
     def fetch_resolved(
         self,

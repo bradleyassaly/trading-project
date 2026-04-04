@@ -2756,6 +2756,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--condition-id", type=str, default=None,
         help="Fetch trades for a specific market conditionId.",
     )
+    data_polymarket_data_api.add_argument(
+        "--per-market", action="store_true", default=False,
+        help="Fetch trades per-market using condition_ids from our live DB.",
+    )
     data_polymarket_data_api.set_defaults(func=cmd_polymarket_data_api_fetch)
 
     # ── data manifold ────────────────────────────────────────────────────────
@@ -2870,6 +2874,10 @@ def build_parser() -> argparse.ArgumentParser:
     data_metaculus_fetch.add_argument(
         "--min-forecasts", type=int, default=5,
         help="Minimum forecast points per question (default: 5).",
+    )
+    data_metaculus_fetch.add_argument(
+        "--api-token", type=str, default=None,
+        help="Metaculus API token (or set METACULUS_API_TOKEN env var).",
     )
     data_metaculus_fetch.set_defaults(func=cmd_metaculus_fetch)
 

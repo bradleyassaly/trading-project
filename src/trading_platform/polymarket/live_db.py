@@ -52,7 +52,8 @@ class LiveTickStore:
                 question       TEXT NOT NULL,
                 volume         REAL,
                 yes_token_id   TEXT,
-                end_date_iso   TEXT
+                end_date_iso   TEXT,
+                condition_id   TEXT
             );
         """)
         # Migrate old databases that lack newer columns
@@ -62,6 +63,7 @@ class LiveTickStore:
             ("best_ask REAL", "ticks"),
             ("spread REAL", "ticks"),
             ("trade_size REAL", "ticks"),
+            ("condition_id TEXT", "markets"),
         ]:
             try:
                 self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {col}")
@@ -168,27 +170,35 @@ class LiveTickStore:
         }
 
     def upsert_market_info(self, market_id: str, question: str, volume: float,
-                           yes_token_id: str, end_date_iso: str | None = None) -> None:
+                           yes_token_id: str, end_date_iso: str | None = None,
+                           condition_id: str | None = None) -> None:
         with self._lock:
             self._conn.execute(
                 """INSERT OR REPLACE INTO markets
-                   (market_id, question, volume, yes_token_id, end_date_iso)
-                   VALUES (?, ?, ?, ?, ?)""",
-                (market_id, question, volume, yes_token_id, end_date_iso),
+                   (market_id, question, volume, yes_token_id, end_date_iso, condition_id)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (market_id, question, volume, yes_token_id, end_date_iso, condition_id),
             )
             self._conn.commit()
 
-    def upsert_markets_batch(self, rows: list[tuple[str, str, float, str, str | None]]) -> None:
+    def upsert_markets_batch(self, rows: list[tuple]) -> None:
         """Batch upsert market metadata.
 
-        Each tuple: ``(market_id, question, volume, yes_token_id, end_date_iso)``.
+        Each tuple: ``(market_id, question, volume, yes_token_id, end_date_iso)``
+        or extended: ``(..., condition_id)`` (6 elements).
         """
+        expanded = []
+        for row in rows:
+            if len(row) >= 6:
+                expanded.append(row[:6])
+            else:
+                expanded.append((*row[:5], None))
         with self._lock:
             self._conn.executemany(
                 """INSERT OR REPLACE INTO markets
-                   (market_id, question, volume, yes_token_id, end_date_iso)
-                   VALUES (?, ?, ?, ?, ?)""",
-                rows,
+                   (market_id, question, volume, yes_token_id, end_date_iso, condition_id)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                expanded,
             )
             self._conn.commit()
 
@@ -196,10 +206,10 @@ class LiveTickStore:
         """Return all market metadata keyed by market_id."""
         with self._lock:
             rows = self._conn.execute(
-                "SELECT market_id, question, volume, yes_token_id, end_date_iso FROM markets"
+                "SELECT market_id, question, volume, yes_token_id, end_date_iso, condition_id FROM markets"
             ).fetchall()
         return {
-            r[0]: {"question": r[1], "volume": r[2], "yes_token_id": r[3], "end_date_iso": r[4]}
+            r[0]: {"question": r[1], "volume": r[2], "yes_token_id": r[3], "end_date_iso": r[4], "condition_id": r[5]}
             for r in rows
         }
 

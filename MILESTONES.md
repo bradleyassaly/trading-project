@@ -30,7 +30,9 @@
 
 - **React GUI** — Command Center, Signal Research, Kalshi Markets Browser, Polymarket Live (with price chart detail panel), Trade Reasoning, Loop Control. 6 pages, auto-refreshing.
 
-- **1,619 passing tests** across all modules.
+- **Shared Replay Evaluation + Monitoring History** — Added registry-backed replay evaluation runners with explicit metric artifacts, API/dashboard consumers for evaluation previews, and compact provider/dataset history summaries on top of shared monitoring timelines.
+
+- **1,630 passing tests** across all modules.
 
 ## In Progress
 
@@ -46,6 +48,7 @@
 - **50+ paper trades with measurable win rate** — statistical significance
 - **All 8 signals firing with real data** — currently 3 of 8 validated
 - **Cross-platform arbitrage** — detect Kalshi vs Polymarket price gaps on same events
+- **G-16 — Cross-provider replay comparison workflows** — compare replay evaluation runs and turn shared artifacts into research-selection views
 
 ## Go-Live Criteria
 

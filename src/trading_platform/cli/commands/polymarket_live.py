@@ -107,6 +107,7 @@ def cmd_polymarket_live_collect(args: argparse.Namespace) -> None:
             yes_token_id=m.yes_token_id,
             volume=m.volume,
             end_date_iso=m.end_date_iso,
+            condition_id=m.condition_id,
         )
         for m in all_markets
     ]

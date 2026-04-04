@@ -23,9 +23,15 @@ def cmd_polymarket_data_api_fetch(args: argparse.Namespace) -> None:
     hours_back = int(getattr(args, "hours_back", None) or 168)
     condition_id = getattr(args, "condition_id", None)
 
+    per_market = getattr(args, "per_market", False)
     fetcher = PolymarketDataApiFetcher()
 
-    if condition_id:
+    if per_market:
+        print("Fetching trades per-market from our tracked markets...")
+        results = fetcher.fetch_trades_for_our_markets(output_dir)
+        total = sum(results.values())
+        print(f"[DONE] {total} trades across {len(results)} markets written to {output_dir}")
+    elif condition_id:
         print(f"Fetching trades for market {condition_id}...")
         count = fetcher.fetch_market_trades(condition_id, output_dir)
         print(f"[DONE] {count} trades written")

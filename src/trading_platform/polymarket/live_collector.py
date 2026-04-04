@@ -48,6 +48,7 @@ class LiveMarketInfo:
     yes_token_id: str
     volume: float
     end_date_iso: str | None = None
+    condition_id: str | None = None
 
 
 @dataclass
@@ -110,7 +111,7 @@ class PolymarketLiveCollector:
         self.state.started_at = datetime.now(tz=timezone.utc)
         # Persist market metadata so the API can join question text
         self._store.upsert_markets_batch([
-            (m.market_id, m.question, m.volume, m.yes_token_id, m.end_date_iso)
+            (m.market_id, m.question, m.volume, m.yes_token_id, m.end_date_iso, m.condition_id)
             for m in self.markets
         ])
         try:

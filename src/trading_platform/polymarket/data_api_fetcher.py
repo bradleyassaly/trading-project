@@ -68,12 +68,17 @@ class PolymarketDataApiFetcher:
             writer = csv.DictWriter(fh, fieldnames=fieldnames)
             writer.writeheader()
 
-            offset = 0
+            # Use timestamp-based pagination (offset API caps at 3500)
+            before_ts: int | None = None
             for page in range(max_pages):
-                trades = self._fetch_page(params={"limit": 500, "offset": offset})
+                params: dict[str, Any] = {"limit": 500}
+                if before_ts is not None:
+                    params["before"] = before_ts
+                trades = self._fetch_page(params=params)
                 if not trades:
                     break
 
+                oldest_ts: int | None = None
                 for trade in trades:
                     ts = _get_timestamp(trade)
                     if ts and ts < cutoff_ts:
@@ -83,10 +88,15 @@ class PolymarketDataApiFetcher:
                     if row:
                         writer.writerow(row)
                         rows_written += 1
+                    if ts is not None and (oldest_ts is None or ts < oldest_ts):
+                        oldest_ts = ts
 
                 if hit_cutoff:
                     break
-                offset += len(trades)
+                if oldest_ts is not None:
+                    before_ts = oldest_ts
+                else:
+                    break
                 time.sleep(self._sleep)
 
         logger.info("Fetched %d recent trades to %s", rows_written, csv_path)
@@ -109,19 +119,27 @@ class PolymarketDataApiFetcher:
             writer = csv.DictWriter(fh, fieldnames=_CSV_FIELDS)
             writer.writeheader()
 
-            offset = 0
+            before_ts: int | None = None
             for page in range(max_pages):
-                trades = self._fetch_page(params={
-                    "market": condition_id, "limit": 500, "offset": offset,
-                })
+                params: dict[str, Any] = {"market": condition_id, "limit": 500}
+                if before_ts is not None:
+                    params["before"] = before_ts
+                trades = self._fetch_page(params=params)
                 if not trades:
                     break
+                oldest: int | None = None
                 for trade in trades:
                     row = _trade_to_row(trade)
                     if row:
                         writer.writerow(row)
                         rows_written += 1
-                offset += len(trades)
+                    ts = _get_timestamp(trade)
+                    if ts is not None and (oldest is None or ts < oldest):
+                        oldest = ts
+                if oldest is not None:
+                    before_ts = oldest
+                else:
+                    break
                 time.sleep(self._sleep)
 
         return rows_written
@@ -143,22 +161,82 @@ class PolymarketDataApiFetcher:
             writer = csv.DictWriter(fh, fieldnames=_CSV_FIELDS)
             writer.writeheader()
 
-            offset = 0
+            before_ts: int | None = None
             for page in range(max_pages):
-                trades = self._fetch_page(params={
-                    "user": wallet, "limit": 500, "offset": offset,
-                })
+                params: dict[str, Any] = {"user": wallet, "limit": 500}
+                if before_ts is not None:
+                    params["before"] = before_ts
+                trades = self._fetch_page(params=params)
                 if not trades:
                     break
+                oldest: int | None = None
                 for trade in trades:
                     row = _trade_to_row(trade)
                     if row:
                         writer.writerow(row)
                         rows_written += 1
-                offset += len(trades)
+                    ts = _get_timestamp(trade)
+                    if ts is not None and (oldest is None or ts < oldest):
+                        oldest = ts
+                if oldest is not None:
+                    before_ts = oldest
+                else:
+                    break
                 time.sleep(self._sleep)
 
         return rows_written
+
+    def fetch_trades_for_our_markets(
+        self,
+        output_dir: str | Path,
+        *,
+        metadata_db_path: str | Path | None = None,
+    ) -> dict[str, int]:
+        """Fetch trades per-market using condition_id from our live DB.
+
+        Returns dict of condition_id → rows written.
+        """
+        output_dir = Path(output_dir)
+        db_path = Path(metadata_db_path) if metadata_db_path else Path("data/polymarket/live/prices.db")
+        if not db_path.exists():
+            logger.warning("No metadata DB at %s", db_path)
+            return {}
+
+        import sqlite3
+        conn = sqlite3.connect(str(db_path), check_same_thread=False)
+        rows = conn.execute(
+            "SELECT condition_id, market_id FROM markets WHERE condition_id IS NOT NULL"
+        ).fetchall()
+        conn.close()
+
+        if not rows:
+            logger.warning("No markets with condition_id in DB")
+            return {}
+
+        logger.info("Fetching trades for %d markets by condition_id", len(rows))
+        results: dict[str, int] = {}
+        combined_path = output_dir / f"all_markets_{datetime.now(tz=timezone.utc).strftime('%Y%m%dT%H%M%S')}.csv"
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        with combined_path.open("w", newline="", encoding="utf-8") as combined_fh:
+            combined_writer = csv.DictWriter(combined_fh, fieldnames=_CSV_FIELDS)
+            combined_writer.writeheader()
+
+            for condition_id, market_id in rows:
+                count = self.fetch_market_trades(condition_id, output_dir)
+                results[condition_id] = count
+
+                # Also append to combined file
+                per_market_csv = output_dir / f"{condition_id[:32]}.csv"
+                if per_market_csv.exists():
+                    with per_market_csv.open(newline="", encoding="utf-8") as mf:
+                        reader = csv.DictReader(mf)
+                        for row in reader:
+                            combined_writer.writerow(row)
+
+        total = sum(results.values())
+        logger.info("Fetched %d total trades across %d markets", total, len(results))
+        return results
 
     def _fetch_page(self, params: dict[str, Any]) -> list[dict[str, Any]]:
         try:

@@ -156,10 +156,11 @@ def cmd_kalshi_full_backtest(args: argparse.Namespace) -> None:
     trade_log_path = output_dir / "kalshi_trade_log.jsonl"
     report_path = output_dir / "kalshi_backtest_report.md"
 
-    compatibility_csv = output_dir / "full_backtest_results.csv"
     compatibility_md = output_dir / "full_backtest_summary.md"
+    # Preserve Kalshi results before subsequent backtests overwrite backtest_results.csv
+    kalshi_results_csv = output_dir / "kalshi_backtest_results.csv"
     if (output_dir / "backtest_results.csv").exists():
-        shutil.copy(output_dir / "backtest_results.csv", compatibility_csv)
+        shutil.copy(output_dir / "backtest_results.csv", kalshi_results_csv)
     if report_path.exists():
         shutil.copy(report_path, compatibility_md)
 
@@ -188,8 +189,8 @@ def cmd_kalshi_full_backtest(args: argparse.Namespace) -> None:
     print(f"  Diagnostics : {diagnostics_path}")
     print(f"  Trade Log   : {trade_log_path}")
     print(f"  Report      : {report_path}")
-    if compatibility_csv.exists():
-        print(f"  Compat CSV  : {compatibility_csv}")
+    if kalshi_results_csv.exists():
+        print(f"  Kalshi CSV  : {kalshi_results_csv}")
     if compatibility_md.exists():
         print(f"  Compat MD   : {compatibility_md}")
 
@@ -395,8 +396,8 @@ def _merge_all_backtest_results(output_dir: Path) -> None:
     all sources so the GUI always shows the most comprehensive data.
     """
     source_files = [
+        output_dir / "kalshi_backtest_results.csv",
         output_dir / "backtest" / "backtest_results.csv",
-        output_dir / "backtest_results.csv",
         output_dir / "polymarket_backtest_results.csv",
         output_dir / "manifold_backtest_results.csv",
         output_dir / "metaculus_backtest_results.csv",
