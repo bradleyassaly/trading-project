@@ -7,8 +7,12 @@ from unittest.mock import patch
 
 from trading_platform.cli.commands import binance_crypto_historical_ingest as historical_cli
 from trading_platform.cli.commands import binance_crypto_features as features_cli
+from trading_platform.cli.commands import binance_crypto_alerts as alerts_cli
+from trading_platform.cli.commands import binance_crypto_health_check as health_cli
 from trading_platform.cli.commands import binance_crypto_normalize as normalize_cli
+from trading_platform.cli.commands import binance_crypto_notify as notify_cli
 from trading_platform.cli.commands import binance_crypto_project as project_cli
+from trading_platform.cli.commands import binance_crypto_status as status_cli
 from trading_platform.cli.commands import binance_crypto_sync as sync_cli
 from trading_platform.cli.commands import binance_crypto_websocket_ingest as websocket_cli
 
@@ -300,11 +304,18 @@ crypto:
         features_root=None,
         feature_store_root=None,
         feature_summary_path=None,
+        status_summary_path=None,
+        sync_manifest_root=None,
+        latest_sync_manifest_path=None,
         sync_summary_path=None,
     )
     with patch(
         "trading_platform.cli.commands.binance_crypto_sync.run_binance_incremental_sync",
         return_value=SimpleNamespace(
+            sync_id="binance-sync-1",
+            manifest_path=str(tmp_path / "data/binance/sync/manifests/binance-sync-1.json"),
+            latest_manifest_path=str(tmp_path / "data/binance/sync/latest_sync_manifest.json"),
+            freshness_summary_path=str(tmp_path / "data/binance/status/binance_status.json"),
             status="completed",
             websocket_summary_path=str(tmp_path / "data/binance/raw/websocket_summary.json"),
             projection_summary_path=str(tmp_path / "data/binance/projections/projection_summary.json"),
@@ -317,4 +328,152 @@ crypto:
 
     output = capsys.readouterr().out
     assert "Status                   : completed" in output
+    assert "Sync manifest            :" in output
     assert "Sync summary             :" in output
+
+
+def test_binance_status_cli_runs_in_json_mode(tmp_path: Path, capsys) -> None:
+    config_path = tmp_path / "binance.yaml"
+    config_path.write_text(
+        """
+crypto:
+  binance:
+    status:
+      summary_path: data/binance/status/binance_status.json
+    outputs:
+      projection_output_root: data/binance/projections
+""",
+        encoding="utf-8",
+    )
+    args = Namespace(
+        config=str(config_path),
+        symbols=None,
+        intervals=None,
+        projection_root=None,
+        features_root=None,
+        feature_store_root=None,
+        latest_sync_manifest_path=None,
+        summary_path=None,
+        format="json",
+    )
+    summary_path = tmp_path / "data/binance/status/binance_status.json"
+    summary_path.parent.mkdir(parents=True, exist_ok=True)
+    summary_path.write_text(
+        '{"dataset_count": 1, "stale_dataset_count": 0, "records": [{"dataset_name": "crypto_ohlcv_bars", "symbol": "BTCUSDT", "interval": "1m", "stale": false}]}',
+        encoding="utf-8",
+    )
+    with patch(
+        "trading_platform.cli.commands.binance_crypto_status.build_binance_status",
+        return_value=SimpleNamespace(
+            summary_path=str(summary_path),
+            latest_sync_manifest_path=None,
+            dataset_count=1,
+            stale_dataset_count=0,
+            records=[],
+        ),
+    ):
+        with patch.object(status_cli, "PROJECT_ROOT", tmp_path):
+            status_cli.cmd_binance_crypto_status(args)
+
+    output = capsys.readouterr().out
+    assert '"dataset_count": 1' in output
+
+
+def test_binance_alerts_cli_runs(tmp_path: Path, capsys) -> None:
+    config_path = tmp_path / "binance.yaml"
+    config_path.write_text("crypto:\n  binance:\n    alerts:\n      summary_path: data/binance/monitoring/alerts/alerts_summary.json\n", encoding="utf-8")
+    args = Namespace(
+        config=str(config_path),
+        symbols=None,
+        intervals=None,
+        latest_sync_manifest_path=None,
+        status_summary_path=None,
+        output_root=None,
+        summary_path=None,
+        format="text",
+    )
+    with patch(
+        "trading_platform.cli.commands.binance_crypto_alerts.evaluate_binance_alerts",
+        return_value=SimpleNamespace(
+            summary_path=str(tmp_path / "data/binance/monitoring/alerts/alerts_summary.json"),
+            alerts_json_path=str(tmp_path / "data/binance/monitoring/alerts/alerts.json"),
+            alerts_csv_path=str(tmp_path / "data/binance/monitoring/alerts/alerts.csv"),
+            status="warning",
+            alert_counts={"info": 0, "warning": 1, "critical": 0},
+            alert_count=1,
+        ),
+    ):
+        with patch.object(alerts_cli, "PROJECT_ROOT", tmp_path):
+            alerts_cli.cmd_binance_crypto_alerts(args)
+    output = capsys.readouterr().out
+    assert "alert count   : 1" in output
+
+
+def test_binance_health_check_cli_runs(tmp_path: Path, capsys) -> None:
+    config_path = tmp_path / "binance.yaml"
+    config_path.write_text("crypto:\n  binance:\n    health:\n      summary_path: data/binance/monitoring/health/health_check.json\n", encoding="utf-8")
+    args = Namespace(
+        config=str(config_path),
+        symbols=None,
+        intervals=None,
+        latest_sync_manifest_path=None,
+        status_summary_path=None,
+        output_root=None,
+        summary_path=None,
+        format="text",
+    )
+    with patch(
+        "trading_platform.cli.commands.binance_crypto_health_check.evaluate_binance_health_check",
+        return_value=SimpleNamespace(
+            summary_path=str(tmp_path / "data/binance/monitoring/health/health_check.json"),
+            status="healthy",
+            alert_counts={"info": 0, "warning": 0, "critical": 0},
+            check_count=5,
+        ),
+    ):
+        with patch.object(health_cli, "PROJECT_ROOT", tmp_path):
+            health_cli.cmd_binance_crypto_health_check(args)
+    output = capsys.readouterr().out
+    assert "status        : healthy" in output
+
+
+def test_binance_notify_cli_runs(tmp_path: Path, capsys) -> None:
+    config_path = tmp_path / "binance.yaml"
+    config_path.write_text("crypto:\n  binance:\n    notify:\n      summary_path: data/binance/monitoring/notifications/notify_summary.json\n", encoding="utf-8")
+    args = Namespace(
+        config=str(config_path),
+        symbols=None,
+        intervals=None,
+        latest_sync_manifest_path=None,
+        status_summary_path=None,
+        alerts_output_root=None,
+        alerts_summary_path=None,
+        health_output_root=None,
+        health_summary_path=None,
+        output_root=None,
+        summary_path=None,
+        state_path=None,
+        notification_config_path=None,
+        enabled=None,
+        dry_run=False,
+        subject_prefix=None,
+        format="text",
+    )
+    with patch(
+        "trading_platform.cli.commands.binance_crypto_notify.run_binance_monitor_notifications",
+        return_value=SimpleNamespace(
+            summary_path=str(tmp_path / "data/binance/monitoring/notifications/notify_summary.json"),
+            state_path=str(tmp_path / "data/binance/monitoring/notifications/notify_state.json"),
+            status="warning",
+            transition="healthy->warning",
+            should_notify=True,
+            notified=False,
+            suppressed=False,
+            alert_count=2,
+        ),
+    ):
+        with patch.object(notify_cli, "PROJECT_ROOT", tmp_path):
+            notify_cli.cmd_binance_crypto_notify(args)
+    output = capsys.readouterr().out
+    assert "transition    : healthy->warning" in output
+    assert "should notify : True" in output

@@ -679,6 +679,136 @@ Dependencies:
 
 ---
 
+## G-08 — Add scheduler-facing sync manifests, freshness monitoring, and research consumers for projected crypto feature datasets
+Status: DONE
+
+Objective:
+Make the Binance crypto pipeline scheduler-friendly and research-usable by adding explicit sync manifests, freshness status outputs for projected and feature datasets, and narrow readers for projected-feature artifacts.
+
+Expected scope:
+- extend the Binance sync runner to write stable scheduler-facing per-run and latest sync manifests
+- add freshness/status outputs for projected datasets and projected-feature datasets with staleness classification
+- add grouped CLI status inspection for the latest Binance sync and dataset freshness
+- add research readers that load Binance feature-store artifacts with symbol, interval, and time filtering
+- add a small research dataset assembly helper that can attach a forward-return target over selected bar horizons
+- document the new artifacts and add focused mocked tests
+
+Acceptance criteria:
+- each Binance sync run emits a stable sync manifest with run metadata, step outcomes, counts, warnings, failures, and artifact references
+- freshness status can classify projected and feature datasets as stale or fresh using configured thresholds
+- `data crypto binance status` exposes the latest freshness state in human-readable or JSON form
+- Binance projected-feature artifacts can be loaded through a stable reader path suitable for replay and research dataset assembly
+- tests cover manifest generation, freshness classification, CLI wiring, empty data handling, and research consumer filtering
+
+Dependencies:
+- G-07
+
+---
+
+## G-09 — Add crypto research loop adapters, freshness alerting, and scheduler-oriented health checks for Binance datasets
+Status: DONE
+
+Objective:
+Integrate Binance projected-feature datasets into the broader research workflow and improve operational trust with explicit freshness alerts and scheduler-facing health checks.
+
+Expected scope:
+- add a research dataset adapter and materializer for Binance feature-store outputs with explicit target-generation behavior
+- define a stable Binance research dataset contract for symbol, interval, timestamp, features, and target columns
+- add rule-based Binance freshness alert evaluation from the latest sync manifest plus status artifacts
+- add scheduler-oriented Binance health checks covering latest sync success, freshness, and required scope presence
+- add grouped CLI commands for Binance alerts and health checks
+- extend config, tests, and documentation without regressing existing Binance flows
+
+Acceptance criteria:
+- Binance research consumers can materialize replay-ready datasets from the existing feature-store outputs without duplicating feature generation
+- alert evaluation writes stable artifacts and surfaces stale datasets, unhealthy latest syncs, and missing required scopes
+- health checks produce machine-readable pass/warn/fail style outputs suitable for scheduler or orchestrator polling
+- CLI commands expose bounded human-readable and JSON-friendly summaries
+- tests cover research dataset loading, target-generation alignment, alert rules, health-check semantics, and CLI wiring
+
+Dependencies:
+- G-08
+
+---
+
+## G-10 — Add cross-asset research dataset registry integration and notification-backed Binance monitoring workflows
+Status: DONE
+
+Objective:
+Make Binance research datasets discoverable alongside other asset classes and turn Binance monitoring results into actionable, transition-aware notification workflows.
+
+Expected scope:
+- add a narrow shared research dataset registry for cross-asset dataset discovery and metadata inspection
+- publish Binance research datasets into that registry with manifest, freshness, and monitoring references
+- extend the Binance research consumer path with registry-backed discovery and loading helpers
+- add a notification workflow that evaluates current alert and health artifacts, tracks status transitions, and optionally delivers through the existing notification service
+- add grouped CLI support for Binance notify evaluation
+- update config, tests, and docs without regressing current Binance ingest, projection, feature, sync, status, research, alert, or health behavior
+
+Acceptance criteria:
+- Binance research datasets can be discovered through a stable cross-asset registry entry rather than only by ad hoc file paths
+- downstream code can resolve registry metadata and load Binance research datasets by dataset key with symbol, interval, and time filtering
+- Binance monitoring writes stable notification-evaluation artifacts with transition-aware `healthy/warning/critical` decisions
+- notification delivery reuses the repo's existing notification service when a shared notification config is provided, and otherwise still writes would-send artifacts
+- tests cover registry publication, registry-backed loading, notification transitions, duplicate suppression, CLI wiring, and empty or missing-artifact cases
+
+Dependencies:
+- G-09
+
+---
+
+## G-11 — Add additional asset-class publishers to the shared research dataset registry and unify scheduler monitoring dashboards across providers
+Status: DONE
+
+Objective:
+Expand the shared research dataset registry beyond Binance and add a machine-readable cross-provider monitoring layer that lets schedulers and operators inspect registry-backed research datasets consistently across providers.
+
+Expected scope:
+- extend the shared research dataset registry contract so providers can publish directory-backed feature datasets, not just single parquet files
+- publish Kalshi and Polymarket prediction-market feature artifacts into the shared registry from their existing manifests, summaries, validation outputs, and feature directories
+- add shared CLI flows for dataset-registry publication and listing without hard-coded provider paths in downstream code
+- build a cross-provider monitoring summary that reads registry entries plus provider truth artifacts and emits stable aggregate JSON summaries for schedulers and future dashboards
+- add grouped CLI support for provider-summary and provider-health inspection
+- update provider configs, tests, and docs without regressing the existing Binance registry, health, alerts, or notify flows
+
+Acceptance criteria:
+- Kalshi and Polymarket research datasets publish stable entries into `data/research/dataset_registry.json` using existing provider artifacts as the source of truth
+- shared registry loading supports both single-parquet and directory-backed research datasets
+- downstream code can list registry entries across providers and filter them by provider, asset class, and dataset name
+- a shared cross-provider monitoring build writes aggregate artifacts such as `latest_registry_summary.json`, `latest_monitoring_summary.json`, and `cross_provider_health_summary.json`
+- tests cover Kalshi and Polymarket publication, cross-provider listing and filtering, aggregate status semantics, missing-artifact handling, and CLI wiring
+
+Dependencies:
+- G-10
+
+---
+
+## G-12 — Add cross-provider research dataset readers and dashboard/API consumers for the shared registry and provider monitoring summaries
+Status: DONE
+
+Objective:
+Make the shared research dataset registry and provider monitoring artifacts first-class read surfaces for the rest of the platform through a stable registry-backed reader layer plus lightweight API and dashboard consumers.
+
+Expected scope:
+- add a shared registry-backed research dataset reader contract that can list, resolve, inspect, and load provider datasets without hard-coded provider paths
+- encapsulate provider-specific dataset quirks behind narrow reader helpers while keeping the shared registry as the entry point
+- add reusable readers for the latest registry publication summary, provider monitoring summary, and provider health rollup artifacts
+- expose those shared registry and monitoring artifacts through the existing FastAPI artifact-backed API
+- add a lightweight dashboard page for inspecting shared datasets and provider health without introducing a new UI framework
+- update tests, docs, and milestone state without regressing Binance, Kalshi, or Polymarket provider flows
+
+Acceptance criteria:
+- downstream code can list and load shared research datasets across Binance, Kalshi, and Polymarket through one registry-backed reader interface
+- registry-backed reads support provider, asset-class, dataset-name, symbol, interval, and time filtering where the underlying dataset supports those fields
+- API consumers can read registry contents, dataset detail, bounded dataset previews, registry publication summaries, provider monitoring summaries, and provider health summaries
+- a lightweight dashboard surface can inspect the shared registry and provider health rollups without relying on provider-specific hard-coded file paths
+- tests cover registry-backed resolution, ambiguous and missing dataset handling, monitoring artifact readers, and the new API routes
+
+Dependencies:
+- G-11
+
+---
+
 ## H-01 — Expand candidate grid generation
 Status: DONE
 
@@ -1631,3 +1761,7 @@ Any milestone that changes trading behavior, promotion logic, portfolio allocati
 - 2026-04-02: Kalshi historical-ingest category-filtered discovery now treats `/events` as the primary path. When `use_events_for_category_filter=true` and `use_direct_series_fetch=false`, the ingest skips `/historical/markets` entirely, and the new `skip_historical_pagination` flag now defaults to true in code, CLI config loading, and the checked-in Kalshi YAML.
 - 2026-04-03: Binance public crypto ingestion now has a first milestone implementation under `data crypto binance ...`. The repo now supports checkpointed REST ingestion of `exchangeInfo`, `klines`, `aggTrades`, and optional `bookTicker` snapshots, plus explicit normalized crypto parquet outputs with raw-artifact provenance and grouped CLI/config coverage. Websocket incremental mode remains intentionally deferred to the next milestone.
 - 2026-04-03: Binance crypto ingestion now supports bounded public websocket incremental append runs plus mixed-source projections. `data crypto binance websocket-ingest` writes checkpointed raw JSONL, deduped incremental parquet outputs, reconnect/duplicate telemetry, and automatic projection refreshes, while `data crypto binance project` rebuilds stable `crypto_ohlcv_bars`, `crypto_agg_trades`, and `crypto_top_of_book` datasets from historical REST plus websocket incremental normalized inputs.
+- 2026-04-03: Binance crypto now supports bounded sync orchestration and projected-dataset feature consumption. `data crypto binance sync` composes websocket incremental ingest, projection refresh, and feature refresh into one restart-safe cycle with step-level summaries, while `data crypto binance features` publishes explicit `crypto_market_features` parquet slices plus local feature-store manifests derived only from `crypto_ohlcv_bars`, `crypto_agg_trades`, and `crypto_top_of_book`.
+- 2026-04-03: Binance crypto syncs now emit scheduler-facing manifests and freshness status artifacts. `data crypto binance sync` writes a per-run manifest plus `latest_sync_manifest.json`, projected and feature freshness is materialized under `data/binance/status`, and new research readers can load `crypto_market_features` from the feature store with symbol, interval, and time filtering for replay-oriented dataset assembly.
+- 2026-04-03: Binance crypto now has research-loop-ready dataset adapters plus rule-based alerts and health checks. `materialize_binance_research_dataset()` turns feature-store slices into replay-ready research parquet with explicit forward-return targets, `data crypto binance alerts` emits stale/missing/unhealthy scheduler artifacts, and `data crypto binance health-check` summarizes whether Binance datasets are fit for downstream research use.
+- 2026-04-03: The shared research dataset registry now publishes additional providers beyond Binance. Kalshi and Polymarket feature directories can publish stable registry entries from their existing ingest and validation artifacts, the shared registry loader now supports directory-backed parquet datasets, and new grouped CLI flows build `latest_registry_summary.json`, `latest_monitoring_summary.json`, and `cross_provider_health_summary.json` for scheduler-facing cross-provider monitoring.

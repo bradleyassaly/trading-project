@@ -126,10 +126,93 @@ class TestLiveTickStore:
         assert latest["mkt-2"]["price"] == 0.30
         store.close()
 
+    def test_get_latest_prices_excludes_price_change(self, tmp_path: Path) -> None:
+        """price_change ticks should not appear in latest prices."""
+        store = LiveTickStore(tmp_path / "test.db")
+        store.insert_tick(
+            asset_id="tok-1", market_id="mkt-1", price=0.50,
+            timestamp="2026-04-03T12:00:00+00:00", msg_type="last_trade_price",
+        )
+        # A later price_change tick with a different price
+        store.insert_tick(
+            asset_id="tok-1", market_id="mkt-1", price=0.01,
+            timestamp="2026-04-03T12:10:00+00:00", msg_type="price_change",
+        )
+        latest = store.get_latest_prices()
+        assert latest["mkt-1"]["price"] == 0.50  # not 0.01
+        store.close()
+
+    def test_upsert_and_get_market_info(self, tmp_path: Path) -> None:
+        store = LiveTickStore(tmp_path / "test.db")
+        store.upsert_market_info("mkt-1", "Will X happen?", 5000.0, "tok-1", "2026-06-01T00:00:00Z")
+        store.upsert_market_info("mkt-2", "Will Y happen?", 3000.0, "tok-2")
+        info = store.get_market_info()
+        assert info["mkt-1"]["question"] == "Will X happen?"
+        assert info["mkt-1"]["end_date_iso"] == "2026-06-01T00:00:00Z"
+        assert info["mkt-2"]["volume"] == 3000.0
+        assert info["mkt-2"]["end_date_iso"] is None
+        store.close()
+
+    def test_upsert_markets_batch(self, tmp_path: Path) -> None:
+        store = LiveTickStore(tmp_path / "test.db")
+        store.upsert_markets_batch([
+            ("m1", "Q1?", 100.0, "t1", "2026-05-01"),
+            ("m2", "Q2?", 200.0, "t2", None),
+        ])
+        info = store.get_market_info()
+        assert len(info) == 2
+        assert info["m1"]["end_date_iso"] == "2026-05-01"
+        store.close()
+
+    def test_get_tick_counts(self, tmp_path: Path) -> None:
+        store = LiveTickStore(tmp_path / "test.db")
+        for i in range(5):
+            store.insert_tick(
+                asset_id="tok-1", market_id="mkt-1", price=0.5,
+                timestamp=f"2026-04-03T12:0{i}:00+00:00", msg_type="last_trade_price",
+            )
+        store.insert_tick(
+            asset_id="tok-2", market_id="mkt-2", price=0.3,
+            timestamp="2026-04-03T12:00:00+00:00", msg_type="last_trade_price",
+        )
+        counts = store.get_tick_counts()
+        assert counts["mkt-1"] == 5
+        assert counts["mkt-2"] == 1
+        store.close()
+
     def test_creates_parent_directories(self, tmp_path: Path) -> None:
         deep_path = tmp_path / "a" / "b" / "c" / "test.db"
         store = LiveTickStore(deep_path)
         assert deep_path.exists()
+        store.close()
+
+    def test_get_ticks_for_market(self, tmp_path: Path) -> None:
+        store = LiveTickStore(tmp_path / "test.db")
+        for i in range(10):
+            store.insert_tick(
+                asset_id="tok-1", market_id="mkt-1", price=0.50 + i * 0.01,
+                timestamp=f"2026-04-03T12:{i:02d}:00+00:00", msg_type="last_trade_price",
+            )
+        ticks = store.get_ticks_for_market("mkt-1", limit=5)
+        assert len(ticks) == 5
+        # Should be in ascending order (most recent 5)
+        assert ticks[0]["price"] < ticks[-1]["price"]
+        assert ticks[0]["price"] == pytest.approx(0.55)
+        store.close()
+
+    def test_get_ticks_for_market_ascending_order(self, tmp_path: Path) -> None:
+        store = LiveTickStore(tmp_path / "test.db")
+        store.insert_tick(
+            asset_id="tok-1", market_id="mkt-1", price=0.40,
+            timestamp="2026-04-03T12:00:00+00:00", msg_type="last_trade_price",
+        )
+        store.insert_tick(
+            asset_id="tok-1", market_id="mkt-1", price=0.60,
+            timestamp="2026-04-03T12:01:00+00:00", msg_type="last_trade_price",
+        )
+        ticks = store.get_ticks_for_market("mkt-1")
+        assert ticks[0]["price"] == 0.40
+        assert ticks[1]["price"] == 0.60
         store.close()
 
 
@@ -173,6 +256,30 @@ class TestMessageHandling:
         }
         collector._handle_price_change(msg)
         assert collector.state.ticks_stored == 2
+        # price_change should NOT update latest_prices
+        assert "mkt-1" not in collector.state.latest_prices
+        collector._store.close()
+
+    def test_handle_book_snapshot(self, tmp_path: Path) -> None:
+        collector = self._make_collector(tmp_path)
+        msg = {
+            "event_type": "book",
+            "asset_id": "tok-1",
+            "timestamp": "1729084877448",
+            "bids": [{"price": "0.60", "size": "100"}, {"price": "0.59", "size": "50"}],
+            "asks": [{"price": "0.62", "size": "80"}],
+        }
+        collector._handle_book(msg)
+        assert collector.state.ticks_stored == 1
+        # midpoint of 0.60 and 0.62 = 0.61
+        assert collector.state.latest_prices["mkt-1"] == pytest.approx(0.61)
+        # Verify orderbook data stored in DB
+        row = collector._store._conn.execute(
+            "SELECT best_bid, best_ask, spread FROM ticks WHERE market_id='mkt-1'"
+        ).fetchone()
+        assert row[0] == pytest.approx(0.60)  # best_bid
+        assert row[1] == pytest.approx(0.62)  # best_ask
+        assert row[2] == pytest.approx(0.02)  # spread
         collector._store.close()
 
     def test_message_loop_handles_array_wrapped_messages(self, tmp_path: Path) -> None:
@@ -347,11 +454,33 @@ class TestConfig:
         assert "wss://" in cfg.ws_url
         assert cfg.reconnect_delay == 2.0
         assert cfg.export_interval_sec == 3600.0
+        assert cfg.heartbeat_interval_sec == 300.0
 
     def test_live_market_info(self) -> None:
         info = _info("abc", "tok-123")
         assert info.market_id == "abc"
         assert info.yes_token_id == "tok-123"
+
+    def test_write_stats(self, tmp_path: Path) -> None:
+        config = PolymarketLiveCollectorConfig(
+            db_path=str(tmp_path / "test.db"),
+            hourly_bars_dir=str(tmp_path / "bars"),
+            stats_path=str(tmp_path / "stats" / "stats.json"),
+        )
+        collector = PolymarketLiveCollector(config, [_info()])
+        collector._store = LiveTickStore(config.db_path)
+        collector.state.started_at = datetime.now(tz=timezone.utc)
+        collector.state.ticks_stored = 42
+        collector.state.latest_prices["mkt-1"] = 0.65
+        collector._write_stats()
+
+        stats_path = tmp_path / "stats" / "stats.json"
+        assert stats_path.exists()
+        stats = json.loads(stats_path.read_text())
+        assert stats["total_ticks"] == 42
+        assert stats["markets_subscribed"] == 1
+        assert stats["markets_active"] == 1
+        collector._store.close()
 
 
 # ── FastAPI Endpoint ─────────────────────────────────────────────────────────
@@ -371,10 +500,11 @@ class TestPolymarketLiveEndpoint:
 
     def test_with_data_returns_markets(self, tmp_path: Path) -> None:
         from trading_platform.api import artifact_reader as reader
-        # Create a live DB with some ticks
+        # Create a live DB with some ticks and market metadata
         db_dir = tmp_path / "polymarket" / "live"
         db_dir.mkdir(parents=True)
         store = LiveTickStore(db_dir / "prices.db")
+        store.upsert_market_info("mkt-1", "Will X happen?", 5000.0, "tok-1", "2026-06-01T00:00:00Z")
         store.insert_tick(
             asset_id="tok-1", market_id="mkt-1", price=0.65,
             timestamp="2026-04-03T12:00:00+00:00", msg_type="last_trade_price",
@@ -387,8 +517,68 @@ class TestPolymarketLiveEndpoint:
             result = reader.read_polymarket_live_markets()
             assert result["available"] is True
             assert result["count"] == 1
-            assert result["data"][0]["market_id"] == "mkt-1"
-            assert result["data"][0]["yes_price"] == 65.0
-            assert result["data"][0]["live"] is True
+            m = result["data"][0]
+            assert m["market_id"] == "mkt-1"
+            assert m["question"] == "Will X happen?"
+            assert m["end_date_iso"] == "2026-06-01T00:00:00Z"
+            assert m["yes_price"] == 65.0
+            assert m["tick_count"] >= 1
+            assert m["live"] is True
+        finally:
+            reader.DATA_ROOT = original
+
+    def test_market_ticks_no_db(self, tmp_path: Path) -> None:
+        from trading_platform.api import artifact_reader as reader
+        original = reader.DATA_ROOT
+        reader.DATA_ROOT = tmp_path
+        try:
+            result = reader.read_polymarket_market_ticks("nonexistent")
+            assert result["available"] is False
+        finally:
+            reader.DATA_ROOT = original
+
+    def test_market_ticks_with_data(self, tmp_path: Path) -> None:
+        from trading_platform.api import artifact_reader as reader
+        db_dir = tmp_path / "polymarket" / "live"
+        db_dir.mkdir(parents=True)
+        store = LiveTickStore(db_dir / "prices.db")
+        store.upsert_market_info("mkt-1", "Will X happen?", 5000.0, "tok-1", "2026-06-01")
+        for i in range(10):
+            store.insert_tick(
+                asset_id="tok-1", market_id="mkt-1", price=0.50 + i * 0.01,
+                timestamp=f"2026-04-03T12:{i:02d}:00+00:00", msg_type="last_trade_price",
+            )
+        store.close()
+
+        original = reader.DATA_ROOT
+        reader.DATA_ROOT = tmp_path
+        try:
+            result = reader.read_polymarket_market_ticks("mkt-1")
+            assert result["available"] is True
+            assert result["question"] == "Will X happen?"
+            assert len(result["ticks"]) == 10
+            # Prices should be in 0-100 scale
+            assert result["ticks"][0]["price"] == 50.0
+            assert result["ticks"][-1]["price"] == 59.0
+            # Stats
+            assert result["stats"]["min"] == 50.0
+            assert result["stats"]["max"] == 59.0
+            assert result["stats"]["tick_count"] == 10
+        finally:
+            reader.DATA_ROOT = original
+
+    def test_market_ticks_no_ticks(self, tmp_path: Path) -> None:
+        from trading_platform.api import artifact_reader as reader
+        db_dir = tmp_path / "polymarket" / "live"
+        db_dir.mkdir(parents=True)
+        store = LiveTickStore(db_dir / "prices.db")
+        store.upsert_market_info("mkt-1", "Q?", 1000.0, "tok-1")
+        store.close()
+
+        original = reader.DATA_ROOT
+        reader.DATA_ROOT = tmp_path
+        try:
+            result = reader.read_polymarket_market_ticks("mkt-1")
+            assert result["available"] is False
         finally:
             reader.DATA_ROOT = original

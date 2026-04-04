@@ -73,6 +73,15 @@ class IngestRunStatus:
     resumed_processed_ticker_count: int = 0
     replayed_work_skipped: int = 0
     replayed_work_replayed: int = 0
+    configured_resume_recovery_mode: str | None = None
+    resume_cursor: str | None = None
+    resume_cursor_retry_count: int = 0
+    resume_cursor_last_http_status: int | None = None
+    resume_recovery_action: str | None = None
+    resumed_from_backup_checkpoint: bool = False
+    resumed_with_cursor_reset: bool = False
+    backup_checkpoint_recovery_attempted: bool = False
+    cursor_reset_recovery_attempted: bool = False
     stages: list[IngestStageStatus] = field(default_factory=list)
     _started_clock: float | None = field(default=None, repr=False, compare=False)
 

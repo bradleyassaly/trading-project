@@ -68,6 +68,48 @@ def _write_parquet(path: Path, df: pd.DataFrame) -> None:
     df.to_parquet(path, index=False)
 
 
+def _write_registry_entry(tmp_path: Path) -> str:
+    dataset_path = tmp_path / "data" / "research" / "binance_features.parquet"
+    _write_parquet(
+        dataset_path,
+        pd.DataFrame(
+            {
+                "symbol": ["BTCUSDT", "ETHUSDT"],
+                "interval": ["1m", "1m"],
+                "timestamp": pd.to_datetime(["2024-01-01T00:00:00Z", "2024-01-01T00:01:00Z"], utc=True),
+                "feature_time": pd.to_datetime(["2024-01-01T00:01:00Z", "2024-01-01T00:02:00Z"], utc=True),
+                "close": [42000.0, 2200.0],
+            }
+        ),
+    )
+    payload = {
+        "generated_at": "2024-01-01T00:00:00Z",
+        "entry_count": 1,
+        "entries": [
+            {
+                "dataset_key": "binance.crypto_market_features",
+                "provider": "binance",
+                "asset_class": "crypto",
+                "dataset_name": "crypto_market_features",
+                "dataset_path": str(dataset_path),
+                "storage_type": "parquet_file",
+                "symbols": ["BTCUSDT", "ETHUSDT"],
+                "intervals": ["1m"],
+                "target_horizons": [1],
+                "schema_version": "research_dataset_registry_v1",
+                "latest_materialized_at": "2024-01-01T00:05:00Z",
+                "latest_event_time": "2024-01-01T00:02:00Z",
+                "summary_path": str(tmp_path / "artifacts" / "binance" / "summary.json"),
+                "manifest_references": {"latest_sync_manifest_path": "artifacts/binance/latest_sync_manifest.json"},
+                "health_references": {"health_summary_path": "artifacts/binance/health.json"},
+                "metadata": {"time_semantics": {"feature_time": "feature time", "timestamp": "bar time"}, "keys": ["symbol", "interval", "timestamp"]},
+            }
+        ],
+    }
+    _write_json(tmp_path / "data" / "research" / "dataset_registry.json", payload)
+    return "binance.crypto_market_features"
+
+
 # ── Health ────────────────────────────────────────────────────────────────────
 
 
@@ -499,7 +541,69 @@ def test_all_get_endpoints_never_500():
         "/api/reasoning/trades",
         "/api/loop/decisions",
         "/api/research/status/nonexistent-job-id",
+        "/api/research/datasets",
+        "/api/ops/registry-summary",
+        "/api/ops/provider-monitoring",
+        "/api/ops/provider-health",
     ]
     for url in endpoints:
         resp = client.get(url)
         assert resp.status_code < 500, f"{url} returned {resp.status_code}"
+
+
+def test_research_dataset_registry_endpoints(tmp_path, monkeypatch):
+    monkeypatch.setattr(reader, "ARTIFACTS_ROOT", tmp_path / "artifacts")
+    monkeypatch.setattr(reader, "DATA_ROOT", tmp_path / "data")
+    dataset_key = _write_registry_entry(tmp_path)
+
+    list_resp = client.get("/api/research/datasets")
+    assert list_resp.status_code == 200
+    list_payload = list_resp.json()
+    assert list_payload["available"] is True
+    assert list_payload["count"] == 1
+    assert list_payload["data"][0]["dataset_key"] == dataset_key
+
+    detail_resp = client.get(f"/api/research/datasets/{dataset_key}")
+    assert detail_resp.status_code == 200
+    detail_payload = detail_resp.json()
+    assert detail_payload["available"] is True
+    assert detail_payload["data"]["time_column"] == "feature_time"
+
+    rows_resp = client.get(f"/api/research/datasets/{dataset_key}/rows?symbol=BTCUSDT&limit=1")
+    assert rows_resp.status_code == 200
+    rows_payload = rows_resp.json()
+    assert rows_payload["available"] is True
+    assert rows_payload["returned_row_count"] == 1
+    assert rows_payload["data"][0]["symbol"] == "BTCUSDT"
+
+
+def test_provider_monitoring_artifact_endpoints(tmp_path, monkeypatch):
+    monkeypatch.setattr(reader, "ARTIFACTS_ROOT", tmp_path / "artifacts")
+    monkeypatch.setattr(reader, "DATA_ROOT", tmp_path / "data")
+    _write_json(
+        tmp_path / "artifacts" / "provider_monitoring" / "latest_registry_summary.json",
+        {"generated_at": "2024-01-01T00:00:00Z", "entry_count": 3},
+    )
+    _write_json(
+        tmp_path / "artifacts" / "provider_monitoring" / "latest_monitoring_summary.json",
+        {"generated_at": "2024-01-01T00:00:00Z", "record_count": 3, "records": [{"provider": "binance"}]},
+    )
+    _write_json(
+        tmp_path / "artifacts" / "provider_monitoring" / "cross_provider_health_summary.json",
+        {"generated_at": "2024-01-01T00:00:00Z", "overall_status": "healthy", "provider_summaries": [{"provider": "binance", "status": "healthy"}]},
+    )
+
+    registry_resp = client.get("/api/ops/registry-summary")
+    assert registry_resp.status_code == 200
+    assert registry_resp.json()["available"] is True
+    assert registry_resp.json()["entry_count"] == 3
+
+    monitoring_resp = client.get("/api/ops/provider-monitoring")
+    assert monitoring_resp.status_code == 200
+    assert monitoring_resp.json()["available"] is True
+    assert monitoring_resp.json()["record_count"] == 3
+
+    health_resp = client.get("/api/ops/provider-health")
+    assert health_resp.status_code == 200
+    assert health_resp.json()["available"] is True
+    assert health_resp.json()["overall_status"] == "healthy"

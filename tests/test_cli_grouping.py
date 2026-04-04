@@ -168,6 +168,53 @@ def test_grouped_research_registry_build_command_parses() -> None:
     assert args.output_dir == "artifacts/research_registry"
 
 
+def test_grouped_research_dataset_registry_publish_command_parses() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "research",
+            "dataset-registry",
+            "publish",
+            "--registry-path",
+            "data/research/dataset_registry.json",
+            "--kalshi-config",
+            "configs/kalshi.yaml",
+            "--polymarket-config",
+            "configs/polymarket.yaml",
+            "--providers",
+            "kalshi",
+            "polymarket",
+        ]
+    )
+
+    assert args.research_command == "dataset-registry"
+    assert args.research_dataset_registry_command == "publish"
+    assert args.providers == ["kalshi", "polymarket"]
+
+
+def test_grouped_research_dataset_registry_list_command_parses() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "research",
+            "dataset-registry",
+            "list",
+            "--provider",
+            "kalshi",
+            "--asset-class",
+            "prediction_market",
+            "--format",
+            "json",
+        ]
+    )
+
+    assert args.research_command == "dataset-registry"
+    assert args.research_dataset_registry_command == "list"
+    assert args.provider == "kalshi"
+    assert args.asset_class == "prediction_market"
+    assert args.format == "json"
+
+
 def test_grouped_research_leaderboard_command_parses() -> None:
     parser = build_parser()
     args = parser.parse_args(
@@ -672,6 +719,103 @@ def test_grouped_data_crypto_binance_sync_command_parses() -> None:
     assert args.max_runtime_seconds == 60
     assert args.max_messages == 100
     assert args.skip_features is True
+
+
+def test_grouped_data_crypto_binance_status_command_parses() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "data",
+            "crypto",
+            "binance",
+            "status",
+            "--config",
+            "configs/binance.yaml",
+            "--symbols",
+            "BTCUSDT",
+            "--intervals",
+            "1m",
+            "--format",
+            "json",
+        ]
+    )
+
+    assert args.data_command == "crypto"
+    assert args.crypto_command == "binance"
+    assert args.crypto_provider_command == "status"
+    assert args.symbols == ["BTCUSDT"]
+    assert args.intervals == ["1m"]
+    assert args.format == "json"
+
+
+def test_grouped_data_crypto_binance_alerts_command_parses() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "data",
+            "crypto",
+            "binance",
+            "alerts",
+            "--config",
+            "configs/binance.yaml",
+            "--symbols",
+            "BTCUSDT",
+            "--intervals",
+            "1m",
+        ]
+    )
+
+    assert args.crypto_provider_command == "alerts"
+    assert args.symbols == ["BTCUSDT"]
+    assert args.intervals == ["1m"]
+
+
+def test_grouped_data_crypto_binance_health_check_command_parses() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "data",
+            "crypto",
+            "binance",
+            "health-check",
+            "--config",
+            "configs/binance.yaml",
+            "--format",
+            "json",
+        ]
+    )
+
+    assert args.crypto_provider_command == "health-check"
+    assert args.format == "json"
+
+
+def test_grouped_data_crypto_binance_notify_command_parses() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "data",
+            "crypto",
+            "binance",
+            "notify",
+            "--config",
+            "configs/binance.yaml",
+            "--symbols",
+            "BTCUSDT",
+            "--intervals",
+            "1m",
+            "--enabled",
+            "--notification-config-path",
+            "configs/notifications.yaml",
+            "--dry-run",
+        ]
+    )
+
+    assert args.crypto_provider_command == "notify"
+    assert args.symbols == ["BTCUSDT"]
+    assert args.intervals == ["1m"]
+    assert args.enabled is True
+    assert args.notification_config_path == "configs/notifications.yaml"
+    assert args.dry_run is True
 
 
 def test_grouped_data_build_classifications_command_parses() -> None:
@@ -2599,6 +2743,48 @@ def test_grouped_monitor_latest_command_parses() -> None:
 
     assert args.monitor_command == "latest"
     assert args.pipeline_root == "artifacts/orchestration"
+
+
+def test_grouped_ops_monitor_providers_summary_command_parses() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "ops",
+            "monitor",
+            "providers-summary",
+            "--registry-path",
+            "data/research/dataset_registry.json",
+            "--providers",
+            "binance",
+            "kalshi",
+            "--staleness-threshold-hours",
+            "72",
+        ]
+    )
+
+    assert args.ops_command == "monitor"
+    assert args.ops_monitor_command == "providers-summary"
+    assert args.providers == ["binance", "kalshi"]
+    assert args.staleness_threshold_hours == 72
+
+
+def test_grouped_ops_monitor_providers_health_command_parses() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "ops",
+            "monitor",
+            "providers-health",
+            "--asset-class",
+            "prediction_market",
+            "--format",
+            "json",
+        ]
+    )
+
+    assert args.ops_monitor_command == "providers-health"
+    assert args.asset_class == "prediction_market"
+    assert args.format == "json"
 
 
 def test_grouped_research_promote_run_local_command_parses() -> None:

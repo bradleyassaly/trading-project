@@ -221,7 +221,8 @@ def test_run_writes_real_raw_normalized_and_feature_artifacts(tmp_path: Path, mo
     assert result.markets_downloaded == 3
     assert result.markets_with_trades == 2
     assert result.total_trades >= 4
-    assert result.total_candlesticks == 4
+    # Historical candle endpoint not available; only live markets produce candles
+    assert result.total_candlesticks == 2
     assert result.normalized_markets_written == 2
     assert Path(config.normalized_markets_path).exists()
     assert Path(config.resolution_csv_path).exists()
@@ -1640,11 +1641,34 @@ def test_cli_resume_modes_are_wired(tmp_path, capsys):
 
 
 class _SeriesTrackingFakeClient(FakeKalshiClient):
-    """FakeKalshiClient that records series_ticker values passed to get_historical_markets."""
+    """FakeKalshiClient that returns events/markets for direct series fetch.
 
-    def __init__(self, **kwargs: object) -> None:
+    The direct series path now uses:
+      get_events_raw(series_ticker=X) → get_markets_raw(event_ticker=Y)
+    instead of get_historical_markets(series_ticker=X).
+    """
+
+    def __init__(self, *, series_events: dict[str, list[dict]] | None = None,
+                 event_markets: dict[str, list[dict]] | None = None,
+                 **kwargs: object) -> None:
         super().__init__(**kwargs)
         self.series_ticker_calls: list[str | None] = []
+        self._series_events = series_events or {}
+        self._event_markets = event_markets or {}
+
+    def get_events_raw(self, **kw: object) -> tuple[list[dict[str, object]], str | None]:
+        st = kw.get("series_ticker")
+        self.series_ticker_calls.append(st)
+        events = self._series_events.get(st, [])
+        return events, None
+
+    def get_markets_raw(self, **kw: object) -> tuple[list[dict[str, object]], str | None]:
+        et = kw.get("event_ticker")
+        markets = self._event_markets.get(et, [])
+        if markets:
+            return markets, None
+        # Fall back to parent for non-series calls
+        return super().get_markets_raw(**kw)
 
     def get_historical_markets(self, **kw: object) -> tuple[list[dict[str, object]], str | None]:
         self.series_ticker_calls.append(kw.get("series_ticker"))
@@ -1661,13 +1685,15 @@ def _econ_market(ticker: str, *, close_time: datetime) -> dict[str, object]:
 def test_direct_series_fetch_calls_series_ticker_param(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """_fetch_markets_by_series passes series_ticker to get_historical_markets for each series."""
+    """_fetch_markets_by_series calls get_events_raw(series_ticker=X) for each series."""
     now = datetime.now(UTC)
     cutoff = now - timedelta(days=7)
     kxfed_markets = [_econ_market(f"KXFED-{i:03d}", close_time=now - timedelta(days=20)) for i in range(25)]
 
     client = _SeriesTrackingFakeClient(
-        historical_markets=[(kxfed_markets, None)],
+        series_events={"KXFED": [{"event_ticker": "KXFED-EV1"}]},
+        event_markets={"KXFED-EV1": kxfed_markets},
+        historical_markets=[],
         live_markets=[([], None)],
         historical_trades={},
         live_trades={},
@@ -1687,7 +1713,7 @@ def test_direct_series_fetch_calls_series_ticker_param(
     HistoricalIngestPipeline(client, config).run()
 
     assert "KXFED" in client.series_ticker_calls, (
-        "Expected get_historical_markets to be called with series_ticker='KXFED'"
+        "Expected get_events_raw to be called with series_ticker='KXFED'"
     )
 
 
@@ -1698,15 +1724,11 @@ def test_direct_series_fetch_skips_historical_pagination_when_sufficient(
     now = datetime.now(UTC)
     cutoff = now - timedelta(days=7)
     kxfed_markets = [_econ_market(f"KXFED-{i:03d}", close_time=now - timedelta(days=20)) for i in range(25)]
-    _series_pages: list[tuple[list[dict[str, object]], str | None]] = [(kxfed_markets, None)]
-
-    def _fake_get_historical(**kw: object) -> tuple[list[dict[str, object]], str | None]:
-        if kw.get("series_ticker") == "KXFED":
-            return _series_pages.pop(0) if _series_pages else ([], None)
-        return ([_econ_market("PAGINATION-001", close_time=now - timedelta(days=20))], None)
 
     client = _SeriesTrackingFakeClient(
-        historical_markets=[],
+        series_events={"KXFED": [{"event_ticker": "KXFED-EV1"}]},
+        event_markets={"KXFED-EV1": kxfed_markets},
+        historical_markets=[([_econ_market("PAGINATION-001", close_time=now - timedelta(days=20))], None)],
         live_markets=[([], None)],
         historical_trades={},
         live_trades={},
@@ -1718,7 +1740,6 @@ def test_direct_series_fetch_skips_historical_pagination_when_sufficient(
             "orders_updated_ts": cutoff.isoformat(),
         },
     )
-    client.get_historical_markets = _fake_get_historical  # type: ignore[method-assign]
 
     monkeypatch.setattr(
         "trading_platform.kalshi.features.build_kalshi_features",

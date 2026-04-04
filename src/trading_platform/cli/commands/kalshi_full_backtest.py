@@ -196,6 +196,15 @@ def cmd_kalshi_full_backtest(args: argparse.Namespace) -> None:
     if getattr(args, "include_polymarket", False):
         _run_polymarket_backtest(args, signal_families, backtester, output_dir)
 
+    if getattr(args, "include_manifold", False):
+        _run_manifold_backtest(args, signal_families, backtester, output_dir)
+
+    if getattr(args, "include_metaculus", False):
+        _run_metaculus_backtest(args, signal_families, backtester, output_dir)
+
+    # Merge all source results into full_backtest_results.csv for the GUI
+    _merge_all_backtest_results(output_dir)
+
 
 def _run_polymarket_backtest(
     args: argparse.Namespace,
@@ -257,6 +266,170 @@ def _run_polymarket_backtest(
             f"avg_return={_format_metric(r.realized_avg_return, '.4f')}, "
             f"brier={_format_metric(r.brier_score, '.4f')}"
         )
+
+
+def _run_manifold_backtest(
+    args: argparse.Namespace,
+    signal_families: list,
+    backtester: Any,
+    output_dir: Path,
+) -> None:
+    """Run the same backtest against Manifold Markets feature parquets."""
+    mf_feature_dir = Path(
+        getattr(args, "manifold_feature_dir", None) or "data/manifold/features"
+    )
+    mf_resolution_path = Path(
+        getattr(args, "manifold_resolution_data", None) or "data/manifold/resolution.csv"
+    )
+
+    if not mf_feature_dir.exists():
+        print(f"\n[WARN] Manifold feature directory not found: {mf_feature_dir}")
+        print("Run 'trading-cli data manifold parse' first.")
+        return
+
+    if not mf_resolution_path.exists():
+        print(f"\n[WARN] Manifold resolution CSV not found: {mf_resolution_path}")
+        print("Run 'trading-cli data manifold parse' first.")
+        return
+
+    mf_resolution_data = pd.read_csv(mf_resolution_path)
+
+    print(f"\nRunning Manifold backtest:")
+    print(f"  feature dir  : {mf_feature_dir}")
+    print(f"  resolution   : {mf_resolution_path}")
+
+    mf_results = backtester.run(
+        feature_dir=mf_feature_dir,
+        resolution_data=mf_resolution_data,
+        signal_families=signal_families,
+        output_dir=output_dir,
+    )
+
+    mf_results_csv = output_dir / "manifold_backtest_results.csv"
+    rows = []
+    for r in mf_results:
+        rows.append({
+            "signal_family": r.signal_family,
+            "n_trades": r.n_trades,
+            "win_rate": r.win_rate,
+            "realized_avg_return": r.realized_avg_return,
+            "brier_score": r.brier_score,
+        })
+    if rows:
+        pd.DataFrame(rows).to_csv(mf_results_csv, index=False)
+
+    print(f"\nManifold backtest complete.")
+    print(f"  Results CSV  : {mf_results_csv}")
+    for r in mf_results:
+        print(
+            f"  - {r.signal_family}: trades={r.n_trades}, "
+            f"win_rate={_format_metric(r.win_rate, '.1%')}, "
+            f"avg_return={_format_metric(r.realized_avg_return, '.4f')}, "
+            f"brier={_format_metric(r.brier_score, '.4f')}"
+        )
+
+
+def _run_metaculus_backtest(
+    args: argparse.Namespace,
+    signal_families: list,
+    backtester: Any,
+    output_dir: Path,
+) -> None:
+    """Run the same backtest against Metaculus feature parquets."""
+    mc_feature_dir = Path(
+        getattr(args, "metaculus_feature_dir", None) or "data/metaculus/features"
+    )
+    mc_resolution_path = Path(
+        getattr(args, "metaculus_resolution_data", None) or "data/metaculus/resolution.csv"
+    )
+
+    if not mc_feature_dir.exists():
+        print(f"\n[WARN] Metaculus feature directory not found: {mc_feature_dir}")
+        print("Run 'trading-cli data metaculus fetch' first.")
+        return
+    if not mc_resolution_path.exists():
+        print(f"\n[WARN] Metaculus resolution CSV not found: {mc_resolution_path}")
+        print("Run 'trading-cli data metaculus fetch' first.")
+        return
+
+    mc_resolution_data = pd.read_csv(mc_resolution_path)
+    print(f"\nRunning Metaculus backtest:")
+    print(f"  feature dir  : {mc_feature_dir}")
+    print(f"  resolution   : {mc_resolution_path}")
+
+    mc_results = backtester.run(
+        feature_dir=mc_feature_dir,
+        resolution_data=mc_resolution_data,
+        signal_families=signal_families,
+        output_dir=output_dir,
+    )
+
+    mc_results_csv = output_dir / "metaculus_backtest_results.csv"
+    rows = []
+    for r in mc_results:
+        rows.append({
+            "signal_family": r.signal_family,
+            "n_trades": r.n_trades,
+            "win_rate": r.win_rate,
+            "realized_avg_return": r.realized_avg_return,
+            "brier_score": r.brier_score,
+        })
+    if rows:
+        pd.DataFrame(rows).to_csv(mc_results_csv, index=False)
+
+    print(f"\nMetaculus backtest complete.")
+    print(f"  Results CSV  : {mc_results_csv}")
+    for r in mc_results:
+        print(
+            f"  - {r.signal_family}: trades={r.n_trades}, "
+            f"win_rate={_format_metric(r.win_rate, '.1%')}, "
+            f"avg_return={_format_metric(r.realized_avg_return, '.4f')}, "
+            f"brier={_format_metric(r.brier_score, '.4f')}"
+        )
+
+
+def _merge_all_backtest_results(output_dir: Path) -> None:
+    """Merge Kalshi + Polymarket + Manifold results into a single CSV.
+
+    For each signal family, keeps the result with the most trades across
+    all sources so the GUI always shows the most comprehensive data.
+    """
+    source_files = [
+        output_dir / "backtest" / "backtest_results.csv",
+        output_dir / "backtest_results.csv",
+        output_dir / "polymarket_backtest_results.csv",
+        output_dir / "manifold_backtest_results.csv",
+        output_dir / "metaculus_backtest_results.csv",
+    ]
+
+    all_rows: list[dict[str, Any]] = []
+    for path in source_files:
+        if not path.exists():
+            continue
+        try:
+            df = pd.read_csv(path)
+            if df.empty or "signal_family" not in df.columns:
+                continue
+            for _, row in df.iterrows():
+                all_rows.append(dict(row))
+        except Exception:
+            continue
+
+    if not all_rows:
+        return
+
+    # Keep the result with highest n_trades per signal family
+    best: dict[str, dict[str, Any]] = {}
+    for row in all_rows:
+        family = str(row.get("signal_family", ""))
+        n_trades = int(row.get("n_trades") or 0)
+        if family not in best or n_trades > int(best[family].get("n_trades") or 0):
+            best[family] = row
+
+    merged_df = pd.DataFrame(list(best.values()))
+    merged_path = output_dir / "full_backtest_results.csv"
+    merged_df.to_csv(merged_path, index=False)
+    print(f"\nMerged results: {len(best)} signal families → {merged_path}")
 
 
 def _format_metric(value: Any, spec: str) -> str:

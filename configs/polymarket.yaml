@@ -8,9 +8,23 @@ lookback_days: 90
 min_volume: 1000
 max_markets_per_tag: 500
 
+market_selection:
+  mode: top_by_volume
+  end_date_max_days: 30
+  min_volume: 10000
+  max_markets: 75
+
 require_order_book: true
 raw_markets_dir: data/polymarket/raw/markets
 raw_prices_dir: data/polymarket/raw/prices
 features_dir: data/polymarket/features
 resolution_csv_path: data/polymarket/resolution.csv
 manifest_path: data/polymarket/raw/ingest_manifest.json
+
+research_registry:
+  enabled: true
+  path: data/research/dataset_registry.json
+  dataset_key: polymarket.prediction_market_features
+  dataset_name: prediction_market_features
+  asset_class: prediction_market
+  schema_version: polymarket_research_dataset_v1

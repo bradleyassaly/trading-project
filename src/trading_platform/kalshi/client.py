@@ -160,6 +160,20 @@ def _market_close_time_in_range(
     return True
 
 
+def extract_series_ticker(ticker: str) -> str | None:
+    """Extract the series prefix from a Kalshi market ticker.
+
+    ``KXCPI-26FEB-T0.3`` → ``KXCPI``
+    ``KXFED-27APR-T4.25`` → ``KXFED``
+    ``PRES-24-D.TR`` → ``PRES``
+
+    Returns ``None`` when the ticker doesn't match the expected pattern.
+    """
+    import re
+    m = re.match(r"^([A-Z]+)(?=-\d)", ticker)
+    return m.group(1) if m else None
+
+
 # ── Client ────────────────────────────────────────────────────────────────────
 
 class KalshiClient:
@@ -377,6 +391,7 @@ class KalshiClient:
         with_nested_markets: bool = False,
         limit: int = 200,
         cursor: str | None = None,
+        series_ticker: str | None = None,
     ) -> tuple[list[dict[str, Any]], str | None]:
         """Fetch one page of raw event payloads from the live endpoint.
 
@@ -389,15 +404,19 @@ class KalshiClient:
         :param with_nested_markets:  When True, each event includes a ``markets`` list.
         :param limit:                Page size (max 200).
         :param cursor:               Pagination cursor from a previous call.
+        :param series_ticker:        Filter events to a specific series (e.g. ``KXCPI``).
         :returns:                    Tuple of (list of raw event dicts, next cursor or None).
         """
-        data = self._get("/events", {
+        params: dict[str, Any] = {
             "limit": limit,
             "category": category,
             "status": status,
             "with_nested_markets": "true" if with_nested_markets else "false",
             "cursor": cursor,
-        })
+        }
+        if series_ticker is not None:
+            params["series_ticker"] = series_ticker
+        data = self._get("/events", params)
         return data.get("events", []), data.get("cursor")
 
     def get_all_events_raw(
@@ -741,14 +760,25 @@ class KalshiClient:
         start_ts: int | None = None,
         end_ts: int | None = None,
         period_interval: int | None = None,
+        series_ticker: str | None = None,
     ) -> list[dict[str, Any]]:
         """
         Fetch raw live candlestick payloads for a market.
 
-        The endpoint is used only for markets that settled after the historical cutoff.
+        The Kalshi live candlestick endpoint requires the series ticker:
+        ``/series/{series_ticker}/markets/{ticker}/candlesticks``.
+        When ``series_ticker`` is not provided, it is extracted from the
+        market ticker (e.g. ``KXCPI-26FEB-T0.3`` → ``KXCPI``).
         """
+        if series_ticker is None:
+            series_ticker = extract_series_ticker(ticker)
+        if series_ticker:
+            path = f"/series/{series_ticker}/markets/{ticker}/candlesticks"
+        else:
+            # Last resort fallback — may 404 on Kalshi
+            path = f"/markets/{ticker}/candlesticks"
         data = self._get(
-            f"/markets/{ticker}/candlesticks",
+            path,
             {
                 "start_ts": start_ts,
                 "end_ts": end_ts,

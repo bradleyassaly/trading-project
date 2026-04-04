@@ -70,6 +70,59 @@ crypto:
       skip_features: false
       full_feature_rebuild: false
       summary_path: data/binance/sync/sync_summary.json
+      manifest_root: data/binance/sync/manifests
+      latest_manifest_path: data/binance/sync/latest_sync_manifest.json
+    status:
+      symbols: []
+      intervals: []
+      summary_path: data/binance/status/binance_status.json
+      projection_staleness_threshold_sec: 300
+      feature_staleness_threshold_sec: 900
+    research:
+      output_root: data/binance/research
+      summary_path: data/binance/research/dataset_summary.json
+      symbols: []
+      intervals: []
+      start: null
+      end: null
+      target_horizons:
+        - 1
+        - 5
+    registry:
+      enabled: true
+      path: data/research/dataset_registry.json
+      dataset_key: binance.crypto_market_features
+      dataset_name: crypto_market_features
+      asset_class: crypto
+      schema_version: binance_research_dataset_v1
+    alerts:
+      output_root: data/binance/monitoring/alerts
+      summary_path: data/binance/monitoring/alerts/alerts_summary.json
+      symbols: []
+      intervals: []
+      latest_sync_max_age_sec: 900
+      require_sync_status_completed: true
+      missing_scope_severity: critical
+    health:
+      output_root: data/binance/monitoring/health
+      summary_path: data/binance/monitoring/health/health_check.json
+      symbols: []
+      intervals: []
+      latest_sync_max_age_sec: 900
+      require_feature_scopes: true
+      require_projection_scopes: true
+    notify:
+      enabled: false
+      output_root: data/binance/monitoring/notifications
+      summary_path: data/binance/monitoring/notifications/notify_summary.json
+      state_path: data/binance/monitoring/notifications/notify_state.json
+      notification_config_path: null
+      notify_on_warning: true
+      notify_on_critical: true
+      notify_on_recovery: true
+      transition_only: true
+      duplicate_suppression_window_sec: 3600
+      subject_prefix: Trading Platform Binance
     outputs:
       raw_root: data/binance/raw
       normalized_root: data/binance/normalized

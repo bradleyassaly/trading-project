@@ -38,5 +38,32 @@ export const api = {
   loopControl: (action) => post('/loop/control', { action }),
   researchRun: () => post('/research/run'),
   researchStatus: (jobId) => get(`/research/status/${encodeURIComponent(jobId)}`),
+  researchDatasets: (params = {}) => {
+    const query = new URLSearchParams()
+    Object.entries(params).forEach(([key, value]) => {
+      if (value != null && value !== '') query.append(key, value)
+    })
+    const suffix = query.toString() ? `?${query.toString()}` : ''
+    return get(`/research/datasets${suffix}`)
+  },
+  researchDatasetDetail: (datasetKey) => get(`/research/datasets/${encodeURIComponent(datasetKey)}`),
+  researchDatasetRows: (datasetKey, params = {}) => {
+    const query = new URLSearchParams()
+    Object.entries(params).forEach(([key, value]) => {
+      if (Array.isArray(value)) {
+        value.forEach((item) => {
+          if (item != null && item !== '') query.append(key, item)
+        })
+        return
+      }
+      if (value != null && value !== '') query.append(key, value)
+    })
+    const suffix = query.toString() ? `?${query.toString()}` : ''
+    return get(`/research/datasets/${encodeURIComponent(datasetKey)}/rows${suffix}`)
+  },
+  registrySummary: () => get('/ops/registry-summary'),
+  providerMonitoring: () => get('/ops/provider-monitoring'),
+  providerHealth: () => get('/ops/provider-health'),
   polymarketLiveMarkets: () => get('/polymarket/live-markets'),
+  polymarketMarketTicks: (marketId) => get(`/polymarket/market-ticks/${encodeURIComponent(marketId)}`),
 }

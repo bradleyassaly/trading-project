@@ -363,7 +363,7 @@ class HistoricalIngestConfig:
     # Feature generation
     feature_period: str = "1h"
     min_trades: int = 5    # skip markets with fewer trades than this
-    candle_period_interval: int | None = None
+    candle_period_interval: int = 60  # minutes: 1, 60, or 1440
 
     # Rate limiting
     request_sleep_sec: float = 0.05   # 20 req/sec
@@ -1313,34 +1313,52 @@ class HistoricalIngestPipeline:
         total_fetched = 0
         total_retained = 0
         for series in cfg.direct_series_tickers:
-            cursor: str | None = None
+            # Step 1: fetch events for this series via authenticated endpoint
+            # (/events?series_ticker=X&status=settled filters correctly,
+            # unlike /historical/markets which ignores series_ticker).
+            event_tickers: list[str] = []
+            ev_cursor: str | None = None
             while True:
-                markets, cursor = self.client.get_historical_markets(
-                    limit=100,
-                    cursor=cursor,
-                    min_close_ts=min_close_ts,
-                    max_close_ts=historical_max_close_ts,
-                    sleep=cfg.request_sleep_sec,
+                events, ev_cursor = self.client.get_events_raw(
                     series_ticker=series,
+                    status="settled",
+                    with_nested_markets=False,
+                    limit=200,
+                    cursor=ev_cursor,
                 )
-                page_markets = []
-                for market in markets:
-                    market["source_tier"] = "historical"
-                    market["ingested_at"] = end_dt.isoformat()
-                    page_markets.append(market)
-                total_fetched += len(page_markets)
-                retained_markets, _ = self._filter_markets_for_ingest_page(page_markets)
-                all_retained.extend(retained_markets)
-                total_retained += len(retained_markets)
-                logger.debug(
-                    "Direct series fetch %s: page fetched=%d retained=%d cursor=%s",
-                    series,
-                    len(page_markets),
-                    len(retained_markets),
-                    bool(cursor),
-                )
-                if not cursor:
+                for ev in events:
+                    et = ev.get("event_ticker") or ev.get("ticker") or ""
+                    if et:
+                        event_tickers.append(et)
+                if not ev_cursor:
                     break
+            logger.info("Direct series %s: found %d events", series, len(event_tickers))
+
+            # Step 2: fetch markets for each event
+            for event_ticker in event_tickers:
+                mkt_cursor: str | None = None
+                while True:
+                    markets, mkt_cursor = self.client.get_markets_raw(
+                        event_ticker=event_ticker,
+                        status="settled",
+                        limit=200,
+                        cursor=mkt_cursor,
+                    )
+                    page_markets = []
+                    for market in markets:
+                        market["source_tier"] = "live_direct_series"
+                        market["ingested_at"] = end_dt.isoformat()
+                        page_markets.append(market)
+                    total_fetched += len(page_markets)
+                    retained_markets, _ = self._filter_markets_for_ingest_page(page_markets)
+                    all_retained.extend(retained_markets)
+                    total_retained += len(retained_markets)
+                    logger.debug(
+                        "Direct series %s event %s: fetched=%d retained=%d",
+                        series, event_ticker, len(page_markets), len(retained_markets),
+                    )
+                    if not mkt_cursor:
+                        break
 
         diagnostics: dict[str, Any] = {
             "total_markets_fetched": total_fetched,
@@ -1433,7 +1451,9 @@ class HistoricalIngestPipeline:
 
         events_mode_enabled = bool(cfg.preferred_categories and cfg.use_events_for_category_filter)
         events_only_mode = events_mode_enabled and not cfg.use_direct_series_fetch
-        if events_mode_enabled:
+        # When direct series fetch is enabled, skip the events-based category
+        # scan entirely — direct_series_tickers is the sole discovery mechanism.
+        if events_mode_enabled and not (cfg.use_direct_series_fetch and cfg.direct_series_tickers):
             events_markets, events_diag = self._fetch_live_markets_by_events(
                 start_dt=live_start_dt,
                 end_dt=end_dt,
@@ -1825,21 +1845,21 @@ class HistoricalIngestPipeline:
             or str(market.get("source_tier")) == "historical"
         )
         if use_historical:
-            candles = self.client.get_historical_market_candlesticks_raw(
+            # Historical candlestick endpoint is not available on free API tiers.
+            # Log a warning and return empty — use `data kalshi live-candles` instead.
+            logger.debug(
+                "Skipping historical candle fetch for %s — endpoint not available on this API tier. "
+                "Use 'trading-cli data kalshi live-candles' for open markets.",
                 ticker,
-                start_ts=params["start_ts"],
-                end_ts=params["end_ts"],
-                period_interval=params["period_interval"],
-                sleep=self.config.request_sleep_sec,
             )
-            for candle in candles:
-                candle["source_tier"] = "historical"
-            return candles
+            return []
+        series_ticker = market.get("series_ticker") or market.get("seriesTicker")
         candles = self.client.get_market_candlesticks_raw(
             ticker,
             start_ts=params["start_ts"],
             end_ts=params["end_ts"],
             period_interval=params["period_interval"],
+            series_ticker=series_ticker,
         )
         for candle in candles:
             candle["source_tier"] = "live"

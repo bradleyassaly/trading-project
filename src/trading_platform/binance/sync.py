@@ -10,11 +10,13 @@ from trading_platform.binance.features import build_binance_market_features
 from trading_platform.binance.models import (
     BinanceFeatureConfig,
     BinanceProjectionConfig,
+    BinanceStatusConfig,
     BinanceSyncConfig,
     BinanceSyncResult,
     BinanceWebsocketIngestConfig,
 )
 from trading_platform.binance.projection import project_binance_market_data
+from trading_platform.binance.status import build_binance_status, build_binance_sync_manifest, generate_sync_id
 from trading_platform.binance.websocket import BinanceWebsocketIngestService
 
 
@@ -27,6 +29,7 @@ def _status_for_step(*, failures: list[Any] | None = None, skipped: bool = False
 
 
 def run_binance_incremental_sync(config: BinanceSyncConfig) -> BinanceSyncResult:
+    sync_id = generate_sync_id()
     started_at = datetime.now(UTC)
     summary_path = Path(config.sync_summary_path)
     summary_path.parent.mkdir(parents=True, exist_ok=True)
@@ -35,6 +38,7 @@ def run_binance_incremental_sync(config: BinanceSyncConfig) -> BinanceSyncResult
     websocket_summary_path: str | None = None
     projection_summary_path: str | None = None
     feature_summary_path: str | None = None
+    freshness_summary_path: str | None = None
     overall_status = "completed"
 
     websocket_config = BinanceWebsocketIngestConfig(
@@ -118,6 +122,7 @@ def run_binance_incremental_sync(config: BinanceSyncConfig) -> BinanceSyncResult
                 }
             ),
             full_rebuild=config.full_feature_rebuild,
+            run_context={"last_successful_sync_id": sync_id},
         )
         features_elapsed = monotonic() - features_started
         feature_summary_path = feature_result.summary_path
@@ -136,8 +141,23 @@ def run_binance_incremental_sync(config: BinanceSyncConfig) -> BinanceSyncResult
             },
         }
 
+    status_config = BinanceStatusConfig(
+        **{
+            **config.status.__dict__,
+            "projection_root": config.projection.output_root,
+            "features_root": config.features.features_root,
+            "feature_store_root": config.features.feature_store_root,
+            "latest_sync_manifest_path": config.latest_sync_manifest_path,
+            "symbols": config.symbols,
+            "intervals": config.intervals,
+        }
+    )
+    freshness_result = build_binance_status(status_config, latest_sync_id=sync_id)
+    freshness_summary_path = freshness_result.summary_path
+
     ended_at = datetime.now(UTC)
     summary = {
+        "sync_id": sync_id,
         "status": overall_status,
         "started_at": started_at.isoformat(),
         "ended_at": ended_at.isoformat(),
@@ -155,11 +175,37 @@ def run_binance_incremental_sync(config: BinanceSyncConfig) -> BinanceSyncResult
             "websocket": websocket_summary_path,
             "projection": projection_summary_path,
             "features": feature_summary_path,
+            "freshness": freshness_summary_path,
         },
     }
     summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    manifest_path, latest_manifest_path = build_binance_sync_manifest(
+        sync_id=sync_id,
+        manifest_root=config.sync_manifest_root,
+        latest_manifest_path=config.latest_sync_manifest_path,
+        status=overall_status,
+        started_at=started_at.isoformat(),
+        completed_at=ended_at.isoformat(),
+        provider="binance",
+        symbols=list(config.symbols),
+        intervals=list(config.intervals),
+        stream_families=list(config.stream_families),
+        step_statuses=step_statuses,
+        step_summaries=step_summaries,
+        checkpoint_paths={"websocket": websocket_config.checkpoint_path},
+        summary_paths={
+            "websocket": websocket_summary_path,
+            "projection": projection_summary_path,
+            "features": feature_summary_path,
+        },
+        freshness_summary_path=freshness_summary_path,
+    )
     return BinanceSyncResult(
+        sync_id=sync_id,
         summary_path=str(summary_path),
+        manifest_path=manifest_path,
+        latest_manifest_path=latest_manifest_path,
+        freshness_summary_path=freshness_summary_path,
         websocket_summary_path=websocket_summary_path,
         projection_summary_path=projection_summary_path,
         feature_summary_path=feature_summary_path,

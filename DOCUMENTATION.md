@@ -1072,6 +1072,508 @@ These projected tables include source-mode metadata (`historical_rest` vs `webso
 #### Recommended Next Milestone
 - G-07 - Add scheduled Binance incremental sync orchestration and feature-store consumers for projected crypto datasets
 
+### G-07 - Add scheduled Binance incremental sync orchestration and feature-store consumers for projected crypto datasets
+Date: 2026-04-03
+Status: DONE
+
+#### Summary
+Added a bounded Binance sync orchestration layer plus the first projected-dataset crypto feature consumers. The repo now supports `data crypto binance sync` for one-command websocket ingest, projection refresh, and feature refresh cycles, and `data crypto binance features` for direct projected-feature rebuilds. Feature outputs are derived only from the projected datasets `crypto_ohlcv_bars`, `crypto_agg_trades`, and `crypto_top_of_book`, then published both as provider-specific parquet artifacts and local feature-store manifests.
+
+#### Why
+G-06 made Binance incremental ingestion operational, but using it repeatedly still required manual step sequencing and downstream consumers still had to hand-assemble research features from projected datasets. This milestone turns the Binance path into a bounded restart-safe sync workflow and adds an explicit research-facing feature layer without broadening into execution or exchange account behavior.
+
+#### Files Changed
+- `configs/binance.yaml`
+- `src/trading_platform/binance/__init__.py`
+- `src/trading_platform/binance/features.py`
+- `src/trading_platform/binance/models.py`
+- `src/trading_platform/binance/sync.py`
+- `src/trading_platform/binance/websocket.py`
+- `src/trading_platform/cli/commands/binance_crypto_features.py`
+- `src/trading_platform/cli/commands/binance_crypto_sync.py`
+- `src/trading_platform/cli/grouped_parser.py`
+- `tests/binance/test_cli.py`
+- `tests/binance/test_features.py`
+- `tests/binance/test_sync.py`
+- `tests/test_cli_grouping.py`
+- `MILESTONES.md`
+- `DOCUMENTATION.md`
+
+#### Tests Run
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\pytest.exe tests/binance/test_features.py tests/binance/test_sync.py tests/binance/test_cli.py tests/binance/test_projection.py tests/binance/test_websocket_incremental.py tests/test_cli_grouping.py tests/test_feature_store.py -q`
+
+#### Verification Commands
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\pytest.exe tests/binance/test_features.py tests/binance/test_sync.py tests/binance/test_cli.py tests/binance/test_projection.py tests/binance/test_websocket_incremental.py tests/test_cli_grouping.py tests/test_feature_store.py -q`
+- `Remove-Item Env:TP_ALERT_SMTP_HOST -ErrorAction SilentlyContinue; Remove-Item Env:TP_ALERT_SMTP_PORT -ErrorAction SilentlyContinue; Remove-Item Env:TP_ALERT_SMTP_USERNAME -ErrorAction SilentlyContinue; Remove-Item Env:TP_ALERT_SMTP_PASSWORD -ErrorAction SilentlyContinue; Remove-Item Env:TP_ALERT_SMTP_USE_TLS -ErrorAction SilentlyContinue; Remove-Item Env:TP_ALERT_FROM -ErrorAction SilentlyContinue; Remove-Item Env:TP_ALERT_TO -ErrorAction SilentlyContinue; Remove-Item Env:TP_ALERT_SUBJECT_PREFIX -ErrorAction SilentlyContinue; C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\pytest.exe -q`
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\python.exe -m trading_platform.cli data crypto binance sync --config configs/binance.yaml --symbols BTCUSDT --intervals 1m --stream-families kline agg_trade --max-messages 100 --max-runtime-seconds 60`
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\python.exe -m trading_platform.cli data crypto binance features --config configs/binance.yaml --symbols BTCUSDT --intervals 1m --full-rebuild`
+
+#### Design Notes
+The new sync runner is intentionally thin. `run_binance_incremental_sync()` reuses the existing websocket ingestion service and projection builder, disables the websocket service's automatic projection refresh during sync mode, and then records step ordering, durations, summary paths, and failure state in one machine-readable sync artifact. The sync layer is bounded by message and runtime caps, reuses the existing websocket checkpoint path, and is suitable for repeated scheduler-style invocation without becoming a permanently running daemon in this milestone.
+
+The feature layer is explicitly projection-first. `build_binance_market_features()` reads `crypto_ohlcv_bars.parquet`, `crypto_agg_trades.parquet`, and `crypto_top_of_book.parquet`, then emits `crypto_market_features` slices keyed by `symbol`, `interval`, and `timestamp`. The first feature set is intentionally narrow:
+- multi-horizon bar returns
+- rolling return volatility
+- rolling volume and dollar-volume means
+- aggregated trade-count, quantity, notional, and signed-flow proxy fields from projected aggregate trades
+- mid-price, spread, spread-bps, and imbalance fields from projected top-of-book snapshots
+- rolling trade-intensity, spread, and imbalance means
+
+Feature refresh defaults to deterministic incremental tail recomputation over the affected symbol and interval slices rather than trying to maintain complex online feature state. Existing rows are replaced by `dedupe_key` and `symbol`/`interval`/`timestamp` uniqueness, while the refreshed slice parquet files are also published through `LocalFeatureStore` so downstream replay or research consumers can resolve feature manifests using the repo's established feature-store contract.
+
+#### Artifact Layout
+- `data/binance/raw/websocket/...` for bounded incremental raw JSONL
+- `data/binance/normalized/incremental/...` for websocket-derived normalized parquet
+- `data/binance/projections/crypto_ohlcv_bars.parquet`
+- `data/binance/projections/crypto_agg_trades.parquet`
+- `data/binance/projections/crypto_top_of_book.parquet`
+- `data/binance/features/crypto_market_features.parquet`
+- `data/binance/features/crypto_market_features/<SYMBOL>/<INTERVAL>.parquet`
+- `data/feature_store/<INTERVAL>/<SYMBOL>/binance__crypto__market_features.parquet` and manifest JSON
+- `data/binance/sync/sync_summary.json`
+
+#### Known Issues / Limitations
+- The sync runner is designed for bounded repeated invocation. It is not yet a long-lived scheduler service, cron integration, or daemon with lease/heartbeat management.
+- Projection refresh remains deterministic full rebuild in this milestone. Only feature refresh supports incremental tail recomputation.
+- Feature generation is bar-anchored, so symbols or intervals without projected OHLCV rows will not emit features even if aggregate trades or top-of-book snapshots exist.
+- The initial trade-flow feature set uses a signed-flow proxy derived from `is_buyer_maker`; it is useful for research but should not be treated as a perfect aggressor-side ground truth label.
+
+#### Recommended Next Milestone
+- G-08 - Add scheduler-facing sync manifests, freshness monitoring, and research consumers for projected crypto feature datasets
+
+### G-08 - Add scheduler-facing sync manifests, freshness monitoring, and research consumers for projected crypto feature datasets
+Date: 2026-04-03
+Status: DONE
+
+#### Summary
+Extended the Binance crypto pipeline with scheduler-facing sync manifests, explicit freshness status outputs, and narrow research consumers for projected crypto feature artifacts. `data crypto binance sync` now writes a unique sync ID, a per-run manifest, a `latest_sync_manifest.json` pointer, and a freshness/status artifact for projected and feature datasets. The repo also now exposes a `data crypto binance status` CLI plus a small reader layer that loads `crypto_market_features` from the feature store for replay and research dataset assembly.
+
+#### Why
+G-07 made Binance syncs operational, but external schedulers and dashboards still lacked a stable one-file view of sync health, dataset freshness, and artifact references. Research consumers also had feature outputs on disk without a dedicated loader contract. This milestone closes those operational and usability gaps without broadening into exchange execution or model-training logic.
+
+#### Files Changed
+- `configs/binance.yaml`
+- `src/trading_platform/binance/__init__.py`
+- `src/trading_platform/binance/features.py`
+- `src/trading_platform/binance/models.py`
+- `src/trading_platform/binance/projection.py`
+- `src/trading_platform/binance/research.py`
+- `src/trading_platform/binance/status.py`
+- `src/trading_platform/binance/sync.py`
+- `src/trading_platform/binance/websocket.py`
+- `src/trading_platform/cli/commands/binance_crypto_status.py`
+- `src/trading_platform/cli/commands/binance_crypto_sync.py`
+- `src/trading_platform/cli/grouped_parser.py`
+- `tests/binance/test_cli.py`
+- `tests/binance/test_research.py`
+- `tests/binance/test_status.py`
+- `tests/binance/test_sync.py`
+- `tests/test_cli_grouping.py`
+- `MILESTONES.md`
+- `DOCUMENTATION.md`
+
+#### Tests Run
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\pytest.exe tests/binance/test_features.py tests/binance/test_sync.py tests/binance/test_status.py tests/binance/test_research.py tests/binance/test_cli.py tests/binance/test_projection.py tests/binance/test_websocket_incremental.py tests/test_cli_grouping.py tests/test_feature_store.py -q`
+
+#### Verification Commands
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\pytest.exe tests/binance/test_features.py tests/binance/test_sync.py tests/binance/test_status.py tests/binance/test_research.py tests/binance/test_cli.py tests/binance/test_projection.py tests/binance/test_websocket_incremental.py tests/test_cli_grouping.py tests/test_feature_store.py -q`
+- `Remove-Item Env:TP_ALERT_SMTP_HOST -ErrorAction SilentlyContinue; Remove-Item Env:TP_ALERT_SMTP_PORT -ErrorAction SilentlyContinue; Remove-Item Env:TP_ALERT_SMTP_USERNAME -ErrorAction SilentlyContinue; Remove-Item Env:TP_ALERT_SMTP_PASSWORD -ErrorAction SilentlyContinue; Remove-Item Env:TP_ALERT_SMTP_USE_TLS -ErrorAction SilentlyContinue; Remove-Item Env:TP_ALERT_FROM -ErrorAction SilentlyContinue; Remove-Item Env:TP_ALERT_TO -ErrorAction SilentlyContinue; Remove-Item Env:TP_ALERT_SUBJECT_PREFIX -ErrorAction SilentlyContinue; C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\pytest.exe -q`
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\python.exe -m trading_platform.cli data crypto binance sync --config configs/binance.yaml --symbols BTCUSDT --intervals 1m --stream-families kline agg_trade --max-messages 100 --max-runtime-seconds 60`
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\python.exe -m trading_platform.cli data crypto binance status --config configs/binance.yaml --symbols BTCUSDT --intervals 1m`
+
+#### Design Notes
+The sync runner still owns the pipeline order, but it now emits two distinct operational artifacts:
+- `sync_summary.json` remains the detailed step summary written by the runner itself
+- `manifests/<sync_id>.json` plus `latest_sync_manifest.json` provide a stable scheduler-facing contract with run ID, timings, step statuses, checkpoint references, counts, warnings, failures, artifact references, and latest event/feature timestamps
+
+Freshness monitoring is intentionally simple and deterministic. `build_binance_status()` reads the current projected parquet datasets plus the feature slice parquet files under `data/binance/features/crypto_market_features/<SYMBOL>/<INTERVAL>.parquet`, computes the latest event or feature timestamp for each scoped dataset, compares that timestamp against configurable staleness thresholds, and writes `data/binance/status/binance_status.json`. The current implementation tracks:
+- `crypto_ohlcv_bars` by `symbol` and `interval`
+- `crypto_agg_trades` by `symbol`
+- `crypto_top_of_book` by `symbol`
+- `crypto_market_features` by `symbol` and `interval`
+
+Each status record includes dataset name, family, symbol, interval where applicable, latest event/materialization time, age in seconds, configured threshold, stale flag, row count, source reference, and the last successful sync ID when available from the latest manifest.
+
+The research reader is intentionally narrow. `load_binance_feature_frame()` resolves the repo’s existing `LocalFeatureStore` artifacts for the `["crypto", "binance", "market_features"]` feature-group contract, applies symbol, interval, and time filters, and returns a stable pandas frame. `assemble_binance_research_dataset()` layers a simple forward-return target on top of that frame when a prediction horizon in bars is requested, which makes the Binance feature outputs immediately usable in replay or research dataset assembly without coupling them to any one model training flow.
+
+#### Artifact Layout
+- `data/binance/sync/sync_summary.json`
+- `data/binance/sync/manifests/<sync_id>.json`
+- `data/binance/sync/latest_sync_manifest.json`
+- `data/binance/status/binance_status.json`
+- `data/binance/projections/crypto_ohlcv_bars.parquet`
+- `data/binance/projections/crypto_agg_trades.parquet`
+- `data/binance/projections/crypto_top_of_book.parquet`
+- `data/binance/features/crypto_market_features.parquet`
+- `data/binance/features/crypto_market_features/<SYMBOL>/<INTERVAL>.parquet`
+- `data/feature_store/<INTERVAL>/<SYMBOL>/binance__crypto__market_features.parquet` and matching manifest JSON
+
+#### Research Consumer Example
+- `from trading_platform.binance.research import load_binance_feature_frame, assemble_binance_research_dataset`
+- `load_binance_feature_frame(feature_store_root="data/feature_store", symbols=["BTCUSDT"], intervals=["1m"], start="2024-01-01T00:00:00Z", end="2024-01-02T00:00:00Z")`
+- `assemble_binance_research_dataset(feature_store_root="data/feature_store", symbols=["BTCUSDT"], intervals=["1m"], target_horizon_bars=5)`
+
+#### Known Issues / Limitations
+- Freshness is file-and-parquet based. It does not yet integrate with a wider monitoring daemon, dashboard push path, or alert delivery workflow.
+- The latest sync ID attached to freshness records comes from the latest successful Binance sync manifest, not from per-row lineage inside every projected parquet file.
+- The research dataset helper only adds simple forward-return targets from the feature-store close column. It does not yet perform broader multi-symbol alignment, cross-sectional packaging, or label-quality diagnostics.
+- Status generation currently scans the current projected and feature artifacts directly rather than caching per-symbol/per-interval lineage metadata during projection and feature refresh.
+
+#### Recommended Next Milestone
+- G-09 - Add crypto research loop adapters, freshness alerting, and scheduler-oriented health checks for Binance datasets
+
+### G-09 - Add crypto research loop adapters, freshness alerting, and scheduler-oriented health checks for Binance datasets
+Date: 2026-04-03
+Status: DONE
+
+#### Summary
+Extended the Binance crypto integration with research-loop-ready dataset adapters, rule-based freshness alerting, and scheduler-oriented health checks. The repo now includes a Binance research dataset contract and materializer on top of the existing feature-store outputs, plus new `data crypto binance alerts` and `data crypto binance health-check` CLI commands that evaluate the latest sync manifest and freshness status artifacts without requiring any live network access.
+
+#### Why
+G-08 made Binance syncs schedulable and observable, but the broader research system still lacked an explicit replay-ready dataset contract for Binance features and operators still had to infer whether stale or failed Binance data should block downstream work. This milestone closes those gaps with a narrow research adapter and explicit alert and health evaluation artifacts.
+
+#### Files Changed
+- `configs/binance.yaml`
+- `src/trading_platform/binance/__init__.py`
+- `src/trading_platform/binance/health.py`
+- `src/trading_platform/binance/models.py`
+- `src/trading_platform/binance/research.py`
+- `src/trading_platform/cli/commands/binance_crypto_alerts.py`
+- `src/trading_platform/cli/commands/binance_crypto_health_check.py`
+- `src/trading_platform/cli/grouped_parser.py`
+- `tests/binance/test_cli.py`
+- `tests/binance/test_health.py`
+- `tests/binance/test_research_adapter.py`
+- `tests/test_cli_grouping.py`
+- `MILESTONES.md`
+- `DOCUMENTATION.md`
+
+#### Tests Run
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\pytest.exe tests/binance/test_features.py tests/binance/test_sync.py tests/binance/test_status.py tests/binance/test_research.py tests/binance/test_research_adapter.py tests/binance/test_health.py tests/binance/test_cli.py tests/binance/test_projection.py tests/binance/test_websocket_incremental.py tests/test_cli_grouping.py tests/test_feature_store.py -q`
+
+#### Verification Commands
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\pytest.exe tests/binance/test_features.py tests/binance/test_sync.py tests/binance/test_status.py tests/binance/test_research.py tests/binance/test_research_adapter.py tests/binance/test_health.py tests/binance/test_cli.py tests/binance/test_projection.py tests/binance/test_websocket_incremental.py tests/test_cli_grouping.py tests/test_feature_store.py -q`
+- `Remove-Item Env:TP_ALERT_SMTP_HOST -ErrorAction SilentlyContinue; Remove-Item Env:TP_ALERT_SMTP_PORT -ErrorAction SilentlyContinue; Remove-Item Env:TP_ALERT_SMTP_USERNAME -ErrorAction SilentlyContinue; Remove-Item Env:TP_ALERT_SMTP_PASSWORD -ErrorAction SilentlyContinue; Remove-Item Env:TP_ALERT_SMTP_USE_TLS -ErrorAction SilentlyContinue; Remove-Item Env:TP_ALERT_FROM -ErrorAction SilentlyContinue; Remove-Item Env:TP_ALERT_TO -ErrorAction SilentlyContinue; Remove-Item Env:TP_ALERT_SUBJECT_PREFIX -ErrorAction SilentlyContinue; C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\pytest.exe -q`
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\python.exe -m trading_platform.cli data crypto binance alerts --config configs/binance.yaml --symbols BTCUSDT --intervals 1m`
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\python.exe -m trading_platform.cli data crypto binance health-check --config configs/binance.yaml --symbols BTCUSDT --intervals 1m`
+
+#### Design Notes
+The research adapter remains feature-store-first. `materialize_binance_research_dataset()` reads Binance feature-store slices through the existing `LocalFeatureStore`, preserves the existing `symbol` / `interval` / `timestamp` keys, and writes a research-ready parquet plus a small summary contract. The contract makes timestamp semantics explicit:
+- `timestamp` is the bar open timestamp
+- `feature_time` is the bar close timestamp used as the effective feature timestamp
+
+The current target-generation path is intentionally narrow and deterministic. It adds forward-return columns named `target_return_<N>` using the `close` column and `N` future bars within each `symbol` and `interval` group. This keeps the behavior replay-friendly and easy to reason about without introducing broader label engineering or model-training logic.
+
+Alerting and health checks intentionally reuse the repo’s existing monitoring vocabulary:
+- alerts use `Alert` with `info` / `warning` / `critical` severities
+- health checks emit `healthy` / `warning` / `critical` status
+
+`evaluate_binance_alerts()` writes JSON and CSV alert artifacts plus a summary JSON. It currently evaluates:
+- missing or unreadable latest sync manifest
+- unhealthy latest sync status
+- stale latest sync completion age
+- stale projected or feature datasets
+- missing required feature scopes for the configured symbol and interval set
+
+`evaluate_binance_health_check()` summarizes scheduler-facing fitness for use by downstream research or orchestration. It evaluates:
+- latest manifest readability
+- latest sync completed successfully
+- latest sync recent enough
+- freshness status readability
+- stale dataset presence
+- required projection scope presence
+- required feature scope presence
+
+#### Artifact Layout
+- `data/binance/research/binance_research_dataset.parquet`
+- `data/binance/research/dataset_summary.json`
+- `data/binance/monitoring/alerts/alerts.json`
+- `data/binance/monitoring/alerts/alerts.csv`
+- `data/binance/monitoring/alerts/alerts_summary.json`
+- `data/binance/monitoring/health/health_check.json`
+- existing upstream references:
+  - `data/binance/sync/latest_sync_manifest.json`
+  - `data/binance/status/binance_status.json`
+  - `data/feature_store/<INTERVAL>/<SYMBOL>/binance__crypto__market_features.parquet`
+
+#### Research Dataset Contract
+- Keys: `symbol`, `interval`, `timestamp`
+- Time fields: `timestamp`, `feature_time`
+- Feature columns: all Binance feature-store columns excluding key/base metadata and generated target columns
+- Target columns: `target_return_<horizon>`
+- Filtering: symbol, interval, and optional start/end feature-time bounds
+- Null/empty behavior: empty store inputs still materialize an empty parquet and summary without raising
+- Provenance: summary references the feature-store root and configured horizons
+
+#### Known Issues / Limitations
+- The research dataset adapter is currently Binance-specific and does not yet plug into a broader cross-asset dataset registry.
+- Target generation only supports simple forward returns from the feature-store `close` column. It does not yet support classification labels, cross-sectional targets, or slippage-aware realized outcomes.
+- Alerting is artifact-based and rule-based. It does not yet automatically dispatch notifications through the repo’s notification service.
+- Health checks are local file evaluations. They do not yet publish to an external service or scheduler callback endpoint.
+
+#### Recommended Next Milestone
+- G-10 - Add cross-asset research dataset registry integration and notification-backed Binance monitoring workflows
+
+### G-10 - Add cross-asset research dataset registry integration and notification-backed Binance monitoring workflows
+Date: 2026-04-03
+Status: DONE
+
+#### Summary
+Integrated Binance research datasets into a new shared research dataset registry and added transition-aware notification evaluation on top of the existing Binance alerts and health artifacts. Binance research datasets can now publish registry entries with dataset metadata, freshness references, and manifest paths, while `data crypto binance notify` can refresh alerts plus health, decide whether an operator notification should fire, and optionally deliver through the repo's existing notification service.
+
+#### Why
+G-09 made Binance research datasets replay-ready and added local alert plus health evaluation, but Binance outputs were still discovered mostly by direct file paths and monitoring stopped at artifact generation. This milestone closes both gaps with a narrow shared registry contract and a notify workflow that is useful to schedulers, operators, and future multi-asset research consumers.
+
+#### Files Changed
+- `configs/binance.yaml`
+- `src/trading_platform/binance/__init__.py`
+- `src/trading_platform/binance/models.py`
+- `src/trading_platform/binance/notify.py`
+- `src/trading_platform/binance/research.py`
+- `src/trading_platform/cli/commands/binance_crypto_notify.py`
+- `src/trading_platform/cli/grouped_parser.py`
+- `src/trading_platform/research/dataset_registry.py`
+- `tests/binance/test_cli.py`
+- `tests/binance/test_notify.py`
+- `tests/binance/test_registry_integration.py`
+- `tests/test_cli_grouping.py`
+- `tests/test_research_dataset_registry.py`
+- `MILESTONES.md`
+- `DOCUMENTATION.md`
+
+#### Tests Run
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\pytest.exe tests/test_research_dataset_registry.py tests/binance/test_registry_integration.py tests/binance/test_notify.py tests/binance/test_cli.py tests/test_cli_grouping.py -q`
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\pytest.exe tests/binance/test_features.py tests/binance/test_sync.py tests/binance/test_status.py tests/binance/test_research.py tests/binance/test_research_adapter.py tests/binance/test_health.py tests/binance/test_registry_integration.py tests/binance/test_notify.py tests/binance/test_cli.py tests/binance/test_projection.py tests/binance/test_websocket_incremental.py tests/test_cli_grouping.py tests/test_feature_store.py tests/test_research_dataset_registry.py -q`
+
+#### Verification Commands
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\pytest.exe tests/test_research_dataset_registry.py tests/binance/test_registry_integration.py tests/binance/test_notify.py tests/binance/test_cli.py tests/test_cli_grouping.py -q`
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\pytest.exe tests/binance/test_features.py tests/binance/test_sync.py tests/binance/test_status.py tests/binance/test_research.py tests/binance/test_research_adapter.py tests/binance/test_health.py tests/binance/test_registry_integration.py tests/binance/test_notify.py tests/binance/test_cli.py tests/binance/test_projection.py tests/binance/test_websocket_incremental.py tests/test_cli_grouping.py tests/test_feature_store.py tests/test_research_dataset_registry.py -q`
+- `Remove-Item Env:TP_ALERT_SMTP_HOST -ErrorAction SilentlyContinue; Remove-Item Env:TP_ALERT_SMTP_PORT -ErrorAction SilentlyContinue; Remove-Item Env:TP_ALERT_SMTP_USERNAME -ErrorAction SilentlyContinue; Remove-Item Env:TP_ALERT_SMTP_PASSWORD -ErrorAction SilentlyContinue; Remove-Item Env:TP_ALERT_SMTP_USE_TLS -ErrorAction SilentlyContinue; Remove-Item Env:TP_ALERT_FROM -ErrorAction SilentlyContinue; Remove-Item Env:TP_ALERT_TO -ErrorAction SilentlyContinue; Remove-Item Env:TP_ALERT_SUBJECT_PREFIX -ErrorAction SilentlyContinue; C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\pytest.exe -q`
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\python.exe -m trading_platform.cli data crypto binance notify --config configs/binance.yaml --symbols BTCUSDT --intervals 1m --dry-run`
+
+#### Design Notes
+The new shared registry is intentionally small and explicit. `src/trading_platform/research/dataset_registry.py` stores a JSON registry with typed entries keyed by dataset key, provider, asset class, dataset name, dataset path, available symbols and intervals, target horizons, schema version, latest materialization timestamps, and manifest or health references. It is not a generic data-lake abstraction. It exists so downstream research code can discover and load research datasets in a cross-asset-friendly way without knowing provider-specific file layouts.
+
+Binance now publishes into that registry during `materialize_binance_research_dataset()`. The published entry includes:
+- provider: `binance`
+- asset class: `crypto`
+- dataset name and dataset key from config
+- dataset parquet path
+- configured symbol and interval scope
+- target horizons
+- summary path
+- feature-store manifest references
+- latest sync, status, alerts, and health artifact references
+
+The Binance research consumer path remains additive. Existing feature-store readers are unchanged, while the new registry-backed helpers allow downstream code to:
+- resolve a Binance research dataset entry by dataset key
+- list registry entries filtered by provider or asset class
+- load the registered dataset with symbol, interval, and time-range filters
+
+Notification handling now wraps the existing monitoring steps instead of replacing them. `run_binance_monitor_notifications()`:
+- refreshes Binance alerts
+- refreshes Binance health checks
+- combines both statuses into one current monitoring state
+- compares against a persisted prior state
+- detects transitions such as `initial->critical`, `critical->healthy`, and repeated same-state evaluations
+- suppresses duplicate noise within a configurable window
+- optionally sends via the repo's existing notification service when a shared notification config is supplied
+- otherwise records the would-send decision in a stable summary artifact
+
+#### Artifact Layout
+- `data/research/dataset_registry.json`
+- `data/binance/research/binance_research_dataset.parquet`
+- `data/binance/research/dataset_summary.json`
+- `data/binance/monitoring/notifications/notify_summary.json`
+- `data/binance/monitoring/notifications/notify_state.json`
+- existing referenced artifacts:
+  - `data/binance/sync/latest_sync_manifest.json`
+  - `data/binance/status/binance_status.json`
+  - `data/binance/monitoring/alerts/alerts_summary.json`
+  - `data/binance/monitoring/health/health_check.json`
+
+#### Discovery / Read Usage
+- Registry discovery:
+  - `list_dataset_registry_entries(registry_path=..., provider="binance", asset_class="crypto")`
+- Registry resolution:
+  - `resolve_binance_research_registry_entry(registry_path=..., dataset_key="binance.crypto_market_features")`
+- Registry-backed load:
+  - `load_binance_research_frame_from_registry(registry_path=..., dataset_key="binance.crypto_market_features", symbols=["BTCUSDT"], intervals=["1m"], start="2024-01-01T00:00:00Z", end="2024-01-02T00:00:00Z")`
+
+#### Notification Semantics
+- `enabled=false` still evaluates alerts and health and writes notification artifacts, but does not attempt delivery.
+- `enabled=true` with `notification_config_path` uses the shared notification service and its SMTP/channel settings.
+- `transition_only=true` emits notifications only on meaningful state changes or recoveries.
+- `duplicate_suppression_window_sec` suppresses repeated same-state evaluations so schedulers do not spam operators.
+- recovery notifications use a synthetic monitoring alert so they can still flow through the existing severity-filtered notification service.
+
+#### Known Issues / Limitations
+- The shared registry currently only has Binance publishers. It is cross-asset-shaped, but other asset classes have not been integrated yet.
+- Registry publication happens when the Binance research dataset is materialized. Sync does not automatically materialize or publish the research dataset in this milestone.
+- Notification delivery depends on an external notification config. Without one, the system writes would-send artifacts only.
+- Duplicate suppression is file-state-based and local to the configured notification state path. It is not yet coordinated across multiple hosts or schedulers.
+
+#### Recommended Next Milestone
+- G-11 - Add additional asset-class publishers to the shared research dataset registry and unify scheduler monitoring dashboards across providers
+
+### G-12 - Add cross-provider research dataset readers and dashboard/API consumers for the shared registry and provider monitoring summaries
+Date: 2026-04-03
+Status: DONE
+
+#### Summary
+Added a shared cross-provider research dataset reader layer on top of the shared registry, reusable readers for registry and provider monitoring artifacts, new FastAPI endpoints for registry and monitoring consumption, and a lightweight React dashboard page for inspecting shared research datasets plus provider health rollups.
+
+#### Why
+G-11 made shared registry publication and cross-provider monitoring possible, but downstream consumers still had to know too much about raw registry files and provider-specific artifact layouts. This milestone closes that gap by turning the shared registry and provider monitoring outputs into first-class read surfaces for research code, API clients, and operator-facing dashboard workflows.
+
+#### Files Changed
+- `src/trading_platform/research/dataset_reader.py`
+- `src/trading_platform/monitoring/provider_monitoring.py`
+- `src/trading_platform/api/artifact_reader.py`
+- `src/trading_platform/api/main.py`
+- `src/trading_platform/frontend/src/api/client.js`
+- `src/trading_platform/frontend/src/App.jsx`
+- `src/trading_platform/frontend/src/components/Sidebar.jsx`
+- `src/trading_platform/frontend/src/pages/ResearchData.jsx`
+- `tests/test_shared_dataset_reader.py`
+- `tests/api/test_api_endpoints.py`
+- `MILESTONES.md`
+- `DOCUMENTATION.md`
+
+#### Tests Run
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\pytest.exe tests/test_shared_dataset_reader.py tests/api/test_api_endpoints.py tests/test_provider_registry_and_monitoring.py tests/test_research_dataset_registry.py -q`
+
+#### Verification Commands
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\pytest.exe tests/test_shared_dataset_reader.py tests/api/test_api_endpoints.py tests/test_provider_registry_and_monitoring.py tests/test_research_dataset_registry.py -q`
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\python.exe -m trading_platform.cli research dataset-registry publish --registry-path data/research/dataset_registry.json --kalshi-config configs/kalshi.yaml --polymarket-config configs/polymarket.yaml --providers kalshi polymarket`
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\python.exe -m trading_platform.cli ops monitor providers-summary --registry-path data/research/dataset_registry.json --output-root artifacts/provider_monitoring`
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\python.exe -m uvicorn trading_platform.api.main:app --port 8001`
+
+#### Architecture / Design Notes
+The new `trading_platform.research.dataset_reader` module keeps the shared registry as the single discovery entry point. It does not pretend all providers share one perfect schema. Instead it resolves one concrete registry entry, probes only the metadata it can support cheaply, exposes explicit fields such as `time_column`, `primary_keys`, and `schema_columns`, and applies provider-agnostic filters only when the underlying dataset actually carries those columns.
+
+Provider quirks remain encapsulated:
+- single-file Binance research datasets and directory-backed Kalshi or Polymarket feature datasets now load through the same reader contract
+- time filtering prefers declared `time_semantics` metadata when available and falls back to known common timestamp columns
+- ambiguous registry matches fail explicitly rather than silently picking one provider artifact
+
+The API stays artifact-backed and read-only. `artifact_reader.py` now exposes:
+- shared registry listing
+- dataset detail by `dataset_key`
+- bounded dataset preview rows
+- latest registry publication summary
+- latest provider monitoring summary
+- latest provider health summary
+
+This keeps the web/API layer aligned with the repo's existing "read artifacts, never 500 on missing data" pattern instead of introducing a new state store.
+
+The dashboard addition is intentionally small. The new Research Data page consumes the shared registry and provider monitoring endpoints, lets an operator filter datasets by provider, inspect one dataset's metadata, and preview a few rows without needing provider-specific filesystem knowledge.
+
+#### API / Consumer Usage
+- `GET /api/research/datasets` lists shared registry entries. Optional query params: `provider`, `asset_class`, `dataset_name`.
+- `GET /api/research/datasets/{dataset_key}` returns one registry-backed dataset descriptor.
+- `GET /api/research/datasets/{dataset_key}/rows?symbol=BTCUSDT&interval=1m&limit=5` returns a bounded preview of dataset rows after registry-backed filtering.
+- `GET /api/ops/registry-summary` returns the latest registry publication summary artifact.
+- `GET /api/ops/provider-monitoring` returns the latest cross-provider monitoring summary artifact.
+- `GET /api/ops/provider-health` returns the latest provider health rollup artifact.
+
+#### Artifact Layout
+- Shared registry: `data/research/dataset_registry.json`
+- Registry publication summary: `artifacts/provider_monitoring/latest_registry_summary.json`
+- Cross-provider monitoring summary: `artifacts/provider_monitoring/latest_monitoring_summary.json`
+- Cross-provider health rollup: `artifacts/provider_monitoring/cross_provider_health_summary.json`
+
+These remain the source-of-truth artifacts. The new readers and API consumers only resolve and expose them.
+
+#### Known Issues / Limitations
+- The shared reader contract is intentionally narrow and DataFrame-oriented; it is not yet a full multi-asset replay schema.
+- Dataset previews are bounded and JSON-serialized for inspection, not bulk transfer.
+- Time-range filtering depends on the dataset carrying a discoverable time column. When upstream metadata is sparse, the reader falls back to common timestamp fields only.
+- The new React page is inspection-focused and does not yet provide deep drill-down charts or editing workflows.
+
+#### Recommended Next Milestone
+- G-13 - Add cross-provider replay dataset assembly and operator drill-down workflows on top of the shared registry readers
+
+### G-11 - Add additional asset-class publishers to the shared research dataset registry and unify scheduler monitoring dashboards across providers
+Date: 2026-04-03
+Status: DONE
+
+#### Summary
+Expanded the shared research dataset registry beyond Binance and added a shared cross-provider monitoring layer. Kalshi and Polymarket now publish registry entries derived from their existing feature directories plus provider truth artifacts, the shared registry loader now supports directory-backed parquet datasets, and new grouped CLI commands can publish/list registry entries and build provider-level monitoring summaries without any live network dependency.
+
+#### Why
+G-10 introduced a shared research dataset registry, but only Binance published into it and there was no single operator-facing view of registry-backed research datasets across providers. This milestone closes that gap by making Kalshi and Polymarket first-class registry publishers and by emitting aggregate provider monitoring artifacts that schedulers and dashboards can inspect consistently.
+
+#### Files Changed
+- `configs/kalshi.yaml`
+- `configs/polymarket.yaml`
+- `src/trading_platform/research/dataset_registry.py`
+- `src/trading_platform/research/provider_dataset_registry.py`
+- `src/trading_platform/monitoring/provider_monitoring.py`
+- `src/trading_platform/cli/commands/research_dataset_registry_publish.py`
+- `src/trading_platform/cli/commands/research_dataset_registry_list.py`
+- `src/trading_platform/cli/commands/ops_monitor_providers_summary.py`
+- `src/trading_platform/cli/commands/ops_monitor_providers_health.py`
+- `src/trading_platform/cli/grouped_parser.py`
+- `tests/test_research_dataset_registry.py`
+- `tests/test_provider_registry_and_monitoring.py`
+- `tests/test_cli_grouping.py`
+- `MILESTONES.md`
+- `DOCUMENTATION.md`
+
+#### Tests Run
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\pytest.exe tests/test_research_dataset_registry.py tests/test_provider_registry_and_monitoring.py tests/test_cli_grouping.py -q`
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\pytest.exe tests/binance/test_registry_integration.py tests/kalshi/test_validation.py tests/polymarket/test_historical_ingest.py tests/test_research_dataset_registry.py tests/test_provider_registry_and_monitoring.py tests/test_cli_grouping.py -q`
+
+#### Verification Commands
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\pytest.exe tests/test_research_dataset_registry.py tests/test_provider_registry_and_monitoring.py tests/test_cli_grouping.py -q`
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\pytest.exe tests/binance/test_registry_integration.py tests/kalshi/test_validation.py tests/polymarket/test_historical_ingest.py tests/test_research_dataset_registry.py tests/test_provider_registry_and_monitoring.py tests/test_cli_grouping.py -q`
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\python.exe -m trading_platform.cli research dataset-registry publish --registry-path data/research/dataset_registry.json --kalshi-config configs/kalshi.yaml --polymarket-config configs/polymarket.yaml --providers kalshi polymarket`
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\python.exe -m trading_platform.cli research dataset-registry list --registry-path data/research/dataset_registry.json`
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\python.exe -m trading_platform.cli ops monitor providers-summary --registry-path data/research/dataset_registry.json --output-root artifacts/provider_monitoring`
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\python.exe -m trading_platform.cli ops monitor providers-health --registry-path data/research/dataset_registry.json --output-root artifacts/provider_monitoring`
+
+#### Architecture / Design Notes
+The shared registry contract remains intentionally narrow. `ResearchDatasetRegistryEntry` now carries a `storage_type` field so a provider can publish either a single parquet file or a directory of parquet slices without inventing a provider-specific loader. `load_registered_dataset_frame()` uses that contract to concatenate directory-backed datasets when needed, which lets Kalshi and Polymarket publish their existing feature directories directly while keeping Binance’s single-parquet research dataset behavior unchanged.
+
+Provider publication stays source-of-truth-first:
+- Binance continues to publish through its existing research dataset materialization flow.
+- Kalshi publication derives registry metadata from `historical_ingest` outputs plus `data_validation` artifacts, including the feature directory, ingest summary/manifest, validation summary, and the latest structured ingest status artifacts when present.
+- Polymarket publication derives registry metadata from the existing feature directory, ingest manifest, and `resolution.csv`.
+
+The new shared monitoring layer reads registry entries rather than calling provider pipelines. For each registered dataset it resolves the best available provider truth artifacts, normalizes provider-specific health semantics into `healthy`, `warning`, or `critical`, computes a simple freshness age from `latest_event_time` or `latest_materialized_at`, and writes:
+- `latest_registry_summary.json`
+- `latest_monitoring_summary.json`
+- `cross_provider_health_summary.json`
+
+This keeps provider behavior intact while giving schedulers and future dashboard code one machine-readable place to look for cross-provider research dataset health.
+
+#### CLI Usage
+- `research dataset-registry publish` publishes Kalshi and/or Polymarket registry entries into the shared dataset registry and writes a registry publication summary.
+- `research dataset-registry list` lists registry entries across providers with optional provider, asset-class, and dataset-name filters.
+- `ops monitor providers-summary` builds the aggregate cross-provider monitoring summary from registry entries.
+- `ops monitor providers-health` prints and writes a provider-level health rollup suitable for scheduler gates.
+
+#### Artifact Layout
+- Shared registry: `data/research/dataset_registry.json`
+- Registry publication summary: `artifacts/provider_monitoring/latest_registry_summary.json`
+- Aggregate monitoring summary: `artifacts/provider_monitoring/latest_monitoring_summary.json`
+- Aggregate provider health summary: `artifacts/provider_monitoring/cross_provider_health_summary.json`
+
+Registry entry references now point back to provider truth artifacts rather than duplicating them. For example:
+- Kalshi entries reference `data/kalshi/raw/ingest_summary.json`, `data/kalshi/raw/ingest_manifest.json`, `data/kalshi/validation/kalshi_data_validation_summary.json`, and the latest structured ingest status artifacts when they exist.
+- Polymarket entries reference `data/polymarket/raw/ingest_manifest.json` and `data/polymarket/resolution.csv`.
+- Binance entries continue to reference their existing sync, status, alerts, and health outputs.
+
+#### Known Issues / Limitations
+- Cross-provider monitoring is registry-backed and artifact-backed; it does not trigger provider refreshes itself.
+- Kalshi and Polymarket publication currently targets their existing feature directories. They do not yet materialize a richer replay-ready research dataset contract analogous to Binance’s explicit research parquet.
+- Shared freshness classification currently uses one CLI-configurable age threshold for all published datasets. Per-provider and per-dataset threshold policies can be layered on later if operators need finer control.
+- The aggregate monitoring artifacts are machine-readable and CLI-friendly, but this milestone does not extend an existing web dashboard because the artifact path was the lower-risk additive slice.
+
+#### Recommended Next Milestone
+- G-12 - Add cross-provider research dataset readers and dashboard/API consumers for the shared registry and provider monitoring summaries
+
 ### G-02 - Add multi-frequency time alignment layer
 Date: 2026-03-30
 Status: DONE

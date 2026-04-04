@@ -8,6 +8,7 @@ from unittest.mock import patch
 from trading_platform.binance.models import (
     BinanceFeatureConfig,
     BinanceProjectionConfig,
+    BinanceStatusConfig,
     BinanceSyncConfig,
     BinanceWebsocketIngestConfig,
 )
@@ -45,6 +46,15 @@ def _sync_config(tmp_path: Path) -> BinanceSyncConfig:
             symbols=("BTCUSDT",),
             intervals=("1m",),
         ),
+        status=BinanceStatusConfig(
+            projection_root=str(tmp_path / "projections"),
+            features_root=str(tmp_path / "features"),
+            feature_store_root=str(tmp_path / "feature_store"),
+            latest_sync_manifest_path=str(tmp_path / "sync" / "latest_sync_manifest.json"),
+            summary_path=str(tmp_path / "status" / "status.json"),
+            symbols=("BTCUSDT",),
+            intervals=("1m",),
+        ),
         symbols=("BTCUSDT",),
         intervals=("1m",),
         stream_families=("kline", "agg_trade"),
@@ -54,6 +64,8 @@ def _sync_config(tmp_path: Path) -> BinanceSyncConfig:
         max_messages=25,
         full_feature_rebuild=False,
         sync_summary_path=str(tmp_path / "sync" / "summary.json"),
+        sync_manifest_root=str(tmp_path / "sync" / "manifests"),
+        latest_sync_manifest_path=str(tmp_path / "sync" / "latest_sync_manifest.json"),
     )
 
 
@@ -92,7 +104,7 @@ def test_sync_runner_orders_steps_and_writes_summary(tmp_path: Path) -> None:
         ):
             with patch(
                 "trading_platform.binance.sync.build_binance_market_features",
-                side_effect=lambda feature_config, full_rebuild=False: call_order.append("features")
+                side_effect=lambda feature_config, full_rebuild=False, run_context=None: call_order.append("features")
                 or SimpleNamespace(
                     summary_path=feature_config.summary_path,
                     features_path=str(tmp_path / "features" / "crypto_market_features.parquet"),
@@ -100,16 +112,33 @@ def test_sync_runner_orders_steps_and_writes_summary(tmp_path: Path) -> None:
                     artifacts_written=1,
                     slice_paths=[str(tmp_path / "features" / "crypto_market_features" / "BTCUSDT" / "1m.parquet")],
                     feature_store_manifest_paths=[str(tmp_path / "feature_store" / "1m" / "BTCUSDT" / "default.manifest.json")],
+                    latest_feature_time="2024-01-01T00:02:59+00:00",
+                    materialized_at="2024-01-01T00:03:00+00:00",
                 ),
             ):
-                result = run_binance_incremental_sync(config)
+                with patch(
+                    "trading_platform.binance.sync.build_binance_status",
+                    side_effect=lambda status_config, latest_sync_id=None: call_order.append("status")
+                    or SimpleNamespace(
+                        summary_path=status_config.summary_path,
+                        latest_sync_manifest_path=status_config.latest_sync_manifest_path,
+                        dataset_count=4,
+                        stale_dataset_count=0,
+                        records=[],
+                    ),
+                ):
+                    result = run_binance_incremental_sync(config)
 
     assert result.status == "completed"
-    assert call_order == ["websocket_init", "websocket_run", "project", "features"]
+    assert result.manifest_path.endswith(".json")
+    assert call_order == ["websocket_init", "websocket_run", "project", "features", "status"]
     summary = json.loads(Path(result.summary_path).read_text(encoding="utf-8"))
     assert summary["step_statuses"]["websocket_ingest"] == "completed"
     assert summary["step_statuses"]["projection"] == "completed"
     assert summary["step_statuses"]["features"] == "completed"
+    manifest = json.loads(Path(result.manifest_path).read_text(encoding="utf-8"))
+    assert manifest["sync_id"] == result.sync_id
+    assert manifest["freshness_summary_path"] == result.freshness_summary_path
 
 
 def test_sync_runner_skips_optional_steps_and_records_failures(tmp_path: Path) -> None:
@@ -133,12 +162,24 @@ def test_sync_runner_skips_optional_steps_and_records_failures(tmp_path: Path) -
             )
 
     with patch("trading_platform.binance.sync.BinanceWebsocketIngestService", FakeWebsocketService):
-        result = run_binance_incremental_sync(config)
+        with patch(
+            "trading_platform.binance.sync.build_binance_status",
+            return_value=SimpleNamespace(
+                summary_path=str(tmp_path / "status" / "status.json"),
+                latest_sync_manifest_path=str(tmp_path / "sync" / "latest_sync_manifest.json"),
+                dataset_count=0,
+                stale_dataset_count=0,
+                records=[],
+            ),
+        ):
+            result = run_binance_incremental_sync(config)
 
     assert result.status == "completed_with_failures"
     summary = json.loads(Path(result.summary_path).read_text(encoding="utf-8"))
     assert summary["step_statuses"]["projection"] == "skipped"
     assert summary["step_statuses"]["features"] == "skipped"
+    manifest = json.loads(Path(result.manifest_path).read_text(encoding="utf-8"))
+    assert manifest["status"] == "completed_with_failures"
 
 
 def test_sync_config_from_yaml_applies_sync_defaults(tmp_path: Path) -> None:

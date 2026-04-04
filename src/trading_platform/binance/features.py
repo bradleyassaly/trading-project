@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -212,6 +213,7 @@ def build_binance_market_features(
     config: BinanceFeatureConfig,
     *,
     full_rebuild: bool = False,
+    run_context: dict[str, Any] | None = None,
 ) -> BinanceFeatureResult:
     projection_root = Path(config.projection_root)
     features_root = Path(config.features_root)
@@ -260,6 +262,7 @@ def build_binance_market_features(
                     "projection_root": str(projection_root),
                     "feature_set": "crypto_market_features",
                     "incremental_refresh": config.incremental_refresh,
+                    **dict(run_context or {}),
                 },
             )
             if artifact.manifest_path:
@@ -276,6 +279,12 @@ def build_binance_market_features(
         combined = pd.DataFrame()
     combined_path = features_root / "crypto_market_features.parquet"
     combined.to_parquet(combined_path, index=False)
+    latest_feature_time = (
+        pd.to_datetime(combined["feature_time"], utc=True).max().isoformat()
+        if not combined.empty and "feature_time" in combined.columns and pd.notna(pd.to_datetime(combined["feature_time"], utc=True).max())
+        else None
+    )
+    materialized_at = datetime.now(UTC).isoformat()
 
     summary = {
         "features_path": str(combined_path),
@@ -288,6 +297,9 @@ def build_binance_market_features(
         "full_rebuild": full_rebuild,
         "incremental_refresh": config.incremental_refresh,
         "schema_version": BINANCE_CRYPTO_FEATURE_SCHEMA_VERSION,
+        "latest_feature_time": latest_feature_time,
+        "materialized_at": materialized_at,
+        "run_context": dict(run_context or {}),
         "projection_inputs": {
             "crypto_ohlcv_bars": str(projection_root / "crypto_ohlcv_bars.parquet"),
             "crypto_agg_trades": str(projection_root / "crypto_agg_trades.parquet"),
@@ -308,4 +320,6 @@ def build_binance_market_features(
         artifacts_written=len(slice_paths),
         symbols=sorted(symbol_filter),
         intervals=sorted(interval_filter),
+        latest_feature_time=latest_feature_time,
+        materialized_at=materialized_at,
     )

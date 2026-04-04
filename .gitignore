@@ -75,3 +75,6 @@ artifacts/experiments/*.json
 .act/
 data/
 artifacts/
+data/
+data/
+nul

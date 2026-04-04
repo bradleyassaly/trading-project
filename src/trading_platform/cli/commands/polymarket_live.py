@@ -36,6 +36,8 @@ def _project_relative(path_str: str) -> Path:
 
 
 def cmd_polymarket_live_collect(args: argparse.Namespace) -> None:
+    from datetime import timedelta
+
     from trading_platform.polymarket.client import PolymarketClient, PolymarketConfig
     from trading_platform.polymarket.models import PolymarketMarket
     from trading_platform.polymarket.live_collector import (
@@ -51,21 +53,43 @@ def cmd_polymarket_live_collect(args: argparse.Namespace) -> None:
         except (OSError, Exception) as exc:
             print(f"[WARN] Could not load config {args.config}: {exc}")
 
-    max_markets = int(getattr(args, "max_markets", None) or cfg_raw.get("live_max_markets", 100))
+    ms_cfg = cfg_raw.get("market_selection", {})
+    max_markets = int(
+        getattr(args, "max_markets", None) or ms_cfg.get("max_markets", 75)
+    )
+    min_volume = float(ms_cfg.get("min_volume") or cfg_raw.get("live_min_volume", 10_000))
+    horizon_days = int(ms_cfg.get("end_date_max_days") or cfg_raw.get("live_lookback_days", 30))
     sleep_sec = float(cfg_raw.get("request_sleep_sec", 0.05))
 
     client = PolymarketClient(PolymarketConfig(request_sleep_sec=sleep_sec))
 
-    # Fetch open (not closed) markets
-    print("Fetching open markets from Gamma API...")
-    raw_markets = client.list_markets(limit=500, active=True, closed=False, archived=False)
-    markets = [PolymarketMarket.from_api_dict(m) for m in raw_markets]
-    markets = [m for m in markets if m.yes_token_id and not m.closed]
-    markets.sort(key=lambda m: m.volume, reverse=True)
-    markets = markets[:max_markets]
+    from datetime import datetime, timezone
+    today = datetime.now(tz=timezone.utc)
+    end_date_min = today.strftime("%Y-%m-%d")
+    end_date_max = (today + timedelta(days=horizon_days)).strftime("%Y-%m-%d")
 
-    if not markets:
-        print("[ERROR] No open markets found with clobTokenIds.")
+    # Fetch top markets by volume with 30-day horizon (no tag filter)
+    print(f"Fetching top {max_markets} open markets by volume resolving within {horizon_days} days...")
+    print(f"  date range : {end_date_min} → {end_date_max}")
+    print(f"  min volume : {min_volume:,.0f}")
+
+    try:
+        raw_pages = client.get_all_markets(
+            closed=False, active=True,
+            end_date_min=end_date_min, end_date_max=end_date_max,
+        )
+    except Exception as exc:
+        print(f"[ERROR] Failed to fetch markets: {exc}")
+        return
+
+    all_markets = [PolymarketMarket.from_api_dict(m) for m in raw_pages]
+    all_markets = [m for m in all_markets if m.yes_token_id and m.volume >= min_volume]
+    all_markets.sort(key=lambda m: m.volume, reverse=True)
+    all_markets = all_markets[:max_markets]
+    print(f"  found      : {len(all_markets)} qualifying markets")
+
+    if not all_markets:
+        print("[ERROR] No open markets found matching criteria.")
         return
 
     live_infos = [
@@ -74,8 +98,9 @@ def cmd_polymarket_live_collect(args: argparse.Namespace) -> None:
             question=m.question,
             yes_token_id=m.yes_token_id,
             volume=m.volume,
+            end_date_iso=m.end_date_iso,
         )
-        for m in markets
+        for m in all_markets
     ]
 
     db_path = str(_project_relative(cfg_raw.get("live_db_path", "data/polymarket/live/prices.db")))

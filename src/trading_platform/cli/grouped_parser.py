@@ -10,10 +10,14 @@ from trading_platform.cli.commands.adaptive_allocation_export_run_config import 
 )
 from trading_platform.cli.commands.adaptive_allocation_show import cmd_adaptive_allocation_show
 from trading_platform.cli.commands.approved_config_diff import cmd_approved_config_diff
+from trading_platform.cli.commands.binance_crypto_alerts import cmd_binance_crypto_alerts
+from trading_platform.cli.commands.binance_crypto_health_check import cmd_binance_crypto_health_check
 from trading_platform.cli.commands.binance_crypto_historical_ingest import cmd_binance_crypto_historical_ingest
 from trading_platform.cli.commands.binance_crypto_features import cmd_binance_crypto_features
 from trading_platform.cli.commands.binance_crypto_normalize import cmd_binance_crypto_normalize
+from trading_platform.cli.commands.binance_crypto_notify import cmd_binance_crypto_notify
 from trading_platform.cli.commands.binance_crypto_project import cmd_binance_crypto_project
+from trading_platform.cli.commands.binance_crypto_status import cmd_binance_crypto_status
 from trading_platform.cli.commands.binance_crypto_sync import cmd_binance_crypto_sync
 from trading_platform.cli.commands.binance_crypto_websocket_ingest import cmd_binance_crypto_websocket_ingest
 from trading_platform.cli.commands.broker_cancel_all import cmd_broker_cancel_all
@@ -40,6 +44,7 @@ from trading_platform.cli.commands.export_universes import cmd_export_universes
 from trading_platform.cli.commands.features import cmd_features
 from trading_platform.cli.commands.kalshi_features import cmd_kalshi_features
 from trading_platform.cli.commands.kalshi_historical_ingest import cmd_kalshi_historical_ingest
+from trading_platform.cli.commands.kalshi_live_candles import cmd_kalshi_live_candles
 from trading_platform.cli.commands.kalshi_recent_ingest import cmd_kalshi_recent_ingest
 from trading_platform.cli.commands.kalshi_validate_dataset import cmd_kalshi_validate_dataset
 from trading_platform.cli.commands.fundamentals_features import cmd_fundamentals_features
@@ -64,6 +69,8 @@ from trading_platform.cli.commands.monitor_notify import cmd_monitor_notify
 from trading_platform.cli.commands.monitor_portfolio_health import cmd_monitor_portfolio_health
 from trading_platform.cli.commands.monitor_run_health import cmd_monitor_run_health
 from trading_platform.cli.commands.monitor_strategy_health import cmd_monitor_strategy_health
+from trading_platform.cli.commands.ops_monitor_providers_health import cmd_ops_monitor_providers_health
+from trading_platform.cli.commands.ops_monitor_providers_summary import cmd_ops_monitor_providers_summary
 from trading_platform.cli.commands.autonomous_loop import cmd_autonomous_loop_start
 from trading_platform.cli.commands.orchestrate_run import cmd_orchestrate_loop, cmd_orchestrate_run
 from trading_platform.cli.commands.orchestrate_show_run import cmd_orchestrate_show_run
@@ -101,11 +108,19 @@ from trading_platform.cli.commands.kalshi_alpha_research import cmd_kalshi_alpha
 from trading_platform.cli.commands.kalshi_full_backtest import cmd_kalshi_full_backtest
 from trading_platform.cli.commands.polymarket_ingest import cmd_polymarket_ingest
 from trading_platform.cli.commands.polymarket_live import cmd_polymarket_live_collect
+from trading_platform.cli.commands.polymarket_blockchain_ingest import cmd_polymarket_blockchain_ingest
+from trading_platform.cli.commands.polymarket_wallet_profiles import cmd_polymarket_wallet_profiles
+from trading_platform.cli.commands.manifold_parse import cmd_manifold_parse
+from trading_platform.cli.commands.predictit_parse import cmd_predictit_parse
+from trading_platform.cli.commands.news_tagger import cmd_news_upcoming, cmd_news_label_moves
+from trading_platform.cli.commands.metaculus_fetch import cmd_metaculus_fetch
 from trading_platform.cli.commands.kalshi_paper_run import cmd_kalshi_paper_run
 from trading_platform.cli.commands.research_leaderboard import cmd_research_leaderboard
 from trading_platform.cli.commands.research_monitor import cmd_research_monitor
 from trading_platform.cli.commands.research_promote import cmd_research_promote
 from trading_platform.cli.commands.research_promotion_candidates import cmd_research_promotion_candidates
+from trading_platform.cli.commands.research_dataset_registry_list import cmd_research_dataset_registry_list
+from trading_platform.cli.commands.research_dataset_registry_publish import cmd_research_dataset_registry_publish
 from trading_platform.cli.commands.research_refresh import cmd_research_refresh
 from trading_platform.cli.commands.research_registry_build import cmd_research_registry_build
 from trading_platform.cli.commands.research_validate_backtester import cmd_research_validate_backtester
@@ -206,6 +221,7 @@ _RESEARCH_GROUP_COMMANDS = {
     "walkforward",
     "compare-xsec-construction",
     "decision-memo",
+    "memo",
     "validate-signal",
     "alpha",
     "loop",
@@ -214,6 +230,7 @@ _RESEARCH_GROUP_COMMANDS = {
     "refresh",
     "monitor",
     "registry",
+    "dataset-registry",
     "leaderboard",
     "compare-runs",
     "promotion-candidates",
@@ -223,6 +240,8 @@ _RESEARCH_GROUP_COMMANDS = {
     "strategies",
     "validate-backtester",
     "cross-market-monitor",
+    "kalshi-alpha",
+    "kalshi-full-backtest",
 }
 _PORTFOLIO_GROUP_COMMANDS = {
     "backtest",
@@ -2076,9 +2095,187 @@ def build_parser() -> argparse.ArgumentParser:
         "--feature-summary-path", type=str, default=None, help="Optional feature summary JSON path override."
     )
     data_crypto_binance_sync.add_argument(
+        "--status-summary-path", type=str, default=None, help="Optional freshness/status JSON path override."
+    )
+    data_crypto_binance_sync.add_argument(
+        "--sync-manifest-root", type=str, default=None, help="Optional per-run sync manifest directory override."
+    )
+    data_crypto_binance_sync.add_argument(
+        "--latest-sync-manifest-path", type=str, default=None, help="Optional latest sync manifest path override."
+    )
+    data_crypto_binance_sync.add_argument(
         "--sync-summary-path", type=str, default=None, help="Optional sync summary JSON path override."
     )
     data_crypto_binance_sync.set_defaults(func=cmd_binance_crypto_sync)
+    data_crypto_binance_status = data_crypto_binance_subparsers.add_parser(
+        "status",
+        help="Inspect Binance projected-dataset and feature freshness plus the latest sync manifest reference.",
+    )
+    data_crypto_binance_status.add_argument(
+        "--config",
+        type=str,
+        default="configs/binance.yaml",
+        help="Path to Binance crypto YAML config (default: configs/binance.yaml).",
+    )
+    data_crypto_binance_status.add_argument("--symbols", nargs="*", default=None, help="Optional symbol filter.")
+    data_crypto_binance_status.add_argument(
+        "--intervals", nargs="*", default=None, help="Optional interval filter for bar and feature datasets."
+    )
+    data_crypto_binance_status.add_argument(
+        "--projection-root", type=str, default=None, help="Optional projection dataset root override."
+    )
+    data_crypto_binance_status.add_argument(
+        "--features-root", type=str, default=None, help="Optional feature dataset root override."
+    )
+    data_crypto_binance_status.add_argument(
+        "--feature-store-root", type=str, default=None, help="Optional feature-store root override."
+    )
+    data_crypto_binance_status.add_argument(
+        "--latest-sync-manifest-path",
+        type=str,
+        default=None,
+        help="Optional latest sync manifest path override.",
+    )
+    data_crypto_binance_status.add_argument(
+        "--summary-path", type=str, default=None, help="Optional status summary JSON path override."
+    )
+    data_crypto_binance_status.add_argument(
+        "--format",
+        type=str,
+        default="text",
+        choices=["text", "json"],
+        help="Render a human-readable summary or emit JSON.",
+    )
+    data_crypto_binance_status.set_defaults(func=cmd_binance_crypto_status)
+    data_crypto_binance_alerts = data_crypto_binance_subparsers.add_parser(
+        "alerts",
+        help="Evaluate Binance freshness and latest-sync alerts for scheduler and operator workflows.",
+    )
+    data_crypto_binance_alerts.add_argument(
+        "--config",
+        type=str,
+        default="configs/binance.yaml",
+        help="Path to Binance crypto YAML config (default: configs/binance.yaml).",
+    )
+    data_crypto_binance_alerts.add_argument("--symbols", nargs="*", default=None, help="Optional symbol filter.")
+    data_crypto_binance_alerts.add_argument("--intervals", nargs="*", default=None, help="Optional interval filter.")
+    data_crypto_binance_alerts.add_argument(
+        "--latest-sync-manifest-path",
+        type=str,
+        default=None,
+        help="Optional latest sync manifest path override.",
+    )
+    data_crypto_binance_alerts.add_argument(
+        "--status-summary-path", type=str, default=None, help="Optional Binance status summary path override."
+    )
+    data_crypto_binance_alerts.add_argument(
+        "--output-root", type=str, default=None, help="Optional Binance alerts output directory override."
+    )
+    data_crypto_binance_alerts.add_argument(
+        "--summary-path", type=str, default=None, help="Optional alerts summary JSON path override."
+    )
+    data_crypto_binance_alerts.add_argument(
+        "--format", type=str, default="text", choices=["text", "json"], help="Render text or emit JSON."
+    )
+    data_crypto_binance_alerts.set_defaults(func=cmd_binance_crypto_alerts)
+    data_crypto_binance_health = data_crypto_binance_subparsers.add_parser(
+        "health-check",
+        help="Run scheduler-oriented Binance health checks for required sync, projection, and feature scopes.",
+    )
+    data_crypto_binance_health.add_argument(
+        "--config",
+        type=str,
+        default="configs/binance.yaml",
+        help="Path to Binance crypto YAML config (default: configs/binance.yaml).",
+    )
+    data_crypto_binance_health.add_argument("--symbols", nargs="*", default=None, help="Optional symbol filter.")
+    data_crypto_binance_health.add_argument("--intervals", nargs="*", default=None, help="Optional interval filter.")
+    data_crypto_binance_health.add_argument(
+        "--latest-sync-manifest-path",
+        type=str,
+        default=None,
+        help="Optional latest sync manifest path override.",
+    )
+    data_crypto_binance_health.add_argument(
+        "--status-summary-path", type=str, default=None, help="Optional Binance status summary path override."
+    )
+    data_crypto_binance_health.add_argument(
+        "--output-root", type=str, default=None, help="Optional Binance health output directory override."
+    )
+    data_crypto_binance_health.add_argument(
+        "--summary-path", type=str, default=None, help="Optional health summary JSON path override."
+    )
+    data_crypto_binance_health.add_argument(
+        "--format", type=str, default="text", choices=["text", "json"], help="Render text or emit JSON."
+    )
+    data_crypto_binance_health.set_defaults(func=cmd_binance_crypto_health_check)
+    data_crypto_binance_notify = data_crypto_binance_subparsers.add_parser(
+        "notify",
+        help="Evaluate Binance alerts plus health results and optionally deliver transition-aware notifications.",
+    )
+    data_crypto_binance_notify.add_argument(
+        "--config",
+        type=str,
+        default="configs/binance.yaml",
+        help="Path to Binance crypto YAML config (default: configs/binance.yaml).",
+    )
+    data_crypto_binance_notify.add_argument("--symbols", nargs="*", default=None, help="Optional symbol filter.")
+    data_crypto_binance_notify.add_argument("--intervals", nargs="*", default=None, help="Optional interval filter.")
+    data_crypto_binance_notify.add_argument(
+        "--latest-sync-manifest-path",
+        type=str,
+        default=None,
+        help="Optional latest sync manifest path override.",
+    )
+    data_crypto_binance_notify.add_argument(
+        "--status-summary-path", type=str, default=None, help="Optional Binance status summary path override."
+    )
+    data_crypto_binance_notify.add_argument(
+        "--alerts-output-root", type=str, default=None, help="Optional Binance alerts output directory override."
+    )
+    data_crypto_binance_notify.add_argument(
+        "--alerts-summary-path", type=str, default=None, help="Optional Binance alerts summary JSON path override."
+    )
+    data_crypto_binance_notify.add_argument(
+        "--health-output-root", type=str, default=None, help="Optional Binance health output directory override."
+    )
+    data_crypto_binance_notify.add_argument(
+        "--health-summary-path", type=str, default=None, help="Optional Binance health summary JSON path override."
+    )
+    data_crypto_binance_notify.add_argument(
+        "--output-root", type=str, default=None, help="Optional Binance notification output directory override."
+    )
+    data_crypto_binance_notify.add_argument(
+        "--summary-path", type=str, default=None, help="Optional notification summary JSON path override."
+    )
+    data_crypto_binance_notify.add_argument(
+        "--state-path", type=str, default=None, help="Optional notification state JSON path override."
+    )
+    data_crypto_binance_notify.add_argument(
+        "--notification-config-path",
+        type=str,
+        default=None,
+        help="Optional shared notification JSON/YAML config path override.",
+    )
+    data_crypto_binance_notify.add_argument(
+        "--enabled",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Enable or disable notification delivery while still writing evaluation artifacts.",
+    )
+    data_crypto_binance_notify.add_argument(
+        "--dry-run",
+        action="store_true",
+        default=False,
+        help="Evaluate and format notifications without delivering them.",
+    )
+    data_crypto_binance_notify.add_argument(
+        "--subject-prefix", type=str, default=None, help="Optional notification subject prefix override."
+    )
+    data_crypto_binance_notify.add_argument(
+        "--format", type=str, default="text", choices=["text", "json"], help="Render text or emit JSON."
+    )
+    data_crypto_binance_notify.set_defaults(func=cmd_binance_crypto_notify)
     data_kalshi = data_subparsers.add_parser(
         "kalshi", help="Kalshi prediction-market data and feature generation commands"
     )
@@ -2199,6 +2396,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         default=False,
         help="Ignore prior checkpoint state and start a fresh ingest run.",
+    )
+    data_kalshi_historical_ingest.add_argument(
+        "--reprocess",
+        action="store_true",
+        default=False,
+        help="Re-fetch candles and regenerate features for all existing raw market JSON files.",
     )
     data_kalshi_historical_ingest.add_argument(
         "--resume-recovery-mode",
@@ -2381,6 +2584,32 @@ def build_parser() -> argparse.ArgumentParser:
     )
     data_kalshi_validate.set_defaults(func=cmd_kalshi_validate_dataset)
 
+    data_kalshi_live_candles = data_kalshi_subparsers.add_parser(
+        "live-candles",
+        help="Fetch hourly candles for open Kalshi markets via authenticated series endpoint.",
+    )
+    data_kalshi_live_candles.add_argument(
+        "--config", type=str, default="configs/kalshi.yaml",
+        help="Path to Kalshi YAML config.",
+    )
+    data_kalshi_live_candles.add_argument(
+        "--lookback-days", type=int, default=30,
+        help="Days of candle history to fetch (default: 30).",
+    )
+    data_kalshi_live_candles.add_argument(
+        "--output-dir", type=str, default=None,
+        help="Output directory (default: data/kalshi/live).",
+    )
+    data_kalshi_live_candles.add_argument(
+        "--loop", action="store_true", default=False,
+        help="Run continuously, re-fetching every --interval minutes.",
+    )
+    data_kalshi_live_candles.add_argument(
+        "--interval", type=int, default=60,
+        help="Minutes between collection runs when --loop is set (default: 60).",
+    )
+    data_kalshi_live_candles.set_defaults(func=cmd_kalshi_live_candles)
+
     # ── Polymarket data commands ──────────────────────────────────────────────
     data_polymarket = data_subparsers.add_parser(
         "polymarket", help="Polymarket prediction market data ingestion commands"
@@ -2443,9 +2672,164 @@ def build_parser() -> argparse.ArgumentParser:
         "--max-markets",
         type=int,
         default=None,
-        help="Maximum number of markets to collect (default: 100).",
+        help="Maximum number of markets to collect (default: 75).",
     )
     data_polymarket_live.set_defaults(func=cmd_polymarket_live_collect)
+
+    data_polymarket_blockchain = data_polymarket_subparsers.add_parser(
+        "blockchain-ingest",
+        help="Convert poly-trade-scan on-chain trade CSV into feature parquets.",
+    )
+    data_polymarket_blockchain.add_argument(
+        "--trades-csv", type=str, required=True,
+        help="Path to poly-trade-scan output CSV.",
+    )
+    data_polymarket_blockchain.add_argument(
+        "--output-dir", type=str, default=None,
+        help="Output directory (default: data/polymarket/blockchain).",
+    )
+    data_polymarket_blockchain.add_argument(
+        "--min-trades", type=int, default=10,
+        help="Minimum trades per market (default: 10).",
+    )
+    data_polymarket_blockchain.add_argument(
+        "--limit", type=int, default=None,
+        help="Max markets to process (for testing).",
+    )
+    data_polymarket_blockchain.set_defaults(func=cmd_polymarket_blockchain_ingest)
+
+    data_polymarket_wallets = data_polymarket_subparsers.add_parser(
+        "wallet-profiles",
+        help="Build wallet performance profiles from blockchain trade history.",
+    )
+    data_polymarket_wallets.add_argument(
+        "--trades-csv", type=str, required=True,
+        help="Path to poly-trade-scan output CSV.",
+    )
+    data_polymarket_wallets.add_argument(
+        "--resolution-csv", type=str, required=True,
+        help="Path to resolution CSV (from blockchain-ingest).",
+    )
+    data_polymarket_wallets.add_argument(
+        "--output", type=str, default=None,
+        help="Output parquet path (default: data/polymarket/wallet_profiles.parquet).",
+    )
+    data_polymarket_wallets.set_defaults(func=cmd_polymarket_wallet_profiles)
+
+    # ── data manifold ────────────────────────────────────────────────────────
+    data_manifold = data_subparsers.add_parser(
+        "manifold", help="Manifold Markets data dump parsing commands"
+    )
+    data_manifold_subparsers = data_manifold.add_subparsers(dest="manifold_command", required=True)
+    data_manifold_parse = data_manifold_subparsers.add_parser(
+        "parse",
+        help="Parse a Manifold data dump into feature parquets and resolution CSV.",
+    )
+    data_manifold_parse.add_argument(
+        "--dump-dir",
+        type=str,
+        required=True,
+        help="Path to the Manifold data dump directory containing markets.json and bets.json.",
+    )
+    data_manifold_parse.add_argument(
+        "--output-dir",
+        type=str,
+        default=None,
+        help="Output directory for features and resolution.csv (default: data/manifold).",
+    )
+    data_manifold_parse.add_argument(
+        "--min-bets",
+        type=int,
+        default=10,
+        help="Minimum bets per market to include (default: 10).",
+    )
+    data_manifold_parse.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="Maximum number of markets to process (for testing).",
+    )
+    data_manifold_parse.set_defaults(func=cmd_manifold_parse)
+
+    # ── data predictit ───────────────────────────────────────────────────────
+    data_predictit = data_subparsers.add_parser(
+        "predictit", help="PredictIt historical data parsing commands"
+    )
+    data_predictit_subparsers = data_predictit.add_subparsers(dest="predictit_command", required=True)
+    data_predictit_parse = data_predictit_subparsers.add_parser(
+        "parse",
+        help="Parse a PredictIt historical CSV into feature parquets and resolution CSV.",
+    )
+    data_predictit_parse.add_argument(
+        "--csv-path",
+        type=str,
+        required=True,
+        help="Path to the PredictIt daily market data CSV.",
+    )
+    data_predictit_parse.add_argument(
+        "--output-dir",
+        type=str,
+        default=None,
+        help="Output directory for features and resolution.csv (default: data/predictit).",
+    )
+    data_predictit_parse.add_argument(
+        "--min-bars",
+        type=int,
+        default=10,
+        help="Minimum daily bars per contract to include (default: 10).",
+    )
+    data_predictit_parse.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="Maximum number of contracts to process (for testing).",
+    )
+    data_predictit_parse.set_defaults(func=cmd_predictit_parse)
+
+    # ── data news ────────────────────────────────────────────────────────────
+    data_news = data_subparsers.add_parser(
+        "news", help="Economic news calendar and market move labeling"
+    )
+    data_news_subparsers = data_news.add_subparsers(dest="news_command", required=True)
+    data_news_upcoming = data_news_subparsers.add_parser(
+        "upcoming", help="Show upcoming economic events from Kalshi tickers.",
+    )
+    data_news_upcoming.add_argument(
+        "--days", type=int, default=7,
+        help="Days ahead to scan (default: 7).",
+    )
+    data_news_upcoming.set_defaults(func=cmd_news_upcoming)
+
+    data_news_label = data_news_subparsers.add_parser(
+        "label-moves", help="Label a market move as scheduled/pre-event/unscheduled.",
+    )
+    data_news_label.add_argument(
+        "--ticker", type=str, required=True,
+        help="Kalshi market ticker (e.g. KXCPI-26MAY-T0.3).",
+    )
+    data_news_label.set_defaults(func=cmd_news_label_moves)
+
+    # ── data metaculus ───────────────────────────────────────────────────────
+    data_metaculus = data_subparsers.add_parser(
+        "metaculus", help="Metaculus prediction data fetching commands"
+    )
+    data_metaculus_subparsers = data_metaculus.add_subparsers(dest="metaculus_command", required=True)
+    data_metaculus_fetch = data_metaculus_subparsers.add_parser(
+        "fetch", help="Fetch resolved binary questions from Metaculus public API.",
+    )
+    data_metaculus_fetch.add_argument(
+        "--output-dir", type=str, default=None,
+        help="Output directory (default: data/metaculus).",
+    )
+    data_metaculus_fetch.add_argument(
+        "--limit", type=int, default=2000,
+        help="Maximum questions to fetch (default: 2000).",
+    )
+    data_metaculus_fetch.add_argument(
+        "--min-forecasts", type=int, default=5,
+        help="Minimum forecast points per question (default: 5).",
+    )
+    data_metaculus_fetch.set_defaults(func=cmd_metaculus_fetch)
 
     data_fundamentals = data_subparsers.add_parser(
         "fundamentals", help="Canonical fundamentals ingest and daily feature generation commands"
@@ -3126,6 +3510,45 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Path to Polymarket resolution CSV (default: data/polymarket/resolution.csv).",
     )
+    research_kalshi_full_backtest.add_argument(
+        "--include-manifold",
+        action="store_true",
+        default=False,
+        help=(
+            "Also run the backtest on Manifold Markets feature parquets "
+            "(requires prior 'trading-cli data manifold parse')."
+        ),
+    )
+    research_kalshi_full_backtest.add_argument(
+        "--manifold-feature-dir",
+        type=str,
+        default=None,
+        help="Directory containing Manifold feature parquets (default: data/manifold/features).",
+    )
+    research_kalshi_full_backtest.add_argument(
+        "--manifold-resolution-data",
+        type=str,
+        default=None,
+        help="Path to Manifold resolution CSV (default: data/manifold/resolution.csv).",
+    )
+    research_kalshi_full_backtest.add_argument(
+        "--include-metaculus",
+        action="store_true",
+        default=False,
+        help="Also run the backtest on Metaculus feature parquets.",
+    )
+    research_kalshi_full_backtest.add_argument(
+        "--metaculus-feature-dir",
+        type=str,
+        default=None,
+        help="Directory containing Metaculus feature parquets (default: data/metaculus/features).",
+    )
+    research_kalshi_full_backtest.add_argument(
+        "--metaculus-resolution-data",
+        type=str,
+        default=None,
+        help="Path to Metaculus resolution CSV (default: data/metaculus/resolution.csv).",
+    )
     research_kalshi_full_backtest.set_defaults(func=cmd_kalshi_full_backtest)
 
     research_cross_market_monitor = research_subparsers.add_parser(
@@ -3234,6 +3657,74 @@ def build_parser() -> argparse.ArgumentParser:
         "--output-dir", type=str, required=True, help="Directory where registry artifacts will be written."
     )
     research_registry_build.set_defaults(func=cmd_research_registry_build)
+    research_dataset_registry = research_subparsers.add_parser(
+        "dataset-registry", help="Cross-provider research dataset registry commands"
+    )
+    research_dataset_registry_subparsers = research_dataset_registry.add_subparsers(
+        dest="research_dataset_registry_command",
+        required=True,
+    )
+    research_dataset_registry_publish = research_dataset_registry_subparsers.add_parser(
+        "publish", help="Publish provider research datasets into the shared dataset registry"
+    )
+    research_dataset_registry_publish.add_argument(
+        "--registry-path",
+        type=str,
+        default="data/research/dataset_registry.json",
+        help="Path to the shared dataset registry JSON artifact.",
+    )
+    research_dataset_registry_publish.add_argument(
+        "--kalshi-config",
+        type=str,
+        default="configs/kalshi.yaml",
+        help="Kalshi config used to derive research dataset metadata.",
+    )
+    research_dataset_registry_publish.add_argument(
+        "--polymarket-config",
+        type=str,
+        default="configs/polymarket.yaml",
+        help="Polymarket config used to derive research dataset metadata.",
+    )
+    research_dataset_registry_publish.add_argument(
+        "--providers",
+        nargs="+",
+        default=["kalshi", "polymarket"],
+        choices=["kalshi", "polymarket"],
+        help="Subset of provider publishers to run.",
+    )
+    research_dataset_registry_publish.add_argument(
+        "--summary-path",
+        type=str,
+        default="artifacts/provider_monitoring/latest_registry_summary.json",
+        help="Path for the registry publication summary artifact.",
+    )
+    research_dataset_registry_publish.set_defaults(func=cmd_research_dataset_registry_publish)
+    research_dataset_registry_list = research_dataset_registry_subparsers.add_parser(
+        "list", help="List shared research dataset registry entries"
+    )
+    research_dataset_registry_list.add_argument(
+        "--registry-path",
+        type=str,
+        default="data/research/dataset_registry.json",
+        help="Path to the shared dataset registry JSON artifact.",
+    )
+    research_dataset_registry_list.add_argument(
+        "--provider", type=str, default=None, help="Optional provider filter."
+    )
+    research_dataset_registry_list.add_argument(
+        "--asset-class", type=str, default=None, help="Optional asset-class filter."
+    )
+    research_dataset_registry_list.add_argument(
+        "--dataset-name", type=str, default=None, help="Optional dataset-name filter."
+    )
+    research_dataset_registry_list.add_argument(
+        "--format",
+        type=str,
+        default="text",
+        choices=["text", "json"],
+        help="Render output as human-readable text or JSON.",
+    )
+    research_dataset_registry_list.set_defaults(func=cmd_research_dataset_registry_list)
     research_leaderboard = research_subparsers.add_parser(
         "leaderboard", help="Build a cross-run research leaderboard from manifest summaries"
     )
@@ -3994,6 +4485,88 @@ def build_parser() -> argparse.ArgumentParser:
         "--config", type=str, required=True, help="Path to the notification JSON/YAML config."
     )
     ops_monitor_notify.set_defaults(func=cmd_monitor_notify)
+    ops_monitor_providers_summary = ops_monitor_subparsers.add_parser(
+        "providers-summary", help="Build a shared cross-provider monitoring summary from dataset registry entries"
+    )
+    ops_monitor_providers_summary.add_argument(
+        "--registry-path",
+        type=str,
+        default="data/research/dataset_registry.json",
+        help="Path to the shared dataset registry JSON artifact.",
+    )
+    ops_monitor_providers_summary.add_argument(
+        "--output-root",
+        type=str,
+        default="artifacts/provider_monitoring",
+        help="Directory where aggregate provider monitoring artifacts will be written.",
+    )
+    ops_monitor_providers_summary.add_argument(
+        "--providers",
+        nargs="+",
+        default=None,
+        help="Optional provider filter.",
+    )
+    ops_monitor_providers_summary.add_argument(
+        "--asset-class",
+        type=str,
+        default=None,
+        help="Optional asset-class filter.",
+    )
+    ops_monitor_providers_summary.add_argument(
+        "--staleness-threshold-hours",
+        type=int,
+        default=48,
+        help="Age threshold used when classifying registry entries as stale.",
+    )
+    ops_monitor_providers_summary.add_argument(
+        "--format",
+        type=str,
+        default="text",
+        choices=["text", "json"],
+        help="Render output as human-readable text or JSON.",
+    )
+    ops_monitor_providers_summary.set_defaults(func=cmd_ops_monitor_providers_summary)
+    ops_monitor_providers_health = ops_monitor_subparsers.add_parser(
+        "providers-health", help="Build a concise provider-level health summary from dataset registry entries"
+    )
+    ops_monitor_providers_health.add_argument(
+        "--registry-path",
+        type=str,
+        default="data/research/dataset_registry.json",
+        help="Path to the shared dataset registry JSON artifact.",
+    )
+    ops_monitor_providers_health.add_argument(
+        "--output-root",
+        type=str,
+        default="artifacts/provider_monitoring",
+        help="Directory where aggregate provider monitoring artifacts will be written.",
+    )
+    ops_monitor_providers_health.add_argument(
+        "--providers",
+        nargs="+",
+        default=None,
+        help="Optional provider filter.",
+    )
+    ops_monitor_providers_health.add_argument(
+        "--asset-class",
+        type=str,
+        default=None,
+        help="Optional asset-class filter.",
+    )
+    ops_monitor_providers_health.add_argument(
+        "--staleness-threshold-hours",
+        type=int,
+        default=48,
+        help="Age threshold used when classifying registry entries as stale.",
+    )
+    ops_monitor_providers_health.add_argument(
+        "--format",
+        type=str,
+        default="text",
+        choices=["text", "json"],
+        help="Render output as human-readable text or JSON.",
+    )
+    ops_monitor_providers_health.set_defaults(func=cmd_ops_monitor_providers_health)
 
     ops_registry = ops_subparsers.add_parser(
         "registry", help="Registry-backed deployment controls and governance decisions"

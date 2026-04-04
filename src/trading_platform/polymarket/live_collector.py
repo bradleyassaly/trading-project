@@ -47,17 +47,21 @@ class LiveMarketInfo:
     question: str
     yes_token_id: str
     volume: float
+    end_date_iso: str | None = None
 
 
 @dataclass
 class PolymarketLiveCollectorConfig:
     db_path: str = "data/polymarket/live/prices.db"
     hourly_bars_dir: str = "data/polymarket/live/hourly_bars"
+    stats_path: str = "artifacts/polymarket_live/stats.json"
     ws_url: str = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
     reconnect_delay: float = 2.0
     reconnect_backoff_max: float = 60.0
     ping_interval_sec: float = 20.0
     export_interval_sec: float = 3600.0
+    stats_interval_sec: float = 60.0
+    heartbeat_interval_sec: float = 300.0
 
 
 @dataclass
@@ -104,13 +108,22 @@ class PolymarketLiveCollector:
         """Run the collector indefinitely (Ctrl+C to stop)."""
         self._store = LiveTickStore(self.config.db_path)
         self.state.started_at = datetime.now(tz=timezone.utc)
+        # Persist market metadata so the API can join question text
+        self._store.upsert_markets_batch([
+            (m.market_id, m.question, m.volume, m.yes_token_id, m.end_date_iso)
+            for m in self.markets
+        ])
         try:
             export_task = asyncio.create_task(self._export_loop())
+            stats_task = asyncio.create_task(self._stats_loop())
+            heartbeat_task = asyncio.create_task(self._heartbeat_loop())
             await self._ws_loop()
         except (KeyboardInterrupt, asyncio.CancelledError):
-            logger.info("Collector shutting down...")
+            logger.info("Collector stopping gracefully")
         finally:
             export_task.cancel()
+            stats_task.cancel()
+            heartbeat_task.cancel()
             # Final export before exit
             try:
                 await self._export_hourly_bars()
@@ -198,6 +211,8 @@ class PolymarketLiveCollector:
                     self._handle_price_change(msg)
                 elif msg_type == "last_trade_price":
                     self._handle_last_trade_price(msg)
+                elif msg_type == "book":
+                    self._handle_book(msg)
 
     # ── Message handlers ─────────────────────────────────────────────────────
 
@@ -223,8 +238,43 @@ class PolymarketLiveCollector:
         if batch and self._store:
             self._store.insert_ticks_batch(batch)
             self.state.ticks_stored += len(batch)
-            # Update latest price from the last change
-            self.state.latest_prices[info.market_id] = batch[-1][2]
+
+    def _handle_book(self, msg: dict[str, Any]) -> None:
+        """Extract midpoint from orderbook snapshot as initial price point."""
+        asset_id = msg.get("asset_id", "")
+        info = self._by_asset.get(asset_id)
+        if not info:
+            return
+        try:
+            bids = msg.get("bids", [])
+            asks = msg.get("asks", [])
+            best_bid = float(bids[0].get("price", 0)) if bids else 0.0
+            best_ask = float(asks[0].get("price", 0)) if asks else 0.0
+            if best_bid > 0 and best_ask > 0:
+                price = (best_bid + best_ask) / 2.0
+            elif best_bid > 0:
+                price = best_bid
+            elif best_ask > 0:
+                price = best_ask
+            else:
+                return
+        except (TypeError, ValueError, IndexError):
+            return
+        spread = best_ask - best_bid if best_ask > 0 and best_bid > 0 else None
+        timestamp = msg.get("timestamp") or datetime.now(tz=timezone.utc).isoformat()
+        if self._store:
+            self._store.insert_tick(
+                asset_id=asset_id,
+                market_id=info.market_id,
+                price=price,
+                timestamp=str(timestamp),
+                msg_type="book",
+                best_bid=best_bid if best_bid > 0 else None,
+                best_ask=best_ask if best_ask > 0 else None,
+                spread=spread,
+            )
+            self.state.ticks_stored += 1
+            self.state.latest_prices[info.market_id] = price
 
     def _handle_last_trade_price(self, msg: dict[str, Any]) -> None:
         asset_id = msg.get("asset_id", "")
@@ -306,3 +356,38 @@ class PolymarketLiveCollector:
         self.state.last_export_at = now
         if exported:
             logger.info("Exported %d hourly bar files for %s", exported, hour_start_str)
+
+    # ── Stats file ───────────────────────────────────────────────────────────
+
+    async def _stats_loop(self) -> None:
+        while True:
+            await asyncio.sleep(self.config.stats_interval_sec)
+            try:
+                self._write_stats()
+            except Exception as exc:
+                logger.warning("Stats write failed: %s", exc)
+
+    def _write_stats(self) -> None:
+        stats_path = Path(self.config.stats_path)
+        stats_path.parent.mkdir(parents=True, exist_ok=True)
+        now = datetime.now(tz=timezone.utc)
+        stats = {
+            "started_at": self.state.started_at.isoformat() if self.state.started_at else None,
+            "markets_subscribed": len(self.markets),
+            "markets_active": len(self.state.latest_prices),
+            "total_ticks": self.state.ticks_stored,
+            "messages_received": self.state.messages_received,
+            "reconnect_count": self.state.reconnect_count,
+            "last_tick_at": now.isoformat(),
+            "last_export_at": self.state.last_export_at.isoformat() if self.state.last_export_at else None,
+        }
+        stats_path.write_text(json.dumps(stats, indent=2), encoding="utf-8")
+
+    async def _heartbeat_loop(self) -> None:
+        while True:
+            await asyncio.sleep(self.config.heartbeat_interval_sec)
+            logger.info(
+                "[heartbeat] %d ticks collected, %d markets active",
+                self.state.ticks_stored,
+                len(self.state.latest_prices),
+            )

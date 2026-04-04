@@ -366,6 +366,7 @@ class BinanceProjectionResult:
     summary_path: str
     output_paths: dict[str, str]
     row_counts: dict[str, int]
+    latest_timestamps: dict[str, dict[str, str | None]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -439,6 +440,74 @@ class BinanceFeatureResult:
     artifacts_written: int
     symbols: list[str]
     intervals: list[str]
+    latest_feature_time: str | None = None
+    materialized_at: str | None = None
+
+
+@dataclass(frozen=True)
+class BinanceStatusConfig:
+    projection_root: str = "data/binance/projections"
+    features_root: str = "data/binance/features"
+    feature_store_root: str = "data/feature_store"
+    latest_sync_manifest_path: str = "data/binance/sync/latest_sync_manifest.json"
+    summary_path: str = "data/binance/status/binance_status.json"
+    symbols: tuple[str, ...] = ()
+    intervals: tuple[str, ...] = ()
+    projection_staleness_threshold_sec: int = 300
+    feature_staleness_threshold_sec: int = 900
+
+    def to_cli_defaults(self) -> dict[str, Any]:
+        return {
+            "projection_root": self.projection_root,
+            "features_root": self.features_root,
+            "feature_store_root": self.feature_store_root,
+            "latest_sync_manifest_path": self.latest_sync_manifest_path,
+            "summary_path": self.summary_path,
+            "symbols": list(self.symbols),
+            "intervals": list(self.intervals),
+            "projection_staleness_threshold_sec": self.projection_staleness_threshold_sec,
+            "feature_staleness_threshold_sec": self.feature_staleness_threshold_sec,
+        }
+
+    @classmethod
+    def from_mapping(cls, mapping: dict[str, Any], *, project_root: Path) -> "BinanceStatusConfig":
+        projection = BinanceProjectionConfig.from_mapping(mapping, project_root=project_root)
+        features = BinanceFeatureConfig.from_mapping(mapping, project_root=project_root)
+        crypto_cfg = dict(mapping.get("crypto", {}) or {})
+        binance_cfg = dict(crypto_cfg.get("binance", {}) or {})
+        status_cfg = dict(binance_cfg.get("status", {}) or {})
+        sync_cfg = dict(binance_cfg.get("sync", {}) or {})
+        return cls(
+            projection_root=projection.output_root,
+            features_root=features.features_root,
+            feature_store_root=features.feature_store_root,
+            latest_sync_manifest_path=_project_relative(
+                project_root,
+                sync_cfg.get("latest_manifest_path", "data/binance/sync/latest_sync_manifest.json"),
+            ),
+            summary_path=_project_relative(
+                project_root,
+                status_cfg.get("summary_path", "data/binance/status/binance_status.json"),
+            ),
+            symbols=tuple(_as_str_list(status_cfg.get("symbols") or projection.symbols)),
+            intervals=tuple(_as_str_list(status_cfg.get("intervals") or projection.intervals)),
+            projection_staleness_threshold_sec=int(status_cfg.get("projection_staleness_threshold_sec", 300)),
+            feature_staleness_threshold_sec=int(status_cfg.get("feature_staleness_threshold_sec", 900)),
+        )
+
+    @classmethod
+    def from_yaml(cls, path: str | Path, *, project_root: Path) -> "BinanceStatusConfig":
+        payload = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
+        return cls.from_mapping(payload, project_root=project_root)
+
+
+@dataclass(frozen=True)
+class BinanceStatusResult:
+    summary_path: str
+    latest_sync_manifest_path: str | None
+    dataset_count: int
+    stale_dataset_count: int
+    records: list[dict[str, Any]]
 
 
 @dataclass(frozen=True)
@@ -446,6 +515,7 @@ class BinanceSyncConfig:
     websocket: BinanceWebsocketIngestConfig
     projection: BinanceProjectionConfig
     features: BinanceFeatureConfig
+    status: BinanceStatusConfig
     symbols: tuple[str, ...]
     intervals: tuple[str, ...]
     stream_families: tuple[str, ...]
@@ -455,12 +525,15 @@ class BinanceSyncConfig:
     max_messages: int | None = None
     full_feature_rebuild: bool = False
     sync_summary_path: str = "data/binance/sync/sync_summary.json"
+    sync_manifest_root: str = "data/binance/sync/manifests"
+    latest_sync_manifest_path: str = "data/binance/sync/latest_sync_manifest.json"
 
     def to_cli_defaults(self) -> dict[str, Any]:
         payload = {}
         payload.update(self.websocket.to_cli_defaults())
         payload.update(self.projection.to_cli_defaults())
         payload.update(self.features.to_cli_defaults())
+        payload.update(self.status.to_cli_defaults())
         payload["skip_projection"] = self.skip_projection
         payload["skip_features"] = self.skip_features
         payload["symbols"] = list(self.symbols)
@@ -470,6 +543,8 @@ class BinanceSyncConfig:
         payload["max_messages"] = self.max_messages
         payload["full_feature_rebuild"] = self.full_feature_rebuild
         payload["sync_summary_path"] = self.sync_summary_path
+        payload["sync_manifest_root"] = self.sync_manifest_root
+        payload["latest_sync_manifest_path"] = self.latest_sync_manifest_path
         return payload
 
     @classmethod
@@ -506,10 +581,16 @@ class BinanceSyncConfig:
             features = BinanceFeatureConfig(**{**features.__dict__, "symbols": symbol_override})
         if interval_override:
             features = BinanceFeatureConfig(**{**features.__dict__, "intervals": interval_override})
+        status = BinanceStatusConfig.from_mapping(mapping, project_root=project_root)
+        if symbol_override:
+            status = BinanceStatusConfig(**{**status.__dict__, "symbols": symbol_override})
+        if interval_override:
+            status = BinanceStatusConfig(**{**status.__dict__, "intervals": interval_override})
         return cls(
             websocket=websocket,
             projection=projection,
             features=features,
+            status=status,
             symbols=tuple(symbol_override or websocket.symbols),
             intervals=tuple(interval_override or projection.intervals),
             stream_families=tuple(stream_override or websocket.stream_families),
@@ -519,6 +600,8 @@ class BinanceSyncConfig:
             max_messages=int(sync_cfg["max_messages"]) if sync_cfg.get("max_messages") is not None else websocket.max_messages,
             full_feature_rebuild=bool(sync_cfg.get("full_feature_rebuild", False)),
             sync_summary_path=_project_relative(project_root, sync_cfg.get("summary_path", "data/binance/sync/sync_summary.json")),
+            sync_manifest_root=_project_relative(project_root, sync_cfg.get("manifest_root", "data/binance/sync/manifests")),
+            latest_sync_manifest_path=_project_relative(project_root, sync_cfg.get("latest_manifest_path", "data/binance/sync/latest_sync_manifest.json")),
         )
 
     @classmethod
@@ -529,9 +612,331 @@ class BinanceSyncConfig:
 
 @dataclass(frozen=True)
 class BinanceSyncResult:
+    sync_id: str
     summary_path: str
+    manifest_path: str
+    latest_manifest_path: str
+    freshness_summary_path: str | None
     websocket_summary_path: str | None
     projection_summary_path: str | None
     feature_summary_path: str | None
     status: str
     step_statuses: dict[str, str]
+
+
+@dataclass(frozen=True)
+class BinanceDatasetRegistryConfig:
+    enabled: bool = True
+    registry_path: str = "data/research/dataset_registry.json"
+    dataset_key: str = "binance.crypto_market_features"
+    dataset_name: str = "crypto_market_features"
+    asset_class: str = "crypto"
+    schema_version: str = "binance_research_dataset_v1"
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "enabled": self.enabled,
+            "registry_path": self.registry_path,
+            "dataset_key": self.dataset_key,
+            "dataset_name": self.dataset_name,
+            "asset_class": self.asset_class,
+            "schema_version": self.schema_version,
+        }
+
+    @classmethod
+    def from_mapping(cls, mapping: dict[str, Any], *, project_root: Path) -> "BinanceDatasetRegistryConfig":
+        crypto_cfg = dict(mapping.get("crypto", {}) or {})
+        binance_cfg = dict(crypto_cfg.get("binance", {}) or {})
+        registry_cfg = dict(binance_cfg.get("registry", {}) or {})
+        return cls(
+            enabled=bool(registry_cfg.get("enabled", True)),
+            registry_path=_project_relative(
+                project_root,
+                registry_cfg.get("path", "data/research/dataset_registry.json"),
+            ),
+            dataset_key=str(registry_cfg.get("dataset_key", "binance.crypto_market_features")),
+            dataset_name=str(registry_cfg.get("dataset_name", "crypto_market_features")),
+            asset_class=str(registry_cfg.get("asset_class", "crypto")),
+            schema_version=str(registry_cfg.get("schema_version", "binance_research_dataset_v1")),
+        )
+
+
+@dataclass(frozen=True)
+class BinanceResearchDatasetConfig:
+    feature_store_root: str = "data/feature_store"
+    output_root: str = "data/binance/research"
+    summary_path: str = "data/binance/research/dataset_summary.json"
+    symbols: tuple[str, ...] = ()
+    intervals: tuple[str, ...] = ()
+    start: str | None = None
+    end: str | None = None
+    target_horizons: tuple[int, ...] = (1,)
+    registry: BinanceDatasetRegistryConfig = field(default_factory=BinanceDatasetRegistryConfig)
+    latest_sync_manifest_path: str = "data/binance/sync/latest_sync_manifest.json"
+    status_summary_path: str = "data/binance/status/binance_status.json"
+    alerts_summary_path: str = "data/binance/monitoring/alerts/alerts_summary.json"
+    health_summary_path: str = "data/binance/monitoring/health/health_check.json"
+
+    def to_cli_defaults(self) -> dict[str, Any]:
+        return {
+            "feature_store_root": self.feature_store_root,
+            "output_root": self.output_root,
+            "summary_path": self.summary_path,
+            "symbols": list(self.symbols),
+            "intervals": list(self.intervals),
+            "start": self.start,
+            "end": self.end,
+            "target_horizons": list(self.target_horizons),
+            "registry": self.registry.to_dict(),
+            "latest_sync_manifest_path": self.latest_sync_manifest_path,
+            "status_summary_path": self.status_summary_path,
+            "alerts_summary_path": self.alerts_summary_path,
+            "health_summary_path": self.health_summary_path,
+        }
+
+    @classmethod
+    def from_mapping(cls, mapping: dict[str, Any], *, project_root: Path) -> "BinanceResearchDatasetConfig":
+        features = BinanceFeatureConfig.from_mapping(mapping, project_root=project_root)
+        crypto_cfg = dict(mapping.get("crypto", {}) or {})
+        binance_cfg = dict(crypto_cfg.get("binance", {}) or {})
+        research_cfg = dict(binance_cfg.get("research", {}) or {})
+        status = BinanceStatusConfig.from_mapping(mapping, project_root=project_root)
+        alerts = BinanceAlertsConfig.from_mapping(mapping, project_root=project_root)
+        health = BinanceHealthCheckConfig.from_mapping(mapping, project_root=project_root)
+        registry = BinanceDatasetRegistryConfig.from_mapping(mapping, project_root=project_root)
+        return cls(
+            feature_store_root=features.feature_store_root,
+            output_root=_project_relative(project_root, research_cfg.get("output_root", "data/binance/research")),
+            summary_path=_project_relative(project_root, research_cfg.get("summary_path", "data/binance/research/dataset_summary.json")),
+            symbols=tuple(_as_str_list(research_cfg.get("symbols") or status.symbols)),
+            intervals=tuple(_as_str_list(research_cfg.get("intervals") or status.intervals)),
+            start=str(research_cfg["start"]) if research_cfg.get("start") is not None else None,
+            end=str(research_cfg["end"]) if research_cfg.get("end") is not None else None,
+            target_horizons=tuple(int(value) for value in (research_cfg.get("target_horizons") or (1,))),
+            registry=registry,
+            latest_sync_manifest_path=status.latest_sync_manifest_path,
+            status_summary_path=status.summary_path,
+            alerts_summary_path=alerts.summary_path,
+            health_summary_path=health.summary_path,
+        )
+
+    @classmethod
+    def from_yaml(cls, path: str | Path, *, project_root: Path) -> "BinanceResearchDatasetConfig":
+        payload = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
+        return cls.from_mapping(payload, project_root=project_root)
+
+
+@dataclass(frozen=True)
+class BinanceResearchDatasetResult:
+    dataset_path: str
+    summary_path: str
+    row_count: int
+    feature_columns: list[str]
+    target_columns: list[str]
+    symbols: list[str]
+    intervals: list[str]
+    registry_path: str | None = None
+    dataset_key: str | None = None
+
+
+@dataclass(frozen=True)
+class BinanceAlertsConfig:
+    latest_sync_manifest_path: str = "data/binance/sync/latest_sync_manifest.json"
+    status_summary_path: str = "data/binance/status/binance_status.json"
+    output_root: str = "data/binance/monitoring/alerts"
+    summary_path: str = "data/binance/monitoring/alerts/alerts_summary.json"
+    symbols: tuple[str, ...] = ()
+    intervals: tuple[str, ...] = ()
+    latest_sync_max_age_sec: int = 900
+    require_sync_status_completed: bool = True
+    missing_scope_severity: str = "critical"
+
+    def to_cli_defaults(self) -> dict[str, Any]:
+        return {
+            "latest_sync_manifest_path": self.latest_sync_manifest_path,
+            "status_summary_path": self.status_summary_path,
+            "output_root": self.output_root,
+            "summary_path": self.summary_path,
+            "symbols": list(self.symbols),
+            "intervals": list(self.intervals),
+            "latest_sync_max_age_sec": self.latest_sync_max_age_sec,
+            "require_sync_status_completed": self.require_sync_status_completed,
+            "missing_scope_severity": self.missing_scope_severity,
+        }
+
+    @classmethod
+    def from_mapping(cls, mapping: dict[str, Any], *, project_root: Path) -> "BinanceAlertsConfig":
+        status = BinanceStatusConfig.from_mapping(mapping, project_root=project_root)
+        crypto_cfg = dict(mapping.get("crypto", {}) or {})
+        binance_cfg = dict(crypto_cfg.get("binance", {}) or {})
+        alerts_cfg = dict(binance_cfg.get("alerts", {}) or {})
+        return cls(
+            latest_sync_manifest_path=status.latest_sync_manifest_path,
+            status_summary_path=status.summary_path,
+            output_root=_project_relative(project_root, alerts_cfg.get("output_root", "data/binance/monitoring/alerts")),
+            summary_path=_project_relative(project_root, alerts_cfg.get("summary_path", "data/binance/monitoring/alerts/alerts_summary.json")),
+            symbols=tuple(_as_str_list(alerts_cfg.get("symbols") or status.symbols)),
+            intervals=tuple(_as_str_list(alerts_cfg.get("intervals") or status.intervals)),
+            latest_sync_max_age_sec=int(alerts_cfg.get("latest_sync_max_age_sec", 900)),
+            require_sync_status_completed=bool(alerts_cfg.get("require_sync_status_completed", True)),
+            missing_scope_severity=str(alerts_cfg.get("missing_scope_severity", "critical")),
+        )
+
+    @classmethod
+    def from_yaml(cls, path: str | Path, *, project_root: Path) -> "BinanceAlertsConfig":
+        payload = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
+        return cls.from_mapping(payload, project_root=project_root)
+
+
+@dataclass(frozen=True)
+class BinanceAlertsResult:
+    summary_path: str
+    alerts_json_path: str
+    alerts_csv_path: str
+    status: str
+    alert_counts: dict[str, int]
+    alert_count: int
+
+
+@dataclass(frozen=True)
+class BinanceHealthCheckConfig:
+    latest_sync_manifest_path: str = "data/binance/sync/latest_sync_manifest.json"
+    status_summary_path: str = "data/binance/status/binance_status.json"
+    output_root: str = "data/binance/monitoring/health"
+    summary_path: str = "data/binance/monitoring/health/health_check.json"
+    symbols: tuple[str, ...] = ()
+    intervals: tuple[str, ...] = ()
+    latest_sync_max_age_sec: int = 900
+    require_feature_scopes: bool = True
+    require_projection_scopes: bool = True
+
+    def to_cli_defaults(self) -> dict[str, Any]:
+        return {
+            "latest_sync_manifest_path": self.latest_sync_manifest_path,
+            "status_summary_path": self.status_summary_path,
+            "output_root": self.output_root,
+            "summary_path": self.summary_path,
+            "symbols": list(self.symbols),
+            "intervals": list(self.intervals),
+            "latest_sync_max_age_sec": self.latest_sync_max_age_sec,
+            "require_feature_scopes": self.require_feature_scopes,
+            "require_projection_scopes": self.require_projection_scopes,
+        }
+
+    @classmethod
+    def from_mapping(cls, mapping: dict[str, Any], *, project_root: Path) -> "BinanceHealthCheckConfig":
+        status = BinanceStatusConfig.from_mapping(mapping, project_root=project_root)
+        crypto_cfg = dict(mapping.get("crypto", {}) or {})
+        binance_cfg = dict(crypto_cfg.get("binance", {}) or {})
+        health_cfg = dict(binance_cfg.get("health", {}) or {})
+        return cls(
+            latest_sync_manifest_path=status.latest_sync_manifest_path,
+            status_summary_path=status.summary_path,
+            output_root=_project_relative(project_root, health_cfg.get("output_root", "data/binance/monitoring/health")),
+            summary_path=_project_relative(project_root, health_cfg.get("summary_path", "data/binance/monitoring/health/health_check.json")),
+            symbols=tuple(_as_str_list(health_cfg.get("symbols") or status.symbols)),
+            intervals=tuple(_as_str_list(health_cfg.get("intervals") or status.intervals)),
+            latest_sync_max_age_sec=int(health_cfg.get("latest_sync_max_age_sec", 900)),
+            require_feature_scopes=bool(health_cfg.get("require_feature_scopes", True)),
+            require_projection_scopes=bool(health_cfg.get("require_projection_scopes", True)),
+        )
+
+    @classmethod
+    def from_yaml(cls, path: str | Path, *, project_root: Path) -> "BinanceHealthCheckConfig":
+        payload = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
+        return cls.from_mapping(payload, project_root=project_root)
+
+
+@dataclass(frozen=True)
+class BinanceHealthCheckResult:
+    summary_path: str
+    status: str
+    alert_counts: dict[str, int]
+    check_count: int
+
+
+@dataclass(frozen=True)
+class BinanceNotifyConfig:
+    alerts: BinanceAlertsConfig
+    health: BinanceHealthCheckConfig
+    output_root: str = "data/binance/monitoring/notifications"
+    summary_path: str = "data/binance/monitoring/notifications/notify_summary.json"
+    state_path: str = "data/binance/monitoring/notifications/notify_state.json"
+    notification_config_path: str | None = None
+    enabled: bool = False
+    notify_on_warning: bool = True
+    notify_on_critical: bool = True
+    notify_on_recovery: bool = True
+    transition_only: bool = True
+    duplicate_suppression_window_sec: int = 3600
+    subject_prefix: str = "Trading Platform Binance"
+
+    def to_cli_defaults(self) -> dict[str, Any]:
+        payload = {}
+        payload.update(self.alerts.to_cli_defaults())
+        payload.update(self.health.to_cli_defaults())
+        payload.update(
+            {
+                "output_root": self.output_root,
+                "summary_path": self.summary_path,
+                "state_path": self.state_path,
+                "notification_config_path": self.notification_config_path,
+                "notifications_enabled": self.enabled,
+                "notify_on_warning": self.notify_on_warning,
+                "notify_on_critical": self.notify_on_critical,
+                "notify_on_recovery": self.notify_on_recovery,
+                "transition_only": self.transition_only,
+                "duplicate_suppression_window_sec": self.duplicate_suppression_window_sec,
+                "subject_prefix": self.subject_prefix,
+            }
+        )
+        return payload
+
+    @classmethod
+    def from_mapping(cls, mapping: dict[str, Any], *, project_root: Path) -> "BinanceNotifyConfig":
+        crypto_cfg = dict(mapping.get("crypto", {}) or {})
+        binance_cfg = dict(crypto_cfg.get("binance", {}) or {})
+        notify_cfg = dict(binance_cfg.get("notify", {}) or {})
+        return cls(
+            alerts=BinanceAlertsConfig.from_mapping(mapping, project_root=project_root),
+            health=BinanceHealthCheckConfig.from_mapping(mapping, project_root=project_root),
+            output_root=_project_relative(
+                project_root,
+                notify_cfg.get("output_root", "data/binance/monitoring/notifications"),
+            ),
+            summary_path=_project_relative(
+                project_root,
+                notify_cfg.get("summary_path", "data/binance/monitoring/notifications/notify_summary.json"),
+            ),
+            state_path=_project_relative(
+                project_root,
+                notify_cfg.get("state_path", "data/binance/monitoring/notifications/notify_state.json"),
+            ),
+            notification_config_path=_project_relative(project_root, notify_cfg["notification_config_path"])
+            if notify_cfg.get("notification_config_path")
+            else None,
+            enabled=bool(notify_cfg.get("enabled", False)),
+            notify_on_warning=bool(notify_cfg.get("notify_on_warning", True)),
+            notify_on_critical=bool(notify_cfg.get("notify_on_critical", True)),
+            notify_on_recovery=bool(notify_cfg.get("notify_on_recovery", True)),
+            transition_only=bool(notify_cfg.get("transition_only", True)),
+            duplicate_suppression_window_sec=int(notify_cfg.get("duplicate_suppression_window_sec", 3600)),
+            subject_prefix=str(notify_cfg.get("subject_prefix", "Trading Platform Binance")),
+        )
+
+    @classmethod
+    def from_yaml(cls, path: str | Path, *, project_root: Path) -> "BinanceNotifyConfig":
+        payload = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
+        return cls.from_mapping(payload, project_root=project_root)
+
+
+@dataclass(frozen=True)
+class BinanceNotifyResult:
+    summary_path: str
+    state_path: str
+    status: str
+    transition: str | None
+    should_notify: bool
+    notified: bool
+    suppressed: bool
+    alert_count: int

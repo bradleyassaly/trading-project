@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pandas as pd
@@ -110,6 +111,7 @@ def project_binance_market_data(config: BinanceProjectionConfig) -> BinanceProje
 
     output_paths: dict[str, str] = {}
     row_counts: dict[str, int] = {}
+    latest_timestamps: dict[str, dict[str, str | None]] = {}
     datasets = {
         "crypto_ohlcv_bars": ohlcv,
         "crypto_agg_trades": agg_trades,
@@ -120,10 +122,20 @@ def project_binance_market_data(config: BinanceProjectionConfig) -> BinanceProje
         frame.to_parquet(output_path, index=False)
         output_paths[dataset_name] = str(output_path)
         row_counts[dataset_name] = int(len(frame.index))
+        latest_timestamps[dataset_name] = {
+            "latest_event_time": pd.to_datetime(frame["event_time"], utc=True).max().isoformat()
+            if not frame.empty and "event_time" in frame.columns and pd.notna(pd.to_datetime(frame["event_time"], utc=True).max())
+            else None,
+            "latest_ingested_at": pd.to_datetime(frame["ingested_at"], utc=True).max().isoformat()
+            if not frame.empty and "ingested_at" in frame.columns and pd.notna(pd.to_datetime(frame["ingested_at"], utc=True).max())
+            else None,
+            "materialized_at": datetime.now(UTC).isoformat(),
+        }
 
     summary = {
         "output_paths": output_paths,
         "row_counts": row_counts,
+        "latest_timestamps": latest_timestamps,
         "uniqueness_rules": {
             "crypto_ohlcv_bars": ["symbol", "interval", "timestamp"],
             "crypto_agg_trades": ["symbol", "aggregate_trade_id"],
@@ -138,4 +150,9 @@ def project_binance_market_data(config: BinanceProjectionConfig) -> BinanceProje
     summary_path = Path(config.summary_path)
     summary_path.parent.mkdir(parents=True, exist_ok=True)
     summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
-    return BinanceProjectionResult(summary_path=str(summary_path), output_paths=output_paths, row_counts=row_counts)
+    return BinanceProjectionResult(
+        summary_path=str(summary_path),
+        output_paths=output_paths,
+        row_counts=row_counts,
+        latest_timestamps=latest_timestamps,
+    )

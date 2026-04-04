@@ -13,7 +13,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -103,6 +103,11 @@ def kalshi_markets() -> dict[str, Any]:
 @app.get("/api/polymarket/live-markets")
 def polymarket_live_markets() -> dict[str, Any]:
     return reader.read_polymarket_live_markets()
+
+
+@app.get("/api/polymarket/market-ticks/{market_id}")
+def polymarket_market_ticks(market_id: str) -> dict[str, Any]:
+    return reader.read_polymarket_market_ticks(market_id)
 
 
 @app.get("/api/kalshi/market/{ticker}/history")
@@ -211,3 +216,58 @@ def research_status(job_id: str) -> dict[str, Any]:
         response["results"] = perf.get("data", [])
 
     return response
+
+
+# Shared research datasets and provider monitoring
+
+
+@app.get("/api/research/datasets")
+def research_datasets(
+    provider: str | None = None,
+    asset_class: str | None = None,
+    dataset_name: str | None = None,
+) -> dict[str, Any]:
+    return reader.read_research_dataset_registry(
+        provider=provider,
+        asset_class=asset_class,
+        dataset_name=dataset_name,
+    )
+
+
+@app.get("/api/research/datasets/{dataset_key}")
+def research_dataset_detail(dataset_key: str) -> dict[str, Any]:
+    return reader.read_research_dataset_detail(dataset_key)
+
+
+@app.get("/api/research/datasets/{dataset_key}/rows")
+def research_dataset_rows(
+    dataset_key: str,
+    symbol: list[str] | None = Query(default=None),
+    interval: list[str] | None = Query(default=None),
+    start: str | None = None,
+    end: str | None = None,
+    limit: int = 200,
+) -> dict[str, Any]:
+    return reader.read_research_dataset_rows(
+        dataset_key=dataset_key,
+        symbols=symbol,
+        intervals=interval,
+        start=start,
+        end=end,
+        limit=limit,
+    )
+
+
+@app.get("/api/ops/registry-summary")
+def ops_registry_summary() -> dict[str, Any]:
+    return reader.read_registry_publication_summary()
+
+
+@app.get("/api/ops/provider-monitoring")
+def ops_provider_monitoring() -> dict[str, Any]:
+    return reader.read_provider_monitoring_summary()
+
+
+@app.get("/api/ops/provider-health")
+def ops_provider_health() -> dict[str, Any]:
+    return reader.read_provider_health_summary()

@@ -6,6 +6,7 @@ from pathlib import Path
 from trading_platform.binance.models import (
     BinanceFeatureConfig,
     BinanceProjectionConfig,
+    BinanceStatusConfig,
     BinanceSyncConfig,
     BinanceWebsocketIngestConfig,
 )
@@ -85,10 +86,26 @@ def cmd_binance_crypto_sync(args: argparse.Namespace) -> None:
             else bool(args.incremental_refresh),
         }
     )
+    status = BinanceStatusConfig(
+        **{
+            **config.status.__dict__,
+            "projection_root": projection.output_root,
+            "features_root": features.features_root,
+            "feature_store_root": features.feature_store_root,
+            "latest_sync_manifest_path": _resolve_path(
+                getattr(args, "latest_sync_manifest_path", None),
+                config.latest_sync_manifest_path,
+            ),
+            "summary_path": _resolve_path(getattr(args, "status_summary_path", None), config.status.summary_path),
+            "symbols": symbols,
+            "intervals": intervals,
+        }
+    )
     config = BinanceSyncConfig(
         websocket=websocket,
         projection=projection,
         features=features,
+        status=status,
         symbols=symbols,
         intervals=intervals,
         stream_families=stream_families,
@@ -102,6 +119,11 @@ def cmd_binance_crypto_sync(args: argparse.Namespace) -> None:
         else config.max_messages,
         full_feature_rebuild=bool(getattr(args, "full_feature_rebuild", False)),
         sync_summary_path=_resolve_path(getattr(args, "sync_summary_path", None), config.sync_summary_path),
+        sync_manifest_root=_resolve_path(getattr(args, "sync_manifest_root", None), config.sync_manifest_root),
+        latest_sync_manifest_path=_resolve_path(
+            getattr(args, "latest_sync_manifest_path", None),
+            config.latest_sync_manifest_path,
+        ),
     )
 
     print("Binance Crypto Incremental Sync")
@@ -117,7 +139,11 @@ def cmd_binance_crypto_sync(args: argparse.Namespace) -> None:
 
     result = run_binance_incremental_sync(config)
     print("\n[DONE] Binance sync complete.")
+    print(f"  Sync id                  : {result.sync_id}")
     print(f"  Status                   : {result.status}")
+    print(f"  Sync manifest            : {result.manifest_path}")
+    print(f"  Latest manifest          : {result.latest_manifest_path}")
+    print(f"  Freshness summary        : {result.freshness_summary_path}")
     print(f"  Websocket summary        : {result.websocket_summary_path}")
     print(f"  Projection summary       : {result.projection_summary_path}")
     print(f"  Feature summary          : {result.feature_summary_path}")

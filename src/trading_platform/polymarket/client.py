@@ -53,6 +53,8 @@ class PolymarketClient:
         order: str | None = None,
         ascending: bool | None = None,
         end_date_min: str | None = None,
+        end_date_max: str | None = None,
+        active: bool | None = None,
     ) -> tuple[list[dict[str, Any]], int | None]:
         """
         Fetch one page of markets from the Gamma API.
@@ -77,6 +79,10 @@ class PolymarketClient:
             params["ascending"] = "true" if ascending else "false"
         if end_date_min is not None:
             params["end_date_min"] = end_date_min
+        if end_date_max is not None:
+            params["end_date_max"] = end_date_max
+        if active is not None:
+            params["active"] = "true" if active else "false"
         payload = self._get(self._gamma_url("/markets"), params=params)
         markets: list[dict[str, Any]]
         if isinstance(payload, list):
@@ -104,6 +110,8 @@ class PolymarketClient:
         order: str | None = None,
         ascending: bool | None = None,
         end_date_min: str | None = None,
+        end_date_max: str | None = None,
+        active: bool | None = None,
         _page_size: int = 100,
     ) -> list[dict[str, Any]]:
         """Paginate through all markets for a given tag_slug."""
@@ -113,6 +121,7 @@ class PolymarketClient:
             page, next_offset = self.get_markets(
                 tag_slug=tag_slug, closed=closed, limit=_page_size, offset=offset,
                 order=order, ascending=ascending, end_date_min=end_date_min,
+                end_date_max=end_date_max, active=active,
             )
             all_markets.extend(page)
             if next_offset is None:

@@ -16,6 +16,18 @@ from typing import Any
 
 import pandas as pd
 
+from trading_platform.monitoring.provider_monitoring import (
+    read_latest_monitoring_summary,
+    read_latest_provider_health_summary,
+    read_latest_registry_summary,
+)
+from trading_platform.research.dataset_reader import (
+    ResearchDatasetReadRequest,
+    list_research_datasets,
+    load_research_dataset,
+    resolve_research_dataset,
+)
+
 
 # Roots — override via environment for testing or non-default layouts
 ARTIFACTS_ROOT = Path(os.environ.get("ARTIFACTS_ROOT", "artifacts"))
@@ -82,6 +94,14 @@ def _read_json(path: Path) -> Any:
         return json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         return None
+
+
+def _research_registry_path() -> Path:
+    return DATA_ROOT / "research" / "dataset_registry.json"
+
+
+def _provider_monitoring_root() -> Path:
+    return ARTIFACTS_ROOT / "provider_monitoring"
 
 
 def _compute_sharpe(returns: pd.Series) -> float | None:
@@ -215,19 +235,37 @@ def read_pnl_summary() -> dict[str, Any]:
 
 
 def read_signals_performance() -> dict[str, Any]:
-    backtest_path = ARTIFACTS_ROOT / "kalshi_research" / "backtest" / "backtest_results.csv"
-    leaderboard_path = ARTIFACTS_ROOT / "kalshi_research" / "leaderboard.csv"
+    # Check multiple result paths, pick the one with the most useful data
+    candidates = [
+        ("full_backtest_results", ARTIFACTS_ROOT / "kalshi_research" / "full_backtest_results.csv"),
+        ("manifold_backtest", ARTIFACTS_ROOT / "kalshi_research" / "manifold_backtest_results.csv"),
+        ("polymarket_backtest", ARTIFACTS_ROOT / "kalshi_research" / "polymarket_backtest_results.csv"),
+        ("backtest_results", ARTIFACTS_ROOT / "kalshi_research" / "backtest" / "backtest_results.csv"),
+        ("leaderboard", ARTIFACTS_ROOT / "kalshi_research" / "leaderboard.csv"),
+    ]
 
-    df = _read_csv(backtest_path)
-    source = "backtest_results"
-    if df is None or df.empty:
-        df = _read_csv(leaderboard_path)
-        source = "leaderboard"
-    if df is None or df.empty:
+    best_df = None
+    best_source = ""
+    best_trades = 0
+
+    for source_name, path in candidates:
+        df = _read_csv(path)
+        if df is None or df.empty:
+            continue
+        if "n_trades" in df.columns:
+            total = int(df["n_trades"].sum())
+        else:
+            total = len(df)
+        if total > best_trades:
+            best_df = df
+            best_source = source_name
+            best_trades = total
+
+    if best_df is None or best_df.empty:
         return {"available": False, "reason": "No signal performance data found", "data": []}
 
-    records = [_safe_row(dict(row)) for _, row in df.iterrows()]
-    return {"available": True, "source": source, "data": records}
+    records = [_safe_row(dict(row)) for _, row in best_df.iterrows()]
+    return {"available": True, "source": best_source, "data": records}
 
 
 def read_signals_correlation() -> dict[str, Any]:
@@ -398,32 +436,319 @@ def read_loop_decisions() -> dict[str, Any]:
     return {"available": True, "data": safe_entries}
 
 
+def _parse_ws_timestamp(ts: str | None) -> str | None:
+    """Convert a WebSocket timestamp to ISO-8601.
+
+    Polymarket sends Unix millisecond strings (e.g. ``"1729084877448"``).
+    """
+    if not ts:
+        return None
+    try:
+        val = int(ts)
+        # Unix milliseconds → seconds
+        if val > 1e12:
+            val = val / 1000
+        from datetime import datetime, timezone as tz
+        return datetime.fromtimestamp(val, tz=tz.utc).isoformat()
+    except (ValueError, TypeError, OSError):
+        return ts  # already ISO or unknown format
+
+
 def read_polymarket_live_markets() -> dict[str, Any]:
     db_path = DATA_ROOT / "polymarket" / "live" / "prices.db"
     if not db_path.exists():
-        return {"available": False, "reason": "Live collector not running", "data": [], "count": 0}
+        return {"available": False, "reason": "Live collector not running",
+                "data": [], "count": 0, "markets_subscribed": 0, "started_at": None}
     try:
         import sqlite3
         conn = sqlite3.connect(str(db_path), check_same_thread=False)
         conn.execute("PRAGMA journal_mode=WAL")
-        rows = conn.execute("""
+        # Latest trade price per market (exclude orderbook price_change ticks)
+        price_rows = conn.execute("""
             SELECT market_id, price, timestamp
             FROM ticks
-            WHERE id IN (
-                SELECT MAX(id) FROM ticks GROUP BY market_id
-            )
+            WHERE msg_type IN ('last_trade_price', 'book')
+              AND id IN (
+                SELECT MAX(id) FROM ticks
+                WHERE msg_type IN ('last_trade_price', 'book')
+                GROUP BY market_id
+              )
         """).fetchall()
+        # Market metadata (question text, end date)
+        market_rows = conn.execute(
+            "SELECT market_id, question, volume, end_date_iso FROM markets"
+        ).fetchall()
+        # Tick counts
+        tick_count_rows = conn.execute(
+            "SELECT market_id, COUNT(*) FROM ticks GROUP BY market_id"
+        ).fetchall()
         conn.close()
     except Exception:
-        return {"available": False, "reason": "Failed to read live DB", "data": [], "count": 0}
+        return {"available": False, "reason": "Failed to read live DB",
+                "data": [], "count": 0, "markets_subscribed": 0, "started_at": None}
 
-    markets = [
-        {
+    market_meta = {r[0]: {"question": r[1], "volume": r[2], "end_date_iso": r[3]} for r in market_rows}
+    tick_counts = {r[0]: r[1] for r in tick_count_rows}
+
+    markets = []
+    for market_id, price, ts in price_rows:
+        meta = market_meta.get(market_id, {})
+        markets.append({
             "market_id": market_id,
+            "question": meta.get("question", ""),
+            "volume": meta.get("volume", 0),
+            "end_date_iso": meta.get("end_date_iso"),
             "yes_price": round(price * 100, 2),
-            "last_tick_at": ts,
+            "last_tick_at": _parse_ws_timestamp(ts),
+            "tick_count": tick_counts.get(market_id, 0),
             "live": True,
-        }
-        for market_id, price, ts in rows
+        })
+
+    # Read stats file for subscribed count and started_at
+    stats_path = Path(os.environ.get("ARTIFACTS_ROOT", "artifacts")) / "polymarket_live" / "stats.json"
+    stats: dict[str, Any] = {}
+    if stats_path.exists():
+        try:
+            stats = json.loads(stats_path.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+
+    return {
+        "available": True,
+        "data": markets,
+        "count": len(markets),
+        "markets_subscribed": stats.get("markets_subscribed", len(market_meta)),
+        "started_at": stats.get("started_at"),
+    }
+
+
+def read_polymarket_market_ticks(market_id: str) -> dict[str, Any]:
+    db_path = DATA_ROOT / "polymarket" / "live" / "prices.db"
+    if not db_path.exists():
+        return {"available": False, "reason": "Live collector not running"}
+    try:
+        import sqlite3
+        conn = sqlite3.connect(str(db_path), check_same_thread=False)
+        conn.execute("PRAGMA journal_mode=WAL")
+
+        # Market metadata
+        meta_row = conn.execute(
+            "SELECT question, volume, end_date_iso FROM markets WHERE market_id = ?",
+            (market_id,),
+        ).fetchone()
+
+        # Ticks — last 500 by id descending, then reverse for ascending
+        tick_rows = conn.execute(
+            "SELECT price, timestamp FROM ticks WHERE market_id = ? ORDER BY id DESC LIMIT 500",
+            (market_id,),
+        ).fetchall()
+
+        # Total tick count
+        count_row = conn.execute(
+            "SELECT COUNT(*) FROM ticks WHERE market_id = ?", (market_id,),
+        ).fetchone()
+
+        # First tick timestamp for ticks_per_hour calculation
+        first_row = conn.execute(
+            "SELECT timestamp FROM ticks WHERE market_id = ? ORDER BY id ASC LIMIT 1",
+            (market_id,),
+        ).fetchone()
+
+        conn.close()
+    except Exception as exc:
+        return {"available": False, "reason": f"DB error: {exc}"}
+
+    if not tick_rows:
+        return {"available": False, "reason": "No ticks for this market"}
+
+    # Reverse to ascending order
+    tick_rows = list(reversed(tick_rows))
+    prices = [r[0] for r in tick_rows]
+
+    # Compute stats
+    total_ticks = count_row[0] if count_row else len(tick_rows)
+    first_ts = _parse_ws_timestamp(first_row[0]) if first_row else None
+    hours_collected = 0.0
+    if first_ts:
+        try:
+            from datetime import datetime as _dt, timezone as _tz
+            first_dt = _dt.fromisoformat(first_ts)
+            hours_collected = (_dt.now(tz=_tz.utc) - first_dt).total_seconds() / 3600.0
+        except Exception:
+            pass
+
+    ticks_per_hour = round(total_ticks / max(hours_collected, 0.1), 1)
+
+    ticks_out = [
+        {"timestamp": _parse_ws_timestamp(r[1]), "price": round(r[0] * 100, 2)}
+        for r in tick_rows
     ]
-    return {"available": True, "data": markets, "count": len(markets)}
+
+    return {
+        "available": True,
+        "market_id": market_id,
+        "question": meta_row[0] if meta_row else "",
+        "volume": meta_row[1] if meta_row else 0,
+        "end_date_iso": meta_row[2] if meta_row else None,
+        "ticks": ticks_out,
+        "stats": {
+            "min": round(min(prices) * 100, 2),
+            "max": round(max(prices) * 100, 2),
+            "first": round(prices[0] * 100, 2),
+            "last": round(prices[-1] * 100, 2),
+            "tick_count": total_ticks,
+            "hours_collected": round(hours_collected, 1),
+            "ticks_per_hour": ticks_per_hour,
+        },
+    }
+
+
+# Shared research registry and provider monitoring
+
+
+def read_research_dataset_registry(
+    *,
+    provider: str | None = None,
+    asset_class: str | None = None,
+    dataset_name: str | None = None,
+) -> dict[str, Any]:
+    registry_path = _research_registry_path()
+    if not registry_path.exists():
+        return {"available": False, "reason": "No shared dataset registry found", "data": []}
+    entries = list_research_datasets(
+        registry_path=registry_path,
+        provider=provider,
+        asset_class=asset_class,
+        dataset_name=dataset_name,
+    )
+    return {
+        "available": True,
+        "registry_path": str(registry_path),
+        "count": len(entries),
+        "data": [
+            {
+                "dataset_key": entry.dataset_key,
+                "provider": entry.provider,
+                "asset_class": entry.asset_class,
+                "dataset_name": entry.dataset_name,
+                "dataset_path": entry.dataset_path,
+                "storage_type": entry.storage_type,
+                "available_symbols": entry.available_symbols,
+                "available_intervals": entry.available_intervals,
+                "target_horizons": entry.target_horizons,
+                "schema_version": entry.schema_version,
+                "summary_path": entry.summary_path,
+                "latest_materialized_at": entry.latest_materialized_at,
+                "latest_event_time": entry.latest_event_time,
+                "time_column": entry.time_column,
+                "primary_keys": entry.primary_keys,
+                "schema_columns": entry.schema_columns,
+                "manifest_references": entry.manifest_references,
+                "health_references": entry.health_references,
+                "metadata": entry.metadata,
+            }
+            for entry in entries
+        ],
+    }
+
+
+def read_research_dataset_detail(dataset_key: str) -> dict[str, Any]:
+    registry_path = _research_registry_path()
+    if not registry_path.exists():
+        return {"available": False, "reason": "No shared dataset registry found"}
+    try:
+        entry = resolve_research_dataset(registry_path=registry_path, dataset_key=dataset_key)
+    except KeyError as exc:
+        return {"available": False, "reason": str(exc)}
+    return {
+        "available": True,
+        "registry_path": str(registry_path),
+        "data": {
+            "dataset_key": entry.dataset_key,
+            "provider": entry.provider,
+            "asset_class": entry.asset_class,
+            "dataset_name": entry.dataset_name,
+            "dataset_path": entry.dataset_path,
+            "storage_type": entry.storage_type,
+            "available_symbols": entry.available_symbols,
+            "available_intervals": entry.available_intervals,
+            "target_horizons": entry.target_horizons,
+            "schema_version": entry.schema_version,
+            "summary_path": entry.summary_path,
+            "latest_materialized_at": entry.latest_materialized_at,
+            "latest_event_time": entry.latest_event_time,
+            "time_column": entry.time_column,
+            "primary_keys": entry.primary_keys,
+            "schema_columns": entry.schema_columns,
+            "manifest_references": entry.manifest_references,
+            "health_references": entry.health_references,
+            "metadata": entry.metadata,
+        },
+    }
+
+
+def read_research_dataset_rows(
+    *,
+    dataset_key: str,
+    symbols: list[str] | None = None,
+    intervals: list[str] | None = None,
+    start: str | None = None,
+    end: str | None = None,
+    limit: int = 200,
+) -> dict[str, Any]:
+    registry_path = _research_registry_path()
+    if not registry_path.exists():
+        return {"available": False, "reason": "No shared dataset registry found", "data": []}
+    try:
+        result = load_research_dataset(
+            ResearchDatasetReadRequest(
+                registry_path=registry_path,
+                dataset_key=dataset_key,
+                symbols=list(symbols or []),
+                intervals=list(intervals or []),
+                start=start,
+                end=end,
+            )
+        )
+    except (KeyError, ValueError) as exc:
+        return {"available": False, "reason": str(exc), "data": []}
+    frame = result.frame.head(max(int(limit), 0))
+    rows = [_safe_row(dict(row)) for _, row in frame.iterrows()]
+    return {
+        "available": True,
+        "registry_path": str(registry_path),
+        "descriptor": {
+            "dataset_key": result.descriptor.dataset_key,
+            "provider": result.descriptor.provider,
+            "asset_class": result.descriptor.asset_class,
+            "dataset_name": result.descriptor.dataset_name,
+            "time_column": result.descriptor.time_column,
+            "primary_keys": result.descriptor.primary_keys,
+            "schema_columns": result.descriptor.schema_columns,
+        },
+        "filters_applied": result.filters_applied,
+        "row_count": int(len(result.frame.index)),
+        "returned_row_count": len(rows),
+        "data": rows,
+    }
+
+
+def read_registry_publication_summary() -> dict[str, Any]:
+    summary = read_latest_registry_summary(summary_path=_provider_monitoring_root() / "latest_registry_summary.json")
+    if not summary:
+        return {"available": False, "reason": "No registry publication summary found"}
+    return {"available": True, **summary}
+
+
+def read_provider_monitoring_summary() -> dict[str, Any]:
+    summary = read_latest_monitoring_summary(output_root=_provider_monitoring_root())
+    if not summary:
+        return {"available": False, "reason": "No provider monitoring summary found"}
+    return {"available": True, **summary}
+
+
+def read_provider_health_summary() -> dict[str, Any]:
+    summary = read_latest_provider_health_summary(output_root=_provider_monitoring_root())
+    if not summary:
+        return {"available": False, "reason": "No provider health summary found"}
+    return {"available": True, **summary}

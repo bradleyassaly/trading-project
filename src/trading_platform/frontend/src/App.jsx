@@ -6,6 +6,7 @@ import Markets from './pages/Markets'
 import PolymarketLive from './pages/PolymarketLive'
 import Reasoning from './pages/Reasoning'
 import Control from './pages/Control'
+import ResearchData from './pages/ResearchData'
 
 export default function App() {
   return (
@@ -19,6 +20,7 @@ export default function App() {
             <Route path="/signals" element={<Signals />} />
             <Route path="/markets" element={<Markets />} />
             <Route path="/polymarket" element={<PolymarketLive />} />
+            <Route path="/research-data" element={<ResearchData />} />
             <Route path="/reasoning" element={<Reasoning />} />
             <Route path="/control" element={<Control />} />
           </Routes>

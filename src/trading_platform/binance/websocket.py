@@ -320,6 +320,13 @@ class BinanceWebsocketIngestService:
 
     def _finalize(self) -> BinanceWebsocketIngestResult:
         projection_summary_path: str | None = None
+        checkpoint = self._load_checkpoint()
+        latest_event_times = [
+            str(stream_state.get("last_event_time"))
+            for stream_state in (checkpoint.get("streams") or {}).values()
+            if stream_state.get("last_event_time")
+        ]
+        latest_event_time = max(latest_event_times) if latest_event_times else None
         if self.config.refresh_projection_after_ingest:
             projection_result = project_binance_market_data(
                 BinanceProjectionConfig(
@@ -346,6 +353,8 @@ class BinanceWebsocketIngestService:
             "normalized_incremental_root": str(self.normalized_root),
             "projection_summary_path": projection_summary_path,
             "stream_count": len(self.config.stream_names()),
+            "latest_event_time": latest_event_time,
+            "stream_state": checkpoint.get("streams", {}),
         }
         _write_json(self.summary_path, summary)
         return BinanceWebsocketIngestResult(

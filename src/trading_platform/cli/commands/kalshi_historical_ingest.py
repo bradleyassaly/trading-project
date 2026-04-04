@@ -113,7 +113,11 @@ def cmd_kalshi_historical_ingest(args: argparse.Namespace) -> None:
         summary_path=str(_project_path("data", "kalshi", "raw", "ingest_summary.json")),
         status_artifacts_root=str(_project_relative_path(hist_cfg.get("status_artifacts_root", "artifacts/kalshi_ingest"))),
         checkpoint_backup_path=str(_project_path("data", "kalshi", "raw", "ingest_checkpoint.bak.json")),
-        lookback_days=int(getattr(args, "lookback_days", None) or ingestion_cfg.get("backfill_days", 365)),
+        lookback_days=int(
+            getattr(args, "lookback_days", None)
+            or cfg_raw.get("lookback_days")
+            or ingestion_cfg.get("backfill_days", 365)
+        ),
         feature_period=getattr(args, "period", None) or hist_cfg.get("feature_period", "1h"),
         min_trades=5,
         request_sleep_sec=float(getattr(args, "sleep", None) or ingestion_cfg.get("request_sleep_sec", 0.05)),
@@ -215,6 +219,20 @@ def cmd_kalshi_historical_ingest(args: argparse.Namespace) -> None:
     )
 
     pipeline = HistoricalIngestPipeline(client, config)
+
+    # --reprocess: clear checkpoint so existing raw markets get reprocessed
+    if getattr(args, "reprocess", False):
+        checkpoint_path = Path(config.checkpoint_path)
+        if checkpoint_path.exists():
+            import json as _json
+            cp = _json.loads(checkpoint_path.read_text(encoding="utf-8"))
+            cp["processed_tickers"] = []
+            cp["market_download_complete"] = False
+            cp["failed_tickers"] = {}
+            checkpoint_path.write_text(_json.dumps(cp, indent=2), encoding="utf-8")
+            print(f"[reprocess] Cleared processed_tickers from checkpoint ({checkpoint_path})")
+        else:
+            print("[reprocess] No checkpoint found — will run fresh.")
 
     print(f"\nStarting download... (this may take several minutes for {config.lookback_days} days of data)")
     result = pipeline.run()

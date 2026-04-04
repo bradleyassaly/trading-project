@@ -8,6 +8,8 @@ auth:
   #   # private_key_pem: "-----BEGIN RSA PRIVATE KEY-----\n...\n-----END RSA PRIVATE KEY-----"
 # `private_key_pem` takes precedence over `private_key_path` when both are set.
 
+lookback_days: 365
+
 environment:
   demo: false  # Historical data reads always use production endpoints; demo only affects order placement.
 
@@ -124,7 +126,7 @@ historical_ingest:
   # NOTE: The Kalshi /events?category=X and /markets?category=X endpoints
   # do NOT filter server-side — category is ignored in API responses.
   # The direct series approach is the only reliable way to target Economics/Politics.
-  use_direct_series_fetch: false
+  use_direct_series_fetch: true
   direct_series_tickers:
     - KXINFL
     - KXFED
@@ -161,6 +163,14 @@ data_validation:
     max_invalid_timestamp_warn_rate: 0.01
     max_invalid_timestamp_fail_rate: 0.05
     synthetic_markers_hard_fail: true
+
+research_registry:
+  enabled: true
+  path: "data/research/dataset_registry.json"
+  dataset_key: "kalshi.prediction_market_features"
+  dataset_name: "prediction_market_features"
+  asset_class: "prediction_market"
+  schema_version: "kalshi_research_dataset_v1"
 
 risk:
   max_drawdown_pct: 0.20   # kill switch triggers at 20% portfolio drawdown
