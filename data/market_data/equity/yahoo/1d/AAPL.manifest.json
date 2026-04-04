@@ -12,7 +12,7 @@
   "manifest_path": "C:\\Users\\bradl\\PycharmProjects\\trading_platform\\data\\market_data\\equity\\yahoo\\1d\\AAPL.manifest.json",
   "validation_report_path": "C:\\Users\\bradl\\PycharmProjects\\trading_platform\\data\\market_data\\equity\\yahoo\\1d\\AAPL.validation.json",
   "metadata": {
-    "legacy_normalized_path": "C:\\Users\\bradl\\AppData\\Local\\Temp\\pytest-of-bradl\\pytest-1071\\test_research_prep_pipeline_en0\\normalized\\AAPL.parquet",
-    "legacy_raw_path": "C:\\Users\\bradl\\AppData\\Local\\Temp\\pytest-of-bradl\\pytest-1071\\test_research_prep_pipeline_en0\\raw\\AAPL.parquet"
+    "legacy_normalized_path": "C:\\Users\\bradl\\AppData\\Local\\Temp\\pytest-of-bradl\\pytest-1075\\test_research_prep_pipeline_en0\\normalized\\AAPL.parquet",
+    "legacy_raw_path": "C:\\Users\\bradl\\AppData\\Local\\Temp\\pytest-of-bradl\\pytest-1075\\test_research_prep_pipeline_en0\\raw\\AAPL.parquet"
   }
 }
