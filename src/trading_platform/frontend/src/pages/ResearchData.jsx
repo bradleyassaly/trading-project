@@ -37,12 +37,20 @@ export default function ResearchData() {
     () => (selectedProvider ? api.providerTimeline(selectedProvider) : Promise.resolve(null)),
     [selectedProvider],
   )
+  const providerHistoryFetcher = useCallback(
+    () => (selectedProvider ? api.providerHistorySummary(selectedProvider) : Promise.resolve(null)),
+    [selectedProvider],
+  )
   const datasetDetailFetcher = useCallback(
     () => (selectedKey ? api.monitoredDatasetDetail(selectedKey) : Promise.resolve(null)),
     [selectedKey],
   )
   const datasetTimelineFetcher = useCallback(
     () => (selectedKey ? api.monitoredDatasetTimeline(selectedKey) : Promise.resolve(null)),
+    [selectedKey],
+  )
+  const datasetHistoryFetcher = useCallback(
+    () => (selectedKey ? api.monitoredDatasetHistorySummary(selectedKey) : Promise.resolve(null)),
     [selectedKey],
   )
   const rowsFetcher = useCallback(
@@ -65,17 +73,28 @@ export default function ResearchData() {
     ),
     [selectedProvider],
   )
+  const replayEvaluationFetcher = useCallback(
+    () => (
+      selectedProvider
+        ? api.researchReplayEvaluationPreview({ provider: [selectedProvider], limit: 500, alignment_mode: 'outer_union' })
+        : Promise.resolve(null)
+    ),
+    [selectedProvider],
+  )
 
   const { data: datasets, loading: datasetsLoading } = useApi(datasetsFetcher, 30_000)
   const { data: monitoring } = useApi(monitoringFetcher, 30_000)
   const { data: health } = useApi(healthFetcher, 30_000)
   const { data: providerDetail, loading: providerDetailLoading } = useApi(providerDetailFetcher, 30_000)
   const { data: providerTimeline, loading: providerTimelineLoading } = useApi(providerTimelineFetcher, 30_000)
+  const { data: providerHistory, loading: providerHistoryLoading } = useApi(providerHistoryFetcher, 30_000)
   const { data: datasetDetail, loading: datasetDetailLoading } = useApi(datasetDetailFetcher, 30_000)
   const { data: datasetTimeline, loading: datasetTimelineLoading } = useApi(datasetTimelineFetcher, 30_000)
+  const { data: datasetHistory, loading: datasetHistoryLoading } = useApi(datasetHistoryFetcher, 30_000)
   const { data: rows, loading: rowsLoading } = useApi(rowsFetcher, 30_000)
   const { data: replayPreview, loading: replayLoading } = useApi(replayFetcher, 30_000)
   const { data: replayConsumerPreview, loading: replayConsumerLoading } = useApi(replayConsumerFetcher, 30_000)
+  const { data: replayEvaluationPreview, loading: replayEvaluationLoading } = useApi(replayEvaluationFetcher, 30_000)
 
   const providerOptions = useMemo(() => {
     const values = (datasets?.data || []).map((entry) => entry.provider)
@@ -373,6 +392,68 @@ export default function ResearchData() {
         </div>
       </div>
 
+      <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+        <div className="card">
+          <h2 className="text-sm font-medium text-gray-400 mb-4">Provider History Summary</h2>
+          {!selectedProvider ? (
+            <EmptyState title="Select a provider" icon="+" />
+          ) : providerHistoryLoading ? (
+            <LoadingSkeleton rows={4} />
+          ) : !providerHistory?.available ? (
+            <EmptyState title={providerHistory?.reason || 'Provider history unavailable'} icon="+" />
+          ) : (
+            <div className="grid grid-cols-2 gap-3 text-xs">
+              <div className="rounded border border-surface-border p-3">
+                <div className="text-gray-500">Snapshots</div>
+                <div className="text-gray-200 mt-1">{providerHistory.snapshot_count}</div>
+              </div>
+              <div className="rounded border border-surface-border p-3">
+                <div className="text-gray-500">Transitions</div>
+                <div className="text-gray-200 mt-1">{providerHistory.transition_count}</div>
+              </div>
+              <div className="rounded border border-surface-border p-3">
+                <div className="text-gray-500">Warnings / Critical</div>
+                <div className="text-gray-200 mt-1">{providerHistory.warning_count} / {providerHistory.critical_count}</div>
+              </div>
+              <div className="rounded border border-surface-border p-3">
+                <div className="text-gray-500">Stale records</div>
+                <div className="text-gray-200 mt-1">{providerHistory.stale_count}</div>
+              </div>
+            </div>
+          )}
+        </div>
+
+        <div className="card">
+          <h2 className="text-sm font-medium text-gray-400 mb-4">Dataset History Summary</h2>
+          {!selectedKey ? (
+            <EmptyState title="Select a dataset" icon="[]" />
+          ) : datasetHistoryLoading ? (
+            <LoadingSkeleton rows={4} />
+          ) : !datasetHistory?.available ? (
+            <EmptyState title={datasetHistory?.reason || 'Dataset history unavailable'} icon="[]" />
+          ) : (
+            <div className="grid grid-cols-2 gap-3 text-xs">
+              <div className="rounded border border-surface-border p-3">
+                <div className="text-gray-500">Snapshots</div>
+                <div className="text-gray-200 mt-1">{datasetHistory.snapshot_count}</div>
+              </div>
+              <div className="rounded border border-surface-border p-3">
+                <div className="text-gray-500">Transitions</div>
+                <div className="text-gray-200 mt-1">{datasetHistory.transition_count}</div>
+              </div>
+              <div className="rounded border border-surface-border p-3">
+                <div className="text-gray-500">Healthy / Warning</div>
+                <div className="text-gray-200 mt-1">{datasetHistory.healthy_count} / {datasetHistory.warning_count}</div>
+              </div>
+              <div className="rounded border border-surface-border p-3">
+                <div className="text-gray-500">Critical / Stale</div>
+                <div className="text-gray-200 mt-1">{datasetHistory.critical_count} / {datasetHistory.stale_count}</div>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+
       <div className="card">
         <h2 className="text-sm font-medium text-gray-400 mb-4">Replay Assembly Preview</h2>
         {!selectedProvider ? (
@@ -436,6 +517,58 @@ export default function ResearchData() {
             <div className="text-gray-500">
               warnings: {(replayConsumerPreview.summary?.warnings || []).join(', ') || 'none'}
             </div>
+          </div>
+        )}
+      </div>
+
+      <div className="card">
+        <h2 className="text-sm font-medium text-gray-400 mb-4">Replay Evaluation Preview</h2>
+        {!selectedProvider ? (
+          <EmptyState title="Select a provider for replay evaluation" icon="[]" />
+        ) : replayEvaluationLoading ? (
+          <LoadingSkeleton rows={4} />
+        ) : !replayEvaluationPreview?.available ? (
+          <EmptyState title={replayEvaluationPreview?.reason || 'Replay evaluation unavailable'} icon="[]" />
+        ) : (
+          <div className="space-y-3 text-xs">
+            <div className="flex items-center gap-4 text-gray-500">
+              <span>metrics: {(replayEvaluationPreview.metrics || []).length}</span>
+              <span>features: {(replayEvaluationPreview.consumer_summary?.feature_columns || []).length}</span>
+              <span>targets: {(replayEvaluationPreview.consumer_summary?.target_columns || []).length}</span>
+            </div>
+            <div className="text-gray-500">
+              warnings: {(replayEvaluationPreview.warnings || []).join(', ') || 'none'}
+            </div>
+            {!(replayEvaluationPreview.metrics || []).length ? (
+              <EmptyState title="No evaluable feature/target pairs" icon="[]" />
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-xs">
+                  <thead>
+                    <tr className="border-b border-surface-border text-left text-gray-500">
+                      <th className="pb-2 pr-4">Feature</th>
+                      <th className="pb-2 pr-4">Target</th>
+                      <th className="pb-2 pr-4">Rows</th>
+                      <th className="pb-2 pr-4">Pearson</th>
+                      <th className="pb-2 pr-4">Directional</th>
+                      <th className="pb-2 pr-4">Spread</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-surface-border">
+                    {(replayEvaluationPreview.metrics || []).slice(0, 10).map((metric, index) => (
+                      <tr key={`${metric.feature_column}-${metric.target_column}-${index}`}>
+                        <td className="py-2 pr-4 text-gray-300">{metric.feature_column}</td>
+                        <td className="py-2 pr-4 text-gray-300">{metric.target_column}</td>
+                        <td className="py-2 pr-4 text-gray-300">{metric.row_count}</td>
+                        <td className="py-2 pr-4 text-gray-300">{metric.pearson_correlation == null ? '-' : metric.pearson_correlation.toFixed(4)}</td>
+                        <td className="py-2 pr-4 text-gray-300">{metric.directional_accuracy == null ? '-' : metric.directional_accuracy.toFixed(4)}</td>
+                        <td className="py-2 pr-4 text-gray-300">{metric.top_bottom_spread == null ? '-' : metric.top_bottom_spread.toFixed(4)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
           </div>
         )}
       </div>

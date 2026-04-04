@@ -266,6 +266,37 @@ def test_grouped_research_replay_consume_command_parses() -> None:
     assert args.summary_path.endswith("latest_replay_consumer_summary.json")
 
 
+def test_grouped_research_replay_evaluate_command_parses() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "research",
+            "replay",
+            "evaluate",
+            "--providers",
+            "binance",
+            "kalshi",
+            "--alignment-mode",
+            "anchor",
+            "--anchor-dataset-key",
+            "binance.crypto_market_features",
+            "--feature-columns",
+            "binance__crypto_market_features__close",
+            "--target-columns",
+            "binance__crypto_market_features__target_return_1",
+            "--output-dir",
+            "artifacts/research_replay/evaluation",
+        ]
+    )
+
+    assert args.research_command == "replay"
+    assert args.research_replay_command == "evaluate"
+    assert args.providers == ["binance", "kalshi"]
+    assert args.alignment_mode == "anchor"
+    assert args.anchor_dataset_key == "binance.crypto_market_features"
+    assert args.output_dir == "artifacts/research_replay/evaluation"
+
+
 def test_grouped_research_leaderboard_command_parses() -> None:
     parser = build_parser()
     args = parser.parse_args(

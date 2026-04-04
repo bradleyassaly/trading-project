@@ -658,14 +658,33 @@ def test_provider_detail_and_replay_preview_endpoints(tmp_path, monkeypatch):
     assert consumer_payload["available"] is True
     assert "feature_columns" in consumer_payload["summary"]
 
+    evaluation_resp = client.get("/api/research/replay/evaluation-preview?provider=binance&limit=10")
+    assert evaluation_resp.status_code == 200
+    evaluation_payload = evaluation_resp.json()
+    assert evaluation_payload["available"] is True
+    assert "consumer_summary" in evaluation_payload
+    assert "metrics" in evaluation_payload
+
     provider_timeline_resp = client.get("/api/ops/providers/binance/timeline")
     assert provider_timeline_resp.status_code == 200
     provider_timeline_payload = provider_timeline_resp.json()
     assert provider_timeline_payload["available"] is True
     assert provider_timeline_payload["scope_type"] == "provider"
 
+    provider_history_resp = client.get("/api/ops/providers/binance/history-summary")
+    assert provider_history_resp.status_code == 200
+    provider_history_payload = provider_history_resp.json()
+    assert provider_history_payload["available"] is True
+    assert provider_history_payload["scope_type"] == "provider"
+
     dataset_timeline_resp = client.get(f"/api/ops/datasets/{dataset_key}/timeline")
     assert dataset_timeline_resp.status_code == 200
     dataset_timeline_payload = dataset_timeline_resp.json()
     assert dataset_timeline_payload["available"] is True
     assert dataset_timeline_payload["scope_type"] == "dataset"
+
+    dataset_history_resp = client.get(f"/api/ops/datasets/{dataset_key}/history-summary")
+    assert dataset_history_resp.status_code == 200
+    dataset_history_payload = dataset_history_resp.json()
+    assert dataset_history_payload["available"] is True
+    assert dataset_history_payload["scope_type"] == "dataset"

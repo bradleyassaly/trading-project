@@ -95,13 +95,18 @@ class WalletProfiler:
             logger.warning("No resolved markets found in %s", resolution_csv)
             return result
 
-        # Load trades and group by wallet
+        # Load trades and group by wallet (auto-detect CSV format)
         wallet_trades: dict[str, list[dict[str, Any]]] = defaultdict(list)
         with trades_csv.open(newline="", encoding="utf-8-sig") as fh:
             for row in csv.DictReader(fh):
-                wallet = row.get("wallet", "").strip()
-                if wallet:
-                    wallet_trades[wallet].append(row)
+                # Auto-detect: Data API uses proxyWallet/asset, blockchain uses wallet/token_id
+                wallet = (row.get("wallet") or row.get("proxyWallet") or "").strip()
+                if not wallet:
+                    continue
+                # Normalize token_id field
+                if "token_id" not in row and "asset" in row:
+                    row["token_id"] = row["asset"]
+                wallet_trades[wallet].append(row)
 
         result.wallets_analyzed = len(wallet_trades)
 

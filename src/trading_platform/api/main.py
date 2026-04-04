@@ -356,11 +356,54 @@ def research_replay_consumer_preview(
     )
 
 
+@app.get("/api/research/replay/evaluation-preview")
+def research_replay_evaluation_preview(
+    dataset_key: list[str] | None = Query(default=None),
+    provider: list[str] | None = Query(default=None),
+    dataset_name: list[str] | None = Query(default=None),
+    symbol: list[str] | None = Query(default=None),
+    interval: list[str] | None = Query(default=None),
+    feature_column: list[str] | None = Query(default=None),
+    target_column: list[str] | None = Query(default=None),
+    start: str | None = None,
+    end: str | None = None,
+    alignment_mode: str = "outer_union",
+    anchor_dataset_key: str | None = None,
+    tolerance: str | None = None,
+    limit: int | None = None,
+) -> dict[str, Any]:
+    return reader.read_replay_evaluation_preview(
+        dataset_keys=dataset_key,
+        providers=provider,
+        dataset_names=dataset_name,
+        symbols=symbol,
+        intervals=interval,
+        start=start,
+        end=end,
+        alignment_mode=alignment_mode,
+        anchor_dataset_key=anchor_dataset_key,
+        tolerance=tolerance,
+        limit=limit,
+        feature_columns=feature_column,
+        target_columns=target_column,
+    )
+
+
 @app.get("/api/ops/providers/{provider}/timeline")
 def ops_provider_timeline(provider: str) -> dict[str, Any]:
     return reader.read_provider_timeline(provider)
 
 
+@app.get("/api/ops/providers/{provider}/history-summary")
+def ops_provider_history_summary(provider: str) -> dict[str, Any]:
+    return reader.read_provider_history_summary(provider)
+
+
 @app.get("/api/ops/datasets/{dataset_key}/timeline")
 def ops_dataset_timeline(dataset_key: str) -> dict[str, Any]:
     return reader.read_dataset_timeline(dataset_key)
+
+
+@app.get("/api/ops/datasets/{dataset_key}/history-summary")
+def ops_dataset_history_summary(dataset_key: str) -> dict[str, Any]:
+    return reader.read_dataset_history_summary(dataset_key)

@@ -8,6 +8,12 @@ from trading_platform.research.replay_consumer import (
     ReplayConsumerResult,
     load_replay_consumer_input,
 )
+from trading_platform.research.replay_evaluation import (
+    ReplayEvaluationRequest,
+    ReplayEvaluationResult,
+    build_replay_evaluation_request,
+    run_replay_evaluation,
+)
 
 __all__ = [
     "run_vectorized_research",
@@ -16,4 +22,8 @@ __all__ = [
     "ReplayConsumerRequest",
     "ReplayConsumerResult",
     "load_replay_consumer_input",
+    "ReplayEvaluationRequest",
+    "ReplayEvaluationResult",
+    "build_replay_evaluation_request",
+    "run_replay_evaluation",
 ]

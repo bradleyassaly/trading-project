@@ -112,6 +112,8 @@ from trading_platform.cli.commands.polymarket_ingest import cmd_polymarket_inges
 from trading_platform.cli.commands.polymarket_live import cmd_polymarket_live_collect
 from trading_platform.cli.commands.polymarket_blockchain_ingest import cmd_polymarket_blockchain_ingest
 from trading_platform.cli.commands.polymarket_wallet_profiles import cmd_polymarket_wallet_profiles
+from trading_platform.cli.commands.polymarket_clob_fetch import cmd_polymarket_clob_fetch, cmd_polymarket_orderbook_fetch
+from trading_platform.cli.commands.polymarket_data_api_fetch import cmd_polymarket_data_api_fetch
 from trading_platform.cli.commands.manifold_parse import cmd_manifold_parse
 from trading_platform.cli.commands.predictit_parse import cmd_predictit_parse
 from trading_platform.cli.commands.news_tagger import cmd_news_upcoming, cmd_news_label_moves
@@ -125,6 +127,7 @@ from trading_platform.cli.commands.research_dataset_registry_list import cmd_res
 from trading_platform.cli.commands.research_dataset_registry_publish import cmd_research_dataset_registry_publish
 from trading_platform.cli.commands.research_replay_assemble import cmd_research_replay_assemble
 from trading_platform.cli.commands.research_replay_consume import cmd_research_replay_consume
+from trading_platform.cli.commands.research_replay_evaluate import cmd_research_replay_evaluate
 from trading_platform.cli.commands.research_refresh import cmd_research_refresh
 from trading_platform.cli.commands.research_registry_build import cmd_research_registry_build
 from trading_platform.cli.commands.research_validate_backtester import cmd_research_validate_backtester
@@ -2720,6 +2723,41 @@ def build_parser() -> argparse.ArgumentParser:
     )
     data_polymarket_wallets.set_defaults(func=cmd_polymarket_wallet_profiles)
 
+    data_polymarket_clob = data_polymarket_subparsers.add_parser(
+        "clob-fetch", help="Fetch trade history from CLOB API for active markets.",
+    )
+    data_polymarket_clob.add_argument(
+        "--output-dir", type=str, default=None,
+        help="Output directory for trade CSVs (default: data/polymarket/clob_trades).",
+    )
+    data_polymarket_clob.add_argument(
+        "--hours-back", type=int, default=168,
+        help="Hours of trade history to fetch (default: 168 = 7 days).",
+    )
+    data_polymarket_clob.set_defaults(func=cmd_polymarket_clob_fetch)
+
+    data_polymarket_orderbook = data_polymarket_subparsers.add_parser(
+        "orderbook-fetch", help="Fetch orderbook depth from Goldsky subgraph.",
+    )
+    data_polymarket_orderbook.set_defaults(func=cmd_polymarket_orderbook_fetch)
+
+    data_polymarket_data_api = data_polymarket_subparsers.add_parser(
+        "data-api-fetch", help="Fetch trades from Polymarket Data API (no auth, all markets).",
+    )
+    data_polymarket_data_api.add_argument(
+        "--output-dir", type=str, default=None,
+        help="Output directory (default: data/polymarket/data_api_trades).",
+    )
+    data_polymarket_data_api.add_argument(
+        "--hours-back", type=int, default=168,
+        help="Hours of trade history (default: 168 = 7 days).",
+    )
+    data_polymarket_data_api.add_argument(
+        "--condition-id", type=str, default=None,
+        help="Fetch trades for a specific market conditionId.",
+    )
+    data_polymarket_data_api.set_defaults(func=cmd_polymarket_data_api_fetch)
+
     # ── data manifold ────────────────────────────────────────────────────────
     data_manifold = data_subparsers.add_parser(
         "manifold", help="Manifold Markets data dump parsing commands"
@@ -3848,6 +3886,58 @@ def build_parser() -> argparse.ArgumentParser:
         help="Render output as human-readable text or JSON.",
     )
     research_replay_consume.set_defaults(func=cmd_research_replay_consume)
+    research_replay_evaluate = research_replay_subparsers.add_parser(
+        "evaluate", help="Evaluate replay-consumer inputs with simple registry-backed metrics"
+    )
+    research_replay_evaluate.add_argument(
+        "--registry-path",
+        type=str,
+        default="data/research/dataset_registry.json",
+        help="Path to the shared dataset registry JSON artifact.",
+    )
+    research_replay_evaluate.add_argument("--dataset-keys", nargs="+", default=None, help="Explicit dataset keys to assemble.")
+    research_replay_evaluate.add_argument("--providers", nargs="+", default=None, help="Optional provider filters.")
+    research_replay_evaluate.add_argument("--dataset-names", nargs="+", default=None, help="Optional dataset-name filters.")
+    research_replay_evaluate.add_argument("--symbols", nargs="+", default=None, help="Optional symbol or market filters.")
+    research_replay_evaluate.add_argument("--intervals", nargs="+", default=None, help="Optional interval filters.")
+    research_replay_evaluate.add_argument("--start", type=str, default=None, help="Inclusive start timestamp filter.")
+    research_replay_evaluate.add_argument("--end", type=str, default=None, help="Inclusive end timestamp filter.")
+    research_replay_evaluate.add_argument(
+        "--alignment-mode",
+        type=str,
+        choices=["outer_union", "anchor"],
+        default="outer_union",
+        help="Replay alignment mode.",
+    )
+    research_replay_evaluate.add_argument(
+        "--anchor-dataset-key",
+        type=str,
+        default=None,
+        help="Anchor dataset key when using anchor alignment.",
+    )
+    research_replay_evaluate.add_argument(
+        "--tolerance",
+        type=str,
+        default=None,
+        help="Optional backward-asof tolerance for anchor alignment, e.g. 5m.",
+    )
+    research_replay_evaluate.add_argument("--feature-columns", nargs="+", default=None, help="Optional explicit feature columns.")
+    research_replay_evaluate.add_argument("--target-columns", nargs="+", default=None, help="Optional explicit target columns.")
+    research_replay_evaluate.add_argument("--limit", type=int, default=None, help="Optional row limit.")
+    research_replay_evaluate.add_argument(
+        "--output-dir",
+        type=str,
+        default=None,
+        help="Optional directory where evaluation artifacts will be written.",
+    )
+    research_replay_evaluate.add_argument(
+        "--format",
+        type=str,
+        default="text",
+        choices=["text", "json"],
+        help="Render output as human-readable text or JSON.",
+    )
+    research_replay_evaluate.set_defaults(func=cmd_research_replay_evaluate)
     research_leaderboard = research_subparsers.add_parser(
         "leaderboard", help="Build a cross-run research leaderboard from manifest summaries"
     )
