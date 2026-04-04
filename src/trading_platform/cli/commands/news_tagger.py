@@ -21,26 +21,37 @@ def cmd_news_upcoming(args: argparse.Namespace) -> None:
 
     days = int(getattr(args, "days", None) or 7)
 
-    # Build calendar from known Kalshi series patterns
-    # Generate tickers for the next 6 months across all known series
-    from datetime import datetime, timezone
+    # Scan live feature files for actual tickers
+    features_dir = Path(__file__).resolve().parents[4] / "data" / "kalshi" / "live" / "features"
+    tickers: list[str] = []
+
+    if features_dir.exists():
+        for f in features_dir.glob("*.parquet"):
+            tickers.append(f.stem)
+
+    # Also generate tickers for the next 12 months across all series
+    # to catch events even if no feature files exist yet
+    from datetime import datetime, timezone, timedelta
     now = datetime.now(tz=timezone.utc)
     months = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN",
               "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"]
     series_list = ["KXCPI", "KXFED", "KXGDP", "KXJOBS", "KXPCE", "KXINFL"]
 
-    tickers: list[str] = []
     for series in series_list:
-        for month_offset in range(6):
-            dt = now.replace(day=1) + __import__("datetime").timedelta(days=month_offset * 31)
+        for m_offset in range(12):
+            dt = (now.replace(day=1) + timedelta(days=32 * m_offset)).replace(day=1)
             yy = dt.year % 100
             mon = months[dt.month - 1]
             tickers.append(f"{series}-{yy}{mon}")
+
+    # Deduplicate
+    tickers = list(set(tickers))
 
     cal = EconomicNewsCalendar(tickers)
     events = cal.get_upcoming_events(days_ahead=days)
 
     print(f"Upcoming economic events (next {days} days):")
+    print(f"  (scanned {len(tickers)} tickers)")
     if not events:
         print("  (none)")
     for ev in events:

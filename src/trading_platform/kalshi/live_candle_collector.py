@@ -246,10 +246,22 @@ class KalshiLiveCandleCollector:
                             import polars as pl
                             trades_df = pl.DataFrame(trades_rows)
 
+                            # Extract close_time for days_to_close computation
+                            close_time = None
+                            ct_raw = market.get("close_time") or market.get("expected_expiration_time")
+                            if ct_raw:
+                                try:
+                                    close_time = datetime.fromisoformat(
+                                        str(ct_raw).replace("Z", "+00:00")
+                                    )
+                                except (ValueError, AttributeError):
+                                    pass
+
                             feat_df = build_kalshi_features(
                                 trades_df,
                                 ticker=ticker,
                                 period="1h",
+                                close_time=close_time,
                                 feature_groups=["probability_calibration", "volume_activity", "time_decay"],
                             )
                             if feat_df.is_empty():

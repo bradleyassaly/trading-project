@@ -68,20 +68,23 @@ class EconomicNewsCalendar:
 
     def __init__(self, event_tickers: list[str] | None = None) -> None:
         self._events: list[NewsEvent] = []
+        self._seen_patterns: set[str] = set()
         if event_tickers:
-            for ticker in event_tickers:
-                ev = self._parse_ticker(ticker)
-                if ev:
-                    self._events.append(ev)
+            self.add_tickers(event_tickers)
 
     def add_tickers(self, tickers: list[str]) -> int:
         """Parse tickers and add to internal calendar. Returns count added."""
         added = 0
         for ticker in tickers:
             ev = self._parse_ticker(ticker)
-            if ev and ev not in self._events:
-                self._events.append(ev)
-                added += 1
+            if ev is None:
+                continue
+            key = f"{ev.series}-{ev.date.year}-{ev.date.month}-{ev.date.day}"
+            if key in self._seen_patterns:
+                continue
+            self._seen_patterns.add(key)
+            self._events.append(ev)
+            added += 1
         return added
 
     def get_upcoming_events(self, *, days_ahead: int = 7) -> list[NewsEvent]:
@@ -165,6 +168,22 @@ class EconomicNewsCalendar:
                     pass
 
         return None
+
+
+def get_yes_price_column(df: Any) -> str:
+    """Return the column name containing yes_price in a feature DataFrame.
+
+    Tries columns in priority order: mid_price, yes_price, close.
+    Raises ``ValueError`` if no price column is found.
+    """
+    for col in ("mid_price", "yes_price", "close"):
+        if hasattr(df, "columns"):
+            cols = list(df.columns)
+        else:
+            cols = df.schema.names() if hasattr(df, "schema") else []
+        if col in cols:
+            return col
+    raise ValueError(f"No price column found. Available: {cols}")
 
 
 def _extract_series(ticker: str) -> str | None:
