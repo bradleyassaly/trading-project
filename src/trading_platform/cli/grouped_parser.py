@@ -2711,8 +2711,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Build wallet performance profiles from blockchain trade history.",
     )
     data_polymarket_wallets.add_argument(
-        "--trades-csv", type=str, required=True,
-        help="Path to poly-trade-scan output CSV.",
+        "--trades-csv", type=str, default=None,
+        help="Path to single trades CSV file.",
+    )
+    data_polymarket_wallets.add_argument(
+        "--trades-dir", type=str, default=None,
+        help="Directory of per-market trade CSVs (from data-api-fetch --per-market).",
     )
     data_polymarket_wallets.add_argument(
         "--resolution-csv", type=str, required=True,

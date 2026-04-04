@@ -54,7 +54,7 @@ function PerformanceTable({ data, sortKey, sortDir, onSort }) {
             return (
               <tr key={i} className="hover:bg-surface-hover transition-colors">
                 <td className="py-2 pr-6 text-gray-200 font-medium">
-                  {String(row[nameKey] ?? '—').replace(/^kalshi_/i, '')}
+                  {String(row[nameKey] ?? '—').replace(/^kalshi_/i, '').replace('metaculus_divergence', 'crowd_divergence')}
                 </td>
                 <td className="py-2 pr-6 text-gray-400 font-mono">
                   {trades > 0 ? trades.toLocaleString() : <span className="text-gray-600">0</span>}

@@ -92,10 +92,17 @@ class TestMetaculusParser:
         assert float(rows[1]["resolution_price"]) == 0.0    # resolution=0 → NO
 
     def test_skips_ambiguous_resolution(self, tmp_path: Path) -> None:
+        """Questions with forecasts near 0.5 (genuinely ambiguous) are skipped."""
+        # q2: resolution=None, forecasts all at 0.5 → ambiguous (fallback can't determine)
+        ambiguous_q = _question(2, n_forecasts=20)
+        ambiguous_q["resolution"] = None
+        # Override forecast history to be flat at 0.5 (ambiguous)
+        ambiguous_q["community_prediction"]["history"] = [
+            {"t": 1700000000 + i * 3600, "x": 0.5} for i in range(20)
+        ]
         questions = [
             _question(1, resolution=1),
-            {**_question(2), "resolution": "ambiguous"},
-            {**_question(3), "resolution": None},
+            ambiguous_q,
         ]
         parser = MetaculusParser()
         parser._session = _mock_session(questions)
@@ -103,8 +110,8 @@ class TestMetaculusParser:
 
         result = parser.fetch_resolved(tmp_path, limit=10)
 
-        assert result.questions_fetched == 3
-        assert result.questions_skipped_ambiguous == 2
+        assert result.questions_fetched == 2
+        assert result.questions_skipped_ambiguous == 1  # q2 at 0.5 is ambiguous
         assert result.questions_processed == 1
 
     def test_skips_few_forecasts(self, tmp_path: Path) -> None:

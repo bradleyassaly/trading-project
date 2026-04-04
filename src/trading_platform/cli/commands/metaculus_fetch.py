@@ -56,5 +56,11 @@ def cmd_metaculus_fetch(args: argparse.Namespace) -> None:
     print(f"  Questions processed       : {result.questions_processed}")
     print(f"  Feature files written     : {result.feature_files_written}")
     print(f"  Resolution records        : {result.resolution_records}")
+
+    if result.feature_files_written == 0 and result.questions_fetched > 0:
+        print()
+        print("[NOTE] Metaculus API does not currently expose resolution values reliably.")
+        print("  The metaculus_divergence signal will use Manifold data as a proxy instead.")
+        print("  Run: trading-cli research kalshi-full-backtest --include-manifold")
     if result.date_range_start:
         print(f"  Date range                : {result.date_range_start} → {result.date_range_end}")

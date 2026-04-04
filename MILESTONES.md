@@ -32,7 +32,9 @@
 
 - **Shared Replay Evaluation + Monitoring History** — Added registry-backed replay evaluation runners with explicit metric artifacts, API/dashboard consumers for evaluation previews, and compact provider/dataset history summaries on top of shared monitoring timelines.
 
-- **1,630 passing tests** across all modules.
+- **Shared Replay Comparison + Research Selection Views** — Added cross-provider replay comparison workflows, ranked candidate slices, comparison artifacts, API consumers, and dashboard inspection panels on top of shared replay evaluation artifacts.
+
+- **1,634 passing tests** across all modules.
 
 ## In Progress
 
@@ -48,7 +50,7 @@
 - **50+ paper trades with measurable win rate** — statistical significance
 - **All 8 signals firing with real data** — currently 3 of 8 validated
 - **Cross-platform arbitrage** — detect Kalshi vs Polymarket price gaps on same events
-- **G-16 — Cross-provider replay comparison workflows** — compare replay evaluation runs and turn shared artifacts into research-selection views
+- **G-17 — Shared replay evaluation history and promotion-style research gating** — turn replay comparison artifacts into lightweight promotion-ready research filters
 
 ## Go-Live Criteria
 

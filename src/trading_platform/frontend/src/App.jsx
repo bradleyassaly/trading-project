@@ -19,6 +19,9 @@ export default function App() {
             <Route path="/dashboard" element={<Dashboard />} />
             <Route path="/signals" element={<Signals />} />
             <Route path="/research" element={<Navigate to="/signals" replace />} />
+            <Route path="/kalshi" element={<Navigate to="/markets" replace />} />
+            <Route path="/loop" element={<Navigate to="/control" replace />} />
+            <Route path="/trade-reasoning" element={<Navigate to="/reasoning" replace />} />
             <Route path="/markets" element={<Markets />} />
             <Route path="/polymarket" element={<PolymarketLive />} />
             <Route path="/research-data" element={<ResearchData />} />

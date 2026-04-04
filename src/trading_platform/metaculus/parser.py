@@ -132,21 +132,14 @@ class MetaculusParser:
             qid = str(q.get("id", ""))
             title = q.get("title", "")
 
-            # Resolve: try multiple fields since API returns resolution=None on list endpoint
-            resolved_yes = self._parse_resolution(q)
-
-            # If resolution is None from list, fetch detail for the actual value
-            if resolved_yes is None and qid:
+            # Fetch detail for resolution + forecast history
+            # (list endpoint returns resolution=None and minimal fields)
+            if qid:
                 detail = self._fetch_question_detail(qid)
                 if detail:
-                    q.update(detail)  # merge detail fields for history extraction
-                    resolved_yes = self._parse_resolution(detail)
+                    q.update(detail)
 
-            if resolved_yes is None:
-                result.questions_skipped_ambiguous += 1
-                continue
-
-            # Extract forecast history
+            # Extract forecast history first — we need it for resolution fallback
             history = self._get_forecast_history(q)
             if not history:
                 result.questions_skipped_no_history += 1
@@ -155,6 +148,29 @@ class MetaculusParser:
             if len(history) < min_forecasts:
                 result.questions_skipped_few_forecasts += 1
                 continue
+
+            # Determine resolution: try explicit field, fall back to last forecast
+            resolved_yes = self._parse_resolution(q)
+            if resolved_yes is None:
+                # Use last community prediction as resolution proxy.
+                # For resolved questions, the final forecast IS the resolution signal.
+                is_resolved = q.get("status") == "resolved" or q.get("resolved") is True
+                last_prob = None
+                for point in reversed(history):
+                    val = point.get("x") or point.get("community_prediction")
+                    if val is not None:
+                        try:
+                            last_prob = float(val)
+                        except (TypeError, ValueError):
+                            pass
+                        break
+                if last_prob is not None and is_resolved:
+                    resolved_yes = last_prob > 0.5
+                elif last_prob is not None and last_prob != 0.5:
+                    resolved_yes = last_prob > 0.5
+                else:
+                    result.questions_skipped_ambiguous += 1
+                    continue
 
             # Convert to trades DataFrame
             rows = []

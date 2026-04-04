@@ -77,6 +77,14 @@ trading-cli research replay evaluate \
   --providers binance kalshi \
   --alignment-mode outer_union \
   --output-dir artifacts/research_replay/evaluation
+
+# Compare replay evaluations across providers and alignment modes
+trading-cli research replay compare \
+  --registry-path data/research/dataset_registry.json \
+  --providers binance kalshi polymarket \
+  --alignment-modes outer_union anchor \
+  --comparison-mode provider \
+  --output-dir artifacts/research_replay/comparison
 ```
 
 ## Data Directories
@@ -96,6 +104,7 @@ trading-cli research replay evaluate \
 | `data/polymarket/data_api_trades/` | Trade CSVs from data-api.polymarket.com |
 | `data/polymarket/wallet_profiles.parquet` | Smart money wallet flags |
 | `artifacts/research_replay/evaluation/` | Replay evaluation summaries and metric tables |
+| `artifacts/research_replay/comparison/` | Replay comparison summaries, rankings, and candidate slices |
 | `artifacts/provider_monitoring/monitoring_history.jsonl` | Shared provider monitoring snapshot history |
 | `artifacts/provider_monitoring/latest_transition_summary.json` | Latest shared provider/dataset status transitions |
 
@@ -115,6 +124,8 @@ trading-cli research replay evaluate \
 | `/api/loop/decisions` | GET | Autonomous loop decision log |
 | `/api/loop/control` | POST | Pause/resume/trigger loop |
 | `/api/research/replay/evaluation-preview` | GET | Registry-backed replay evaluation preview |
+| `/api/research/replay/comparison-preview` | GET | Ranked replay comparison preview across evaluation slices |
+| `/api/research/replay/comparison-latest` | GET | Latest replay comparison artifact if one has been written |
 | `/api/ops/providers/{provider}/history-summary` | GET | Compact provider monitoring history summary |
 | `/api/ops/datasets/{dataset_key}/history-summary` | GET | Compact dataset monitoring history summary |
 
@@ -223,3 +234,92 @@ The shared replay layer could already assemble and consume mixed-provider datase
 ### Suggested Next Milestone
 
 - `G-16 - Add cross-provider replay comparison workflows and richer research-selection views on top of shared evaluation artifacts`
+
+## G-16 - Cross-Provider Replay Comparison and Research Selection Views
+
+Date: 2026-04-04
+Status: DONE
+
+### What Changed
+
+- Added `src/trading_platform/research/replay_comparison.py` as a narrow comparison runner on top of replay-evaluation summaries.
+- Added `research replay compare` for artifact-backed or on-demand comparison runs.
+- Extended API readers and routes with replay comparison preview and latest-comparison artifact support.
+- Extended the Research Data dashboard with a ranked replay-comparison candidate panel.
+
+### Why It Changed
+
+G-15 made replay evaluations machine-readable, but there was still no stable way to compare providers, datasets, targets, or alignment modes and decide which slices looked worth pursuing next. G-16 adds that selection layer without changing provider-specific ingestion or replay pipelines.
+
+### Files Changed
+
+- `src/trading_platform/research/replay_comparison.py`
+- `src/trading_platform/research/__init__.py`
+- `src/trading_platform/api/artifact_reader.py`
+- `src/trading_platform/api/main.py`
+- `src/trading_platform/frontend/src/api/client.js`
+- `src/trading_platform/frontend/src/pages/ResearchData.jsx`
+- `src/trading_platform/cli/commands/research_replay_compare.py`
+- `src/trading_platform/cli/grouped_parser.py`
+- `tests/test_replay_comparison.py`
+- `tests/test_replay_evaluation.py`
+- `tests/api/test_api_endpoints.py`
+- `tests/test_cli_grouping.py`
+- `MILESTONES.md`
+- `DOCUMENTATION.md`
+
+### Tests Run
+
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\pytest.exe tests/test_replay_comparison.py tests/test_replay_evaluation.py tests/api/test_api_endpoints.py tests/test_cli_grouping.py -q`
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\pytest.exe tests/test_shared_dataset_reader.py tests/test_replay_assembly.py tests/test_replay_consumer.py tests/test_replay_evaluation.py tests/test_replay_comparison.py tests/api/test_api_endpoints.py tests/test_provider_registry_and_monitoring.py tests/test_research_dataset_registry.py tests/test_cli_grouping.py tests/binance/test_registry_integration.py -q`
+- `Remove-Item Env:TP_ALERT_SMTP_HOST -ErrorAction SilentlyContinue; Remove-Item Env:TP_ALERT_SMTP_PORT -ErrorAction SilentlyContinue; Remove-Item Env:TP_ALERT_SMTP_USERNAME -ErrorAction SilentlyContinue; Remove-Item Env:TP_ALERT_SMTP_PASSWORD -ErrorAction SilentlyContinue; Remove-Item Env:TP_ALERT_SMTP_USE_TLS -ErrorAction SilentlyContinue; Remove-Item Env:TP_ALERT_FROM -ErrorAction SilentlyContinue; Remove-Item Env:TP_ALERT_TO -ErrorAction SilentlyContinue; Remove-Item Env:TP_ALERT_SUBJECT_PREFIX -ErrorAction SilentlyContinue; C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\pytest.exe -q`
+
+### Exact Verification Commands
+
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\pytest.exe tests/test_replay_comparison.py tests/test_replay_evaluation.py tests/api/test_api_endpoints.py tests/test_cli_grouping.py -q`
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\pytest.exe tests/test_shared_dataset_reader.py tests/test_replay_assembly.py tests/test_replay_consumer.py tests/test_replay_evaluation.py tests/test_replay_comparison.py tests/api/test_api_endpoints.py tests/test_provider_registry_and_monitoring.py tests/test_research_dataset_registry.py tests/test_cli_grouping.py tests/binance/test_registry_integration.py -q`
+- `Remove-Item Env:TP_ALERT_SMTP_HOST -ErrorAction SilentlyContinue; Remove-Item Env:TP_ALERT_SMTP_PORT -ErrorAction SilentlyContinue; Remove-Item Env:TP_ALERT_SMTP_USERNAME -ErrorAction SilentlyContinue; Remove-Item Env:TP_ALERT_SMTP_PASSWORD -ErrorAction SilentlyContinue; Remove-Item Env:TP_ALERT_SMTP_USE_TLS -ErrorAction SilentlyContinue; Remove-Item Env:TP_ALERT_FROM -ErrorAction SilentlyContinue; Remove-Item Env:TP_ALERT_TO -ErrorAction SilentlyContinue; Remove-Item Env:TP_ALERT_SUBJECT_PREFIX -ErrorAction SilentlyContinue; C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\pytest.exe -q`
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\python.exe -m trading_platform.cli research replay compare --registry-path data/research/dataset_registry.json --providers binance kalshi polymarket --alignment-modes outer_union anchor --comparison-mode provider --output-dir artifacts/research_replay/comparison`
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\python.exe -m uvicorn trading_platform.api.main:app --port 8001`
+
+### Design Notes
+
+- The comparison runner is artifact-first. If `--evaluation-summary-paths` are provided, it compares those summaries directly. Otherwise it generates bounded replay evaluations on demand from the shared registry and replay-consumer layer.
+- Supported first comparison modes are explicit:
+  - `provider`
+  - `dataset`
+  - `scope`
+- Ranking is intentionally simple and transparent. Each evaluated slice gets a composite score built from row-count coverage plus existing evaluation metrics:
+  - absolute correlation
+  - directional accuracy above a 0.5 baseline
+  - absolute top-minus-bottom spread
+- Slices below `min_row_count` are retained as exclusions with warnings instead of silently disappearing.
+
+### Produced Artifacts
+
+- `artifacts/research_replay/comparison/latest_replay_comparison_summary.json`
+- `artifacts/research_replay/comparison/latest_replay_comparison_rankings.csv`
+- `artifacts/research_replay/comparison/latest_replay_candidate_slices.json`
+
+These artifacts reference replay-evaluation summaries rather than inventing a new truth source.
+
+### API / Dashboard Additions
+
+- `GET /api/research/replay/comparison-preview`
+- `GET /api/research/replay/comparison-latest`
+
+The Research Data dashboard now shows:
+
+- ranked replay candidate slices
+- candidate counts and exclusions
+- warning visibility for sparse or skipped slices
+
+### Known Limitations
+
+- Replay comparison is still a bounded ranking layer, not a general experiment-management system.
+- Provider comparisons are only as good as the evaluation metrics and target availability already present in replay-evaluation summaries.
+- The dashboard stays compact and inspection-oriented. It is not a full research notebook or visual analytics workbench.
+
+### Suggested Next Milestone
+
+- `G-17 - Shared replay evaluation history and promotion-style research gating`
