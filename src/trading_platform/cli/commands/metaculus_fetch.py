@@ -25,6 +25,12 @@ def _project_relative(path_str: str) -> Path:
 
 
 def cmd_metaculus_fetch(args: argparse.Namespace) -> None:
+    try:
+        from dotenv import load_dotenv
+        load_dotenv()
+    except ImportError:
+        pass
+
     from trading_platform.metaculus.parser import MetaculusParser
 
     output_dir = _project_relative(getattr(args, "output_dir", None) or "data/metaculus")

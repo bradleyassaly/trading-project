@@ -104,42 +104,40 @@ class PolymarketDataApiFetcher:
 
     def fetch_market_trades(
         self,
-        condition_id: str,
+        market_id: str,
         output_dir: str | Path,
         *,
-        max_pages: int = 100,
+        max_pages: int = 7,
     ) -> int:
-        """Fetch all trades for a specific market. Returns row count."""
+        """Fetch all trades for a specific market. Returns row count.
+
+        Uses offset-based pagination (0, 500, ..., 3000) since per-market
+        queries are bounded and offset works within 3500.
+        """
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
-        csv_path = output_dir / f"{condition_id[:32]}.csv"
+        csv_path = output_dir / f"{market_id[:32]}.csv"
 
         rows_written = 0
         with csv_path.open("w", newline="", encoding="utf-8") as fh:
             writer = csv.DictWriter(fh, fieldnames=_CSV_FIELDS)
             writer.writeheader()
 
-            before_ts: int | None = None
+            offset = 0
             for page in range(max_pages):
-                params: dict[str, Any] = {"market": condition_id, "limit": 500}
-                if before_ts is not None:
-                    params["before"] = before_ts
-                trades = self._fetch_page(params=params)
+                trades = self._fetch_page(params={
+                    "market": market_id, "limit": 500, "offset": offset,
+                })
                 if not trades:
                     break
-                oldest: int | None = None
                 for trade in trades:
                     row = _trade_to_row(trade)
                     if row:
                         writer.writerow(row)
                         rows_written += 1
-                    ts = _get_timestamp(trade)
-                    if ts is not None and (oldest is None or ts < oldest):
-                        oldest = ts
-                if oldest is not None:
-                    before_ts = oldest
-                else:
-                    break
+                if len(trades) < 500:
+                    break  # last page
+                offset += len(trades)
                 time.sleep(self._sleep)
 
         return rows_written
@@ -192,9 +190,11 @@ class PolymarketDataApiFetcher:
         *,
         metadata_db_path: str | Path | None = None,
     ) -> dict[str, int]:
-        """Fetch trades per-market using condition_id from our live DB.
+        """Fetch trades per-market from our live DB.
 
-        Returns dict of condition_id → rows written.
+        Uses condition_id if available, falls back to yes_token_id
+        (the Data API accepts both as the ``market`` parameter).
+        Returns dict of market_key → rows written.
         """
         output_dir = Path(output_dir)
         db_path = Path(metadata_db_path) if metadata_db_path else Path("data/polymarket/live/prices.db")
@@ -204,16 +204,20 @@ class PolymarketDataApiFetcher:
 
         import sqlite3
         conn = sqlite3.connect(str(db_path), check_same_thread=False)
-        rows = conn.execute(
-            "SELECT condition_id, market_id FROM markets WHERE condition_id IS NOT NULL"
-        ).fetchall()
+        # Use yes_token_id directly — confirmed working with Data API
+        try:
+            rows = conn.execute(
+                "SELECT yes_token_id, market_id, question FROM markets WHERE yes_token_id IS NOT NULL"
+            ).fetchall()
+        except sqlite3.OperationalError:
+            rows = []
         conn.close()
 
         if not rows:
-            logger.warning("No markets with condition_id in DB")
+            logger.warning("No markets found in DB")
             return {}
 
-        logger.info("Fetching trades for %d markets by condition_id", len(rows))
+        logger.info("Fetching trades for %d markets", len(rows))
         results: dict[str, int] = {}
         combined_path = output_dir / f"all_markets_{datetime.now(tz=timezone.utc).strftime('%Y%m%dT%H%M%S')}.csv"
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -222,12 +226,14 @@ class PolymarketDataApiFetcher:
             combined_writer = csv.DictWriter(combined_fh, fieldnames=_CSV_FIELDS)
             combined_writer.writeheader()
 
-            for condition_id, market_id in rows:
-                count = self.fetch_market_trades(condition_id, output_dir)
-                results[condition_id] = count
+            for yes_token_id, market_id, question in rows:
+                if not yes_token_id:
+                    continue
+                count = self.fetch_market_trades(yes_token_id, output_dir)
+                results[yes_token_id] = count
 
                 # Also append to combined file
-                per_market_csv = output_dir / f"{condition_id[:32]}.csv"
+                per_market_csv = output_dir / f"{yes_token_id[:32]}.csv"
                 if per_market_csv.exists():
                     with per_market_csv.open(newline="", encoding="utf-8") as mf:
                         reader = csv.DictReader(mf)

@@ -35,6 +35,7 @@ from trading_platform.research.dataset_reader import (
     resolve_research_dataset,
 )
 from trading_platform.research.replay_evaluation import build_replay_evaluation_request, run_replay_evaluation
+from trading_platform.research.replay_comparison import ReplayComparisonRequest, run_replay_comparison
 from trading_platform.research.replay_assembly import ReplayAssemblyRequest, assemble_replay_dataset
 from trading_platform.research.replay_consumer import ReplayConsumerRequest, load_replay_consumer_input
 
@@ -112,6 +113,10 @@ def _research_registry_path() -> Path:
 
 def _provider_monitoring_root() -> Path:
     return ARTIFACTS_ROOT / "provider_monitoring"
+
+
+def _research_replay_root() -> Path:
+    return ARTIFACTS_ROOT / "research_replay"
 
 
 def _compute_sharpe(returns: pd.Series) -> float | None:
@@ -1000,5 +1005,64 @@ def read_replay_evaluation_preview(
             )
         )
     except (KeyError, ValueError) as exc:
+        return {"available": False, "reason": str(exc)}
+    return {"available": True, **result.to_summary()}
+
+
+def read_latest_replay_comparison_summary() -> dict[str, Any]:
+    summary_path = _research_replay_root() / "comparison" / "latest_replay_comparison_summary.json"
+    summary = _read_json(summary_path)
+    if not summary:
+        return {"available": False, "reason": "No replay comparison summary found"}
+    return {"available": True, **summary}
+
+
+def read_replay_comparison_preview(
+    *,
+    evaluation_summary_paths: list[str] | None = None,
+    dataset_keys: list[str] | None = None,
+    providers: list[str] | None = None,
+    dataset_names: list[str] | None = None,
+    symbols: list[str] | None = None,
+    intervals: list[str] | None = None,
+    start: str | None = None,
+    end: str | None = None,
+    alignment_modes: list[str] | None = None,
+    anchor_dataset_key: str | None = None,
+    tolerance: str | None = None,
+    limit: int | None = None,
+    feature_columns: list[str] | None = None,
+    target_columns: list[str] | None = None,
+    comparison_mode: str = "provider",
+    min_row_count: int = 25,
+    max_candidates: int = 10,
+) -> dict[str, Any]:
+    registry_path = _research_registry_path()
+    if not list(evaluation_summary_paths or []) and not registry_path.exists():
+        return {"available": False, "reason": "No shared dataset registry found"}
+    try:
+        result = run_replay_comparison(
+            ReplayComparisonRequest(
+                registry_path=registry_path if not list(evaluation_summary_paths or []) else None,
+                evaluation_summary_paths=list(evaluation_summary_paths or []),
+                dataset_keys=list(dataset_keys or []),
+                providers=list(providers or []),
+                dataset_names=list(dataset_names or []),
+                symbols=list(symbols or []),
+                intervals=list(intervals or []),
+                start=start,
+                end=end,
+                alignment_modes=list(alignment_modes or ["outer_union"]),
+                anchor_dataset_key=anchor_dataset_key,
+                tolerance=tolerance,
+                limit=limit,
+                feature_columns=list(feature_columns or []),
+                target_columns=list(target_columns or []),
+                comparison_mode=comparison_mode,
+                min_row_count=min_row_count,
+                max_candidates=max_candidates,
+            )
+        )
+    except (KeyError, ValueError, FileNotFoundError) as exc:
         return {"available": False, "reason": str(exc)}
     return {"available": True, **result.to_summary()}

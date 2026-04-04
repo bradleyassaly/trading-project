@@ -103,6 +103,21 @@ export const api = {
     const suffix = query.toString() ? `?${query.toString()}` : ''
     return get(`/research/replay/evaluation-preview${suffix}`)
   },
+  researchReplayComparisonLatest: () => get('/research/replay/comparison-latest'),
+  researchReplayComparisonPreview: (params = {}) => {
+    const query = new URLSearchParams()
+    Object.entries(params).forEach(([key, value]) => {
+      if (Array.isArray(value)) {
+        value.forEach((item) => {
+          if (item != null && item !== '') query.append(key, item)
+        })
+        return
+      }
+      if (value != null && value !== '') query.append(key, value)
+    })
+    const suffix = query.toString() ? `?${query.toString()}` : ''
+    return get(`/research/replay/comparison-preview${suffix}`)
+  },
   registrySummary: () => get('/ops/registry-summary'),
   providerMonitoring: () => get('/ops/provider-monitoring'),
   providerHealth: () => get('/ops/provider-health'),

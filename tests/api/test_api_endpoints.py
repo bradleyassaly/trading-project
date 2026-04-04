@@ -665,6 +665,15 @@ def test_provider_detail_and_replay_preview_endpoints(tmp_path, monkeypatch):
     assert "consumer_summary" in evaluation_payload
     assert "metrics" in evaluation_payload
 
+    comparison_resp = client.get(
+        "/api/research/replay/comparison-preview?provider=binance&provider=kalshi&comparison_mode=provider&alignment_mode=outer_union&min_row_count=1"
+    )
+    assert comparison_resp.status_code == 200
+    comparison_payload = comparison_resp.json()
+    assert comparison_payload["available"] is True
+    assert "candidate_slices" in comparison_payload
+    assert "warnings" in comparison_payload
+
     provider_timeline_resp = client.get("/api/ops/providers/binance/timeline")
     assert provider_timeline_resp.status_code == 200
     provider_timeline_payload = provider_timeline_resp.json()
@@ -688,3 +697,24 @@ def test_provider_detail_and_replay_preview_endpoints(tmp_path, monkeypatch):
     dataset_history_payload = dataset_history_resp.json()
     assert dataset_history_payload["available"] is True
     assert dataset_history_payload["scope_type"] == "dataset"
+
+
+def test_replay_comparison_latest_endpoint(tmp_path, monkeypatch):
+    monkeypatch.setattr(reader, "ARTIFACTS_ROOT", tmp_path / "artifacts")
+    monkeypatch.setattr(reader, "DATA_ROOT", tmp_path / "data")
+    _write_json(
+        tmp_path / "artifacts" / "research_replay" / "comparison" / "latest_replay_comparison_summary.json",
+        {
+            "generated_at": "2024-01-01T00:00:00Z",
+            "comparison_name": "shared_replay_comparison",
+            "ranking_count": 2,
+            "candidate_count": 1,
+            "candidate_slices": [{"providers": ["binance"], "target_column": "target_return_1"}],
+        },
+    )
+
+    resp = client.get("/api/research/replay/comparison-latest")
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["available"] is True
+    assert payload["candidate_count"] == 1

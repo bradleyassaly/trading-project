@@ -297,6 +297,40 @@ def test_grouped_research_replay_evaluate_command_parses() -> None:
     assert args.output_dir == "artifacts/research_replay/evaluation"
 
 
+def test_grouped_research_replay_compare_command_parses() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "research",
+            "replay",
+            "compare",
+            "--providers",
+            "binance",
+            "kalshi",
+            "--alignment-modes",
+            "outer_union",
+            "anchor",
+            "--comparison-mode",
+            "provider",
+            "--min-row-count",
+            "5",
+            "--max-candidates",
+            "6",
+            "--output-dir",
+            "artifacts/research_replay/comparison",
+        ]
+    )
+
+    assert args.research_command == "replay"
+    assert args.research_replay_command == "compare"
+    assert args.providers == ["binance", "kalshi"]
+    assert args.alignment_modes == ["outer_union", "anchor"]
+    assert args.comparison_mode == "provider"
+    assert args.min_row_count == 5
+    assert args.max_candidates == 6
+    assert args.output_dir == "artifacts/research_replay/comparison"
+
+
 def test_grouped_research_leaderboard_command_parses() -> None:
     parser = build_parser()
     args = parser.parse_args(

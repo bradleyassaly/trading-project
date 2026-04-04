@@ -9,11 +9,11 @@ import EmptyState from '../components/EmptyState'
 
 const COLS = [
   { key: 'signal_family', label: 'Signal', sortable: false },
-  { key: 'ic', label: 'IC', sortable: true },
-  { key: 'win_rate', label: 'Win %', sortable: true },
-  { key: 'mean_edge', label: 'Mean Edge', sortable: true },
-  { key: 'sharpe', label: 'Sharpe', sortable: true },
   { key: 'n_trades', label: 'Trades', sortable: true },
+  { key: 'win_rate', label: 'Win %', sortable: true },
+  { key: 'realized_avg_return', label: 'Avg Return', sortable: true },
+  { key: 'brier_score', label: 'Brier', sortable: true },
+  { key: 'ic', label: 'IC', sortable: true },
 ]
 
 function colorFor(val, neutral = 0) {
@@ -45,28 +45,39 @@ function PerformanceTable({ data, sortKey, sortDir, onSort }) {
           </tr>
         </thead>
         <tbody className="divide-y divide-surface-border">
-          {data.map((row, i) => (
-            <tr key={i} className="hover:bg-surface-hover transition-colors">
-              <td className="py-2 pr-6 text-gray-200 font-medium">
-                {String(row[nameKey] ?? '—').replace('KALSHI_', '')}
-              </td>
-              <td className={`py-2 pr-6 font-mono ${colorFor(row.ic)}`}>
-                {row.ic != null ? Number(row.ic).toFixed(4) : '—'}
-              </td>
-              <td className={`py-2 pr-6 font-mono ${colorFor(Number(row.win_rate) - 0.5)}`}>
-                {row.win_rate != null ? `${(Number(row.win_rate) * 100).toFixed(1)}%` : '—'}
-              </td>
-              <td className={`py-2 pr-6 font-mono ${colorFor(row.mean_edge)}`}>
-                {row.mean_edge != null ? Number(row.mean_edge).toFixed(3) : '—'}
-              </td>
-              <td className={`py-2 pr-6 font-mono ${colorFor(row.sharpe)}`}>
-                {row.sharpe != null ? Number(row.sharpe).toFixed(2) : '—'}
-              </td>
-              <td className="py-2 text-gray-400">
-                {row.n_trades ?? row.sample_size ?? '—'}
-              </td>
-            </tr>
-          ))}
+          {data.map((row, i) => {
+            const wr = row.win_rate != null ? Number(row.win_rate) : null
+            const wrPct = wr != null ? (wr <= 1 ? wr * 100 : wr) : null
+            const trades = Number(row.n_trades ?? row.sample_size ?? 0)
+            const avgRet = row.realized_avg_return ?? row.mean_edge
+            const brier = row.brier_score ?? row.sharpe
+            return (
+              <tr key={i} className="hover:bg-surface-hover transition-colors">
+                <td className="py-2 pr-6 text-gray-200 font-medium">
+                  {String(row[nameKey] ?? '—').replace(/^kalshi_/i, '')}
+                </td>
+                <td className="py-2 pr-6 text-gray-400 font-mono">
+                  {trades > 0 ? trades.toLocaleString() : <span className="text-gray-600">0</span>}
+                </td>
+                <td className={`py-2 pr-6 font-mono ${
+                  wrPct == null ? 'text-gray-600' :
+                  wrPct > 55 ? 'text-accent-green' :
+                  wrPct > 50 ? 'text-accent-yellow' : 'text-accent-red'
+                }`}>
+                  {wrPct != null ? `${wrPct.toFixed(1)}%` : trades === 0 ? 'Needs data' : '—'}
+                </td>
+                <td className={`py-2 pr-6 font-mono ${colorFor(avgRet != null ? Number(avgRet) : null)}`}>
+                  {avgRet != null ? Number(avgRet).toFixed(4) : '—'}
+                </td>
+                <td className="py-2 pr-6 font-mono text-gray-400">
+                  {brier != null ? Number(brier).toFixed(4) : '—'}
+                </td>
+                <td className={`py-2 pr-6 font-mono ${colorFor(row.ic != null ? Number(row.ic) : null)}`}>
+                  {row.ic != null ? Number(row.ic).toFixed(4) : '—'}
+                </td>
+              </tr>
+            )
+          })}
         </tbody>
       </table>
     </div>
@@ -211,7 +222,7 @@ function BacktestRunner() {
 }
 
 export default function Signals() {
-  const [sortKey, setSortKey] = useState('ic')
+  const [sortKey, setSortKey] = useState('n_trades')
   const [sortDir, setSortDir] = useState('desc')
 
   const perfFetcher = useCallback(() => api.signalsPerformance(), [])

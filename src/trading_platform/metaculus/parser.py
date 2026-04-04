@@ -95,11 +95,11 @@ class MetaculusParser:
                 resp = self._session.get(
                     f"{self._base_url}/questions/",
                     params={
-                        "status": "resolved",
+                        "has_resolution": "true",
                         "type": "binary",
                         "limit": min(page_size, limit - len(questions)),
                         "offset": offset,
-                        "order_by": "-resolved_at",
+                        "order_by": "-resolve_time",
                     },
                     timeout=30,
                 )
@@ -131,10 +131,18 @@ class MetaculusParser:
         for q in questions:
             qid = str(q.get("id", ""))
             title = q.get("title", "")
-            resolution = q.get("resolution")
 
-            # Skip ambiguous/null resolutions
-            if resolution not in (0, 0.0, 1, 1.0, "yes", "no", True, False):
+            # Resolve: try multiple fields since API returns resolution=None on list endpoint
+            resolved_yes = self._parse_resolution(q)
+
+            # If resolution is None from list, fetch detail for the actual value
+            if resolved_yes is None and qid:
+                detail = self._fetch_question_detail(qid)
+                if detail:
+                    q.update(detail)  # merge detail fields for history extraction
+                    resolved_yes = self._parse_resolution(detail)
+
+            if resolved_yes is None:
                 result.questions_skipped_ambiguous += 1
                 continue
 
@@ -208,11 +216,8 @@ class MetaculusParser:
             result.feature_files_written += 1
             result.questions_processed += 1
 
-            # Resolution
-            if resolution in (1, 1.0, "yes", True):
-                resolution_price = 100.0
-            else:
-                resolution_price = 0.0
+            # Resolution (already parsed above)
+            resolution_price = 100.0 if resolved_yes else 0.0
 
             resolution_rows.append({
                 "ticker": qid,
@@ -237,6 +242,46 @@ class MetaculusParser:
             result.date_range_end = max(all_dates).isoformat()
 
         return result
+
+    @staticmethod
+    def _parse_resolution(q: dict[str, Any]) -> bool | None:
+        """Parse resolution from a Metaculus question dict.
+
+        Tries ``resolution``, ``actual_resolution``, and final
+        ``community_prediction`` value as fallbacks.
+        Returns True (YES), False (NO), or None (ambiguous/unresolved).
+        """
+        for key in ("resolution", "actual_resolution"):
+            val = q.get(key)
+            if val is None:
+                continue
+            try:
+                fval = float(val)
+                if fval >= 0.9:
+                    return True
+                if 0.0 <= fval <= 0.1:
+                    return False
+                if fval < 0:
+                    return None  # ambiguous
+                continue
+            except (TypeError, ValueError):
+                s = str(val).strip().lower()
+                if s in ("yes", "true", "1"):
+                    return True
+                if s in ("no", "false", "0"):
+                    return False
+        return None
+
+    def _fetch_question_detail(self, qid: str) -> dict[str, Any] | None:
+        """Fetch full question detail from /questions/{id}/."""
+        try:
+            time.sleep(self._sleep_sec)
+            resp = self._session.get(f"{self._base_url}/questions/{qid}/", timeout=30)
+            resp.raise_for_status()
+            return resp.json()
+        except Exception as exc:
+            logger.debug("Failed to fetch detail for question %s: %s", qid, exc)
+            return None
 
     def _get_forecast_history(self, question: dict[str, Any]) -> list[dict[str, Any]]:
         """Extract forecast history from a question object.

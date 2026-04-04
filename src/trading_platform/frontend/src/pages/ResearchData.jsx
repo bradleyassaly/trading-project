@@ -81,6 +81,16 @@ export default function ResearchData() {
     ),
     [selectedProvider],
   )
+  const replayComparisonFetcher = useCallback(
+    () => api.researchReplayComparisonPreview({
+      provider: selectedProvider ? [selectedProvider] : undefined,
+      alignment_mode: ['outer_union', 'anchor'],
+      comparison_mode: selectedProvider ? 'provider' : 'scope',
+      max_candidates: 8,
+      min_row_count: 2,
+    }),
+    [selectedProvider],
+  )
 
   const { data: datasets, loading: datasetsLoading } = useApi(datasetsFetcher, 30_000)
   const { data: monitoring } = useApi(monitoringFetcher, 30_000)
@@ -95,6 +105,7 @@ export default function ResearchData() {
   const { data: replayPreview, loading: replayLoading } = useApi(replayFetcher, 30_000)
   const { data: replayConsumerPreview, loading: replayConsumerLoading } = useApi(replayConsumerFetcher, 30_000)
   const { data: replayEvaluationPreview, loading: replayEvaluationLoading } = useApi(replayEvaluationFetcher, 30_000)
+  const { data: replayComparisonPreview, loading: replayComparisonLoading } = useApi(replayComparisonFetcher, 30_000)
 
   const providerOptions = useMemo(() => {
     const values = (datasets?.data || []).map((entry) => entry.provider)
@@ -563,6 +574,56 @@ export default function ResearchData() {
                         <td className="py-2 pr-4 text-gray-300">{metric.pearson_correlation == null ? '-' : metric.pearson_correlation.toFixed(4)}</td>
                         <td className="py-2 pr-4 text-gray-300">{metric.directional_accuracy == null ? '-' : metric.directional_accuracy.toFixed(4)}</td>
                         <td className="py-2 pr-4 text-gray-300">{metric.top_bottom_spread == null ? '-' : metric.top_bottom_spread.toFixed(4)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+
+      <div className="card">
+        <h2 className="text-sm font-medium text-gray-400 mb-4">Replay Comparison Candidates</h2>
+        {replayComparisonLoading ? (
+          <LoadingSkeleton rows={4} />
+        ) : !replayComparisonPreview?.available ? (
+          <EmptyState title={replayComparisonPreview?.reason || 'Replay comparison unavailable'} icon="[]" />
+        ) : (
+          <div className="space-y-3 text-xs">
+            <div className="flex items-center gap-4 text-gray-500">
+              <span>rankings: {replayComparisonPreview.ranking_count}</span>
+              <span>candidates: {replayComparisonPreview.candidate_count}</span>
+              <span>excluded: {replayComparisonPreview.excluded_count}</span>
+            </div>
+            <div className="text-gray-500">
+              warnings: {(replayComparisonPreview.warnings || []).join(', ') || 'none'}
+            </div>
+            {!(replayComparisonPreview.candidate_slices || []).length ? (
+              <EmptyState title="No candidate slices met current thresholds" icon="[]" />
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-xs">
+                  <thead>
+                    <tr className="border-b border-surface-border text-left text-gray-500">
+                      <th className="pb-2 pr-4">Providers</th>
+                      <th className="pb-2 pr-4">Alignment</th>
+                      <th className="pb-2 pr-4">Target</th>
+                      <th className="pb-2 pr-4">Rows</th>
+                      <th className="pb-2 pr-4">Score</th>
+                      <th className="pb-2 pr-4">Warnings</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-surface-border">
+                    {(replayComparisonPreview.candidate_slices || []).slice(0, 8).map((slice, index) => (
+                      <tr key={`${slice.evaluation_name}-${slice.feature_column}-${slice.target_column}-${index}`}>
+                        <td className="py-2 pr-4 text-gray-300">{(slice.providers || []).join(', ') || '-'}</td>
+                        <td className="py-2 pr-4 text-gray-300">{slice.alignment_mode}</td>
+                        <td className="py-2 pr-4 text-gray-300">{slice.target_column}</td>
+                        <td className="py-2 pr-4 text-gray-300">{slice.row_count}</td>
+                        <td className="py-2 pr-4 text-gray-300">{slice.composite_score.toFixed(4)}</td>
+                        <td className="py-2 pr-4 text-gray-300">{(slice.warnings || []).join(', ') || '-'}</td>
                       </tr>
                     ))}
                   </tbody>

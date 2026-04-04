@@ -389,6 +389,52 @@ def research_replay_evaluation_preview(
     )
 
 
+@app.get("/api/research/replay/comparison-latest")
+def research_replay_comparison_latest() -> dict[str, Any]:
+    return reader.read_latest_replay_comparison_summary()
+
+
+@app.get("/api/research/replay/comparison-preview")
+def research_replay_comparison_preview(
+    evaluation_summary_path: list[str] | None = Query(default=None),
+    dataset_key: list[str] | None = Query(default=None),
+    provider: list[str] | None = Query(default=None),
+    dataset_name: list[str] | None = Query(default=None),
+    symbol: list[str] | None = Query(default=None),
+    interval: list[str] | None = Query(default=None),
+    alignment_mode: list[str] | None = Query(default=None),
+    feature_column: list[str] | None = Query(default=None),
+    target_column: list[str] | None = Query(default=None),
+    start: str | None = None,
+    end: str | None = None,
+    anchor_dataset_key: str | None = None,
+    tolerance: str | None = None,
+    limit: int | None = None,
+    comparison_mode: str = "provider",
+    min_row_count: int = 25,
+    max_candidates: int = 10,
+) -> dict[str, Any]:
+    return reader.read_replay_comparison_preview(
+        evaluation_summary_paths=evaluation_summary_path,
+        dataset_keys=dataset_key,
+        providers=provider,
+        dataset_names=dataset_name,
+        symbols=symbol,
+        intervals=interval,
+        start=start,
+        end=end,
+        alignment_modes=alignment_mode,
+        anchor_dataset_key=anchor_dataset_key,
+        tolerance=tolerance,
+        limit=limit,
+        feature_columns=feature_column,
+        target_columns=target_column,
+        comparison_mode=comparison_mode,
+        min_row_count=min_row_count,
+        max_candidates=max_candidates,
+    )
+
+
 @app.get("/api/ops/providers/{provider}/timeline")
 def ops_provider_timeline(provider: str) -> dict[str, Any]:
     return reader.read_provider_timeline(provider)

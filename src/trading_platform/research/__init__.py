@@ -14,6 +14,11 @@ from trading_platform.research.replay_evaluation import (
     build_replay_evaluation_request,
     run_replay_evaluation,
 )
+from trading_platform.research.replay_comparison import (
+    ReplayComparisonRequest,
+    ReplayComparisonResult,
+    run_replay_comparison,
+)
 
 __all__ = [
     "run_vectorized_research",
@@ -26,4 +31,7 @@ __all__ = [
     "ReplayEvaluationResult",
     "build_replay_evaluation_request",
     "run_replay_evaluation",
+    "ReplayComparisonRequest",
+    "ReplayComparisonResult",
+    "run_replay_comparison",
 ]
