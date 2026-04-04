@@ -82,8 +82,16 @@ def cmd_polymarket_live_collect(args: argparse.Namespace) -> None:
         print(f"[ERROR] Failed to fetch markets: {exc}")
         return
 
+    _SPORTS_KEYWORDS = {"vs.", "vs ", "nba", "nfl", "nhl", "mlb", "spread", "o/u",
+                         "rebounds", "assists", "points", "touchdowns", "goals",
+                         "winner:", "game ", "match ", "set winner"}
+
     all_markets = [PolymarketMarket.from_api_dict(m) for m in raw_pages]
-    all_markets = [m for m in all_markets if m.yes_token_id and m.volume >= min_volume]
+    all_markets = [
+        m for m in all_markets
+        if m.yes_token_id and m.volume >= min_volume
+        and not any(kw in m.question.lower() for kw in _SPORTS_KEYWORDS)
+    ]
     all_markets.sort(key=lambda m: m.volume, reverse=True)
     all_markets = all_markets[:max_markets]
     print(f"  found      : {len(all_markets)} qualifying markets")

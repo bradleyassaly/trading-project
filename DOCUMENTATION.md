@@ -1416,6 +1416,93 @@ Notification handling now wraps the existing monitoring steps instead of replaci
 #### Recommended Next Milestone
 - G-11 - Add additional asset-class publishers to the shared research dataset registry and unify scheduler monitoring dashboards across providers
 
+### G-14 - Add cross-provider replay consumers in the research loop and richer operator timeline drill-down on shared monitoring artifacts
+Date: 2026-04-04
+Status: DONE
+
+#### Summary
+Added a replay-consumer layer on top of the shared replay assemblies, lightweight monitoring-history and transition artifacts on top of the shared provider monitoring outputs, timeline readers for providers and datasets, new API endpoints for replay-consumer previews and monitoring timelines, a dashboard extension for provider and dataset timelines, and thin CLI surfaces for replay consumption plus provider and dataset timeline inspection.
+
+#### Why
+G-13 made cross-provider replay assembly and latest-state drill-down possible, but the research loop still lacked a stable consumer contract for replay-ready inputs and operators still only had point-in-time status views. This milestone closes those gaps by making replay assemblies reusable evaluation inputs and by adding artifact-backed timeline views over shared monitoring outputs.
+
+#### Files Changed
+- `src/trading_platform/research/replay_consumer.py`
+- `src/trading_platform/research/__init__.py`
+- `src/trading_platform/monitoring/provider_monitoring.py`
+- `src/trading_platform/monitoring/drilldown.py`
+- `src/trading_platform/api/artifact_reader.py`
+- `src/trading_platform/api/main.py`
+- `src/trading_platform/frontend/src/api/client.js`
+- `src/trading_platform/frontend/src/pages/ResearchData.jsx`
+- `src/trading_platform/cli/commands/research_replay_consume.py`
+- `src/trading_platform/cli/commands/ops_monitor_provider_timeline.py`
+- `src/trading_platform/cli/commands/ops_monitor_dataset_timeline.py`
+- `src/trading_platform/cli/grouped_parser.py`
+- `tests/test_replay_consumer.py`
+- `tests/test_replay_assembly.py`
+- `tests/api/test_api_endpoints.py`
+- `tests/test_cli_grouping.py`
+- `MILESTONES.md`
+- `DOCUMENTATION.md`
+
+#### Tests Run
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\pytest.exe tests/test_replay_consumer.py tests/test_replay_assembly.py tests/api/test_api_endpoints.py tests/test_cli_grouping.py -q`
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\pytest.exe tests/test_shared_dataset_reader.py tests/test_replay_assembly.py tests/test_replay_consumer.py tests/api/test_api_endpoints.py tests/test_provider_registry_and_monitoring.py tests/test_research_dataset_registry.py tests/test_cli_grouping.py tests/binance/test_registry_integration.py -q`
+
+#### Verification Commands
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\pytest.exe tests/test_replay_consumer.py tests/test_replay_assembly.py tests/api/test_api_endpoints.py tests/test_cli_grouping.py -q`
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\pytest.exe tests/test_shared_dataset_reader.py tests/test_replay_assembly.py tests/test_replay_consumer.py tests/api/test_api_endpoints.py tests/test_provider_registry_and_monitoring.py tests/test_research_dataset_registry.py tests/test_cli_grouping.py tests/binance/test_registry_integration.py -q`
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\python.exe -m trading_platform.cli research replay consume --registry-path data/research/dataset_registry.json --providers binance kalshi --alignment-mode outer_union --summary-path artifacts/research_replay/latest_replay_consumer_summary.json`
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\python.exe -m trading_platform.cli ops monitor provider-timeline --provider binance --output-root artifacts/provider_monitoring`
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\python.exe -m trading_platform.cli ops monitor dataset-timeline --dataset-key binance.crypto_market_features --output-root artifacts/provider_monitoring`
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\python.exe -m uvicorn trading_platform.api.main:app --port 8001`
+
+#### Architecture / Design Notes
+The new `trading_platform.research.replay_consumer` module is the research-loop-facing contract on top of replay assembly. It supports two input modes:
+- on-demand assembly from a `ReplayAssemblyRequest`
+- consumption of a materialized replay parquet plus its assembly summary
+
+The replay-consumer payload is explicit about:
+- included providers and resolved datasets
+- alignment mode and time bounds
+- identity, feature, and target columns
+- feature and target coverage
+- warnings such as sparse feature or target alignment
+
+This keeps replay consumption inspectable and bounded instead of letting evaluation code reach directly into shared assemblies and infer semantics ad hoc.
+
+On the operator side, `build_cross_provider_monitoring_summary()` now appends lightweight snapshots to `monitoring_history.jsonl` and writes `latest_transition_summary.json` based on the previous snapshot. That remains artifact-backed and deliberately simple; there is no new event database. `load_provider_timeline()` and `load_dataset_timeline()` rebuild timeline views from those shared artifacts.
+
+#### API / Consumer Usage
+- `GET /api/research/replay/consumer-preview?provider=binance&limit=5` returns an evaluation-ready replay-consumer summary and bounded row preview.
+- `GET /api/ops/providers/{provider}/timeline` returns recent provider monitoring snapshots and transitions.
+- `GET /api/ops/datasets/{dataset_key}/timeline` returns recent dataset monitoring snapshots and transitions.
+
+#### Dashboard Workflow
+The Research Data page now includes:
+- provider timeline snapshots for the selected provider
+- dataset timeline snapshots for the selected dataset
+- replay-consumer summary information in addition to raw replay-assembly preview
+
+This stays inspection-oriented. It is meant to help operators understand drift, staleness, and sparse joins over recent runs without leaving the shared dashboard workflow.
+
+#### Artifact Layout
+- Replay consumer summary artifact when requested: caller-defined, for example `artifacts/research_replay/latest_replay_consumer_summary.json`
+- Shared monitoring history: `artifacts/provider_monitoring/monitoring_history.jsonl`
+- Recent transition summary: `artifacts/provider_monitoring/latest_transition_summary.json`
+
+These artifacts reference the existing shared registry and monitoring outputs; they do not replace them.
+
+#### Known Issues / Limitations
+- Monitoring timelines are based on snapshots written when the shared provider monitoring summary is rebuilt. They are only as granular as those rebuilds.
+- Transition extraction currently compares the latest snapshot with the immediately previous snapshot. It is intentionally simple.
+- Replay-consumer coverage warnings are heuristic and based on non-null density after assembly, not strategy-specific data-quality rules.
+- The dashboard timeline views are compact summaries, not full charted time-series visualizations.
+
+#### Recommended Next Milestone
+- G-15 - Add registry-backed replay evaluation runners and richer historical monitoring visualizations for shared provider operations
+
 ### G-13 - Add cross-provider replay dataset assembly and operator drill-down workflows on top of the shared registry readers
 Date: 2026-04-03
 Status: DONE

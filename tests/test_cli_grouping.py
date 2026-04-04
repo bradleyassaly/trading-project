@@ -244,6 +244,28 @@ def test_grouped_research_replay_assemble_command_parses() -> None:
     assert args.anchor_dataset_key == "binance.crypto_market_features"
 
 
+def test_grouped_research_replay_consume_command_parses() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "research",
+            "replay",
+            "consume",
+            "--providers",
+            "binance",
+            "--alignment-mode",
+            "outer_union",
+            "--summary-path",
+            "artifacts/research_replay/latest_replay_consumer_summary.json",
+        ]
+    )
+
+    assert args.research_command == "replay"
+    assert args.research_replay_command == "consume"
+    assert args.providers == ["binance"]
+    assert args.summary_path.endswith("latest_replay_consumer_summary.json")
+
+
 def test_grouped_research_leaderboard_command_parses() -> None:
     parser = build_parser()
     args = parser.parse_args(
@@ -2814,6 +2836,41 @@ def test_grouped_ops_monitor_providers_health_command_parses() -> None:
     assert args.ops_monitor_command == "providers-health"
     assert args.asset_class == "prediction_market"
     assert args.format == "json"
+
+
+def test_grouped_ops_monitor_provider_timeline_command_parses() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "ops",
+            "monitor",
+            "provider-timeline",
+            "--provider",
+            "binance",
+            "--format",
+            "json",
+        ]
+    )
+
+    assert args.ops_monitor_command == "provider-timeline"
+    assert args.provider == "binance"
+    assert args.format == "json"
+
+
+def test_grouped_ops_monitor_dataset_timeline_command_parses() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "ops",
+            "monitor",
+            "dataset-timeline",
+            "--dataset-key",
+            "binance.crypto_market_features",
+        ]
+    )
+
+    assert args.ops_monitor_command == "dataset-timeline"
+    assert args.dataset_key == "binance.crypto_market_features"
 
 
 def test_grouped_research_promote_run_local_command_parses() -> None:

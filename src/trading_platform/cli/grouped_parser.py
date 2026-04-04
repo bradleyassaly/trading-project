@@ -70,6 +70,8 @@ from trading_platform.cli.commands.monitor_portfolio_health import cmd_monitor_p
 from trading_platform.cli.commands.monitor_run_health import cmd_monitor_run_health
 from trading_platform.cli.commands.monitor_strategy_health import cmd_monitor_strategy_health
 from trading_platform.cli.commands.ops_monitor_providers_health import cmd_ops_monitor_providers_health
+from trading_platform.cli.commands.ops_monitor_provider_timeline import cmd_ops_monitor_provider_timeline
+from trading_platform.cli.commands.ops_monitor_dataset_timeline import cmd_ops_monitor_dataset_timeline
 from trading_platform.cli.commands.ops_monitor_providers_summary import cmd_ops_monitor_providers_summary
 from trading_platform.cli.commands.autonomous_loop import cmd_autonomous_loop_start
 from trading_platform.cli.commands.orchestrate_run import cmd_orchestrate_loop, cmd_orchestrate_run
@@ -122,6 +124,7 @@ from trading_platform.cli.commands.research_promotion_candidates import cmd_rese
 from trading_platform.cli.commands.research_dataset_registry_list import cmd_research_dataset_registry_list
 from trading_platform.cli.commands.research_dataset_registry_publish import cmd_research_dataset_registry_publish
 from trading_platform.cli.commands.research_replay_assemble import cmd_research_replay_assemble
+from trading_platform.cli.commands.research_replay_consume import cmd_research_replay_consume
 from trading_platform.cli.commands.research_refresh import cmd_research_refresh
 from trading_platform.cli.commands.research_registry_build import cmd_research_registry_build
 from trading_platform.cli.commands.research_validate_backtester import cmd_research_validate_backtester
@@ -3789,6 +3792,62 @@ def build_parser() -> argparse.ArgumentParser:
         help="Render output as human-readable text or JSON.",
     )
     research_replay_assemble.set_defaults(func=cmd_research_replay_assemble)
+    research_replay_consume = research_replay_subparsers.add_parser(
+        "consume", help="Load replay assemblies as evaluation-ready research inputs"
+    )
+    research_replay_consume.add_argument(
+        "--registry-path",
+        type=str,
+        default="data/research/dataset_registry.json",
+        help="Path to the shared dataset registry JSON artifact.",
+    )
+    research_replay_consume.add_argument("--dataset-keys", nargs="+", default=None, help="Explicit dataset keys to assemble.")
+    research_replay_consume.add_argument("--providers", nargs="+", default=None, help="Optional provider filters.")
+    research_replay_consume.add_argument("--asset-class", type=str, default=None, help="Optional asset-class filter.")
+    research_replay_consume.add_argument("--dataset-names", nargs="+", default=None, help="Optional dataset-name filters.")
+    research_replay_consume.add_argument("--symbols", nargs="+", default=None, help="Optional symbol or market filters.")
+    research_replay_consume.add_argument("--intervals", nargs="+", default=None, help="Optional interval filters.")
+    research_replay_consume.add_argument("--start", type=str, default=None, help="Inclusive start timestamp filter.")
+    research_replay_consume.add_argument("--end", type=str, default=None, help="Inclusive end timestamp filter.")
+    research_replay_consume.add_argument(
+        "--alignment-mode",
+        type=str,
+        choices=["outer_union", "anchor"],
+        default="outer_union",
+        help="Replay alignment mode.",
+    )
+    research_replay_consume.add_argument(
+        "--anchor-dataset-key",
+        type=str,
+        default=None,
+        help="Anchor dataset key when using anchor alignment.",
+    )
+    research_replay_consume.add_argument(
+        "--tolerance",
+        type=str,
+        default=None,
+        help="Optional backward-asof tolerance for anchor alignment, e.g. 5m.",
+    )
+    research_replay_consume.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="Optional row limit applied after replay consumption.",
+    )
+    research_replay_consume.add_argument(
+        "--summary-path",
+        type=str,
+        default="artifacts/research_replay/latest_replay_consumer_summary.json",
+        help="Summary artifact path for the replay consumer payload.",
+    )
+    research_replay_consume.add_argument(
+        "--format",
+        type=str,
+        default="text",
+        choices=["text", "json"],
+        help="Render output as human-readable text or JSON.",
+    )
+    research_replay_consume.set_defaults(func=cmd_research_replay_consume)
     research_leaderboard = research_subparsers.add_parser(
         "leaderboard", help="Build a cross-run research leaderboard from manifest summaries"
     )
@@ -4631,6 +4690,42 @@ def build_parser() -> argparse.ArgumentParser:
         help="Render output as human-readable text or JSON.",
     )
     ops_monitor_providers_health.set_defaults(func=cmd_ops_monitor_providers_health)
+    ops_monitor_provider_timeline = ops_monitor_subparsers.add_parser(
+        "provider-timeline", help="Show timeline-oriented status history for one provider"
+    )
+    ops_monitor_provider_timeline.add_argument("--provider", type=str, required=True, help="Provider name.")
+    ops_monitor_provider_timeline.add_argument(
+        "--output-root",
+        type=str,
+        default="artifacts/provider_monitoring",
+        help="Directory containing shared provider monitoring artifacts.",
+    )
+    ops_monitor_provider_timeline.add_argument(
+        "--format",
+        type=str,
+        default="text",
+        choices=["text", "json"],
+        help="Render output as human-readable text or JSON.",
+    )
+    ops_monitor_provider_timeline.set_defaults(func=cmd_ops_monitor_provider_timeline)
+    ops_monitor_dataset_timeline = ops_monitor_subparsers.add_parser(
+        "dataset-timeline", help="Show timeline-oriented status history for one registry dataset"
+    )
+    ops_monitor_dataset_timeline.add_argument("--dataset-key", type=str, required=True, help="Registry dataset key.")
+    ops_monitor_dataset_timeline.add_argument(
+        "--output-root",
+        type=str,
+        default="artifacts/provider_monitoring",
+        help="Directory containing shared provider monitoring artifacts.",
+    )
+    ops_monitor_dataset_timeline.add_argument(
+        "--format",
+        type=str,
+        default="text",
+        choices=["text", "json"],
+        help="Render output as human-readable text or JSON.",
+    )
+    ops_monitor_dataset_timeline.set_defaults(func=cmd_ops_monitor_dataset_timeline)
 
     ops_registry = ops_subparsers.add_parser(
         "registry", help="Registry-backed deployment controls and governance decisions"

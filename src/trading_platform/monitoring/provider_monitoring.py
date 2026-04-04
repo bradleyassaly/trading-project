@@ -151,6 +151,71 @@ def read_latest_provider_health_summary(*, output_root: str | Path) -> dict[str,
     return _read_json(Path(output_root) / "cross_provider_health_summary.json")
 
 
+def read_monitoring_history(*, output_root: str | Path) -> list[dict[str, Any]]:
+    path = Path(output_root) / "monitoring_history.jsonl"
+    if not path.exists():
+        return []
+    entries: list[dict[str, Any]] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        try:
+            entries.append(dict(json.loads(stripped) or {}))
+        except json.JSONDecodeError:
+            continue
+    return entries
+
+
+def read_recent_transitions(*, output_root: str | Path) -> dict[str, Any]:
+    return _read_json(Path(output_root) / "latest_transition_summary.json")
+
+
+def _append_monitoring_history(*, output_root: Path, monitoring_payload: dict[str, Any]) -> None:
+    history_path = output_root / "monitoring_history.jsonl"
+    snapshot = {
+        "generated_at": monitoring_payload.get("generated_at"),
+        "record_count": monitoring_payload.get("record_count"),
+        "records": monitoring_payload.get("records", []),
+    }
+    with history_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(snapshot) + "\n")
+
+
+def _build_transition_summary(*, history: list[dict[str, Any]], latest_records: list[dict[str, Any]]) -> dict[str, Any]:
+    previous_records: dict[str, dict[str, Any]] = {}
+    if len(history) >= 2:
+        for record in history[-2].get("records", []) or []:
+            if isinstance(record, dict) and record.get("dataset_key"):
+                previous_records[str(record["dataset_key"])] = record
+    transitions: list[dict[str, Any]] = []
+    for record in latest_records:
+        dataset_key = str(record.get("dataset_key") or "")
+        previous = previous_records.get(dataset_key, {})
+        previous_status = previous.get("status")
+        current_status = record.get("status")
+        if previous_status is None:
+            continue
+        if previous_status != current_status or bool(previous.get("stale")) != bool(record.get("stale")):
+            transitions.append(
+                {
+                    "dataset_key": dataset_key,
+                    "provider": record.get("provider"),
+                    "previous_status": previous_status,
+                    "current_status": current_status,
+                    "previous_stale": bool(previous.get("stale")),
+                    "current_stale": bool(record.get("stale")),
+                    "latest_event_time": record.get("latest_event_time"),
+                    "latest_materialized_at": record.get("latest_materialized_at"),
+                }
+            )
+    return {
+        "generated_at": _now_utc().isoformat(),
+        "transition_count": len(transitions),
+        "transitions": transitions,
+    }
+
+
 def build_cross_provider_monitoring_summary(
     *,
     registry_path: str | Path,
@@ -212,6 +277,13 @@ def build_cross_provider_monitoring_summary(
     }
     monitoring_summary_path.write_text(json.dumps(monitoring_payload, indent=2), encoding="utf-8")
     health_summary_path.write_text(json.dumps(health_payload, indent=2), encoding="utf-8")
+    _append_monitoring_history(output_root=output_dir, monitoring_payload=monitoring_payload)
+    history = read_monitoring_history(output_root=output_dir)
+    transition_summary = _build_transition_summary(history=history, latest_records=records)
+    (output_dir / "latest_transition_summary.json").write_text(
+        json.dumps(transition_summary, indent=2),
+        encoding="utf-8",
+    )
     return CrossProviderMonitoringResult(
         monitoring_summary_path=str(monitoring_summary_path),
         health_summary_path=str(health_summary_path),

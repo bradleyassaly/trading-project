@@ -651,3 +651,21 @@ def test_provider_detail_and_replay_preview_endpoints(tmp_path, monkeypatch):
     assert replay_payload["available"] is True
     assert replay_payload["returned_row_count"] == 1
     assert replay_payload["summary"]["metadata"]["alignment_mode"] == "outer_union"
+
+    consumer_resp = client.get("/api/research/replay/consumer-preview?provider=binance&limit=1")
+    assert consumer_resp.status_code == 200
+    consumer_payload = consumer_resp.json()
+    assert consumer_payload["available"] is True
+    assert "feature_columns" in consumer_payload["summary"]
+
+    provider_timeline_resp = client.get("/api/ops/providers/binance/timeline")
+    assert provider_timeline_resp.status_code == 200
+    provider_timeline_payload = provider_timeline_resp.json()
+    assert provider_timeline_payload["available"] is True
+    assert provider_timeline_payload["scope_type"] == "provider"
+
+    dataset_timeline_resp = client.get(f"/api/ops/datasets/{dataset_key}/timeline")
+    assert dataset_timeline_resp.status_code == 200
+    dataset_timeline_payload = dataset_timeline_resp.json()
+    assert dataset_timeline_payload["available"] is True
+    assert dataset_timeline_payload["scope_type"] == "dataset"

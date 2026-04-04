@@ -835,6 +835,32 @@ Dependencies:
 
 ---
 
+## G-14 — Add cross-provider replay consumers in the research loop and richer operator timeline drill-down on shared monitoring artifacts
+Status: DONE
+
+Objective:
+Turn shared replay assemblies into standard research-loop inputs and extend operator drill-down from latest-state inspection into lightweight timeline-oriented monitoring views.
+
+Expected scope:
+- add a replay-consumer contract that can assemble on demand from the shared registry or consume a previously materialized replay assembly artifact
+- expose replay-consumer metadata such as providers, datasets, alignment mode, feature and target coverage, and warnings for sparse joins
+- add lightweight monitoring history accumulation plus transition summaries on top of the shared provider-monitoring artifacts
+- add provider and dataset timeline readers backed by those shared monitoring history artifacts
+- expose replay-consumer previews and timeline drill-down through the existing API, dashboard, and small CLI surfaces
+- update tests, milestone state, and docs without regressing Binance, Kalshi, or Polymarket provider flows
+
+Acceptance criteria:
+- downstream research code can load replay-consumer inputs through an explicit contract rather than working directly with raw replay assembly frames
+- replay-consumer summaries expose feature columns, target columns, row counts, time bounds, alignment mode, and sparse-coverage warnings
+- provider monitoring writes lightweight history snapshots and recent transition summaries that can be read back without a database
+- operators can inspect provider timelines and dataset timelines through shared readers and API consumers
+- tests cover replay-consumer loading, materialized and on-demand assembly paths, timeline history and transition extraction, API routes, and CLI parsing
+
+Dependencies:
+- G-13
+
+---
+
 ## H-01 — Expand candidate grid generation
 Status: DONE
 

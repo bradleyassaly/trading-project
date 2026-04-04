@@ -110,6 +110,21 @@ def polymarket_market_ticks(market_id: str) -> dict[str, Any]:
     return reader.read_polymarket_market_ticks(market_id)
 
 
+@app.get("/api/paper/portfolio")
+def paper_portfolio() -> dict[str, Any]:
+    return reader.read_paper_portfolio()
+
+
+@app.get("/api/paper/trades")
+def paper_trades() -> dict[str, Any]:
+    return reader.read_paper_trades()
+
+
+@app.get("/api/paper/scan")
+def paper_scan() -> dict[str, Any]:
+    return reader.read_paper_scan()
+
+
 @app.get("/api/kalshi/market/{ticker}/history")
 def kalshi_market_history(ticker: str) -> dict[str, Any]:
     # Sanitize ticker to prevent path traversal
@@ -310,3 +325,42 @@ def research_replay_preview(
         tolerance=tolerance,
         limit=limit,
     )
+
+
+@app.get("/api/research/replay/consumer-preview")
+def research_replay_consumer_preview(
+    dataset_key: list[str] | None = Query(default=None),
+    provider: list[str] | None = Query(default=None),
+    dataset_name: list[str] | None = Query(default=None),
+    symbol: list[str] | None = Query(default=None),
+    interval: list[str] | None = Query(default=None),
+    start: str | None = None,
+    end: str | None = None,
+    alignment_mode: str = "outer_union",
+    anchor_dataset_key: str | None = None,
+    tolerance: str | None = None,
+    limit: int = 50,
+) -> dict[str, Any]:
+    return reader.read_replay_consumer_preview(
+        dataset_keys=dataset_key,
+        providers=provider,
+        dataset_names=dataset_name,
+        symbols=symbol,
+        intervals=interval,
+        start=start,
+        end=end,
+        alignment_mode=alignment_mode,
+        anchor_dataset_key=anchor_dataset_key,
+        tolerance=tolerance,
+        limit=limit,
+    )
+
+
+@app.get("/api/ops/providers/{provider}/timeline")
+def ops_provider_timeline(provider: str) -> dict[str, Any]:
+    return reader.read_provider_timeline(provider)
+
+
+@app.get("/api/ops/datasets/{dataset_key}/timeline")
+def ops_dataset_timeline(dataset_key: str) -> dict[str, Any]:
+    return reader.read_dataset_timeline(dataset_key)

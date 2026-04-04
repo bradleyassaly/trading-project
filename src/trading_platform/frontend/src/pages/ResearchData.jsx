@@ -33,8 +33,16 @@ export default function ResearchData() {
     () => (selectedProvider ? api.providerDetail(selectedProvider) : Promise.resolve(null)),
     [selectedProvider],
   )
+  const providerTimelineFetcher = useCallback(
+    () => (selectedProvider ? api.providerTimeline(selectedProvider) : Promise.resolve(null)),
+    [selectedProvider],
+  )
   const datasetDetailFetcher = useCallback(
     () => (selectedKey ? api.monitoredDatasetDetail(selectedKey) : Promise.resolve(null)),
+    [selectedKey],
+  )
+  const datasetTimelineFetcher = useCallback(
+    () => (selectedKey ? api.monitoredDatasetTimeline(selectedKey) : Promise.resolve(null)),
     [selectedKey],
   )
   const rowsFetcher = useCallback(
@@ -49,14 +57,25 @@ export default function ResearchData() {
     ),
     [selectedProvider],
   )
+  const replayConsumerFetcher = useCallback(
+    () => (
+      selectedProvider
+        ? api.researchReplayConsumerPreview({ provider: [selectedProvider], limit: 5, alignment_mode: 'outer_union' })
+        : Promise.resolve(null)
+    ),
+    [selectedProvider],
+  )
 
   const { data: datasets, loading: datasetsLoading } = useApi(datasetsFetcher, 30_000)
   const { data: monitoring } = useApi(monitoringFetcher, 30_000)
   const { data: health } = useApi(healthFetcher, 30_000)
   const { data: providerDetail, loading: providerDetailLoading } = useApi(providerDetailFetcher, 30_000)
+  const { data: providerTimeline, loading: providerTimelineLoading } = useApi(providerTimelineFetcher, 30_000)
   const { data: datasetDetail, loading: datasetDetailLoading } = useApi(datasetDetailFetcher, 30_000)
+  const { data: datasetTimeline, loading: datasetTimelineLoading } = useApi(datasetTimelineFetcher, 30_000)
   const { data: rows, loading: rowsLoading } = useApi(rowsFetcher, 30_000)
   const { data: replayPreview, loading: replayLoading } = useApi(replayFetcher, 30_000)
+  const { data: replayConsumerPreview, loading: replayConsumerLoading } = useApi(replayConsumerFetcher, 30_000)
 
   const providerOptions = useMemo(() => {
     const values = (datasets?.data || []).map((entry) => entry.provider)
@@ -298,6 +317,62 @@ export default function ResearchData() {
         </div>
       </div>
 
+      <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+        <div className="card">
+          <h2 className="text-sm font-medium text-gray-400 mb-4">Provider Timeline</h2>
+          {!selectedProvider ? (
+            <EmptyState title="Select a provider" icon="+" />
+          ) : providerTimelineLoading ? (
+            <LoadingSkeleton rows={4} />
+          ) : !providerTimeline?.available ? (
+            <EmptyState title={providerTimeline?.reason || 'Provider timeline unavailable'} icon="+" />
+          ) : !(providerTimeline.history || []).length ? (
+            <EmptyState title="No provider timeline yet" icon="+" />
+          ) : (
+            <div className="space-y-3">
+              {(providerTimeline.history || []).slice(-5).reverse().map((snapshot, index) => (
+                <div key={index} className="rounded border border-surface-border p-3 text-xs">
+                  <div className="flex items-center justify-between">
+                    <div className="text-gray-300">{snapshot.generated_at || '-'}</div>
+                    <StatusBadge status={snapshot.status} />
+                  </div>
+                  <div className="mt-2 text-gray-500">
+                    records: {snapshot.record_count} | transitions: {(providerTimeline.transitions || []).length}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <div className="card">
+          <h2 className="text-sm font-medium text-gray-400 mb-4">Dataset Timeline</h2>
+          {!selectedKey ? (
+            <EmptyState title="Select a dataset" icon="[]" />
+          ) : datasetTimelineLoading ? (
+            <LoadingSkeleton rows={4} />
+          ) : !datasetTimeline?.available ? (
+            <EmptyState title={datasetTimeline?.reason || 'Dataset timeline unavailable'} icon="[]" />
+          ) : !(datasetTimeline.history || []).length ? (
+            <EmptyState title="No dataset timeline yet" icon="[]" />
+          ) : (
+            <div className="space-y-3">
+              {(datasetTimeline.history || []).slice(-5).reverse().map((snapshot, index) => (
+                <div key={index} className="rounded border border-surface-border p-3 text-xs">
+                  <div className="flex items-center justify-between">
+                    <div className="text-gray-300">{snapshot.generated_at || '-'}</div>
+                    <StatusBadge status={snapshot.record?.status} />
+                  </div>
+                  <div className="mt-2 text-gray-500">
+                    stale: {String(snapshot.record?.stale)} | latest event: {snapshot.record?.latest_event_time || '-'}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+
       <div className="card">
         <h2 className="text-sm font-medium text-gray-400 mb-4">Replay Assembly Preview</h2>
         {!selectedProvider ? (
@@ -339,6 +414,28 @@ export default function ResearchData() {
                 </table>
               </div>
             )}
+          </div>
+        )}
+      </div>
+
+      <div className="card">
+        <h2 className="text-sm font-medium text-gray-400 mb-4">Replay Consumer Preview</h2>
+        {!selectedProvider ? (
+          <EmptyState title="Select a provider for replay-consumer preview" icon="[]" />
+        ) : replayConsumerLoading ? (
+          <LoadingSkeleton rows={4} />
+        ) : !replayConsumerPreview?.available ? (
+          <EmptyState title={replayConsumerPreview?.reason || 'Replay consumer preview unavailable'} icon="[]" />
+        ) : (
+          <div className="space-y-3 text-xs">
+            <div className="flex items-center gap-4 text-gray-500">
+              <span>rows: {replayConsumerPreview.row_count}</span>
+              <span>features: {(replayConsumerPreview.summary?.feature_columns || []).length}</span>
+              <span>targets: {(replayConsumerPreview.summary?.target_columns || []).length}</span>
+            </div>
+            <div className="text-gray-500">
+              warnings: {(replayConsumerPreview.summary?.warnings || []).join(', ') || 'none'}
+            </div>
           </div>
         )}
       </div>

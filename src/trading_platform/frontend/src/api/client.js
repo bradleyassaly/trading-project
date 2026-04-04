@@ -75,11 +75,30 @@ export const api = {
     const suffix = query.toString() ? `?${query.toString()}` : ''
     return get(`/research/replay/preview${suffix}`)
   },
+  researchReplayConsumerPreview: (params = {}) => {
+    const query = new URLSearchParams()
+    Object.entries(params).forEach(([key, value]) => {
+      if (Array.isArray(value)) {
+        value.forEach((item) => {
+          if (item != null && item !== '') query.append(key, item)
+        })
+        return
+      }
+      if (value != null && value !== '') query.append(key, value)
+    })
+    const suffix = query.toString() ? `?${query.toString()}` : ''
+    return get(`/research/replay/consumer-preview${suffix}`)
+  },
   registrySummary: () => get('/ops/registry-summary'),
   providerMonitoring: () => get('/ops/provider-monitoring'),
   providerHealth: () => get('/ops/provider-health'),
   providerDetail: (provider) => get(`/ops/providers/${encodeURIComponent(provider)}`),
+  providerTimeline: (provider) => get(`/ops/providers/${encodeURIComponent(provider)}/timeline`),
   monitoredDatasetDetail: (datasetKey) => get(`/ops/datasets/${encodeURIComponent(datasetKey)}`),
+  monitoredDatasetTimeline: (datasetKey) => get(`/ops/datasets/${encodeURIComponent(datasetKey)}/timeline`),
+  paperPortfolio: () => get('/paper/portfolio'),
+  paperTrades: () => get('/paper/trades'),
+  paperScan: () => get('/paper/scan'),
   polymarketLiveMarkets: () => get('/polymarket/live-markets'),
   polymarketMarketTicks: (marketId) => get(`/polymarket/market-ticks/${encodeURIComponent(marketId)}`),
 }

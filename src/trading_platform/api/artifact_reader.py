@@ -21,7 +21,12 @@ from trading_platform.monitoring.provider_monitoring import (
     read_latest_provider_health_summary,
     read_latest_registry_summary,
 )
-from trading_platform.monitoring.drilldown import load_dataset_drilldown, load_provider_drilldown
+from trading_platform.monitoring.drilldown import (
+    load_dataset_drilldown,
+    load_dataset_timeline,
+    load_provider_drilldown,
+    load_provider_timeline,
+)
 from trading_platform.research.dataset_reader import (
     ResearchDatasetReadRequest,
     list_research_datasets,
@@ -29,6 +34,7 @@ from trading_platform.research.dataset_reader import (
     resolve_research_dataset,
 )
 from trading_platform.research.replay_assembly import ReplayAssemblyRequest, assemble_replay_dataset
+from trading_platform.research.replay_consumer import ReplayConsumerRequest, load_replay_consumer_input
 
 
 # Roots — override via environment for testing or non-default layouts
@@ -605,6 +611,51 @@ def read_polymarket_market_ticks(market_id: str) -> dict[str, Any]:
     }
 
 
+# ── Paper trading ────────────────────────────────────────────────────────────
+
+
+def read_paper_portfolio() -> dict[str, Any]:
+    db_path = DATA_ROOT / "kalshi" / "paper_trades.db"
+    if not db_path.exists():
+        return {"available": False, "reason": "No paper trading DB found"}
+    try:
+        from trading_platform.kalshi.paper_executor import KalshiPaperExecutor
+        executor = KalshiPaperExecutor(db_path)
+        summary = executor.get_summary()
+        executor.close()
+        return {"available": True, **summary}
+    except Exception as exc:
+        return {"available": False, "reason": str(exc)}
+
+
+def read_paper_trades() -> dict[str, Any]:
+    db_path = DATA_ROOT / "kalshi" / "paper_trades.db"
+    if not db_path.exists():
+        return {"available": False, "reason": "No paper trading DB found", "data": []}
+    try:
+        from trading_platform.kalshi.paper_executor import KalshiPaperExecutor
+        executor = KalshiPaperExecutor(db_path)
+        trades = executor.get_recent_trades(limit=50)
+        executor.close()
+        return {"available": True, "data": trades, "count": len(trades)}
+    except Exception as exc:
+        return {"available": False, "reason": str(exc), "data": []}
+
+
+def read_paper_scan() -> dict[str, Any]:
+    scan_dir = ARTIFACTS_ROOT / "kalshi_paper"
+    if not scan_dir.exists():
+        return {"available": False, "reason": "No scan artifacts found", "data": []}
+    scans = sorted(scan_dir.glob("scan_*.json"), reverse=True)
+    if not scans:
+        return {"available": False, "reason": "No scan files found", "data": []}
+    try:
+        data = json.loads(scans[0].read_text(encoding="utf-8"))
+        return {"available": True, "scan_file": scans[0].name, **data}
+    except Exception as exc:
+        return {"available": False, "reason": str(exc), "data": []}
+
+
 # Shared research registry and provider monitoring
 
 
@@ -832,3 +883,67 @@ def read_replay_assembly_preview(
         "summary": result.to_summary(),
         "data": rows,
     }
+
+
+def read_replay_consumer_preview(
+    *,
+    dataset_keys: list[str] | None = None,
+    providers: list[str] | None = None,
+    dataset_names: list[str] | None = None,
+    symbols: list[str] | None = None,
+    intervals: list[str] | None = None,
+    start: str | None = None,
+    end: str | None = None,
+    alignment_mode: str = "outer_union",
+    anchor_dataset_key: str | None = None,
+    tolerance: str | None = None,
+    limit: int = 200,
+) -> dict[str, Any]:
+    registry_path = _research_registry_path()
+    if not registry_path.exists():
+        return {"available": False, "reason": "No shared dataset registry found", "data": []}
+    try:
+        result = load_replay_consumer_input(
+            ReplayConsumerRequest(
+                assembly_request=ReplayAssemblyRequest(
+                    registry_path=registry_path,
+                    dataset_keys=list(dataset_keys or []),
+                    providers=list(providers or []),
+                    dataset_names=list(dataset_names or []),
+                    symbols=list(symbols or []),
+                    intervals=list(intervals or []),
+                    start=start,
+                    end=end,
+                    alignment_mode=alignment_mode,
+                    anchor_dataset_key=anchor_dataset_key,
+                    tolerance=tolerance,
+                ),
+                limit=limit,
+            )
+        )
+    except (KeyError, ValueError) as exc:
+        return {"available": False, "reason": str(exc), "data": []}
+    rows = [_safe_row(dict(row)) for _, row in result.frame.iterrows()]
+    return {
+        "available": True,
+        "row_count": int(len(result.frame.index)),
+        "returned_row_count": len(rows),
+        "summary": result.to_summary(),
+        "data": rows,
+    }
+
+
+def read_provider_timeline(provider: str) -> dict[str, Any]:
+    result = load_provider_timeline(
+        monitoring_output_root=_provider_monitoring_root(),
+        provider=provider,
+    )
+    return {"available": True, **result.to_dict()}
+
+
+def read_dataset_timeline(dataset_key: str) -> dict[str, Any]:
+    result = load_dataset_timeline(
+        monitoring_output_root=_provider_monitoring_root(),
+        dataset_key=dataset_key,
+    )
+    return {"available": True, **result.to_dict()}
