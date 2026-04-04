@@ -61,9 +61,25 @@ export const api = {
     const suffix = query.toString() ? `?${query.toString()}` : ''
     return get(`/research/datasets/${encodeURIComponent(datasetKey)}/rows${suffix}`)
   },
+  researchReplayPreview: (params = {}) => {
+    const query = new URLSearchParams()
+    Object.entries(params).forEach(([key, value]) => {
+      if (Array.isArray(value)) {
+        value.forEach((item) => {
+          if (item != null && item !== '') query.append(key, item)
+        })
+        return
+      }
+      if (value != null && value !== '') query.append(key, value)
+    })
+    const suffix = query.toString() ? `?${query.toString()}` : ''
+    return get(`/research/replay/preview${suffix}`)
+  },
   registrySummary: () => get('/ops/registry-summary'),
   providerMonitoring: () => get('/ops/provider-monitoring'),
   providerHealth: () => get('/ops/provider-health'),
+  providerDetail: (provider) => get(`/ops/providers/${encodeURIComponent(provider)}`),
+  monitoredDatasetDetail: (datasetKey) => get(`/ops/datasets/${encodeURIComponent(datasetKey)}`),
   polymarketLiveMarkets: () => get('/polymarket/live-markets'),
   polymarketMarketTicks: (marketId) => get(`/polymarket/market-ticks/${encodeURIComponent(marketId)}`),
 }

@@ -21,12 +21,14 @@ from trading_platform.monitoring.provider_monitoring import (
     read_latest_provider_health_summary,
     read_latest_registry_summary,
 )
+from trading_platform.monitoring.drilldown import load_dataset_drilldown, load_provider_drilldown
 from trading_platform.research.dataset_reader import (
     ResearchDatasetReadRequest,
     list_research_datasets,
     load_research_dataset,
     resolve_research_dataset,
 )
+from trading_platform.research.replay_assembly import ReplayAssemblyRequest, assemble_replay_dataset
 
 
 # Roots — override via environment for testing or non-default layouts
@@ -752,3 +754,81 @@ def read_provider_health_summary() -> dict[str, Any]:
     if not summary:
         return {"available": False, "reason": "No provider health summary found"}
     return {"available": True, **summary}
+
+
+def read_provider_drilldown(provider: str) -> dict[str, Any]:
+    registry_path = _research_registry_path()
+    monitoring_root = _provider_monitoring_root()
+    if not registry_path.exists():
+        return {"available": False, "reason": "No shared dataset registry found"}
+    result = load_provider_drilldown(
+        registry_path=registry_path,
+        monitoring_output_root=monitoring_root,
+        provider=provider,
+    )
+    if not result.datasets and not result.monitoring_records and not result.health_summary:
+        return {"available": False, "reason": f"No shared drill-down data found for provider '{provider}'"}
+    return {"available": True, **result.to_dict()}
+
+
+def read_dataset_drilldown(dataset_key: str) -> dict[str, Any]:
+    registry_path = _research_registry_path()
+    monitoring_root = _provider_monitoring_root()
+    if not registry_path.exists():
+        return {"available": False, "reason": "No shared dataset registry found"}
+    try:
+        result = load_dataset_drilldown(
+            registry_path=registry_path,
+            monitoring_output_root=monitoring_root,
+            dataset_key=dataset_key,
+        )
+    except KeyError as exc:
+        return {"available": False, "reason": str(exc)}
+    return {"available": True, **result.to_dict()}
+
+
+def read_replay_assembly_preview(
+    *,
+    dataset_keys: list[str] | None = None,
+    providers: list[str] | None = None,
+    dataset_names: list[str] | None = None,
+    symbols: list[str] | None = None,
+    intervals: list[str] | None = None,
+    start: str | None = None,
+    end: str | None = None,
+    alignment_mode: str = "outer_union",
+    anchor_dataset_key: str | None = None,
+    tolerance: str | None = None,
+    limit: int = 200,
+) -> dict[str, Any]:
+    registry_path = _research_registry_path()
+    if not registry_path.exists():
+        return {"available": False, "reason": "No shared dataset registry found", "data": []}
+    try:
+        result = assemble_replay_dataset(
+            ReplayAssemblyRequest(
+                registry_path=registry_path,
+                dataset_keys=list(dataset_keys or []),
+                providers=list(providers or []),
+                dataset_names=list(dataset_names or []),
+                symbols=list(symbols or []),
+                intervals=list(intervals or []),
+                start=start,
+                end=end,
+                alignment_mode=alignment_mode,
+                anchor_dataset_key=anchor_dataset_key,
+                tolerance=tolerance,
+            )
+        )
+    except (KeyError, ValueError) as exc:
+        return {"available": False, "reason": str(exc), "data": []}
+
+    preview = result.frame.head(max(int(limit), 0))
+    rows = [_safe_row(dict(row)) for _, row in preview.iterrows()]
+    return {
+        "available": True,
+        "row_count": int(len(result.frame.index)),
+        "returned_row_count": len(rows),
+        "summary": result.to_summary(),
+        "data": rows,
+    }

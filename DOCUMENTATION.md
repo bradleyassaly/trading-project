@@ -1416,6 +1416,91 @@ Notification handling now wraps the existing monitoring steps instead of replaci
 #### Recommended Next Milestone
 - G-11 - Add additional asset-class publishers to the shared research dataset registry and unify scheduler monitoring dashboards across providers
 
+### G-13 - Add cross-provider replay dataset assembly and operator drill-down workflows on top of the shared registry readers
+Date: 2026-04-03
+Status: DONE
+
+#### Summary
+Added a shared cross-provider replay assembly layer on top of the registry-backed dataset readers, shared provider and dataset drill-down readers on top of the provider monitoring artifacts, new API endpoints for replay preview and operator drill-down, a small dashboard extension for provider-to-dataset drill-down, and a thin `research replay assemble` CLI for bounded batch assembly.
+
+#### Why
+G-12 made the shared registry and provider monitoring artifacts readable, but downstream research code still lacked a stable way to build replay-ready mixed-provider datasets and operators still lacked a clean path from provider health rollups down to concrete dataset detail. This milestone closes that gap by turning shared reads into actual replay assembly and drill-down workflows.
+
+#### Files Changed
+- `src/trading_platform/research/replay_assembly.py`
+- `src/trading_platform/monitoring/drilldown.py`
+- `src/trading_platform/api/artifact_reader.py`
+- `src/trading_platform/api/main.py`
+- `src/trading_platform/frontend/src/api/client.js`
+- `src/trading_platform/frontend/src/pages/ResearchData.jsx`
+- `src/trading_platform/cli/commands/research_replay_assemble.py`
+- `src/trading_platform/cli/grouped_parser.py`
+- `tests/test_replay_assembly.py`
+- `tests/api/test_api_endpoints.py`
+- `tests/test_cli_grouping.py`
+- `MILESTONES.md`
+- `DOCUMENTATION.md`
+
+#### Tests Run
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\pytest.exe tests/test_replay_assembly.py tests/api/test_api_endpoints.py tests/test_cli_grouping.py -q`
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\pytest.exe tests/test_shared_dataset_reader.py tests/test_replay_assembly.py tests/api/test_api_endpoints.py tests/test_provider_registry_and_monitoring.py tests/test_research_dataset_registry.py tests/test_cli_grouping.py tests/binance/test_registry_integration.py -q`
+
+#### Verification Commands
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\pytest.exe tests/test_replay_assembly.py tests/api/test_api_endpoints.py tests/test_cli_grouping.py -q`
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\pytest.exe tests/test_shared_dataset_reader.py tests/test_replay_assembly.py tests/api/test_api_endpoints.py tests/test_provider_registry_and_monitoring.py tests/test_research_dataset_registry.py tests/test_cli_grouping.py tests/binance/test_registry_integration.py -q`
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\python.exe -m trading_platform.cli research replay assemble --registry-path data/research/dataset_registry.json --providers binance kalshi --alignment-mode outer_union --output-path artifacts/research_replay/assembled.parquet`
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\python.exe -m uvicorn trading_platform.api.main:app --port 8001`
+
+#### Architecture / Design Notes
+The new `trading_platform.research.replay_assembly` module is deliberately narrow. It does not try to erase provider differences. Instead it:
+- resolves concrete registry entries through the shared dataset readers
+- normalizes each component to a common `event_time` identity when possible
+- preserves shared identity columns such as `symbol` and `interval` when present
+- namespaces non-identity columns as `{provider}__{dataset_name}__{column}` so mixed-provider assemblies stay explicit
+- records a machine-readable component summary and join plan alongside the assembled frame
+
+Two alignment modes are supported:
+- `outer_union`: outer-merge components on shared identity columns, anchored on exact shared timestamps
+- `anchor`: left-join components onto one anchor dataset using backward `merge_asof` on `event_time` plus any shared `symbol` and `interval` keys, with optional tolerance
+
+This is enough to support practical replay and research assembly without introducing a giant generic temporal join framework.
+
+The drill-down layer reuses existing truth artifacts:
+- shared registry entries
+- `latest_registry_summary.json`
+- `latest_monitoring_summary.json`
+- `cross_provider_health_summary.json`
+
+`load_provider_drilldown()` and `load_dataset_drilldown()` turn those artifacts into explicit operator-facing views without asking any provider pipeline to regenerate data.
+
+#### API / Consumer Usage
+- `GET /api/research/replay/preview?provider=binance&provider=kalshi&limit=5` previews a registry-backed replay assembly using the shared reader layer.
+- `GET /api/ops/providers/{provider}` returns provider drill-down detail including health, monitoring records, and registry datasets.
+- `GET /api/ops/datasets/{dataset_key}` returns dataset drill-down detail including registry metadata, monitoring record, and provider health context.
+
+#### Dashboard Workflow
+The Research Data page now supports:
+- selecting a provider from the provider-health rollup
+- drilling into the provider's registered datasets
+- selecting a dataset to inspect registry metadata plus monitoring state
+- previewing replay assembly rows for the selected provider through the shared replay preview API
+
+This remains a lightweight inspection-oriented workflow. It is not intended to be a full research notebook replacement.
+
+#### Artifact Layout
+- Replay assembly parquet output when requested: caller-defined, for example `artifacts/research_replay/assembled.parquet`
+- Replay assembly summary artifact when requested: caller-defined or `artifacts/research_replay/latest_replay_assembly_summary.json`
+- Provider and dataset drill-down readers do not create new truth artifacts; they resolve the existing shared registry and monitoring artifacts
+
+#### Known Issues / Limitations
+- Replay assembly is intentionally narrow. It supports explicit `outer_union` and `anchor` semantics, but it is not a full cross-asset replay engine.
+- Provider datasets still differ materially. The assembly layer namespaces columns and documents join assumptions rather than pretending the schemas are identical.
+- The dashboard preview is bounded and inspection-focused; large replay datasets should still be assembled through Python or the CLI.
+- Anchor alignment uses backward `merge_asof` semantics. That is deliberate, but downstream users should still choose anchors and tolerances carefully.
+
+#### Recommended Next Milestone
+- G-14 - Add cross-provider replay consumers in the research loop and richer operator timeline drill-down on shared monitoring artifacts
+
 ### G-12 - Add cross-provider research dataset readers and dashboard/API consumers for the shared registry and provider monitoring summaries
 Date: 2026-04-03
 Status: DONE

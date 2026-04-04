@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { api } from '../api/client'
 import { useApi } from '../hooks/useApi'
 import LoadingSkeleton from '../components/LoadingSkeleton'
@@ -20,40 +20,61 @@ function StatusBadge({ status }) {
 
 export default function ResearchData() {
   const [providerFilter, setProviderFilter] = useState('')
+  const [selectedProvider, setSelectedProvider] = useState('')
   const [selectedKey, setSelectedKey] = useState(null)
 
   const datasetsFetcher = useCallback(
     () => api.researchDatasets(providerFilter ? { provider: providerFilter } : {}),
     [providerFilter],
   )
-  const detailFetcher = useCallback(
-    () => (selectedKey ? api.researchDatasetDetail(selectedKey) : Promise.resolve(null)),
+  const monitoringFetcher = useCallback(() => api.providerMonitoring(), [])
+  const healthFetcher = useCallback(() => api.providerHealth(), [])
+  const providerDetailFetcher = useCallback(
+    () => (selectedProvider ? api.providerDetail(selectedProvider) : Promise.resolve(null)),
+    [selectedProvider],
+  )
+  const datasetDetailFetcher = useCallback(
+    () => (selectedKey ? api.monitoredDatasetDetail(selectedKey) : Promise.resolve(null)),
     [selectedKey],
   )
   const rowsFetcher = useCallback(
     () => (selectedKey ? api.researchDatasetRows(selectedKey, { limit: 5 }) : Promise.resolve(null)),
     [selectedKey],
   )
-  const monitoringFetcher = useCallback(() => api.providerMonitoring(), [])
-  const healthFetcher = useCallback(() => api.providerHealth(), [])
+  const replayFetcher = useCallback(
+    () => (
+      selectedProvider
+        ? api.researchReplayPreview({ provider: [selectedProvider], limit: 5, alignment_mode: 'outer_union' })
+        : Promise.resolve(null)
+    ),
+    [selectedProvider],
+  )
 
   const { data: datasets, loading: datasetsLoading } = useApi(datasetsFetcher, 30_000)
-  const { data: detail, loading: detailLoading } = useApi(detailFetcher, 30_000)
-  const { data: rows, loading: rowsLoading } = useApi(rowsFetcher, 30_000)
   const { data: monitoring } = useApi(monitoringFetcher, 30_000)
   const { data: health } = useApi(healthFetcher, 30_000)
+  const { data: providerDetail, loading: providerDetailLoading } = useApi(providerDetailFetcher, 30_000)
+  const { data: datasetDetail, loading: datasetDetailLoading } = useApi(datasetDetailFetcher, 30_000)
+  const { data: rows, loading: rowsLoading } = useApi(rowsFetcher, 30_000)
+  const { data: replayPreview, loading: replayLoading } = useApi(replayFetcher, 30_000)
 
   const providerOptions = useMemo(() => {
     const values = (datasets?.data || []).map((entry) => entry.provider)
     return Array.from(new Set(values)).sort()
   }, [datasets])
 
+  useEffect(() => {
+    if (!selectedProvider && (health?.provider_summaries || []).length) {
+      setSelectedProvider(health.provider_summaries[0].provider)
+    }
+  }, [health, selectedProvider])
+
+  const previewColumns = rows?.data?.length ? Object.keys(rows.data[0]) : []
+  const replayColumns = replayPreview?.data?.length ? Object.keys(replayPreview.data[0]) : []
   const selectedMonitoring = useMemo(() => {
     if (!selectedKey || !monitoring?.records) return null
     return monitoring.records.find((record) => record.dataset_key === selectedKey) || null
   }, [monitoring, selectedKey])
-
-  const previewColumns = rows?.data?.length ? Object.keys(rows.data[0]) : []
 
   return (
     <div className="p-6 space-y-6">
@@ -64,7 +85,7 @@ export default function ResearchData() {
         </p>
         <h1 className="text-lg font-semibold text-gray-200">Shared Research Registry</h1>
         <p className="text-sm text-gray-500 mt-1">
-          Inspect registry-backed datasets and the latest provider monitoring rollups without reading provider-specific paths directly.
+          Inspect shared registry datasets, drill into provider health, and preview replay-ready assemblies from the shared reader layer.
         </p>
       </div>
 
@@ -104,7 +125,10 @@ export default function ResearchData() {
                     <tr
                       key={entry.dataset_key}
                       className={`cursor-pointer hover:bg-surface-hover ${selectedKey === entry.dataset_key ? 'bg-accent-blue/10' : ''}`}
-                      onClick={() => setSelectedKey(entry.dataset_key)}
+                      onClick={() => {
+                        setSelectedKey(entry.dataset_key)
+                        setSelectedProvider(entry.provider)
+                      }}
                     >
                       <td className="py-2 pr-4 text-gray-300">{entry.provider}</td>
                       <td className="py-2 pr-4">
@@ -129,7 +153,12 @@ export default function ResearchData() {
           ) : (
             <div className="space-y-3">
               {(health.provider_summaries || []).map((provider) => (
-                <div key={provider.provider} className="rounded border border-surface-border p-3">
+                <button
+                  type="button"
+                  key={provider.provider}
+                  className={`w-full text-left rounded border p-3 ${selectedProvider === provider.provider ? 'border-accent-blue bg-accent-blue/10' : 'border-surface-border'}`}
+                  onClick={() => setSelectedProvider(provider.provider)}
+                >
                   <div className="flex items-center justify-between gap-3">
                     <div>
                       <div className="text-sm text-gray-200">{provider.provider}</div>
@@ -139,58 +168,94 @@ export default function ResearchData() {
                     </div>
                     <StatusBadge status={provider.status} />
                   </div>
-                </div>
+                </button>
               ))}
             </div>
           )}
         </div>
       </div>
 
-      <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+      <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
         <div className="card">
-          <h2 className="text-sm font-medium text-gray-400 mb-4">Dataset Detail</h2>
+          <h2 className="text-sm font-medium text-gray-400 mb-4">Provider Drill-Down</h2>
+          {!selectedProvider ? (
+            <EmptyState title="Select a provider" icon="+" />
+          ) : providerDetailLoading ? (
+            <LoadingSkeleton rows={5} />
+          ) : !providerDetail?.available ? (
+            <EmptyState title={providerDetail?.reason || 'No provider detail available'} icon="+" />
+          ) : (
+            <div className="space-y-3 text-xs">
+              <div className="flex items-center justify-between">
+                <div className="text-gray-200">{providerDetail.provider}</div>
+                <StatusBadge status={providerDetail.health_summary?.status} />
+              </div>
+              <div className="text-gray-500">
+                Registry entries: {(providerDetail.datasets || []).length} | monitored scopes: {(providerDetail.monitoring_records || []).length}
+              </div>
+              <div className="rounded border border-surface-border p-3">
+                <div className="text-gray-500 mb-1">Provider datasets</div>
+                <div className="space-y-1">
+                  {(providerDetail.datasets || []).map((dataset) => (
+                    <button
+                      type="button"
+                      key={dataset.dataset_key}
+                      className="block w-full text-left text-accent-blue"
+                      onClick={() => setSelectedKey(dataset.dataset_key)}
+                    >
+                      {dataset.dataset_key}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+
+        <div className="card">
+          <h2 className="text-sm font-medium text-gray-400 mb-4">Dataset Drill-Down</h2>
           {!selectedKey ? (
             <EmptyState title="Select a dataset" icon="[]" />
-          ) : detailLoading ? (
+          ) : datasetDetailLoading ? (
             <LoadingSkeleton rows={4} />
-          ) : !detail?.available ? (
-            <EmptyState title={detail?.reason || 'Dataset detail unavailable'} icon="[]" />
+          ) : !datasetDetail?.available ? (
+            <EmptyState title={datasetDetail?.reason || 'Dataset detail unavailable'} icon="[]" />
           ) : (
             <div className="space-y-3 text-xs">
               <div>
                 <div className="text-gray-500">Key</div>
-                <div className="font-mono text-gray-300 break-all">{detail.data.dataset_key}</div>
+                <div className="font-mono text-gray-300 break-all">{datasetDetail.dataset.dataset_key}</div>
               </div>
               <div>
                 <div className="text-gray-500">Path</div>
-                <div className="font-mono text-gray-300 break-all">{detail.data.dataset_path}</div>
+                <div className="font-mono text-gray-300 break-all">{datasetDetail.dataset.dataset_path}</div>
               </div>
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <div className="text-gray-500">Time Column</div>
-                  <div className="text-gray-300">{detail.data.time_column || '-'}</div>
+                  <div className="text-gray-300">{datasetDetail.dataset.time_column || '-'}</div>
                 </div>
                 <div>
                   <div className="text-gray-500">Storage</div>
-                  <div className="text-gray-300">{detail.data.storage_type}</div>
+                  <div className="text-gray-300">{datasetDetail.dataset.storage_type}</div>
                 </div>
               </div>
               <div>
                 <div className="text-gray-500">Primary Keys</div>
-                <div className="text-gray-300">{(detail.data.primary_keys || []).join(', ') || '-'}</div>
+                <div className="text-gray-300">{(datasetDetail.dataset.primary_keys || []).join(', ') || '-'}</div>
               </div>
               <div>
-                <div className="text-gray-500">Columns</div>
-                <div className="text-gray-300">{(detail.data.schema_columns || []).join(', ') || '-'}</div>
+                <div className="text-gray-500">Provider health</div>
+                <div className="mt-1"><StatusBadge status={datasetDetail.provider_health_summary?.status} /></div>
               </div>
-              {selectedMonitoring && (
+              {(selectedMonitoring || datasetDetail.monitoring_record) && (
                 <div className="rounded border border-surface-border p-3">
                   <div className="flex items-center justify-between">
                     <div className="text-gray-200">Monitoring</div>
-                    <StatusBadge status={selectedMonitoring.status} />
+                    <StatusBadge status={(datasetDetail.monitoring_record || selectedMonitoring)?.status} />
                   </div>
                   <div className="mt-2 text-gray-500">
-                    Sync: {selectedMonitoring.latest_sync_outcome || '-'} | stale: {String(selectedMonitoring.stale)}
+                    Sync: {(datasetDetail.monitoring_record || selectedMonitoring)?.latest_sync_outcome || '-'} | stale: {String((datasetDetail.monitoring_record || selectedMonitoring)?.stale)}
                   </div>
                 </div>
               )}
@@ -231,6 +296,51 @@ export default function ResearchData() {
             </div>
           )}
         </div>
+      </div>
+
+      <div className="card">
+        <h2 className="text-sm font-medium text-gray-400 mb-4">Replay Assembly Preview</h2>
+        {!selectedProvider ? (
+          <EmptyState title="Select a provider for assembly preview" icon="[]" />
+        ) : replayLoading ? (
+          <LoadingSkeleton rows={4} />
+        ) : !replayPreview?.available ? (
+          <EmptyState title={replayPreview?.reason || 'Replay preview unavailable'} icon="[]" />
+        ) : (
+          <div className="space-y-3">
+            <div className="flex items-center gap-4 text-xs text-gray-500">
+              <span>rows: {replayPreview.row_count}</span>
+              <span>mode: {replayPreview.summary?.metadata?.alignment_mode || replayPreview.summary?.request?.alignment_mode}</span>
+              <span>datasets: {(replayPreview.summary?.components || []).length}</span>
+            </div>
+            {!replayPreview.data?.length ? (
+              <EmptyState title="No assembled rows for current scope" icon="[]" />
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-xs">
+                  <thead>
+                    <tr className="border-b border-surface-border text-left text-gray-500">
+                      {replayColumns.map((column) => (
+                        <th key={column} className="pb-2 pr-4">{column}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-surface-border">
+                    {(replayPreview.data || []).map((row, index) => (
+                      <tr key={index}>
+                        {replayColumns.map((column) => (
+                          <td key={column} className="py-2 pr-4 text-gray-300">
+                            {row[column] == null ? '-' : String(row[column])}
+                          </td>
+                        ))}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        )}
       </div>
     </div>
   )

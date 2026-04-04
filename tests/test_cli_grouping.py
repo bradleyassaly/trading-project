@@ -215,6 +215,35 @@ def test_grouped_research_dataset_registry_list_command_parses() -> None:
     assert args.format == "json"
 
 
+def test_grouped_research_replay_assemble_command_parses() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "research",
+            "replay",
+            "assemble",
+            "--providers",
+            "binance",
+            "kalshi",
+            "--symbols",
+            "BTCUSDT",
+            "FED-2024",
+            "--alignment-mode",
+            "anchor",
+            "--anchor-dataset-key",
+            "binance.crypto_market_features",
+            "--output-path",
+            "artifacts/research_replay/assembled.parquet",
+        ]
+    )
+
+    assert args.research_command == "replay"
+    assert args.research_replay_command == "assemble"
+    assert args.providers == ["binance", "kalshi"]
+    assert args.alignment_mode == "anchor"
+    assert args.anchor_dataset_key == "binance.crypto_market_features"
+
+
 def test_grouped_research_leaderboard_command_parses() -> None:
     parser = build_parser()
     args = parser.parse_args(

@@ -271,3 +271,42 @@ def ops_provider_monitoring() -> dict[str, Any]:
 @app.get("/api/ops/provider-health")
 def ops_provider_health() -> dict[str, Any]:
     return reader.read_provider_health_summary()
+
+
+@app.get("/api/ops/providers/{provider}")
+def ops_provider_detail(provider: str) -> dict[str, Any]:
+    return reader.read_provider_drilldown(provider)
+
+
+@app.get("/api/ops/datasets/{dataset_key}")
+def ops_dataset_detail(dataset_key: str) -> dict[str, Any]:
+    return reader.read_dataset_drilldown(dataset_key)
+
+
+@app.get("/api/research/replay/preview")
+def research_replay_preview(
+    dataset_key: list[str] | None = Query(default=None),
+    provider: list[str] | None = Query(default=None),
+    dataset_name: list[str] | None = Query(default=None),
+    symbol: list[str] | None = Query(default=None),
+    interval: list[str] | None = Query(default=None),
+    start: str | None = None,
+    end: str | None = None,
+    alignment_mode: str = "outer_union",
+    anchor_dataset_key: str | None = None,
+    tolerance: str | None = None,
+    limit: int = 50,
+) -> dict[str, Any]:
+    return reader.read_replay_assembly_preview(
+        dataset_keys=dataset_key,
+        providers=provider,
+        dataset_names=dataset_name,
+        symbols=symbol,
+        intervals=interval,
+        start=start,
+        end=end,
+        alignment_mode=alignment_mode,
+        anchor_dataset_key=anchor_dataset_key,
+        tolerance=tolerance,
+        limit=limit,
+    )

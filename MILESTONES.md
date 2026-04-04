@@ -809,6 +809,32 @@ Dependencies:
 
 ---
 
+## G-13 — Add cross-provider replay dataset assembly and operator drill-down workflows on top of the shared registry readers
+Status: DONE
+
+Objective:
+Make the shared registry readers actionable for research and operations by adding replay-ready cross-provider dataset assembly plus provider and dataset drill-down consumers built on the shared monitoring artifacts.
+
+Expected scope:
+- add a shared replay assembly contract that resolves datasets through the shared registry readers rather than provider-specific paths
+- support bounded replay assembly across one or more providers with explicit `outer_union` and `anchor` alignment modes
+- namespace provider and dataset columns predictably so mixed-provider assemblies remain inspectable and provenance-safe
+- add shared provider and dataset drill-down readers that resolve from provider health and monitoring rollups down to concrete registry entries and artifact references
+- expose replay preview and drill-down consumers through the existing FastAPI and dashboard surfaces
+- add a thin `research replay assemble` CLI for bounded batch assembly and optional artifact emission
+
+Acceptance criteria:
+- downstream research code can assemble replay-ready datasets from registry-backed readers using provider filters or explicit dataset keys
+- the replay assembly contract captures resolved components, join plan, row identity assumptions, namespacing rules, and timestamp alignment semantics
+- operators can drill from provider rollups to provider dataset lists and dataset-specific monitoring detail without provider-specific file browsing
+- API consumers can preview replay assemblies and read provider or dataset drill-down detail from existing registry and monitoring artifacts
+- tests cover single-provider and cross-provider replay assembly, alignment behavior, drill-down readers, API routes, and CLI parsing without regressing existing provider flows
+
+Dependencies:
+- G-12
+
+---
+
 ## H-01 — Expand candidate grid generation
 Status: DONE
 

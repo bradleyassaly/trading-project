@@ -64,7 +64,7 @@ class TestLiveCandleCollector:
 
         client = FakeLiveCandleClient(
             events_by_series={"KXFED": [{"event_ticker": "KXFED-27APR"}]},
-            markets_by_event={"KXFED-27APR": [{"ticker": "KXFED-27APR-T4.25"}]},
+            markets_by_event={"KXFED-27APR": [{"ticker": "KXFED-27APR-T4.25", "close_time": "2027-04-30T00:00:00Z"}]},
             candles_by_ticker={"KXFED-27APR-T4.25": candles},
         )
         collector = KalshiLiveCandleCollector(client, series_tickers=["KXFED"])
@@ -78,6 +78,12 @@ class TestLiveCandleCollector:
 
         # Raw candles saved
         assert (tmp_path / "candles" / "KXFED-27APR-T4.25.json").exists()
+
+        # Feature parquet has days_to_close populated (not all NaN)
+        import pandas as pd
+        feat_df = pd.read_parquet(tmp_path / "features" / "KXFED-27APR-T4.25.parquet")
+        if "days_to_close" in feat_df.columns:
+            assert feat_df["days_to_close"].notna().any(), "days_to_close should not be all NaN"
 
         # Feature parquet written
         assert result.feature_files_written == 1

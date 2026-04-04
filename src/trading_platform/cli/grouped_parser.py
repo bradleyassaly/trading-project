@@ -121,6 +121,7 @@ from trading_platform.cli.commands.research_promote import cmd_research_promote
 from trading_platform.cli.commands.research_promotion_candidates import cmd_research_promotion_candidates
 from trading_platform.cli.commands.research_dataset_registry_list import cmd_research_dataset_registry_list
 from trading_platform.cli.commands.research_dataset_registry_publish import cmd_research_dataset_registry_publish
+from trading_platform.cli.commands.research_replay_assemble import cmd_research_replay_assemble
 from trading_platform.cli.commands.research_refresh import cmd_research_refresh
 from trading_platform.cli.commands.research_registry_build import cmd_research_registry_build
 from trading_platform.cli.commands.research_validate_backtester import cmd_research_validate_backtester
@@ -3725,6 +3726,69 @@ def build_parser() -> argparse.ArgumentParser:
         help="Render output as human-readable text or JSON.",
     )
     research_dataset_registry_list.set_defaults(func=cmd_research_dataset_registry_list)
+    research_replay = research_subparsers.add_parser(
+        "replay", help="Shared registry-backed replay dataset assembly commands"
+    )
+    research_replay_subparsers = research_replay.add_subparsers(
+        dest="research_replay_command",
+        required=True,
+    )
+    research_replay_assemble = research_replay_subparsers.add_parser(
+        "assemble", help="Assemble replay-ready datasets from shared registry readers"
+    )
+    research_replay_assemble.add_argument(
+        "--registry-path",
+        type=str,
+        default="data/research/dataset_registry.json",
+        help="Path to the shared dataset registry JSON artifact.",
+    )
+    research_replay_assemble.add_argument("--dataset-keys", nargs="+", default=None, help="Explicit dataset keys to assemble.")
+    research_replay_assemble.add_argument("--providers", nargs="+", default=None, help="Optional provider filters.")
+    research_replay_assemble.add_argument("--asset-class", type=str, default=None, help="Optional asset-class filter.")
+    research_replay_assemble.add_argument("--dataset-names", nargs="+", default=None, help="Optional dataset-name filters.")
+    research_replay_assemble.add_argument("--symbols", nargs="+", default=None, help="Optional symbol or market filters.")
+    research_replay_assemble.add_argument("--intervals", nargs="+", default=None, help="Optional interval filters.")
+    research_replay_assemble.add_argument("--start", type=str, default=None, help="Inclusive start timestamp filter.")
+    research_replay_assemble.add_argument("--end", type=str, default=None, help="Inclusive end timestamp filter.")
+    research_replay_assemble.add_argument(
+        "--alignment-mode",
+        type=str,
+        choices=["outer_union", "anchor"],
+        default="outer_union",
+        help="Replay alignment mode.",
+    )
+    research_replay_assemble.add_argument(
+        "--anchor-dataset-key",
+        type=str,
+        default=None,
+        help="Anchor dataset key when using anchor alignment.",
+    )
+    research_replay_assemble.add_argument(
+        "--tolerance",
+        type=str,
+        default=None,
+        help="Optional backward-asof tolerance for anchor alignment, e.g. 5m.",
+    )
+    research_replay_assemble.add_argument(
+        "--output-path",
+        type=str,
+        default=None,
+        help="Optional parquet output path for the assembled replay dataset.",
+    )
+    research_replay_assemble.add_argument(
+        "--summary-path",
+        type=str,
+        default="artifacts/research_replay/latest_replay_assembly_summary.json",
+        help="Summary artifact path when output is written.",
+    )
+    research_replay_assemble.add_argument(
+        "--format",
+        type=str,
+        default="text",
+        choices=["text", "json"],
+        help="Render output as human-readable text or JSON.",
+    )
+    research_replay_assemble.set_defaults(func=cmd_research_replay_assemble)
     research_leaderboard = research_subparsers.add_parser(
         "leaderboard", help="Build a cross-run research leaderboard from manifest summaries"
     )

@@ -607,3 +607,47 @@ def test_provider_monitoring_artifact_endpoints(tmp_path, monkeypatch):
     assert health_resp.status_code == 200
     assert health_resp.json()["available"] is True
     assert health_resp.json()["overall_status"] == "healthy"
+
+
+def test_provider_detail_and_replay_preview_endpoints(tmp_path, monkeypatch):
+    monkeypatch.setattr(reader, "ARTIFACTS_ROOT", tmp_path / "artifacts")
+    monkeypatch.setattr(reader, "DATA_ROOT", tmp_path / "data")
+    dataset_key = _write_registry_entry(tmp_path)
+    _write_json(
+        tmp_path / "artifacts" / "provider_monitoring" / "latest_registry_summary.json",
+        {"generated_at": "2024-01-01T00:00:00Z", "entry_count": 1},
+    )
+    _write_json(
+        tmp_path / "artifacts" / "provider_monitoring" / "latest_monitoring_summary.json",
+        {
+            "generated_at": "2024-01-01T00:00:00Z",
+            "records": [{"provider": "binance", "dataset_key": dataset_key, "status": "healthy", "stale": False}],
+        },
+    )
+    _write_json(
+        tmp_path / "artifacts" / "provider_monitoring" / "cross_provider_health_summary.json",
+        {
+            "generated_at": "2024-01-01T00:00:00Z",
+            "provider_summaries": [{"provider": "binance", "status": "healthy", "dataset_count": 1, "stale_dataset_count": 0}],
+        },
+    )
+
+    provider_resp = client.get("/api/ops/providers/binance")
+    assert provider_resp.status_code == 200
+    provider_payload = provider_resp.json()
+    assert provider_payload["available"] is True
+    assert provider_payload["provider"] == "binance"
+    assert len(provider_payload["datasets"]) == 1
+
+    dataset_resp = client.get(f"/api/ops/datasets/{dataset_key}")
+    assert dataset_resp.status_code == 200
+    dataset_payload = dataset_resp.json()
+    assert dataset_payload["available"] is True
+    assert dataset_payload["dataset"]["dataset_key"] == dataset_key
+
+    replay_resp = client.get("/api/research/replay/preview?provider=binance&limit=1")
+    assert replay_resp.status_code == 200
+    replay_payload = replay_resp.json()
+    assert replay_payload["available"] is True
+    assert replay_payload["returned_row_count"] == 1
+    assert replay_payload["summary"]["metadata"]["alignment_mode"] == "outer_union"
