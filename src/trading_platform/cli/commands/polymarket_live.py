@@ -133,5 +133,32 @@ def cmd_polymarket_live_collect(args: argparse.Namespace) -> None:
         print(f"  ... and {len(live_infos) - 5} more")
     print()
 
-    collector = PolymarketLiveCollector(config, live_infos)
+    # Initialize whale detection pipeline
+    tripwire = None
+    signal_engine = None
+    paper_executor = None
+    try:
+        from trading_platform.polymarket.market_universe import MarketUniverse
+        from trading_platform.polymarket.whale_tripwire import WhaleTripwire
+        from trading_platform.polymarket.whale_signal_engine import WhaleSignalEngine
+        from trading_platform.polymarket.polymarket_paper_executor import PolymarketPaperExecutor
+
+        universe = MarketUniverse()
+        if not universe.load_cached():
+            print("Refreshing market universe...")
+            universe.refresh(max_per_category=25)
+
+        tripwire = WhaleTripwire(universe=universe)
+        signal_engine = WhaleSignalEngine()
+        paper_executor = PolymarketPaperExecutor()
+        print(f"  whale detection: ENABLED (tier1={len(tripwire.watched_tier1)}, tier2={len(tripwire.watched_tier2)})")
+    except Exception as exc:
+        print(f"  whale detection: DISABLED ({exc})")
+
+    collector = PolymarketLiveCollector(
+        config, live_infos,
+        whale_tripwire=tripwire,
+        signal_engine=signal_engine,
+        paper_executor=paper_executor,
+    )
     asyncio.run(collector.run())

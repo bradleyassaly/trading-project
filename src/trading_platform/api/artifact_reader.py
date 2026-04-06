@@ -886,13 +886,15 @@ def read_smart_money_wallet_trades(address: str, *, page: int = 1, limit: int = 
 
 
 _SIGNAL_ALLOCATIONS = {
-    "whale_entry":       {"allocated": 2000, "stake_per_trade": 100},
-    "convergence":       {"allocated": 2500, "stake_per_trade": 125},
-    "contrarian_whale":  {"allocated": 1500, "stake_per_trade": 75},
-    "position_building": {"allocated": 1500, "stake_per_trade": 75},
-    "cross_type":        {"allocated": 1500, "stake_per_trade": 75},
-    "cascade":           {"allocated": 500,  "stake_per_trade": 25},
-    "domain_specialist": {"allocated": 500,  "stake_per_trade": 25},
+    "wallet_reversal":    {"allocated": 1800, "stake_per_trade": 90},
+    "cascade":            {"allocated": 1500, "stake_per_trade": 75},
+    "oversized_bet":      {"allocated": 1500, "stake_per_trade": 75},
+    "accumulation":       {"allocated": 1200, "stake_per_trade": 60},
+    "market_maker_flip":  {"allocated": 1200, "stake_per_trade": 60},
+    "convergence":        {"allocated": 1200, "stake_per_trade": 60},
+    "specialist_entry":   {"allocated":  800, "stake_per_trade": 40},
+    "pre_deadline_surge": {"allocated":  500, "stake_per_trade": 25},
+    "whale_entry":        {"allocated":  300, "stake_per_trade": 15},
 }
 
 
@@ -1002,9 +1004,11 @@ def read_paper_pnl_history() -> dict[str, Any]:
 
 
 def read_signals_performance() -> dict[str, Any]:
-    """Signal type performance from wallet alerts + paper trade outcomes."""
+    """Signal type performance from market_signals table."""
     db = _get_wallet_db()
     by_type: list[dict] = []
+    total_fired = 0
+    total_resolved = 0
 
     for sig_type, alloc in _SIGNAL_ALLOCATIONS.items():
         entry = {
@@ -1015,32 +1019,41 @@ def read_signals_performance() -> dict[str, Any]:
             "win_rate": None, "avg_ev": None, "profit_factor": None,
             "cumulative_pnl": 0, "status": "building",
         }
-        by_type.append(entry)
 
-    total_fired = 0
-    total_resolved = 0
+        if db:
+            try:
+                with db._lock:
+                    row = db._conn.execute(
+                        """SELECT COUNT(*) as fired,
+                                  SUM(CASE WHEN status='resolved' THEN 1 ELSE 0 END) as resolved,
+                                  SUM(CASE WHEN status='resolved' AND confidence > 0.5 THEN 1 ELSE 0 END) as wins,
+                                  AVG(CASE WHEN status='resolved' THEN confidence END) as avg_conf
+                           FROM market_signals WHERE signal_type = ?""",
+                        (sig_type,),
+                    ).fetchone()
+                if row:
+                    entry["fired"] = row[0] or 0
+                    entry["resolved"] = row[1] or 0
+                    entry["wins"] = row[2] or 0
+                    total_fired += entry["fired"]
+                    total_resolved += entry["resolved"]
+            except Exception:
+                pass
 
-    if db:
-        try:
-            alerts = db.get_alerts(limit=5000)
-            for a in alerts:
-                at = a.get("alert_type") or a.get("wallet_type") or "unknown"
-                for entry in by_type:
-                    if entry["signal_type"] == at:
-                        entry["fired"] += 1
-                        total_fired += 1
-                        break
-        except Exception:
-            pass
-
-    for entry in by_type:
         r = entry["resolved"]
         if r >= 10:
             wr = entry["wins"] / r if r > 0 else 0
             entry["win_rate"] = round(wr, 3)
-            entry["status"] = "live" if wr > 0.55 and (entry.get("profit_factor") or 0) > 1.5 else "weak" if (entry.get("profit_factor") or 0) >= 1.0 else "off"
+            if wr >= 0.52:
+                entry["status"] = "active"
+            elif wr < 0.45:
+                entry["status"] = "underperforming"
+            else:
+                entry["status"] = "monitoring"
         elif r > 0:
             entry["win_rate"] = round(entry["wins"] / r, 3)
+
+        by_type.append(entry)
 
     return {
         "available": True,
@@ -1672,3 +1685,266 @@ def read_latest_replay_drift_summary() -> dict[str, Any]:
     if not summary:
         return {"available": False, "reason": "No replay drift summary found"}
     return {"available": True, **summary}
+
+
+# ── Polymarket whale monitoring ──────────────────────────────────────────────
+
+
+def read_polymarket_whale_feed() -> dict[str, Any]:
+    """Recent whale alerts for the live feed."""
+    try:
+        from trading_platform.polymarket.wallet_db import WalletDB
+        db = WalletDB()
+        alerts = db.get_alerts(limit=50)
+        import time
+        now = int(time.time())
+        data = []
+        for a in alerts:
+            fired_at = a.get("detected_at") or a.get("trade_ts") or 0
+            age_secs = max(now - fired_at, 0) if fired_at else 0
+            if age_secs < 60:
+                time_ago = f"{age_secs}s ago"
+            elif age_secs < 3600:
+                time_ago = f"{age_secs // 60}m ago"
+            elif age_secs < 86400:
+                time_ago = f"{age_secs // 3600}h ago"
+            else:
+                time_ago = f"{age_secs // 86400}d ago"
+
+            data.append({
+                "wallet": (a.get("wallet") or "")[:10] + "...",
+                "wallet_full": a.get("wallet", ""),
+                "condition_id": a.get("token_id", ""),
+                "question": a.get("question") or a.get("market_title", ""),
+                "category": a.get("category", "other"),
+                "side": a.get("side", ""),
+                "price": a.get("price"),
+                "size": a.get("size"),
+                "tier": a.get("tier"),
+                "directional_win_rate": a.get("directional_win_rate"),
+                "fired_at": fired_at,
+                "signal_fired": bool(a.get("signal_fired") or a.get("paper_trade_fired")),
+                "time_ago": time_ago,
+            })
+        return {"available": True, "count": len(data), "data": data}
+    except Exception as exc:
+        return {"available": False, "reason": str(exc), "data": []}
+
+
+def read_polymarket_subscription_status() -> dict[str, Any]:
+    """Read WebSocket subscription status from ws_status.json."""
+    ws_path = DATA_ROOT / "polymarket" / "ws_status.json"
+    data = _read_json(ws_path)
+    if not data:
+        return {
+            "available": True,
+            "connected": False,
+            "markets_subscribed": 0,
+            "watched_wallets": 0,
+            "tier1_wallets": 0,
+            "tier2_wallets": 0,
+            "signals_today": 0,
+            "last_event_ts": 0,
+            "categories": {},
+        }
+    import time
+    age = time.time() - (data.get("written_at") or 0)
+    data["connected"] = age < 120  # Stale if >2 minutes
+    data["available"] = True
+    return data
+
+
+def read_polymarket_signals_feed() -> dict[str, Any]:
+    """Recent signals for the signal feed panel."""
+    try:
+        from trading_platform.polymarket.whale_signal_engine import WhaleSignalEngine
+        engine = WhaleSignalEngine()
+        signals = engine.get_recent_signals(hours=24.0)
+        import time
+        now = int(time.time())
+
+        # Check which signals had paper trades
+        from trading_platform.polymarket.polymarket_paper_executor import PolymarketPaperExecutor
+        executor = PolymarketPaperExecutor()
+        open_tickers = set()
+        try:
+            with executor._lock:
+                rows = executor._conn.execute(
+                    "SELECT ticker FROM trades WHERE platform='polymarket' AND status='open'"
+                ).fetchall()
+            open_tickers = {r[0] for r in rows}
+        except Exception:
+            pass
+
+        data = []
+        for s in signals[:50]:
+            fired_at = s.get("fired_at") or s.get("computed_at") or 0
+            age_secs = max(now - fired_at, 0) if fired_at else 0
+            if age_secs < 60:
+                time_ago = f"{age_secs}s ago"
+            elif age_secs < 3600:
+                time_ago = f"{age_secs // 60}m ago"
+            elif age_secs < 86400:
+                time_ago = f"{age_secs // 3600}h ago"
+            else:
+                time_ago = f"{age_secs // 86400}d ago"
+
+            cid = s.get("condition_id") or s.get("token_id", "")
+            ticker = cid[:20]
+            data.append({
+                "fired_at": fired_at,
+                "signal_type": s.get("signal_type", "smart_money"),
+                "category": s.get("category", "other"),
+                "question": (s.get("market_title") or "")[:60],
+                "direction": s.get("direction", ""),
+                "confidence": s.get("confidence"),
+                "size": s.get("size") or s.get("net_smart_volume"),
+                "wallet": (s.get("wallet") or s.get("top_wallet_address") or "")[:10] + "...",
+                "executed": ticker in open_tickers,
+                "stake": None,
+                "time_ago": time_ago,
+            })
+        return {"available": True, "count": len(data), "data": data}
+    except Exception as exc:
+        return {"available": False, "reason": str(exc), "data": []}
+
+
+def read_polymarket_category_performance() -> dict[str, Any]:
+    """Category-level signal performance."""
+    try:
+        from trading_platform.polymarket.wallet_db import WalletDB
+        db = WalletDB()
+        rows = db.get_category_performance()
+        return {"available": True, "data": rows}
+    except Exception as exc:
+        return {"available": False, "reason": str(exc), "data": []}
+
+
+def read_intelligence_health() -> dict[str, Any]:
+    """Complete system health for the dashboard."""
+    import time as _time
+
+    result: dict[str, Any] = {"available": True}
+
+    # Intelligence pipeline health
+    try:
+        from trading_platform.polymarket.wallet_db import WalletDB
+        db = WalletDB()
+        now = int(_time.time())
+
+        # Leaderboard status
+        with db._lock:
+            meta = db._conn.execute(
+                "SELECT current_version, wallets_tier1, wallets_tier2, built_at, is_valid FROM leaderboard_meta WHERE id=1"
+            ).fetchone()
+
+        if meta:
+            built_at = meta[3] or 0
+            result["intelligence"] = {
+                "leaderboard_version": meta[0],
+                "wallets_tier1": meta[1],
+                "wallets_tier2": meta[2],
+                "leaderboard_age_hours": round((now - built_at) / 3600, 1) if built_at else None,
+                "leaderboard_valid": bool(meta[4]),
+            }
+        else:
+            result["intelligence"] = {"leaderboard_version": 0, "wallets_tier1": 0, "wallets_tier2": 0}
+
+        # Last pipeline run
+        runs_path = DATA_ROOT / "polymarket" / "pipeline_runs.jsonl"
+        if runs_path.exists():
+            lines = runs_path.read_text(encoding="utf-8").strip().split("\n")
+            if lines:
+                import json as _json
+                last_run = _json.loads(lines[-1])
+                result["intelligence"]["last_run_at"] = last_run.get("completed_at")
+                result["intelligence"]["last_run_success"] = last_run.get("success", False)
+    except Exception as exc:
+        result["intelligence"] = {"error": str(exc)}
+
+    # Monitor health
+    ws_path = DATA_ROOT / "polymarket" / "ws_status.json"
+    ws_data = _read_json(ws_path) or {}
+    written_at = ws_data.get("written_at", 0)
+    result["monitor"] = {
+        "connected": bool(ws_data.get("connected") and (_time.time() - written_at < 120)),
+        "markets_subscribed": ws_data.get("markets_subscribed", 0),
+        "last_event_age_minutes": round((_time.time() - written_at) / 60, 1) if written_at else None,
+        "signals_today": ws_data.get("signals_today", 0),
+    }
+
+    # Paper trading health
+    try:
+        import sqlite3
+        paper_db = DATA_ROOT.parent / "kalshi" / "paper_trades.db"
+        if paper_db.exists():
+            conn = sqlite3.connect(str(paper_db))
+            open_count = conn.execute(
+                "SELECT COUNT(*) FROM trades WHERE platform='polymarket' AND status='open'"
+            ).fetchone()[0]
+            cash_row = conn.execute("SELECT cash_usd FROM portfolio ORDER BY id DESC LIMIT 1").fetchone()
+            conn.close()
+            result["paper_trading"] = {
+                "open_positions": open_count,
+                "bankroll_current": round(cash_row[0], 2) if cash_row else 500.0,
+            }
+        else:
+            result["paper_trading"] = {"open_positions": 0, "bankroll_current": 500.0}
+    except Exception:
+        result["paper_trading"] = {"open_positions": 0, "bankroll_current": 500.0}
+
+    # Category status
+    try:
+        from trading_platform.polymarket.wallet_db import WalletDB
+        db = WalletDB()
+        cats = db.get_category_performance()
+        result["categories"] = [
+            {
+                "name": c.get("category", "?"),
+                "signals_resolved": c.get("signals_resolved", 0),
+                "win_rate": c.get("win_rate"),
+                "status": (
+                    "live_candidate" if (c.get("win_rate") or 0) > 0.58 and (c.get("signals_resolved") or 0) >= 50
+                    else "underperforming" if (c.get("win_rate") or 0) < 0.45 and (c.get("signals_resolved") or 0) >= 20
+                    else "testing"
+                ),
+            }
+            for c in cats
+        ]
+    except Exception:
+        result["categories"] = []
+
+    # Live readiness gates
+    paper = result.get("paper_trading", {})
+    cats_with_edge = sum(
+        1 for c in result.get("categories", [])
+        if c.get("status") == "live_candidate"
+    )
+    result["live_readiness"] = {
+        "gate_1_resolved_trades": {"required": 50, "current": 0, "passed": False},
+        "gate_2_categories_with_edge": {"required": 2, "current": cats_with_edge, "passed": cats_with_edge >= 2},
+        "gate_3_max_drawdown": {"required": 0.20, "current": 0.0, "passed": False},
+        "gate_4_human_approval": {"passed": False},
+        "gate_5_capital_allocated": {"passed": False},
+        "all_passed": False,
+    }
+
+    return result
+
+
+_POLICY_PATH = DATA_ROOT / "system" / "execution_policy.json"
+_VALID_POLICIES = {"monitor_only", "paper_t1", "paper_t1t2", "live_t1"}
+
+
+def read_execution_policy() -> dict[str, Any]:
+    data = _read_json(_POLICY_PATH)
+    return {"available": True, "policy": (data or {}).get("policy", "paper_t1")}
+
+
+def write_execution_policy(policy: str) -> dict[str, Any]:
+    if policy not in _VALID_POLICIES:
+        return {"success": False, "error": f"Invalid policy: {policy}. Must be one of {_VALID_POLICIES}"}
+    _POLICY_PATH.parent.mkdir(parents=True, exist_ok=True)
+    import json as _j
+    _POLICY_PATH.write_text(_j.dumps({"policy": policy}), encoding="utf-8")
+    return {"success": True, "policy": policy}

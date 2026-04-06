@@ -155,11 +155,6 @@ def paper_pnl_history() -> dict[str, Any]:
     return reader.read_paper_pnl_history()
 
 
-@app.get("/api/signals/performance")
-def signals_performance() -> dict[str, Any]:
-    return reader.read_signals_performance()
-
-
 @app.get("/api/smart-money/leaderboard")
 def smart_money_leaderboard(sort_by: str = "equity_score") -> dict[str, Any]:
     return reader.read_smart_money_leaderboard(sort_by=sort_by)
@@ -183,6 +178,41 @@ def smart_money_wallet_trades(address: str, page: int = 1, limit: int = 50) -> d
 @app.get("/api/smart-money/mirror")
 def smart_money_mirror() -> dict[str, Any]:
     return reader.read_smart_money_mirror()
+
+
+@app.get("/api/polymarket/whale-feed")
+def polymarket_whale_feed() -> dict[str, Any]:
+    return reader.read_polymarket_whale_feed()
+
+
+@app.get("/api/polymarket/subscription-status")
+def polymarket_subscription_status() -> dict[str, Any]:
+    return reader.read_polymarket_subscription_status()
+
+
+@app.get("/api/polymarket/signals-feed")
+def polymarket_signals_feed() -> dict[str, Any]:
+    return reader.read_polymarket_signals_feed()
+
+
+@app.get("/api/polymarket/category-performance")
+def polymarket_category_performance() -> dict[str, Any]:
+    return reader.read_polymarket_category_performance()
+
+
+@app.get("/api/system/intelligence-health")
+def system_intelligence_health() -> dict[str, Any]:
+    return reader.read_intelligence_health()
+
+
+@app.get("/api/system/execution-policy")
+def get_execution_policy() -> dict[str, Any]:
+    return reader.read_execution_policy()
+
+
+@app.post("/api/system/execution-policy")
+def set_execution_policy(request: dict[str, Any]) -> dict[str, Any]:
+    return reader.write_execution_policy(request.get("policy", "paper_t1"))
 
 
 @app.get("/api/paper/dashboard")

@@ -37,7 +37,26 @@ def cmd_polymarket_wallet_profiles(args: argparse.Namespace) -> None:
     trades_dir = getattr(args, "trades_dir", None)
     use_graph = getattr(args, "use_graph_resolution", False)
     resolution_csv_str = getattr(args, "resolution_csv", None)
+    from_db = getattr(args, "from_db", False)
     output = _project_relative(getattr(args, "output", None) or "data/polymarket/wallet_profiles.parquet")
+
+    # --from-db flag, or default when no CSV args provided
+    if from_db or (not trades_csv and not trades_dir and not resolution_csv_str and not use_graph):
+        from trading_platform.polymarket.wallet_db import WalletDB
+        from trading_platform.polymarket.wallet_profile_rebuild import rebuild_profiles
+
+        db = WalletDB()
+        print("Polymarket Wallet Profiler (from DB)")
+        print(f"  source       : {db._path}")
+        stats = db.stats()
+        print(f"  profiles     : {stats['profiles']}")
+        print(f"  trades       : {stats['trades']}")
+        print()
+        result = rebuild_profiles(db=db)
+        print(f"[DONE] Wallet profiles rebuilt from DB.")
+        print(f"  Wallets rebuilt              : {result['wallets_rebuilt']}")
+        print(f"  Elapsed                      : {result['elapsed_seconds']}s")
+        return
 
     # Graph-based resolution path (no resolution CSV needed)
     if use_graph and trades_dir:

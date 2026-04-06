@@ -134,6 +134,9 @@ from trading_platform.cli.commands.polymarket_backfill import cmd_polymarket_bac
 from trading_platform.cli.commands.polymarket_orderflow import cmd_polymarket_collect_orderflow, cmd_polymarket_orderflow_status
 from trading_platform.cli.commands.polymarket_goldsky_profiles import cmd_polymarket_goldsky_profiles
 from trading_platform.cli.commands.polymarket_goldsky_backfill import cmd_polymarket_backfill_goldsky
+from trading_platform.cli.commands.polymarket_refresh_universe import cmd_polymarket_refresh_universe
+from trading_platform.cli.commands.polymarket_build_leaderboard import cmd_polymarket_build_leaderboard
+from trading_platform.cli.commands.polymarket_performance_review import cmd_polymarket_performance_review
 from trading_platform.cli.commands.manifold_parse import cmd_manifold_parse
 from trading_platform.cli.commands.predictit_parse import cmd_predictit_parse
 from trading_platform.cli.commands.news_tagger import cmd_news_upcoming, cmd_news_label_moves
@@ -2767,6 +2770,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Path to resolution CSV (from blockchain-ingest). Not needed with --use-graph-resolution.",
     )
     data_polymarket_wallets.add_argument(
+        "--from-db", action="store_true", default=False,
+        help="Rebuild profiles from wallet_intelligence.db (default when no CSV args given).",
+    )
+    data_polymarket_wallets.add_argument(
         "--use-graph-resolution", action="store_true", default=False,
         help="Fetch resolutions from The Graph positions subgraph instead of resolution CSV.",
     )
@@ -3013,6 +3020,25 @@ def build_parser() -> argparse.ArgumentParser:
         "compute-signals", help="Compute multi-wallet convergence signals.",
     )
     data_polymarket_compute_sigs.set_defaults(func=cmd_compute_signals)
+
+    data_polymarket_refresh_universe = data_polymarket_subparsers.add_parser(
+        "refresh-universe", help="Fetch top markets per category from Gamma API.",
+    )
+    data_polymarket_refresh_universe.add_argument(
+        "--max-per-category", type=int, default=25,
+        help="Max markets per category (default: 25).",
+    )
+    data_polymarket_refresh_universe.set_defaults(func=cmd_polymarket_refresh_universe)
+
+    data_polymarket_build_lb = data_polymarket_subparsers.add_parser(
+        "build-leaderboard", help="Rebuild wallet leaderboard from profiles.",
+    )
+    data_polymarket_build_lb.set_defaults(func=cmd_polymarket_build_leaderboard)
+
+    data_polymarket_perf_review = data_polymarket_subparsers.add_parser(
+        "performance-review", help="Run advisory performance review on signal quality.",
+    )
+    data_polymarket_perf_review.set_defaults(func=cmd_polymarket_performance_review)
 
     # ── data manifold ─────────────────────���──────────────────────────��───────
     data_manifold = data_subparsers.add_parser(

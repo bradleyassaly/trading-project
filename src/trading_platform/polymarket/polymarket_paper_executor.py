@@ -141,6 +141,80 @@ class PolymarketPaperExecutor:
         )
         return True
 
+    def on_signal(self, signal: dict[str, Any]) -> bool:
+        """Place paper trade from a whale signal dict. Returns True if placed."""
+        confidence = signal.get("confidence", 0)
+        if confidence < 0.40:
+            return False
+
+        signal_type = signal.get("signal_type", "whale_entry")
+        wallet_tier = signal.get("wallet_tier", "tier2")
+        condition_id = signal.get("condition_id", "")
+        direction = signal.get("direction", "BUY")
+        price = signal.get("price", 0)
+        question = signal.get("question", "")[:80]
+        category = signal.get("category", "other")
+
+        # Bankroll allocation per signal type
+        if signal_type == "convergence":
+            max_stake = 500.0 * 0.05  # 5% of default $10K... but we use $500 actual
+        elif wallet_tier == "tier1":
+            max_stake = 500.0 * 0.03  # 3%
+        else:
+            max_stake = 500.0 * 0.015  # 1.5%
+
+        stake = round(max_stake * confidence, 2)
+        if stake < 1.0:
+            return False
+
+        token_short = condition_id[:20] if condition_id else "unknown"
+
+        with self._lock:
+            # Skip if already have open position on same side
+            existing = self._conn.execute(
+                "SELECT id FROM trades WHERE ticker = ? AND side = ? AND status = 'open' AND platform = 'polymarket'",
+                (token_short, direction),
+            ).fetchone()
+            if existing:
+                return False
+
+            # Check cash
+            cash_row = self._conn.execute(
+                "SELECT cash_usd FROM portfolio ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+            cash = float(cash_row[0]) if cash_row else _STARTING_CASH
+            if cash < stake:
+                return False
+
+            now = datetime.now(tz=timezone.utc).isoformat()
+            self._conn.execute(
+                """INSERT INTO trades
+                   (ticker, side, entry_price, size_usd, signal_family, confidence,
+                    news_context, entry_ts, status, platform, full_token_id,
+                    signal_type, smart_money_confidence, smart_money_edge,
+                    weighted_net_volume)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open', 'polymarket', ?, ?, ?, ?, ?)""",
+                (token_short, direction, price, stake,
+                 f"polymarket_whale", confidence, f"{signal_type}|{category}", now,
+                 condition_id, signal_type,
+                 confidence, signal.get("directional_win_rate", 0),
+                 signal.get("size", 0)),
+            )
+            new_cash = cash - stake
+            self._conn.execute(
+                "INSERT INTO portfolio (ts, cash_usd, open_value, total_value, realized_pnl) "
+                "SELECT ?, ?, open_value + ?, total_value, realized_pnl "
+                "FROM portfolio ORDER BY id DESC LIMIT 1",
+                (now, round(new_cash, 2), round(stake, 2)),
+            )
+            self._conn.commit()
+
+        print(
+            f"[PAPER] {direction} | ${stake:.0f} | {category} | "
+            f"{question}... | conf={confidence:.2f}"
+        )
+        return True
+
     def check_resolutions(self, resolver: Any) -> list[dict[str, Any]]:
         """Check open Polymarket trades for resolution. Returns resolved trades."""
         with self._lock:

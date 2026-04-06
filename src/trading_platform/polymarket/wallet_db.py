@@ -137,6 +137,44 @@ CREATE TABLE IF NOT EXISTS wallet_alerts (
 );
 CREATE INDEX IF NOT EXISTS idx_wa_wallet ON wallet_alerts(wallet);
 CREATE INDEX IF NOT EXISTS idx_wa_detected ON wallet_alerts(detected_at);
+
+CREATE TABLE IF NOT EXISTS category_performance (
+    category TEXT PRIMARY KEY,
+    signals_fired INTEGER DEFAULT 0,
+    signals_resolved INTEGER DEFAULT 0,
+    signals_won INTEGER DEFAULT 0,
+    win_rate REAL,
+    total_pnl REAL DEFAULT 0,
+    last_updated INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS leaderboard (
+    wallet TEXT PRIMARY KEY,
+    category TEXT,
+    rank INTEGER,
+    tier TEXT,
+    directional_win_rate REAL,
+    rolling_20_wr REAL,
+    conviction_score REAL,
+    resolved_trades INTEGER,
+    total_volume_usdc REAL,
+    wallet_type TEXT,
+    wallet_bucket TEXT,
+    last_trade_ts INTEGER,
+    version INTEGER,
+    updated_at INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS leaderboard_meta (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    current_version INTEGER DEFAULT 0,
+    wallets_tier1 INTEGER DEFAULT 0,
+    wallets_tier2 INTEGER DEFAULT 0,
+    built_at INTEGER,
+    is_valid INTEGER DEFAULT 0
+);
+
+INSERT OR IGNORE INTO leaderboard_meta (id, current_version, is_valid) VALUES (1, 0, 0);
 """
 
 
@@ -191,6 +229,7 @@ class WalletDB:
         self._conn.executescript(_SCHEMA)
         self._conn.commit()
         self._migrate_profiles()
+        self._migrate_signals()
 
     def _migrate_profiles(self) -> None:
         """Add columns that may not exist in older DBs."""
@@ -210,6 +249,30 @@ class WalletDB:
         for col, typedef in new_cols:
             if col not in existing:
                 self._conn.execute(f"ALTER TABLE wallet_profiles ADD COLUMN {col} {typedef}")
+        self._conn.commit()
+
+    def _migrate_signals(self) -> None:
+        """Add columns to market_signals for whale signal engine."""
+        existing = {r[1] for r in self._conn.execute("PRAGMA table_info(market_signals)").fetchall()}
+        new_cols = [
+            ("signal_type", "TEXT"),
+            ("wallet", "TEXT"),
+            ("price", "REAL"),
+            ("size", "REAL"),
+            ("fired_at", "INTEGER"),
+            ("condition_id", "TEXT"),
+            ("status", "TEXT DEFAULT 'open'"),
+            ("updated_confidence", "REAL"),
+            ("convergence_count", "INTEGER DEFAULT 0"),
+        ]
+        for col, typedef in new_cols:
+            if col not in existing:
+                self._conn.execute(f"ALTER TABLE market_signals ADD COLUMN {col} {typedef}")
+        # Also add signal_fired to wallet_alerts
+        alert_cols = {r[1] for r in self._conn.execute("PRAGMA table_info(wallet_alerts)").fetchall()}
+        for col, typedef in [("signal_fired", "INTEGER DEFAULT 0"), ("question", "TEXT"), ("category", "TEXT")]:
+            if col not in alert_cols:
+                self._conn.execute(f"ALTER TABLE wallet_alerts ADD COLUMN {col} {typedef}")
         self._conn.commit()
 
     # ── Wallet profiles ──────────────────────────────────────────────────────
@@ -559,6 +622,133 @@ class WalletDB:
             "tier2_today": t2_today,
             "last_sync_ts": last_sync,
         }
+
+    # ── Leaderboard ──────────────────────────────────────────────────────────
+
+    def get_leaderboard_version(self) -> int:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT current_version FROM leaderboard_meta WHERE id=1"
+            ).fetchone()
+        return row[0] if row else 0
+
+    def begin_leaderboard_rebuild(self, version: int) -> None:
+        with self._lock:
+            self._conn.execute("UPDATE leaderboard_meta SET is_valid=0 WHERE id=1")
+            self._conn.commit()
+
+    def commit_leaderboard(self, version: int, tier1_count: int, tier2_count: int) -> None:
+        with self._lock:
+            self._conn.execute(
+                """UPDATE leaderboard_meta
+                   SET current_version=?, wallets_tier1=?, wallets_tier2=?,
+                       built_at=?, is_valid=1
+                   WHERE id=1""",
+                (version, tier1_count, tier2_count, _now_ts()),
+            )
+            self._conn.commit()
+
+    def get_watched_wallets(self) -> dict[str, dict[str, Any]]:
+        with self._lock:
+            meta = self._conn.execute(
+                "SELECT is_valid FROM leaderboard_meta WHERE id=1"
+            ).fetchone()
+            if not meta or not meta[0]:
+                return {}
+            rows = self._conn.execute("SELECT * FROM leaderboard").fetchall()
+        if not rows:
+            return {}
+        cols = [d[0] for d in self._conn.execute("SELECT * FROM leaderboard LIMIT 0").description]
+        return {r[0]: dict(zip(cols, r)) for r in rows}
+
+    def update_signal_confidence(self, signal_id: int, new_confidence: float, convergence_count: int) -> None:
+        """Update an existing signal's confidence and convergence count."""
+        with self._lock:
+            self._conn.execute(
+                """UPDATE market_signals
+                   SET updated_confidence = ?, convergence_count = ?
+                   WHERE id = ?""",
+                (new_confidence, convergence_count, signal_id),
+            )
+            self._conn.commit()
+
+    def compute_rolling_wr(self, wallet: str, n: int = 20) -> float | None:
+        with self._lock:
+            rows = self._conn.execute(
+                """SELECT pnl FROM wallet_trades
+                   WHERE wallet=? AND market_resolved=1 AND pnl IS NOT NULL
+                   ORDER BY timestamp DESC LIMIT ?""",
+                (wallet, n),
+            ).fetchall()
+        if len(rows) < n:
+            return None
+        wins = sum(1 for r in rows if r[0] > 0)
+        return wins / len(rows)
+
+    # ── Signal helpers ──────────────────────────────────────────────────────
+
+    def get_prior_position(self, wallet: str, condition_id: str) -> dict[str, Any] | None:
+        """Check if wallet has a prior recorded trade on this market."""
+        with self._lock:
+            row = self._conn.execute(
+                """SELECT side, size, price, timestamp FROM wallet_trades
+                   WHERE wallet = ? AND (asset = ? OR condition_id = ?)
+                   ORDER BY timestamp DESC LIMIT 1""",
+                (wallet, condition_id, condition_id),
+            ).fetchone()
+        if not row:
+            # Also check wallet_alerts
+            with self._lock:
+                row = self._conn.execute(
+                    """SELECT side, size, price, detected_at as timestamp FROM wallet_alerts
+                       WHERE wallet = ? AND token_id = ?
+                       ORDER BY detected_at DESC LIMIT 1""",
+                    (wallet, condition_id),
+                ).fetchone()
+        if not row:
+            return None
+        return {"side": row[0], "size": row[1], "price": row[2], "timestamp": row[3]}
+
+    def get_market_whale_activity(self, condition_id: str, hours: float = 6.0) -> dict[str, Any]:
+        """Whale trade count, distinct wallets, side breakdown for a market."""
+        cutoff = _now_ts() - int(hours * 3600)
+        with self._lock:
+            rows = self._conn.execute(
+                """SELECT wallet, side, size FROM wallet_alerts
+                   WHERE token_id = ? AND detected_at >= ?""",
+                (condition_id, cutoff),
+            ).fetchall()
+        buy_count = sum(1 for r in rows if r[1] == "BUY")
+        sell_count = sum(1 for r in rows if r[1] == "SELL")
+        wallets = {r[0] for r in rows}
+        return {
+            "total_trades": len(rows),
+            "distinct_wallets": len(wallets),
+            "buy_count": buy_count,
+            "sell_count": sell_count,
+            "tier1_wallets": wallets,
+        }
+
+    # ── Category performance ────────────────────────────────────────────────
+
+    def increment_category_signal(self, category: str) -> None:
+        with self._lock:
+            self._conn.execute(
+                """INSERT INTO category_performance (category, signals_fired, last_updated)
+                   VALUES (?, 1, ?)
+                   ON CONFLICT(category) DO UPDATE SET
+                   signals_fired = signals_fired + 1, last_updated = ?""",
+                (category, _now_ts(), _now_ts()),
+            )
+            self._conn.commit()
+
+    def get_category_performance(self) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM category_performance ORDER BY win_rate DESC"
+            ).fetchall()
+        cols = [d[0] for d in self._conn.execute("SELECT * FROM category_performance LIMIT 0").description]
+        return [dict(zip(cols, r)) for r in rows]
 
     # ── Stats ────────────────────────────────────────────────────────────────
 

@@ -169,4 +169,11 @@ export const api = {
   signalsPerformance: () => get('/signals/performance'),
   smartMoneyWalletPositions: (addr) => get(`/smart-money/wallet/${encodeURIComponent(addr)}/positions`),
   smartMoneyWalletTrades: (addr, page = 1) => get(`/smart-money/wallet/${encodeURIComponent(addr)}/trades?page=${page}&limit=50`),
+  intelligenceHealth: () => get('/system/intelligence-health'),
+  executionPolicy: () => get('/system/execution-policy'),
+  setExecutionPolicy: (policy) => post('/system/execution-policy', { policy }),
+  polymarketWhaleFeed: () => get('/polymarket/whale-feed'),
+  polymarketSubscriptionStatus: () => get('/polymarket/subscription-status'),
+  polymarketSignalsFeed: () => get('/polymarket/signals-feed'),
+  polymarketCategoryPerformance: () => get('/polymarket/category-performance'),
 }

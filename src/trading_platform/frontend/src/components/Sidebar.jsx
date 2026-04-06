@@ -1,16 +1,15 @@
 import { useState } from 'react'
 import { NavLink } from 'react-router-dom'
-import { LayoutGrid, Eye, Radio, Search, DollarSign, Settings, ChevronLeft, ChevronRight } from 'lucide-react'
+import { LayoutGrid, Eye, Search, DollarSign, Shield, ChevronLeft, ChevronRight } from 'lucide-react'
 import { useApi } from '../hooks/useApi'
 import { api } from '../api/client'
 
 const NAV = [
   { to: '/dashboard', label: 'Command Center',   Icon: LayoutGrid },
   { to: '/wallets',   label: 'Wallet Intel',     Icon: Eye        },
-  { to: '/signals',   label: 'Signal Monitor',   Icon: Radio      },
-  { to: '/scanner',   label: 'Market Scanner',   Icon: Search     },
+  { to: '/scanner',   label: 'Whale Monitor',    Icon: Search     },
   { to: '/paper',     label: 'Paper Trading',    Icon: DollarSign },
-  { to: '/engine',    label: 'Execution Engine', Icon: Settings   },
+  { to: '/live',      label: 'Live Readiness',   Icon: Shield     },
 ]
 
 const STATE_LABELS = {

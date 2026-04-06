@@ -1,3 +1,6 @@
+# DEPRECATED: This module is not part of the active pipeline.
+# It is preserved for reference but not called by any active process.
+# See ARCHITECTURE.md for what is currently active.
 """
 CLI command: trading-cli data metaculus fetch
 

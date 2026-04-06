@@ -17,13 +17,15 @@ const BUCKET_STYLES = {
 }
 
 const SIGNAL_STYLES = {
-  whale_entry:       { bg: 'bg-blue-900/60',   text: 'text-blue-300',   label: 'Whale' },
-  convergence:       { bg: 'bg-purple-900/60',  text: 'text-purple-300', label: 'Converge' },
-  contrarian:        { bg: 'bg-orange-900/60',  text: 'text-orange-300', label: 'Contrarian' },
-  cross_type:        { bg: 'bg-teal-900/60',    text: 'text-teal-300',   label: 'CrossType' },
-  position_building: { bg: 'bg-cyan-900/60',    text: 'text-cyan-300',   label: 'Building' },
-  cascade:           { bg: 'bg-gray-700',        text: 'text-gray-300',   label: 'Cascade' },
-  volume_trader:     { bg: 'bg-gray-800',        text: 'text-gray-400',   label: 'Volume' },
+  wallet_reversal:    { bg: 'bg-red-900/60',    text: 'text-red-300',    label: 'Reversal' },
+  cascade:            { bg: 'bg-purple-900/60',  text: 'text-purple-300', label: 'Cascade' },
+  oversized_bet:      { bg: 'bg-orange-900/60',  text: 'text-orange-300', label: 'Oversized' },
+  accumulation:       { bg: 'bg-cyan-900/60',    text: 'text-cyan-300',   label: 'Accum' },
+  market_maker_flip:  { bg: 'bg-yellow-900/60',  text: 'text-yellow-300', label: 'MM Flip' },
+  convergence:        { bg: 'bg-purple-900/60',  text: 'text-purple-300', label: 'Converge' },
+  specialist_entry:   { bg: 'bg-green-900/60',   text: 'text-green-300',  label: 'Specialist' },
+  pre_deadline_surge: { bg: 'bg-amber-900/60',   text: 'text-amber-300',  label: 'Deadline' },
+  whale_entry:        { bg: 'bg-blue-900/60',    text: 'text-blue-300',   label: 'Whale' },
 }
 
 export function BucketBadge({ bucket }) {

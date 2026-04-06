@@ -224,10 +224,12 @@ def test_signals_performance_returns_wallet_intelligence():
     data = resp.json()
     assert data["available"] is True
     assert "by_type" in data
-    assert len(data["by_type"]) == 7  # 7 signal types
+    assert len(data["by_type"]) == 9  # 9 signal types
     types = {t["signal_type"] for t in data["by_type"]}
     assert "whale_entry" in types
     assert "convergence" in types
+    assert "wallet_reversal" in types
+    assert "cascade" in types
 
 
 def test_signals_performance_all_types_have_allocation():

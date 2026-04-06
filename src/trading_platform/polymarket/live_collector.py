@@ -81,12 +81,16 @@ class PolymarketLiveCollector:
 
     Subscribes to market price updates via the CLOB WebSocket, stores
     ticks in SQLite, and exports hourly OHLCV bars to parquet.
+    Optionally integrates whale detection via WhaleTripwire.
     """
 
     def __init__(
         self,
         config: PolymarketLiveCollectorConfig,
         markets: list[LiveMarketInfo],
+        whale_tripwire: Any | None = None,
+        signal_engine: Any | None = None,
+        paper_executor: Any | None = None,
     ) -> None:
         if ws_connect is None:
             raise ImportError(
@@ -102,6 +106,9 @@ class PolymarketLiveCollector:
         self.state = _CollectorState()
         self._store: LiveTickStore | None = None
         self._ws: Any = None
+        self._tripwire = whale_tripwire
+        self._signal_engine = signal_engine
+        self._paper_executor = paper_executor
 
     # ── Public API ───────────────────────────────────────────────────────────
 
@@ -118,6 +125,7 @@ class PolymarketLiveCollector:
             export_task = asyncio.create_task(self._export_loop())
             stats_task = asyncio.create_task(self._stats_loop())
             heartbeat_task = asyncio.create_task(self._heartbeat_loop())
+            poll_task = asyncio.create_task(self._tier1_poll_loop())
             await self._ws_loop()
         except (KeyboardInterrupt, asyncio.CancelledError):
             logger.info("Collector stopping gracefully")
@@ -125,6 +133,7 @@ class PolymarketLiveCollector:
             export_task.cancel()
             stats_task.cancel()
             heartbeat_task.cancel()
+            poll_task.cancel()
             # Final export before exit
             try:
                 await self._export_hourly_bars()
@@ -214,6 +223,8 @@ class PolymarketLiveCollector:
                     self._handle_last_trade_price(msg)
                 elif msg_type == "book":
                     self._handle_book(msg)
+                # Whale detection on every event
+                self._check_whale(msg)
 
     # ── Message handlers ─────────────────────────────────────────────────────
 
@@ -298,6 +309,96 @@ class PolymarketLiveCollector:
             self.state.ticks_stored += 1
             self.state.latest_prices[info.market_id] = price
 
+    # ── Whale detection ───────────────────────────────────────────────────────
+
+    def _check_whale(self, event: dict[str, Any]) -> None:
+        """Check event for watched wallet activity."""
+        if not self._tripwire:
+            return
+        try:
+            whale = self._tripwire.check_event(event)
+            if whale and self._signal_engine:
+                signal = self._signal_engine.on_whale_trade(whale)
+                if signal and self._paper_executor:
+                    self._paper_executor.on_signal(signal)
+        except Exception as exc:
+            logger.debug("Whale check error: %s", exc)
+
+    # ── Tier-1 wallet polling ──────────────────────────────────────────────
+
+    async def _tier1_poll_loop(self) -> None:
+        """Poll Data API every 15 min for tier-1 wallet trades.
+
+        Catches trades on markets outside the WebSocket universe.
+        """
+        _POLL_INTERVAL = 900  # 15 minutes
+        _last_seen: dict[str, int] = {}  # wallet → last seen trade timestamp
+
+        while True:
+            await asyncio.sleep(_POLL_INTERVAL)
+            if not self._tripwire or not self._tripwire.watched_tier1:
+                continue
+            try:
+                await self._poll_tier1_wallets(_last_seen)
+            except Exception as exc:
+                logger.debug("Tier-1 poll error: %s", exc)
+
+    async def _poll_tier1_wallets(self, last_seen: dict[str, int]) -> None:
+        """Fetch recent trades for tier-1 wallets from Data API."""
+        try:
+            from trading_platform.polymarket.data_api_fetcher import PolymarketDataAPIFetcher
+        except ImportError:
+            return
+
+        fetcher = PolymarketDataAPIFetcher()
+        for wallet in list(self._tripwire.watched_tier1)[:50]:
+            try:
+                trades = fetcher.get_wallet_trades(wallet, limit=10)
+            except Exception:
+                continue
+
+            if not trades:
+                continue
+
+            cutoff = last_seen.get(wallet, 0)
+            for trade in trades:
+                ts = trade.get("timestamp") or trade.get("createdAt") or 0
+                if isinstance(ts, str):
+                    try:
+                        from datetime import datetime as _dt, timezone as _tz
+                        ts = int(_dt.fromisoformat(ts.replace("Z", "+00:00")).timestamp())
+                    except Exception:
+                        ts = 0
+                if ts <= cutoff:
+                    continue
+
+                # Build a synthetic event and run through whale check
+                event = {
+                    "maker": wallet,
+                    "side": trade.get("side", "BUY"),
+                    "price": trade.get("price", 0),
+                    "size": trade.get("size") or trade.get("amount", 0),
+                    "asset_id": trade.get("asset") or trade.get("token_id", ""),
+                    "condition_id": trade.get("condition_id", ""),
+                    "timestamp": ts,
+                }
+                self._check_whale(event)
+
+            # Update last_seen
+            all_ts = [
+                t.get("timestamp") or t.get("createdAt") or 0
+                for t in trades
+            ]
+            int_ts = []
+            for t in all_ts:
+                if isinstance(t, (int, float)):
+                    int_ts.append(int(t))
+            if int_ts:
+                last_seen[wallet] = max(int_ts)
+
+            # Small delay between wallets
+            await asyncio.sleep(0.2)
+
     # ── Hourly export ────────────────────────────────────────────────────────
 
     async def _export_loop(self) -> None:
@@ -372,6 +473,7 @@ class PolymarketLiveCollector:
         stats_path = Path(self.config.stats_path)
         stats_path.parent.mkdir(parents=True, exist_ok=True)
         now = datetime.now(tz=timezone.utc)
+        now_ts = int(now.timestamp())
         stats = {
             "started_at": self.state.started_at.isoformat() if self.state.started_at else None,
             "markets_subscribed": len(self.markets),
@@ -383,6 +485,58 @@ class PolymarketLiveCollector:
             "last_export_at": self.state.last_export_at.isoformat() if self.state.last_export_at else None,
         }
         stats_path.write_text(json.dumps(stats, indent=2), encoding="utf-8")
+
+        # Write ws_status.json for the API
+        ws_status_path = Path("data/polymarket/ws_status.json")
+        ws_status_path.parent.mkdir(parents=True, exist_ok=True)
+        t1 = len(self._tripwire.watched_tier1) if self._tripwire else 0
+        t2 = len(self._tripwire.watched_tier2) if self._tripwire else 0
+
+        # Category counts — use MarketUniverse for accurate classification
+        categories: dict[str, int] = {}
+        if self._tripwire and self._tripwire.universe:
+            for m in self.markets:
+                cid = m.condition_id or m.market_id
+                cat = self._tripwire.universe.get_category(cid)
+                categories[cat] = categories.get(cat, 0) + 1
+        else:
+            try:
+                from trading_platform.polymarket.market_universe import MarketUniverse
+                _u = MarketUniverse()
+                if _u.load_cached():
+                    for m in self.markets:
+                        cid = m.condition_id or m.market_id
+                        cat = _u.get_category(cid)
+                        categories[cat] = categories.get(cat, 0) + 1
+                else:
+                    categories["unknown"] = len(self.markets)
+            except Exception:
+                categories["unknown"] = len(self.markets)
+
+        # Count signals today
+        signals_today = 0
+        if self._signal_engine:
+            try:
+                signals_today = len(self._signal_engine.get_recent_signals(hours=24.0))
+            except Exception:
+                pass
+
+        ws_status = {
+            "connected": True,
+            "markets_subscribed": len(self.markets),
+            "watched_wallets": t1 + t2,
+            "tier1_wallets": t1,
+            "tier2_wallets": t2,
+            "signals_today": signals_today,
+            "last_event_ts": now_ts,
+            "categories": categories,
+            "written_at": now_ts,
+        }
+        ws_status_path.write_text(json.dumps(ws_status, indent=2), encoding="utf-8")
+
+        # Periodic tripwire reload
+        if self._tripwire:
+            self._tripwire.maybe_reload()
 
     async def _heartbeat_loop(self) -> None:
         while True:

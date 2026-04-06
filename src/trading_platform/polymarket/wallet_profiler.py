@@ -1,3 +1,8 @@
+# DEPRECATED: The CSV-based build_profiles() method in this module is replaced by
+# wallet_profile_rebuild.rebuild_profiles() which reads directly from wallet_intelligence.db.
+# Use: trading-cli data polymarket wallet-profiles --from-db
+# This module is preserved for reference but the CSV path is not part of the active pipeline.
+# See ARCHITECTURE.md for what is currently active.
 """
 Polymarket wallet profiler and smart money detection.
 
