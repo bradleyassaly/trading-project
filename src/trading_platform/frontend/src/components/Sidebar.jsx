@@ -1,17 +1,16 @@
 import { useState } from 'react'
 import { NavLink } from 'react-router-dom'
-import { LayoutGrid, BarChart2, Globe, TrendingUp, Lightbulb, Settings, Database, ChevronLeft, ChevronRight } from 'lucide-react'
+import { LayoutGrid, Eye, Radio, Search, DollarSign, Settings, ChevronLeft, ChevronRight } from 'lucide-react'
 import { useApi } from '../hooks/useApi'
 import { api } from '../api/client'
 
 const NAV = [
-  { to: '/dashboard', label: 'Command Center',  Icon: LayoutGrid },
-  { to: '/signals',   label: 'Signal Research', Icon: BarChart2  },
-  { to: '/markets',     label: 'Kalshi Markets',   Icon: Globe       },
-  { to: '/polymarket',  label: 'Polymarket Live',  Icon: TrendingUp  },
-  { to: '/research-data', label: 'Research Data', Icon: Database },
-  { to: '/reasoning',   label: 'Trade Reasoning',  Icon: Lightbulb   },
-  { to: '/control',   label: 'Loop Control',    Icon: Settings   },
+  { to: '/dashboard', label: 'Command Center',   Icon: LayoutGrid },
+  { to: '/wallets',   label: 'Wallet Intel',     Icon: Eye        },
+  { to: '/signals',   label: 'Signal Monitor',   Icon: Radio      },
+  { to: '/scanner',   label: 'Market Scanner',   Icon: Search     },
+  { to: '/paper',     label: 'Paper Trading',    Icon: DollarSign },
+  { to: '/engine',    label: 'Execution Engine', Icon: Settings   },
 ]
 
 const STATE_LABELS = {
@@ -41,9 +40,8 @@ export default function Sidebar() {
       className={`flex flex-col bg-surface-card border-r border-surface-border transition-all duration-200
         ${collapsed ? 'w-14' : 'w-56'} min-h-screen flex-shrink-0`}
     >
-      {/* Logo */}
       <div className="flex items-center gap-2 px-3 py-4 border-b border-surface-border">
-        <span className="text-accent-blue text-xl font-bold select-none">⬡</span>
+        <span className="text-accent-blue text-xl font-bold select-none">*</span>
         {!collapsed && (
           <span className="text-sm font-semibold tracking-wide text-gray-200 truncate">
             Trading Platform
@@ -54,13 +52,10 @@ export default function Sidebar() {
           className="ml-auto text-gray-500 hover:text-gray-300"
           aria-label="Toggle sidebar"
         >
-          {collapsed
-            ? <ChevronRight size={14} />
-            : <ChevronLeft  size={14} />}
+          {collapsed ? <ChevronRight size={14} /> : <ChevronLeft size={14} />}
         </button>
       </div>
 
-      {/* Navigation */}
       <nav className="flex-1 py-4 space-y-0.5 px-1.5">
         {NAV.map(({ to, label, Icon }) => (
           <NavLink
@@ -80,7 +75,6 @@ export default function Sidebar() {
         ))}
       </nav>
 
-      {/* Status strip */}
       <div className="border-t border-surface-border p-3 space-y-1.5">
         <div className="flex items-center gap-2">
           <StatusDot state={loopState} />
@@ -97,12 +91,6 @@ export default function Sidebar() {
             </span>
           )}
         </div>
-        {!collapsed && status?.active_strategy_count != null && (
-          <p className="text-xs text-gray-500">
-            {status.active_strategy_count} active{' '}
-            {status.active_strategy_count === 1 ? 'strategy' : 'strategies'}
-          </p>
-        )}
       </div>
     </aside>
   )

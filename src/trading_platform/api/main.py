@@ -110,6 +110,86 @@ def polymarket_market_ticks(market_id: str) -> dict[str, Any]:
     return reader.read_polymarket_market_ticks(market_id)
 
 
+@app.get("/api/smart-money/wallets")
+def smart_money_wallets() -> dict[str, Any]:
+    return reader.read_smart_money_wallets()
+
+
+@app.get("/api/smart-money/signals")
+def smart_money_signals() -> dict[str, Any]:
+    return reader.read_smart_money_signals()
+
+
+@app.get("/api/smart-money/wallet/{address}")
+def smart_money_wallet_detail(address: str) -> dict[str, Any]:
+    return reader.read_smart_money_wallet_detail(address)
+
+
+@app.get("/api/smart-money/alerts")
+def smart_money_alerts(limit: int = 50, wallet: str | None = None, tier: int | None = None) -> dict[str, Any]:
+    return reader.read_smart_money_alerts(limit=limit, wallet=wallet, tier=tier)
+
+
+@app.get("/api/smart-money/open-positions")
+def smart_money_open_positions() -> dict[str, Any]:
+    return reader.read_smart_money_open_positions()
+
+
+@app.get("/api/smart-money/actionable-signals")
+def smart_money_actionable_signals() -> dict[str, Any]:
+    return reader.read_smart_money_actionable_signals()
+
+
+@app.get("/api/smart-money/universe-stats")
+def smart_money_universe_stats() -> dict[str, Any]:
+    return reader.read_smart_money_universe_stats()
+
+
+@app.get("/api/paper/bankroll")
+def paper_bankroll() -> dict[str, Any]:
+    return reader.read_paper_bankroll()
+
+
+@app.get("/api/paper/pnl-history")
+def paper_pnl_history() -> dict[str, Any]:
+    return reader.read_paper_pnl_history()
+
+
+@app.get("/api/signals/performance")
+def signals_performance() -> dict[str, Any]:
+    return reader.read_signals_performance()
+
+
+@app.get("/api/smart-money/leaderboard")
+def smart_money_leaderboard(sort_by: str = "equity_score") -> dict[str, Any]:
+    return reader.read_smart_money_leaderboard(sort_by=sort_by)
+
+
+@app.get("/api/smart-money/winners")
+def smart_money_winners(window: str = "all") -> dict[str, Any]:
+    return reader.read_smart_money_winners(window=window)
+
+
+@app.get("/api/smart-money/wallet/{address}/positions")
+def smart_money_wallet_positions(address: str) -> dict[str, Any]:
+    return reader.read_smart_money_wallet_positions(address)
+
+
+@app.get("/api/smart-money/wallet/{address}/trades")
+def smart_money_wallet_trades(address: str, page: int = 1, limit: int = 50) -> dict[str, Any]:
+    return reader.read_smart_money_wallet_trades(address, page=page, limit=limit)
+
+
+@app.get("/api/smart-money/mirror")
+def smart_money_mirror() -> dict[str, Any]:
+    return reader.read_smart_money_mirror()
+
+
+@app.get("/api/paper/dashboard")
+def paper_dashboard() -> dict[str, Any]:
+    return reader.read_paper_dashboard()
+
+
 @app.get("/api/paper/portfolio")
 def paper_portfolio() -> dict[str, Any]:
     return reader.read_paper_portfolio()
@@ -392,6 +472,34 @@ def research_replay_evaluation_preview(
 @app.get("/api/research/replay/comparison-latest")
 def research_replay_comparison_latest() -> dict[str, Any]:
     return reader.read_latest_replay_comparison_summary()
+
+
+@app.get("/api/research/replay/gating-latest")
+def research_replay_gating_latest() -> dict[str, Any]:
+    return reader.read_latest_research_gating_summary()
+
+
+@app.get("/api/research/replay/history")
+def research_replay_history(
+    candidate_id: str | None = None,
+    provider: str | None = None,
+    limit: int = 50,
+) -> dict[str, Any]:
+    return reader.read_replay_history_view(
+        candidate_id=candidate_id,
+        provider=provider,
+        limit=limit,
+    )
+
+
+@app.get("/api/research/replay/review-queue-latest")
+def research_replay_review_queue_latest() -> dict[str, Any]:
+    return reader.read_latest_replay_review_queue_summary()
+
+
+@app.get("/api/research/replay/drift-latest")
+def research_replay_drift_latest() -> dict[str, Any]:
+    return reader.read_latest_replay_drift_summary()
 
 
 @app.get("/api/research/replay/comparison-preview")

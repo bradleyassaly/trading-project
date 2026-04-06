@@ -35,9 +35,36 @@ def cmd_polymarket_wallet_profiles(args: argparse.Namespace) -> None:
 
     trades_csv = getattr(args, "trades_csv", None)
     trades_dir = getattr(args, "trades_dir", None)
-    resolution_csv = Path(args.resolution_csv).expanduser()
+    use_graph = getattr(args, "use_graph_resolution", False)
+    resolution_csv_str = getattr(args, "resolution_csv", None)
     output = _project_relative(getattr(args, "output", None) or "data/polymarket/wallet_profiles.parquet")
 
+    # Graph-based resolution path (no resolution CSV needed)
+    if use_graph and trades_dir:
+        trades_dir_path = Path(trades_dir).expanduser()
+        if not trades_dir_path.exists():
+            print(f"[ERROR] Trades directory not found: {trades_dir_path}")
+            return
+        csv_count = len(list(trades_dir_path.glob("*.csv")))
+        print("Polymarket Wallet Profiler (Graph Resolution)")
+        print(f"  trades dir   : {trades_dir_path} ({csv_count} files)")
+        print(f"  resolution   : The Graph positions subgraph")
+        print(f"  output       : {output}")
+        print()
+        profiler = WalletProfiler()
+        result = profiler.build_profiles_from_data_api(trades_dir_path, output)
+        print("[DONE] Wallet profiles built.")
+        print(f"  Wallets analyzed            : {result.wallets_analyzed}")
+        print(f"  With resolved trades        : {result.wallets_with_resolved_trades}")
+        print(f"  Smart money flagged         : {result.smart_money_count}")
+        print(f"  Output                      : {result.output_path}")
+        return
+
+    # Standard resolution CSV path
+    if not resolution_csv_str:
+        print("[ERROR] Provide --resolution-csv or use --use-graph-resolution with --trades-dir")
+        return
+    resolution_csv = Path(resolution_csv_str).expanduser()
     if not resolution_csv.exists():
         print(f"[ERROR] Resolution CSV not found: {resolution_csv}")
         return

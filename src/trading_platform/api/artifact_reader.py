@@ -35,6 +35,7 @@ from trading_platform.research.dataset_reader import (
     resolve_research_dataset,
 )
 from trading_platform.research.replay_evaluation import build_replay_evaluation_request, run_replay_evaluation
+from trading_platform.research.replay_history import filter_replay_history, load_replay_history
 from trading_platform.research.replay_comparison import ReplayComparisonRequest, run_replay_comparison
 from trading_platform.research.replay_assembly import ReplayAssemblyRequest, assemble_replay_dataset
 from trading_platform.research.replay_consumer import ReplayConsumerRequest, load_replay_consumer_input
@@ -117,6 +118,18 @@ def _provider_monitoring_root() -> Path:
 
 def _research_replay_root() -> Path:
     return ARTIFACTS_ROOT / "research_replay"
+
+
+def _research_replay_history_root() -> Path:
+    return _research_replay_root() / "history"
+
+
+def _research_replay_gating_root() -> Path:
+    return _research_replay_root() / "gating"
+
+
+def _research_replay_review_root() -> Path:
+    return _research_replay_root() / "review"
 
 
 def _compute_sharpe(returns: pd.Series) -> float | None:
@@ -489,9 +502,9 @@ def read_polymarket_live_markets() -> dict[str, Any]:
                 GROUP BY market_id
               )
         """).fetchall()
-        # Market metadata (question text, end date)
+        # Market metadata (question text, end date, token ID)
         market_rows = conn.execute(
-            "SELECT market_id, question, volume, end_date_iso FROM markets"
+            "SELECT market_id, question, volume, end_date_iso, yes_token_id FROM markets"
         ).fetchall()
         # Tick counts
         tick_count_rows = conn.execute(
@@ -502,7 +515,8 @@ def read_polymarket_live_markets() -> dict[str, Any]:
         return {"available": False, "reason": "Failed to read live DB",
                 "data": [], "count": 0, "markets_subscribed": 0, "started_at": None}
 
-    market_meta = {r[0]: {"question": r[1], "volume": r[2], "end_date_iso": r[3]} for r in market_rows}
+    market_meta = {r[0]: {"question": r[1], "volume": r[2], "end_date_iso": r[3],
+                          "yes_token_id": r[4] if len(r) > 4 else None} for r in market_rows}
     tick_counts = {r[0]: r[1] for r in tick_count_rows}
 
     markets = []
@@ -513,6 +527,7 @@ def read_polymarket_live_markets() -> dict[str, Any]:
             "question": meta.get("question", ""),
             "volume": meta.get("volume", 0),
             "end_date_iso": meta.get("end_date_iso"),
+            "yes_token_id": meta.get("yes_token_id"),
             "yes_price": round(price * 100, 2),
             "last_tick_at": _parse_ws_timestamp(ts),
             "tick_count": tick_counts.get(market_id, 0),
@@ -616,6 +631,548 @@ def read_polymarket_market_ticks(market_id: str) -> dict[str, Any]:
             "ticks_per_hour": ticks_per_hour,
         },
     }
+
+
+# ── Smart money ──────────────────────────────────────────────────────────────
+
+
+def read_smart_money_wallets() -> dict[str, Any]:
+    path = DATA_ROOT / "polymarket" / "wallet_profiles.parquet"
+    if not path.exists():
+        return {"available": False, "reason": "No wallet profiles found", "data": []}
+    try:
+        import pandas as _pd
+        df = _pd.read_parquet(path)
+        if "edge" not in df.columns:
+            return {"available": False, "reason": "Profile schema missing edge", "data": []}
+        top = df.nlargest(100, "edge")
+        wallets = []
+        for _, row in top.iterrows():
+            wallets.append({
+                "wallet": row.get("wallet", ""),
+                "edge": _safe(row.get("edge")),
+                "early_win_rate": _safe(row.get("early_win_rate")),
+                "uncertain_early_trades": int(row.get("uncertain_early_trades", row.get("early_trades", 0))),
+                "total_volume_usdc": _safe(row.get("total_volume_usdc")),
+                "is_early_informed": bool(row.get("is_early_informed", False)),
+                "win_rate": _safe(row.get("win_rate")),
+                "resolved_trades": int(row.get("resolved_trades", 0)),
+            })
+        return {"available": True, "count": len(wallets), "data": wallets}
+    except Exception as exc:
+        return {"available": False, "reason": str(exc), "data": []}
+
+
+def read_smart_money_signals() -> dict[str, Any]:
+    profiles = DATA_ROOT / "polymarket" / "wallet_profiles.parquet"
+    fills_dir = DATA_ROOT / "polymarket" / "orderflow"
+    if not profiles.exists() or not fills_dir.exists():
+        return {"available": False, "reason": "Missing profiles or fills", "data": []}
+    try:
+        from trading_platform.polymarket.smart_money_signal import SmartMoneySignalGenerator
+        import pandas as _pd
+        from datetime import datetime as _dt, timedelta, timezone as _tz
+
+        gen = SmartMoneySignalGenerator(profiles)
+        cutoff = _dt.now(tz=_tz.utc) - timedelta(hours=12)
+        dfs = []
+        for p in fills_dir.glob("*.parquet"):
+            try:
+                df = _pd.read_parquet(p)
+                if "timestamp" in df.columns:
+                    df = df[df["timestamp"] >= cutoff]
+                if not df.empty:
+                    dfs.append(df)
+            except Exception:
+                continue
+        if not dfs:
+            return {"available": True, "data": [], "count": 0}
+        fills = _pd.concat(dfs, ignore_index=True)
+        signals = gen.compute(fills)
+        data = [
+            {
+                "token_id": s.token_id[:24],
+                "direction": s.direction,
+                "confidence": s.confidence,
+                "weighted_net_volume": s.weighted_net_volume,
+                "net_smart_volume": s.net_smart_volume,
+                "top_wallet_edge": s.top_wallet_edge,
+                "hours_since_last_trade": s.hours_since_last_smart_trade,
+                "smart_trade_count": s.smart_trade_count,
+            }
+            for s in signals[:50]
+        ]
+        return {"available": True, "count": len(data), "data": data}
+    except Exception as exc:
+        return {"available": False, "reason": str(exc), "data": []}
+
+
+def read_smart_money_mirror() -> dict[str, Any]:
+    profiles = DATA_ROOT / "polymarket" / "wallet_profiles.parquet"
+    if not profiles.exists():
+        return {"available": False, "reason": "No profiles", "data": []}
+    try:
+        from trading_platform.polymarket.wallet_mirror import WalletMirror
+        mirror = WalletMirror(profiles, top_n=30)
+        signals = mirror.get_mirror_signals(since_minutes=90, min_fill_usdc=100)
+        data = [
+            {
+                "wallet": s.trigger_wallet[:16],
+                "token_id": s.token_id[:24],
+                "question": s.question[:60] if s.question else "",
+                "direction": s.direction,
+                "fill_amount": s.fill_amount_usdc,
+                "minutes_since_fill": s.minutes_since_fill,
+                "current_price": round(s.current_price * 100, 1) if s.current_price else None,
+                "spread": round(s.spread * 100, 1) if s.spread else None,
+                "wallet_edge": s.wallet_edge,
+                "tradeable": s.tradeable,
+            }
+            for s in signals[:30]
+        ]
+        return {"available": True, "count": len(data), "data": data}
+    except Exception as exc:
+        return {"available": False, "reason": str(exc), "data": []}
+
+
+def read_smart_money_wallet_detail(address: str) -> dict[str, Any]:
+    profiles_path = DATA_ROOT / "polymarket" / "wallet_profiles.parquet"
+    fills_dir = DATA_ROOT / "polymarket" / "goldsky_resolved_fills"
+    res_path = DATA_ROOT / "polymarket" / "gamma_resolution.csv"
+
+    if not profiles_path.exists():
+        return {"available": False, "reason": "No wallet profiles"}
+
+    try:
+        import pandas as _pd
+        from trading_platform.polymarket.resolution_resolver import ResolutionResolver
+
+        # Profile
+        df = _pd.read_parquet(profiles_path)
+        wallet_row = df[df["wallet"] == address]
+        if wallet_row.empty:
+            return {"available": False, "reason": f"Wallet {address[:16]}... not found"}
+        profile = {k: _safe(v) for k, v in wallet_row.iloc[0].to_dict().items()}
+
+        # Load resolved fills
+        resolver = ResolutionResolver(res_path) if res_path.exists() else None
+        trades = []
+        if fills_dir.exists():
+            for path in fills_dir.glob("*.parquet"):
+                if path.name == "combined.parquet":
+                    continue
+                try:
+                    fdf = _pd.read_parquet(path)
+                    wallet_fills = fdf[fdf["maker_wallet"] == address]
+                    if wallet_fills.empty:
+                        continue
+                    for _, row in wallet_fills.head(100).iterrows():
+                        maker_asset = str(row.get("maker_asset_id", ""))
+                        taker_asset = str(row.get("taker_asset_id", ""))
+                        direction = "YES" if maker_asset == "0" else "NO"
+                        token_id = taker_asset if maker_asset == "0" else maker_asset
+                        rp = resolver.resolve(token_id) if resolver else None
+                        won = None
+                        if rp is not None:
+                            won = (rp >= 99.0 and direction == "YES") or (rp < 1.0 and direction == "NO")
+                        trades.append({
+                            "token_id": token_id[:24],
+                            "direction": direction,
+                            "amount_usdc": _safe(row.get("maker_amount")),
+                            "timestamp": str(row.get("timestamp", "")),
+                            "resolution_price": rp,
+                            "won": won,
+                        })
+                except Exception:
+                    continue
+
+        # Load recent alerts for this wallet
+        alerts = []
+        try:
+            from trading_platform.polymarket.alert_log import AlertLog
+            log = AlertLog(DATA_ROOT / "polymarket" / "alerts.jsonl")
+            alerts = log.query(limit=50, wallet=address)
+        except Exception:
+            pass
+
+        # Load open positions for this wallet
+        open_pos = []
+        pos_path = DATA_ROOT / "polymarket" / "wallet_open_positions.parquet"
+        if pos_path.exists():
+            try:
+                pos_df = _pd.read_parquet(pos_path)
+                wallet_pos = pos_df[pos_df["wallet"] == address]
+                for _, r in wallet_pos.iterrows():
+                    open_pos.append({k: _safe(v) for k, v in r.to_dict().items()})
+            except Exception:
+                pass
+
+        return {
+            "available": True,
+            "profile": profile,
+            "resolved_trades": trades[:200],
+            "trade_count": len(trades),
+            "alerts": alerts,
+            "open_positions": open_pos,
+        }
+    except Exception as exc:
+        return {"available": False, "reason": str(exc)}
+
+
+def _get_wallet_db() -> Any:
+    from trading_platform.polymarket.wallet_db import WalletDB
+    db_path = DATA_ROOT / "polymarket" / "wallet_intelligence.db"
+    if not db_path.exists():
+        return None
+    return WalletDB(db_path)
+
+
+def read_smart_money_actionable_signals() -> dict[str, Any]:
+    db = _get_wallet_db()
+    if not db:
+        return {"available": False, "reason": "Wallet intelligence DB not found", "data": []}
+    try:
+        from trading_platform.polymarket.signal_engine import SignalEngine
+        engine = SignalEngine(db=db)
+        signals = engine.get_actionable_signals()
+        return {"available": True, "data": signals, "count": len(signals)}
+    except Exception as exc:
+        return {"available": False, "reason": str(exc), "data": []}
+
+
+def read_smart_money_leaderboard(*, sort_by: str = "equity_score") -> dict[str, Any]:
+    db = _get_wallet_db()
+    if not db:
+        return {"available": False, "reason": "Wallet intelligence DB not found", "data": []}
+    try:
+        rows = db.get_leaderboard(limit=50, sort_by=sort_by)
+        return {"available": True, "data": rows, "count": len(rows), "sort_by": sort_by}
+    except Exception as exc:
+        return {"available": False, "reason": str(exc), "data": []}
+
+
+def read_smart_money_winners(*, window: str = "all") -> dict[str, Any]:
+    db = _get_wallet_db()
+    if not db:
+        return {"available": False, "reason": "Wallet intelligence DB not found", "data": []}
+    try:
+        rows = db.get_winners(window=window, limit=50)
+        return {"available": True, "data": rows, "window": window, "count": len(rows)}
+    except Exception as exc:
+        return {"available": False, "reason": str(exc), "data": []}
+
+
+def read_smart_money_wallet_positions(address: str) -> dict[str, Any]:
+    db = _get_wallet_db()
+    if not db:
+        return {"available": False, "reason": "Wallet intelligence DB not found", "data": []}
+    try:
+        positions = db.get_wallet_positions(address)
+        return {"available": True, "data": positions, "count": len(positions)}
+    except Exception as exc:
+        return {"available": False, "reason": str(exc), "data": []}
+
+
+def read_smart_money_wallet_trades(address: str, *, page: int = 1, limit: int = 50) -> dict[str, Any]:
+    db = _get_wallet_db()
+    if not db:
+        return {"available": False, "reason": "Wallet intelligence DB not found", "data": []}
+    try:
+        offset = (page - 1) * limit
+        trades = db.get_wallet_trades(address, limit=limit, offset=offset)
+        return {"available": True, "data": trades, "page": page, "count": len(trades)}
+    except Exception as exc:
+        return {"available": False, "reason": str(exc), "data": []}
+
+
+_SIGNAL_ALLOCATIONS = {
+    "whale_entry":       {"allocated": 2000, "stake_per_trade": 100},
+    "convergence":       {"allocated": 2500, "stake_per_trade": 125},
+    "contrarian_whale":  {"allocated": 1500, "stake_per_trade": 75},
+    "position_building": {"allocated": 1500, "stake_per_trade": 75},
+    "cross_type":        {"allocated": 1500, "stake_per_trade": 75},
+    "cascade":           {"allocated": 500,  "stake_per_trade": 25},
+    "domain_specialist": {"allocated": 500,  "stake_per_trade": 25},
+}
+
+
+def read_smart_money_universe_stats() -> dict[str, Any]:
+    db = _get_wallet_db()
+    if not db:
+        return {"available": False, "reason": "Wallet intelligence DB not found"}
+    try:
+        return {"available": True, **db.universe_stats()}
+    except Exception as exc:
+        return {"available": False, "reason": str(exc)}
+
+
+def read_paper_bankroll() -> dict[str, Any]:
+    """Return bankroll allocation structure + actual paper trade performance."""
+    db_path = DATA_ROOT / "kalshi" / "paper_trades.db"
+    by_signal = {}
+    total_pnl = 0.0
+    total_resolved = 0
+    total_wins = 0
+    total_open = 0
+
+    for sig_type, alloc in _SIGNAL_ALLOCATIONS.items():
+        by_signal[sig_type] = {
+            **alloc, "trades": 0, "resolved": 0, "wins": 0, "win_rate": None, "pnl": 0.0,
+        }
+
+    if db_path.exists():
+        try:
+            import sqlite3
+            conn = sqlite3.connect(str(db_path), check_same_thread=False)
+            rows = conn.execute("""
+                SELECT COALESCE(signal_family, 'unknown'), COUNT(*),
+                       SUM(CASE WHEN status='closed' THEN 1 ELSE 0 END),
+                       SUM(CASE WHEN outcome='win' THEN 1 ELSE 0 END),
+                       COALESCE(SUM(CASE WHEN status='closed' THEN return_pct ELSE 0 END), 0)
+                FROM trades GROUP BY 1
+            """).fetchall()
+            for sig, trades, resolved, wins, ret in rows:
+                total_resolved += (resolved or 0)
+                total_wins += (wins or 0)
+                total_pnl += (ret or 0)
+                if sig in by_signal:
+                    by_signal[sig]["trades"] = trades or 0
+                    by_signal[sig]["resolved"] = resolved or 0
+                    by_signal[sig]["wins"] = wins or 0
+                    by_signal[sig]["win_rate"] = round((wins or 0) / resolved, 3) if resolved else None
+                    by_signal[sig]["pnl"] = round(ret or 0, 2)
+            total_open = conn.execute("SELECT COUNT(*) FROM trades WHERE status='open'").fetchone()[0]
+            conn.close()
+        except Exception:
+            pass
+
+    return {
+        "available": True,
+        "total_bankroll": 10000,
+        "net_pnl": round(total_pnl, 2),
+        "win_rate": round(total_wins / total_resolved, 3) if total_resolved > 0 else None,
+        "resolved": total_resolved,
+        "open": total_open,
+        "by_signal": by_signal,
+    }
+
+
+def read_paper_pnl_history() -> dict[str, Any]:
+    """Daily P&L snapshots for charting."""
+    db_path = DATA_ROOT / "kalshi" / "paper_trades.db"
+    by_day: list[dict] = []
+    by_signal_total: dict[str, dict] = {}
+
+    if db_path.exists():
+        try:
+            import sqlite3
+            conn = sqlite3.connect(str(db_path), check_same_thread=False)
+            rows = conn.execute("""
+                SELECT DATE(exit_ts) as d, COALESCE(signal_family, 'unknown'),
+                       SUM(return_pct), COUNT(*)
+                FROM trades WHERE outcome IS NOT NULL AND exit_ts IS NOT NULL
+                GROUP BY d, signal_family ORDER BY d
+            """).fetchall()
+
+            day_totals: dict[str, float] = {}
+            for d, sig, pnl, count in rows:
+                if d:
+                    day_totals[d] = day_totals.get(d, 0) + (pnl or 0)
+                if sig not in by_signal_total:
+                    by_signal_total[sig] = {"total_pnl": 0, "trades": 0, "wins": 0}
+                by_signal_total[sig]["total_pnl"] += (pnl or 0)
+                by_signal_total[sig]["trades"] += count
+
+            cumulative = 0.0
+            for d in sorted(day_totals):
+                cumulative += day_totals[d]
+                by_day.append({"date": d, "pnl": round(day_totals[d], 4), "cumulative_pnl": round(cumulative, 4)})
+
+            conn.close()
+        except Exception:
+            pass
+
+    return {
+        "available": True,
+        "has_data": len(by_day) > 0,
+        "by_day": by_day,
+        "by_signal_total": {k: {kk: round(vv, 4) if isinstance(vv, float) else vv for kk, vv in v.items()} for k, v in by_signal_total.items()},
+        "next_resolution": "April 15, 2026 (KXCPI/KXFED markets)",
+    }
+
+
+def read_signals_performance() -> dict[str, Any]:
+    """Signal type performance from wallet alerts + paper trade outcomes."""
+    db = _get_wallet_db()
+    by_type: list[dict] = []
+
+    for sig_type, alloc in _SIGNAL_ALLOCATIONS.items():
+        entry = {
+            "signal_type": sig_type,
+            "allocated": alloc["allocated"],
+            "stake_per_trade": alloc["stake_per_trade"],
+            "fired": 0, "resolved": 0, "wins": 0,
+            "win_rate": None, "avg_ev": None, "profit_factor": None,
+            "cumulative_pnl": 0, "status": "building",
+        }
+        by_type.append(entry)
+
+    total_fired = 0
+    total_resolved = 0
+
+    if db:
+        try:
+            alerts = db.get_alerts(limit=5000)
+            for a in alerts:
+                at = a.get("alert_type") or a.get("wallet_type") or "unknown"
+                for entry in by_type:
+                    if entry["signal_type"] == at:
+                        entry["fired"] += 1
+                        total_fired += 1
+                        break
+        except Exception:
+            pass
+
+    for entry in by_type:
+        r = entry["resolved"]
+        if r >= 10:
+            wr = entry["wins"] / r if r > 0 else 0
+            entry["win_rate"] = round(wr, 3)
+            entry["status"] = "live" if wr > 0.55 and (entry.get("profit_factor") or 0) > 1.5 else "weak" if (entry.get("profit_factor") or 0) >= 1.0 else "off"
+        elif r > 0:
+            entry["win_rate"] = round(entry["wins"] / r, 3)
+
+    return {
+        "available": True,
+        "by_type": by_type,
+        "total_fired": total_fired,
+        "total_resolved": total_resolved,
+        "overall_ev": None,
+    }
+
+
+def read_smart_money_alerts(*, limit: int = 50, wallet: str | None = None,
+                            tier: int | None = None) -> dict[str, Any]:
+    """Read recent alerts from the JSONL alert log."""
+    try:
+        from trading_platform.polymarket.alert_log import AlertLog
+        log = AlertLog(DATA_ROOT / "polymarket" / "alerts.jsonl")
+        alerts = log.query(limit=limit, wallet=wallet, tier=tier)
+        return {"available": True, "data": alerts, "count": len(alerts)}
+    except Exception as exc:
+        return {"available": False, "reason": str(exc), "data": []}
+
+
+def read_smart_money_open_positions() -> dict[str, Any]:
+    """Read precomputed open positions from parquet."""
+    path = DATA_ROOT / "polymarket" / "wallet_open_positions.parquet"
+    if not path.exists():
+        return {"available": False, "reason": "No open positions file. Run: compute-open-positions", "data": []}
+    try:
+        import pandas as _pd
+        df = _pd.read_parquet(path)
+        rows = []
+        for _, r in df.head(200).iterrows():
+            rows.append({k: _safe(v) for k, v in r.to_dict().items()})
+        return {"available": True, "data": rows, "count": len(rows)}
+    except Exception as exc:
+        return {"available": False, "reason": str(exc), "data": []}
+
+
+def read_paper_dashboard() -> dict[str, Any]:
+    """Comprehensive paper trading dashboard data."""
+    db_path = DATA_ROOT / "kalshi" / "paper_trades.db"
+    if not db_path.exists():
+        return {"available": False, "reason": "No paper trading DB found"}
+    try:
+        import sqlite3
+        conn = sqlite3.connect(str(db_path), check_same_thread=False)
+
+        # Portfolio summary
+        port = conn.execute("SELECT cash_usd, open_value, total_value, realized_pnl FROM portfolio ORDER BY id DESC LIMIT 1").fetchone()
+        cash = float(port[0]) if port else 500.0
+        total_val = float(port[2]) if port else 500.0
+        realized = float(port[3]) if port else 0.0
+
+        # Open positions
+        open_trades = conn.execute("""
+            SELECT id, ticker, side, entry_price, size_usd, signal_family, confidence,
+                   entry_ts, COALESCE(platform, 'kalshi') as platform
+            FROM trades WHERE status = 'open'
+            ORDER BY entry_ts DESC
+        """).fetchall()
+        positions = []
+        for t in open_trades:
+            positions.append({
+                "id": t[0], "ticker": t[1], "side": t[2],
+                "entry_price": t[3], "size_usd": t[4],
+                "signal_type": t[5] or "unknown", "confidence": t[6],
+                "entry_ts": t[7], "platform": t[8],
+            })
+
+        # Signal attribution
+        attr_rows = conn.execute("""
+            SELECT COALESCE(signal_family, 'unknown') as sig,
+                   COUNT(*) as total,
+                   SUM(CASE WHEN outcome='win' THEN 1 ELSE 0 END) as wins,
+                   SUM(CASE WHEN status='closed' THEN 1 ELSE 0 END) as closed,
+                   AVG(size_usd) as avg_stake
+            FROM trades
+            GROUP BY sig ORDER BY total DESC
+        """).fetchall()
+        attribution = []
+        for r in attr_rows:
+            closed = r[3]
+            attribution.append({
+                "signal_type": r[0],
+                "total_trades": r[1],
+                "wins": r[2],
+                "closed": closed,
+                "win_rate": round(r[2] / closed, 3) if closed > 0 else 0.0,
+                "avg_stake": round(r[4], 2) if r[4] else 0.0,
+            })
+
+        # Recent closed trades
+        closed_trades = conn.execute("""
+            SELECT ticker, side, entry_price, exit_price, size_usd,
+                   signal_family, outcome, return_pct, exit_ts,
+                   COALESCE(platform, 'kalshi') as platform
+            FROM trades WHERE status = 'closed'
+            ORDER BY exit_ts DESC LIMIT 20
+        """).fetchall()
+        recent = []
+        for t in closed_trades:
+            recent.append({
+                "ticker": t[0], "side": t[1],
+                "entry_price": t[2], "exit_price": t[3],
+                "size_usd": t[4], "signal_type": t[5],
+                "outcome": t[6], "return_pct": t[7],
+                "exit_ts": t[8], "platform": t[9],
+            })
+
+        # Platform breakdown
+        platform_rows = conn.execute("""
+            SELECT COALESCE(platform, 'kalshi'),
+                   COUNT(*), SUM(CASE WHEN outcome='win' THEN 1 ELSE 0 END),
+                   SUM(CASE WHEN status='open' THEN 1 ELSE 0 END)
+            FROM trades GROUP BY 1
+        """).fetchall()
+        platforms = {}
+        for r in platform_rows:
+            platforms[r[0]] = {"total": r[1], "wins": r[2] or 0, "open": r[3]}
+
+        conn.close()
+
+        return {
+            "available": True,
+            "portfolio": {"cash": cash, "total_value": total_val, "realized_pnl": realized},
+            "positions": positions,
+            "attribution": attribution,
+            "recent_closed": recent,
+            "platforms": platforms,
+        }
+    except Exception as exc:
+        return {"available": False, "reason": str(exc)}
 
 
 # ── Paper trading ────────────────────────────────────────────────────────────
@@ -1066,3 +1623,52 @@ def read_replay_comparison_preview(
     except (KeyError, ValueError, FileNotFoundError) as exc:
         return {"available": False, "reason": str(exc)}
     return {"available": True, **result.to_summary()}
+
+
+def read_latest_research_gating_summary() -> dict[str, Any]:
+    summary_path = _research_replay_gating_root() / "latest_research_gating_summary.json"
+    summary = _read_json(summary_path)
+    if not summary:
+        return {"available": False, "reason": "No research gating summary found"}
+    return {"available": True, **summary}
+
+
+def read_replay_history_view(
+    *,
+    candidate_id: str | None = None,
+    provider: str | None = None,
+    limit: int = 50,
+) -> dict[str, Any]:
+    history_path = _research_replay_history_root() / "shared_replay_history.jsonl"
+    records = load_replay_history(history_path)
+    filtered = filter_replay_history(
+        records,
+        candidate_id=candidate_id,
+        provider=provider,
+        limit=limit,
+    )
+    return {
+        "available": bool(records),
+        "history_path": str(history_path),
+        "total_record_count": len(records),
+        "returned_record_count": len(filtered),
+        "candidate_id": candidate_id,
+        "provider": provider,
+        "records": [record.to_dict() for record in filtered],
+    }
+
+
+def read_latest_replay_review_queue_summary() -> dict[str, Any]:
+    summary_path = _research_replay_review_root() / "latest_review_queue_summary.json"
+    summary = _read_json(summary_path)
+    if not summary:
+        return {"available": False, "reason": "No replay review queue summary found"}
+    return {"available": True, **summary}
+
+
+def read_latest_replay_drift_summary() -> dict[str, Any]:
+    summary_path = _research_replay_review_root() / "latest_replay_drift_summary.json"
+    summary = _read_json(summary_path)
+    if not summary:
+        return {"available": False, "reason": "No replay drift summary found"}
+    return {"available": True, **summary}

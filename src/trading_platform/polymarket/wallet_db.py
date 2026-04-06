@@ -1,0 +1,577 @@
+"""
+SQLite database for the wallet intelligence system.
+
+Central store for wallet profiles, trades, positions, signals, and alerts.
+Runs alongside the existing parquet-based pipeline.
+
+Usage::
+
+    from trading_platform.polymarket.wallet_db import WalletDB
+    db = WalletDB()
+    db.upsert_trade(wallet="0xabc...", asset="tok1", side="BUY", ...)
+"""
+from __future__ import annotations
+
+import json
+import logging
+import sqlite3
+import threading
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+logger = logging.getLogger(__name__)
+
+_DEFAULT_PATH = "data/polymarket/wallet_intelligence.db"
+
+_SCHEMA = """
+CREATE TABLE IF NOT EXISTS wallet_profiles (
+    wallet TEXT PRIMARY KEY,
+    edge REAL,
+    early_win_rate REAL,
+    win_rate REAL,
+    resolved_trades INTEGER,
+    total_volume_usdc REAL,
+    is_early_informed INTEGER,
+    uncertain_early_trades INTEGER,
+    directional_win_rate REAL,
+    crypto_win_rate REAL,
+    politics_win_rate REAL,
+    category_trades TEXT,
+    wallet_type TEXT DEFAULT 'unknown',
+    avg_entry_hours_before_close REAL,
+    avg_position_size_usdc REAL,
+    total_realized_pnl REAL,
+    equity_score REAL,
+    last_trade_ts INTEGER,
+    last_synced_ts INTEGER,
+    first_seen_ts INTEGER,
+    notes TEXT
+);
+
+CREATE TABLE IF NOT EXISTS wallet_trades (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    wallet TEXT NOT NULL,
+    proxy_wallet TEXT,
+    asset TEXT,
+    condition_id TEXT,
+    side TEXT,
+    size REAL,
+    price REAL,
+    timestamp INTEGER,
+    title TEXT,
+    slug TEXT,
+    outcome TEXT,
+    event_slug TEXT,
+    transaction_hash TEXT UNIQUE,
+    category TEXT,
+    market_resolved INTEGER DEFAULT 0,
+    market_outcome TEXT,
+    pnl REAL,
+    synced_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_wt_wallet ON wallet_trades(wallet);
+CREATE INDEX IF NOT EXISTS idx_wt_asset ON wallet_trades(asset);
+CREATE INDEX IF NOT EXISTS idx_wt_timestamp ON wallet_trades(timestamp);
+CREATE INDEX IF NOT EXISTS idx_wt_category ON wallet_trades(category);
+
+CREATE TABLE IF NOT EXISTS wallet_positions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    wallet TEXT NOT NULL,
+    asset TEXT NOT NULL,
+    condition_id TEXT,
+    title TEXT,
+    slug TEXT,
+    outcome TEXT,
+    size REAL,
+    avg_price REAL,
+    initial_value REAL,
+    current_value REAL,
+    cash_pnl REAL,
+    percent_pnl REAL,
+    realized_pnl REAL,
+    cur_price REAL,
+    end_date TEXT,
+    last_updated INTEGER,
+    UNIQUE(wallet, asset)
+);
+CREATE INDEX IF NOT EXISTS idx_wp_wallet ON wallet_positions(wallet);
+CREATE INDEX IF NOT EXISTS idx_wp_asset ON wallet_positions(asset);
+
+CREATE TABLE IF NOT EXISTS market_signals (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    token_id TEXT,
+    market_title TEXT,
+    slug TEXT,
+    category TEXT,
+    direction TEXT,
+    confidence REAL,
+    net_smart_volume REAL,
+    weighted_net_volume REAL,
+    smart_wallet_count INTEGER,
+    top_wallet_edge REAL,
+    top_wallet_address TEXT,
+    hours_since_first_entry REAL,
+    hours_since_last_trade REAL,
+    directional_wallet_count INTEGER,
+    computed_at INTEGER,
+    UNIQUE(token_id, computed_at)
+);
+CREATE INDEX IF NOT EXISTS idx_ms_token ON market_signals(token_id);
+
+CREATE TABLE IF NOT EXISTS wallet_alerts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    wallet TEXT,
+    token_id TEXT,
+    market_title TEXT,
+    side TEXT,
+    size REAL,
+    price REAL,
+    wallet_edge REAL,
+    wallet_type TEXT,
+    directional_win_rate REAL,
+    tier INTEGER,
+    trade_ts INTEGER,
+    detected_at INTEGER,
+    paper_trade_fired INTEGER DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_wa_wallet ON wallet_alerts(wallet);
+CREATE INDEX IF NOT EXISTS idx_wa_detected ON wallet_alerts(detected_at);
+"""
+
+
+def _now_ts() -> int:
+    return int(datetime.now(tz=timezone.utc).timestamp())
+
+
+def categorize_slug(slug: str) -> str:
+    """Classify a market slug into a category."""
+    s = (slug or "").lower()
+    if any(k in s for k in [
+        "bitcoin", "btc", "ethereum", "eth-", "crypto", "solana", "sol-",
+        "xrp", "coinbase", "binance", "doge", "dogecoin", "matic", "polygon",
+        "defi", "will-bitcoin", "will-ethereum", "will-btc", "will-eth",
+        "price-above", "price-below", "market-cap",
+    ]):
+        return "crypto"
+    if any(k in s for k in [
+        "election", "president", "senate", "congress", "democrat", "republican",
+        "trump", "biden", "harris", "vance", "vote", "ballot", "approval",
+        "will-trump", "will-biden", "polling", "impeach", "cabinet",
+    ]):
+        return "politics"
+    if any(k in s for k in [
+        "nba", "nfl", "nhl", "mlb", "nascar", "f1-", "formula-1", "ufc",
+        "boxing", "championship", "super-bowl", "world-series", "stanley-cup",
+        "playoffs", "tournament", "soccer", "epl-", "match-", "game-winner",
+    ]):
+        return "sports"
+    if any(k in s for k in ["elon", "tweet", "musk", "twitter", "x-posts"]):
+        return "tweet_count"
+    if any(k in s for k in [
+        "cpi", "fed", "gdp", "jobs", "pce", "inflation", "interest-rate",
+        "fomc", "recession", "unemployment", "payroll", "treasury",
+        "will-cpi", "will-fed", "will-gdp", "economic", "rate-hike",
+        "rate-cut", "basis-points", "nonfarm",
+    ]):
+        return "economics"
+    return "other"
+
+
+class WalletDB:
+    """SQLite-backed wallet intelligence database."""
+
+    def __init__(self, db_path: str | Path = _DEFAULT_PATH) -> None:
+        self._path = Path(db_path)
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        self._lock = threading.Lock()
+        self._conn = sqlite3.connect(str(self._path), check_same_thread=False)
+        self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn.execute("PRAGMA busy_timeout=5000")
+        self._conn.executescript(_SCHEMA)
+        self._conn.commit()
+        self._migrate_profiles()
+
+    def _migrate_profiles(self) -> None:
+        """Add columns that may not exist in older DBs."""
+        existing = {r[1] for r in self._conn.execute("PRAGMA table_info(wallet_profiles)").fetchall()}
+        new_cols = [
+            ("total_won_usdc", "REAL"),
+            ("total_lost_usdc", "REAL"),
+            ("net_pnl_usdc", "REAL"),
+            ("avg_win_size_usdc", "REAL"),
+            ("avg_loss_size_usdc", "REAL"),
+            ("profit_factor", "REAL"),
+            ("conviction_score", "REAL"),
+            ("volume_tier", "TEXT"),
+            ("large_bet_threshold", "REAL"),
+            ("profit_score", "REAL"),
+        ]
+        for col, typedef in new_cols:
+            if col not in existing:
+                self._conn.execute(f"ALTER TABLE wallet_profiles ADD COLUMN {col} {typedef}")
+        self._conn.commit()
+
+    # ── Wallet profiles ──────────────────────────────────────────────────────
+
+    def upsert_profile(self, wallet: str, **fields: Any) -> None:
+        """Insert or update a wallet profile."""
+        with self._lock:
+            existing = self._conn.execute(
+                "SELECT wallet FROM wallet_profiles WHERE wallet = ?", (wallet,)
+            ).fetchone()
+            if existing:
+                sets = ", ".join(f"{k} = ?" for k in fields)
+                vals = list(fields.values()) + [wallet]
+                self._conn.execute(f"UPDATE wallet_profiles SET {sets} WHERE wallet = ?", vals)
+            else:
+                fields["wallet"] = wallet
+                cols = ", ".join(fields.keys())
+                placeholders = ", ".join("?" for _ in fields)
+                self._conn.execute(
+                    f"INSERT INTO wallet_profiles ({cols}) VALUES ({placeholders})",
+                    list(fields.values()),
+                )
+            self._conn.commit()
+
+    def get_profile(self, wallet: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM wallet_profiles WHERE wallet = ?", (wallet,)
+            ).fetchone()
+        if not row:
+            return None
+        cols = [d[0] for d in self._conn.execute("SELECT * FROM wallet_profiles LIMIT 0").description]
+        return dict(zip(cols, row))
+
+    def get_profiles_needing_sync(self, max_age_hours: float = 2.0) -> list[str]:
+        """Return wallets whose last_synced_ts is older than max_age_hours."""
+        cutoff = _now_ts() - int(max_age_hours * 3600)
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT wallet FROM wallet_profiles WHERE last_synced_ts IS NULL OR last_synced_ts < ?",
+                (cutoff,),
+            ).fetchall()
+        return [r[0] for r in rows]
+
+    def get_all_wallets(self) -> list[str]:
+        with self._lock:
+            return [r[0] for r in self._conn.execute("SELECT wallet FROM wallet_profiles").fetchall()]
+
+    # ── Trades ───────────────────────────────────────────────────────────────
+
+    def upsert_trade(self, **fields: Any) -> bool:
+        """Insert a trade, skip if transaction_hash already exists. Returns True if inserted."""
+        tx = fields.get("transaction_hash")
+        if not tx:
+            return False
+        with self._lock:
+            existing = self._conn.execute(
+                "SELECT 1 FROM wallet_trades WHERE transaction_hash = ?", (tx,)
+            ).fetchone()
+            if existing:
+                return False
+            try:
+                cols = ", ".join(fields.keys())
+                placeholders = ", ".join("?" for _ in fields)
+                self._conn.execute(
+                    f"INSERT INTO wallet_trades ({cols}) VALUES ({placeholders})",
+                    list(fields.values()),
+                )
+                self._conn.commit()
+                return True
+            except sqlite3.IntegrityError:
+                return False
+
+    def get_wallet_trades(self, wallet: str, limit: int = 100, offset: int = 0) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM wallet_trades WHERE wallet = ? ORDER BY timestamp DESC LIMIT ? OFFSET ?",
+                (wallet, limit, offset),
+            ).fetchall()
+        cols = [d[0] for d in self._conn.execute("SELECT * FROM wallet_trades LIMIT 0").description]
+        return [dict(zip(cols, r)) for r in rows]
+
+    def get_trades_by_category(self, wallet: str, category: str) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM wallet_trades WHERE wallet = ? AND category = ? ORDER BY timestamp DESC",
+                (wallet, category),
+            ).fetchall()
+        cols = [d[0] for d in self._conn.execute("SELECT * FROM wallet_trades LIMIT 0").description]
+        return [dict(zip(cols, r)) for r in rows]
+
+    # ── Positions ────────────────────────────────────────────────────────────
+
+    def upsert_position(self, wallet: str, asset: str, **fields: Any) -> None:
+        fields["wallet"] = wallet
+        fields["asset"] = asset
+        fields["last_updated"] = _now_ts()
+        with self._lock:
+            self._conn.execute(
+                """INSERT INTO wallet_positions (wallet, asset, condition_id, title, slug, outcome,
+                   size, avg_price, initial_value, current_value, cash_pnl, percent_pnl,
+                   realized_pnl, cur_price, end_date, last_updated)
+                   VALUES (:wallet, :asset, :condition_id, :title, :slug, :outcome,
+                   :size, :avg_price, :initial_value, :current_value, :cash_pnl, :percent_pnl,
+                   :realized_pnl, :cur_price, :end_date, :last_updated)
+                   ON CONFLICT(wallet, asset) DO UPDATE SET
+                   size=:size, avg_price=:avg_price, initial_value=:initial_value,
+                   current_value=:current_value, cash_pnl=:cash_pnl, percent_pnl=:percent_pnl,
+                   realized_pnl=:realized_pnl, cur_price=:cur_price, end_date=:end_date,
+                   last_updated=:last_updated""",
+                {
+                    "wallet": wallet, "asset": asset,
+                    "condition_id": fields.get("condition_id"),
+                    "title": fields.get("title"), "slug": fields.get("slug"),
+                    "outcome": fields.get("outcome"),
+                    "size": fields.get("size", 0), "avg_price": fields.get("avg_price"),
+                    "initial_value": fields.get("initial_value"),
+                    "current_value": fields.get("current_value"),
+                    "cash_pnl": fields.get("cash_pnl"),
+                    "percent_pnl": fields.get("percent_pnl"),
+                    "realized_pnl": fields.get("realized_pnl"),
+                    "cur_price": fields.get("cur_price"),
+                    "end_date": fields.get("end_date"),
+                    "last_updated": _now_ts(),
+                },
+            )
+            self._conn.commit()
+
+    def get_wallet_positions(self, wallet: str) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM wallet_positions WHERE wallet = ? AND size > 0 ORDER BY current_value DESC",
+                (wallet,),
+            ).fetchall()
+        cols = [d[0] for d in self._conn.execute("SELECT * FROM wallet_positions LIMIT 0").description]
+        return [dict(zip(cols, r)) for r in rows]
+
+    def get_positions_by_asset(self, asset: str) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM wallet_positions WHERE asset = ? AND size > 0",
+                (asset,),
+            ).fetchall()
+        cols = [d[0] for d in self._conn.execute("SELECT * FROM wallet_positions LIMIT 0").description]
+        return [dict(zip(cols, r)) for r in rows]
+
+    # ── Market signals ───────────────────────────────────────────────────────
+
+    def insert_signal(self, **fields: Any) -> None:
+        fields["computed_at"] = _now_ts()
+        with self._lock:
+            cols = ", ".join(fields.keys())
+            placeholders = ", ".join("?" for _ in fields)
+            self._conn.execute(
+                f"INSERT OR REPLACE INTO market_signals ({cols}) VALUES ({placeholders})",
+                list(fields.values()),
+            )
+            self._conn.commit()
+
+    def get_latest_signals(self, limit: int = 20) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                """SELECT * FROM market_signals
+                   WHERE id IN (SELECT MAX(id) FROM market_signals GROUP BY token_id)
+                   ORDER BY weighted_net_volume DESC LIMIT ?""",
+                (limit,),
+            ).fetchall()
+        cols = [d[0] for d in self._conn.execute("SELECT * FROM market_signals LIMIT 0").description]
+        return [dict(zip(cols, r)) for r in rows]
+
+    # ── Alerts ───────────────────────────────────────────────────────────────
+
+    def insert_alert(self, **fields: Any) -> None:
+        fields["detected_at"] = _now_ts()
+        with self._lock:
+            cols = ", ".join(fields.keys())
+            placeholders = ", ".join("?" for _ in fields)
+            self._conn.execute(
+                f"INSERT INTO wallet_alerts ({cols}) VALUES ({placeholders})",
+                list(fields.values()),
+            )
+            self._conn.commit()
+
+    def get_alerts(self, *, limit: int = 50, tier: int | None = None,
+                   hours: float | None = None, wallet: str | None = None) -> list[dict[str, Any]]:
+        clauses = []
+        params: list[Any] = []
+        if tier is not None:
+            clauses.append("tier = ?")
+            params.append(tier)
+        if hours is not None:
+            cutoff = _now_ts() - int(hours * 3600)
+            clauses.append("detected_at >= ?")
+            params.append(cutoff)
+        if wallet:
+            clauses.append("wallet = ?")
+            params.append(wallet)
+        where = " AND ".join(clauses) if clauses else "1=1"
+        params.append(limit)
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT * FROM wallet_alerts WHERE {where} ORDER BY detected_at DESC LIMIT ?",
+                params,
+            ).fetchall()
+        cols = [d[0] for d in self._conn.execute("SELECT * FROM wallet_alerts LIMIT 0").description]
+        return [dict(zip(cols, r)) for r in rows]
+
+    # ── Leaderboard ──────────────────────────────────────────────────────────
+
+    def get_leaderboard(self, limit: int = 50, sort_by: str = "equity_score") -> list[dict[str, Any]]:
+        allowed_sorts = {"equity_score", "profit_score", "conviction_score",
+                         "directional_win_rate", "resolved_trades", "net_pnl_usdc"}
+        col = sort_by if sort_by in allowed_sorts else "equity_score"
+        with self._lock:
+            rows = self._conn.execute(
+                f"""SELECT wallet, wallet_type, equity_score, directional_win_rate,
+                          win_rate, resolved_trades, total_volume_usdc,
+                          category_trades, avg_position_size_usdc,
+                          net_pnl_usdc, profit_factor, conviction_score,
+                          volume_tier, total_won_usdc, total_lost_usdc,
+                          profit_score, notes
+                   FROM wallet_profiles
+                   WHERE {col} IS NOT NULL
+                   ORDER BY {col} DESC LIMIT ?""",
+                (limit,),
+            ).fetchall()
+        cols = ["wallet", "wallet_type", "equity_score", "directional_win_rate",
+                "win_rate", "resolved_trades", "total_volume_usdc",
+                "category_trades", "avg_position_size_usdc",
+                "net_pnl_usdc", "profit_factor", "conviction_score",
+                "volume_tier", "total_won_usdc", "total_lost_usdc",
+                "profit_score", "notes"]
+        return [dict(zip(cols, r)) for r in rows]
+
+    # ── Winners ───────────────────────────────────────────────────────────────
+
+    def get_winners(self, *, window: str = "all", limit: int = 50) -> list[dict[str, Any]]:
+        """Return wallets ranked by profit for a given time window."""
+        now = _now_ts()
+        if window == "today":
+            # Midnight UTC today
+            from datetime import datetime, timezone
+            midnight = int(datetime.now(tz=timezone.utc).replace(hour=0, minute=0, second=0).timestamp())
+            time_filter = f"AND wt.timestamp >= {midnight}"
+        elif window == "weekly":
+            time_filter = f"AND wt.timestamp >= {now - 7 * 86400}"
+        elif window == "monthly":
+            time_filter = f"AND wt.timestamp >= {now - 30 * 86400}"
+        else:
+            time_filter = ""
+
+        with self._lock:
+            if time_filter:
+                # Compute profit from trades in window
+                rows = self._conn.execute(f"""
+                    SELECT wt.wallet,
+                           SUM(wt.pnl) as profit,
+                           SUM(wt.size) as volume,
+                           COUNT(*) as trades,
+                           wp.wallet_type, wp.equity_score, wp.directional_win_rate,
+                           wp.category_trades, wp.notes
+                    FROM wallet_trades wt
+                    LEFT JOIN wallet_profiles wp ON wt.wallet = wp.wallet
+                    WHERE wt.market_resolved = 1 AND wt.pnl IS NOT NULL
+                    {time_filter}
+                    GROUP BY wt.wallet
+                    ORDER BY profit DESC
+                    LIMIT ?
+                """, (limit,)).fetchall()
+                cols = ["wallet", "profit", "volume", "trades",
+                        "wallet_type", "equity_score", "directional_win_rate",
+                        "category_trades", "notes"]
+            else:
+                # All-time: use precomputed net_pnl_usdc
+                rows = self._conn.execute("""
+                    SELECT wallet, net_pnl_usdc as profit, total_volume_usdc as volume,
+                           resolved_trades as trades,
+                           wallet_type, equity_score, directional_win_rate,
+                           category_trades, notes
+                    FROM wallet_profiles
+                    WHERE net_pnl_usdc IS NOT NULL
+                    ORDER BY net_pnl_usdc DESC
+                    LIMIT ?
+                """, (limit,)).fetchall()
+                cols = ["wallet", "profit", "volume", "trades",
+                        "wallet_type", "equity_score", "directional_win_rate",
+                        "category_trades", "notes"]
+
+        return [dict(zip(cols, r)) for r in rows]
+
+    # ── Universe Stats ────────────────────────────────────────────────────────
+
+    def universe_stats(self) -> dict[str, Any]:
+        """Comprehensive stats for the wallet universe."""
+        now = _now_ts()
+        with self._lock:
+            total = self._conn.execute("SELECT COUNT(*) FROM wallet_profiles").fetchone()[0]
+
+            # By type
+            type_rows = self._conn.execute(
+                "SELECT COALESCE(wallet_type, 'unknown'), COUNT(*) FROM wallet_profiles GROUP BY 1"
+            ).fetchall()
+            by_type = {r[0]: r[1] for r in type_rows}
+
+            # By volume tier
+            tier_rows = self._conn.execute(
+                "SELECT COALESCE(volume_tier, 'unknown'), COUNT(*) FROM wallet_profiles GROUP BY 1"
+            ).fetchall()
+            by_tier = {r[0]: r[1] for r in tier_rows}
+
+            # Total deployed
+            deployed = self._conn.execute(
+                "SELECT COALESCE(SUM(total_volume_usdc), 0) FROM wallet_profiles"
+            ).fetchone()[0]
+
+            # Active last 7 days
+            cutoff_7d = now - 7 * 86400
+            active_7d = self._conn.execute(
+                "SELECT COUNT(*) FROM wallet_profiles WHERE last_synced_ts > ?", (cutoff_7d,)
+            ).fetchone()[0]
+
+            # Alerts today
+            from datetime import datetime, timezone
+            midnight = int(datetime.now(tz=timezone.utc).replace(hour=0, minute=0, second=0).timestamp())
+            alerts_today = self._conn.execute(
+                "SELECT COUNT(*) FROM wallet_alerts WHERE detected_at >= ?", (midnight,)
+            ).fetchone()[0]
+            t1_today = self._conn.execute(
+                "SELECT COUNT(*) FROM wallet_alerts WHERE detected_at >= ? AND tier = 1", (midnight,)
+            ).fetchone()[0]
+            t2_today = self._conn.execute(
+                "SELECT COUNT(*) FROM wallet_alerts WHERE detected_at >= ? AND tier = 2", (midnight,)
+            ).fetchone()[0]
+
+            last_sync = self._conn.execute(
+                "SELECT MAX(last_synced_ts) FROM wallet_profiles"
+            ).fetchone()[0]
+
+        return {
+            "total_wallets": total,
+            "by_type": by_type,
+            "by_tier": by_tier,
+            "total_deployed_usdc": round(deployed, 0),
+            "active_last_7d": active_7d,
+            "signals_today": alerts_today,
+            "tier1_today": t1_today,
+            "tier2_today": t2_today,
+            "last_sync_ts": last_sync,
+        }
+
+    # ── Stats ────────────────────────────────────────────────────────────────
+
+    def stats(self) -> dict[str, int]:
+        with self._lock:
+            profiles = self._conn.execute("SELECT COUNT(*) FROM wallet_profiles").fetchone()[0]
+            trades = self._conn.execute("SELECT COUNT(*) FROM wallet_trades").fetchone()[0]
+            positions = self._conn.execute("SELECT COUNT(*) FROM wallet_positions").fetchone()[0]
+            signals = self._conn.execute("SELECT COUNT(*) FROM market_signals").fetchone()[0]
+            alerts = self._conn.execute("SELECT COUNT(*) FROM wallet_alerts").fetchone()[0]
+        return {"profiles": profiles, "trades": trades, "positions": positions,
+                "signals": signals, "alerts": alerts}
+
+    def close(self) -> None:
+        with self._lock:
+            self._conn.close()

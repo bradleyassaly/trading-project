@@ -34,6 +34,12 @@ class ScanResult:
     confidence: float
     news_context: str  # "pre_event", "scheduled_release", "unscheduled"
     kelly_fraction: float
+    smart_money_direction: str = "NEUTRAL"  # "YES", "NO", "NEUTRAL"
+    smart_money_confidence: float = 0.0
+    taker_imbalance: float | None = None
+    large_order: float | None = None
+    unexplained_move: float | None = None
+    depth_imbalance: float | None = None
 
 
 class KalshiMarketScanner:

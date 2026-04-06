@@ -91,6 +91,9 @@ export default function ResearchData() {
     }),
     [selectedProvider],
   )
+  const replayGatingFetcher = useCallback(() => api.researchReplayGatingLatest(), [])
+  const replayReviewQueueFetcher = useCallback(() => api.researchReplayReviewQueueLatest(), [])
+  const replayDriftFetcher = useCallback(() => api.researchReplayDriftLatest(), [])
 
   const { data: datasets, loading: datasetsLoading } = useApi(datasetsFetcher, 30_000)
   const { data: monitoring } = useApi(monitoringFetcher, 30_000)
@@ -106,6 +109,9 @@ export default function ResearchData() {
   const { data: replayConsumerPreview, loading: replayConsumerLoading } = useApi(replayConsumerFetcher, 30_000)
   const { data: replayEvaluationPreview, loading: replayEvaluationLoading } = useApi(replayEvaluationFetcher, 30_000)
   const { data: replayComparisonPreview, loading: replayComparisonLoading } = useApi(replayComparisonFetcher, 30_000)
+  const { data: replayGatingSummary, loading: replayGatingLoading } = useApi(replayGatingFetcher, 30_000)
+  const { data: replayReviewQueueSummary, loading: replayReviewQueueLoading } = useApi(replayReviewQueueFetcher, 30_000)
+  const { data: replayDriftSummary, loading: replayDriftLoading } = useApi(replayDriftFetcher, 30_000)
 
   const providerOptions = useMemo(() => {
     const values = (datasets?.data || []).map((entry) => entry.provider)
@@ -630,6 +636,125 @@ export default function ResearchData() {
                 </table>
               </div>
             )}
+          </div>
+        )}
+      </div>
+
+      <div className="card">
+        <h2 className="text-sm font-medium text-gray-400 mb-4">Research Gating</h2>
+        {replayGatingLoading ? (
+          <LoadingSkeleton rows={4} />
+        ) : !replayGatingSummary?.available ? (
+          <EmptyState title={replayGatingSummary?.reason || 'No research gating summary'} icon="[]" />
+        ) : (
+          <div className="space-y-3 text-xs">
+            <div className="grid grid-cols-2 xl:grid-cols-4 gap-3">
+              <div className="rounded border border-surface-border p-3">
+                <div className="text-gray-500">Candidates</div>
+                <div className="text-gray-200 mt-1">{replayGatingSummary.summary_counts?.candidate_count || 0}</div>
+              </div>
+              <div className="rounded border border-surface-border p-3">
+                <div className="text-gray-500">Promotable</div>
+                <div className="text-gray-200 mt-1">{replayGatingSummary.summary_counts?.promotable_count || 0}</div>
+              </div>
+              <div className="rounded border border-surface-border p-3">
+                <div className="text-gray-500">Watchlist</div>
+                <div className="text-gray-200 mt-1">{replayGatingSummary.summary_counts?.watchlist_count || 0}</div>
+              </div>
+              <div className="rounded border border-surface-border p-3">
+                <div className="text-gray-500">Rejected</div>
+                <div className="text-gray-200 mt-1">{replayGatingSummary.summary_counts?.rejected_count || 0}</div>
+              </div>
+            </div>
+            <div className="text-gray-500">
+              warnings: {(replayGatingSummary.warnings || []).join(', ') || 'none'}
+            </div>
+            {!(replayGatingSummary.promotable_candidates || []).length && !(replayGatingSummary.watchlist_candidates || []).length ? (
+              <EmptyState title="No promotable or watchlist candidates yet" icon="[]" />
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-xs">
+                  <thead>
+                    <tr className="border-b border-surface-border text-left text-gray-500">
+                      <th className="pb-2 pr-4">Status</th>
+                      <th className="pb-2 pr-4">Providers</th>
+                      <th className="pb-2 pr-4">Target</th>
+                      <th className="pb-2 pr-4">Mean Score</th>
+                      <th className="pb-2 pr-4">Reasons</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-surface-border">
+                    {[...(replayGatingSummary.promotable_candidates || []).slice(0, 4), ...(replayGatingSummary.watchlist_candidates || []).slice(0, 4)].map((candidate, index) => (
+                      <tr key={`${candidate.candidate_id}-${index}`}>
+                        <td className="py-2 pr-4 text-gray-300">{candidate.overall_status}</td>
+                        <td className="py-2 pr-4 text-gray-300">{(candidate.providers || []).join(', ') || '-'}</td>
+                        <td className="py-2 pr-4 text-gray-300">{candidate.supporting_metrics?.target_column || '-'}</td>
+                        <td className="py-2 pr-4 text-gray-300">
+                          {candidate.supporting_metrics?.mean_composite_score == null ? '-' : candidate.supporting_metrics.mean_composite_score.toFixed(4)}
+                        </td>
+                        <td className="py-2 pr-4 text-gray-300">
+                          {[...(candidate.watchlist_reasons || []), ...(candidate.rejection_reasons || [])].join(', ') || '-'}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+
+      <div className="card">
+        <h2 className="text-sm font-medium text-gray-400 mb-4">Review Queue and Drift</h2>
+        {replayReviewQueueLoading || replayDriftLoading ? (
+          <LoadingSkeleton rows={4} />
+        ) : !replayReviewQueueSummary?.available || !replayDriftSummary?.available ? (
+          <EmptyState title={replayReviewQueueSummary?.reason || replayDriftSummary?.reason || 'No review queue summary'} icon="[]" />
+        ) : (
+          <div className="space-y-3 text-xs">
+            <div className="grid grid-cols-2 xl:grid-cols-4 gap-3">
+              <div className="rounded border border-surface-border p-3">
+                <div className="text-gray-500">Promotable Review</div>
+                <div className="text-gray-200 mt-1">{replayReviewQueueSummary.summary_counts?.promotable_review_count || 0}</div>
+              </div>
+              <div className="rounded border border-surface-border p-3">
+                <div className="text-gray-500">Watchlist Review</div>
+                <div className="text-gray-200 mt-1">{replayReviewQueueSummary.summary_counts?.watchlist_review_count || 0}</div>
+              </div>
+              <div className="rounded border border-surface-border p-3">
+                <div className="text-gray-500">Needs Rerun</div>
+                <div className="text-gray-200 mt-1">{replayReviewQueueSummary.summary_counts?.needs_rerun_count || 0}</div>
+              </div>
+              <div className="rounded border border-surface-border p-3">
+                <div className="text-gray-500">Drifted</div>
+                <div className="text-gray-200 mt-1">{replayDriftSummary.summary_counts?.drifted_count || 0}</div>
+              </div>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full text-xs">
+                <thead>
+                  <tr className="border-b border-surface-border text-left text-gray-500">
+                    <th className="pb-2 pr-4">Queue</th>
+                    <th className="pb-2 pr-4">Providers</th>
+                    <th className="pb-2 pr-4">Gating</th>
+                    <th className="pb-2 pr-4">Drift</th>
+                    <th className="pb-2 pr-4">Reasons</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-surface-border">
+                  {[...(replayReviewQueueSummary.promotable_review || []).slice(0, 3), ...(replayReviewQueueSummary.needs_rerun || []).slice(0, 3)].map((entry, index) => (
+                    <tr key={`${entry.candidate_id}-${index}`}>
+                      <td className="py-2 pr-4 text-gray-300">{entry.queue_state}</td>
+                      <td className="py-2 pr-4 text-gray-300">{(entry.providers || []).join(', ') || '-'}</td>
+                      <td className="py-2 pr-4 text-gray-300">{entry.latest_gating_status}</td>
+                      <td className="py-2 pr-4 text-gray-300">{entry.latest_drift_status}</td>
+                      <td className="py-2 pr-4 text-gray-300">{(entry.queue_reasons || []).join(', ') || '-'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           </div>
         )}
       </div>

@@ -2,55 +2,63 @@
 
 ## Completed
 
-- **Signal Research Lab** — 8 signal families implemented and validated. calibration_drift 56.2% WR, volume_spike 55.2% WR, time_decay 54.8% WR. Tested on 48,509 resolved Manifold markets + Metaculus data.
+- **Signal Research Lab** - 8 signal families implemented and validated. calibration_drift 56.2% WR, volume_spike 55.2% WR, time_decay 54.8% WR. Tested on 48,509 resolved Manifold markets + Metaculus data.
 
-- **Kalshi Live Candle Collector** — Fetches hourly candles for 213 open Economics markets via authenticated `/series/{s}/markets/{t}/candlesticks` endpoint. Builds feature parquets with all signal columns. `days_to_close` populated from market close times.
+- **Kalshi Live Candle Collector** - Fetches hourly candles for 213 open Economics markets via authenticated `/series/{s}/markets/{t}/candlesticks` endpoint. Builds feature parquets with all signal columns. `days_to_close` populated from market close times.
 
-- **Polymarket Live WebSocket Collector** — Connects to Polymarket CLOB WebSocket, subscribes to 75 active markets (30-day horizon, $10k+ volume, no sports). Stores ticks in SQLite with orderbook data (best_bid, best_ask, spread). Exports hourly OHLCV bars to parquet.
+- **Polymarket Live WebSocket Collector** - Connects to Polymarket CLOB WebSocket, subscribes to 75 active markets (30-day horizon, $10k+ volume, no sports). Stores ticks in SQLite with orderbook data (`best_bid`, `best_ask`, `spread`). Exports hourly OHLCV bars to parquet.
 
-- **Manifold Markets Parser** — Parsed 48,509 resolved binary markets from Manifold data dump (2021-2024). Each market's bet history converted to hourly feature parquets using same `build_kalshi_features()` pipeline.
+- **Manifold Markets Parser** - Parsed 48,509 resolved binary markets from Manifold data dump (2021-2024). Each market's bet history converted to hourly feature parquets using same `build_kalshi_features()` pipeline.
 
-- **Metaculus Integration** — Fetches resolved binary questions from Metaculus public API. Converts community forecast history to feature parquets. 2,000+ questions available for backtesting.
+- **Metaculus Integration** - Fetches resolved binary questions from Metaculus public API. Converts community forecast history to feature parquets. 2,000+ questions available for backtesting.
 
-- **PredictIt Parser** — Converts PredictIt historical CSV to daily feature parquets. Real USD data (capped at $850/contract).
+- **PredictIt Parser** - Converts PredictIt historical CSV to daily feature parquets. Real USD data (capped at $850/contract).
 
-- **Autonomous Market Scanner** — `KalshiMarketScanner` scans open markets per series, fetches candles, builds features, runs all 8 signal families. Returns `ScanResult` with ticker, yes_price, days_to_close, signal scores, confidence, recommended side, news context.
+- **Autonomous Market Scanner** - `KalshiMarketScanner` scans open markets per series, fetches candles, builds features, runs all 8 signal families. Returns `ScanResult` with ticker, yes_price, days_to_close, signal scores, confidence, recommended side, news context.
 
-- **Paper Trade Executor** — `KalshiPaperExecutor` tracks paper trades in SQLite. $500 starting capital. Kelly-sized $5-15 per trade. Checks market resolutions and records outcomes. Skips duplicate positions and scheduled_release contexts.
+- **Paper Trade Executor** - `KalshiPaperExecutor` tracks paper trades in SQLite. $500 starting capital. Kelly-sized $5-15 per trade. Checks market resolutions and records outcomes. Skips duplicate positions and `scheduled_release` contexts.
 
-- **Wallet Profiler** — Identifies early informed traders from on-chain Polymarket trade history. `early_win_rate >= 0.65` with 5+ early trades (>24h before close) = smart money. Separates genuine insiders from late arbitrageurs.
+- **Wallet Profiler** - Identifies early informed traders from on-chain Polymarket trade history. `early_win_rate >= 0.65` with 5+ early trades (>24h before close) = smart money. Separates genuine insiders from late arbitrageurs.
 
-- **News Tagger** — `EconomicNewsCalendar` parses Kalshi tickers to build event calendar. Labels price moves as `scheduled_release`, `pre_event`, or `unscheduled`. Scans feature files for actual market tickers.
+- **News Tagger** - `EconomicNewsCalendar` parses Kalshi tickers to build event calendar. Labels price moves as `scheduled_release`, `pre_event`, or `unscheduled`. Scans feature files for actual market tickers.
 
-- **Polymarket Data API Fetcher** — Fetches all trades from `data-api.polymarket.com/trades` (no auth). Supports filtering by market or wallet. Output compatible with wallet profiler.
+- **Polymarket Data API Fetcher** - Fetches all trades from `data-api.polymarket.com/trades` (no auth). Supports filtering by market or wallet. Output compatible with wallet profiler.
 
-- **Blockchain Ingest** — Converts poly-trade-scan on-chain trade CSV to feature parquets. Maps token_ids to markets via live collector SQLite metadata.
+- **Blockchain Ingest** - Converts poly-trade-scan on-chain trade CSV to feature parquets. Maps `token_ids` to markets via live collector SQLite metadata.
 
-- **Cross-Platform Backtest** — Single command backtests across Kalshi + Polymarket + Manifold + Metaculus. Results merged per signal family, best source wins.
+- **Cross-Platform Backtest** - Single command backtests across Kalshi + Polymarket + Manifold + Metaculus. Results merged per signal family, best source wins.
 
-- **React GUI** — Command Center, Signal Research, Kalshi Markets Browser, Polymarket Live (with price chart detail panel), Trade Reasoning, Loop Control. 6 pages, auto-refreshing.
+- **React GUI** - Command Center, Signal Research, Kalshi Markets Browser, Polymarket Live (with price chart detail panel), Trade Reasoning, Loop Control. 6 pages, auto-refreshing.
 
-- **Shared Replay Evaluation + Monitoring History** — Added registry-backed replay evaluation runners with explicit metric artifacts, API/dashboard consumers for evaluation previews, and compact provider/dataset history summaries on top of shared monitoring timelines.
+- **Shared Replay Evaluation + Monitoring History** - Added registry-backed replay evaluation runners with explicit metric artifacts, API/dashboard consumers for evaluation previews, and compact provider/dataset history summaries on top of shared monitoring timelines.
 
-- **Shared Replay Comparison + Research Selection Views** — Added cross-provider replay comparison workflows, ranked candidate slices, comparison artifacts, API consumers, and dashboard inspection panels on top of shared replay evaluation artifacts.
+- **Shared Replay Comparison + Research Selection Views** - Added cross-provider replay comparison workflows, ranked candidate slices, comparison artifacts, API consumers, and dashboard inspection panels on top of shared replay evaluation artifacts.
 
-- **1,634 passing tests** across all modules.
+- **Shared Replay History + Research Gating** - Added append-only replay evaluation/comparison history artifacts, promotion-style replay research gates, and API/dashboard surfaces for promotable, watchlist, and rejected candidate slices.
+
+- **Research Review Queues + Replay Drift Checks** - Added deterministic review queues derived from replay gating/history, replay-history drift classification, and API/dashboard surfaces for promotable review, watchlist review, needs rerun, and rejected archive slices.
+
+- **Gamma Resolution Fetcher** - Fetches 22,894 resolved market outcomes from Gamma API with `condition_id` indexing. Bridges trade data to resolution outcomes for wallet profiling.
+
+- **Order Flow Signal Infrastructure** - `GoldskyClient` for fill data, `KalshiOrderBookCollector` for depth snapshots, `OrderFlowFeatures` (`taker_imbalance`, `large_order`, `unexplained_move`), `OrderFlowCollector` background loop, `OrderFlowBacktester` validation framework.
+
+- **1,761 passing tests** across all modules.
 
 ## In Progress
 
-- KXCPI-26APR paper trades — resolves around April 15, 2026
-- Polymarket data-api trade history accumulation for wallet profiling
-- Goldsky orderbook depth integration for microstructure signals
+- KXCPI-26APR paper trades - resolves around April 15, 2026
+- Polymarket trade accumulation started April 4 - need 1-2 weeks for trades to resolve and match Gamma resolutions (0 overlap currently; trade markets are still active)
+- Goldsky fill accumulation - infrastructure ready, awaiting first data collection run
 - Confidence calibration on paper trade outcomes
 
 ## Next Milestones
 
-- **First paper trade resolution** (April 15, 2026) — KXCPI and KXFED events
-- **30 days of wallet trade history** — enough data for reliable smart money detection
-- **50+ paper trades with measurable win rate** — statistical significance
-- **All 8 signals firing with real data** — currently 3 of 8 validated
-- **Cross-platform arbitrage** — detect Kalshi vs Polymarket price gaps on same events
-- **G-17 — Shared replay evaluation history and promotion-style research gating** — turn replay comparison artifacts into lightweight promotion-ready research filters
+- **First paper trade resolution** (April 15, 2026) - KXCPI and KXFED events
+- **30 days of wallet trade history** - enough data for reliable smart money detection
+- **50+ paper trades with measurable win rate** - statistical significance
+- **All 8 signals firing with real data** - currently 3 of 8 validated
+- **Cross-platform arbitrage** - detect Kalshi vs Polymarket price gaps on same events
+- **G-19 - Research queue actions and replay-governance audit decisions** - add operator action artifacts on top of review queues so replay candidates can be accepted, deferred, rerun, or archived with explicit audit trails
 
 ## Go-Live Criteria
 
@@ -64,7 +72,7 @@ Before placing real money trades:
 
 ## Known Limitations
 
-- Kalshi `/historical/markets/{ticker}/candlesticks` returns 404 on free tier. Historical candle data unavailable — collect forward only.
+- Kalshi `/historical/markets/{ticker}/candlesticks` returns 404 on free tier. Historical candle data unavailable - collect forward only.
 - Manifold uses play money (Mana). Volume not comparable to real-money markets.
 - Polymarket WS occasionally wraps messages in JSON arrays. Handled.
 - Wallet profiler needs external trade data (data API or blockchain). No automated pipeline yet.

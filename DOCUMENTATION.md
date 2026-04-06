@@ -85,6 +85,21 @@ trading-cli research replay compare \
   --alignment-modes outer_union anchor \
   --comparison-mode provider \
   --output-dir artifacts/research_replay/comparison
+
+# Persist append-only replay history and evaluate promotion-style research gates
+trading-cli research replay gate \
+  --evaluation-root artifacts/research_replay/evaluation \
+  --comparison-root artifacts/research_replay/comparison \
+  --history-output-dir artifacts/research_replay/history \
+  --gating-output-dir artifacts/research_replay/gating
+
+# Build review queues and replay-history drift summaries
+trading-cli research replay review \
+  --evaluation-root artifacts/research_replay/evaluation \
+  --comparison-root artifacts/research_replay/comparison \
+  --history-output-dir artifacts/research_replay/history \
+  --gating-output-dir artifacts/research_replay/gating \
+  --review-output-dir artifacts/research_replay/review
 ```
 
 ## Data Directories
@@ -105,6 +120,9 @@ trading-cli research replay compare \
 | `data/polymarket/wallet_profiles.parquet` | Smart money wallet flags |
 | `artifacts/research_replay/evaluation/` | Replay evaluation summaries and metric tables |
 | `artifacts/research_replay/comparison/` | Replay comparison summaries, rankings, and candidate slices |
+| `artifacts/research_replay/history/` | Append-only replay evaluation/comparison history artifacts |
+| `artifacts/research_replay/gating/` | Latest replay research gating summaries and status buckets |
+| `artifacts/research_replay/review/` | Latest review queue summaries and replay drift summaries |
 | `artifacts/provider_monitoring/monitoring_history.jsonl` | Shared provider monitoring snapshot history |
 | `artifacts/provider_monitoring/latest_transition_summary.json` | Latest shared provider/dataset status transitions |
 
@@ -126,6 +144,10 @@ trading-cli research replay compare \
 | `/api/research/replay/evaluation-preview` | GET | Registry-backed replay evaluation preview |
 | `/api/research/replay/comparison-preview` | GET | Ranked replay comparison preview across evaluation slices |
 | `/api/research/replay/comparison-latest` | GET | Latest replay comparison artifact if one has been written |
+| `/api/research/replay/gating-latest` | GET | Latest replay research gating summary artifact |
+| `/api/research/replay/history` | GET | Recent shared replay history records filtered by candidate/provider |
+| `/api/research/replay/review-queue-latest` | GET | Latest replay research review queue summary artifact |
+| `/api/research/replay/drift-latest` | GET | Latest replay-history drift summary artifact |
 | `/api/ops/providers/{provider}/history-summary` | GET | Compact provider monitoring history summary |
 | `/api/ops/datasets/{dataset_key}/history-summary` | GET | Compact dataset monitoring history summary |
 
@@ -323,3 +345,207 @@ The Research Data dashboard now shows:
 ### Suggested Next Milestone
 
 - `G-17 - Shared replay evaluation history and promotion-style research gating`
+
+## G-17 - Shared Replay Evaluation History and Promotion-Style Research Gating
+
+Date: 2026-04-04
+Status: DONE
+
+### What Changed
+
+- Added `src/trading_platform/research/replay_history.py` to persist append-only shared replay history from existing replay evaluation and replay comparison summary artifacts.
+- Added `src/trading_platform/research/replay_gating.py` to evaluate promotion-style replay research gates and classify candidate slices as `promotable`, `watchlist`, or `rejected`.
+- Added `research replay gate` as a thin CLI that updates shared replay history and writes latest gating summaries.
+- Extended FastAPI artifact readers and routes with latest replay gating summaries plus recent shared replay history reads.
+- Extended the Research Data dashboard with a lightweight research-gating panel that shows status counts and top promotable/watchlist slices.
+
+### Why It Changed
+
+G-16 made replay comparisons useful for ranking slices, but the platform still lacked a durable, cross-run memory of those results and a structured way to turn them into research-governance decisions. G-17 adds a stable history artifact layer plus configurable promotion-style gating without changing provider-specific ingest, feature, sync, registry, replay-evaluation, or replay-comparison behavior.
+
+### Files Changed
+
+- `src/trading_platform/research/replay_history.py`
+- `src/trading_platform/research/replay_gating.py`
+- `src/trading_platform/research/__init__.py`
+- `src/trading_platform/cli/commands/research_replay_gate.py`
+- `src/trading_platform/cli/grouped_parser.py`
+- `src/trading_platform/api/artifact_reader.py`
+- `src/trading_platform/api/main.py`
+- `src/trading_platform/frontend/src/api/client.js`
+- `src/trading_platform/frontend/src/pages/ResearchData.jsx`
+- `tests/test_replay_history.py`
+- `tests/test_replay_gating.py`
+- `tests/api/test_api_endpoints.py`
+- `tests/test_cli_grouping.py`
+- `MILESTONES.md`
+- `DOCUMENTATION.md`
+
+### Tests Run
+
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\pytest.exe tests/test_replay_history.py tests/test_replay_gating.py tests/api/test_api_endpoints.py tests/test_cli_grouping.py -q`
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\pytest.exe tests/test_shared_dataset_reader.py tests/test_replay_assembly.py tests/test_replay_consumer.py tests/test_replay_evaluation.py tests/test_replay_comparison.py tests/test_replay_history.py tests/test_replay_gating.py tests/api/test_api_endpoints.py tests/test_provider_registry_and_monitoring.py tests/test_research_dataset_registry.py tests/test_cli_grouping.py tests/binance/test_registry_integration.py -q`
+- `Remove-Item Env:TP_ALERT_SMTP_HOST -ErrorAction SilentlyContinue; Remove-Item Env:TP_ALERT_SMTP_PORT -ErrorAction SilentlyContinue; Remove-Item Env:TP_ALERT_SMTP_USERNAME -ErrorAction SilentlyContinue; Remove-Item Env:TP_ALERT_SMTP_PASSWORD -ErrorAction SilentlyContinue; Remove-Item Env:TP_ALERT_SMTP_USE_TLS -ErrorAction SilentlyContinue; Remove-Item Env:TP_ALERT_FROM -ErrorAction SilentlyContinue; Remove-Item Env:TP_ALERT_TO -ErrorAction SilentlyContinue; Remove-Item Env:TP_ALERT_SUBJECT_PREFIX -ErrorAction SilentlyContinue; C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\pytest.exe -q`
+
+### Exact Verification Commands
+
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\pytest.exe tests/test_replay_history.py tests/test_replay_gating.py tests/api/test_api_endpoints.py tests/test_cli_grouping.py -q`
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\pytest.exe tests/test_shared_dataset_reader.py tests/test_replay_assembly.py tests/test_replay_consumer.py tests/test_replay_evaluation.py tests/test_replay_comparison.py tests/test_replay_history.py tests/test_replay_gating.py tests/api/test_api_endpoints.py tests/test_provider_registry_and_monitoring.py tests/test_research_dataset_registry.py tests/test_cli_grouping.py tests/binance/test_registry_integration.py -q`
+- `Remove-Item Env:TP_ALERT_SMTP_HOST -ErrorAction SilentlyContinue; Remove-Item Env:TP_ALERT_SMTP_PORT -ErrorAction SilentlyContinue; Remove-Item Env:TP_ALERT_SMTP_USERNAME -ErrorAction SilentlyContinue; Remove-Item Env:TP_ALERT_SMTP_PASSWORD -ErrorAction SilentlyContinue; Remove-Item Env:TP_ALERT_SMTP_USE_TLS -ErrorAction SilentlyContinue; Remove-Item Env:TP_ALERT_FROM -ErrorAction SilentlyContinue; Remove-Item Env:TP_ALERT_TO -ErrorAction SilentlyContinue; Remove-Item Env:TP_ALERT_SUBJECT_PREFIX -ErrorAction SilentlyContinue; C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\pytest.exe -q`
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\python.exe -m trading_platform.cli research replay gate --evaluation-root artifacts/research_replay/evaluation --comparison-root artifacts/research_replay/comparison --history-output-dir artifacts/research_replay/history --gating-output-dir artifacts/research_replay/gating`
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\python.exe -m uvicorn trading_platform.api.main:app --port 8001`
+
+### History Artifact Layout
+
+- `artifacts/research_replay/history/shared_replay_history.jsonl`
+  - append-only record stream across replay evaluation and replay comparison imports
+  - stores `history_run_id`, `recorded_at`, source artifact references, provider/dataset scope, alignment mode, feature/target columns, key metrics, and comparison rank metadata when available
+- `artifacts/research_replay/history/latest_replay_history_summary.json`
+  - latest import summary with discovered source artifacts, appended record count, total record count, and warnings
+
+### Gating Concepts
+
+- Gates reuse the repo’s promotion-style gate contract from `trading_platform.governance.models` rather than inventing a new schema.
+- G-17 introduces replay-research statuses:
+  - `promotable`
+  - `watchlist`
+  - `rejected`
+- Hard gates currently cover:
+  - minimum sample size
+  - minimum replay run count
+  - minimum mean absolute Spearman signal strength
+- Soft gates currently cover:
+  - directional accuracy
+  - mean composite score
+  - score stability
+  - comparison rank when available
+  - cross-provider support
+- This is research governance, not live trading promotion governance. It ranks and filters replay slices for further research review; it does not authorize paper/live deployment or bypass existing strategy governance.
+
+### API Surface
+
+- `GET /api/research/replay/gating-latest`
+- `GET /api/research/replay/history?candidate_id=...&provider=...&limit=...`
+
+These endpoints are read-only and artifact-backed.
+
+### Known Limitations
+
+- Shared replay history only becomes durable for runs that are imported into `artifacts/research_replay/history/`; it does not retroactively reconstruct overwritten historical artifacts.
+- Current gating thresholds are CLI-configurable and typed in code, but there is not yet a dedicated YAML policy file for replay gating.
+- Replay gating intentionally stays lightweight. It does not replace the repo’s strategy promotion, paper, or live governance systems.
+- Comparison-rank gates are only meaningful when replay comparison artifacts exist for a candidate. Missing comparison rank is treated as a soft limitation, not a hard failure.
+
+### Suggested Next Milestone
+
+- `G-18 - Research promotion review queues and replay-history drift checks`
+
+## G-18 - Research Promotion Review Queues and Replay-History Drift Checks
+
+Date: 2026-04-04
+Status: DONE
+
+### What Changed
+
+- Added `src/trading_platform/research/replay_review.py` as an additive review-governance layer on top of replay history and replay gating.
+- Added deterministic review queue generation with queue states:
+  - `promotable_review`
+  - `watchlist_review`
+  - `rejected_archive`
+  - `needs_rerun`
+- Added replay-history drift checks with `stable`, `warning`, and `drifted` statuses plus queue recommendations.
+- Added `research replay review` as a thin CLI that refreshes replay history, rebuilds gating, evaluates drift, and writes latest review artifacts.
+- Extended API readers/routes and the Research Data dashboard with latest review-queue and drift summaries.
+- Hardened `tests/test_provider_registry_and_monitoring.py` to use a current-time-relative timestamp so monitoring verification remains deterministic.
+
+### Why It Changed
+
+G-17 could tell the system which replay slices were promotable, watchlist, or rejected, but it did not organize them into an explicit operator review workflow or monitor whether their replay behavior was drifting over time. G-18 adds those operator-facing layers without changing provider-specific ingest, replay evaluation, replay comparison, or gating logic.
+
+### Files Changed
+
+- `src/trading_platform/research/replay_review.py`
+- `src/trading_platform/research/__init__.py`
+- `src/trading_platform/cli/commands/research_replay_review.py`
+- `src/trading_platform/cli/grouped_parser.py`
+- `src/trading_platform/api/artifact_reader.py`
+- `src/trading_platform/api/main.py`
+- `src/trading_platform/frontend/src/api/client.js`
+- `src/trading_platform/frontend/src/pages/ResearchData.jsx`
+- `tests/test_replay_review.py`
+- `tests/api/test_api_endpoints.py`
+- `tests/test_cli_grouping.py`
+- `tests/test_provider_registry_and_monitoring.py`
+- `MILESTONES.md`
+- `DOCUMENTATION.md`
+
+### Tests Run
+
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\pytest.exe tests/test_replay_review.py tests/test_replay_history.py tests/test_replay_gating.py tests/api/test_api_endpoints.py tests/test_cli_grouping.py -q`
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\pytest.exe tests/test_shared_dataset_reader.py tests/test_replay_assembly.py tests/test_replay_consumer.py tests/test_replay_evaluation.py tests/test_replay_comparison.py tests/test_replay_history.py tests/test_replay_gating.py tests/test_replay_review.py tests/api/test_api_endpoints.py tests/test_provider_registry_and_monitoring.py tests/test_research_dataset_registry.py tests/test_cli_grouping.py tests/binance/test_registry_integration.py -q`
+- `Remove-Item Env:TP_ALERT_SMTP_HOST -ErrorAction SilentlyContinue; Remove-Item Env:TP_ALERT_SMTP_PORT -ErrorAction SilentlyContinue; Remove-Item Env:TP_ALERT_SMTP_USERNAME -ErrorAction SilentlyContinue; Remove-Item Env:TP_ALERT_SMTP_PASSWORD -ErrorAction SilentlyContinue; Remove-Item Env:TP_ALERT_SMTP_USE_TLS -ErrorAction SilentlyContinue; Remove-Item Env:TP_ALERT_FROM -ErrorAction SilentlyContinue; Remove-Item Env:TP_ALERT_TO -ErrorAction SilentlyContinue; Remove-Item Env:TP_ALERT_SUBJECT_PREFIX -ErrorAction SilentlyContinue; C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\pytest.exe -q`
+
+### Exact Verification Commands
+
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\pytest.exe tests/test_replay_review.py tests/test_replay_history.py tests/test_replay_gating.py tests/api/test_api_endpoints.py tests/test_cli_grouping.py -q`
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\pytest.exe tests/test_shared_dataset_reader.py tests/test_replay_assembly.py tests/test_replay_consumer.py tests/test_replay_evaluation.py tests/test_replay_comparison.py tests/test_replay_history.py tests/test_replay_gating.py tests/test_replay_review.py tests/api/test_api_endpoints.py tests/test_provider_registry_and_monitoring.py tests/test_research_dataset_registry.py tests/test_cli_grouping.py tests/binance/test_registry_integration.py -q`
+- `Remove-Item Env:TP_ALERT_SMTP_HOST -ErrorAction SilentlyContinue; Remove-Item Env:TP_ALERT_SMTP_PORT -ErrorAction SilentlyContinue; Remove-Item Env:TP_ALERT_SMTP_USERNAME -ErrorAction SilentlyContinue; Remove-Item Env:TP_ALERT_SMTP_PASSWORD -ErrorAction SilentlyContinue; Remove-Item Env:TP_ALERT_SMTP_USE_TLS -ErrorAction SilentlyContinue; Remove-Item Env:TP_ALERT_FROM -ErrorAction SilentlyContinue; Remove-Item Env:TP_ALERT_TO -ErrorAction SilentlyContinue; Remove-Item Env:TP_ALERT_SUBJECT_PREFIX -ErrorAction SilentlyContinue; C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\pytest.exe -q`
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\python.exe -m trading_platform.cli research replay review --evaluation-root artifacts/research_replay/evaluation --comparison-root artifacts/research_replay/comparison --history-output-dir artifacts/research_replay/history --gating-output-dir artifacts/research_replay/gating --review-output-dir artifacts/research_replay/review`
+- `C:\Users\bradl\PycharmProjects\trading_platform\.venv\Scripts\python.exe -m uvicorn trading_platform.api.main:app --port 8001`
+
+### Queue Artifact Layout
+
+- `artifacts/research_replay/review/latest_review_queue_summary.json`
+  - latest deterministic queue assignment derived from latest gating plus drift summaries
+- `artifacts/research_replay/review/latest_promotable_review.json`
+- `artifacts/research_replay/review/latest_watchlist_review.json`
+- `artifacts/research_replay/review/latest_needs_rerun.json`
+- `artifacts/research_replay/review/latest_rejected_archive.json`
+
+Each queue entry records queue state, provider scope, latest gating status, latest drift status, concise reasons, supporting metrics, timestamps, and provenance links back to replay history and gating artifacts.
+
+### Drift-Check Concepts
+
+- Drift checks are promotion-style named checks built with the same `PromotionGateResult` contract used elsewhere in governance.
+- Current drift checks cover:
+  - recent support sufficiency
+  - Spearman degradation versus trailing history
+  - directional-accuracy degradation versus trailing history
+  - rank-percentile worsening
+  - recent score stability
+  - recent provider support
+- Drift status semantics:
+  - `stable`
+  - `warning`
+  - `drifted`
+- Recommendations currently include:
+  - `keep_in_queue`
+  - `rerun`
+  - `deprioritize`
+
+### Queue State vs Gating Status
+
+- Gating status answers whether a replay slice currently looks promotable, watchlist, or rejected from a research-quality perspective.
+- Queue state answers where that slice belongs in the operator review workflow right now.
+- A slice can therefore be:
+  - `promotable` but moved to `needs_rerun` if drifted strongly
+  - `watchlist` and remain in `watchlist_review`
+  - `rejected` and live in `rejected_archive`
+
+### API Surface
+
+- `GET /api/research/replay/review-queue-latest`
+- `GET /api/research/replay/drift-latest`
+
+These endpoints are read-only and artifact-backed.
+
+### Known Limitations
+
+- Review queues are deterministic latest-state artifacts; they are not yet operator-action queues with accept/defer/rerun acknowledgements.
+- Drift checks are history-window heuristics, not a full statistical change-point system.
+- Cross-provider drift is currently inferred from shared candidate/provider history rather than a dedicated provider-agreement model.
+- Queue generation depends on the quality of replay history imports; overwritten or missing upstream artifacts will reduce drift context.
+
+### Suggested Next Milestone
+
+- `G-19 - Research queue actions and replay-governance audit decisions`

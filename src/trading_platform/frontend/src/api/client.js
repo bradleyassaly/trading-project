@@ -104,6 +104,23 @@ export const api = {
     return get(`/research/replay/evaluation-preview${suffix}`)
   },
   researchReplayComparisonLatest: () => get('/research/replay/comparison-latest'),
+  researchReplayGatingLatest: () => get('/research/replay/gating-latest'),
+  researchReplayReviewQueueLatest: () => get('/research/replay/review-queue-latest'),
+  researchReplayDriftLatest: () => get('/research/replay/drift-latest'),
+  researchReplayHistory: (params = {}) => {
+    const query = new URLSearchParams()
+    Object.entries(params).forEach(([key, value]) => {
+      if (Array.isArray(value)) {
+        value.forEach((item) => {
+          if (item != null && item !== '') query.append(key, item)
+        })
+        return
+      }
+      if (value != null && value !== '') query.append(key, value)
+    })
+    const suffix = query.toString() ? `?${query.toString()}` : ''
+    return get(`/research/replay/history${suffix}`)
+  },
   researchReplayComparisonPreview: (params = {}) => {
     const query = new URLSearchParams()
     Object.entries(params).forEach(([key, value]) => {
@@ -127,9 +144,29 @@ export const api = {
   monitoredDatasetDetail: (datasetKey) => get(`/ops/datasets/${encodeURIComponent(datasetKey)}`),
   monitoredDatasetTimeline: (datasetKey) => get(`/ops/datasets/${encodeURIComponent(datasetKey)}/timeline`),
   monitoredDatasetHistorySummary: (datasetKey) => get(`/ops/datasets/${encodeURIComponent(datasetKey)}/history-summary`),
+  paperDashboard: () => get('/paper/dashboard'),
   paperPortfolio: () => get('/paper/portfolio'),
   paperTrades: () => get('/paper/trades'),
   paperScan: () => get('/paper/scan'),
   polymarketLiveMarkets: () => get('/polymarket/live-markets'),
   polymarketMarketTicks: (marketId) => get(`/polymarket/market-ticks/${encodeURIComponent(marketId)}`),
+  smartMoneyWallets: () => get('/smart-money/wallets'),
+  smartMoneySignals: () => get('/smart-money/signals'),
+  smartMoneyMirror: () => get('/smart-money/mirror'),
+  smartMoneyWalletDetail: (addr) => get(`/smart-money/wallet/${encodeURIComponent(addr)}`),
+  smartMoneyActionableSignals: () => get('/smart-money/actionable-signals'),
+  smartMoneyLeaderboard: () => get('/smart-money/leaderboard'),
+  smartMoneyAlerts: (params = {}) => {
+    const q = new URLSearchParams()
+    Object.entries(params).forEach(([k, v]) => { if (v != null) q.append(k, v) })
+    return get(`/smart-money/alerts${q.toString() ? '?' + q.toString() : ''}`)
+  },
+  smartMoneyWinners: (window = 'all') => get(`/smart-money/winners?window=${window}`),
+  smartMoneyOpenPositions: () => get('/smart-money/open-positions'),
+  smartMoneyUniverseStats: () => get('/smart-money/universe-stats'),
+  paperBankroll: () => get('/paper/bankroll'),
+  paperPnlHistory: () => get('/paper/pnl-history'),
+  signalsPerformance: () => get('/signals/performance'),
+  smartMoneyWalletPositions: (addr) => get(`/smart-money/wallet/${encodeURIComponent(addr)}/positions`),
+  smartMoneyWalletTrades: (addr, page = 1) => get(`/smart-money/wallet/${encodeURIComponent(addr)}/trades?page=${page}&limit=50`),
 }

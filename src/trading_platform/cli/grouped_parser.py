@@ -45,6 +45,7 @@ from trading_platform.cli.commands.features import cmd_features
 from trading_platform.cli.commands.kalshi_features import cmd_kalshi_features
 from trading_platform.cli.commands.kalshi_historical_ingest import cmd_kalshi_historical_ingest
 from trading_platform.cli.commands.kalshi_live_candles import cmd_kalshi_live_candles
+from trading_platform.cli.commands.kalshi_orderbook import cmd_kalshi_snapshot_orderbooks
 from trading_platform.cli.commands.kalshi_recent_ingest import cmd_kalshi_recent_ingest
 from trading_platform.cli.commands.kalshi_validate_dataset import cmd_kalshi_validate_dataset
 from trading_platform.cli.commands.fundamentals_features import cmd_fundamentals_features
@@ -114,6 +115,25 @@ from trading_platform.cli.commands.polymarket_blockchain_ingest import cmd_polym
 from trading_platform.cli.commands.polymarket_wallet_profiles import cmd_polymarket_wallet_profiles
 from trading_platform.cli.commands.polymarket_clob_fetch import cmd_polymarket_clob_fetch, cmd_polymarket_orderbook_fetch
 from trading_platform.cli.commands.polymarket_data_api_fetch import cmd_polymarket_data_api_fetch
+from trading_platform.cli.commands.polymarket_diagnose import cmd_polymarket_diagnose_resolution
+from trading_platform.cli.commands.polymarket_smart_money_scan import cmd_polymarket_smart_money_scan
+from trading_platform.cli.commands.polymarket_smart_money_trade import cmd_polymarket_smart_money_trade
+from trading_platform.cli.commands.polymarket_mirror_scan import cmd_polymarket_mirror_scan
+from trading_platform.cli.commands.polymarket_realtime_monitor import cmd_polymarket_monitor_realtime
+from trading_platform.cli.commands.polymarket_daily_refresh import cmd_polymarket_daily_refresh
+from trading_platform.cli.commands.ops_send_telegram import cmd_ops_send_telegram
+from trading_platform.cli.commands.polymarket_open_positions import cmd_polymarket_compute_open_positions
+from trading_platform.cli.commands.wallet_intelligence import (
+    cmd_sync_wallet_trades, cmd_sync_wallet_positions,
+    cmd_rebuild_wallet_profiles, cmd_compute_signals,
+    cmd_enrich_trade_resolution, cmd_build_address_map,
+    cmd_seed_from_leaderboard, cmd_classify_wallet_buckets,
+)
+from trading_platform.cli.commands.polymarket_fetch_resolutions import cmd_polymarket_fetch_resolutions
+from trading_platform.cli.commands.polymarket_backfill import cmd_polymarket_backfill_historical
+from trading_platform.cli.commands.polymarket_orderflow import cmd_polymarket_collect_orderflow, cmd_polymarket_orderflow_status
+from trading_platform.cli.commands.polymarket_goldsky_profiles import cmd_polymarket_goldsky_profiles
+from trading_platform.cli.commands.polymarket_goldsky_backfill import cmd_polymarket_backfill_goldsky
 from trading_platform.cli.commands.manifold_parse import cmd_manifold_parse
 from trading_platform.cli.commands.predictit_parse import cmd_predictit_parse
 from trading_platform.cli.commands.news_tagger import cmd_news_upcoming, cmd_news_label_moves
@@ -129,6 +149,8 @@ from trading_platform.cli.commands.research_replay_assemble import cmd_research_
 from trading_platform.cli.commands.research_replay_compare import cmd_research_replay_compare
 from trading_platform.cli.commands.research_replay_consume import cmd_research_replay_consume
 from trading_platform.cli.commands.research_replay_evaluate import cmd_research_replay_evaluate
+from trading_platform.cli.commands.research_replay_gate import cmd_research_replay_gate
+from trading_platform.cli.commands.research_replay_review import cmd_research_replay_review
 from trading_platform.cli.commands.research_refresh import cmd_research_refresh
 from trading_platform.cli.commands.research_registry_build import cmd_research_registry_build
 from trading_platform.cli.commands.research_validate_backtester import cmd_research_validate_backtester
@@ -2618,6 +2640,28 @@ def build_parser() -> argparse.ArgumentParser:
     )
     data_kalshi_live_candles.set_defaults(func=cmd_kalshi_live_candles)
 
+    data_kalshi_orderbook = data_kalshi_subparsers.add_parser(
+        "snapshot-orderbooks",
+        help="Fetch orderbook snapshots for open Kalshi markets.",
+    )
+    data_kalshi_orderbook.add_argument(
+        "--config", type=str, default="configs/kalshi.yaml",
+        help="Path to Kalshi YAML config.",
+    )
+    data_kalshi_orderbook.add_argument(
+        "--tickers", type=str, default=None,
+        help="Comma-separated ticker list (default: discover from config series).",
+    )
+    data_kalshi_orderbook.add_argument(
+        "--loop", action="store_true", default=False,
+        help="Run continuously.",
+    )
+    data_kalshi_orderbook.add_argument(
+        "--interval", type=int, default=300,
+        help="Seconds between snapshots when --loop is set (default: 300).",
+    )
+    data_kalshi_orderbook.set_defaults(func=cmd_kalshi_snapshot_orderbooks)
+
     # ── Polymarket data commands ──────────────────────────────────────────────
     data_polymarket = data_subparsers.add_parser(
         "polymarket", help="Polymarket prediction market data ingestion commands"
@@ -2719,8 +2763,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Directory of per-market trade CSVs (from data-api-fetch --per-market).",
     )
     data_polymarket_wallets.add_argument(
-        "--resolution-csv", type=str, required=True,
-        help="Path to resolution CSV (from blockchain-ingest).",
+        "--resolution-csv", type=str, default=None,
+        help="Path to resolution CSV (from blockchain-ingest). Not needed with --use-graph-resolution.",
+    )
+    data_polymarket_wallets.add_argument(
+        "--use-graph-resolution", action="store_true", default=False,
+        help="Fetch resolutions from The Graph positions subgraph instead of resolution CSV.",
     )
     data_polymarket_wallets.add_argument(
         "--output", type=str, default=None,
@@ -2767,7 +2815,206 @@ def build_parser() -> argparse.ArgumentParser:
     )
     data_polymarket_data_api.set_defaults(func=cmd_polymarket_data_api_fetch)
 
-    # ── data manifold ────────────────────────────────────────────────────────
+    data_polymarket_diagnose = data_polymarket_subparsers.add_parser(
+        "diagnose-resolution",
+        help="Diagnose resolution CSV vs trade data token ID overlap.",
+    )
+    data_polymarket_diagnose.set_defaults(func=cmd_polymarket_diagnose_resolution)
+
+    data_polymarket_smart_scan = data_polymarket_subparsers.add_parser(
+        "smart-money-scan",
+        help="Show top markets by smart money signal strength.",
+    )
+    data_polymarket_smart_scan.set_defaults(func=cmd_polymarket_smart_money_scan)
+
+    data_polymarket_smart_trade = data_polymarket_subparsers.add_parser(
+        "smart-money-trade",
+        help="Run one smart money trade cycle (scan + paper trade).",
+    )
+    data_polymarket_smart_trade.set_defaults(func=cmd_polymarket_smart_money_trade)
+
+    data_polymarket_mirror = data_polymarket_subparsers.add_parser(
+        "mirror-scan",
+        help="Scan top smart money wallets for recent trades to mirror.",
+    )
+    data_polymarket_mirror.add_argument("--minutes", type=int, default=90)
+    data_polymarket_mirror.add_argument("--top-n", type=int, default=30)
+    data_polymarket_mirror.add_argument("--min-fill", type=float, default=100)
+    data_polymarket_mirror.add_argument("--min-confidence", type=float, default=0.70)
+    data_polymarket_mirror.add_argument("--all", action="store_true", default=False,
+                                        help="Show all including illiquid/untracked.")
+    data_polymarket_mirror.set_defaults(func=cmd_polymarket_mirror_scan)
+
+    data_polymarket_rt_monitor = data_polymarket_subparsers.add_parser(
+        "monitor-realtime",
+        help="Real-time smart money monitor via Goldsky stream.",
+    )
+    data_polymarket_rt_monitor.add_argument("--min-fill", type=float, default=100,
+                                             help="Minimum fill size in USDC (default: 100).")
+    data_polymarket_rt_monitor.add_argument("--min-ewr", type=float, default=0.70,
+                                             help="Minimum EWR for auto-trade (default: 0.70).")
+    data_polymarket_rt_monitor.add_argument("--auto-trade", action="store_true", default=False,
+                                             help="Enable auto paper trading for Tier 1 fills.")
+    data_polymarket_rt_monitor.add_argument("--tier1-only", action="store_true", default=False,
+                                             help="Only watch top 50 Tier 1 wallets.")
+    data_polymarket_rt_monitor.set_defaults(func=cmd_polymarket_monitor_realtime)
+
+    data_polymarket_daily_refresh = data_polymarket_subparsers.add_parser(
+        "daily-refresh",
+        help="Run complete daily pipeline: fetch resolutions, backfill, rebuild profiles.",
+    )
+    data_polymarket_daily_refresh.add_argument(
+        "--initial", action="store_true", default=False,
+        help="Initial run: fetch all unbackfilled markets (larger limit).",
+    )
+    data_polymarket_daily_refresh.set_defaults(func=cmd_polymarket_daily_refresh)
+
+    data_polymarket_fetch_res = data_polymarket_subparsers.add_parser(
+        "fetch-resolutions",
+        help="Fetch resolved market outcomes from Gamma API.",
+    )
+    data_polymarket_fetch_res.add_argument(
+        "--days", type=int, default=90,
+        help="Days of history to fetch (default: 90).",
+    )
+    data_polymarket_fetch_res.set_defaults(func=cmd_polymarket_fetch_resolutions)
+
+    data_polymarket_backfill = data_polymarket_subparsers.add_parser(
+        "backfill-historical-trades",
+        help="Fetch trade history for already-resolved markets from Data API.",
+    )
+    data_polymarket_backfill.add_argument(
+        "--limit", type=int, default=200,
+        help="Max markets to backfill (default: 200).",
+    )
+    data_polymarket_backfill.add_argument(
+        "--min-volume", type=float, default=5000,
+        help="Minimum market volume to include (default: 5000).",
+    )
+    data_polymarket_backfill.add_argument(
+        "--max-trades-per-market", type=int, default=10000,
+        help="Max trades to fetch per market (default: 10000).",
+    )
+    data_polymarket_backfill.set_defaults(func=cmd_polymarket_backfill_historical)
+
+    data_polymarket_orderflow = data_polymarket_subparsers.add_parser(
+        "collect-orderflow",
+        help="Collect fills from Goldsky and orderbook snapshots from Kalshi.",
+    )
+    data_polymarket_orderflow.add_argument(
+        "--interval", type=int, default=300,
+        help="Seconds between iterations (default: 300).",
+    )
+    data_polymarket_orderflow.add_argument(
+        "--once", action="store_true", default=False,
+        help="Run one iteration and exit.",
+    )
+    data_polymarket_orderflow.add_argument(
+        "--since-days", type=int, default=7,
+        help="Backfill window on first run (default: 7 days).",
+    )
+    data_polymarket_orderflow.set_defaults(func=cmd_polymarket_collect_orderflow)
+
+    data_polymarket_orderflow_status = data_polymarket_subparsers.add_parser(
+        "orderflow-status",
+        help="Show status of collected orderflow data.",
+    )
+    data_polymarket_orderflow_status.set_defaults(func=cmd_polymarket_orderflow_status)
+
+    data_polymarket_goldsky_prof = data_polymarket_subparsers.add_parser(
+        "goldsky-wallet-profiles",
+        help="Build wallet profiles from Goldsky on-chain fill data.",
+    )
+    data_polymarket_goldsky_prof.add_argument(
+        "--fills-dir", type=str, default=None,
+        help="Directory with fill parquets (default: data/polymarket/orderflow/).",
+    )
+    data_polymarket_goldsky_prof.add_argument(
+        "--resolution", type=str, default=None,
+        help="Resolution CSV path (default: data/polymarket/gamma_resolution.csv).",
+    )
+    data_polymarket_goldsky_prof.add_argument(
+        "--output", type=str, default=None,
+        help="Output parquet (default: data/polymarket/wallet_profiles.parquet).",
+    )
+    data_polymarket_goldsky_prof.set_defaults(func=cmd_polymarket_goldsky_profiles)
+
+    data_polymarket_goldsky_backfill = data_polymarket_subparsers.add_parser(
+        "backfill-goldsky-fills",
+        help="Backfill historical Goldsky fills for resolved markets.",
+    )
+    data_polymarket_goldsky_backfill.add_argument(
+        "--limit", type=int, default=100,
+        help="Max markets to backfill (default: 100).",
+    )
+    data_polymarket_goldsky_backfill.add_argument(
+        "--min-volume", type=float, default=10000,
+        help="Minimum volume to include (default: 10000).",
+    )
+    data_polymarket_goldsky_backfill.add_argument(
+        "--strategy", choices=["balanced", "volume"], default="balanced",
+        help="Token selection strategy: balanced (50/50 YES/NO) or volume (top by volume).",
+    )
+    data_polymarket_goldsky_backfill.add_argument(
+        "--skip-existing", action="store_true", default=False,
+        help="Skip tokens already in the backfill directory.",
+    )
+    data_polymarket_goldsky_backfill.set_defaults(func=cmd_polymarket_backfill_goldsky)
+
+    data_polymarket_open_pos = data_polymarket_subparsers.add_parser(
+        "compute-open-positions",
+        help="Compute net open positions for smart money wallets.",
+    )
+    data_polymarket_open_pos.add_argument(
+        "--min-edge", type=float, default=0.20,
+        help="Minimum wallet edge to include (default: 0.20).",
+    )
+    data_polymarket_open_pos.set_defaults(func=cmd_polymarket_compute_open_positions)
+
+    data_polymarket_sync_trades = data_polymarket_subparsers.add_parser(
+        "sync-wallet-trades", help="Sync wallet trade history from Polymarket Data API.",
+    )
+    data_polymarket_sync_trades.add_argument("--top-n", type=int, default=200)
+    data_polymarket_sync_trades.set_defaults(func=cmd_sync_wallet_trades)
+
+    data_polymarket_sync_positions = data_polymarket_subparsers.add_parser(
+        "sync-wallet-positions", help="Sync wallet positions from Polymarket Data API.",
+    )
+    data_polymarket_sync_positions.add_argument("--top-n", type=int, default=None)
+    data_polymarket_sync_positions.set_defaults(func=cmd_sync_wallet_positions)
+
+    data_polymarket_rebuild_profiles = data_polymarket_subparsers.add_parser(
+        "rebuild-wallet-profiles", help="Rebuild wallet profiles from accumulated trade data.",
+    )
+    data_polymarket_rebuild_profiles.set_defaults(func=cmd_rebuild_wallet_profiles)
+
+    data_polymarket_classify = data_polymarket_subparsers.add_parser(
+        "classify-wallet-buckets", help="Classify wallets into behavioral buckets.",
+    )
+    data_polymarket_classify.set_defaults(func=cmd_classify_wallet_buckets)
+
+    data_polymarket_seed_lb = data_polymarket_subparsers.add_parser(
+        "seed-from-leaderboard", help="Seed wallet intelligence DB from Polymarket leaderboard wallets.",
+    )
+    data_polymarket_seed_lb.set_defaults(func=cmd_seed_from_leaderboard)
+
+    data_polymarket_addr_map = data_polymarket_subparsers.add_parser(
+        "build-address-map", help="Build EOA-to-proxy wallet address mapping from Gamma API.",
+    )
+    data_polymarket_addr_map.add_argument("--top-n", type=int, default=None)
+    data_polymarket_addr_map.set_defaults(func=cmd_build_address_map)
+
+    data_polymarket_enrich_res = data_polymarket_subparsers.add_parser(
+        "enrich-trade-resolution", help="Enrich wallet trades with resolution outcomes.",
+    )
+    data_polymarket_enrich_res.set_defaults(func=cmd_enrich_trade_resolution)
+
+    data_polymarket_compute_sigs = data_polymarket_subparsers.add_parser(
+        "compute-signals", help="Compute multi-wallet convergence signals.",
+    )
+    data_polymarket_compute_sigs.set_defaults(func=cmd_compute_signals)
+
+    # ── data manifold ─────────────────────���──────────────────────────��───────
     data_manifold = data_subparsers.add_parser(
         "manifold", help="Manifold Markets data dump parsing commands"
     )
@@ -4034,6 +4281,151 @@ def build_parser() -> argparse.ArgumentParser:
         help="Render output as human-readable text or JSON.",
     )
     research_replay_compare.set_defaults(func=cmd_research_replay_compare)
+    research_replay_gate = research_replay_subparsers.add_parser(
+        "gate", help="Persist shared replay history and evaluate promotion-style research gates"
+    )
+    research_replay_gate.add_argument(
+        "--evaluation-root",
+        type=str,
+        default="artifacts/research_replay/evaluation",
+        help="Directory containing replay evaluation summary artifacts to import into shared history.",
+    )
+    research_replay_gate.add_argument(
+        "--comparison-root",
+        type=str,
+        default="artifacts/research_replay/comparison",
+        help="Directory containing replay comparison summary artifacts to import into shared history.",
+    )
+    research_replay_gate.add_argument(
+        "--evaluation-summary-paths",
+        nargs="+",
+        default=None,
+        help="Optional explicit replay evaluation summary paths to import instead of scanning --evaluation-root.",
+    )
+    research_replay_gate.add_argument(
+        "--comparison-summary-paths",
+        nargs="+",
+        default=None,
+        help="Optional explicit replay comparison summary paths to import instead of scanning --comparison-root.",
+    )
+    research_replay_gate.add_argument(
+        "--history-output-dir",
+        type=str,
+        default="artifacts/research_replay/history",
+        help="Directory where append-only shared replay history artifacts will be written.",
+    )
+    research_replay_gate.add_argument(
+        "--gating-output-dir",
+        type=str,
+        default="artifacts/research_replay/gating",
+        help="Directory where latest research gating summary artifacts will be written.",
+    )
+    research_replay_gate.add_argument("--min-row-count", type=int, default=25, help="Minimum mean row count gate.")
+    research_replay_gate.add_argument("--min-replay-runs", type=int, default=2, help="Minimum replay source-run count gate.")
+    research_replay_gate.add_argument(
+        "--min-mean-abs-spearman",
+        type=float,
+        default=0.02,
+        help="Minimum mean absolute Spearman correlation gate.",
+    )
+    research_replay_gate.add_argument(
+        "--min-mean-directional-accuracy",
+        type=float,
+        default=0.51,
+        help="Minimum mean directional accuracy gate.",
+    )
+    research_replay_gate.add_argument(
+        "--min-mean-composite-score",
+        type=float,
+        default=0.10,
+        help="Minimum mean replay comparison score gate.",
+    )
+    research_replay_gate.add_argument(
+        "--max-score-stddev",
+        type=float,
+        default=0.20,
+        help="Maximum replay comparison score standard deviation gate.",
+    )
+    research_replay_gate.add_argument("--max-best-rank", type=int, default=5, help="Best comparison rank required for the rank gate.")
+    research_replay_gate.add_argument(
+        "--max-best-rank-percentile",
+        type=float,
+        default=0.50,
+        help="Best comparison rank percentile required for the rank gate.",
+    )
+    research_replay_gate.add_argument(
+        "--min-provider-count",
+        type=int,
+        default=1,
+        help="Minimum distinct provider count required by the support gate.",
+    )
+    research_replay_gate.add_argument(
+        "--format",
+        type=str,
+        default="text",
+        choices=["text", "json"],
+        help="Render output as human-readable text or JSON.",
+    )
+    research_replay_gate.set_defaults(func=cmd_research_replay_gate)
+    research_replay_review = research_replay_subparsers.add_parser(
+        "review", help="Build research review queues and replay-history drift summaries"
+    )
+    research_replay_review.add_argument(
+        "--evaluation-root",
+        type=str,
+        default="artifacts/research_replay/evaluation",
+        help="Directory containing replay evaluation summary artifacts to import into shared history.",
+    )
+    research_replay_review.add_argument(
+        "--comparison-root",
+        type=str,
+        default="artifacts/research_replay/comparison",
+        help="Directory containing replay comparison summary artifacts to import into shared history.",
+    )
+    research_replay_review.add_argument("--evaluation-summary-paths", nargs="+", default=None)
+    research_replay_review.add_argument("--comparison-summary-paths", nargs="+", default=None)
+    research_replay_review.add_argument(
+        "--history-output-dir",
+        type=str,
+        default="artifacts/research_replay/history",
+        help="Directory where append-only shared replay history artifacts will be written.",
+    )
+    research_replay_review.add_argument(
+        "--gating-output-dir",
+        type=str,
+        default="artifacts/research_replay/gating",
+        help="Directory where latest research gating summary artifacts will be written.",
+    )
+    research_replay_review.add_argument(
+        "--review-output-dir",
+        type=str,
+        default="artifacts/research_replay/review",
+        help="Directory where drift and review queue artifacts will be written.",
+    )
+    research_replay_review.add_argument("--min-row-count", type=int, default=25)
+    research_replay_review.add_argument("--min-replay-runs", type=int, default=2)
+    research_replay_review.add_argument("--min-mean-abs-spearman", type=float, default=0.02)
+    research_replay_review.add_argument("--min-mean-directional-accuracy", type=float, default=0.51)
+    research_replay_review.add_argument("--min-mean-composite-score", type=float, default=0.10)
+    research_replay_review.add_argument("--max-score-stddev", type=float, default=0.20)
+    research_replay_review.add_argument("--max-best-rank", type=int, default=5)
+    research_replay_review.add_argument("--max-best-rank-percentile", type=float, default=0.50)
+    research_replay_review.add_argument("--min-provider-count", type=int, default=1)
+    research_replay_review.add_argument("--recent-window", type=int, default=4)
+    research_replay_review.add_argument("--min-recent-runs", type=int, default=2)
+    research_replay_review.add_argument("--max-abs-spearman-drop", type=float, default=0.03)
+    research_replay_review.add_argument("--max-directional-accuracy-drop", type=float, default=0.03)
+    research_replay_review.add_argument("--max-rank-percentile-worsening", type=float, default=0.25)
+    research_replay_review.add_argument("--max-recent-score-stddev", type=float, default=0.20)
+    research_replay_review.add_argument("--min-recent-provider-count", type=int, default=1)
+    research_replay_review.add_argument(
+        "--format",
+        type=str,
+        default="text",
+        choices=["text", "json"],
+        help="Render output as human-readable text or JSON.",
+    )
+    research_replay_review.set_defaults(func=cmd_research_replay_review)
     research_leaderboard = research_subparsers.add_parser(
         "leaderboard", help="Build a cross-run research leaderboard from manifest summaries"
     )
@@ -4614,6 +5006,15 @@ def build_parser() -> argparse.ArgumentParser:
         "ops", help="Operational controls: doctor, deploy pipeline, monitoring, registry, broker, and execution tooling"
     )
     ops_subparsers = ops_parser.add_subparsers(dest="ops_command", required=True)
+
+    ops_send_telegram = ops_subparsers.add_parser(
+        "send-telegram", help="Send a test message to Telegram.",
+    )
+    ops_send_telegram.add_argument(
+        "--message", type=str, default="Trading Platform test message",
+        help="Message text to send.",
+    )
+    ops_send_telegram.set_defaults(func=cmd_ops_send_telegram)
 
     ops_doctor = ops_subparsers.add_parser("doctor", help="Run local environment, config, and artifact sanity checks")
     ops_doctor.add_argument("--artifacts-root", type=str, default="artifacts", help="Artifact root to inspect.")

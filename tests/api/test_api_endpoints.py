@@ -218,44 +218,33 @@ def test_pnl_summary_with_data(tmp_path, monkeypatch):
 # ── Signal performance ────────────────────────────────────────────────────────
 
 
-def test_signals_performance_no_file():
-    resp = client.get("/api/signals/performance")
-    assert resp.status_code == 200
-    data = resp.json()
-    assert data["available"] is False
-
-
-def test_signals_performance_with_backtest_results(tmp_path, monkeypatch):
-    monkeypatch.setattr(reader, "ARTIFACTS_ROOT", tmp_path)
-    df = pd.DataFrame({
-        "signal_family": ["KALSHI_CALIBRATION_DRIFT", "KALSHI_VOLUME_SPIKE"],
-        "n_trades": [42, 17],
-        "win_rate": [0.6, 0.55],
-        "mean_edge": [2.1, 1.5],
-        "sharpe": [1.2, 0.8],
-        "ic": [0.15, 0.09],
-    })
-    path = tmp_path / "kalshi_research" / "backtest" / "backtest_results.csv"
-    _write_csv(path, df)
-
+def test_signals_performance_returns_wallet_intelligence():
     resp = client.get("/api/signals/performance")
     assert resp.status_code == 200
     data = resp.json()
     assert data["available"] is True
-    assert len(data["data"]) == 2
-    assert data["data"][0]["signal_family"] == "KALSHI_CALIBRATION_DRIFT"
+    assert "by_type" in data
+    assert len(data["by_type"]) == 7  # 7 signal types
+    types = {t["signal_type"] for t in data["by_type"]}
+    assert "whale_entry" in types
+    assert "convergence" in types
 
 
-def test_signals_performance_falls_back_to_leaderboard(tmp_path, monkeypatch):
-    monkeypatch.setattr(reader, "ARTIFACTS_ROOT", tmp_path)
-    df = pd.DataFrame({"signal_family": ["KALSHI_TIME_DECAY"], "ic": [0.07]})
-    _write_csv(tmp_path / "kalshi_research" / "leaderboard.csv", df)
-
+def test_signals_performance_all_types_have_allocation():
     resp = client.get("/api/signals/performance")
-    assert resp.status_code == 200
     data = resp.json()
-    assert data["available"] is True
-    assert data["source"] == "leaderboard"
+    for t in data["by_type"]:
+        assert "allocated" in t
+        assert "stake_per_trade" in t
+        assert t["allocated"] > 0
+
+
+def test_signals_performance_building_status_when_no_resolved():
+    resp = client.get("/api/signals/performance")
+    data = resp.json()
+    for t in data["by_type"]:
+        if t["resolved"] == 0:
+            assert t["status"] == "building"
 
 
 # ── Signal correlation ────────────────────────────────────────────────────────
@@ -718,3 +707,129 @@ def test_replay_comparison_latest_endpoint(tmp_path, monkeypatch):
     payload = resp.json()
     assert payload["available"] is True
     assert payload["candidate_count"] == 1
+
+
+def test_replay_gating_and_history_endpoints(tmp_path, monkeypatch):
+    monkeypatch.setattr(reader, "ARTIFACTS_ROOT", tmp_path / "artifacts")
+    monkeypatch.setattr(reader, "DATA_ROOT", tmp_path / "data")
+    _write_json(
+        tmp_path / "artifacts" / "research_replay" / "gating" / "latest_research_gating_summary.json",
+        {
+            "generated_at": "2024-01-01T00:00:00Z",
+            "summary_counts": {"candidate_count": 2, "promotable_count": 1, "watchlist_count": 1, "rejected_count": 0},
+            "promotable_candidates": [{"candidate_id": "binance|dataset|outer_union|feature|target", "overall_status": "promotable"}],
+            "watchlist_candidates": [{"candidate_id": "kalshi|dataset|outer_union|feature|target", "overall_status": "watchlist"}],
+            "rejected_candidates": [],
+            "warnings": [],
+        },
+    )
+    _write_jsonl(
+        tmp_path / "artifacts" / "research_replay" / "history" / "shared_replay_history.jsonl",
+        [
+            {
+                "record_id": "a",
+                "history_run_id": "history_a",
+                "recorded_at": "2024-01-01T00:00:00Z",
+                "source_type": "evaluation",
+                "source_name": "eval_a",
+                "source_summary_path": "artifacts/eval_a.json",
+                "source_generated_at": "2024-01-01T00:00:00Z",
+                "candidate_id": "binance|dataset|outer_union|feature|target",
+                "providers": ["binance"],
+                "dataset_keys": ["binance.crypto_market_features"],
+                "alignment_mode": "outer_union",
+                "feature_column": "feature",
+                "target_column": "target",
+                "row_count": 80,
+                "pearson_correlation": 0.02,
+                "spearman_correlation": 0.03,
+                "directional_accuracy": 0.55,
+                "top_bottom_spread": 0.05,
+                "warnings": [],
+                "provenance": {},
+            },
+            {
+                "record_id": "b",
+                "history_run_id": "history_b",
+                "recorded_at": "2024-01-02T00:00:00Z",
+                "source_type": "comparison",
+                "source_name": "compare_b",
+                "source_summary_path": "artifacts/compare_b.json",
+                "source_generated_at": "2024-01-02T00:00:00Z",
+                "candidate_id": "binance|dataset|outer_union|feature|target",
+                "providers": ["binance"],
+                "dataset_keys": ["binance.crypto_market_features"],
+                "alignment_mode": "outer_union",
+                "comparison_mode": "provider",
+                "feature_column": "feature",
+                "target_column": "target",
+                "row_count": 80,
+                "pearson_correlation": 0.02,
+                "spearman_correlation": 0.03,
+                "directional_accuracy": 0.55,
+                "top_bottom_spread": 0.05,
+                "composite_score": 0.2,
+                "comparison_rank": 1,
+                "comparison_rank_percentile": 0.2,
+                "eligible": True,
+                "warnings": [],
+                "provenance": {},
+            },
+        ],
+    )
+
+    gating_resp = client.get("/api/research/replay/gating-latest")
+    assert gating_resp.status_code == 200
+    gating_payload = gating_resp.json()
+    assert gating_payload["available"] is True
+    assert gating_payload["summary_counts"]["promotable_count"] == 1
+
+    history_resp = client.get("/api/research/replay/history?provider=binance&limit=1")
+    assert history_resp.status_code == 200
+    history_payload = history_resp.json()
+    assert history_payload["available"] is True
+    assert history_payload["returned_record_count"] == 1
+    assert history_payload["records"][0]["providers"] == ["binance"]
+
+    _write_json(
+        tmp_path / "artifacts" / "research_replay" / "review" / "latest_review_queue_summary.json",
+        {
+            "generated_at": "2024-01-03T00:00:00Z",
+            "summary_counts": {
+                "promotable_review_count": 1,
+                "watchlist_review_count": 0,
+                "needs_rerun_count": 1,
+                "rejected_archive_count": 0,
+            },
+            "promotable_review": [{"candidate_id": "binance|dataset|outer_union|feature|target"}],
+            "watchlist_review": [],
+            "needs_rerun": [{"candidate_id": "kalshi|dataset|outer_union|feature|target"}],
+            "rejected_archive": [],
+            "entries": [],
+            "warnings": [],
+        },
+    )
+    _write_json(
+        tmp_path / "artifacts" / "research_replay" / "review" / "latest_replay_drift_summary.json",
+        {
+            "generated_at": "2024-01-03T00:00:00Z",
+            "summary_counts": {"candidate_count": 2, "stable_count": 1, "warning_count": 0, "drifted_count": 1},
+            "decisions": [
+                {"candidate_id": "binance|dataset|outer_union|feature|target", "drift_status": "stable"},
+                {"candidate_id": "kalshi|dataset|outer_union|feature|target", "drift_status": "drifted"},
+            ],
+            "warnings": [],
+        },
+    )
+
+    review_resp = client.get("/api/research/replay/review-queue-latest")
+    assert review_resp.status_code == 200
+    review_payload = review_resp.json()
+    assert review_payload["available"] is True
+    assert review_payload["summary_counts"]["needs_rerun_count"] == 1
+
+    drift_resp = client.get("/api/research/replay/drift-latest")
+    assert drift_resp.status_code == 200
+    drift_payload = drift_resp.json()
+    assert drift_payload["available"] is True
+    assert drift_payload["summary_counts"]["drifted_count"] == 1

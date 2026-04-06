@@ -331,6 +331,68 @@ def test_grouped_research_replay_compare_command_parses() -> None:
     assert args.output_dir == "artifacts/research_replay/comparison"
 
 
+def test_grouped_research_replay_gate_command_parses() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "research",
+            "replay",
+            "gate",
+            "--evaluation-root",
+            "artifacts/research_replay/evaluation",
+            "--comparison-root",
+            "artifacts/research_replay/comparison",
+            "--history-output-dir",
+            "artifacts/research_replay/history",
+            "--gating-output-dir",
+            "artifacts/research_replay/gating",
+            "--min-replay-runs",
+            "3",
+            "--min-provider-count",
+            "2",
+            "--format",
+            "json",
+        ]
+    )
+
+    assert args.research_command == "replay"
+    assert args.research_replay_command == "gate"
+    assert args.history_output_dir == "artifacts/research_replay/history"
+    assert args.gating_output_dir == "artifacts/research_replay/gating"
+    assert args.min_replay_runs == 3
+    assert args.min_provider_count == 2
+    assert args.format == "json"
+
+
+def test_grouped_research_replay_review_command_parses() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "research",
+            "replay",
+            "review",
+            "--history-output-dir",
+            "artifacts/research_replay/history",
+            "--review-output-dir",
+            "artifacts/research_replay/review",
+            "--recent-window",
+            "6",
+            "--max-abs-spearman-drop",
+            "0.02",
+            "--format",
+            "json",
+        ]
+    )
+
+    assert args.research_command == "replay"
+    assert args.research_replay_command == "review"
+    assert args.history_output_dir == "artifacts/research_replay/history"
+    assert args.review_output_dir == "artifacts/research_replay/review"
+    assert args.recent_window == 6
+    assert args.max_abs_spearman_drop == 0.02
+    assert args.format == "json"
+
+
 def test_grouped_research_leaderboard_command_parses() -> None:
     parser = build_parser()
     args = parser.parse_args(

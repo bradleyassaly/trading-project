@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from argparse import Namespace
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pandas as pd
@@ -115,6 +116,7 @@ def test_publish_shared_dataset_registry_adds_kalshi_and_polymarket(tmp_path: Pa
 
 def test_cross_provider_monitoring_summary_aggregates_statuses(tmp_path: Path) -> None:
     registry_path = tmp_path / "data" / "research" / "dataset_registry.json"
+    recent_materialized_at = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
     upsert_dataset_registry_entry(
         registry_path=registry_path,
         entry=ResearchDatasetRegistryEntry(
@@ -123,7 +125,7 @@ def test_cross_provider_monitoring_summary_aggregates_statuses(tmp_path: Path) -
                 asset_class="crypto",
                 dataset_name="crypto_market_features",
                 dataset_path=str(tmp_path / "data" / "binance" / "research.parquet"),
-                latest_materialized_at="2026-04-03T23:59:00+00:00",
+                latest_materialized_at=recent_materialized_at,
             health_references={"health_summary_path": str(tmp_path / "data" / "binance" / "health.json")},
             manifest_references={"latest_sync_manifest_path": str(tmp_path / "data" / "binance" / "latest_sync_manifest.json")},
         ),

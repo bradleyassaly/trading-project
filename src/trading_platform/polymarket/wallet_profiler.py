@@ -1,16 +1,16 @@
 """
 Polymarket wallet profiler and smart money detection.
 
-Analyzes on-chain trade history to identify wallets that consistently
-trade on the winning side of resolved markets. These "smart money"
-wallets produce an alpha signal when they trade on active markets.
+Analyzes trade history to identify wallets that consistently trade on
+the winning side of resolved markets *before* the outcome is obvious.
+Uses ``ResolutionResolver`` for outcome lookups and ``MarketCloseTimeMap``
+for early-trade detection.
 
 Usage::
 
     from trading_platform.polymarket.wallet_profiler import WalletProfiler
     profiler = WalletProfiler()
     result = profiler.build_profiles("trades.csv", "resolution.csv", "profiles.parquet")
-    signal = profiler.get_smart_money_signal(trades, profiles, "market-123")
 """
 from __future__ import annotations
 
@@ -24,6 +24,8 @@ from typing import Any
 
 import pandas as pd
 
+from trading_platform.polymarket.resolution_resolver import ResolutionResolver, normalize_token_id
+
 logger = logging.getLogger(__name__)
 
 
@@ -31,12 +33,18 @@ logger = logging.getLogger(__name__)
 class WalletProfile:
     wallet: str
     total_trades: int
+    resolved_trades: int
     wins: int
     win_rate: float
+    early_trades: int
+    early_wins: int
+    early_win_rate: float
+    avg_hours_before_close: float
     total_volume_usdc: float
     avg_trade_size: float
     markets_traded: int
-    edge: float  # win_rate - 0.5
+    edge: float
+    is_early_informed: bool
     smart_money: bool
 
 
@@ -44,6 +52,7 @@ class WalletProfile:
 class ProfileBuildResult:
     wallets_analyzed: int = 0
     wallets_with_resolved_trades: int = 0
+    wallets_with_early_trades: int = 0
     smart_money_count: int = 0
     output_path: str = ""
 
@@ -57,53 +66,34 @@ class WalletProfiler:
         resolution_csv: str | Path,
         output_path: str | Path,
         *,
-        min_resolved_trades: int = 5,
+        min_resolved_trades: int = 3,
         early_hours_threshold: float = 24.0,
         early_win_rate_threshold: float = 0.65,
         min_early_trades: int = 5,
+        close_time_db_path: str | Path | None = None,
     ) -> ProfileBuildResult:
         trades_csv = Path(trades_csv)
-        resolution_csv = Path(resolution_csv)
         output_path = Path(output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
-
         result = ProfileBuildResult(output_path=str(output_path))
 
-        # Load resolution outcomes: ticker → {resolution_price, close_time}
-        resolution_map: dict[str, float] = {}
-        close_time_map: dict[str, datetime] = {}
-        if resolution_csv.exists():
-            with resolution_csv.open(newline="", encoding="utf-8-sig") as fh:
-                for row in csv.DictReader(fh):
-                    ticker = row.get("ticker", "")
-                    rp = row.get("resolution_price", "")
-                    if ticker and rp:
-                        try:
-                            resolution_map[ticker] = float(rp)
-                        except ValueError:
-                            pass
-                    ct = row.get("close_time") or row.get("end_date_iso") or ""
-                    if ticker and ct:
-                        try:
-                            close_time_map[ticker] = datetime.fromisoformat(
-                                ct.replace("Z", "+00:00")
-                            )
-                        except (ValueError, AttributeError):
-                            pass
+        # Load resolution resolver (normalizes token IDs automatically)
+        resolver = ResolutionResolver(resolution_csv)
+        if resolver.count == 0:
+            logger.warning("No resolutions loaded from %s", resolution_csv)
 
-        if not resolution_map:
-            logger.warning("No resolved markets found in %s", resolution_csv)
-            return result
+        # Load close times for early-trade detection
+        from trading_platform.polymarket.market_close_times import MarketCloseTimeMap
+        db_path = close_time_db_path or Path("data/polymarket/live/prices.db")
+        close_times = MarketCloseTimeMap.from_live_db(db_path)
 
-        # Load trades and group by wallet (auto-detect CSV format)
+        # Load trades
         wallet_trades: dict[str, list[dict[str, Any]]] = defaultdict(list)
         with trades_csv.open(newline="", encoding="utf-8-sig") as fh:
             for row in csv.DictReader(fh):
-                # Auto-detect: Data API uses proxyWallet/asset, blockchain uses wallet/token_id
                 wallet = (row.get("wallet") or row.get("proxyWallet") or "").strip()
                 if not wallet:
                     continue
-                # Normalize token_id field
                 if "token_id" not in row and "asset" in row:
                     row["token_id"] = row["asset"]
                 wallet_trades[wallet].append(row)
@@ -119,41 +109,54 @@ class WalletProfiler:
             early_trades = 0
             total_usdc = 0.0
             markets_seen: set[str] = set()
-            hours_before_close_list: list[float] = []
+            hours_list: list[float] = []
 
             for trade in trades:
-                token_id = trade.get("token_id", "")
+                token_id = (trade.get("token_id") or "").strip()
                 side = trade.get("side", "").upper()
-                usdc = float(trade.get("total_usdc") or 0)
+                usdc = float(trade.get("total_usdc") or trade.get("amount") or 0)
                 total_usdc += usdc
+                markets_seen.add(normalize_token_id(token_id))
 
-                market_id = token_id[:16]
-                markets_seen.add(market_id)
-
-                rp = resolution_map.get(market_id)
+                # Resolve market outcome via resolver (token_id + condition_id)
+                cond_id = trade.get("condition_id", "").strip()
+                rp = resolver.resolve(token_id, condition_id=cond_id)
                 if rp is None:
                     continue
                 resolved_trades += 1
-
                 resolved_yes = rp >= 99.0
-                is_win = (side == "BUY" and resolved_yes) or (side == "SELL" and not resolved_yes)
+
+                # Determine which side the trader is on
+                outcome_str = (trade.get("outcome") or "").strip().upper()
+                if outcome_str in ("YES", "NO"):
+                    # outcome tells us trader's side (YES/NO contract)
+                    trader_on_yes = outcome_str == "YES"
+                elif side in ("BUY", "YES"):
+                    trader_on_yes = True
+                else:
+                    trader_on_yes = False
+
+                is_win = (trader_on_yes and resolved_yes) or (not trader_on_yes and not resolved_yes)
+
                 if is_win:
                     wins += 1
 
-                # Compute hours before close
-                close_dt = close_time_map.get(market_id)
-                trade_ts = trade.get("timestamp", "")
+                # Early trade detection
+                close_dt = close_times.get(token_id)
+                ts_str = trade.get("timestamp", "")
                 hours_before = None
-                if close_dt and trade_ts:
+                if close_dt and ts_str:
                     try:
-                        trade_dt = datetime.fromisoformat(trade_ts.replace("Z", "+00:00"))
+                        if ts_str.replace(".", "").isdigit():
+                            trade_dt = datetime.fromtimestamp(float(ts_str), tz=timezone.utc)
+                        else:
+                            trade_dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
                         hours_before = (close_dt - trade_dt).total_seconds() / 3600.0
                         if hours_before > 0:
-                            hours_before_close_list.append(hours_before)
-                    except (ValueError, AttributeError):
+                            hours_list.append(hours_before)
+                    except (ValueError, AttributeError, OSError):
                         pass
 
-                # Early trade detection
                 if hours_before is not None and hours_before > early_hours_threshold:
                     early_trades += 1
                     if is_win:
@@ -165,28 +168,29 @@ class WalletProfiler:
             result.wallets_with_resolved_trades += 1
             win_rate = wins / resolved_trades
             early_win_rate = early_wins / early_trades if early_trades > 0 else 0.0
-            avg_hours = sum(hours_before_close_list) / len(hours_before_close_list) if hours_before_close_list else 0.0
+            avg_hours = sum(hours_list) / len(hours_list) if hours_list else 0.0
 
-            # Smart money = genuinely early informed, not late arbitrageur
             is_early_informed = (
                 early_win_rate >= early_win_rate_threshold
                 and early_trades >= min_early_trades
             )
+            if early_trades >= min_early_trades:
+                result.wallets_with_early_trades += 1
 
             profiles.append({
                 "wallet": wallet,
                 "total_trades": len(trades),
                 "resolved_trades": resolved_trades,
                 "wins": wins,
-                "win_rate": win_rate,
+                "win_rate": round(win_rate, 4),
                 "early_trades": early_trades,
                 "early_wins": early_wins,
-                "early_win_rate": early_win_rate,
+                "early_win_rate": round(early_win_rate, 4),
                 "avg_hours_before_close": round(avg_hours, 1),
-                "total_volume_usdc": total_usdc,
-                "avg_trade_size": total_usdc / len(trades) if trades else 0,
+                "total_volume_usdc": round(total_usdc, 2),
+                "avg_trade_size": round(total_usdc / len(trades), 2) if trades else 0,
                 "markets_traded": len(markets_seen),
-                "edge": win_rate - 0.5,
+                "edge": round(win_rate - 0.5, 4),
                 "is_early_informed": is_early_informed,
                 "smart_money": is_early_informed,
             })
@@ -195,17 +199,105 @@ class WalletProfiler:
             return result
 
         result.smart_money_count = sum(1 for p in profiles if p["smart_money"])
-
-        # Write to parquet
         df = pd.DataFrame(profiles)
         df.to_parquet(output_path, index=False)
-
         logger.info(
-            "Built %d wallet profiles (%d smart money) from %d wallets",
+            "Built %d profiles (%d smart money) from %d wallets",
             result.wallets_with_resolved_trades,
             result.smart_money_count,
             result.wallets_analyzed,
         )
+        return result
+
+    def build_profiles_from_data_api(
+        self,
+        trades_dir: str | Path,
+        output_path: str | Path,
+        *,
+        min_resolved_trades: int = 5,
+    ) -> ProfileBuildResult:
+        """Build profiles from Data API trade CSVs + Graph resolutions."""
+        from trading_platform.polymarket.graph_resolver import GraphResolver
+
+        trades_dir = Path(trades_dir)
+        output_path = Path(output_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        result = ProfileBuildResult(output_path=str(output_path))
+
+        all_trades: list[dict[str, Any]] = []
+        for csv_file in sorted(trades_dir.glob("*.csv")):
+            try:
+                with csv_file.open(newline="", encoding="utf-8-sig") as fh:
+                    for row in csv.DictReader(fh):
+                        all_trades.append(row)
+            except Exception:
+                continue
+
+        if not all_trades:
+            return result
+
+        condition_ids = list({
+            t.get("condition_id", "").strip()
+            for t in all_trades if t.get("condition_id", "").strip()
+        })
+        resolver = GraphResolver()
+        resolutions = resolver.get_resolutions(condition_ids)
+
+        wallet_stats: dict[str, dict[str, Any]] = defaultdict(
+            lambda: {"trades": 0, "resolved": 0, "wins": 0, "volume": 0.0, "markets": set()}
+        )
+
+        for trade in all_trades:
+            wallet = (trade.get("wallet") or trade.get("proxyWallet") or "").strip()
+            if not wallet:
+                continue
+            side = trade.get("side", "").upper()
+            if side != "BUY":
+                continue
+
+            cid = trade.get("condition_id", "").strip()
+            outcome = trade.get("outcome", "").strip()
+            usdc = float(trade.get("total_usdc") or 0)
+
+            ws = wallet_stats[wallet]
+            ws["trades"] += 1
+            ws["volume"] += usdc
+            ws["markets"].add(cid)
+
+            resolves_yes = resolutions.get(cid)
+            if resolves_yes is None:
+                continue
+            ws["resolved"] += 1
+            if (outcome == "Yes" and resolves_yes) or (outcome == "No" and not resolves_yes):
+                ws["wins"] += 1
+
+        result.wallets_analyzed = len(wallet_stats)
+        profiles: list[dict[str, Any]] = []
+        for wallet, ws in wallet_stats.items():
+            if ws["resolved"] < min_resolved_trades:
+                continue
+            result.wallets_with_resolved_trades += 1
+            win_rate = ws["wins"] / ws["resolved"]
+            profiles.append({
+                "wallet": wallet,
+                "total_trades": ws["trades"],
+                "resolved_trades": ws["resolved"],
+                "wins": ws["wins"],
+                "win_rate": round(win_rate, 4),
+                "early_trades": 0, "early_wins": 0, "early_win_rate": 0.0,
+                "avg_hours_before_close": 0.0,
+                "total_volume_usdc": round(ws["volume"], 2),
+                "avg_trade_size": round(ws["volume"] / ws["trades"], 2) if ws["trades"] > 0 else 0,
+                "markets_traded": len(ws["markets"]),
+                "edge": round(win_rate - 0.5, 4),
+                "is_early_informed": False,
+                "smart_money": win_rate >= 0.65 and ws["resolved"] >= min_resolved_trades,
+            })
+
+        if profiles:
+            result.smart_money_count = sum(1 for p in profiles if p["smart_money"])
+            pd.DataFrame(profiles).to_parquet(output_path, index=False)
+
         return result
 
     @staticmethod
@@ -218,18 +310,13 @@ class WalletProfiler:
     ) -> float:
         """Compute smart money imbalance signal for a market.
 
-        Returns float in [-1, 1]:
-          +1 = heavy smart money buying YES
-          -1 = heavy smart money buying NO
-           0 = no smart money activity
+        Returns float in [-1, 1].
         """
         profiles_path = Path(profiles_path)
         trades_csv = Path(trades_csv)
-
         if not profiles_path.exists() or not trades_csv.exists():
             return 0.0
 
-        # Load smart money wallets
         profiles_df = pd.read_parquet(profiles_path)
         smart_wallets = set(
             profiles_df[profiles_df["smart_money"] == True]["wallet"].tolist()
@@ -237,27 +324,26 @@ class WalletProfiler:
         if not smart_wallets:
             return 0.0
 
-        # Load recent trades for this market
-        cutoff = datetime.now(tz=timezone.utc) - timedelta(hours=lookback_hours)
-        smart_buy_volume = 0.0
-        smart_sell_volume = 0.0
+        smart_buy = 0.0
+        smart_sell = 0.0
+        normalized_market = normalize_token_id(market_id)
 
         with trades_csv.open(newline="", encoding="utf-8-sig") as fh:
             for row in csv.DictReader(fh):
-                token_id = row.get("token_id", "")
-                if token_id[:16] != market_id and token_id != market_id:
+                token_id = row.get("token_id") or row.get("asset") or ""
+                if normalize_token_id(token_id) != normalized_market:
                     continue
-                wallet = row.get("wallet", "").strip()
+                wallet = (row.get("wallet") or row.get("proxyWallet") or "").strip()
                 if wallet not in smart_wallets:
                     continue
                 usdc = float(row.get("total_usdc") or 0)
                 side = row.get("side", "").upper()
                 if side == "BUY":
-                    smart_buy_volume += usdc
+                    smart_buy += usdc
                 elif side == "SELL":
-                    smart_sell_volume += usdc
+                    smart_sell += usdc
 
-        total = smart_buy_volume + smart_sell_volume
+        total = smart_buy + smart_sell
         if total < 1.0:
             return 0.0
-        return (smart_buy_volume - smart_sell_volume) / total
+        return (smart_buy - smart_sell) / total

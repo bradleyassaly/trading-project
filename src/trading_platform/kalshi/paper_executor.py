@@ -72,6 +72,24 @@ class KalshiPaperExecutor:
                 SELECT 1, '{datetime.now(tz=timezone.utc).isoformat()}', {_STARTING_CASH}, 0, {_STARTING_CASH}, 0
                 WHERE NOT EXISTS (SELECT 1 FROM portfolio);
         """)
+        # Migrations — add columns if they don't exist
+        existing = {
+            row[1]
+            for row in self._conn.execute("PRAGMA table_info(trades)").fetchall()
+        }
+        migrations = [
+            ("platform", "TEXT DEFAULT 'kalshi'"),
+            ("full_token_id", "TEXT"),
+            ("signal_type", "TEXT"),
+            ("signal_score", "REAL"),
+            ("smart_money_confidence", "REAL"),
+            ("smart_money_edge", "REAL"),
+            ("weighted_net_volume", "REAL"),
+        ]
+        for col, typedef in migrations:
+            if col not in existing:
+                self._conn.execute(f"ALTER TABLE trades ADD COLUMN {col} {typedef}")
+        self._conn.commit()
 
     def _get_cash(self) -> float:
         row = self._conn.execute(
@@ -117,14 +135,18 @@ class KalshiPaperExecutor:
                 return False
 
             now = datetime.now(tz=timezone.utc).isoformat()
+            # Extract signal score for the strongest signal
+            signal_score = result.signal_scores.get(result.strongest_signal, 0.0) if result.signal_scores else 0.0
             self._conn.execute(
                 """INSERT INTO trades
                    (ticker, side, entry_price, size_usd, signal_family,
-                    confidence, news_context, entry_ts, status)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open')""",
+                    confidence, news_context, entry_ts, status,
+                    signal_type, signal_score)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?)""",
                 (result.ticker, result.recommended_side, result.yes_price,
                  round(size, 2), result.strongest_signal, result.confidence,
-                 result.news_context, now),
+                 result.news_context, now,
+                 result.strongest_signal, round(signal_score, 4)),
             )
             # Deduct cash
             new_cash = cash - size
@@ -211,6 +233,27 @@ class KalshiPaperExecutor:
         total_val = port[2] if port else _STARTING_CASH
         realized = port[3] if port else 0
 
+        # Signal attribution
+        attr_rows = self._conn.execute("""
+            SELECT COALESCE(signal_family, 'unknown') as sig,
+                   COUNT(*) as total,
+                   SUM(CASE WHEN outcome='win' THEN 1 ELSE 0 END) as wins,
+                   SUM(CASE WHEN status='closed' THEN 1 ELSE 0 END) as closed,
+                   AVG(size_usd) as avg_stake
+            FROM trades GROUP BY sig ORDER BY total DESC
+        """).fetchall()
+        attribution = []
+        for r in attr_rows:
+            sig_closed = r[3]
+            attribution.append({
+                "signal_type": r[0],
+                "total_trades": r[1],
+                "wins": r[2],
+                "closed": sig_closed,
+                "win_rate": round(r[2] / sig_closed, 3) if sig_closed > 0 else 0.0,
+                "avg_stake": round(r[4], 2) if r[4] else 0.0,
+            })
+
         return {
             "cash_usd": round(cash, 2),
             "open_positions_value": round(open_val, 2),
@@ -221,6 +264,7 @@ class KalshiPaperExecutor:
             "closed_trades": closed,
             "wins": wins,
             "win_rate": round(wins / closed, 3) if closed > 0 else 0.0,
+            "signal_attribution": attribution,
         }
 
     def get_recent_trades(self, limit: int = 50) -> list[dict[str, Any]]:
@@ -228,13 +272,16 @@ class KalshiPaperExecutor:
             rows = self._conn.execute(
                 """SELECT id, ticker, side, entry_price, size_usd, signal_family,
                           confidence, news_context, entry_ts, exit_price, exit_ts,
-                          outcome, return_pct, status
+                          outcome, return_pct, status,
+                          COALESCE(platform, 'kalshi') as platform,
+                          signal_type, signal_score
                    FROM trades ORDER BY id DESC LIMIT ?""",
                 (limit,),
             ).fetchall()
         cols = ["id", "ticker", "side", "entry_price", "size_usd", "signal_family",
                 "confidence", "news_context", "entry_ts", "exit_price", "exit_ts",
-                "outcome", "return_pct", "status"]
+                "outcome", "return_pct", "status", "platform", "signal_type",
+                "signal_score"]
         return [dict(zip(cols, row)) for row in rows]
 
     def close(self) -> None:
