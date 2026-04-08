@@ -615,10 +615,26 @@ class WalletDB:
     # ── Trades ───────────────────────────────────────────────────────────────
 
     def upsert_trade(self, **fields: Any) -> bool:
-        """Insert a trade, skip if transaction_hash already exists. Returns True if inserted."""
+        """Insert a trade, skip if transaction_hash already exists. Returns True if inserted.
+
+        Auto-classifies the trade's category from its slug+title if the
+        caller didn't provide one. This ensures every new fill ingested
+        by the data-api-fetch pipeline gets a category at insert time —
+        no more null-category accumulation.
+        """
         tx = fields.get("transaction_hash")
         if not tx:
             return False
+        # Auto-classify category if missing
+        if not fields.get("category"):
+            try:
+                from trading_platform.polymarket.market_categorizer import classify_keywords
+                cat, _ = classify_keywords(
+                    fields.get("slug") or "", fields.get("title") or "",
+                )
+                fields["category"] = cat
+            except Exception:
+                fields["category"] = "other"
         with self._lock:
             existing = self._conn.execute(
                 "SELECT 1 FROM wallet_trades WHERE transaction_hash = ?", (tx,)
