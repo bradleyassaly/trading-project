@@ -3033,6 +3033,229 @@ def read_paper_positions_enriched() -> dict[str, Any]:
     }
 
 
+def read_calibration_status() -> dict[str, Any]:
+    """Per-signal calibration + current allocation plan + bankroll snapshot."""
+    import sqlite3 as _sq
+    db = _get_wallet_db()
+    if not db:
+        return {"available": False, "error": "wallet_db unavailable"}
+    db_path = str(db._path)
+
+    try:
+        conn = _sq.connect(db_path)
+        try:
+            rows = conn.execute(
+                """SELECT signal_type, sample_size, wins, losses, bayesian_wr,
+                          ev_per_trade, profit_factor, sharpe_ratio,
+                          kelly_fraction, rolling_10_wr, rolling_20_ev,
+                          consecutive_losses, recommended_allocation_pct,
+                          recommended_stake_usd, allocated_usd, status,
+                          last_updated
+                   FROM signal_calibration
+                   ORDER BY CASE status
+                        WHEN 'live' THEN 1
+                        WHEN 'weak' THEN 2
+                        WHEN 'building' THEN 3
+                        WHEN 'disabled' THEN 4
+                        ELSE 5 END,
+                       sample_size DESC"""
+            ).fetchall()
+        finally:
+            conn.close()
+    except Exception as exc:
+        return {"available": False, "error": str(exc)}
+
+    cols = [
+        "signal_type", "sample_size", "wins", "losses", "bayesian_wr",
+        "ev_per_trade", "profit_factor", "sharpe_ratio", "kelly_fraction",
+        "rolling_10_wr", "rolling_20_ev", "consecutive_losses",
+        "recommended_allocation_pct", "recommended_stake_usd",
+        "allocated_usd", "status", "last_updated",
+    ]
+    by_type = [dict(zip(cols, r)) for r in rows]
+
+    # Live allocation plan + bankroll snapshot
+    allocation_plan = None
+    try:
+        from trading_platform.polymarket.bankroll_allocator import BankrollAllocator
+        plan = BankrollAllocator(db_path).compute_plan()
+        allocation_plan = plan.to_dict()
+    except Exception as exc:
+        allocation_plan = {"error": str(exc)}
+
+    return {
+        "available": True,
+        "by_type": by_type,
+        "n_live": sum(1 for s in by_type if s["status"] == "live"),
+        "n_weak": sum(1 for s in by_type if s["status"] == "weak"),
+        "n_building": sum(1 for s in by_type if s["status"] == "building"),
+        "n_disabled": sum(1 for s in by_type if s["status"] == "disabled"),
+        "allocation_plan": allocation_plan,
+    }
+
+
+def read_calibration_report(date: str | None = None) -> dict[str, Any]:
+    """Read a stored calibration report by date, or the latest if date is None."""
+    import sqlite3 as _sq
+    import json as _json
+    db = _get_wallet_db()
+    if not db:
+        return {"available": False}
+    try:
+        conn = _sq.connect(str(db._path))
+        try:
+            if date:
+                row = conn.execute(
+                    """SELECT report_date, created_at, report_json,
+                              total_bankroll, total_pnl_today
+                       FROM calibration_reports
+                       WHERE report_date = ?
+                       ORDER BY created_at DESC LIMIT 1""",
+                    (date,),
+                ).fetchone()
+            else:
+                row = conn.execute(
+                    """SELECT report_date, created_at, report_json,
+                              total_bankroll, total_pnl_today
+                       FROM calibration_reports
+                       ORDER BY created_at DESC LIMIT 1"""
+                ).fetchone()
+        finally:
+            conn.close()
+    except Exception as exc:
+        return {"available": False, "error": str(exc)}
+    if not row:
+        return {"available": True, "report": None}
+    try:
+        body = _json.loads(row[2])
+    except Exception:
+        body = {}
+    return {
+        "available": True,
+        "report_date": row[0],
+        "created_at": row[1],
+        "total_bankroll": row[3],
+        "total_pnl_today": row[4],
+        "report": body,
+    }
+
+
+def write_calibration_report() -> dict[str, Any]:
+    """Generate and persist a daily calibration report. Returns the report."""
+    import sqlite3 as _sq
+    import json as _json
+    import time as _time
+    from datetime import datetime as _dt, timezone as _tz
+    db = _get_wallet_db()
+    if not db:
+        return {"available": False}
+    db_path = str(db._path)
+
+    status = read_calibration_status()
+    if not status.get("available"):
+        return {"available": False, "error": "calibration unavailable"}
+
+    # Day's PnL from polymarket_paper_trades
+    today_start = int(_time.time()) - 86400
+    total_pnl_today = 0.0
+    bankroll = 100_000.0
+    try:
+        conn = _sq.connect(db_path)
+        try:
+            row = conn.execute(
+                """SELECT COALESCE(SUM(realized_pnl), 0)
+                   FROM polymarket_paper_trades
+                   WHERE archived = 0 AND exit_ts >= ?""",
+                (today_start,),
+            ).fetchone()
+            total_pnl_today = float(row[0] or 0.0)
+
+            # Trend per signal: compare last-10 cum PnL vs prior-10
+            trends: dict[str, str] = {}
+            for s in status["by_type"]:
+                sig = s["signal_type"]
+                trades = conn.execute(
+                    """SELECT realized_pnl FROM polymarket_paper_trades
+                       WHERE signal_type = ? AND archived = 0
+                         AND exit_ts IS NOT NULL AND realized_pnl IS NOT NULL
+                       ORDER BY exit_ts DESC LIMIT 20""",
+                    (sig,),
+                ).fetchall()
+                pnls = [float(r[0]) for r in trades]
+                if len(pnls) >= 10:
+                    last10 = sum(pnls[:10])
+                    prev10 = sum(pnls[10:20]) if len(pnls) >= 20 else 0.0
+                    trends[sig] = (
+                        "improving" if last10 > prev10 * 1.1
+                        else "degrading" if last10 < prev10 * 0.9
+                        else "stable"
+                    )
+                else:
+                    trends[sig] = "insufficient_data"
+        finally:
+            conn.close()
+    except Exception:
+        trends = {}
+
+    report_body = {
+        "by_type": status["by_type"],
+        "trends": trends,
+        "allocation_plan": status.get("allocation_plan"),
+        "summary": {
+            "n_live": status["n_live"],
+            "n_weak": status["n_weak"],
+            "n_building": status["n_building"],
+            "n_disabled": status["n_disabled"],
+        },
+    }
+    report_date = _dt.now(tz=_tz.utc).strftime("%Y-%m-%d")
+    try:
+        conn = _sq.connect(db_path)
+        try:
+            conn.execute(
+                """INSERT INTO calibration_reports
+                    (report_date, created_at, report_json, total_bankroll, total_pnl_today)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (
+                    report_date, int(_time.time()), _json.dumps(report_body),
+                    bankroll, round(total_pnl_today, 2),
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception as exc:
+        return {"available": False, "error": str(exc)}
+
+    return {
+        "available": True,
+        "report_date": report_date,
+        "report": report_body,
+        "total_bankroll": bankroll,
+        "total_pnl_today": round(total_pnl_today, 2),
+    }
+
+
+def trigger_calibration_rebalance(dry_run: bool = False) -> dict[str, Any]:
+    """Recompute calibration from scratch and rebalance the bankroll."""
+    db = _get_wallet_db()
+    if not db:
+        return {"available": False}
+    try:
+        from trading_platform.polymarket.signal_evaluator import SignalEvaluator
+        from trading_platform.polymarket.bankroll_allocator import BankrollAllocator
+    except Exception as exc:
+        return {"available": False, "error": f"calibration modules unavailable: {exc}"}
+    db_path = str(db._path)
+    SignalEvaluator(db_path).update_all()
+    plan = BankrollAllocator(db_path).rebalance(dry_run=dry_run)
+    return {
+        "available": True,
+        "dry_run": dry_run,
+        "plan": plan.to_dict(),
+    }
+
+
 def read_live_readiness() -> dict[str, Any]:
     """All live readiness gates computed from live data.
 

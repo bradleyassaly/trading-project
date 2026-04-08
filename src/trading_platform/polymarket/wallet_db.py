@@ -275,6 +275,67 @@ class WalletDB:
         self._migrate_signals()
         self._migrate_positions()
         self._migrate_anomalies()
+        self._migrate_calibration()
+
+    def _migrate_calibration(self) -> None:
+        """Create signal_calibration + calibration_reports tables for the
+        Bayesian signal evaluator and bankroll allocator. Also adds
+        fusion-score / context columns to polymarket_paper_trades.
+        """
+        self._conn.execute("""
+            CREATE TABLE IF NOT EXISTS signal_calibration (
+                signal_type TEXT PRIMARY KEY,
+                sample_size INTEGER DEFAULT 0,
+                wins INTEGER DEFAULT 0,
+                losses INTEGER DEFAULT 0,
+                bayesian_wr REAL,
+                ev_per_trade REAL,
+                profit_factor REAL,
+                sharpe_ratio REAL,
+                kelly_fraction REAL,
+                rolling_10_wr REAL,
+                rolling_20_ev REAL,
+                consecutive_losses INTEGER DEFAULT 0,
+                recommended_allocation_pct REAL,
+                recommended_stake_usd REAL,
+                allocated_usd REAL,
+                status TEXT DEFAULT 'building',
+                last_updated INTEGER
+            )
+        """)
+        self._conn.execute("""
+            CREATE TABLE IF NOT EXISTS calibration_reports (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                report_date TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                report_json TEXT NOT NULL,
+                total_bankroll REAL,
+                total_pnl_today REAL
+            )
+        """)
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_cal_reports_date ON calibration_reports(report_date DESC)"
+        )
+        # Optional fusion / context columns on paper trades. ALTER is
+        # idempotent here because we only add when missing.
+        ppt_cols = {r[1] for r in self._conn.execute(
+            "PRAGMA table_info(polymarket_paper_trades)"
+        ).fetchall()}
+        for col, typedef in [
+            ("fusion_score", "REAL"),
+            ("fusion_components", "TEXT"),
+            ("wallet_tier_at_fire", "TEXT"),
+            ("wallet_bucket_at_fire", "TEXT"),
+            ("kelly_stake_pct", "REAL"),
+        ]:
+            if col not in ppt_cols:
+                try:
+                    self._conn.execute(
+                        f"ALTER TABLE polymarket_paper_trades ADD COLUMN {col} {typedef}"
+                    )
+                except sqlite3.OperationalError:
+                    pass
+        self._conn.commit()
 
     def _migrate_anomalies(self) -> None:
         """Create market_anomalies + market_ticks tables for live monitor pipelines."""

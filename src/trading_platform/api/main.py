@@ -207,6 +207,40 @@ def alerts_anomalies(limit: int = 50, severity: str | None = None) -> dict[str, 
 # ── Market Intelligence endpoints ────────────────────────────────────────────
 
 
+# ── Calibration endpoints ───────────────────────────────────────────────────
+
+
+@app.get("/api/calibration/status")
+def calibration_status() -> dict[str, Any]:
+    """Per-signal calibration + current bankroll allocation plan."""
+    return reader.read_calibration_status()
+
+
+@app.get("/api/calibration/report/latest")
+def calibration_report_latest() -> dict[str, Any]:
+    """Most recent calibration report."""
+    return reader.read_calibration_report()
+
+
+@app.get("/api/calibration/report")
+def calibration_report(date: str | None = None) -> dict[str, Any]:
+    """Calibration report for a specific YYYY-MM-DD date."""
+    return reader.read_calibration_report(date=date)
+
+
+@app.post("/api/calibration/report/generate")
+def calibration_report_generate() -> dict[str, Any]:
+    """Generate and persist a fresh calibration report for today."""
+    return reader.write_calibration_report()
+
+
+@app.post("/api/calibration/rebalance")
+def calibration_rebalance(request: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Recompute calibration + rebalance the bankroll allocator."""
+    dry_run = bool((request or {}).get("dry_run", False))
+    return reader.trigger_calibration_rebalance(dry_run=dry_run)
+
+
 # ── Live trading readiness + control endpoints ─────────────────────────────
 
 

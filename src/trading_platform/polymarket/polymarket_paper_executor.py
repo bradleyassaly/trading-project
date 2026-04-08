@@ -288,10 +288,53 @@ class PolymarketPaperExecutor:
             return None
 
         wallet = signal.get("wallet", "")
-        # Compute stake — uses Kelly + Sharpe + trend if analytics available
-        stake = self._compute_stake(signal_type, confidence, wallet)
+
+        # Calibrated stake: prefer the bankroll allocator's recommendation
+        # (Kelly-weighted from real outcomes) over the legacy compute_stake
+        # path. Fall back to legacy if calibration hasn't been built yet.
+        try:
+            from trading_platform.polymarket.bankroll_allocator import BankrollAllocator
+            calibrated_stake = BankrollAllocator(str(self._wallet_db_path)).get_stake_for(signal_type)
+        except Exception:
+            calibrated_stake = 0.0
+        if calibrated_stake and calibrated_stake > 0:
+            stake = calibrated_stake
+        else:
+            stake = self._compute_stake(signal_type, confidence, wallet)
         if stake < MIN_STAKE:
             return None
+
+        # Tri-factor fusion gate. Skip the trade entirely if the fusion
+        # score is below the floor; halve the stake when the score is
+        # mid-range; full stake when high.
+        fusion_dict: dict[str, Any] | None = None
+        try:
+            from trading_platform.polymarket.fusion_score import compute_fusion
+            fusion = compute_fusion(
+                wallet_wr=signal.get("directional_win_rate"),
+                wallet_tier=signal.get("wallet_tier"),
+                trade_size_usd=float(signal.get("size") or stake),
+                wallet_avg_bet_usd=float(signal.get("wallet_avg_bet_usd") or 0),
+                market_volume_usd=signal.get("market_volume_usd"),
+                current_price=signal.get("price"),
+                days_since_last_trade=signal.get("days_since_last_trade"),
+                minutes_since_whale_entry=signal.get("minutes_since_whale_entry"),
+                convergence_count=int(signal.get("converging_wallets") or 0),
+            )
+            fusion_dict = fusion.to_dict()
+            if fusion.decision == "skip":
+                logger.info(
+                    "[FUSION_SKIP] %s score=%.2f w=%.2f m=%.2f t=%.2f | %s",
+                    signal_type, fusion.score, fusion.wallet_signal,
+                    fusion.market_signal, fusion.timing_signal,
+                    (signal.get("question") or "")[:40],
+                )
+                return None
+            stake = round(stake * fusion.stake_multiplier, 2)
+            if stake < MIN_STAKE:
+                return None
+        except Exception as exc:
+            logger.debug("fusion gate skipped: %s", exc)
 
         side = "YES" if direction == "BUY" else "NO"
         category = signal.get("category", "other")
@@ -300,14 +343,20 @@ class PolymarketPaperExecutor:
         now_ts = int(time.time())
 
         try:
+            import json as _json
+            fusion_blob = _json.dumps(fusion_dict) if fusion_dict else None
+            fusion_score_val = fusion_dict.get("score") if fusion_dict else None
             with self._wallet_lock:
                 cursor = self._wallet_conn.execute(
                     """INSERT INTO polymarket_paper_trades
                        (condition_id, question, category, side, entry_price,
-                        size_usd, signal_type, confidence, wallet, entry_ts, archived)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)""",
+                        size_usd, signal_type, confidence, wallet, entry_ts,
+                        fusion_score, fusion_components, wallet_tier_at_fire,
+                        archived)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)""",
                     (condition_id, question, category, side, entry_price,
-                     stake, signal_type, confidence, wallet, now_ts),
+                     stake, signal_type, confidence, wallet, now_ts,
+                     fusion_score_val, fusion_blob, signal.get("wallet_tier")),
                 )
                 trade_id = cursor.lastrowid
                 self._wallet_conn.commit()
@@ -454,8 +503,61 @@ class PolymarketPaperExecutor:
                 time.sleep(0.2)
                 continue
 
+        # After any resolution, refresh calibration. If a status transition
+        # occurred for any signal type, fire a Telegram alert.
+        if resolved_count > 0:
+            try:
+                from trading_platform.polymarket.signal_evaluator import SignalEvaluator
+                from trading_platform.polymarket.bankroll_allocator import BankrollAllocator
+                evaluator = SignalEvaluator(str(self._wallet_db_path))
+                results = evaluator.update_all()
+                # Rebalance allocations
+                try:
+                    BankrollAllocator(str(self._wallet_db_path)).rebalance(dry_run=False)
+                except Exception as exc:
+                    logger.debug("rebalance failed: %s", exc)
+                # Telegram on transitions
+                try:
+                    from trading_platform.polymarket.telegram_alerts import get_alerter
+                    alerter = get_alerter()
+                    if alerter.enabled:
+                        for row, prev_status in results:
+                            if prev_status and prev_status != row.status:
+                                self._send_status_transition_alert(
+                                    alerter, row, prev_status,
+                                )
+                except Exception as exc:
+                    logger.debug("transition alert dispatch failed: %s", exc)
+            except Exception as exc:
+                logger.debug("post-resolution calibration failed: %s", exc)
+
         logger.info("Resolution check: %d open, %d resolved", len(open_trades), resolved_count)
         return {"checked": len(open_trades), "resolved": resolved_count}
+
+    def _send_status_transition_alert(self, alerter: Any, row: Any, prev_status: str) -> None:
+        """Telegram alert when a signal type changes calibration status."""
+        emoji = {
+            "live": "🟢",
+            "weak": "🟡",
+            "disabled": "🔴",
+            "building": "🔵",
+        }.get(row.status, "⚪")
+        msg = (
+            f"{emoji} <b>SIGNAL CALIBRATION CHANGE</b>\n"
+            f"<b>{row.signal_type}</b>: {prev_status.upper()} → {row.status.upper()}\n\n"
+            f"Sample: {row.sample_size} ({row.wins}W / {row.losses}L)\n"
+            f"Bayesian WR: {(row.bayesian_wr or 0)*100:.0f}%\n"
+            f"EV/trade: {(row.ev_per_trade or 0)*100:+.1f}%\n"
+            f"Profit factor: {row.profit_factor}\n"
+            f"Kelly: {(row.kelly_fraction or 0)*100:.1f}%\n"
+            f"Rolling 10 WR: {(row.rolling_10_wr or 0)*100:.0f}%\n"
+            f"\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n"
+            f"\U0001f5a5 localhost:5173/signals"
+        )
+        try:
+            alerter._send(msg, disable_notification=(row.status not in ("disabled", "live")))
+        except Exception:
+            pass
 
     def _get_signal_stats(self, signal_type: str) -> dict[str, Any]:
         """Aggregate stats for one signal type for inclusion in resolution alerts."""
