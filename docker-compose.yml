@@ -1,0 +1,95 @@
+# Polymarket trading platform — full stack orchestration.
+#
+# Usage:
+#   docker compose up -d              # start everything
+#   docker compose ps                 # status
+#   docker compose logs -f scheduler  # tail one service
+#   docker compose down               # stop everything
+#
+# All services share the project root as a bind mount so the SQLite
+# DB at data/polymarket/wallet_intelligence.db, the .env file, and the
+# scripts/ directory are accessible from every container.
+
+services:
+
+  # ─── Always-on services ────────────────────────────────────────────────
+
+  api:
+    build: .
+    container_name: polymarket-api
+    command: uvicorn trading_platform.api.main:app --host 0.0.0.0 --port 8001
+    ports:
+      - "8001:8001"
+    volumes:
+      - .:/app
+    env_file: .env
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8001/api/system/status"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  frontend:
+    build:
+      context: ./src/trading_platform/frontend
+      dockerfile: Dockerfile
+    container_name: polymarket-frontend
+    ports:
+      - "5173:5173"
+    volumes:
+      - ./src/trading_platform/frontend:/app
+      - /app/node_modules
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+
+  # ─── Scheduled tasks ───────────────────────────────────────────────────
+  # The scheduler runs cron-like tasks against the trading-cli + the
+  # local API. See scripts/task_scheduler.py for the schedule.
+  scheduler:
+    build: .
+    container_name: polymarket-scheduler
+    command: python scripts/task_scheduler.py
+    volumes:
+      - .:/app
+    env_file: .env
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+
+  # ─── Health watchdog ───────────────────────────────────────────────────
+  # Polls the API + scheduler every 5 minutes and fires Telegram alerts
+  # on degradation / recovery. See scripts/health_watchdog.py.
+  watchdog:
+    build: .
+    container_name: polymarket-watchdog
+    command: python scripts/health_watchdog.py
+    volumes:
+      - .:/app
+    env_file: .env
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_started
+
+  # ─── DEFERRED / TODO ───────────────────────────────────────────────────
+  #
+  # signal-monitor: continuous whale-trade websocket loop. The
+  # underlying live_collector.py exists but expects a market universe
+  # to be loaded; enable once that pipeline is verified end-to-end.
+  #
+  # signal-monitor:
+  #   build: .
+  #   command: trading-cli data polymarket realtime-monitor
+  #   volumes: [".:/app"]
+  #   env_file: .env
+  #   restart: unless-stopped
+  #   depends_on: { api: { condition: service_healthy } }
+  #
+  # pmxt-sidecar: pmxt 2.26.x is a Python package, NOT a Node sidecar.
+  # No separate container needed. The api/scheduler/watchdog containers
+  # import pmxt directly.

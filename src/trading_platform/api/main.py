@@ -207,6 +207,12 @@ def alerts_anomalies(limit: int = 50, severity: str | None = None) -> dict[str, 
 # ── Market Intelligence endpoints ────────────────────────────────────────────
 
 
+@app.get("/api/system/scheduler-status")
+def system_scheduler_status() -> dict[str, Any]:
+    """Read the task_scheduler.py state file."""
+    return reader.read_scheduler_status()
+
+
 # ── Wallet tiering endpoints ────────────────────────────────────────────────
 
 

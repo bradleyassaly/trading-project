@@ -1,0 +1,692 @@
+{
+  "audit_timestamp": "2026-04-08T16:00:24.525263+00:00",
+  "codebase": {
+    "python_files": 607,
+    "jsx_files": 24,
+    "test_files": 243,
+    "main_py_lines": 948,
+    "polymarket_modules": [
+      "__init__.py",
+      "address_map.py",
+      "alert_log.py",
+      "alert_system.py",
+      "backtester.py",
+      "bankroll_allocator.py",
+      "blockchain_ingest.py",
+      "client.py",
+      "clob_client.py",
+      "clob_trades_fetcher.py",
+      "data_api_fetcher.py",
+      "enrich_resolution.py",
+      "features.py",
+      "fusion_score.py",
+      "gamma_resolution_fetcher.py",
+      "goldsky_backfill.py",
+      "goldsky_client.py",
+      "goldsky_stream.py",
+      "goldsky_wallet_profiler.py",
+      "graph_orderbook.py",
+      "graph_resolver.py",
+      "historical_backfill.py",
+      "historical_ingest.py",
+      "hot_market_scanner.py",
+      "kelly_sizer.py",
+      "kill_switch.py",
+      "leaderboard.py",
+      "leaderboard_ingest.py",
+      "live_collector.py",
+      "live_db.py",
+      "market_close_times.py",
+      "market_data_service.py",
+      "market_universe.py",
+      "models.py",
+      "open_positions.py",
+      "order_book_monitor.py",
+      "orderflow_collector.py",
+      "performance_monitor.py",
+      "pmxt_smoke_test.py",
+      "polymarket_live_executor.py",
+      "polymarket_paper_executor.py",
+      "position_fetcher.py",
+      "price_history_fetcher.py",
+      "price_lookup.py",
+      "realtime_monitor.py",
+      "resolution_resolver.py",
+      "seed_leaderboard.py",
+      "signal_engine.py",
+      "signal_evaluator.py",
+      "smart_money_loop.py",
+      "smart_money_signal.py",
+      "telegram_alerts.py",
+      "wallet_analytics.py",
+      "wallet_buckets.py",
+      "wallet_db.py",
+      "wallet_mirror.py",
+      "wallet_position_reconstructor.py",
+      "wallet_position_sync.py",
+      "wallet_profile_rebuild.py",
+      "wallet_profiler.py",
+      "wallet_tiering.py",
+      "wallet_trade_sync.py",
+      "whale_signal_engine.py",
+      "whale_tripwire.py"
+    ],
+    "frontend_pages": [
+      "Backtest.jsx",
+      "Control.jsx",
+      "Dashboard.jsx",
+      "LiveReadiness.jsx",
+      "MarketDetail.jsx",
+      "MarketMonitor.jsx",
+      "MarketScanner.jsx",
+      "Markets.jsx",
+      "MarketsHub.jsx",
+      "Paper.jsx",
+      "PipelineMonitor.jsx",
+      "PolymarketLive.jsx",
+      "Reasoning.jsx",
+      "ResearchData.jsx",
+      "SignalLab.jsx",
+      "Signals.jsx",
+      "SmartMoney.jsx",
+      "WalletDetail.jsx"
+    ],
+    "polymarket_cli_commands": [
+      "backfill",
+      "blockchain_ingest",
+      "build_leaderboard",
+      "clob_fetch",
+      "collect_history",
+      "daily_refresh",
+      "data_api_fetch",
+      "diagnose",
+      "fetch_resolutions",
+      "goldsky_backfill",
+      "goldsky_profiles",
+      "ingest",
+      "ingest_top_wallets",
+      "live",
+      "mirror_scan",
+      "open_positions",
+      "orderflow",
+      "performance_review",
+      "realtime_monitor",
+      "refresh_positions",
+      "refresh_universe",
+      "smart_money_scan",
+      "smart_money_trade",
+      "test_telegram",
+      "wallet_profiles"
+    ]
+  },
+  "database": {
+    "tables": [
+      {
+        "name": "calibration_reports",
+        "rows": 1,
+        "cols": 6
+      },
+      {
+        "name": "category_performance",
+        "rows": 4,
+        "cols": 7
+      },
+      {
+        "name": "leaderboard",
+        "rows": 219,
+        "cols": 22
+      },
+      {
+        "name": "leaderboard_meta",
+        "rows": 1,
+        "cols": 6
+      },
+      {
+        "name": "live_trades",
+        "rows": 1,
+        "cols": 13
+      },
+      {
+        "name": "market_anomalies",
+        "rows": 2310,
+        "cols": 13
+      },
+      {
+        "name": "market_price_history",
+        "rows": 242573,
+        "cols": 6
+      },
+      {
+        "name": "market_signals",
+        "rows": 3372,
+        "cols": 29
+      },
+      {
+        "name": "market_ticks",
+        "rows": 233212,
+        "cols": 5
+      },
+      {
+        "name": "outcome_id_cache",
+        "rows": 0,
+        "cols": 5
+      },
+      {
+        "name": "pmxt_health",
+        "rows": 1,
+        "cols": 8
+      },
+      {
+        "name": "polymarket_paper_trades",
+        "rows": 232,
+        "cols": 22
+      },
+      {
+        "name": "signal_calibration",
+        "rows": 13,
+        "cols": 17
+      },
+      {
+        "name": "sqlite_sequence",
+        "rows": 10,
+        "cols": 2
+      },
+      {
+        "name": "wallet_alerts",
+        "rows": 4858,
+        "cols": 17
+      },
+      {
+        "name": "wallet_category_profiles",
+        "rows": 0,
+        "cols": 17
+      },
+      {
+        "name": "wallet_market_positions",
+        "rows": 91934,
+        "cols": 26
+      },
+      {
+        "name": "wallet_positions",
+        "rows": 23178,
+        "cols": 21
+      },
+      {
+        "name": "wallet_profiles",
+        "rows": 16259,
+        "cols": 64
+      },
+      {
+        "name": "wallet_tier_history",
+        "rows": 0,
+        "cols": 13
+      },
+      {
+        "name": "wallet_trades",
+        "rows": 397962,
+        "cols": 19
+      }
+    ],
+    "wallet_count": 16259,
+    "trade_count": 397962,
+    "leaderboard_count": 219,
+    "paper_trades_open": 216,
+    "paper_trades_resolved": 16,
+    "oldest_trade": "2022-12-12 15:32:10",
+    "newest_trade": "2026-04-08 01:34:19",
+    "categories": {
+      "(null)": 289117,
+      "crypto": 39640,
+      "economics": 1298,
+      "other": 36339,
+      "politics": 11114,
+      "sports": 15733,
+      "tweet_count": 4721
+    }
+  },
+  "api_endpoints": {
+    "count": 102,
+    "routes": [
+      {
+        "method": "GET",
+        "path": "/api/health"
+      },
+      {
+        "method": "GET",
+        "path": "/api/system/status"
+      },
+      {
+        "method": "GET",
+        "path": "/api/pnl/equity-curve"
+      },
+      {
+        "method": "GET",
+        "path": "/api/pnl/summary"
+      },
+      {
+        "method": "GET",
+        "path": "/api/signals/performance"
+      },
+      {
+        "method": "GET",
+        "path": "/api/signals/correlation"
+      },
+      {
+        "method": "GET",
+        "path": "/api/kalshi/markets"
+      },
+      {
+        "method": "GET",
+        "path": "/api/polymarket/live-markets"
+      },
+      {
+        "method": "GET",
+        "path": "/api/polymarket/market-ticks/{market_id}"
+      },
+      {
+        "method": "GET",
+        "path": "/api/smart-money/wallets"
+      },
+      {
+        "method": "GET",
+        "path": "/api/smart-money/signals"
+      },
+      {
+        "method": "GET",
+        "path": "/api/smart-money/wallet/{address}"
+      },
+      {
+        "method": "GET",
+        "path": "/api/wallets/winners"
+      },
+      {
+        "method": "GET",
+        "path": "/api/wallets/{wallet_address}/positions"
+      },
+      {
+        "method": "POST",
+        "path": "/api/backtest/run"
+      },
+      {
+        "method": "GET",
+        "path": "/api/backtest/wallet/{wallet_address}/positions"
+      },
+      {
+        "method": "GET",
+        "path": "/api/backtest/market/{condition_id}/price-history"
+      },
+      {
+        "method": "GET",
+        "path": "/api/backtest/wallet/{wallet_address}/market/{condition_id}"
+      },
+      {
+        "method": "GET",
+        "path": "/api/market/{condition_id}/order-book"
+      },
+      {
+        "method": "GET",
+        "path": "/api/alerts/anomalies"
+      },
+      {
+        "method": "GET",
+        "path": "/api/tiers/summary"
+      },
+      {
+        "method": "GET",
+        "path": "/api/tiers/category/{category}"
+      },
+      {
+        "method": "GET",
+        "path": "/api/tiers/wallet/{wallet}"
+      },
+      {
+        "method": "GET",
+        "path": "/api/tiers/history"
+      },
+      {
+        "method": "POST",
+        "path": "/api/tiers/rebuild"
+      },
+      {
+        "method": "GET",
+        "path": "/api/market-data/health"
+      },
+      {
+        "method": "GET",
+        "path": "/api/market-data/{condition_id}"
+      },
+      {
+        "method": "GET",
+        "path": "/api/market-data/{condition_id}/candles"
+      },
+      {
+        "method": "GET",
+        "path": "/api/calibration/status"
+      },
+      {
+        "method": "GET",
+        "path": "/api/calibration/report/latest"
+      },
+      {
+        "method": "GET",
+        "path": "/api/calibration/report"
+      },
+      {
+        "method": "POST",
+        "path": "/api/calibration/report/generate"
+      },
+      {
+        "method": "POST",
+        "path": "/api/calibration/rebalance"
+      },
+      {
+        "method": "GET",
+        "path": "/api/live/readiness"
+      },
+      {
+        "method": "GET",
+        "path": "/api/live/trades"
+      },
+      {
+        "method": "POST",
+        "path": "/api/live/emergency-stop"
+      },
+      {
+        "method": "POST",
+        "path": "/api/live/clear-stop"
+      },
+      {
+        "method": "POST",
+        "path": "/api/live/test-dry-run"
+      },
+      {
+        "method": "POST",
+        "path": "/api/paper/check-resolutions"
+      },
+      {
+        "method": "GET",
+        "path": "/api/markets/top"
+      },
+      {
+        "method": "GET",
+        "path": "/api/market/{condition_id}/candles"
+      },
+      {
+        "method": "GET",
+        "path": "/api/market/{condition_id}/flow"
+      },
+      {
+        "method": "GET",
+        "path": "/api/market/{condition_id}/signals"
+      },
+      {
+        "method": "GET",
+        "path": "/api/market/{condition_id}/intelligence"
+      },
+      {
+        "method": "GET",
+        "path": "/api/markets/search"
+      },
+      {
+        "method": "POST",
+        "path": "/api/backtest/convergence"
+      },
+      {
+        "method": "GET",
+        "path": "/api/wallets/{wallet_address}"
+      },
+      {
+        "method": "GET",
+        "path": "/api/smart-money/alerts"
+      },
+      {
+        "method": "GET",
+        "path": "/api/smart-money/open-positions"
+      },
+      {
+        "method": "GET",
+        "path": "/api/smart-money/actionable-signals"
+      },
+      {
+        "method": "GET",
+        "path": "/api/smart-money/universe-stats"
+      },
+      {
+        "method": "GET",
+        "path": "/api/paper/bankroll"
+      },
+      {
+        "method": "GET",
+        "path": "/api/paper/pnl-history"
+      },
+      {
+        "method": "GET",
+        "path": "/api/smart-money/leaderboard"
+      },
+      {
+        "method": "GET",
+        "path": "/api/smart-money/winners"
+      },
+      {
+        "method": "GET",
+        "path": "/api/smart-money/wallet/{address}/positions"
+      },
+      {
+        "method": "GET",
+        "path": "/api/smart-money/wallet/{address}/trades"
+      },
+      {
+        "method": "GET",
+        "path": "/api/smart-money/mirror"
+      },
+      {
+        "method": "GET",
+        "path": "/api/polymarket/whale-feed"
+      },
+      {
+        "method": "GET",
+        "path": "/api/polymarket/subscription-status"
+      },
+      {
+        "method": "GET",
+        "path": "/api/polymarket/signals-feed"
+      },
+      {
+        "method": "GET",
+        "path": "/api/polymarket/category-performance"
+      },
+      {
+        "method": "GET",
+        "path": "/api/system/intelligence-health"
+      },
+      {
+        "method": "GET",
+        "path": "/api/market/{condition_id}"
+      },
+      {
+        "method": "GET",
+        "path": "/api/paper/positions-enriched"
+      },
+      {
+        "method": "GET",
+        "path": "/api/system/pipeline-status"
+      },
+      {
+        "method": "GET",
+        "path": "/api/system/pipeline-runs"
+      },
+      {
+        "method": "POST",
+        "path": "/api/system/run-pipeline"
+      },
+      {
+        "method": "POST",
+        "path": "/api/alerts/telegram-test"
+      },
+      {
+        "method": "GET",
+        "path": "/api/system/execution-policy"
+      },
+      {
+        "method": "POST",
+        "path": "/api/system/execution-policy"
+      },
+      {
+        "method": "GET",
+        "path": "/api/paper/dashboard"
+      },
+      {
+        "method": "GET",
+        "path": "/api/paper/portfolio"
+      },
+      {
+        "method": "GET",
+        "path": "/api/paper/trades"
+      },
+      {
+        "method": "GET",
+        "path": "/api/paper/scan"
+      },
+      {
+        "method": "GET",
+        "path": "/api/kalshi/market/{ticker}/history"
+      },
+      {
+        "method": "GET",
+        "path": "/api/reasoning/trades"
+      },
+      {
+        "method": "GET",
+        "path": "/api/loop/decisions"
+      },
+      {
+        "method": "POST",
+        "path": "/api/loop/control"
+      },
+      {
+        "method": "POST",
+        "path": "/api/research/run"
+      },
+      {
+        "method": "GET",
+        "path": "/api/research/status/{job_id}"
+      },
+      {
+        "method": "GET",
+        "path": "/api/research/datasets"
+      },
+      {
+        "method": "GET",
+        "path": "/api/research/datasets/{dataset_key}"
+      },
+      {
+        "method": "GET",
+        "path": "/api/research/datasets/{dataset_key}/rows"
+      },
+      {
+        "method": "GET",
+        "path": "/api/ops/registry-summary"
+      },
+      {
+        "method": "GET",
+        "path": "/api/ops/provider-monitoring"
+      },
+      {
+        "method": "GET",
+        "path": "/api/ops/provider-health"
+      },
+      {
+        "method": "GET",
+        "path": "/api/ops/providers/{provider}"
+      },
+      {
+        "method": "GET",
+        "path": "/api/ops/datasets/{dataset_key}"
+      },
+      {
+        "method": "GET",
+        "path": "/api/research/replay/preview"
+      },
+      {
+        "method": "GET",
+        "path": "/api/research/replay/consumer-preview"
+      },
+      {
+        "method": "GET",
+        "path": "/api/research/replay/evaluation-preview"
+      },
+      {
+        "method": "GET",
+        "path": "/api/research/replay/comparison-latest"
+      },
+      {
+        "method": "GET",
+        "path": "/api/research/replay/gating-latest"
+      },
+      {
+        "method": "GET",
+        "path": "/api/research/replay/history"
+      },
+      {
+        "method": "GET",
+        "path": "/api/research/replay/review-queue-latest"
+      },
+      {
+        "method": "GET",
+        "path": "/api/research/replay/drift-latest"
+      },
+      {
+        "method": "GET",
+        "path": "/api/research/replay/comparison-preview"
+      },
+      {
+        "method": "GET",
+        "path": "/api/ops/providers/{provider}/timeline"
+      },
+      {
+        "method": "GET",
+        "path": "/api/ops/providers/{provider}/history-summary"
+      },
+      {
+        "method": "GET",
+        "path": "/api/ops/datasets/{dataset_key}/timeline"
+      },
+      {
+        "method": "GET",
+        "path": "/api/ops/datasets/{dataset_key}/history-summary"
+      }
+    ]
+  },
+  "tests": {
+    "passed": 529,
+    "failed": 0,
+    "errors": 0,
+    "last_run_ok": true
+  },
+  "environment": {
+    "python": "3.14.0",
+    "node": "v24.14.0",
+    "docker": "Docker version 29.3.0",
+    "docker_compose": "v5.1.0",
+    "env_file_exists": true,
+    "telegram_configured": true,
+    "polymarket_clob_configured": false,
+    "polymarket_wallet_configured": false,
+    "live_trading_enabled": false
+  },
+  "live_readiness_gates": {
+    "wallet_universe_50plus": true,
+    "paper_trades_resolving": true,
+    "paper_trades_50plus": false,
+    "calibration_engine_active": true,
+    "dynamic_tiering_active": false,
+    "market_data_service_implemented": true,
+    "kill_switch_implemented": true,
+    "live_executor_implemented": true,
+    "telegram_alerts_working": true,
+    "docker_installed": true,
+    "docker_orchestration_ready": false,
+    "clob_credentials_set": false,
+    "live_trading_master_switch": false
+  }
+}

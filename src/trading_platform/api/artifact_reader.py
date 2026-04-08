@@ -3033,6 +3033,27 @@ def read_paper_positions_enriched() -> dict[str, Any]:
     }
 
 
+def read_scheduler_status() -> dict[str, Any]:
+    """Reads ``data/scheduler/state.json`` written by task_scheduler.py."""
+    from pathlib import Path as _P
+    state_path = _P("data/scheduler/state.json")
+    if not state_path.exists():
+        return {
+            "available": False,
+            "reason": "scheduler state file not found — task_scheduler.py not running?",
+            "tasks": [],
+        }
+    try:
+        data = json.loads(state_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return {"available": False, "error": str(exc), "tasks": []}
+    return {
+        "available": True,
+        "updated_at": data.get("updated_at"),
+        "tasks": data.get("tasks", []),
+    }
+
+
 def read_tiers_summary() -> dict[str, Any]:
     """Per-category tier distribution + recent changes."""
     import sqlite3 as _sq
