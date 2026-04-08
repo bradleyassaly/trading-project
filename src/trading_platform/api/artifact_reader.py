@@ -3033,6 +3033,85 @@ def read_paper_positions_enriched() -> dict[str, Any]:
     }
 
 
+def read_circuit_breaker_status() -> dict[str, Any]:
+    """Cumulative-drawdown circuit breaker state + recent log."""
+    db = _get_wallet_db()
+    if not db:
+        return {"available": False}
+    try:
+        from trading_platform.polymarket.circuit_breaker import CircuitBreaker
+        return CircuitBreaker(str(db._path)).get_status()
+    except Exception as exc:
+        return {"available": False, "error": str(exc)}
+
+
+def read_circuit_breaker_log(limit: int = 50) -> dict[str, Any]:
+    db = _get_wallet_db()
+    if not db:
+        return {"available": False, "events": []}
+    try:
+        from trading_platform.polymarket.circuit_breaker import CircuitBreaker
+        events = CircuitBreaker(str(db._path)).get_log(limit=limit)
+        return {"available": True, "events": events, "count": len(events)}
+    except Exception as exc:
+        return {"available": False, "error": str(exc), "events": []}
+
+
+def trigger_circuit_breaker_reset(
+    confirm: bool = False,
+    reset_peak: bool = False,
+    reset_by: str = "api",
+) -> dict[str, Any]:
+    if not confirm:
+        return {"error": "reset requires confirm=true"}
+    db = _get_wallet_db()
+    if not db:
+        return {"error": "wallet_db unavailable"}
+    try:
+        from trading_platform.polymarket.circuit_breaker import CircuitBreaker
+        return CircuitBreaker(str(db._path)).reset_drawdown(
+            reset_by=reset_by, reset_peak=reset_peak,
+        )
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
+def trigger_circuit_breaker_configure(
+    max_drawdown_pct: float | None = None,
+    daily_loss_limit: float | None = None,
+) -> dict[str, Any]:
+    db = _get_wallet_db()
+    if not db:
+        return {"error": "wallet_db unavailable"}
+    try:
+        from trading_platform.polymarket.circuit_breaker import CircuitBreaker
+        return CircuitBreaker(str(db._path)).configure(
+            max_drawdown_pct=max_drawdown_pct,
+            daily_loss_limit=daily_loss_limit,
+        )
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
+def trigger_circuit_breaker_initialize(
+    starting_capital: float = 100_000.0,
+    max_drawdown_pct: float = 0.20,
+    daily_loss_limit: float = 0.05,
+) -> dict[str, Any]:
+    db = _get_wallet_db()
+    if not db:
+        return {"error": "wallet_db unavailable"}
+    try:
+        from trading_platform.polymarket.circuit_breaker import CircuitBreaker
+        return CircuitBreaker(str(db._path)).initialize(
+            starting_capital=starting_capital,
+            max_drawdown_pct=max_drawdown_pct,
+            daily_loss_limit=daily_loss_limit,
+        )
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
 def read_scheduler_status() -> dict[str, Any]:
     """Reads ``data/scheduler/state.json`` written by task_scheduler.py."""
     from pathlib import Path as _P

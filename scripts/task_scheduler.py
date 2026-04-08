@@ -151,6 +151,25 @@ SCHEDULE: list[Task] = [
         interval_seconds=24 * 3600,
         description="Persist daily calibration report snapshot",
     ),
+    Task(
+        name="circuit_breaker_daily_reset",
+        # Inline Python so we don't depend on a CLI command — clears
+        # daily_pnl + daily_halted on the cumulative-drawdown breaker.
+        # Drawdown halt itself is NEVER auto-reset.
+        cmd=(
+            "python -c \""
+            "from trading_platform.polymarket.circuit_breaker import CircuitBreaker; "
+            "CircuitBreaker().reset_daily()\""
+        ),
+        interval_seconds=24 * 3600,
+        description="Midnight reset of circuit breaker daily loss state",
+    ),
+    Task(
+        name="categories_backfill_weekly",
+        cmd="trading-cli data polymarket backfill-categories --no-reclassify-other",
+        interval_seconds=7 * 24 * 3600,
+        description="Weekly catch-up for any null-category rows",
+    ),
 
     # ── TODO — wire when underlying commands are stable ────────────────
     # Task(

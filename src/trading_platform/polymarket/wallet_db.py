@@ -278,6 +278,46 @@ class WalletDB:
         self._migrate_calibration()
         self._migrate_market_data_cache()
         self._migrate_wallet_tiering()
+        self._migrate_circuit_breaker()
+
+    def _migrate_circuit_breaker(self) -> None:
+        """Singleton circuit_breaker_state row + append-only log."""
+        self._conn.execute("""
+            CREATE TABLE IF NOT EXISTS circuit_breaker_state (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                starting_capital REAL NOT NULL,
+                peak_equity REAL NOT NULL,
+                current_equity REAL NOT NULL,
+                max_drawdown_pct REAL NOT NULL DEFAULT 0.20,
+                current_drawdown_pct REAL NOT NULL DEFAULT 0.0,
+                is_halted INTEGER NOT NULL DEFAULT 0,
+                halted_at INTEGER,
+                halted_reason TEXT,
+                last_reset_at INTEGER,
+                last_reset_by TEXT,
+                last_updated INTEGER,
+                daily_pnl REAL DEFAULT 0.0,
+                daily_loss_limit REAL DEFAULT 0.05,
+                daily_halted INTEGER DEFAULT 0,
+                daily_reset_at INTEGER
+            )
+        """)
+        self._conn.execute("""
+            CREATE TABLE IF NOT EXISTS circuit_breaker_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_type TEXT NOT NULL,
+                equity_before REAL,
+                equity_after REAL,
+                drawdown_pct REAL,
+                daily_pnl REAL,
+                details TEXT,
+                created_at INTEGER NOT NULL
+            )
+        """)
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_cb_log_created ON circuit_breaker_log(created_at DESC)"
+        )
+        self._conn.commit()
 
     def _migrate_wallet_tiering(self) -> None:
         """Per-wallet per-category dynamic tier table + change history."""

@@ -96,6 +96,17 @@ class PolymarketLiveExecutor:
             logger.warning("[LIVE] Emergency stop active: %s", stop_reason)
             return self._result(False, reason=f"Emergency stop: {stop_reason}")
 
+        # 0b. Circuit breaker check (cumulative drawdown layer)
+        try:
+            from trading_platform.polymarket.circuit_breaker import CircuitBreaker
+            cb = CircuitBreaker(self._db_path)
+            allowed, cb_reason = cb.can_trade()
+            if not allowed:
+                logger.warning("[LIVE] Circuit breaker blocked: %s", cb_reason)
+                return self._result(False, reason=f"circuit breaker: {cb_reason}")
+        except Exception as exc:
+            logger.debug("circuit breaker check failed (proceeding): %s", exc)
+
         # 1. Kelly size
         size_usd = self._sizer.get_trade_size(sig_type, confidence)
 

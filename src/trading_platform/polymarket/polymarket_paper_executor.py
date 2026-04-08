@@ -269,6 +269,19 @@ class PolymarketPaperExecutor:
         if signal_type not in SIGNAL_BANKROLL:
             return None
 
+        # Layer 3: cumulative drawdown circuit breaker. Blocks ALL trades
+        # — paper or live — once cumulative drawdown from peak crosses
+        # the threshold. Initialized lazily; absent state means no block.
+        try:
+            from trading_platform.polymarket.circuit_breaker import CircuitBreaker
+            cb = CircuitBreaker(str(self._wallet_db_path))
+            allowed, reason = cb.can_trade()
+            if not allowed:
+                logger.warning("[CIRCUIT_BREAKER] Trade blocked: %s", reason)
+                return None
+        except Exception as exc:
+            logger.debug("circuit breaker check failed (proceeding): %s", exc)
+
         direction = (signal.get("direction") or "").upper()
         if direction not in ("BUY", "SELL"):
             return None
@@ -504,6 +517,22 @@ class PolymarketPaperExecutor:
                     "[RESOLVE] %s %s pnl=$%.2f (%.1f%%) — %s",
                     sig_type, outcome, pnl, return_pct, (question or "")[:40],
                 )
+
+                # Feed the cumulative-drawdown circuit breaker
+                try:
+                    from trading_platform.polymarket.circuit_breaker import CircuitBreaker
+                    CircuitBreaker(str(self._wallet_db_path)).record_trade(
+                        pnl_dollars=pnl,
+                        trade_details={
+                            "signal_type": sig_type,
+                            "trade_id": trade_id,
+                            "side": side,
+                            "size_usd": size_usd,
+                            "outcome": outcome,
+                        },
+                    )
+                except Exception as exc:
+                    logger.debug("circuit breaker record failed: %s", exc)
 
                 # Telegram alert (best effort)
                 try:

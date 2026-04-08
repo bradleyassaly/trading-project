@@ -207,6 +207,48 @@ def alerts_anomalies(limit: int = 50, severity: str | None = None) -> dict[str, 
 # ── Market Intelligence endpoints ────────────────────────────────────────────
 
 
+@app.get("/api/circuit-breaker/status")
+def circuit_breaker_status() -> dict[str, Any]:
+    """Cumulative-drawdown state + recent log."""
+    return reader.read_circuit_breaker_status()
+
+
+@app.get("/api/circuit-breaker/log")
+def circuit_breaker_log(limit: int = 50) -> dict[str, Any]:
+    """Append-only audit trail of circuit-breaker events."""
+    return reader.read_circuit_breaker_log(limit=limit)
+
+
+@app.post("/api/circuit-breaker/reset")
+def circuit_breaker_reset(request: dict[str, Any]) -> dict[str, Any]:
+    """Manual reset. Body must include {confirm: true}."""
+    return reader.trigger_circuit_breaker_reset(
+        confirm=bool((request or {}).get("confirm")),
+        reset_peak=bool((request or {}).get("reset_peak")),
+        reset_by=(request or {}).get("reset_by", "api"),
+    )
+
+
+@app.post("/api/circuit-breaker/configure")
+def circuit_breaker_configure(request: dict[str, Any]) -> dict[str, Any]:
+    """Update max_drawdown_pct and/or daily_loss_limit (refused while halted)."""
+    return reader.trigger_circuit_breaker_configure(
+        max_drawdown_pct=(request or {}).get("max_drawdown_pct"),
+        daily_loss_limit=(request or {}).get("daily_loss_limit"),
+    )
+
+
+@app.post("/api/circuit-breaker/initialize")
+def circuit_breaker_initialize(request: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Initialize the circuit breaker (idempotent — won't overwrite)."""
+    body = request or {}
+    return reader.trigger_circuit_breaker_initialize(
+        starting_capital=float(body.get("starting_capital", 100_000)),
+        max_drawdown_pct=float(body.get("max_drawdown_pct", 0.20)),
+        daily_loss_limit=float(body.get("daily_loss_limit", 0.05)),
+    )
+
+
 @app.get("/api/system/scheduler-status")
 def system_scheduler_status() -> dict[str, Any]:
     """Read the task_scheduler.py state file."""
