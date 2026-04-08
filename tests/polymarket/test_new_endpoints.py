@@ -33,12 +33,13 @@ class TestBankrollEndpoint:
         from trading_platform.api.artifact_reader import read_paper_bankroll
         result = read_paper_bankroll()
         assert result["available"]
-        assert result["total_bankroll"] == 10000
-        assert len(result["by_signal"]) == 7
+        assert result["total_bankroll"] == 100000
+        assert len(result["by_signal"]) == 9
         assert "whale_entry" in result["by_signal"]
         assert "convergence" in result["by_signal"]
-        assert result["by_signal"]["whale_entry"]["allocated"] == 2000
-        assert result["by_signal"]["convergence"]["stake_per_trade"] == 125
+        assert "wallet_reversal" in result["by_signal"]
+        assert result["by_signal"]["wallet_reversal"]["allocated"] == 18000
+        assert result["by_signal"]["convergence"]["stake_per_trade"] == 6000
 
 
 class TestPnlHistory:
@@ -62,7 +63,9 @@ class TestSignalsPerformance:
         assert "whale_entry" in types
         assert "convergence" in types
         assert "cascade" in types
-        assert len(result["by_type"]) == 7
+        assert "wallet_reversal" in types
+        # 9 original + 4 new (price_velocity, whale_exit, position_reduction, no_position_entry)
+        assert len(result["by_type"]) == 13
 
 
 class TestBucketClassification:

@@ -1,3 +1,7 @@
+# DEPRECATED: This module used EWR-based smart money detection.
+# Replaced by whale_tripwire.py + whale_signal_engine.py (9-signal system).
+# Do not run or import this module in new code.
+# Preserved for reference only.
 """
 Smart money trading loop — converts live smart money signals into
 paper trades via the existing KalshiPaperExecutor.

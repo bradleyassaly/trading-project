@@ -5,7 +5,12 @@ Starts with:  uvicorn trading_platform.api.main:app --port 8001
 Runs alongside the existing Flask dashboard on port 8000.
 Reads from the same artifact files — no new database required.
 """
+
 from __future__ import annotations
+
+from dotenv import load_dotenv
+load_dotenv()
+
 
 import subprocess
 import threading
@@ -125,6 +130,214 @@ def smart_money_wallet_detail(address: str) -> dict[str, Any]:
     return reader.read_smart_money_wallet_detail(address)
 
 
+# NOTE: /api/wallets/winners and /api/wallets/{wallet}/positions must be declared
+# BEFORE /api/wallets/{wallet_address} so literal paths are matched first.
+@app.get("/api/wallets/winners")
+def wallets_winners_pre(window: str = "all") -> dict[str, Any]:
+    """Wallet winners — declared early so it isn't shadowed by /{wallet_address}."""
+    return reader.read_smart_money_winners(window=window)
+
+
+@app.get("/api/wallets/{wallet_address}/positions")
+def wallet_positions(wallet_address: str) -> dict[str, Any]:
+    """Return current open positions from wallet_positions table."""
+    return reader.read_wallet_positions(wallet_address)
+
+
+# ── Backtesting endpoints ────────────────────────────────────────────────────
+
+
+@app.post("/api/backtest/run")
+def backtest_run(request: dict[str, Any]) -> dict[str, Any]:
+    """Run a backtest for a wallet over a date range."""
+    from trading_platform.polymarket.backtester import Backtester, BacktestConfig
+    from trading_platform.polymarket.wallet_db import WalletDB
+
+    try:
+        config = BacktestConfig(
+            wallet=request.get("wallet", ""),
+            start_date=request.get("start_date", "2025-01-01"),
+            end_date=request.get("end_date", "2026-04-07"),
+            delay_seconds=int(request.get("delay_seconds", 300)),
+            slippage_pct=float(request.get("slippage_pct", 0.02)),
+            starting_bankroll=float(request.get("starting_bankroll", 100_000)),
+            stake_per_trade_pct=float(request.get("stake_per_trade_pct", 0.02)),
+            max_open_positions=int(request.get("max_open_positions", 20)),
+            min_position_size=float(request.get("min_position_size", 25)),
+            categories=request.get("categories"),
+        )
+        return Backtester().run(config, str(WalletDB()._path))
+    except Exception as exc:
+        return {"error": str(exc), "total_trades": 0, "trades": []}
+
+
+@app.get("/api/backtest/wallet/{wallet_address}/positions")
+def backtest_wallet_positions(wallet_address: str) -> dict[str, Any]:
+    """Return all wallet_market_positions for visualization."""
+    return reader.read_backtest_wallet_positions(wallet_address)
+
+
+@app.get("/api/backtest/market/{condition_id}/price-history")
+def backtest_market_price_history(condition_id: str) -> dict[str, Any]:
+    """Return market price history (fetches if not cached)."""
+    return reader.read_backtest_price_history(condition_id)
+
+
+@app.get("/api/backtest/wallet/{wallet_address}/market/{condition_id}")
+def backtest_wallet_market_view(wallet_address: str, condition_id: str) -> dict[str, Any]:
+    """Combined view: price history + wallet entries + simulated entry."""
+    return reader.read_backtest_wallet_market(wallet_address, condition_id)
+
+
+# ── Order book + anomaly endpoints ───────────────────────────────────────────
+
+
+@app.get("/api/market/{condition_id}/order-book")
+def market_order_book(condition_id: str) -> dict[str, Any]:
+    """Live CLOB order book + recent anomalies for a market."""
+    return reader.read_market_order_book(condition_id)
+
+
+@app.get("/api/alerts/anomalies")
+def alerts_anomalies(limit: int = 50, severity: str | None = None) -> dict[str, Any]:
+    """Recent market_anomalies, ordered by detection time desc."""
+    return reader.read_anomaly_alerts(limit=limit, severity=severity)
+
+
+# ── Market Intelligence endpoints ────────────────────────────────────────────
+
+
+# ── Live trading readiness + control endpoints ─────────────────────────────
+
+
+@app.get("/api/live/readiness")
+def live_readiness() -> dict[str, Any]:
+    """All live readiness gates + per-signal status + kill-switch limits."""
+    return reader.read_live_readiness()
+
+
+@app.get("/api/live/trades")
+def live_trades(limit: int = 50) -> dict[str, Any]:
+    """Recent live_trades audit log (dry runs + real submissions)."""
+    return reader.read_live_trades(limit=limit)
+
+
+@app.post("/api/live/emergency-stop")
+def live_emergency_stop(request: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Activate the kill-switch flag file. Halts all live trading."""
+    try:
+        from trading_platform.polymarket.kill_switch import KillSwitch
+        from trading_platform.polymarket.wallet_db import WalletDB
+        reason = (request or {}).get("reason", "manual via API")
+        KillSwitch(str(WalletDB()._path)).emergency_stop(reason)
+        return {"ok": True, "reason": reason}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+@app.post("/api/live/clear-stop")
+def live_clear_stop() -> dict[str, Any]:
+    """Clear the kill-switch flag file."""
+    try:
+        from trading_platform.polymarket.kill_switch import KillSwitch
+        from trading_platform.polymarket.wallet_db import WalletDB
+        KillSwitch(str(WalletDB()._path)).clear_emergency_stop()
+        return {"ok": True}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+@app.post("/api/live/test-dry-run")
+def live_test_dry_run(request: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Run a synthetic dry-run trade through the live executor pipeline."""
+    try:
+        from trading_platform.polymarket.polymarket_live_executor import PolymarketLiveExecutor
+        sig_type = (request or {}).get("signal_type", "price_velocity")
+        return PolymarketLiveExecutor().test_dry_run(sig_type)
+    except Exception as exc:
+        return {"success": False, "error": str(exc)}
+
+
+@app.post("/api/paper/check-resolutions")
+def paper_check_resolutions() -> dict[str, Any]:
+    """Walk open paper trades and resolve any whose underlying market settled."""
+    try:
+        from trading_platform.polymarket.polymarket_paper_executor import PolymarketPaperExecutor
+        return PolymarketPaperExecutor().check_and_resolve_open_trades()
+    except Exception as exc:
+        return {"checked": 0, "resolved": 0, "error": str(exc)}
+
+
+@app.get("/api/markets/top")
+def markets_top(
+    sort: str = "volume24h",
+    category: str | None = None,
+    limit: int = 20,
+) -> dict[str, Any]:
+    """Top markets for the Market Monitor browse view."""
+    return reader.read_top_markets(category=category, sort=sort, limit=limit)
+
+
+@app.get("/api/market/{condition_id}/candles")
+def market_candles(
+    condition_id: str,
+    interval: str = "1d",
+    from_ts: int | None = None,
+    to_ts: int | None = None,
+) -> dict[str, Any]:
+    """Synthesized OHLCV candles for a market."""
+    return reader.read_market_candles(condition_id, interval=interval, from_ts=from_ts, to_ts=to_ts)
+
+
+@app.get("/api/market/{condition_id}/flow")
+def market_flow(
+    condition_id: str,
+    limit: int = 200,
+    from_ts: int | None = None,
+    to_ts: int | None = None,
+) -> dict[str, Any]:
+    """Order flow trades on a market: tracked wallets from DB + recent untracked from data-api."""
+    return reader.read_market_trade_flow(condition_id, from_ts=from_ts, to_ts=to_ts, limit=limit)
+
+
+@app.get("/api/market/{condition_id}/signals")
+def market_signals(condition_id: str) -> dict[str, Any]:
+    """Signals + paper trades fired for a market."""
+    return reader.read_market_signals_and_trades(condition_id)
+
+
+@app.get("/api/market/{condition_id}/intelligence")
+def market_intelligence(condition_id: str) -> dict[str, Any]:
+    """Full market intelligence: price history, all tier1/1h wallet activity,
+    aggregated consensus, and convergence signal.
+    """
+    return reader.read_market_intelligence(condition_id)
+
+
+@app.get("/api/markets/search")
+def markets_search(
+    q: str = "",
+    category: str | None = None,
+    has_whale_activity: bool = False,
+    limit: int = 50,
+) -> dict[str, Any]:
+    """Search markets with whale activity, ordered by tier1/1h wallet count."""
+    return reader.search_markets(q=q, category=category,
+                                 has_whale_activity=has_whale_activity, limit=limit)
+
+
+@app.post("/api/backtest/convergence")
+def backtest_convergence(request: dict[str, Any]) -> dict[str, Any]:
+    """Backtest the 'wait for N wallets to converge' strategy."""
+    return reader.run_convergence_backtest(request)
+
+
+@app.get("/api/wallets/{wallet_address}")
+def wallet_detail(wallet_address: str) -> dict[str, Any]:
+    """Alias for /api/smart-money/wallet/{address} — preferred endpoint."""
+    return reader.read_smart_money_wallet_detail(wallet_address)
+
+
 @app.get("/api/smart-money/alerts")
 def smart_money_alerts(limit: int = 50, wallet: str | None = None, tier: int | None = None) -> dict[str, Any]:
     return reader.read_smart_money_alerts(limit=limit, wallet=wallet, tier=tier)
@@ -165,6 +378,10 @@ def smart_money_winners(window: str = "all") -> dict[str, Any]:
     return reader.read_smart_money_winners(window=window)
 
 
+# /api/wallets/winners — see early declaration above (line ~133)
+# It must be declared before /api/wallets/{wallet_address} to avoid shadowing.
+
+
 @app.get("/api/smart-money/wallet/{address}/positions")
 def smart_money_wallet_positions(address: str) -> dict[str, Any]:
     return reader.read_smart_money_wallet_positions(address)
@@ -203,6 +420,49 @@ def polymarket_category_performance() -> dict[str, Any]:
 @app.get("/api/system/intelligence-health")
 def system_intelligence_health() -> dict[str, Any]:
     return reader.read_intelligence_health()
+
+
+@app.get("/api/market/{condition_id}")
+def market_detail(condition_id: str) -> dict[str, Any]:
+    return reader.read_market_detail(condition_id)
+
+
+@app.get("/api/paper/positions-enriched")
+def paper_positions_enriched() -> dict[str, Any]:
+    return reader.read_paper_positions_enriched()
+
+
+@app.get("/api/system/pipeline-status")
+def system_pipeline_status() -> dict[str, Any]:
+    return reader.read_pipeline_status()
+
+
+@app.get("/api/system/pipeline-runs")
+def system_pipeline_runs() -> list[dict[str, Any]]:
+    return reader.read_pipeline_runs()
+
+
+@app.post("/api/system/run-pipeline")
+def system_run_pipeline() -> dict[str, Any]:
+    import sys as _sys
+    subprocess.Popen(
+        [_sys.executable, "scripts/run_daily_intelligence.py"],
+        cwd=str(reader.DATA_ROOT.parent),
+    )
+    return {"started": True, "message": "Pipeline started"}
+
+
+@app.post("/api/alerts/telegram-test")
+def alerts_telegram_test() -> dict[str, Any]:
+    try:
+        from trading_platform.polymarket.telegram_alerts import TelegramAlerter
+        alerter = TelegramAlerter()
+        if not alerter.enabled:
+            return {"success": False, "error": "TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID not set"}
+        ok = alerter.send_test()
+        return {"success": ok, "error": None if ok else "Send failed"}
+    except Exception as exc:
+        return {"success": False, "error": str(exc)}
 
 
 @app.get("/api/system/execution-policy")

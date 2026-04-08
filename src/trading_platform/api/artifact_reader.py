@@ -735,85 +735,1705 @@ def read_smart_money_mirror() -> dict[str, Any]:
         return {"available": False, "reason": str(exc), "data": []}
 
 
-def read_smart_money_wallet_detail(address: str) -> dict[str, Any]:
-    profiles_path = DATA_ROOT / "polymarket" / "wallet_profiles.parquet"
-    fills_dir = DATA_ROOT / "polymarket" / "goldsky_resolved_fills"
-    res_path = DATA_ROOT / "polymarket" / "gamma_resolution.csv"
-
-    if not profiles_path.exists():
-        return {"available": False, "reason": "No wallet profiles"}
-
+def read_backtest_wallet_positions(wallet_address: str) -> dict[str, Any]:
+    """Return all wallet_market_positions for backtest visualization."""
+    db = _get_wallet_db()
+    if not db:
+        return {"available": False, "positions": []}
     try:
-        import pandas as _pd
-        from trading_platform.polymarket.resolution_resolver import ResolutionResolver
+        with db._lock:
+            rows = db._conn.execute(
+                """SELECT condition_id, question, category, side,
+                          first_entry_ts, last_entry_ts, exit_ts,
+                          avg_entry_price, avg_exit_price,
+                          total_shares, total_cost_usdc, realized_pnl,
+                          market_resolved, market_outcome, resolution_price,
+                          end_date_ts, hours_before_close
+                   FROM wallet_market_positions
+                   WHERE wallet = ?
+                   ORDER BY first_entry_ts DESC""",
+                (wallet_address.lower(),),
+            ).fetchall()
+        cols = ["condition_id", "question", "category", "side",
+                "first_entry_ts", "last_entry_ts", "exit_ts",
+                "avg_entry_price", "avg_exit_price",
+                "total_shares", "total_cost_usdc", "realized_pnl",
+                "market_resolved", "market_outcome", "resolution_price",
+                "end_date_ts", "hours_before_close"]
+        positions = [dict(zip(cols, r)) for r in rows]
+        return {
+            "available": True,
+            "wallet": wallet_address,
+            "count": len(positions),
+            "resolved": sum(1 for p in positions if p["market_resolved"]),
+            "positions": positions,
+        }
+    except Exception as exc:
+        return {"available": False, "reason": str(exc), "positions": []}
 
-        # Profile
-        df = _pd.read_parquet(profiles_path)
-        wallet_row = df[df["wallet"] == address]
-        if wallet_row.empty:
-            return {"available": False, "reason": f"Wallet {address[:16]}... not found"}
-        profile = {k: _safe(v) for k, v in wallet_row.iloc[0].to_dict().items()}
 
-        # Load resolved fills
-        resolver = ResolutionResolver(res_path) if res_path.exists() else None
-        trades = []
-        if fills_dir.exists():
-            for path in fills_dir.glob("*.parquet"):
-                if path.name == "combined.parquet":
-                    continue
-                try:
-                    fdf = _pd.read_parquet(path)
-                    wallet_fills = fdf[fdf["maker_wallet"] == address]
-                    if wallet_fills.empty:
-                        continue
-                    for _, row in wallet_fills.head(100).iterrows():
-                        maker_asset = str(row.get("maker_asset_id", ""))
-                        taker_asset = str(row.get("taker_asset_id", ""))
-                        direction = "YES" if maker_asset == "0" else "NO"
-                        token_id = taker_asset if maker_asset == "0" else maker_asset
-                        rp = resolver.resolve(token_id) if resolver else None
-                        won = None
-                        if rp is not None:
-                            won = (rp >= 99.0 and direction == "YES") or (rp < 1.0 and direction == "NO")
-                        trades.append({
-                            "token_id": token_id[:24],
-                            "direction": direction,
-                            "amount_usdc": _safe(row.get("maker_amount")),
-                            "timestamp": str(row.get("timestamp", "")),
-                            "resolution_price": rp,
-                            "won": won,
-                        })
-                except Exception:
-                    continue
+def read_backtest_price_history(condition_id: str) -> dict[str, Any]:
+    """Return price history for a market. Auto-fetches if not cached."""
+    db = _get_wallet_db()
+    if not db:
+        return {"available": False, "history": []}
+    try:
+        with db._lock:
+            rows = db._conn.execute(
+                "SELECT t, p FROM market_price_history WHERE condition_id = ? ORDER BY t ASC",
+                (condition_id,),
+            ).fetchall()
 
-        # Load recent alerts for this wallet
-        alerts = []
-        try:
-            from trading_platform.polymarket.alert_log import AlertLog
-            log = AlertLog(DATA_ROOT / "polymarket" / "alerts.jsonl")
-            alerts = log.query(limit=50, wallet=address)
-        except Exception:
-            pass
-
-        # Load open positions for this wallet
-        open_pos = []
-        pos_path = DATA_ROOT / "polymarket" / "wallet_open_positions.parquet"
-        if pos_path.exists():
-            try:
-                pos_df = _pd.read_parquet(pos_path)
-                wallet_pos = pos_df[pos_df["wallet"] == address]
-                for _, r in wallet_pos.iterrows():
-                    open_pos.append({k: _safe(v) for k, v in r.to_dict().items()})
-            except Exception:
-                pass
+        # Auto-fetch if not cached
+        if not rows:
+            from trading_platform.polymarket.price_history_fetcher import MarketPriceHistoryFetcher
+            MarketPriceHistoryFetcher().fetch_and_store(condition_id, str(db._path))
+            with db._lock:
+                rows = db._conn.execute(
+                    "SELECT t, p FROM market_price_history WHERE condition_id = ? ORDER BY t ASC",
+                    (condition_id,),
+                ).fetchall()
 
         return {
             "available": True,
-            "profile": profile,
-            "resolved_trades": trades[:200],
+            "condition_id": condition_id,
+            "count": len(rows),
+            "history": [{"t": r[0], "p": r[1]} for r in rows],
+        }
+    except Exception as exc:
+        return {"available": False, "reason": str(exc), "history": []}
+
+
+def read_backtest_wallet_market(wallet_address: str, condition_id: str) -> dict[str, Any]:
+    """Combined view: price history + wallet trades on a single market."""
+    db = _get_wallet_db()
+    if not db:
+        return {"available": False}
+    try:
+        wallet_lower = wallet_address.lower()
+
+        # Price history (auto-fetch)
+        ph = read_backtest_price_history(condition_id)
+
+        # Wallet trades on this market
+        with db._lock:
+            trade_rows = db._conn.execute(
+                """SELECT timestamp, side, price, size FROM wallet_trades
+                   WHERE wallet = ? AND condition_id = ?
+                   ORDER BY timestamp ASC""",
+                (wallet_lower, condition_id),
+            ).fetchall()
+            pos_row = db._conn.execute(
+                """SELECT first_entry_ts, last_entry_ts, exit_ts,
+                          avg_entry_price, avg_exit_price, total_shares,
+                          total_cost_usdc, realized_pnl, resolution_price,
+                          market_outcome, end_date_ts, question, category
+                   FROM wallet_market_positions
+                   WHERE wallet = ? AND condition_id = ?""",
+                (wallet_lower, condition_id),
+            ).fetchone()
+
+        wallet_entries = [
+            {"ts": r[0], "side": r[1], "price": r[2], "size": r[3]}
+            for r in trade_rows
+            if (r[1] or "").upper() == "BUY"
+        ]
+        wallet_exits = [
+            {"ts": r[0], "side": r[1], "price": r[2], "size": r[3]}
+            for r in trade_rows
+            if (r[1] or "").upper() == "SELL"
+        ]
+
+        position_summary = None
+        backtest_entry = None
+        if pos_row:
+            pcols = ["first_entry_ts", "last_entry_ts", "exit_ts",
+                     "avg_entry_price", "avg_exit_price", "total_shares",
+                     "total_cost_usdc", "realized_pnl", "resolution_price",
+                     "market_outcome", "end_date_ts", "question", "category"]
+            position_summary = dict(zip(pcols, pos_row))
+            # Simulated backtest entry: 5 minutes after wallet's first entry
+            if pos_row[0]:
+                backtest_entry = {
+                    "ts": pos_row[0] + 300,
+                    "price": round((pos_row[3] or 0.5) * 1.02, 4),
+                }
+
+        return {
+            "available": True,
+            "wallet": wallet_address,
+            "condition_id": condition_id,
+            "price_history": ph.get("history", []),
+            "wallet_entries": wallet_entries,
+            "wallet_exits": wallet_exits,
+            "position_summary": position_summary,
+            "backtest_entry": backtest_entry,
+        }
+    except Exception as exc:
+        return {"available": False, "reason": str(exc)}
+
+
+def read_market_order_book(condition_id: str) -> dict[str, Any]:
+    """Live CLOB order book + recent anomalies for a market.
+
+    Resolves the YES token via Gamma, fetches the current order book via
+    OrderBookMonitor.fetch_snapshot, and returns it alongside any anomalies
+    persisted in market_anomalies for this market in the last 24 hours.
+    """
+    import sqlite3 as _sq
+    import json as _json
+    import time as _time
+    try:
+        import requests as _req
+    except Exception:
+        return {"available": False, "error": "requests not available"}
+
+    db = _get_wallet_db()
+    if not db:
+        return {"available": False, "error": "wallet_db unavailable"}
+    try:
+        # Resolve token from Gamma (using the verified condition_ids param)
+        token_id = None
+        question = ""
+        category = ""
+        try:
+            r = _req.get(
+                "https://gamma-api.polymarket.com/markets",
+                params={"condition_ids": condition_id},
+                timeout=10,
+            )
+            data = r.json()
+            m = data[0] if isinstance(data, list) and data else None
+            if m and (m.get("conditionId") or "").lower() == condition_id.lower():
+                tids_raw = m.get("clobTokenIds", "[]")
+                tids = _json.loads(tids_raw) if isinstance(tids_raw, str) else tids_raw
+                token_id = tids[0] if tids else None
+                question = m.get("question") or ""
+                category = m.get("category") or ""
+        except Exception:
+            pass
+
+        if not token_id:
+            return {
+                "available": False,
+                "error": "could not resolve token_id from gamma",
+                "condition_id": condition_id,
+            }
+
+        from trading_platform.polymarket.order_book_monitor import OrderBookMonitor
+        mon = OrderBookMonitor(db_path=str(db._path))
+        snap = mon.fetch_snapshot(condition_id, token_id)
+        if not snap:
+            return {
+                "available": False,
+                "error": "could not fetch order book",
+                "condition_id": condition_id,
+                "token_id": token_id,
+            }
+
+        large_trades = mon.check_large_trades(condition_id, minutes_back=60)
+
+        # Recent persisted anomalies for this market
+        recent_anomalies: list[dict[str, Any]] = []
+        try:
+            conn = _sq.connect(str(db._path))
+            cutoff = int(_time.time()) - 86400
+            rows = conn.execute(
+                """SELECT detected_at, anomaly_type, severity, detail,
+                          imbalance, bid_usd, ask_usd
+                   FROM market_anomalies
+                   WHERE condition_id = ? AND detected_at >= ?
+                   ORDER BY detected_at DESC LIMIT 50""",
+                (condition_id, cutoff),
+            ).fetchall()
+            conn.close()
+            recent_anomalies = [
+                {
+                    "detected_at": r[0],
+                    "type": r[1],
+                    "severity": r[2],
+                    "detail": r[3],
+                    "imbalance": r[4],
+                    "bid_usd": r[5],
+                    "ask_usd": r[6],
+                }
+                for r in rows
+            ]
+        except Exception:
+            pass
+
+        # Format levels: top 20 each with USD
+        def _fmt(levels: list[dict]) -> list[dict]:
+            out = []
+            for lvl in levels[:20]:
+                try:
+                    p = float(lvl.get("price") or 0)
+                    s = float(lvl.get("size") or 0)
+                except (TypeError, ValueError):
+                    continue
+                out.append({"price": p, "size": s, "usd": round(p * s, 2)})
+            return out
+
+        return {
+            "available": True,
+            "condition_id": condition_id,
+            "token_id": token_id,
+            "question": question,
+            "category": category,
+            "timestamp": snap.timestamp,
+            "mid_price": snap.mid_price,
+            "best_bid": snap.best_bid,
+            "best_ask": snap.best_ask,
+            "spread": snap.spread,
+            "bid_depth_usd": snap.bid_depth_usd,
+            "ask_depth_usd": snap.ask_depth_usd,
+            "imbalance_ratio": snap.imbalance_ratio,
+            "top_bid_usd": snap.top_bid_usd,
+            "top_ask_usd": snap.top_ask_usd,
+            "bids": _fmt(snap.bids),
+            "asks": _fmt(snap.asks),
+            "large_trades_1h": large_trades,
+            "recent_anomalies": recent_anomalies,
+        }
+    except Exception as exc:
+        return {"available": False, "error": str(exc)}
+
+
+def read_anomaly_alerts(limit: int = 50, severity: str | None = None) -> dict[str, Any]:
+    """Recent anomalies from the market_anomalies table."""
+    import sqlite3 as _sq
+    db = _get_wallet_db()
+    if not db:
+        return {"available": False, "alerts": []}
+    try:
+        conn = _sq.connect(str(db._path))
+        sql = """SELECT id, detected_at, condition_id, question, category,
+                        anomaly_type, severity, detail, imbalance, bid_usd, ask_usd
+                 FROM market_anomalies"""
+        params: list[Any] = []
+        if severity:
+            sql += " WHERE severity = ?"
+            params.append(severity)
+        sql += " ORDER BY detected_at DESC LIMIT ?"
+        params.append(int(limit))
+        rows = conn.execute(sql, params).fetchall()
+        conn.close()
+        alerts = [
+            {
+                "id": r[0],
+                "detected_at": r[1],
+                "condition_id": r[2],
+                "question": r[3],
+                "category": r[4],
+                "type": r[5],
+                "severity": r[6],
+                "detail": r[7],
+                "imbalance": r[8],
+                "bid_usd": r[9],
+                "ask_usd": r[10],
+            }
+            for r in rows
+        ]
+        return {"available": True, "count": len(alerts), "alerts": alerts}
+    except Exception as exc:
+        return {"available": False, "error": str(exc), "alerts": []}
+
+
+_BUCKET_SIZE_SECONDS = {
+    "1h": 3600,
+    "4h": 4 * 3600,
+    "1d": 86400,
+    "1w": 7 * 86400,
+}
+
+# Module-level cache for synthesized candles. Key = (cid, interval, from_ts, to_ts).
+# 5-minute TTL — synthesizing OHLCV from 700+ price points is cheap but
+# doing it on every chart timeframe change is wasteful.
+_CANDLE_CACHE: dict[tuple, tuple[float, dict[str, Any]]] = {}
+_CANDLE_TTL_SECONDS = 300
+
+
+# Module-level cache for the top-markets browser. Key = (sort, category, limit).
+# 3-minute TTL — Gamma data refresh roughly aligns with this.
+_TOP_MARKETS_CACHE: dict[tuple, tuple[float, dict[str, Any]]] = {}
+_TOP_MARKETS_TTL_SECONDS = 180
+
+
+def read_top_markets(
+    category: str | None = None,
+    sort: str = "volume24h",
+    limit: int = 20,
+) -> dict[str, Any]:
+    """Browse markets for the Market Monitor landing page.
+
+    ``sort`` options:
+      * ``volume24h`` — top by 24h trading volume (Gamma API)
+      * ``trending``  — biggest active markets by liquidity (Gamma API proxy)
+      * ``new``       — most recently created active markets (Gamma API)
+      * ``whale``     — most whale activity (our DB)
+
+    ``category`` filters Gamma's ``category`` field (case-insensitive).
+    Pass ``None`` to disable. Note that Gamma frequently returns
+    ``category=null`` so a strict filter can drop everything; we keep
+    null-category markets when no category is specified and skip them
+    when one is.
+    """
+    import sqlite3 as _sq
+    import time as _time
+
+    cache_key = (sort, (category or "").lower(), int(limit))
+    cached = _TOP_MARKETS_CACHE.get(cache_key)
+    if cached and (_time.time() - cached[0]) < _TOP_MARKETS_TTL_SECONDS:
+        return cached[1]
+
+    db = _get_wallet_db()
+    db_path = str(db._path) if db else None
+
+    results: list[dict[str, Any]] = []
+
+    # ── Gamma-backed sorts ──────────────────────────────────────────────────
+    if sort in ("volume24h", "trending", "new"):
+        params: dict[str, Any] = {
+            "active": "true",
+            "closed": "false",
+            "limit": min(int(limit) * 3, 100),  # over-fetch for category filter
+        }
+        if sort == "volume24h":
+            params["order"] = "volume24hr"
+            params["ascending"] = "false"
+        elif sort == "trending":
+            # Gamma has no native "trending" param; liquidity is a stable proxy
+            params["order"] = "liquidity"
+            params["ascending"] = "false"
+        elif sort == "new":
+            params["order"] = "startDate"
+            params["ascending"] = "false"
+
+        gamma_markets: list[dict] = []
+        try:
+            import requests as _req
+            r = _req.get(
+                "https://gamma-api.polymarket.com/markets",
+                params=params,
+                timeout=10,
+            )
+            data = r.json()
+            gamma_markets = data if isinstance(data, list) else (data.get("data", []) if isinstance(data, dict) else [])
+        except Exception as exc:
+            logger = __import__("logging").getLogger(__name__)
+            logger.debug("top markets gamma fetch failed: %s", exc)
+
+        for m in gamma_markets:
+            mcat_raw = m.get("category")
+            mcat = (mcat_raw or "").lower()
+            if category:
+                # Strict filter: skip rows whose category doesn't match
+                if mcat != category.lower():
+                    continue
+
+            try:
+                vol = float(m.get("volume24hr") or m.get("volume") or 0)
+            except (TypeError, ValueError):
+                vol = 0.0
+            try:
+                liquidity = float(m.get("liquidity") or 0)
+            except (TypeError, ValueError):
+                liquidity = 0.0
+
+            # Resolve last price: lastTradePrice → outcomePrices[0] → 0.5
+            last_price: float | None = None
+            ltp = m.get("lastTradePrice")
+            if ltp is not None:
+                try:
+                    last_price = float(ltp)
+                except (TypeError, ValueError):
+                    last_price = None
+            if last_price is None:
+                op_raw = m.get("outcomePrices")
+                if op_raw:
+                    try:
+                        op = json.loads(op_raw) if isinstance(op_raw, str) else op_raw
+                        if op:
+                            last_price = float(op[0])
+                    except Exception:
+                        last_price = None
+
+            results.append({
+                "condition_id": m.get("conditionId", "") or "",
+                "question": m.get("question", "") or "",
+                "category": mcat or "other",
+                "volume_24h": round(vol, 2),
+                "liquidity": round(liquidity, 2),
+                "last_price": last_price,
+                "price_change_24h": None,
+                "whale_count": 0,
+                "is_active": True,
+                "end_date": m.get("endDate") or m.get("endDateIso"),
+            })
+            if len(results) >= int(limit):
+                break
+
+    # ── Whale-mode: read straight from our DB ───────────────────────────────
+    if sort == "whale" and db_path:
+        try:
+            conn = _sq.connect(db_path)
+            try:
+                if category:
+                    rows = conn.execute(
+                        """SELECT mph.condition_id, mph.question, mph.category,
+                                  COUNT(DISTINCT wmp.wallet) whale_count
+                           FROM market_price_history mph
+                           JOIN wallet_market_positions wmp ON mph.condition_id = wmp.condition_id
+                           WHERE LOWER(mph.category) = ?
+                           GROUP BY mph.condition_id
+                           ORDER BY whale_count DESC LIMIT ?""",
+                        (category.lower(), int(limit)),
+                    ).fetchall()
+                else:
+                    rows = conn.execute(
+                        """SELECT mph.condition_id, mph.question, mph.category,
+                                  COUNT(DISTINCT wmp.wallet) whale_count
+                           FROM market_price_history mph
+                           JOIN wallet_market_positions wmp ON mph.condition_id = wmp.condition_id
+                           GROUP BY mph.condition_id
+                           ORDER BY whale_count DESC LIMIT ?""",
+                        (int(limit),),
+                    ).fetchall()
+            finally:
+                conn.close()
+            results = [{
+                "condition_id": r[0],
+                "question": r[1] or "",
+                "category": (r[2] or "other").lower(),
+                "whale_count": r[3] or 0,
+                "volume_24h": 0.0,
+                "liquidity": 0.0,
+                "last_price": None,
+                "price_change_24h": None,
+                "is_active": True,
+                "end_date": None,
+            } for r in rows]
+        except Exception as exc:
+            logger = __import__("logging").getLogger(__name__)
+            logger.debug("whale top markets failed: %s", exc)
+
+    # ── Fallback: if Gamma fetch returned nothing AND we have DB, fall back
+    # to whale-sorted markets so the GUI never shows an empty grid.
+    if not results and db_path and sort != "whale":
+        try:
+            return read_top_markets(category=category, sort="whale", limit=limit)
+        except Exception:
+            pass
+
+    # ── Enrich with whale_count from our DB ─────────────────────────────────
+    if results and db_path and sort != "whale":
+        try:
+            conn = _sq.connect(db_path)
+            try:
+                cids = [r["condition_id"] for r in results if r["condition_id"]]
+                if cids:
+                    placeholders = ",".join("?" * len(cids))
+                    rows = conn.execute(
+                        f"""SELECT condition_id, COUNT(DISTINCT wallet) AS wc
+                            FROM wallet_market_positions
+                            WHERE condition_id IN ({placeholders})
+                            GROUP BY condition_id""",
+                        cids,
+                    ).fetchall()
+                    wc_map = {row[0]: row[1] for row in rows}
+                    for r in results:
+                        r["whale_count"] = wc_map.get(r["condition_id"], 0)
+            finally:
+                conn.close()
+        except Exception:
+            pass
+
+    response = {
+        "available": True,
+        "sort": sort,
+        "category": category,
+        "count": len(results),
+        "markets": results[: int(limit)],
+    }
+    _TOP_MARKETS_CACHE[cache_key] = (_time.time(), response)
+    return response
+
+
+def read_market_candles(
+    condition_id: str,
+    interval: str = "1d",
+    from_ts: int | None = None,
+    to_ts: int | None = None,
+) -> dict[str, Any]:
+    """Synthesize OHLCV candles for a market.
+
+    Strategy: bucket ``market_price_history`` points into ``interval``
+    sized buckets to compute O/H/L/C, then layer ``wallet_trades`` from
+    the same window for buy/sell volume. Buckets with no price points
+    use the previous close (flat candle, no body).
+    """
+    import sqlite3 as _sq
+    import time as _time
+
+    if interval not in _BUCKET_SIZE_SECONDS:
+        return {"available": False, "error": f"invalid interval '{interval}'", "candles": []}
+    bucket = _BUCKET_SIZE_SECONDS[interval]
+
+    cache_key = (condition_id, interval, from_ts, to_ts)
+    cached = _CANDLE_CACHE.get(cache_key)
+    if cached and (_time.time() - cached[0]) < _CANDLE_TTL_SECONDS:
+        return cached[1]
+
+    db = _get_wallet_db()
+    if not db:
+        return {"available": False, "error": "wallet_db unavailable", "candles": []}
+
+    try:
+        conn = _sq.connect(str(db._path))
+        try:
+            # Price points
+            ph_query = "SELECT t, p FROM market_price_history WHERE condition_id = ?"
+            ph_params: list[Any] = [condition_id]
+            if from_ts is not None:
+                ph_query += " AND t >= ?"
+                ph_params.append(from_ts)
+            if to_ts is not None:
+                ph_query += " AND t <= ?"
+                ph_params.append(to_ts)
+            ph_query += " ORDER BY t ASC"
+            price_rows = conn.execute(ph_query, ph_params).fetchall()
+
+            # Merge in live ticks (recorded by the live collector). These give
+            # us denser intra-day data than the Gamma snapshot. Deduplicate
+            # by timestamp so the merged stream is well-formed.
+            try:
+                tick_query = "SELECT timestamp, price FROM market_ticks WHERE condition_id = ?"
+                tick_params: list[Any] = [condition_id]
+                if from_ts is not None:
+                    tick_query += " AND timestamp >= ?"
+                    tick_params.append(from_ts)
+                if to_ts is not None:
+                    tick_query += " AND timestamp <= ?"
+                    tick_params.append(to_ts)
+                tick_query += " ORDER BY timestamp ASC"
+                tick_rows = conn.execute(tick_query, tick_params).fetchall()
+                if tick_rows:
+                    seen_ts = {ts for ts, _ in price_rows}
+                    merged: list[tuple] = list(price_rows)
+                    for ts, p in tick_rows:
+                        if ts not in seen_ts:
+                            merged.append((ts, p))
+                            seen_ts.add(ts)
+                    merged.sort(key=lambda x: x[0])
+                    price_rows = merged
+            except Exception:
+                pass
+
+            # Question + category metadata
+            meta = conn.execute(
+                """SELECT question, category FROM market_price_history
+                   WHERE condition_id = ? LIMIT 1""",
+                (condition_id,),
+            ).fetchone()
+            question = (meta[0] if meta else "") or ""
+            category = (meta[1] if meta else "") or ""
+
+            # Wallet trades for volume — joined with leaderboard tier
+            wt_query = (
+                """SELECT timestamp, price, size, side
+                   FROM wallet_trades
+                   WHERE condition_id = ?"""
+            )
+            wt_params: list[Any] = [condition_id]
+            if from_ts is not None:
+                wt_query += " AND timestamp >= ?"
+                wt_params.append(from_ts)
+            if to_ts is not None:
+                wt_query += " AND timestamp <= ?"
+                wt_params.append(to_ts)
+            wt_query += " ORDER BY timestamp ASC"
+            trade_rows = conn.execute(wt_query, wt_params).fetchall()
+        finally:
+            conn.close()
+
+        if not price_rows and not trade_rows:
+            result = {
+                "available": True,
+                "condition_id": condition_id,
+                "question": question,
+                "category": category,
+                "interval": interval,
+                "candles": [],
+                "total_candles": 0,
+                "price_range": {"min": None, "max": None},
+                "from_ts": from_ts,
+                "to_ts": to_ts,
+            }
+            _CANDLE_CACHE[cache_key] = (_time.time(), result)
+            return result
+
+        # Determine the time span: union of price + trade timestamps
+        all_ts = [r[0] for r in price_rows] + [r[0] for r in trade_rows]
+        span_min = min(all_ts)
+        span_max = max(all_ts)
+        if from_ts is not None:
+            span_min = max(span_min, from_ts)
+        if to_ts is not None:
+            span_max = min(span_max, to_ts)
+
+        first_bucket = (span_min // bucket) * bucket
+        last_bucket = (span_max // bucket) * bucket
+
+        # Bin prices and trades
+        prices_by_bucket: dict[int, list[float]] = {}
+        for ts, p in price_rows:
+            if p is None:
+                continue
+            b = (int(ts) // bucket) * bucket
+            prices_by_bucket.setdefault(b, []).append(float(p))
+
+        trades_by_bucket: dict[int, list[tuple]] = {}
+        for ts, price, size, side in trade_rows:
+            if price is None or size is None:
+                continue
+            b = (int(ts) // bucket) * bucket
+            trades_by_bucket.setdefault(b, []).append((float(price), float(size), side or "BUY"))
+
+        candles: list[dict[str, Any]] = []
+        prev_close: float | None = None
+        all_prices: list[float] = []
+
+        b = first_bucket
+        while b <= last_bucket:
+            bucket_prices = prices_by_bucket.get(b, [])
+            bucket_trades = trades_by_bucket.get(b, [])
+
+            if bucket_prices:
+                o = bucket_prices[0]
+                c = bucket_prices[-1]
+                h = max(bucket_prices)
+                l_ = min(bucket_prices)
+                prev_close = c
+                all_prices.extend(bucket_prices)
+            elif prev_close is not None:
+                # Flat candle: no price movement in this bucket
+                o = h = l_ = c = prev_close
+            else:
+                # No data yet — skip until we see the first price
+                b += bucket
+                continue
+
+            v_buy = 0.0
+            v_sell = 0.0
+            for tp, ts_, side in bucket_trades:
+                notional = tp * ts_
+                if (side or "").upper() == "SELL":
+                    v_sell += notional
+                else:
+                    v_buy += notional
+
+            candles.append({
+                "t": b,
+                "o": round(o, 4),
+                "h": round(h, 4),
+                "l": round(l_, 4),
+                "c": round(c, 4),
+                "v_buy": round(v_buy, 2),
+                "v_sell": round(v_sell, 2),
+                "v_total": round(v_buy + v_sell, 2),
+                "trade_count": len(bucket_trades),
+            })
+            b += bucket
+
+        result = {
+            "available": True,
+            "condition_id": condition_id,
+            "question": question,
+            "category": category,
+            "interval": interval,
+            "candles": candles,
+            "total_candles": len(candles),
+            "price_range": {
+                "min": round(min(all_prices), 4) if all_prices else None,
+                "max": round(max(all_prices), 4) if all_prices else None,
+            },
+            "from_ts": from_ts,
+            "to_ts": to_ts,
+        }
+        _CANDLE_CACHE[cache_key] = (_time.time(), result)
+        return result
+    except Exception as exc:
+        return {"available": False, "error": str(exc), "candles": []}
+
+
+def read_market_trade_flow(
+    condition_id: str,
+    from_ts: int | None = None,
+    to_ts: int | None = None,
+    limit: int = 500,
+) -> dict[str, Any]:
+    """Order-flow trades for a market.
+
+    Tracked trades come from ``wallet_trades`` joined with ``leaderboard``
+    so we get tier, pseudonym, directional_win_rate and conviction_score.
+    Untracked trades come from ``data-api.polymarket.com/trades?market={cid}``
+    and are deduplicated by ``transaction_hash``.
+    """
+    import sqlite3 as _sq
+    db = _get_wallet_db()
+    if not db:
+        return {"available": False, "error": "wallet_db unavailable", "trades": []}
+
+    try:
+        conn = _sq.connect(str(db._path))
+        try:
+            wt_query = (
+                """SELECT wt.timestamp, wt.price, wt.size, wt.side, wt.outcome,
+                          wt.wallet, wt.transaction_hash,
+                          l.tier, l.pseudonym,
+                          l.directional_win_rate, l.conviction_score
+                   FROM wallet_trades wt
+                   LEFT JOIN leaderboard l ON wt.wallet = l.wallet
+                   WHERE wt.condition_id = ?"""
+            )
+            params: list[Any] = [condition_id]
+            if from_ts is not None:
+                wt_query += " AND wt.timestamp >= ?"
+                params.append(from_ts)
+            if to_ts is not None:
+                wt_query += " AND wt.timestamp <= ?"
+                params.append(to_ts)
+            wt_query += " ORDER BY wt.timestamp DESC LIMIT ?"
+            params.append(int(limit))
+            tracked_rows = conn.execute(wt_query, params).fetchall()
+
+            meta = conn.execute(
+                """SELECT question FROM market_price_history
+                   WHERE condition_id = ? LIMIT 1""",
+                (condition_id,),
+            ).fetchone()
+            question = (meta[0] if meta else "") or ""
+            if not question:
+                meta2 = conn.execute(
+                    "SELECT title FROM wallet_trades WHERE condition_id = ? AND title != '' LIMIT 1",
+                    (condition_id,),
+                ).fetchone()
+                question = (meta2[0] if meta2 else "") or ""
+        finally:
+            conn.close()
+
+        seen_hashes: set[str] = set()
+        trades: list[dict[str, Any]] = []
+        for r in tracked_rows:
+            tx = r[6] or ""
+            if tx:
+                seen_hashes.add(tx)
+            price = float(r[1] or 0)
+            size = float(r[2] or 0)
+            trades.append({
+                "ts": r[0],
+                "price": round(price, 4),
+                "size_usd": round(price * size, 2),
+                "size": round(size, 2),
+                "side": r[3] or "",
+                "outcome": r[4] or "",
+                "wallet": r[5] or "",
+                "pseudonym": r[8] or "",
+                "tier": r[7] or "unknown",
+                "win_rate": float(r[9]) if r[9] is not None else 0.0,
+                "conviction": float(r[10]) if r[10] is not None else 0.0,
+                "is_tracked": True,
+                "transaction_hash": tx,
+            })
+        tracked_count = len(trades)
+
+        # Best-effort: fetch recent untracked from data-api. Cap at half the
+        # requested limit (and at most 100) so a small ``limit`` query never
+        # has its tracked rows swamped by a flood of recent untracked
+        # trades during the final sort+slice.
+        live_cap = max(5, min(int(limit) // 2, 100))
+        try:
+            import requests as _req
+            r = _req.get(
+                "https://data-api.polymarket.com/trades",
+                params={"market": condition_id, "limit": live_cap},
+                timeout=10,
+            )
+            if r.status_code == 200:
+                data = r.json()
+                live_trades = data if isinstance(data, list) else data.get("data", [])
+                for t in live_trades:
+                    tx = t.get("transactionHash") or ""
+                    if tx and tx in seen_hashes:
+                        continue
+                    if tx:
+                        seen_hashes.add(tx)
+                    try:
+                        price = float(t.get("price") or 0)
+                        size = float(t.get("size") or 0)
+                    except (TypeError, ValueError):
+                        continue
+                    trades.append({
+                        "ts": t.get("timestamp") or 0,
+                        "price": round(price, 4),
+                        "size_usd": round(price * size, 2),
+                        "size": round(size, 2),
+                        "side": t.get("side") or "",
+                        "outcome": t.get("outcome") or "",
+                        "wallet": (t.get("proxyWallet") or "").lower(),
+                        "pseudonym": t.get("pseudonym") or "",
+                        "tier": "unknown",
+                        "win_rate": 0.0,
+                        "conviction": 0.0,
+                        "is_tracked": False,
+                        "transaction_hash": tx,
+                    })
+        except Exception:
+            pass
+
+        trades.sort(key=lambda x: x["ts"], reverse=True)
+        trades = trades[: int(limit)]
+        # Recount tracked after sort+slice so the metric matches the
+        # returned list (otherwise live trades can push tracked ones out).
+        final_tracked = sum(1 for t in trades if t["is_tracked"])
+
+        return {
+            "available": True,
+            "condition_id": condition_id,
+            "question": question,
+            "trades": trades,
+            "tracked_count": final_tracked,
+            "total_count": len(trades),
+        }
+    except Exception as exc:
+        return {"available": False, "error": str(exc), "trades": []}
+
+
+def read_market_signals_and_trades(condition_id: str) -> dict[str, Any]:
+    """Signals + paper trades fired for a market."""
+    import sqlite3 as _sq
+    db = _get_wallet_db()
+    if not db:
+        return {"available": False, "signals": [], "paper_trades": []}
+    try:
+        conn = _sq.connect(str(db._path))
+        try:
+            sig_cols_present = {r[1] for r in conn.execute("PRAGMA table_info(market_signals)").fetchall()}
+            select_pt = "paper_trade_id" if "paper_trade_id" in sig_cols_present else "NULL"
+            sig_rows = conn.execute(
+                f"""SELECT fired_at, signal_type, direction, confidence, wallet,
+                           {select_pt}
+                    FROM market_signals
+                    WHERE condition_id = ?
+                    ORDER BY fired_at ASC""",
+                (condition_id,),
+            ).fetchall()
+
+            pt_cols = {r[1] for r in conn.execute("PRAGMA table_info(polymarket_paper_trades)").fetchall()}
+            if pt_cols:
+                pt_rows = conn.execute(
+                    """SELECT id, entry_ts, side, size_usd, entry_price,
+                              exit_price, exit_ts, signal_type, confidence,
+                              outcome, return_pct, realized_pnl
+                       FROM polymarket_paper_trades
+                       WHERE condition_id = ?
+                       ORDER BY entry_ts ASC""",
+                    (condition_id,),
+                ).fetchall()
+            else:
+                pt_rows = []
+        finally:
+            conn.close()
+
+        signals = [
+            {
+                "ts": r[0],
+                "signal_type": r[1] or "",
+                "direction": r[2] or "",
+                "confidence": r[3],
+                "wallet": r[4] or "",
+                "paper_trade_id": r[5],
+            }
+            for r in sig_rows
+        ]
+        paper_trades = [
+            {
+                "id": r[0],
+                "ts": r[1],
+                "side": r[2] or "",
+                "size_usd": r[3],
+                "entry_price": r[4],
+                "exit_price": r[5],
+                "exit_ts": r[6],
+                "signal_type": r[7] or "",
+                "confidence": r[8],
+                "outcome": r[9],
+                "return_pct": r[10],
+                "realized_pnl": r[11],
+            }
+            for r in pt_rows
+        ]
+        return {
+            "available": True,
+            "condition_id": condition_id,
+            "signals": signals,
+            "paper_trades": paper_trades,
+            "signal_count": len(signals),
+            "paper_trade_count": len(paper_trades),
+        }
+    except Exception as exc:
+        return {"available": False, "error": str(exc), "signals": [], "paper_trades": []}
+
+
+def read_market_intelligence(condition_id: str) -> dict[str, Any]:
+    """Return full market intelligence: price history, all tier1/1h wallet
+    activity, aggregated consensus, and convergence signal.
+    """
+    import sqlite3 as _sq
+    db = _get_wallet_db()
+    if not db:
+        return {"available": False}
+    try:
+        conn = _sq.connect(str(db._path))
+        try:
+            meta = conn.execute(
+                """SELECT question, category, token_id FROM market_price_history
+                   WHERE condition_id = ? LIMIT 1""",
+                (condition_id,),
+            ).fetchone()
+            if not meta:
+                # Fall back to wallet_market_positions / wallet_trades for question/category
+                meta = conn.execute(
+                    """SELECT question, category, NULL FROM wallet_market_positions
+                       WHERE condition_id = ? LIMIT 1""",
+                    (condition_id,),
+                ).fetchone()
+            if not meta:
+                meta = conn.execute(
+                    """SELECT title, category, NULL FROM wallet_trades
+                       WHERE condition_id = ? LIMIT 1""",
+                    (condition_id,),
+                ).fetchone()
+            question = (meta[0] if meta else "") or ""
+            category = (meta[1] if meta else "") or ""
+            token_id = (meta[2] if meta and len(meta) > 2 else None)
+
+            prices = conn.execute(
+                """SELECT t, p FROM market_price_history
+                   WHERE condition_id = ? ORDER BY t ASC""",
+                (condition_id,),
+            ).fetchall()
+            price_history = [{"t": r[0], "p": r[1]} for r in prices]
+
+            pos_rows = conn.execute(
+                """SELECT wmp.wallet, wmp.side, wmp.avg_entry_price,
+                          wmp.first_entry_ts, wmp.last_entry_ts, wmp.exit_ts,
+                          wmp.total_cost_usdc, wmp.realized_pnl,
+                          wmp.resolution_price, wmp.market_resolved,
+                          wmp.market_outcome, wmp.end_date_ts,
+                          l.pseudonym, l.tier,
+                          wmp.net_shares, wmp.total_sold, wmp.sell_volume_usdc,
+                          wmp.is_fully_exited, wmp.avg_exit_price,
+                          wmp.total_shares
+                   FROM wallet_market_positions wmp
+                   JOIN leaderboard l ON wmp.wallet = l.wallet
+                   WHERE wmp.condition_id = ?
+                     AND l.tier IN ('tier1h', 'tier1')
+                   ORDER BY wmp.first_entry_ts ASC""",
+                (condition_id,),
+            ).fetchall()
+            pos_cols = ["wallet", "side", "avg_entry_price", "first_entry_ts",
+                        "last_entry_ts", "exit_ts", "total_cost_usdc",
+                        "realized_pnl", "resolution_price", "market_resolved",
+                        "market_outcome", "end_date_ts", "pseudonym", "tier",
+                        "net_shares", "total_sold", "sell_volume_usdc",
+                        "is_fully_exited", "avg_exit_price", "total_shares"]
+
+            # All fills for the tier1/1h wallets on this market — with outcome
+            # so we can tag each fill BUY_YES / BUY_NO / SELL_YES / SELL_NO.
+            wallets_in = sorted({r[0] for r in pos_rows})
+            fills_by_wallet: dict[str, list[tuple]] = {w: [] for w in wallets_in}
+            if wallets_in:
+                ph_marks = ",".join("?" * len(wallets_in))
+                fill_rows = conn.execute(
+                    f"""SELECT wallet, side, price, size, timestamp, outcome
+                        FROM wallet_trades
+                        WHERE condition_id = ? AND wallet IN ({ph_marks})
+                        ORDER BY timestamp ASC""",
+                    (condition_id, *wallets_in),
+                ).fetchall()
+                for fr in fill_rows:
+                    fills_by_wallet.setdefault(fr[0], []).append(fr)
+
+            def _classify(side: str, outcome: str) -> str:
+                s = (side or "").upper()
+                o = (outcome or "").strip().lower()
+                # Treat 'no'/'down'/'under' as the bearish (NO) side; everything else
+                # (yes/up/over/team names) as the bullish (YES) side.
+                is_no = o in ("no", "down", "under")
+                token = "NO" if is_no else "YES"
+                return f"{s}_{token}" if s in ("BUY", "SELL") else f"OTHER_{token}"
+
+            wallet_activity = []
+            market_resolved = 0
+            resolution_price = None
+            end_date = None
+            # Group rows by wallet so we can roll multi-side positions
+            # (e.g., a wallet trading both Lakers and Heat) into one entry.
+            by_wallet: dict[str, list[dict]] = {}
+            for row in pos_rows:
+                p = dict(zip(pos_cols, row))
+                if p["market_resolved"]:
+                    market_resolved = 1
+                if p["resolution_price"] is not None:
+                    resolution_price = p["resolution_price"]
+                if p["end_date_ts"]:
+                    end_date = p["end_date_ts"]
+                by_wallet.setdefault(p["wallet"], []).append(p)
+
+            for wallet, positions in by_wallet.items():
+                fills = fills_by_wallet.get(wallet, [])
+                entry_fills = []
+                exit_fills = []
+                yes_buy_usdc = no_buy_usdc = 0.0
+                yes_sell_usdc = no_sell_usdc = 0.0
+                for f in fills:
+                    side = (f[1] or "").upper()
+                    price = f[2] or 0
+                    size = f[3] or 0
+                    ts = f[4]
+                    outcome = f[5] or ""
+                    cls = _classify(side, outcome)
+                    notional = price * size
+                    rec = {"ts": ts, "price": price, "size": size,
+                           "notional_usdc": round(notional, 2),
+                           "type": cls, "outcome": outcome}
+                    if side == "BUY":
+                        entry_fills.append(rec)
+                        if cls.endswith("_NO"):
+                            no_buy_usdc += notional
+                        else:
+                            yes_buy_usdc += notional
+                    elif side == "SELL":
+                        exit_fills.append(rec)
+                        if cls.endswith("_NO"):
+                            no_sell_usdc += notional
+                        else:
+                            yes_sell_usdc += notional
+
+                # Hedge detection
+                yes_exposure = max(0.0, yes_buy_usdc - yes_sell_usdc)
+                no_exposure = max(0.0, no_buy_usdc - no_sell_usdc)
+                total_exp = yes_exposure + no_exposure
+                if yes_exposure > 0 and no_exposure > 0:
+                    smaller = min(yes_exposure, no_exposure)
+                    larger = max(yes_exposure, no_exposure)
+                    hedge_ratio = round(smaller / larger, 3) if larger else 0.0
+                    is_hedged = hedge_ratio >= 0.20
+                    net_direction = "YES" if yes_exposure > no_exposure else "NO"
+                else:
+                    hedge_ratio = 0.0
+                    is_hedged = False
+                    net_direction = "YES" if yes_exposure > 0 else ("NO" if no_exposure > 0 else "NEUTRAL")
+
+                # Pick the dominant position row for headline fields (largest cost basis)
+                primary = max(positions, key=lambda x: x.get("total_cost_usdc") or 0)
+
+                # Aggregate stats across this wallet's positions on this market
+                total_cost = sum((x.get("total_cost_usdc") or 0) for x in positions)
+                total_realized = sum((x.get("realized_pnl") or 0) for x in positions)
+                total_sold = sum((x.get("total_sold") or 0) for x in positions)
+                total_bought_shares = sum((x.get("total_shares") or 0) for x in positions)
+                pct_sold = round(total_sold / total_bought_shares, 3) if total_bought_shares > 0 else 0.0
+                fully_exited = pct_sold >= 0.99 or all((x.get("is_fully_exited") or 0) for x in positions)
+                if fully_exited:
+                    status = "Closed"
+                elif pct_sold >= 0.20:
+                    status = "Partially Closed"
+                else:
+                    status = "Open"
+
+                wallet_activity.append({
+                    "wallet": wallet,
+                    "pseudonym": primary.get("pseudonym"),
+                    "tier": primary.get("tier"),
+                    "side": primary.get("side"),
+                    "avg_entry_price": primary.get("avg_entry_price"),
+                    "avg_exit_price": primary.get("avg_exit_price"),
+                    "first_entry_ts": min((x.get("first_entry_ts") or 0) for x in positions) or None,
+                    "last_entry_ts": max((x.get("last_entry_ts") or 0) for x in positions) or None,
+                    "exit_ts": max((x.get("exit_ts") or 0) for x in positions) or None,
+                    "total_cost_usdc": round(total_cost, 2),
+                    "realized_pnl": round(total_realized, 2),
+                    "resolution_price": primary.get("resolution_price"),
+                    "market_resolved": primary.get("market_resolved"),
+                    "market_outcome": primary.get("market_outcome"),
+                    "end_date_ts": primary.get("end_date_ts"),
+                    "entry_fills": entry_fills,
+                    "exit_fills": exit_fills,
+                    "yes_exposure_usdc": round(yes_exposure, 2),
+                    "no_exposure_usdc": round(no_exposure, 2),
+                    "net_position_usdc": round(total_exp, 2),
+                    "hedge_ratio": hedge_ratio,
+                    "is_hedged": is_hedged,
+                    "net_direction": net_direction,
+                    "pct_sold": pct_sold,
+                    "is_closed": fully_exited,
+                    "status": status,
+                })
+
+            # Count wallets by side label (works for both binary YES/NO and
+            # multi-outcome markets where side is a team/option name).
+            side_counts: dict[str, int] = {}
+            for w in wallet_activity:
+                s = (w["side"] or "YES").upper()
+                side_counts[s] = side_counts.get(s, 0) + 1
+            yes_wallets = [w for w in wallet_activity if (w["side"] or "").upper() == "YES"]
+            no_wallets = [w for w in wallet_activity if (w["side"] or "").upper() == "NO"]
+            total = len(wallet_activity)
+            if not side_counts:
+                consensus = "SPLIT"
+                majority = []
+            else:
+                top_side, top_n = max(side_counts.items(), key=lambda x: x[1])
+                # Tie => SPLIT
+                ties = [s for s, n in side_counts.items() if n == top_n]
+                if len(ties) > 1:
+                    consensus = "SPLIT"
+                    majority = [w for w in wallet_activity if (w["side"] or "").upper() in ties]
+                else:
+                    consensus = top_side
+                    majority = [w for w in wallet_activity if (w["side"] or "").upper() == top_side]
+
+            tier1h_majority = [w for w in majority if w["tier"] == "tier1h"]
+            avg_majority_entry = (
+                sum((w["avg_entry_price"] or 0) for w in majority) / len(majority)
+                if majority else None
+            )
+
+            convergence_ts = None
+            convergence_price = None
+            convergence_outcome = None
+            convergence_fired = len(tier1h_majority) >= 2 if tier1h_majority else len(majority) >= 2
+            if convergence_fired:
+                converging = tier1h_majority if len(tier1h_majority) >= 2 else majority
+                sorted_maj = sorted(converging, key=lambda w: w["first_entry_ts"] or 0)
+                convergence_ts = sorted_maj[1]["first_entry_ts"]
+                if convergence_ts and price_history:
+                    before = [pt for pt in price_history if pt["t"] <= convergence_ts]
+                    if before:
+                        convergence_price = before[-1]["p"]
+                if resolution_price is not None and convergence_price is not None:
+                    # If majority side is YES, we win when resolution >= convergence (price went up)
+                    side_upper = (sorted_maj[0]["side"] or "YES").upper()
+                    final = resolution_price if side_upper == "YES" else 1.0 - resolution_price
+                    entry = convergence_price if side_upper == "YES" else 1.0 - convergence_price
+                    convergence_outcome = "win" if final > entry else "loss"
+
+            return {
+                "available": True,
+                "condition_id": condition_id,
+                "question": question,
+                "category": category,
+                "token_id": token_id,
+                "market_resolved": market_resolved,
+                "resolution_price": resolution_price,
+                "end_date": end_date,
+                "price_history": price_history,
+                "wallet_activity": wallet_activity,
+                "aggregated": {
+                    "yes_wallets": len(yes_wallets),
+                    "no_wallets": len(no_wallets),
+                    "consensus_side": consensus,
+                    "consensus_strength": (len(majority) / total) if total else 0,
+                    "first_entry_ts": min((w["first_entry_ts"] for w in wallet_activity if w["first_entry_ts"]), default=None),
+                    "tier1h_count": len(tier1h_majority),
+                    "avg_majority_entry": avg_majority_entry,
+                    "total_volume_usdc": sum((w["total_cost_usdc"] or 0) for w in wallet_activity),
+                },
+                "convergence_signal": {
+                    "fired": convergence_fired,
+                    "wallet_count": len(majority),
+                    "tier1h_count": len(tier1h_majority),
+                    "first_convergence_ts": convergence_ts,
+                    "convergence_price": convergence_price,
+                    "outcome": convergence_outcome,
+                },
+            }
+        finally:
+            conn.close()
+    except Exception as exc:
+        return {"available": False, "reason": str(exc)}
+
+
+def search_markets(
+    q: str = "",
+    category: str | None = None,
+    has_whale_activity: bool = False,
+    limit: int = 50,
+) -> dict[str, Any]:
+    """Search markets, ordered by tier1/1h whale count desc."""
+    import sqlite3 as _sq
+    db = _get_wallet_db()
+    if not db:
+        return {"available": False, "results": []}
+    try:
+        conn = _sq.connect(str(db._path))
+        try:
+            sql = """
+                SELECT mph.condition_id,
+                       MAX(mph.question) AS question,
+                       MAX(mph.category) AS category,
+                       COUNT(DISTINCT CASE WHEN l.tier IN ('tier1h','tier1')
+                                           THEN wmp.wallet END) AS whale_count,
+                       MAX(wmp.resolution_price) AS resolution_price,
+                       MAX(wmp.market_resolved) AS resolved
+                FROM market_price_history mph
+                LEFT JOIN wallet_market_positions wmp ON mph.condition_id = wmp.condition_id
+                LEFT JOIN leaderboard l ON wmp.wallet = l.wallet
+            """
+            where: list[str] = []
+            params: list[Any] = []
+            if q:
+                where.append("LOWER(mph.question) LIKE ?")
+                params.append(f"%{q.lower()}%")
+            if category:
+                where.append("LOWER(mph.category) = ?")
+                params.append(category.lower())
+            if where:
+                sql += " WHERE " + " AND ".join(where)
+            sql += " GROUP BY mph.condition_id"
+            if has_whale_activity:
+                sql += " HAVING whale_count > 0"
+            sql += " ORDER BY whale_count DESC, mph.condition_id LIMIT ?"
+            params.append(int(limit))
+
+            rows = conn.execute(sql, params).fetchall()
+            results = [
+                {
+                    "condition_id": r[0],
+                    "question": r[1] or "",
+                    "category": r[2] or "",
+                    "whale_count": r[3] or 0,
+                    "resolution_price": r[4],
+                    "resolved": bool(r[5]),
+                }
+                for r in rows
+            ]
+            return {"available": True, "count": len(results), "results": results}
+        finally:
+            conn.close()
+    except Exception as exc:
+        return {"available": False, "reason": str(exc), "results": []}
+
+
+def run_convergence_backtest(request: dict[str, Any]) -> dict[str, Any]:
+    """Backtest the 'wait for N wallets to converge' strategy.
+
+    For each market where >= min_wallets tier1/tier1h wallets are on the
+    same side, simulate entering at convergence_ts + delay_seconds using
+    the price from market_price_history at that timestamp, and exiting at
+    the market's resolution_price.
+    """
+    import datetime as _dt
+    import sqlite3 as _sq
+    from collections import defaultdict as _dd
+
+    db = _get_wallet_db()
+    if not db:
+        return {"available": False, "error": "wallet_db not available", "trades": []}
+
+    try:
+        start_date = request.get("start_date", "2025-01-01")
+        end_date = request.get("end_date", "2026-04-07")
+        min_wallets = max(2, int(request.get("min_wallets", 2)))
+        delay_seconds = int(request.get("delay_seconds", 86400))
+        slippage_pct = float(request.get("slippage_pct", 0.02))
+        starting_bankroll = float(request.get("starting_bankroll", 100_000))
+        stake_per_trade_pct = float(request.get("stake_per_trade_pct", 0.02))
+        wallet_tier = request.get("wallet_tier", "tier1h")
+        categories = request.get("categories")
+        max_markets = int(request.get("max_markets", 200))
+
+        start_ts = int(_dt.datetime.strptime(start_date, "%Y-%m-%d").timestamp())
+        end_ts = int(_dt.datetime.strptime(end_date, "%Y-%m-%d").timestamp())
+
+        if wallet_tier == "tier1h":
+            tier_filter = "l.tier = 'tier1h'"
+        elif wallet_tier == "tier1":
+            tier_filter = "l.tier IN ('tier1h','tier1')"
+        else:
+            tier_filter = "l.tier IN ('tier1h','tier1','tier2')"
+
+        cat_clause = ""
+        cat_params: list[Any] = []
+        if categories:
+            cat_clause = f" AND wmp.category IN ({','.join('?'*len(categories))})"
+            cat_params.extend(categories)
+
+        conn = _sq.connect(str(db._path))
+        try:
+            # Group resolved positions by (condition_id, side); collect ordered entry timestamps
+            rows = conn.execute(
+                f"""SELECT wmp.condition_id, wmp.side, wmp.first_entry_ts,
+                          wmp.avg_entry_price, wmp.resolution_price,
+                          wmp.market_resolved, wmp.question, wmp.category,
+                          wmp.realized_pnl, l.tier
+                   FROM wallet_market_positions wmp
+                   JOIN leaderboard l ON wmp.wallet = l.wallet
+                   WHERE wmp.market_resolved = 1
+                     AND wmp.resolution_price IS NOT NULL
+                     AND wmp.first_entry_ts BETWEEN ? AND ?
+                     AND {tier_filter}
+                     {cat_clause}
+                   ORDER BY wmp.first_entry_ts ASC""",
+                (start_ts, end_ts, *cat_params),
+            ).fetchall()
+
+            grouped: dict[tuple[str, str], list[tuple]] = _dd(list)
+            for r in rows:
+                key = (r[0], (r[1] or "YES").upper())
+                grouped[key].append(r)
+
+            signals: list[dict[str, Any]] = []
+            for (cid, side), entries in grouped.items():
+                if len(entries) < min_wallets:
+                    continue
+                # Convergence ts = the moment the Nth wallet entered
+                entries_sorted = sorted(entries, key=lambda x: x[2] or 0)
+                convergence_entry = entries_sorted[min_wallets - 1]
+                convergence_ts = convergence_entry[2]
+                if not convergence_ts:
+                    continue
+                signals.append({
+                    "cid": cid,
+                    "side": side,
+                    "convergence_ts": convergence_ts,
+                    "wallet_count": len(entries),
+                    "res_price": entries_sorted[0][4],
+                    "question": entries_sorted[0][6] or "",
+                    "category": entries_sorted[0][7] or "",
+                    "wallet_realized_pnl": sum((e[8] or 0) for e in entries_sorted),
+                })
+
+            signals.sort(key=lambda s: s["convergence_ts"])
+            signals = signals[:max_markets]
+
+            # Simulate
+            bankroll = starting_bankroll
+            trades: list[dict[str, Any]] = []
+            for sig in signals:
+                entry_ts = sig["convergence_ts"] + delay_seconds
+                # Look up market price at entry_ts
+                row = conn.execute(
+                    """SELECT p FROM market_price_history
+                       WHERE condition_id = ? AND t <= ?
+                       ORDER BY t DESC LIMIT 1""",
+                    (sig["cid"], entry_ts),
+                ).fetchone()
+                market_price = row[0] if row else None
+                if market_price is None or market_price <= 0:
+                    continue
+
+                # Clamp prices into [0.05, 0.95] — outside this range outcome
+                # tokens are too thinly traded for realistic fills, and the
+                # leverage math (shares = stake/price) explodes.
+                if sig["side"] == "NO":
+                    our_price = max(market_price * (1 - slippage_pct), 0.05)
+                    our_exit = 1.0 - sig["res_price"]
+                else:
+                    our_price = min(market_price * (1 + slippage_pct), 0.95)
+                    our_exit = sig["res_price"]
+                our_price = max(min(our_price, 0.95), 0.05)
+
+                # Constant sizing based on STARTING bankroll — convergence
+                # signals fire rarely so compounding distorts results.
+                stake = max(starting_bankroll * stake_per_trade_pct, 25)
+                if stake <= 0:
+                    continue
+
+                pnl = (our_exit - our_price) * stake / our_price if our_price > 0 else 0
+                bankroll += pnl
+                trades.append({
+                    "condition_id": sig["cid"],
+                    "question": sig["question"][:100],
+                    "category": sig["category"],
+                    "side": sig["side"],
+                    "wallet_count": sig["wallet_count"],
+                    "convergence_ts": sig["convergence_ts"],
+                    "entry_ts": entry_ts,
+                    "our_entry_price": round(our_price, 4),
+                    "our_exit_price": round(our_exit, 4),
+                    "stake": round(stake, 2),
+                    "pnl": round(pnl, 2),
+                    "won": pnl > 0,
+                })
+        finally:
+            conn.close()
+
+        if not trades:
+            return {
+                "available": True,
+                "total_trades": 0,
+                "trades": [],
+                "convergence_stats": {
+                    "markets_with_convergence": len(grouped),
+                    "signals_meeting_threshold": len(signals),
+                    "trades_simulated": 0,
+                },
+                "config": {
+                    "min_wallets": min_wallets,
+                    "delay_seconds": delay_seconds,
+                    "slippage_pct": slippage_pct,
+                    "starting_bankroll": starting_bankroll,
+                    "wallet_tier": wallet_tier,
+                },
+            }
+
+        wins = sum(1 for t in trades if t["won"])
+        total_pnl = sum(t["pnl"] for t in trades)
+
+        # By wallet count breakdown
+        by_wc: dict[int, dict[str, float]] = _dd(lambda: {"trades": 0, "wins": 0, "pnl": 0.0})
+        for t in trades:
+            wc = t["wallet_count"]
+            by_wc[wc]["trades"] += 1
+            by_wc[wc]["wins"] += 1 if t["won"] else 0
+            by_wc[wc]["pnl"] += t["pnl"]
+        for wc in by_wc:
+            by_wc[wc]["pnl"] = round(by_wc[wc]["pnl"], 2)
+            by_wc[wc]["win_rate"] = round(by_wc[wc]["wins"] / by_wc[wc]["trades"], 3) if by_wc[wc]["trades"] else 0
+
+        by_month: dict[str, dict[str, float]] = _dd(lambda: {"pnl": 0.0, "trades": 0, "wins": 0})
+        by_cat: dict[str, dict[str, float]] = _dd(lambda: {"pnl": 0.0, "trades": 0, "wins": 0})
+        for t in trades:
+            mo = _dt.datetime.fromtimestamp(t["entry_ts"]).strftime("%Y-%m")
+            by_month[mo]["pnl"] += t["pnl"]
+            by_month[mo]["trades"] += 1
+            by_month[mo]["wins"] += 1 if t["won"] else 0
+            cat = t["category"] or "other"
+            by_cat[cat]["pnl"] += t["pnl"]
+            by_cat[cat]["trades"] += 1
+            by_cat[cat]["wins"] += 1 if t["won"] else 0
+
+        avg_wallets = sum(t["wallet_count"] for t in trades) / len(trades)
+
+        return {
+            "available": True,
+            "total_trades": len(trades),
+            "winning_trades": wins,
+            "win_rate": round(wins / len(trades), 3),
+            "total_pnl": round(total_pnl, 2),
+            "total_pnl_pct": round(total_pnl / starting_bankroll * 100, 2),
+            "trades": trades,
+            "by_month": {k: {kk: (round(vv, 2) if isinstance(vv, float) else vv) for kk, vv in v.items()}
+                         for k, v in sorted(by_month.items())},
+            "by_category": {k: {kk: (round(vv, 2) if isinstance(vv, float) else vv) for kk, vv in v.items()}
+                            for k, v in by_cat.items()},
+            "convergence_stats": {
+                "markets_with_convergence": len(grouped),
+                "signals_meeting_threshold": len(signals),
+                "trades_simulated": len(trades),
+                "avg_wallets_per_signal": round(avg_wallets, 2),
+                "by_wallet_count": dict(by_wc),
+            },
+            "config": {
+                "min_wallets": min_wallets,
+                "delay_seconds": delay_seconds,
+                "slippage_pct": slippage_pct,
+                "starting_bankroll": starting_bankroll,
+                "stake_per_trade_pct": stake_per_trade_pct,
+                "wallet_tier": wallet_tier,
+                "date_range": f"{start_date} to {end_date}",
+            },
+        }
+    except Exception as exc:
+        return {"available": False, "error": str(exc), "trades": []}
+
+
+def read_wallet_positions(wallet_address: str) -> dict[str, Any]:
+    """Return current open positions from wallet_positions table."""
+    db = _get_wallet_db()
+    if not db:
+        return {"available": False, "wallet": wallet_address, "count": 0, "positions": []}
+    try:
+        with db._lock:
+            rows = db._conn.execute(
+                """SELECT condition_id, title, outcome, side, size, avg_price,
+                          initial_value, current_value, cur_price, cash_pnl,
+                          percent_pnl, realized_pnl, total_bought, redeemable,
+                          end_date, updated_at
+                   FROM wallet_positions
+                   WHERE wallet = ?
+                   ORDER BY ABS(COALESCE(cash_pnl, 0)) DESC""",
+                (wallet_address,),
+            ).fetchall()
+        cols = ["condition_id", "title", "outcome", "side", "size", "avg_price",
+                "initial_value", "current_value", "cur_price", "cash_pnl",
+                "percent_pnl", "realized_pnl", "total_bought", "redeemable",
+                "end_date", "updated_at"]
+        positions = [dict(zip(cols, r)) for r in rows]
+        return {
+            "available": True,
+            "wallet": wallet_address,
+            "count": len(positions),
+            "positions": positions,
+            "total_unrealized": round(sum((p.get("cash_pnl") or 0) for p in positions), 2),
+            "total_value": round(sum((p.get("current_value") or 0) for p in positions), 2),
+        }
+    except Exception as exc:
+        return {"available": False, "reason": str(exc), "wallet": wallet_address, "count": 0, "positions": []}
+
+
+def read_smart_money_wallet_detail(address: str) -> dict[str, Any]:
+    """Wallet detail from wallet_intelligence.db + leaderboard."""
+    db = _get_wallet_db()
+    if not db:
+        return {"available": False, "reason": "Wallet intelligence DB not found"}
+
+    try:
+        import sqlite3 as _sq
+
+        conn = _sq.connect(str(db._path))
+
+        # Profile + leaderboard join (RIGHT JOIN-style: include PM-only wallets)
+        row = conn.execute("""
+            SELECT
+                COALESCE(l.tier, 'unranked') as tier,
+                COALESCE(l.directional_win_rate, p.directional_win_rate) as directional_win_rate,
+                l.rolling_20_wr,
+                COALESCE(l.conviction_score, p.conviction_score) as conviction_score,
+                COALESCE(l.resolved_trades, p.resolved_trades) as resolved_trades,
+                COALESCE(l.total_volume_usdc, p.total_volume_usdc) as total_volume_usdc,
+                COALESCE(l.wallet_type, p.wallet_type) as wallet_type,
+                l.wallet_bucket,
+                p.net_pnl_usdc, p.profit_factor,
+                p.avg_win_size_usdc, p.avg_loss_size_usdc,
+                p.large_bet_threshold, p.volume_tier, p.last_trade_ts,
+                p.politics_win_rate, p.crypto_win_rate,
+                p.category_trades, p.equity_score,
+                l.primary_category, l.profit_factor as lb_pf,
+                l.pm_pnl, l.pm_rank, l.leaderboard_source, l.pseudonym,
+                p.pnl_7d, p.pnl_30d, p.pnl_90d, p.pnl_trend, p.pnl_consistency,
+                p.pnl_volatility, p.sharpe_ratio, p.sortino_ratio,
+                p.max_drawdown_pct, p.max_drawdown_usd, p.recovery_factor,
+                p.calmar_ratio, p.win_streak_max, p.loss_streak_max,
+                p.expected_value, p.kelly_fraction,
+                p.ev_politics, p.ev_sports, p.ev_crypto, p.ev_economics,
+                p.edge_vs_market, p.avg_hours_before_resolution,
+                p.early_entry_rate, p.category_specialization,
+                p.open_positions_count, p.open_positions_value
+            FROM wallet_profiles p
+            LEFT JOIN leaderboard l ON p.wallet = l.wallet
+            WHERE p.wallet = ?
+        """, (address,)).fetchone()
+
+        if not row:
+            return {"available": False, "reason": f"Wallet {address[:16]}... not found"}
+
+        cols = ["tier", "directional_win_rate", "rolling_20_wr", "conviction_score",
+                "resolved_trades", "total_volume_usdc", "wallet_type", "wallet_bucket",
+                "net_pnl_usdc", "profit_factor", "avg_win_size_usdc", "avg_loss_size_usdc",
+                "large_bet_threshold", "volume_tier", "last_trade_ts",
+                "politics_win_rate", "crypto_win_rate", "category_trades", "equity_score",
+                "primary_category", "lb_profit_factor",
+                "pm_pnl", "pm_rank", "leaderboard_source", "pseudonym",
+                "pnl_7d", "pnl_30d", "pnl_90d", "pnl_trend", "pnl_consistency",
+                "pnl_volatility", "sharpe_ratio", "sortino_ratio",
+                "max_drawdown_pct", "max_drawdown_usd", "recovery_factor",
+                "calmar_ratio", "win_streak_max", "loss_streak_max",
+                "expected_value", "kelly_fraction",
+                "ev_politics", "ev_sports", "ev_crypto", "ev_economics",
+                "edge_vs_market", "avg_hours_before_resolution",
+                "early_entry_rate", "category_specialization",
+                "open_positions_count", "open_positions_value"]
+        profile = dict(zip(cols, row))
+        profile["wallet"] = address
+        # Display PnL prefers Polymarket-reported value
+        profile["display_pnl"] = profile.get("pm_pnl") or profile.get("net_pnl_usdc")
+        profile["display_pnl_source"] = "polymarket" if profile.get("pm_pnl") is not None else "local_estimate"
+
+        # Category breakdown from category_trades JSON
+        cat_breakdown = {}
+        try:
+            ct = json.loads(profile.get("category_trades") or "{}") or {}
+            total = sum(ct.values()) or 1
+            cat_breakdown = {k: round(v / total, 3) for k, v in sorted(ct.items(), key=lambda x: -x[1])}
+        except Exception:
+            pass
+        profile["category_breakdown"] = cat_breakdown
+
+        # PnL history from wallet_trades
+        pnl_rows = conn.execute("""
+            SELECT timestamp, pnl FROM wallet_trades
+            WHERE wallet = ? AND market_resolved = 1 AND pnl IS NOT NULL
+            ORDER BY timestamp ASC
+        """, (address,)).fetchall()
+
+        cumulative = 0.0
+        pnl_history = []
+        for ts, pnl in pnl_rows:
+            cumulative += (pnl or 0)
+            pnl_history.append({"ts": ts, "pnl": round(pnl or 0, 2), "cumulative": round(cumulative, 2)})
+
+        # Signals triggered by this wallet
+        sig_rows = conn.execute("""
+            SELECT signal_type, COUNT(*) as n FROM market_signals
+            WHERE wallet = ? AND signal_type IS NOT NULL
+            GROUP BY signal_type
+        """, (address,)).fetchall()
+        signals_triggered = {r[0]: r[1] for r in sig_rows} if sig_rows else {}
+
+        # Recent trades
+        trade_rows = conn.execute("""
+            SELECT side, size, price, timestamp, category, market_resolved,
+                   market_outcome, pnl, title, slug
+            FROM wallet_trades
+            WHERE wallet = ?
+            ORDER BY timestamp DESC LIMIT 50
+        """, (address,)).fetchall()
+        trades = []
+        for tr in trade_rows:
+            side, size, price, ts, cat, resolved, outcome, pnl, title, slug = tr
+            won = None
+            if resolved and pnl is not None:
+                won = pnl > 0
+            trades.append({
+                "side": side, "size": round(size or 0, 2), "price": round(price or 0, 4),
+                "timestamp": ts, "category": cat,
+                "resolved": bool(resolved), "outcome": outcome,
+                "pnl": round(pnl, 2) if pnl is not None else None,
+                "won": won,
+                "question": title or slug or "",
+            })
+
+        # Open positions
+        pos_rows = conn.execute("""
+            SELECT asset, title, outcome, size, avg_price, current_value,
+                   cash_pnl, percent_pnl, cur_price
+            FROM wallet_positions
+            WHERE wallet = ? AND size > 0
+            ORDER BY current_value DESC
+        """, (address,)).fetchall()
+        open_positions = []
+        for pr in pos_rows:
+            open_positions.append({
+                "asset": pr[0], "title": pr[1], "outcome": pr[2],
+                "size": pr[3], "avg_price": pr[4], "current_value": pr[5],
+                "cash_pnl": pr[6], "percent_pnl": pr[7], "cur_price": pr[8],
+            })
+
+        conn.close()
+
+        return {
+            "available": True,
+            "wallet": address,
+            **{k: v for k, v in profile.items() if k != "category_trades"},
+            "pnl_history": pnl_history,
+            "signals_triggered": signals_triggered,
+            "recent_trades": trades,
+            "open_positions": open_positions,
             "trade_count": len(trades),
-            "alerts": alerts,
-            "open_positions": open_pos,
         }
     except Exception as exc:
         return {"available": False, "reason": str(exc)}
@@ -856,7 +2476,82 @@ def read_smart_money_winners(*, window: str = "all") -> dict[str, Any]:
     if not db:
         return {"available": False, "reason": "Wallet intelligence DB not found", "data": []}
     try:
-        rows = db.get_winners(window=window, limit=50)
+        # Read directly from leaderboard table (includes polymarket-sourced tier1h)
+        # Sort: tier1h first (by PM PnL DESC), then tier1 (by conviction DESC), then tier2
+        with db._lock:
+            lb_rows = db._conn.execute(
+                """SELECT l.wallet, l.tier, l.leaderboard_source, l.pseudonym,
+                          l.directional_win_rate, l.rolling_20_wr, l.conviction_score,
+                          l.profit_factor, l.primary_category, l.wallet_bucket,
+                          l.resolved_trades, l.total_volume_usdc, l.net_pnl_usdc,
+                          l.rank, l.pm_pnl, l.pm_rank, l.wallet_type
+                   FROM leaderboard l
+                   ORDER BY
+                     CASE l.tier WHEN 'tier1h' THEN 1 WHEN 'tier1' THEN 2 WHEN 'tier2' THEN 3 ELSE 4 END,
+                     COALESCE(l.pm_pnl, l.net_pnl_usdc, 0) DESC,
+                     COALESCE(l.conviction_score, 0) DESC
+                   LIMIT 100"""
+            ).fetchall()
+
+        cols = ["wallet", "tier", "leaderboard_source", "pseudonym",
+                "directional_win_rate", "rolling_20_wr", "conviction_score",
+                "profit_factor", "primary_category", "wallet_bucket",
+                "resolved_trades", "total_volume_usdc", "net_pnl_usdc",
+                "rank", "pm_pnl", "pm_rank", "wallet_type"]
+        rows = []
+        for r in lb_rows:
+            row = dict(zip(cols, r))
+            # Display PnL: prefer Polymarket-reported when available
+            row["display_pnl"] = row.get("pm_pnl") or row.get("net_pnl_usdc")
+            row["display_pnl_source"] = "polymarket" if row.get("pm_pnl") is not None else "local_estimate"
+            # Compat fields for GUI
+            row["profit"] = row["display_pnl"]
+            row["volume"] = row.get("total_volume_usdc")
+            row["trades"] = row.get("resolved_trades")
+            row["win_rate"] = row.get("directional_win_rate")
+            rows.append(row)
+
+        # Fall back to wallet_profiles if leaderboard is empty
+        if not rows:
+            rows = db.get_winners(window=window, limit=50)
+
+        # Enrich each row with tier, rolling_20_wr, conviction_score, profit_factor,
+        # primary_category from the leaderboard table
+        if rows:
+            wallets = [r["wallet"] for r in rows]
+            placeholders = ",".join("?" * len(wallets))
+            with db._lock:
+                lb_rows = db._conn.execute(
+                    f"""SELECT wallet, tier, rolling_20_wr, conviction_score,
+                               profit_factor, primary_category, wallet_bucket,
+                               leaderboard_source, pseudonym, net_pnl_usdc
+                        FROM leaderboard WHERE wallet IN ({placeholders})""",
+                    wallets,
+                ).fetchall()
+                pf_rows = db._conn.execute(
+                    f"""SELECT wallet, profit_factor, net_pnl_usdc, pseudonym
+                        FROM wallet_profiles WHERE wallet IN ({placeholders})""",
+                    wallets,
+                ).fetchall()
+            lb_map = {r[0]: {
+                "tier": r[1], "rolling_20_wr": r[2], "conviction_score": r[3],
+                "profit_factor": r[4], "primary_category": r[5], "wallet_bucket": r[6],
+                "leaderboard_source": r[7], "pseudonym": r[8], "lb_net_pnl": r[9],
+            } for r in lb_rows}
+            pf_map = {r[0]: {"profit_factor": r[1], "net_pnl_usdc": r[2], "pseudonym": r[3]} for r in pf_rows}
+            for r in rows:
+                lb = lb_map.get(r["wallet"], {})
+                pf = pf_map.get(r["wallet"], {})
+                r["tier"] = lb.get("tier") or "unranked"
+                r["rolling_20_wr"] = lb.get("rolling_20_wr")
+                r["conviction_score"] = lb.get("conviction_score")
+                r["profit_factor"] = lb.get("profit_factor") or pf.get("profit_factor")
+                r["primary_category"] = lb.get("primary_category") or "unknown"
+                r["wallet_bucket"] = lb.get("wallet_bucket") or r.get("wallet_type") or "unknown"
+                r["net_pnl_usdc"] = lb.get("lb_net_pnl") or pf.get("net_pnl_usdc") or r.get("profit")
+                r["leaderboard_source"] = lb.get("leaderboard_source") or "local"
+                r["pseudonym"] = lb.get("pseudonym") or pf.get("pseudonym") or ""
+
         return {"available": True, "data": rows, "window": window, "count": len(rows)}
     except Exception as exc:
         return {"available": False, "reason": str(exc), "data": []}
@@ -886,15 +2581,15 @@ def read_smart_money_wallet_trades(address: str, *, page: int = 1, limit: int = 
 
 
 _SIGNAL_ALLOCATIONS = {
-    "wallet_reversal":    {"allocated": 1800, "stake_per_trade": 90},
-    "cascade":            {"allocated": 1500, "stake_per_trade": 75},
-    "oversized_bet":      {"allocated": 1500, "stake_per_trade": 75},
-    "accumulation":       {"allocated": 1200, "stake_per_trade": 60},
-    "market_maker_flip":  {"allocated": 1200, "stake_per_trade": 60},
-    "convergence":        {"allocated": 1200, "stake_per_trade": 60},
-    "specialist_entry":   {"allocated":  800, "stake_per_trade": 40},
-    "pre_deadline_surge": {"allocated":  500, "stake_per_trade": 25},
-    "whale_entry":        {"allocated":  300, "stake_per_trade": 15},
+    "wallet_reversal":    {"allocated": 18000, "stake_per_trade": 9000},
+    "cascade":            {"allocated": 15000, "stake_per_trade": 7500},
+    "oversized_bet":      {"allocated": 15000, "stake_per_trade": 7500},
+    "accumulation":       {"allocated": 12000, "stake_per_trade": 6000},
+    "market_maker_flip":  {"allocated": 12000, "stake_per_trade": 6000},
+    "convergence":        {"allocated": 12000, "stake_per_trade": 6000},
+    "specialist_entry":   {"allocated":  8000, "stake_per_trade": 4000},
+    "pre_deadline_surge": {"allocated":  5000, "stake_per_trade": 2500},
+    "whale_entry":        {"allocated":  3000, "stake_per_trade": 1500},
 }
 
 
@@ -948,9 +2643,39 @@ def read_paper_bankroll() -> dict[str, Any]:
         except Exception:
             pass
 
+    # Compute Polymarket-specific stats (non-archived)
+    poly_open = 0
+    poly_deployed = 0.0
+    kalshi_open = 0
+    kalshi_cash = 0.0
+    if db_path.exists():
+        try:
+            import sqlite3 as _sq
+            conn = _sq.connect(str(db_path), check_same_thread=False)
+            poly_open = conn.execute(
+                "SELECT COUNT(*) FROM trades WHERE platform='polymarket' AND status='open' AND (archived=0 OR archived IS NULL)"
+            ).fetchone()[0]
+            poly_deployed = conn.execute(
+                "SELECT COALESCE(SUM(size_usd), 0) FROM trades WHERE platform='polymarket' AND status='open' AND (archived=0 OR archived IS NULL)"
+            ).fetchone()[0]
+            kalshi_open = conn.execute(
+                "SELECT COUNT(*) FROM trades WHERE (platform='kalshi' OR platform IS NULL) AND status='open'"
+            ).fetchone()[0]
+            cash_row = conn.execute("SELECT cash_usd FROM portfolio ORDER BY id DESC LIMIT 1").fetchone()
+            kalshi_cash = float(cash_row[0]) if cash_row else 0
+            conn.close()
+        except Exception:
+            pass
+
     return {
         "available": True,
-        "total_bankroll": 10000,
+        "total_bankroll": 100000,
+        "starting_bankroll": 100000,
+        "polymarket_cash": round(100000 - poly_deployed, 2),
+        "polymarket_open_count": poly_open,
+        "polymarket_deployed": round(poly_deployed, 2),
+        "kalshi_cash": round(kalshi_cash, 2),
+        "kalshi_open_count": kalshi_open,
         "net_pnl": round(total_pnl, 2),
         "win_rate": round(total_wins / total_resolved, 3) if total_resolved > 0 else None,
         "resolved": total_resolved,
@@ -1003,64 +2728,626 @@ def read_paper_pnl_history() -> dict[str, Any]:
     }
 
 
-def read_signals_performance() -> dict[str, Any]:
-    """Signal type performance from market_signals table."""
-    db = _get_wallet_db()
-    by_type: list[dict] = []
-    total_fired = 0
-    total_resolved = 0
+def read_market_detail(condition_id: str) -> dict[str, Any]:
+    """Full detail for a specific market: whale trades, signals, paper position."""
+    import time as _t
+    now = int(_t.time())
 
-    for sig_type, alloc in _SIGNAL_ALLOCATIONS.items():
-        entry = {
-            "signal_type": sig_type,
-            "allocated": alloc["allocated"],
-            "stake_per_trade": alloc["stake_per_trade"],
-            "fired": 0, "resolved": 0, "wins": 0,
-            "win_rate": None, "avg_ev": None, "profit_factor": None,
-            "cumulative_pnl": 0, "status": "building",
+    # Market metadata from universe
+    question = ""
+    category = "other"
+    end_date_iso = ""
+    volume = 0
+    try:
+        from trading_platform.polymarket.market_universe import MarketUniverse
+        u = MarketUniverse()
+        if u.load_cached():
+            question = u.get_question(condition_id)
+            category = u.get_category(condition_id)
+            entry = u._by_condition.get(condition_id, {})
+            end_date_iso = entry.get("end_date_iso", "")
+            volume = entry.get("volume", 0)
+    except Exception:
+        pass
+
+    hours_to_close = None
+    if end_date_iso:
+        try:
+            from datetime import datetime, timezone
+            end_dt = datetime.fromisoformat(end_date_iso.replace("Z", "+00:00"))
+            hours_to_close = round((end_dt - datetime.now(tz=timezone.utc)).total_seconds() / 3600, 1)
+        except Exception:
+            pass
+
+    # Current price
+    current_price = None
+    try:
+        import urllib.request as _ur
+        url = f"https://gamma-api.polymarket.com/markets?conditionId={condition_id}&limit=1"
+        with _ur.urlopen(url, timeout=5) as resp:
+            data = json.loads(resp.read())
+            if data and isinstance(data, list):
+                prices_str = data[0].get("outcomePrices")
+                if prices_str:
+                    prices = json.loads(prices_str) if isinstance(prices_str, str) else prices_str
+                    if prices:
+                        current_price = float(prices[0])
+                if not question:
+                    question = data[0].get("question", "")
+    except Exception:
+        pass
+
+    # Whale trades from wallet_alerts
+    whale_trades = []
+    whale_summary = {"tier1_count": 0, "tier2_count": 0, "buy_volume_tier1": 0, "sell_volume_tier1": 0}
+    db = _get_wallet_db()
+    if db:
+        try:
+            with db._lock:
+                rows = db._conn.execute("""
+                    SELECT a.wallet, a.side, a.size, a.price, a.detected_at, a.tier,
+                           a.directional_win_rate, a.category, a.question,
+                           l.wallet_type, l.conviction_score
+                    FROM wallet_alerts a
+                    LEFT JOIN leaderboard l ON a.wallet = l.wallet
+                    WHERE a.token_id = ?
+                    ORDER BY a.detected_at DESC LIMIT 100
+                """, (condition_id,)).fetchall()
+
+            for r in rows:
+                w, side, size, price, ts, tier, wr, cat, q, wtype, conv = r
+                whale_trades.append({
+                    "wallet": (w or "")[:10] + "...",
+                    "wallet_full": w,
+                    "side": side, "size": size, "price": price,
+                    "detected_at": ts, "tier": tier,
+                    "directional_win_rate": wr,
+                    "wallet_type": wtype, "conviction_score": conv,
+                    "time_ago": _human_age(ts, now),
+                })
+                if tier == 1:
+                    whale_summary["tier1_count"] += 1
+                    if side == "BUY":
+                        whale_summary["buy_volume_tier1"] += (size or 0)
+                    else:
+                        whale_summary["sell_volume_tier1"] += (size or 0)
+                elif tier == 2:
+                    whale_summary["tier2_count"] += 1
+
+            buy_t1 = whale_summary["buy_volume_tier1"]
+            sell_t1 = whale_summary["sell_volume_tier1"]
+            whale_summary["net_direction"] = "BUY" if buy_t1 > sell_t1 else "SELL" if sell_t1 > buy_t1 else "MIXED"
+        except Exception:
+            pass
+
+    # Signals on this market
+    signals = []
+    if db:
+        try:
+            with db._lock:
+                sig_rows = db._conn.execute("""
+                    SELECT signal_type, direction, confidence, wallet, fired_at, size
+                    FROM market_signals WHERE condition_id = ?
+                    ORDER BY fired_at DESC LIMIT 20
+                """, (condition_id,)).fetchall()
+            for r in sig_rows:
+                signals.append({
+                    "signal_type": r[0], "direction": r[1], "confidence": r[2],
+                    "wallet": (r[3] or "")[:10] + "...", "fired_at": r[4], "size": r[5],
+                    "time_ago": _human_age(r[4], now),
+                })
+        except Exception:
+            pass
+
+    # Paper position
+    paper_position = None
+    try:
+        import sqlite3 as _sq
+        paper_db = DATA_ROOT / "kalshi" / "paper_trades.db"
+        if paper_db.exists():
+            conn = _sq.connect(str(paper_db))
+            pr = conn.execute("""
+                SELECT ticker, side, entry_price, size_usd, confidence, signal_type, entry_ts
+                FROM trades
+                WHERE (full_token_id = ? OR ticker LIKE ?)
+                AND status = 'open' AND (archived = 0 OR archived IS NULL)
+                LIMIT 1
+            """, (condition_id, condition_id[:20] + "%")).fetchone()
+            if pr:
+                paper_position = {
+                    "side": pr[1], "entry_price": pr[2], "size_usd": pr[3],
+                    "confidence": pr[4], "signal_type": pr[5], "entry_ts": pr[6],
+                    "current_price": current_price,
+                    "unrealized_pnl": round(pr[3] * (current_price / pr[2] - 1), 2) if current_price and pr[2] else None,
+                }
+            conn.close()
+    except Exception:
+        pass
+
+    return {
+        "available": True,
+        "condition_id": condition_id,
+        "question": question,
+        "category": category,
+        "end_date_iso": end_date_iso,
+        "hours_to_close": hours_to_close,
+        "current_price": current_price,
+        "total_volume": volume,
+        "whale_trades": whale_trades,
+        "whale_summary": whale_summary,
+        "signals": signals,
+        "paper_position": paper_position,
+    }
+
+
+def _human_age(ts: int | None, now: int) -> str:
+    if not ts:
+        return "?"
+    d = now - ts
+    if d < 60:
+        return f"{d}s ago"
+    if d < 3600:
+        return f"{d // 60}m ago"
+    if d < 86400:
+        return f"{d // 3600}h ago"
+    return f"{d // 86400}d ago"
+
+
+# Module-level cache: condition_id -> (timestamp, price). 5-minute TTL.
+_PAPER_PRICE_CACHE: dict[str, tuple[float, float | None]] = {}
+_PAPER_PRICE_TTL_SECONDS = 300
+
+
+def _fetch_polymarket_current_price(condition_id: str) -> float | None:
+    """Look up the current YES-side price for a Polymarket market.
+
+    Uses the verified ``condition_ids`` (plural) Gamma API param — passing
+    ``conditionId`` is silently ignored and returns the default first
+    market. Cached for 5 minutes per condition_id. Returns None on
+    failure rather than raising.
+    """
+    import time as _t
+    now = _t.time()
+    cached = _PAPER_PRICE_CACHE.get(condition_id)
+    if cached and (now - cached[0]) < _PAPER_PRICE_TTL_SECONDS:
+        return cached[1]
+
+    price: float | None = None
+    try:
+        import requests as _req
+        r = _req.get(
+            "https://gamma-api.polymarket.com/markets",
+            params={"condition_ids": condition_id},
+            timeout=5,
+        )
+        if r.status_code == 200:
+            data = r.json()
+            m = data[0] if isinstance(data, list) and data else None
+            if m and (m.get("conditionId") or "").lower() == condition_id.lower():
+                # Try in priority order: lastTradePrice, midpoint of bid/ask, outcomePrices[0]
+                ltp = m.get("lastTradePrice")
+                if ltp is not None:
+                    price = float(ltp)
+                if price is None:
+                    bb = m.get("bestBid")
+                    ba = m.get("bestAsk")
+                    if bb is not None and ba is not None:
+                        price = (float(bb) + float(ba)) / 2
+                if price is None:
+                    op_raw = m.get("outcomePrices")
+                    if op_raw:
+                        op = json.loads(op_raw) if isinstance(op_raw, str) else op_raw
+                        if op:
+                            price = float(op[0])
+    except Exception as exc:
+        logger = __import__("logging").getLogger(__name__)
+        logger.debug("price fetch failed for %s: %s", condition_id[:20], exc)
+
+    _PAPER_PRICE_CACHE[condition_id] = (now, price)
+    return price
+
+
+def read_paper_positions_enriched() -> dict[str, Any]:
+    """Open Polymarket paper positions with live current prices.
+
+    Reads from ``polymarket_paper_trades`` (the canonical Polymarket
+    paper-trade table inside ``wallet_intelligence.db``), enriches each
+    position with the current Gamma price, and computes unrealized PnL.
+    """
+    import sqlite3 as _sq
+    db = _get_wallet_db()
+    if not db:
+        return {
+            "available": True, "positions": [], "count": 0,
+            "unrealized_pnl_total": 0, "starting_bankroll": 100_000,
         }
 
-        if db:
+    try:
+        conn = _sq.connect(str(db._path))
+        rows = conn.execute(
+            """SELECT id, condition_id, question, category, side,
+                      entry_price, size_usd, signal_type, confidence,
+                      wallet, entry_ts
+               FROM polymarket_paper_trades
+               WHERE archived = 0
+               ORDER BY entry_ts DESC"""
+        ).fetchall()
+        conn.close()
+    except Exception as exc:
+        return {"available": False, "error": str(exc), "positions": []}
+
+    cols = ["id", "condition_id", "question", "category", "side",
+            "entry_price", "size_usd", "signal_type", "confidence",
+            "wallet", "entry_ts"]
+
+    positions: list[dict[str, Any]] = []
+    total_unrealized = 0.0
+
+    for row in rows:
+        p = dict(zip(cols, row))
+        cid = p["condition_id"] or ""
+
+        current_price: float | None = None
+        unrealized_pnl: float | None = None
+        unrealized_pct: float | None = None
+        if cid:
+            current_price = _fetch_polymarket_current_price(cid)
+            entry = float(p.get("entry_price") or 0)
+            size = float(p.get("size_usd") or 0)
+            if current_price is not None and entry > 0 and size > 0:
+                # Long this outcome at entry → return = (current - entry) / entry
+                ret = (current_price / entry) - 1.0
+                unrealized_pct = round(ret * 100, 2)
+                unrealized_pnl = round(size * ret, 2)
+                total_unrealized += unrealized_pnl
+
+        sig_type = p.get("signal_type") or ""
+        conf = float(p.get("confidence") or 0)
+        justification = f"{sig_type}: conf {conf:.0%}" if sig_type else "unknown"
+
+        positions.append({
+            "id": p["id"],
+            "condition_id": cid,
+            "question": p.get("question") or "",
+            "category": p.get("category") or "",
+            "side": p.get("side") or "YES",
+            "entry_price": p.get("entry_price"),
+            "size_usd": p.get("size_usd"),
+            "signal_type": sig_type,
+            "confidence": conf,
+            "wallet": p.get("wallet"),
+            "entry_ts": p.get("entry_ts"),
+            "platform": "polymarket",
+            "current_price": round(current_price, 4) if current_price is not None else None,
+            "unrealized_pnl": unrealized_pnl,
+            "unrealized_pct": unrealized_pct,
+            "justification": justification,
+        })
+
+    return {
+        "available": True,
+        "positions": positions,
+        "count": len(positions),
+        "unrealized_pnl_total": round(total_unrealized, 2),
+        "starting_bankroll": 100_000,
+    }
+
+
+def read_live_readiness() -> dict[str, Any]:
+    """All live readiness gates computed from live data.
+
+    Aggregates: per-signal gates from polymarket_paper_trades, system
+    gates from env + CLOB connectivity + emergency stop file, and the
+    current KillSwitch hard limits for display.
+    """
+    import os as _os
+    import sqlite3 as _sq
+    db = _get_wallet_db()
+    if not db:
+        return {"available": False, "error": "wallet_db unavailable"}
+
+    try:
+        from trading_platform.polymarket.kill_switch import KillSwitch
+        from trading_platform.polymarket.kelly_sizer import KellySizer
+        from trading_platform.polymarket.clob_client import ClobClient
+    except Exception as exc:
+        return {"available": False, "error": f"live modules unavailable: {exc}"}
+
+    db_path = str(db._path)
+    ks = KillSwitch(db_path)
+    sizer = KellySizer(db_path)
+    clob = ClobClient()
+
+    # Per-signal performance from polymarket_paper_trades
+    sig_rows: list[tuple] = []
+    live_trades_count = 0
+    try:
+        conn = _sq.connect(db_path)
+        try:
+            sig_rows = conn.execute(
+                """SELECT signal_type,
+                          COUNT(*) AS n,
+                          AVG(return_pct) AS avg_return_pct,
+                          SUM(CASE WHEN outcome='win' THEN 1 ELSE 0 END) AS wins
+                   FROM polymarket_paper_trades
+                   WHERE archived = 0 AND exit_ts IS NOT NULL
+                     AND return_pct IS NOT NULL
+                   GROUP BY signal_type"""
+            ).fetchall()
             try:
-                with db._lock:
-                    row = db._conn.execute(
-                        """SELECT COUNT(*) as fired,
-                                  SUM(CASE WHEN status='resolved' THEN 1 ELSE 0 END) as resolved,
-                                  SUM(CASE WHEN status='resolved' AND confidence > 0.5 THEN 1 ELSE 0 END) as wins,
-                                  AVG(CASE WHEN status='resolved' THEN confidence END) as avg_conf
-                           FROM market_signals WHERE signal_type = ?""",
-                        (sig_type,),
-                    ).fetchone()
-                if row:
-                    entry["fired"] = row[0] or 0
-                    entry["resolved"] = row[1] or 0
-                    entry["wins"] = row[2] or 0
-                    total_fired += entry["fired"]
-                    total_resolved += entry["resolved"]
+                live_trades_count = conn.execute(
+                    "SELECT COUNT(*) FROM live_trades WHERE dry_run = 0"
+                ).fetchone()[0]
+            except _sq.OperationalError:
+                live_trades_count = 0
+        finally:
+            conn.close()
+    except Exception:
+        pass
+
+    signal_gates: list[dict[str, Any]] = []
+    for sig_type, n, avg_return_pct, wins in sig_rows:
+        n = n or 0
+        ev = (avg_return_pct or 0.0) / 100.0
+        wr = (wins or 0) / n if n > 0 else 0.0
+        kelly = sizer.compute_kelly(sig_type)
+        sample_ok = n >= ks.MIN_RESOLVED_HARD
+        ev_ok = ev > 0
+        wr_ok = wr >= ks.MIN_WIN_RATE if n >= 20 else True
+        ready = sample_ok and ev_ok and wr_ok
+        signal_gates.append({
+            "signal_type": sig_type,
+            "n_resolved": n,
+            "ev": round(ev, 4),
+            "win_rate": round(wr, 3) if n > 0 else None,
+            "kelly_recommended_usd": kelly.get("recommended_usd"),
+            "kelly_fraction": kelly.get("kelly_fractional"),
+            "gates": {
+                "sample_size": sample_ok,
+                "ev_positive": ev_ok,
+                "win_rate_ok": wr_ok,
+            },
+            "ready": ready,
+        })
+    signal_gates.sort(key=lambda s: (-int(s["ready"]), -s["n_resolved"]))
+
+    # CLOB + system state
+    clob_test = clob.test_connection()
+    is_stopped, stop_reason = ks.is_emergency_stopped()
+    master_switch = _os.getenv("POLYMARKET_LIVE_ENABLED", "").lower() in ("1", "true", "yes")
+
+    system_gates = {
+        "master_switch": master_switch,
+        "clob_reachable": clob_test.get("public_endpoint", False),
+        "clob_configured": clob_test.get("credentials_configured", False),
+        "wallet_set": clob_test.get("wallet_set", False),
+        "py_clob_client": clob_test.get("py_clob_client", False),
+        "emergency_stop_clear": not is_stopped,
+        "live_trades_executed": live_trades_count,
+    }
+
+    ready_signals = [s for s in signal_gates if s["ready"]]
+    return {
+        "available": True,
+        "system_gates": system_gates,
+        "signal_gates": signal_gates,
+        "ready_signals": [s["signal_type"] for s in ready_signals],
+        "n_ready": len(ready_signals),
+        "emergency_stopped": is_stopped,
+        "stop_reason": stop_reason,
+        "kill_switch_limits": {
+            "max_trade_usd": ks.MAX_TRADE_USD,
+            "max_daily_loss_pct": ks.MAX_DAILY_LOSS_PCT,
+            "max_open_positions": ks.MAX_OPEN_POSITIONS,
+            "min_win_rate": ks.MIN_WIN_RATE,
+            "min_resolved_hard": ks.MIN_RESOLVED_HARD,
+            "preferred_min_resolved": ks.PREFERRED_MIN_RESOLVED,
+            "bankroll": ks.BANKROLL,
+        },
+    }
+
+
+def read_live_trades(limit: int = 50) -> dict[str, Any]:
+    """Recent rows from the live_trades audit table."""
+    import sqlite3 as _sq
+    db = _get_wallet_db()
+    if not db:
+        return {"available": False, "trades": []}
+    try:
+        conn = _sq.connect(str(db._path))
+        try:
+            rows = conn.execute(
+                """SELECT id, attempted_at, signal_type, condition_id, question,
+                          direction, confidence, size_usd, entry_price,
+                          order_id, status, dry_run, error_msg
+                   FROM live_trades
+                   ORDER BY attempted_at DESC LIMIT ?""",
+                (int(limit),),
+            ).fetchall()
+        finally:
+            conn.close()
+    except Exception:
+        return {"available": True, "trades": [], "count": 0}
+    cols = ["id", "attempted_at", "signal_type", "condition_id", "question",
+            "direction", "confidence", "size_usd", "entry_price",
+            "order_id", "status", "dry_run", "error_msg"]
+    return {
+        "available": True,
+        "count": len(rows),
+        "trades": [dict(zip(cols, r)) for r in rows],
+    }
+
+
+_SIGNAL_BANKROLL_MAP: dict[str, int] = {
+    "wallet_reversal": 18_000, "cascade": 15_000, "oversized_bet": 15_000,
+    "accumulation": 12_000, "market_maker_flip": 12_000, "convergence": 12_000,
+    "price_velocity": 10_000, "specialist_entry": 8_000, "whale_exit": 8_000,
+    "no_position_entry": 8_000, "pre_deadline_surge": 5_000,
+    "position_reduction": 5_000, "whale_entry": 3_000,
+}
+
+
+def read_signals_performance() -> dict[str, Any]:
+    """Per-signal performance computed from polymarket_paper_trades.
+
+    Reports on the **paper trades** that signals actually placed (the
+    ground truth for paper-trading P&L), not on raw signal-fire counts.
+    Returns per-signal stats including win rate, profit factor, max
+    drawdown, equity curve and recent trades, plus a portfolio summary.
+    """
+    import sqlite3 as _sq
+    db = _get_wallet_db()
+    if not db:
+        return {"available": False, "by_type": [], "portfolio": {}}
+
+    try:
+        conn = _sq.connect(str(db._path))
+        try:
+            resolved_rows = conn.execute(
+                """SELECT signal_type, side, entry_price, exit_price, size_usd,
+                          realized_pnl, return_pct, outcome, entry_ts, exit_ts,
+                          condition_id, question
+                   FROM polymarket_paper_trades
+                   WHERE archived = 0 AND exit_ts IS NOT NULL
+                     AND realized_pnl IS NOT NULL
+                   ORDER BY entry_ts ASC"""
+            ).fetchall()
+            open_rows = conn.execute(
+                """SELECT signal_type, COUNT(*), SUM(size_usd)
+                   FROM polymarket_paper_trades
+                   WHERE archived = 0 AND exit_ts IS NULL
+                   GROUP BY signal_type"""
+            ).fetchall()
+        finally:
+            conn.close()
+    except Exception as exc:
+        return {"available": False, "error": str(exc), "by_type": []}
+
+    rcols = ["signal_type", "side", "entry_price", "exit_price", "size_usd",
+             "realized_pnl", "return_pct", "outcome", "entry_ts", "exit_ts",
+             "condition_id", "question"]
+    resolved = [dict(zip(rcols, r)) for r in resolved_rows]
+    open_by_type: dict[str, dict[str, float]] = {
+        r[0] or "": {"n_open": int(r[1] or 0), "deployed": float(r[2] or 0)}
+        for r in open_rows
+    }
+
+    by_type: list[dict[str, Any]] = []
+    for sig_type, allocated in _SIGNAL_BANKROLL_MAP.items():
+        group = [t for t in resolved if (t.get("signal_type") or "") == sig_type]
+        n_resolved = len(group)
+        opened = open_by_type.get(sig_type, {"n_open": 0, "deployed": 0.0})
+
+        wins = sum(1 for t in group if (t.get("outcome") or "") == "win")
+        losses = n_resolved - wins
+        win_rate = round(wins / n_resolved, 3) if n_resolved >= 3 else None
+
+        cum_pnl = round(sum(float(t.get("realized_pnl") or 0) for t in group), 2)
+        win_pnls = [float(t.get("realized_pnl") or 0) for t in group if (t.get("outcome") or "") == "win"]
+        loss_pnls = [float(t.get("realized_pnl") or 0) for t in group if (t.get("outcome") or "") == "loss"]
+        avg_win = round(sum(win_pnls) / len(win_pnls), 2) if win_pnls else None
+        avg_loss = round(sum(loss_pnls) / len(loss_pnls), 2) if loss_pnls else None
+
+        profit_factor = None
+        if avg_loss is not None and losses > 0 and avg_win is not None and wins > 0:
+            denom = abs(avg_loss * losses)
+            if denom > 0:
+                profit_factor = round((avg_win * wins) / denom, 2)
+
+        max_drawdown = None
+        if n_resolved >= 3:
+            cum = 0.0
+            peak = 0.0
+            min_dd = 0.0
+            for t in group:
+                cum += float(t.get("realized_pnl") or 0)
+                peak = max(peak, cum)
+                dd = cum - peak
+                if dd < min_dd:
+                    min_dd = dd
+            max_drawdown = round(min_dd, 2)
+
+        avg_return_pct = (
+            round(sum(float(t.get("return_pct") or 0) for t in group) / n_resolved, 2)
+            if n_resolved else None
+        )
+
+        equity_curve: list[dict[str, Any]] = []
+        if n_resolved >= 2:
+            cum = 0.0
+            for t in group:
+                cum += float(t.get("realized_pnl") or 0)
+                equity_curve.append({"ts": int(t.get("exit_ts") or 0), "pnl": round(cum, 2)})
+
+        recent: list[dict[str, Any]] = []
+        for t in group[-5:]:
+            try:
+                recent.append({
+                    "entry_ts": int(t.get("entry_ts") or 0),
+                    "exit_ts": int(t.get("exit_ts") or 0),
+                    "question": (t.get("question") or "")[:80],
+                    "side": t.get("side"),
+                    "entry_price": round(float(t.get("entry_price") or 0), 4),
+                    "exit_price": round(float(t.get("exit_price") or 0), 4),
+                    "size_usd": round(float(t.get("size_usd") or 0), 2),
+                    "pnl": round(float(t.get("realized_pnl") or 0), 2),
+                    "return_pct": round(float(t.get("return_pct") or 0), 2),
+                    "outcome": t.get("outcome"),
+                    "condition_id": t.get("condition_id"),
+                })
             except Exception:
-                pass
+                continue
 
-        r = entry["resolved"]
-        if r >= 10:
-            wr = entry["wins"] / r if r > 0 else 0
-            entry["win_rate"] = round(wr, 3)
-            if wr >= 0.52:
-                entry["status"] = "active"
-            elif wr < 0.45:
-                entry["status"] = "underperforming"
-            else:
-                entry["status"] = "monitoring"
-        elif r > 0:
-            entry["win_rate"] = round(entry["wins"] / r, 3)
+        if n_resolved == 0:
+            status = "no_data"
+        elif n_resolved < 10:
+            status = "building"
+        elif n_resolved < 50:
+            status = "active"
+        else:
+            status = "mature"
 
-        by_type.append(entry)
+        by_type.append({
+            "signal_type": sig_type,
+            "allocated": allocated,
+            "n_resolved": n_resolved,
+            "n_open": opened["n_open"],
+            "deployed_usd": round(opened["deployed"], 2),
+            "wins": wins,
+            "losses": losses,
+            "win_rate": win_rate,
+            "cum_pnl": cum_pnl,
+            "avg_win": avg_win,
+            "avg_loss": avg_loss,
+            "profit_factor": profit_factor,
+            "max_drawdown": max_drawdown,
+            "avg_return_pct": avg_return_pct,
+            "equity_curve": equity_curve,
+            "recent_trades": recent,
+            "status": status,
+        })
+
+    by_type.sort(key=lambda x: (x["cum_pnl"], x["n_resolved"]), reverse=True)
+
+    total_resolved = len(resolved)
+    total_pnl = round(sum(float(t.get("realized_pnl") or 0) for t in resolved), 2)
+    total_wins = sum(1 for t in resolved if (t.get("outcome") or "") == "win")
+    overall_wr = round(total_wins / total_resolved, 3) if total_resolved >= 3 else None
+    total_open = sum(v["n_open"] for v in open_by_type.values())
+    total_deployed = round(sum(v["deployed"] for v in open_by_type.values()), 2)
 
     return {
         "available": True,
         "by_type": by_type,
-        "total_fired": total_fired,
-        "total_resolved": total_resolved,
-        "overall_ev": None,
+        "portfolio": {
+            "bankroll": 100_000,
+            "total_resolved": total_resolved,
+            "total_open": total_open,
+            "total_deployed": total_deployed,
+            "total_pnl": total_pnl,
+            "overall_win_rate": overall_wr,
+            "pnl_pct": round(total_pnl / 100_000 * 100, 2),
+        },
     }
 
 
@@ -1092,8 +3379,15 @@ def read_smart_money_open_positions() -> dict[str, Any]:
         return {"available": False, "reason": str(exc), "data": []}
 
 
+_WHALE_SIGNAL_TYPES = [
+    "wallet_reversal", "cascade", "oversized_bet", "accumulation",
+    "market_maker_flip", "convergence", "specialist_entry",
+    "pre_deadline_surge", "whale_entry",
+]
+
+
 def read_paper_dashboard() -> dict[str, Any]:
-    """Comprehensive paper trading dashboard data."""
+    """Comprehensive paper trading dashboard — non-archived only."""
     db_path = DATA_ROOT / "kalshi" / "paper_trades.db"
     if not db_path.exists():
         return {"available": False, "reason": "No paper trading DB found"}
@@ -1101,56 +3395,64 @@ def read_paper_dashboard() -> dict[str, Any]:
         import sqlite3
         conn = sqlite3.connect(str(db_path), check_same_thread=False)
 
-        # Portfolio summary
-        port = conn.execute("SELECT cash_usd, open_value, total_value, realized_pnl FROM portfolio ORDER BY id DESC LIMIT 1").fetchone()
-        cash = float(port[0]) if port else 500.0
-        total_val = float(port[2]) if port else 500.0
-        realized = float(port[3]) if port else 0.0
-
-        # Open positions
+        # Open positions — Polymarket whale signals only (non-archived)
         open_trades = conn.execute("""
             SELECT id, ticker, side, entry_price, size_usd, signal_family, confidence,
-                   entry_ts, COALESCE(platform, 'kalshi') as platform
-            FROM trades WHERE status = 'open'
+                   entry_ts, COALESCE(platform, 'kalshi') as platform, full_token_id, signal_type
+            FROM trades
+            WHERE status = 'open' AND (archived = 0 OR archived IS NULL)
             ORDER BY entry_ts DESC
         """).fetchall()
         positions = []
+        poly_deployed = 0.0
         for t in open_trades:
             positions.append({
                 "id": t[0], "ticker": t[1], "side": t[2],
                 "entry_price": t[3], "size_usd": t[4],
-                "signal_type": t[5] or "unknown", "confidence": t[6],
+                "signal_type": t[10] or t[5] or "unknown",
+                "confidence": t[6],
                 "entry_ts": t[7], "platform": t[8],
+                "full_token_id": t[9],
             })
+            if t[8] == "polymarket":
+                poly_deployed += (t[4] or 0)
 
-        # Signal attribution
+        # Signal attribution — show all 9 whale signals (non-archived only)
         attr_rows = conn.execute("""
-            SELECT COALESCE(signal_family, 'unknown') as sig,
+            SELECT COALESCE(signal_type, signal_family, 'unknown') as sig,
                    COUNT(*) as total,
                    SUM(CASE WHEN outcome='win' THEN 1 ELSE 0 END) as wins,
                    SUM(CASE WHEN status='closed' THEN 1 ELSE 0 END) as closed,
                    AVG(size_usd) as avg_stake
             FROM trades
-            GROUP BY sig ORDER BY total DESC
+            WHERE archived = 0 OR archived IS NULL
+            GROUP BY sig
         """).fetchall()
+        by_sig = {r[0]: r for r in attr_rows}
         attribution = []
-        for r in attr_rows:
-            closed = r[3]
-            attribution.append({
-                "signal_type": r[0],
-                "total_trades": r[1],
-                "wins": r[2],
-                "closed": closed,
-                "win_rate": round(r[2] / closed, 3) if closed > 0 else 0.0,
-                "avg_stake": round(r[4], 2) if r[4] else 0.0,
-            })
+        for sig in _WHALE_SIGNAL_TYPES:
+            r = by_sig.get(sig)
+            if r:
+                closed = r[3]
+                attribution.append({
+                    "signal_type": sig,
+                    "total_trades": r[1], "wins": r[2], "closed": closed,
+                    "win_rate": round(r[2] / closed, 3) if closed > 0 else 0.0,
+                    "avg_stake": round(r[4], 2) if r[4] else 0.0,
+                })
+            else:
+                attribution.append({
+                    "signal_type": sig, "total_trades": 0, "wins": 0,
+                    "closed": 0, "win_rate": 0.0, "avg_stake": 0.0,
+                })
 
-        # Recent closed trades
+        # Recent closed trades — non-archived only
         closed_trades = conn.execute("""
             SELECT ticker, side, entry_price, exit_price, size_usd,
                    signal_family, outcome, return_pct, exit_ts,
-                   COALESCE(platform, 'kalshi') as platform
-            FROM trades WHERE status = 'closed'
+                   COALESCE(platform, 'kalshi') as platform, signal_type
+            FROM trades
+            WHERE status = 'closed' AND (archived = 0 OR archived IS NULL)
             ORDER BY exit_ts DESC LIMIT 20
         """).fetchall()
         recent = []
@@ -1158,7 +3460,8 @@ def read_paper_dashboard() -> dict[str, Any]:
             recent.append({
                 "ticker": t[0], "side": t[1],
                 "entry_price": t[2], "exit_price": t[3],
-                "size_usd": t[4], "signal_type": t[5],
+                "size_usd": t[4],
+                "signal_type": t[10] or t[5],
                 "outcome": t[6], "return_pct": t[7],
                 "exit_ts": t[8], "platform": t[9],
             })
@@ -1168,19 +3471,100 @@ def read_paper_dashboard() -> dict[str, Any]:
             SELECT COALESCE(platform, 'kalshi'),
                    COUNT(*), SUM(CASE WHEN outcome='win' THEN 1 ELSE 0 END),
                    SUM(CASE WHEN status='open' THEN 1 ELSE 0 END)
-            FROM trades GROUP BY 1
+            FROM trades
+            WHERE archived = 0 OR archived IS NULL
+            GROUP BY 1
         """).fetchall()
         platforms = {}
         for r in platform_rows:
             platforms[r[0]] = {"total": r[1], "wins": r[2] or 0, "open": r[3]}
 
+        # NEW: Read from polymarket_paper_trades in wallet_intelligence.db
+        # This is the primary Polymarket paper trading source going forward
+        poly_db = DATA_ROOT / "polymarket" / "wallet_intelligence.db"
+        if poly_db.exists():
+            try:
+                pconn = sqlite3.connect(str(poly_db), check_same_thread=False)
+                ppt_rows = pconn.execute("""
+                    SELECT id, condition_id, question, category, side, entry_price,
+                           size_usd, signal_type, confidence, wallet, entry_ts
+                    FROM polymarket_paper_trades
+                    WHERE exit_ts IS NULL AND archived = 0
+                    ORDER BY entry_ts DESC
+                """).fetchall()
+                for r in ppt_rows:
+                    positions.append({
+                        "id": f"ppt-{r[0]}", "ticker": r[1], "side": r[4],
+                        "entry_price": r[5], "size_usd": r[6],
+                        "signal_type": r[7] or "unknown",
+                        "confidence": r[8],
+                        "entry_ts": r[10], "platform": "polymarket",
+                        "full_token_id": r[1], "question": r[2], "category": r[3],
+                        "wallet": r[9],
+                    })
+                    poly_deployed += (r[6] or 0)
+
+                # Add to attribution
+                attr_v2 = pconn.execute("""
+                    SELECT signal_type, COUNT(*), SUM(CASE WHEN outcome='win' THEN 1 ELSE 0 END),
+                           SUM(CASE WHEN outcome IS NOT NULL THEN 1 ELSE 0 END), AVG(size_usd)
+                    FROM polymarket_paper_trades WHERE archived = 0 GROUP BY signal_type
+                """).fetchall()
+                for sig_row in attr_v2:
+                    sig_name = sig_row[0]
+                    for entry in attribution:
+                        if entry["signal_type"] == sig_name:
+                            entry["total_trades"] = (entry["total_trades"] or 0) + (sig_row[1] or 0)
+                            entry["wins"] = (entry["wins"] or 0) + (sig_row[2] or 0)
+                            entry["closed"] = (entry["closed"] or 0) + (sig_row[3] or 0)
+                            if entry["closed"] > 0:
+                                entry["win_rate"] = round(entry["wins"] / entry["closed"], 3)
+                            if sig_row[4]:
+                                entry["avg_stake"] = round(sig_row[4], 2)
+                            break
+                pconn.close()
+            except Exception as exc:
+                pass
+
+        # Polymarket bankroll math
+        poly_open = sum(1 for p in positions if p["platform"] == "polymarket")
+        starting_bankroll = 100_000
+        polymarket_cash = round(starting_bankroll - poly_deployed, 2)
+
+        # Kalshi legacy (archived) for display
+        kalshi_archived_count = conn.execute(
+            "SELECT COUNT(*) FROM trades WHERE archived = 1 AND (platform IS NULL OR platform = 'kalshi')"
+        ).fetchone()[0]
+        port = conn.execute("SELECT cash_usd, realized_pnl FROM portfolio ORDER BY id DESC LIMIT 1").fetchone()
+        kalshi_cash = float(port[0]) if port else 0.0
+        realized = float(port[1]) if port else 0.0
+
+        # Total counts include both legacy Kalshi trades AND new Polymarket trades
+        total_open = len(positions)
+        total_trades_active = conn.execute(
+            "SELECT COUNT(*) FROM trades WHERE archived = 0 OR archived IS NULL"
+        ).fetchone()[0] + poly_open
+
         conn.close()
 
         return {
             "available": True,
-            "portfolio": {"cash": cash, "total_value": total_val, "realized_pnl": realized},
+            "starting_bankroll": starting_bankroll,
+            "polymarket_cash": polymarket_cash,
+            "polymarket_open_count": poly_open,
+            "polymarket_deployed": round(poly_deployed, 2),
+            "kalshi_cash": round(kalshi_cash, 2),
+            "kalshi_open_count": kalshi_archived_count,
+            "total_trades": total_trades_active,
+            "open_trades": total_open,
+            "portfolio": {
+                "cash": polymarket_cash,
+                "total_value": polymarket_cash + poly_deployed,
+                "realized_pnl": realized,
+            },
             "positions": positions,
             "attribution": attribution,
+            "signal_attribution": attribution,
             "recent_closed": recent,
             "platforms": platforms,
         }
@@ -1192,17 +3576,8 @@ def read_paper_dashboard() -> dict[str, Any]:
 
 
 def read_paper_portfolio() -> dict[str, Any]:
-    db_path = DATA_ROOT / "kalshi" / "paper_trades.db"
-    if not db_path.exists():
-        return {"available": False, "reason": "No paper trading DB found"}
-    try:
-        from trading_platform.kalshi.paper_executor import KalshiPaperExecutor
-        executor = KalshiPaperExecutor(db_path)
-        summary = executor.get_summary()
-        executor.close()
-        return {"available": True, **summary}
-    except Exception as exc:
-        return {"available": False, "reason": str(exc)}
+    """Portfolio summary — non-archived only with $100K Polymarket bankroll."""
+    return read_paper_dashboard()
 
 
 def read_paper_trades() -> dict[str, Any]:
@@ -1948,3 +4323,123 @@ def write_execution_policy(policy: str) -> dict[str, Any]:
     import json as _j
     _POLICY_PATH.write_text(_j.dumps({"policy": policy}), encoding="utf-8")
     return {"success": True, "policy": policy}
+
+
+# ── Pipeline monitoring ──────────────────────────────────────────────────────
+
+
+_SYSTEM_DIR = DATA_ROOT / "system"
+
+
+def read_pipeline_status() -> dict[str, Any]:
+    """Read pipeline + monitor status, compute overall health."""
+    import time as _t
+    now = int(_t.time())
+
+    # Pipeline status
+    pipeline_data = _read_json(_SYSTEM_DIR / "pipeline_status.json") or {}
+    pipeline_last = pipeline_data.get("started_at") or 0
+    pipeline_next = pipeline_data.get("next_run_at") or 0
+    pipeline_age = round((now - pipeline_last) / 60, 1) if pipeline_last else None
+
+    pipeline = {
+        "last_run_at": pipeline_last or None,
+        "last_run_success": pipeline_data.get("success"),
+        "last_run_duration": pipeline_data.get("duration_seconds"),
+        "age_minutes": pipeline_age,
+        "next_run_at": pipeline_next or None,
+        "overdue": bool(pipeline_next and now > pipeline_next + 1800),
+        "steps": pipeline_data.get("steps", {}),
+    }
+
+    # Monitor status
+    monitor_data = _read_json(_SYSTEM_DIR / "monitor_status.json") or {}
+    ws = monitor_data.get("websocket", {})
+    ws_age = now - (ws.get("last_event_ts") or now)
+
+    monitor = {
+        "running": bool(monitor_data.get("last_heartbeat") and now - monitor_data["last_heartbeat"] < 120),
+        "uptime_seconds": now - (monitor_data.get("started_at") or now),
+        "restarts_today": monitor_data.get("restarts_today", 0),
+        "websocket_connected": ws.get("connected", False),
+        "websocket_age_seconds": ws_age,
+        "websocket_stale": ws_age > 300,
+        "tier1_poll_age_seconds": (monitor_data.get("tier1_poll", {}).get("last_poll_age_seconds")),
+        "tier1_poll_overdue": bool(
+            monitor_data.get("tier1_poll", {}).get("last_poll_age_seconds")
+            and monitor_data["tier1_poll"]["last_poll_age_seconds"] > 1200
+        ),
+        "signals_fired_today": (monitor_data.get("signals", {}).get("fired_today", 0)),
+    }
+
+    # File ages
+    def _file_age_hours(path: Path) -> float | None:
+        if not path.exists():
+            return None
+        return round((_t.time() - path.stat().st_mtime) / 3600, 2)
+
+    uni_age = _file_age_hours(DATA_ROOT / "polymarket" / "market_universe.json")
+    lb_age = None
+    lb_ver = 0
+    try:
+        from trading_platform.polymarket.wallet_db import WalletDB
+        db = WalletDB()
+        with db._lock:
+            meta = db._conn.execute("SELECT current_version, built_at FROM leaderboard_meta WHERE id=1").fetchone()
+        if meta:
+            lb_ver = meta[0]
+            lb_age = round((now - (meta[1] or now)) / 3600, 2) if meta[1] else None
+    except Exception:
+        pass
+
+    files = {
+        "market_universe_age_hours": uni_age,
+        "market_universe_stale": bool(uni_age and uni_age > 7),
+        "leaderboard_version": lb_ver,
+        "leaderboard_age_hours": lb_age,
+        "leaderboard_stale": bool(lb_age and lb_age > 8),
+    }
+
+    # Telegram
+    telegram_configured = bool(os.environ.get("TELEGRAM_BOT_TOKEN") and os.environ.get("TELEGRAM_CHAT_ID"))
+    alerts = {
+        "telegram_configured": telegram_configured,
+        "telegram_healthy": telegram_configured,
+        "last_alert_at": None,
+    }
+
+    # Overall health
+    if monitor.get("websocket_stale") or (pipeline_age and pipeline_age > 480):
+        health = "critical"
+    elif pipeline.get("overdue") or monitor.get("tier1_poll_overdue"):
+        health = "degraded"
+    else:
+        health = "healthy"
+
+    return {
+        "pipeline": pipeline,
+        "monitor": monitor,
+        "files": files,
+        "alerts": alerts,
+        "overall_health": health,
+    }
+
+
+def read_pipeline_runs() -> list[dict[str, Any]]:
+    """Read last 20 pipeline runs from JSONL."""
+    runs_path = _SYSTEM_DIR / "pipeline_runs.jsonl"
+    if not runs_path.exists():
+        # Fallback to old location
+        runs_path = DATA_ROOT / "polymarket" / "pipeline_runs.jsonl"
+    if not runs_path.exists():
+        return []
+    try:
+        lines = runs_path.read_text(encoding="utf-8").strip().split("\n")
+        runs = []
+        for line in lines[-20:]:
+            if line.strip():
+                runs.append(json.loads(line))
+        runs.reverse()
+        return runs
+    except Exception:
+        return []

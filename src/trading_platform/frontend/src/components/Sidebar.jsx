@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { NavLink } from 'react-router-dom'
-import { LayoutGrid, Eye, Search, DollarSign, Shield, ChevronLeft, ChevronRight } from 'lucide-react'
+import { LayoutGrid, Eye, Search, LineChart, Activity, DollarSign, Shield, BarChart3, FlaskConical, ChevronLeft, ChevronRight } from 'lucide-react'
 import { useApi } from '../hooks/useApi'
 import { api } from '../api/client'
 
@@ -8,6 +8,10 @@ const NAV = [
   { to: '/dashboard', label: 'Command Center',   Icon: LayoutGrid },
   { to: '/wallets',   label: 'Wallet Intel',     Icon: Eye        },
   { to: '/scanner',   label: 'Whale Monitor',    Icon: Search     },
+  { to: '/monitor',   label: 'Market Monitor',   Icon: LineChart  },
+  { to: '/pipeline',  label: 'Pipeline',         Icon: Activity   },
+  { to: '/backtest',  label: 'Backtest',         Icon: BarChart3  },
+  { to: '/signals',   label: 'Signal Lab',       Icon: FlaskConical },
   { to: '/paper',     label: 'Paper Trading',    Icon: DollarSign },
   { to: '/live',      label: 'Live Readiness',   Icon: Shield     },
 ]

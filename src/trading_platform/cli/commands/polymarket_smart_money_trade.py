@@ -1,3 +1,7 @@
+# DEPRECATED: This module used EWR-based smart money detection.
+# Replaced by whale_tripwire.py + whale_signal_engine.py (9-signal system).
+# Do not run or import this module in new code.
+# Preserved for reference only.
 """CLI: trading-cli data polymarket smart-money-trade"""
 from __future__ import annotations
 

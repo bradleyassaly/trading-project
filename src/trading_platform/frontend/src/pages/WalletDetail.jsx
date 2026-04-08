@@ -1,15 +1,81 @@
 import { useCallback, useMemo } from 'react'
-import { useParams, Link } from 'react-router-dom'
-import {
-  LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, ReferenceLine,
-} from 'recharts'
+import { useParams, useNavigate, Link } from 'react-router-dom'
 import { api } from '../api/client'
 import { useApi } from '../hooks/useApi'
 import LoadingSkeleton from '../components/LoadingSkeleton'
-import EmptyState from '../components/EmptyState'
+import { TierBadge, BucketBadge, SignalBadge } from '../components/Badges'
+
+function fmtUsd(n) {
+  if (n == null) return '—'
+  if (Math.abs(n) >= 1e6) return `$${(n / 1e6).toFixed(1)}M`
+  if (Math.abs(n) >= 1e3) return `$${(n / 1e3).toFixed(1)}K`
+  return `$${Math.round(n)}`
+}
+function fmtPct(n, dp = 1) { return n != null ? `${(n * 100).toFixed(dp)}%` : '—' }
+function relTime(ts) {
+  if (!ts) return '?'
+  const d = (Date.now() / 1000) - ts
+  if (d < 86400) return `${Math.floor(d / 3600)}h ago`
+  return `${Math.floor(d / 86400)}d ago`
+}
+
+function PnlChart({ history }) {
+  if (!history || history.length < 3) return (
+    <div className="text-[10px] text-gray-600">
+      {history?.length || 0} resolved trades — chart available after 3+
+    </div>
+  )
+
+  const w = 800
+  const h = 150
+  const pad = 30
+  const points = history
+  const minPnl = Math.min(0, ...points.map(p => p.cumulative))
+  const maxPnl = Math.max(0, ...points.map(p => p.cumulative))
+  const range = maxPnl - minPnl || 1
+  const xScale = (i) => pad + ((w - 2 * pad) * i) / Math.max(points.length - 1, 1)
+  const yScale = (v) => h - pad - ((v - minPnl) / range) * (h - 2 * pad)
+  const path = points.map((p, i) => `${i === 0 ? 'M' : 'L'} ${xScale(i)} ${yScale(p.cumulative)}`).join(' ')
+  const final = points[points.length - 1].cumulative
+  const lineColor = final >= 0 ? '#00d68f' : '#ef4444'
+  const zeroY = yScale(0)
+
+  return (
+    <svg viewBox={`0 0 ${w} ${h}`} className="w-full" preserveAspectRatio="none" style={{ height: 150 }}>
+      <line x1={pad} y1={zeroY} x2={w - pad} y2={zeroY} stroke="#4b5563" strokeWidth="1" strokeDasharray="3 3" />
+      <path d={path} fill="none" stroke={lineColor} strokeWidth="2" />
+      <text x={pad} y={pad - 8} fontSize="9" fill="#6b7280">{fmtUsd(maxPnl)}</text>
+      <text x={pad} y={h - pad + 14} fontSize="9" fill="#6b7280">{fmtUsd(minPnl)}</text>
+      <text x={w - pad - 60} y={pad - 8} fontSize="10" fill={lineColor} textAnchor="end">
+        Final: {fmtUsd(final)}
+      </text>
+    </svg>
+  )
+}
+
+function CategoryBars({ breakdown }) {
+  if (!breakdown || Object.keys(breakdown).length === 0) {
+    return <p className="text-[10px] text-gray-600">No category data</p>
+  }
+  const entries = Object.entries(breakdown).sort((a, b) => b[1] - a[1]).slice(0, 5)
+  return (
+    <div className="space-y-1.5">
+      {entries.map(([cat, pct]) => (
+        <div key={cat} className="flex items-center gap-2 text-[10px]">
+          <span className="text-gray-400 w-20 capitalize">{cat}</span>
+          <div className="flex-1 bg-gray-800 rounded-full h-2 overflow-hidden">
+            <div className="h-2 bg-accent-blue rounded-full" style={{ width: `${pct * 100}%` }} />
+          </div>
+          <span className="text-gray-500 w-10 text-right">{(pct * 100).toFixed(0)}%</span>
+        </div>
+      ))}
+    </div>
+  )
+}
 
 export default function WalletDetail() {
   const { address } = useParams()
+  const navigate = useNavigate()
   const fetcher = useCallback(() => api.smartMoneyWalletDetail(address), [address])
   const { data, loading } = useApi(fetcher)
 
@@ -18,120 +84,176 @@ export default function WalletDetail() {
     return (
       <div className="p-6">
         <p className="text-sm text-gray-400">{data?.reason || 'Wallet not found'}</p>
-        <Link to="/smart-money" className="text-xs text-accent-blue hover:underline mt-2 inline-block">Back to Smart Money</Link>
+        <Link to="/wallets" className="text-xs text-accent-blue hover:underline mt-2 inline-block">Back to Wallet Intel</Link>
       </div>
     )
   }
 
-  const profile = data.profile || {}
-  const trades = data.resolved_trades || []
-  const edge = Number(profile.edge || 0)
-  const ewr = Number(profile.early_win_rate || 0)
-  const uet = Number(profile.uncertain_early_trades || 0)
-  const tier = profile.is_early_informed ? (ewr >= 0.80 ? 'Tier 1 - Mirror' : 'Tier 2 - Signal') : 'Watch Only'
-  const tierColor = tier.startsWith('Tier 1') ? 'text-accent-green' : tier.startsWith('Tier 2') ? 'text-accent-yellow' : 'text-gray-500'
-
-  // Running win rate chart
-  const chartData = useMemo(() => {
-    let wins = 0
-    return trades.filter(t => t.won != null).map((t, i) => {
-      if (t.won) wins++
-      return { idx: i + 1, win_rate: wins / (i + 1) }
-    })
-  }, [trades])
-
-  const wonTrades = trades.filter(t => t.won === true)
-  const lostTrades = trades.filter(t => t.won === false)
+  const tier = data.tier || 'unranked'
+  const tierNum = tier === 'tier1' || tier === 'tier1h' ? 1 : tier === 'tier2' ? 2 : null
+  const isTier1h = tier === 'tier1h'
+  const trades = data.recent_trades || []
 
   return (
-    <div className="p-6 space-y-6">
+    <div className="p-6 space-y-4">
       <div>
         <p className="text-xs text-gray-600 mb-1">
-          <Link to="/smart-money" className="hover:text-gray-400">Smart Money</Link>
-          <span className="mx-1">></span>
+          <Link to="/wallets" className="hover:text-gray-400">Wallet Intel</Link>
+          <span className="mx-1">&gt;</span>
           <span className="text-gray-400">Wallet Detail</span>
         </p>
-        <h1 className="text-lg font-semibold text-gray-200 font-mono">{address?.slice(0, 20)}...</h1>
+        <h1 className="text-base font-semibold text-gray-200 font-mono">{address}</h1>
       </div>
 
-      {/* Profile header */}
-      <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
-        <div className="bg-surface-card rounded-lg p-3">
-          <p className="text-[10px] text-gray-500">Edge</p>
-          <p className="text-xl font-bold font-mono text-accent-green">{(edge * 100).toFixed(1)}%</p>
-        </div>
-        <div className="bg-surface-card rounded-lg p-3">
-          <p className="text-[10px] text-gray-500">Early Win Rate</p>
-          <p className="text-xl font-bold font-mono">{(ewr * 100).toFixed(1)}%</p>
-        </div>
-        <div className="bg-surface-card rounded-lg p-3">
-          <p className="text-[10px] text-gray-500">Sample Size</p>
-          <p className="text-xl font-bold font-mono text-gray-200">{uet}</p>
-        </div>
-        <div className="bg-surface-card rounded-lg p-3">
-          <p className="text-[10px] text-gray-500">Volume</p>
-          <p className="text-lg font-bold font-mono text-gray-200">${Number(profile.total_volume_usdc || 0).toLocaleString()}</p>
-        </div>
-        <div className="bg-surface-card rounded-lg p-3">
-          <p className="text-[10px] text-gray-500">Tier</p>
-          <p className={`text-sm font-bold ${tierColor}`}>{tier}</p>
-        </div>
+      {/* Row 1: Identity badges */}
+      <div className="flex items-center gap-2">
+        {isTier1h ? (
+          <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-amber-500/20 text-amber-300" title="High-conviction whale">T1★ HIGH-CONVICTION</span>
+        ) : tierNum ? <TierBadge tier={tierNum} /> : (
+          <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-gray-800 text-gray-500">UNRANKED</span>
+        )}
+        {data.wallet_bucket && <BucketBadge bucket={data.wallet_bucket} />}
+        {data.primary_category && (
+          <span className="px-1.5 py-0.5 rounded text-[9px] bg-surface-hover text-gray-400 capitalize">{data.primary_category}</span>
+        )}
+        {data.last_trade_ts && (
+          <span className="text-[9px] text-gray-600">last active {relTime(data.last_trade_ts)}</span>
+        )}
       </div>
 
-      {/* Win rate chart */}
-      {chartData.length > 5 && (
-        <div className="card">
-          <h2 className="text-sm font-medium text-gray-400 mb-3">Cumulative Win Rate</h2>
-          <ResponsiveContainer width="100%" height={180}>
-            <LineChart data={chartData} margin={{ top: 4, right: 8, left: -10, bottom: 0 }}>
-              <XAxis dataKey="idx" tick={{ fill: '#6b7280', fontSize: 9 }} tickLine={false} axisLine={false} />
-              <YAxis domain={[0, 1]} tick={{ fill: '#6b7280', fontSize: 9 }} tickLine={false} axisLine={false}
-                     tickFormatter={v => `${(v * 100).toFixed(0)}%`} />
-              <Tooltip contentStyle={{ background: '#1a1d27', border: '1px solid #2a2d3e', borderRadius: 6, fontSize: 11 }}
-                       formatter={v => [`${(v * 100).toFixed(1)}%`, 'Win Rate']} />
-              <ReferenceLine y={0.5} stroke="#4b5563" strokeDasharray="4 4" />
-              <Line type="monotone" dataKey="win_rate" stroke="#00ff88" strokeWidth={2} dot={false} />
-            </LineChart>
-          </ResponsiveContainer>
+      {isTier1h && (
+        <div className="bg-amber-500/10 border border-amber-500/30 rounded p-2 text-[10px] text-amber-300">
+          <strong>HIGH-CONVICTION TIER</strong> — Qualified by ${(data.net_pnl_usdc / 1000).toFixed(0)}K+ PnL on large position sizes,
+          not by trade count. Treated as tier-1 with 1.1× signal confidence multiplier.
         </div>
       )}
 
-      {/* Trade history */}
+      {/* Row 2: Core metrics */}
+      <div className="grid grid-cols-3 gap-3">
+        <div className="bg-surface-card rounded-lg p-3">
+          <p className="text-[10px] text-gray-500 mb-1">DIRECTIONAL WR</p>
+          <p className="text-xl font-bold font-mono text-gray-200">{fmtPct(data.directional_win_rate)}</p>
+          <p className="text-[9px] text-gray-600">all-time</p>
+        </div>
+        <div className="bg-surface-card rounded-lg p-3">
+          <p className="text-[10px] text-gray-500 mb-1">ROLLING WR (20)</p>
+          <p className="text-xl font-bold font-mono text-gray-200">{fmtPct(data.rolling_20_wr)}</p>
+          <p className="text-[9px] text-gray-600">last 20 trades</p>
+        </div>
+        <div className="bg-surface-card rounded-lg p-3">
+          <p className="text-[10px] text-gray-500 mb-1">CONVICTION</p>
+          <p className="text-xl font-bold font-mono text-gray-200">{data.conviction_score?.toFixed(3) ?? '—'}</p>
+          <p className="text-[9px] text-gray-600">WR × log(resolved)</p>
+        </div>
+      </div>
+
+      {/* Row 3: Performance */}
+      <div className="grid grid-cols-3 gap-3">
+        <div className="bg-surface-card rounded-lg p-3">
+          <p className="text-[10px] text-gray-500 mb-1">TOTAL VOLUME</p>
+          <p className="text-xl font-bold font-mono text-gray-200">{fmtUsd(data.total_volume_usdc)}</p>
+        </div>
+        <div className="bg-surface-card rounded-lg p-3">
+          <p className="text-[10px] text-gray-500 mb-1">NET PnL</p>
+          <p className={`text-xl font-bold font-mono ${(data.net_pnl_usdc || 0) >= 0 ? 'text-accent-green' : 'text-accent-red'}`}>
+            {(data.net_pnl_usdc || 0) >= 0 ? '+' : ''}{fmtUsd(data.net_pnl_usdc)}
+          </p>
+        </div>
+        <div className="bg-surface-card rounded-lg p-3">
+          <p className="text-[10px] text-gray-500 mb-1">PROFIT FACTOR</p>
+          <p className="text-xl font-bold font-mono text-gray-200">
+            {data.profit_factor != null ? `${data.profit_factor.toFixed(1)}x` : '—'}
+          </p>
+        </div>
+      </div>
+
+      {/* Row 4: Detail */}
+      <div className="grid grid-cols-3 gap-3">
+        <div className="bg-surface-card rounded-lg p-3">
+          <p className="text-[10px] text-gray-500 mb-1">RESOLVED TRADES</p>
+          <p className="text-xl font-bold text-gray-200">{data.resolved_trades ?? '—'}</p>
+        </div>
+        <div className="bg-surface-card rounded-lg p-3">
+          <p className="text-[10px] text-gray-500 mb-1">AVG WIN</p>
+          <p className="text-xl font-bold font-mono text-accent-green">+{fmtUsd(data.avg_win_size_usdc)}</p>
+        </div>
+        <div className="bg-surface-card rounded-lg p-3">
+          <p className="text-[10px] text-gray-500 mb-1">AVG LOSS</p>
+          <p className="text-xl font-bold font-mono text-accent-red">-{fmtUsd(data.avg_loss_size_usdc)}</p>
+        </div>
+      </div>
+
+      {/* Row 5: Category breakdown */}
       <div className="card">
-        <h2 className="text-sm font-medium text-gray-400 mb-3">
-          Trade History ({wonTrades.length} wins / {lostTrades.length} losses of {trades.length} total)
-        </h2>
-        {!trades.length ? <EmptyState title="No trade history" /> : (
-          <div className="overflow-x-auto">
-            <table className="w-full text-xs">
-              <thead>
-                <tr className="border-b border-surface-border text-gray-500 text-left">
-                  <th className="pb-2 pr-3">Date</th>
-                  <th className="pb-2 pr-3">Token</th>
-                  <th className="pb-2 pr-3">Dir</th>
-                  <th className="pb-2 pr-3 text-right">Amount</th>
-                  <th className="pb-2 pr-3 text-right">Resolution</th>
-                  <th className="pb-2 pr-3">Outcome</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-surface-border">
-                {trades.slice(0, 50).map((t, i) => (
-                  <tr key={i} className="hover:bg-surface-hover">
-                    <td className="py-1 pr-3 text-gray-500 text-[10px]">{String(t.timestamp || '').slice(0, 16)}</td>
-                    <td className="py-1 pr-3 font-mono text-[10px] text-gray-400">{t.token_id}</td>
-                    <td className={`py-1 pr-3 font-bold ${t.direction === 'YES' ? 'text-accent-green' : 'text-accent-red'}`}>{t.direction}</td>
-                    <td className="py-1 pr-3 text-right font-mono">${Number(t.amount_usdc || 0).toFixed(0)}</td>
-                    <td className="py-1 pr-3 text-right font-mono text-gray-400">{t.resolution_price != null ? `${t.resolution_price}` : '-'}</td>
-                    <td className="py-1 pr-3">
-                      {t.won === true ? <span className="text-accent-green font-bold">WIN</span> :
-                       t.won === false ? <span className="text-accent-red font-bold">LOSS</span> :
-                       <span className="text-gray-600">-</span>}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+        <h2 className="text-sm font-medium text-gray-400 mb-2">Category Breakdown</h2>
+        <CategoryBars breakdown={data.category_breakdown} />
+      </div>
+
+      {/* Row 6: PnL chart */}
+      <div className="card">
+        <h2 className="text-sm font-medium text-gray-400 mb-2">Cumulative P&L</h2>
+        <PnlChart history={data.pnl_history} />
+        <p className="text-[9px] text-gray-600 mt-1">{(data.pnl_history || []).length} resolved trades</p>
+      </div>
+
+      {/* Signals triggered */}
+      {data.signals_triggered && Object.keys(data.signals_triggered).length > 0 && (
+        <div className="card">
+          <h2 className="text-sm font-medium text-gray-400 mb-2">Signals Triggered</h2>
+          <div className="flex flex-wrap gap-1.5">
+            {Object.entries(data.signals_triggered).map(([sig, n]) => (
+              <span key={sig} className="flex items-center gap-1">
+                <SignalBadge type={sig} />
+                <span className="text-[9px] text-gray-500">×{n}</span>
+              </span>
+            ))}
           </div>
+        </div>
+      )}
+
+      {/* Recent trades */}
+      <div className="card">
+        <h2 className="text-sm font-medium text-gray-400 mb-2">Recent Trades</h2>
+        {!trades.length ? <p className="text-[10px] text-gray-600">No trade history</p> : (
+          <table className="w-full text-[10px]">
+            <thead>
+              <tr className="border-b border-surface-border text-gray-500 text-left">
+                <th className="pb-1 pr-2">Side</th>
+                <th className="pb-1 pr-2">Market</th>
+                <th className="pb-1 pr-2 text-right">Size</th>
+                <th className="pb-1 pr-2">Outcome</th>
+                <th className="pb-1">Category</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-surface-border">
+              {trades.slice(0, 30).map((t, i) => {
+                const won = t.won
+                const isResolved = t.resolved
+                const cid = t.condition_id || t.asset
+                return (
+                  <tr key={i}
+                      className={`hover:bg-surface-hover cursor-pointer border-l-2 ${
+                        won === true ? 'border-accent-green' :
+                        won === false ? 'border-accent-red' :
+                        'border-gray-700'
+                      }`}
+                      onClick={() => cid && navigate(`/market/${cid}`)}>
+                    <td className={`py-1 pr-2 font-bold ${t.side === 'BUY' ? 'text-accent-green' : 'text-accent-red'}`}>{t.side}</td>
+                    <td className="py-1 pr-2 text-gray-400 truncate max-w-[300px]">{t.question || '—'}</td>
+                    <td className="py-1 pr-2 text-right font-mono text-gray-400">{fmtUsd(t.size)}</td>
+                    <td className="py-1 pr-2">
+                      {isResolved && t.pnl != null ? (
+                        <span className={won ? 'text-accent-green font-bold' : 'text-accent-red font-bold'}>
+                          {won ? 'WIN' : 'LOSS'} {t.pnl >= 0 ? '+' : ''}{fmtUsd(t.pnl)}
+                        </span>
+                      ) : <span className="text-gray-600">OPEN</span>}
+                    </td>
+                    <td className="py-1 text-gray-500 capitalize">{t.category || '—'}</td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
         )}
       </div>
     </div>

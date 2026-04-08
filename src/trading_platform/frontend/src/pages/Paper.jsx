@@ -4,6 +4,16 @@ import { useApi } from '../hooks/useApi'
 import LoadingSkeleton from '../components/LoadingSkeleton'
 import EmptyState from '../components/EmptyState'
 
+function fmtTs(ts) {
+  if (ts == null) return '--'
+  if (typeof ts === 'number') {
+    return new Date(ts * 1000).toLocaleDateString('en-US', {
+      month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'
+    })
+  }
+  return String(ts).slice(0, 16)
+}
+
 function GoLiveProgress({ positions, attribution }) {
   const totalTrades = attribution?.reduce((sum, a) => sum + (a.total_trades || 0), 0) ?? 0
   const closedTrades = attribution?.reduce((sum, a) => sum + (a.closed || 0), 0) ?? 0
@@ -11,10 +21,6 @@ function GoLiveProgress({ positions, attribution }) {
   const winRate = closedTrades > 0 ? (wins / closedTrades * 100) : null
   const threshold = 50
   const pct = Math.min(100, (closedTrades / threshold) * 100)
-
-  // Signal breakdown
-  const signalTrades = attribution?.filter(a => a.signal_type && a.signal_type !== 'smart_money').reduce((s, a) => s + (a.total_trades || 0), 0) ?? 0
-  const smartTrades = attribution?.filter(a => a.signal_type === 'smart_money').reduce((s, a) => s + (a.total_trades || 0), 0) ?? 0
 
   return (
     <div className="bg-surface-card rounded-lg p-4">
@@ -34,41 +40,50 @@ function GoLiveProgress({ positions, attribution }) {
         <span>Win rate: <span className={`font-mono ${winRate && winRate > 55 ? 'text-accent-green' : 'text-gray-300'}`}>
           {winRate != null ? `${winRate.toFixed(1)}%` : 'N/A'}
         </span></span>
-        <span>Signals: {signalTrades}</span>
-        <span>Smart Money: {smartTrades}</span>
+        <span>{totalTrades} trades ({closedTrades} resolved)</span>
         <span className="text-accent-green">Kill switch: Active</span>
       </div>
     </div>
   )
 }
 
-function PortfolioSummary({ portfolio, platforms }) {
-  if (!portfolio) return null
+function PortfolioSummary({ data }) {
+  if (!data) return null
+  const startingBankroll = data.starting_bankroll || 100000
+  const polymarketCash = data.polymarket_cash ?? startingBankroll
+  const polymarketDeployed = data.polymarket_deployed || 0
+  const polymarketOpen = data.polymarket_open_count || 0
+  const kalshiCash = data.kalshi_cash || 0
+  const kalshiOpen = data.kalshi_open_count || 0
+  const realizedPnl = data.portfolio?.realized_pnl || 0
+  const totalTrades = data.total_trades || 0
+
   return (
     <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
       <div className="bg-surface-card rounded-lg p-4">
-        <p className="text-xs text-gray-500 mb-1">Cash</p>
-        <p className="text-xl font-bold font-mono text-gray-200">${portfolio.cash?.toFixed(2)}</p>
-      </div>
-      <div className="bg-surface-card rounded-lg p-4">
-        <p className="text-xs text-gray-500 mb-1">Total Value</p>
-        <p className="text-xl font-bold font-mono text-gray-200">${portfolio.total_value?.toFixed(2)}</p>
-      </div>
-      <div className="bg-surface-card rounded-lg p-4">
-        <p className="text-xs text-gray-500 mb-1">Realized P&L</p>
-        <p className={`text-xl font-bold font-mono ${portfolio.realized_pnl >= 0 ? 'text-accent-green' : 'text-accent-red'}`}>
-          {portfolio.realized_pnl >= 0 ? '+' : ''}${portfolio.realized_pnl?.toFixed(2)}
+        <p className="text-xs text-gray-500 mb-1">Polymarket Whale Signals</p>
+        <p className="text-xl font-bold font-mono text-gray-200">${polymarketCash.toLocaleString(undefined, {maximumFractionDigits: 0})}</p>
+        <p className="text-[10px] text-gray-500">
+          {polymarketOpen} open · ${polymarketDeployed.toLocaleString(undefined, {maximumFractionDigits: 0})} deployed
         </p>
       </div>
       <div className="bg-surface-card rounded-lg p-4">
-        <p className="text-xs text-gray-500 mb-1">Platforms</p>
-        <div className="space-y-1">
-          {platforms && Object.entries(platforms).map(([p, d]) => (
-            <p key={p} className="text-xs text-gray-400">
-              <span className="text-gray-200 font-medium">{p}</span>: {d.total} trades ({d.open} open)
-            </p>
-          ))}
-        </div>
+        <p className="text-xs text-gray-500 mb-1">Kalshi (legacy)</p>
+        <p className="text-lg font-bold font-mono text-gray-400">${kalshiCash.toFixed(2)}</p>
+        <p className="text-[10px] text-gray-600">{kalshiOpen} positions archived</p>
+      </div>
+      <div className="bg-surface-card rounded-lg p-4">
+        <p className="text-xs text-gray-500 mb-1">Realized P&L</p>
+        <p className={`text-xl font-bold font-mono ${realizedPnl >= 0 ? 'text-accent-green' : 'text-accent-red'}`}>
+          {realizedPnl >= 0 ? '+' : ''}${realizedPnl.toFixed(2)}
+        </p>
+      </div>
+      <div className="bg-surface-card rounded-lg p-4">
+        <p className="text-xs text-gray-500 mb-1">Total Trades</p>
+        <p className="text-xl font-bold font-mono text-gray-200">{totalTrades}</p>
+        <p className="text-[10px] text-gray-500">
+          starting: ${startingBankroll.toLocaleString()}
+        </p>
       </div>
     </div>
   )
@@ -99,17 +114,52 @@ function OpenPositions({ positions }) {
                   p.platform === 'polymarket' ? 'bg-purple-500/20 text-purple-400' : 'bg-accent-blue/20 text-accent-blue'
                 }`}>{p.platform}</span>
               </td>
-              <td className="py-1.5 pr-3 font-mono text-gray-300 text-[10px]">{p.ticker}</td>
+              <td className="py-1.5 pr-3 font-mono text-gray-300 text-[10px]">
+                {p.question || (p.ticker?.length > 20 && !p.ticker.includes(' ')
+                  ? `${p.ticker.slice(0, 8)}...${p.ticker.slice(-6)}`
+                  : p.ticker)}
+              </td>
               <td className={`py-1.5 pr-3 font-bold ${p.side === 'YES' ? 'text-accent-green' : 'text-accent-red'}`}>{p.side}</td>
               <td className="py-1.5 pr-3 text-right font-mono">{p.entry_price?.toFixed(1)}</td>
               <td className="py-1.5 pr-3 text-right font-mono">${p.size_usd?.toFixed(2)}</td>
               <td className="py-1.5 pr-3 text-gray-400">{p.signal_type}</td>
               <td className="py-1.5 pr-3 text-right font-mono">{p.confidence?.toFixed(2)}</td>
-              <td className="py-1.5 pr-3 text-gray-500 text-[10px]">{p.entry_ts?.slice(5, 16)}</td>
+              <td className="py-1.5 pr-3 text-gray-500 text-[10px]">{fmtTs(p.entry_ts)}</td>
             </tr>
           ))}
         </tbody>
       </table>
+    </div>
+  )
+}
+
+const WHALE_SIGNALS = [
+  'wallet_reversal', 'cascade', 'oversized_bet', 'accumulation',
+  'market_maker_flip', 'convergence', 'specialist_entry',
+  'pre_deadline_surge', 'whale_entry',
+]
+
+function WhaleSignalAttribution({ attribution }) {
+  const byType = {}
+  ;(attribution || []).forEach(a => { byType[a.signal_type] = a })
+
+  return (
+    <div className="grid grid-cols-3 md:grid-cols-5 gap-2">
+      {WHALE_SIGNALS.map(sig => {
+        const a = byType[sig] || {}
+        const fired = a.total_trades || 0
+        const closed = a.closed || 0
+        const wins = a.wins || 0
+        const wr = closed > 0 ? (wins / closed * 100) : null
+        const wrColor = wr && wr > 55 ? 'text-accent-green' : wr && wr > 50 ? 'text-yellow-400' : wr != null ? 'text-accent-red' : 'text-gray-600'
+        return (
+          <div key={sig} className="bg-surface-card rounded p-2">
+            <p className="text-[9px] text-gray-500 truncate">{sig.replace(/_/g, ' ')}</p>
+            <p className={`text-sm font-bold font-mono ${wrColor}`}>{wr != null ? `${wr.toFixed(0)}%` : '—'}</p>
+            <p className="text-[9px] text-gray-600">{fired} fired · {closed} resolved</p>
+          </div>
+        )
+      })}
     </div>
   )
 }
@@ -163,7 +213,11 @@ function RecentClosed({ trades }) {
                   t.platform === 'polymarket' ? 'bg-purple-500/20 text-purple-400' : 'bg-accent-blue/20 text-accent-blue'
                 }`}>{t.platform}</span>
               </td>
-              <td className="py-1.5 pr-3 font-mono text-[10px] text-gray-300">{t.ticker}</td>
+              <td className="py-1.5 pr-3 font-mono text-[10px] text-gray-300">
+                {t.question || (t.ticker?.length > 20 && !t.ticker.includes(' ')
+                  ? `${t.ticker.slice(0, 8)}...${t.ticker.slice(-6)}`
+                  : t.ticker)}
+              </td>
               <td className={`py-1.5 pr-3 ${t.side === 'YES' ? 'text-accent-green' : 'text-accent-red'}`}>{t.side}</td>
               <td className="py-1.5 pr-3 text-gray-400">{t.signal_type}</td>
               <td className="py-1.5 pr-3 text-right font-mono">{t.entry_price?.toFixed(1)}</td>
@@ -210,13 +264,21 @@ export default function Paper() {
         <EmptyState title={data?.reason || "No paper trading data"} message="Run the autonomous loop to start paper trading" />
       ) : (
         <>
-          <PortfolioSummary portfolio={portfolio} platforms={platforms} />
+          <PortfolioSummary data={data} />
 
           <GoLiveProgress positions={positions} attribution={attribution} />
 
           <div className="card">
-            <h2 className="text-sm font-medium text-gray-400 mb-4">Signal Attribution</h2>
-            <SignalAttribution attribution={attribution} />
+            <h2 className="text-sm font-medium text-gray-400 mb-4">Polymarket Whale Signals</h2>
+            <WhaleSignalAttribution attribution={attribution} />
+            {attribution?.some(a => a.signal_type?.startsWith('kalshi') || a.signal_type === 'smart_money') && (
+              <details className="mt-4">
+                <summary className="text-[10px] text-gray-600 cursor-pointer hover:text-gray-400">Kalshi legacy trades ({attribution.filter(a => a.signal_type?.startsWith('kalshi') || a.signal_type === 'smart_money').reduce((s,a) => s + (a.total_trades||0), 0)})</summary>
+                <div className="mt-2">
+                  <SignalAttribution attribution={attribution.filter(a => a.signal_type?.startsWith('kalshi') || a.signal_type === 'smart_money')} />
+                </div>
+              </details>
+            )}
           </div>
 
           <div className="card">

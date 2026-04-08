@@ -145,6 +145,13 @@ export const api = {
   monitoredDatasetTimeline: (datasetKey) => get(`/ops/datasets/${encodeURIComponent(datasetKey)}/timeline`),
   monitoredDatasetHistorySummary: (datasetKey) => get(`/ops/datasets/${encodeURIComponent(datasetKey)}/history-summary`),
   paperDashboard: () => get('/paper/dashboard'),
+  paperPositionsEnriched: () => get('/paper/positions-enriched'),
+  paperCheckResolutions: () => post('/paper/check-resolutions'),
+  liveReadiness: () => get('/live/readiness'),
+  liveTrades: (limit = 50) => get(`/live/trades?limit=${limit}`),
+  liveEmergencyStop: (body = {}) => post('/live/emergency-stop', body),
+  liveClearStop: () => post('/live/clear-stop'),
+  liveTestDryRun: (signalType = 'price_velocity') => post('/live/test-dry-run', { signal_type: signalType }),
   paperPortfolio: () => get('/paper/portfolio'),
   paperTrades: () => get('/paper/trades'),
   paperScan: () => get('/paper/scan'),
@@ -170,6 +177,41 @@ export const api = {
   smartMoneyWalletPositions: (addr) => get(`/smart-money/wallet/${encodeURIComponent(addr)}/positions`),
   smartMoneyWalletTrades: (addr, page = 1) => get(`/smart-money/wallet/${encodeURIComponent(addr)}/trades?page=${page}&limit=50`),
   intelligenceHealth: () => get('/system/intelligence-health'),
+  backtestRun: (config) => post('/backtest/run', config),
+  backtestWalletPositions: (wallet) => get(`/backtest/wallet/${encodeURIComponent(wallet)}/positions`),
+  backtestPriceHistory: (cid) => get(`/backtest/market/${encodeURIComponent(cid)}/price-history`),
+  backtestWalletMarket: (wallet, cid) => get(`/backtest/wallet/${encodeURIComponent(wallet)}/market/${encodeURIComponent(cid)}`),
+  backtestConvergence: (config) => post('/backtest/convergence', config),
+  marketIntelligence: (cid) => get(`/market/${encodeURIComponent(cid)}/intelligence`),
+  topMarkets: (sort = 'volume24h', category = null, limit = 20) => {
+    const q = new URLSearchParams({ sort, limit })
+    if (category) q.append('category', category)
+    return get(`/markets/top?${q.toString()}`)
+  },
+  marketCandles: (cid, interval = '1d', fromTs = null, toTs = null) => {
+    const q = new URLSearchParams({ interval })
+    if (fromTs != null) q.append('from_ts', fromTs)
+    if (toTs != null) q.append('to_ts', toTs)
+    return get(`/market/${encodeURIComponent(cid)}/candles?${q.toString()}`)
+  },
+  marketFlow: (cid, limit = 300) => get(`/market/${encodeURIComponent(cid)}/flow?limit=${limit}`),
+  marketSignalsAndTrades: (cid) => get(`/market/${encodeURIComponent(cid)}/signals`),
+  marketOrderBook: (cid) => get(`/market/${encodeURIComponent(cid)}/order-book`),
+  anomalyAlerts: (params = {}) => {
+    const q = new URLSearchParams()
+    Object.entries(params).forEach(([k, v]) => { if (v != null && v !== '') q.append(k, v) })
+    const suffix = q.toString() ? `?${q.toString()}` : ''
+    return get(`/alerts/anomalies${suffix}`)
+  },
+  marketsSearch: (params = {}) => {
+    const q = new URLSearchParams()
+    Object.entries(params).forEach(([k, v]) => { if (v != null && v !== '') q.append(k, v) })
+    const suffix = q.toString() ? `?${q.toString()}` : ''
+    return get(`/markets/search${suffix}`)
+  },
+  pipelineStatus: () => get('/system/pipeline-status'),
+  pipelineRuns: () => get('/system/pipeline-runs'),
+  runPipeline: () => post('/system/run-pipeline'),
   executionPolicy: () => get('/system/execution-policy'),
   setExecutionPolicy: (policy) => post('/system/execution-policy', { policy }),
   polymarketWhaleFeed: () => get('/polymarket/whale-feed'),

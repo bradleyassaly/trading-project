@@ -137,6 +137,15 @@ from trading_platform.cli.commands.polymarket_goldsky_backfill import cmd_polyma
 from trading_platform.cli.commands.polymarket_refresh_universe import cmd_polymarket_refresh_universe
 from trading_platform.cli.commands.polymarket_build_leaderboard import cmd_polymarket_build_leaderboard
 from trading_platform.cli.commands.polymarket_performance_review import cmd_polymarket_performance_review
+from trading_platform.cli.commands.polymarket_test_telegram import cmd_polymarket_test_telegram
+from trading_platform.cli.commands.polymarket_refresh_positions import cmd_polymarket_refresh_positions
+from trading_platform.cli.commands.polymarket_collect_history import cmd_polymarket_collect_history
+from trading_platform.cli.commands.polymarket_ingest_top_wallets import (
+    cmd_polymarket_ingest_top_wallets,
+    cmd_polymarket_backfill_wallet,
+    cmd_polymarket_backfill_top_wallets,
+    cmd_polymarket_discover_market_wallets,
+)
 from trading_platform.cli.commands.manifold_parse import cmd_manifold_parse
 from trading_platform.cli.commands.predictit_parse import cmd_predictit_parse
 from trading_platform.cli.commands.news_tagger import cmd_news_upcoming, cmd_news_label_moves
@@ -3025,8 +3034,16 @@ def build_parser() -> argparse.ArgumentParser:
         "refresh-universe", help="Fetch top markets per category from Gamma API.",
     )
     data_polymarket_refresh_universe.add_argument(
-        "--max-per-category", type=int, default=25,
-        help="Max markets per category (default: 25).",
+        "--max-per-category", type=int, default=50,
+        help="Max markets per category for standard refresh (default: 50).",
+    )
+    data_polymarket_refresh_universe.add_argument(
+        "--full", action="store_true",
+        help="Full-coverage mode: paginate all active markets above min-volume.",
+    )
+    data_polymarket_refresh_universe.add_argument(
+        "--min-volume", type=int, default=10_000,
+        help="Min volume USD for --full mode (default: 10000).",
     )
     data_polymarket_refresh_universe.set_defaults(func=cmd_polymarket_refresh_universe)
 
@@ -3039,6 +3056,84 @@ def build_parser() -> argparse.ArgumentParser:
         "performance-review", help="Run advisory performance review on signal quality.",
     )
     data_polymarket_perf_review.set_defaults(func=cmd_polymarket_performance_review)
+
+    data_polymarket_test_tg = data_polymarket_subparsers.add_parser(
+        "test-telegram", help="Test Telegram alert configuration.",
+    )
+    data_polymarket_test_tg.set_defaults(func=cmd_polymarket_test_telegram)
+
+    data_polymarket_refresh_pos = data_polymarket_subparsers.add_parser(
+        "refresh-positions",
+        help="Fetch current open positions for watched wallets.",
+    )
+    data_polymarket_refresh_pos.add_argument(
+        "--tier", type=str, default="tier1h",
+        choices=["tier1h", "tier1", "tier2", "all"],
+        help="Which tier to refresh (default: tier1h).",
+    )
+    data_polymarket_refresh_pos.add_argument(
+        "--limit", type=int, default=50,
+        help="Max wallets to refresh (default: 50).",
+    )
+    data_polymarket_refresh_pos.set_defaults(func=cmd_polymarket_refresh_positions)
+
+    data_polymarket_history = data_polymarket_subparsers.add_parser(
+        "collect-history",
+        help="Bootstrap historical data for backtesting (trades + prices + positions).",
+    )
+    data_polymarket_history.add_argument("--wallets", type=int, default=100,
+        help="Top N watched wallets to backfill (default: 100).")
+    data_polymarket_history.add_argument("--days-back", type=int, default=180,
+        help="Days of trade history to fetch (default: 180).")
+    data_polymarket_history.add_argument("--skip-trades", action="store_true")
+    data_polymarket_history.add_argument("--skip-resolution", action="store_true")
+    data_polymarket_history.add_argument("--skip-prices", action="store_true")
+    data_polymarket_history.add_argument("--skip-reconstruct", action="store_true")
+    data_polymarket_history.set_defaults(func=cmd_polymarket_collect_history)
+
+    data_polymarket_ingest_top = data_polymarket_subparsers.add_parser(
+        "ingest-top-wallets",
+        help="Fetch Polymarket leaderboard and backfill missing wallets.",
+    )
+    data_polymarket_ingest_top.add_argument("--limit", type=int, default=200,
+        help="Number of leaderboard wallets to fetch (default: 200, max ~2000).")
+    data_polymarket_ingest_top.add_argument("--window", type=str, default="all",
+        choices=["all", "30d", "7d", "1d"],
+        help="Time window: all (all-time), 30d (month), 7d (week), 1d (day).")
+    data_polymarket_ingest_top.add_argument("--by-volume", action="store_true",
+        help="Sort by trading volume instead of profit (captures market makers).")
+    data_polymarket_ingest_top.add_argument("--dry-run", action="store_true",
+        help="Show what would be fetched without fetching.")
+    data_polymarket_ingest_top.set_defaults(func=cmd_polymarket_ingest_top_wallets)
+
+    data_polymarket_backfill_w = data_polymarket_subparsers.add_parser(
+        "backfill-wallet", help="Backfill complete trade history for a single wallet.",
+    )
+    data_polymarket_backfill_w.add_argument("--address", type=str, required=True,
+        help="Wallet address to backfill.")
+    data_polymarket_backfill_w.set_defaults(func=cmd_polymarket_backfill_wallet)
+
+    data_polymarket_backfill_top = data_polymarket_subparsers.add_parser(
+        "backfill-top-wallets",
+        help="Backfill top N wallets from leaderboard by net_pnl_usdc.",
+    )
+    data_polymarket_backfill_top.add_argument("--limit", type=int, default=50,
+        help="Number of top wallets to backfill (default: 50).")
+    data_polymarket_backfill_top.set_defaults(func=cmd_polymarket_backfill_top_wallets)
+
+    data_polymarket_discover = data_polymarket_subparsers.add_parser(
+        "discover-market-wallets",
+        help="Discover wallets by scanning top markets for active traders.",
+    )
+    data_polymarket_discover.add_argument("--markets", type=int, default=50,
+        help="Top N markets to scan (default: 50).")
+    data_polymarket_discover.add_argument("--traders", type=int, default=100,
+        help="Top traders to fetch per market (default: 100).")
+    data_polymarket_discover.add_argument("--days-back", type=int, default=30,
+        help="Only markets resolved in last N days (default: 30).")
+    data_polymarket_discover.add_argument("--dry-run", action="store_true",
+        help="Show what would be fetched without fetching.")
+    data_polymarket_discover.set_defaults(func=cmd_polymarket_discover_market_wallets)
 
     # ── data manifold ─────────────────────���──────────────────────────��───────
     data_manifold = data_subparsers.add_parser(

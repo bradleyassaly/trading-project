@@ -1,0 +1,263 @@
+"""
+Polymarket live trading executor.
+
+Same interface as :class:`PolymarketPaperExecutor` but routes orders
+through the real CLOB after every layer of safety has cleared:
+
+  1. ``DRY_RUN`` flag — defaults to True, must be flipped explicitly
+  2. :class:`KillSwitch` — env switch + emergency stop + sample-size +
+     EV + win-rate + daily-loss + position-count gates
+  3. :class:`KellySizer` — sizes the trade from real outcome history,
+     scaled by signal confidence
+  4. :class:`ClobClient` — actual order placement (only when both
+     DRY_RUN is False AND ``POLYMARKET_LIVE_ENABLED=1``)
+
+Every attempt — dry run or live — is appended to the ``live_trades``
+table for an audit trail.
+
+**Critical safety contract**
+
+* ``DRY_RUN`` must remain ``True`` in source. The user has to flip it
+  in their own running instance.
+* Even with ``DRY_RUN=False``, the kill switch will block trading
+  until ``POLYMARKET_LIVE_ENABLED=1`` is set in ``.env``.
+* Both conditions must hold simultaneously for any real CLOB order
+  to be submitted.
+"""
+from __future__ import annotations
+
+import json
+import logging
+import sqlite3
+import time
+from typing import Any
+
+from trading_platform.polymarket.clob_client import ClobClient, OrderResult
+from trading_platform.polymarket.kelly_sizer import KellySizer
+from trading_platform.polymarket.kill_switch import KillSwitch
+from trading_platform.polymarket.wallet_db import WalletDB
+
+logger = logging.getLogger(__name__)
+
+
+class PolymarketLiveExecutor:
+    """Live trading executor with multi-layer safety gating."""
+
+    # ALWAYS True in source. Flip in your local instance only.
+    DRY_RUN: bool = True
+
+    def __init__(self) -> None:
+        self._db = WalletDB()
+        self._db_path = str(self._db._path)
+        self._clob = ClobClient()
+        self._kill = KillSwitch(self._db_path)
+        self._sizer = KellySizer(self._db_path)
+        self._ensure_live_trades_table()
+
+    def _ensure_live_trades_table(self) -> None:
+        try:
+            conn = sqlite3.connect(self._db_path)
+            try:
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS live_trades (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        attempted_at INTEGER NOT NULL,
+                        signal_type TEXT,
+                        condition_id TEXT,
+                        question TEXT,
+                        direction TEXT,
+                        confidence REAL,
+                        size_usd REAL,
+                        entry_price REAL,
+                        order_id TEXT,
+                        status TEXT,
+                        dry_run INTEGER DEFAULT 1,
+                        error_msg TEXT
+                    )
+                """)
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_live_trades_ts ON live_trades(attempted_at DESC)"
+                )
+                conn.commit()
+            finally:
+                conn.close()
+        except Exception as exc:
+            logger.debug("live_trades table ensure failed: %s", exc)
+
+    def execute(self, signal: dict[str, Any]) -> dict[str, Any]:
+        """Attempt a (gated) live trade for a fired signal."""
+        sig_type = signal.get("signal_type", "")
+        confidence = float(signal.get("confidence") or 0)
+        condition_id = signal.get("condition_id") or ""
+
+        # 0. Emergency stop check
+        stopped, stop_reason = self._kill.is_emergency_stopped()
+        if stopped:
+            logger.warning("[LIVE] Emergency stop active: %s", stop_reason)
+            return self._result(False, reason=f"Emergency stop: {stop_reason}")
+
+        # 1. Kelly size
+        size_usd = self._sizer.get_trade_size(sig_type, confidence)
+
+        # 2. Kill switch check
+        ks = self._kill.check(sig_type, size_usd, confidence)
+        for w in ks.warnings:
+            logger.warning("[LIVE] KillSwitch warning: %s", w)
+        if not ks.allowed:
+            logger.warning("[LIVE] KillSwitch blocked: %s", ks.reason)
+            self._record_attempt(signal, size_usd, None, None, dry_run=self.DRY_RUN, status="blocked", error_msg=ks.reason)
+            return self._result(False, reason=ks.reason)
+
+        # 3. Resolve token_id (Gamma)
+        token_id = signal.get("token_id") or self._resolve_token_id(condition_id)
+        if not token_id:
+            return self._result(False, reason=f"No token_id for {condition_id[:20]}")
+
+        # 4. Current price (for slippage + logging)
+        current_price = self._clob.get_mid_price(token_id)
+        if current_price is None:
+            return self._result(False, reason="Could not fetch current price from CLOB")
+
+        direction = (signal.get("direction") or "BUY").upper()
+        outcome_label = "YES" if direction == "BUY" else "NO"
+
+        logger.info(
+            "[LIVE%s] %s %s $%.0f @ %.3f | conf=%.0f%% | %s",
+            "(DRY)" if self.DRY_RUN else "",
+            sig_type, outcome_label, size_usd, current_price,
+            confidence * 100, (signal.get("question") or "")[:40],
+        )
+
+        # 5. DRY RUN: log + record + return
+        if self.DRY_RUN:
+            self._record_attempt(
+                signal, size_usd, current_price, None,
+                dry_run=True, status="dry_run", error_msg=None,
+            )
+            return self._result(
+                True, mode="dry_run", size_usd=size_usd,
+                filled_price=current_price,
+                reason="DRY RUN — no order submitted",
+            )
+
+        # 6. LIVE — submit
+        if not self._clob.is_configured:
+            return self._result(False, reason="CLOB not configured — set POLYMARKET_API_KEY etc.")
+
+        order_result: OrderResult = self._clob.place_market_order(
+            token_id=token_id, side="BUY", size_usdc=size_usd, max_slippage=0.02,
+        )
+        self._record_attempt(
+            signal, size_usd, current_price, order_result,
+            dry_run=False,
+            status=order_result.status if order_result.success else "error",
+            error_msg=order_result.error_msg,
+        )
+        if order_result.success:
+            logger.info("[LIVE] order placed: %s @ %.3f",
+                        order_result.order_id, order_result.filled_price or current_price)
+            return self._result(
+                True, mode="live", order_id=order_result.order_id,
+                size_usd=size_usd, filled_price=order_result.filled_price,
+            )
+        else:
+            logger.error("[LIVE] order failed: %s", order_result.error_msg)
+            return self._result(False, reason=order_result.error_msg)
+
+    # ── Helpers ────────────────────────────────────────────────────────────
+
+    def _resolve_token_id(self, condition_id: str) -> str | None:
+        if not condition_id:
+            return None
+        try:
+            import requests as _req
+            r = _req.get(
+                "https://gamma-api.polymarket.com/markets",
+                params={"condition_ids": condition_id},
+                timeout=8,
+            )
+            data = r.json()
+            m = data[0] if isinstance(data, list) and data else None
+            if m and (m.get("conditionId") or "").lower() == condition_id.lower():
+                tids_raw = m.get("clobTokenIds") or "[]"
+                tids = json.loads(tids_raw) if isinstance(tids_raw, str) else tids_raw
+                return tids[0] if tids else None
+        except Exception as exc:
+            logger.debug("token id resolve failed: %s", exc)
+        return None
+
+    def _record_attempt(
+        self,
+        signal: dict[str, Any],
+        size_usd: float,
+        entry_price: float | None,
+        order_result: OrderResult | None,
+        *,
+        dry_run: bool,
+        status: str,
+        error_msg: str | None,
+    ) -> None:
+        try:
+            conn = sqlite3.connect(self._db_path)
+            try:
+                conn.execute(
+                    """INSERT INTO live_trades
+                       (attempted_at, signal_type, condition_id, question, direction,
+                        confidence, size_usd, entry_price, order_id, status,
+                        dry_run, error_msg)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        int(time.time()),
+                        signal.get("signal_type"),
+                        signal.get("condition_id", ""),
+                        (signal.get("question") or "")[:200],
+                        signal.get("direction", "BUY"),
+                        signal.get("confidence"),
+                        float(size_usd) if size_usd is not None else None,
+                        float(entry_price) if entry_price is not None else None,
+                        order_result.order_id if order_result else None,
+                        status,
+                        1 if dry_run else 0,
+                        error_msg,
+                    ),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+        except Exception as exc:
+            logger.debug("live_trades record failed: %s", exc)
+
+    def _result(
+        self,
+        success: bool,
+        mode: str = "live",
+        order_id: str | None = None,
+        size_usd: float | None = None,
+        filled_price: float | None = None,
+        reason: str | None = None,
+    ) -> dict[str, Any]:
+        return {
+            "success": success,
+            "mode": mode,
+            "order_id": order_id,
+            "size_usd": size_usd,
+            "filled_price": filled_price,
+            "reason": reason,
+        }
+
+    def test_dry_run(self, signal_type: str = "price_velocity") -> dict[str, Any]:
+        """Synthetic dry-run test for the kill switch + sizer pipeline."""
+        test_signal = {
+            "signal_type": signal_type,
+            "condition_id": "test_cid",
+            "question": "DRY RUN TEST",
+            "direction": "BUY",
+            "confidence": 0.65,
+            "category": "test",
+        }
+        original = self.DRY_RUN
+        self.DRY_RUN = True
+        try:
+            return self.execute(test_signal)
+        finally:
+            self.DRY_RUN = original

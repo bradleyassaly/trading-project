@@ -91,6 +91,7 @@ class PolymarketLiveCollector:
         whale_tripwire: Any | None = None,
         signal_engine: Any | None = None,
         paper_executor: Any | None = None,
+        market_universe: Any | None = None,
     ) -> None:
         if ws_connect is None:
             raise ImportError(
@@ -109,6 +110,19 @@ class PolymarketLiveCollector:
         self._tripwire = whale_tripwire
         self._signal_engine = signal_engine
         self._paper_executor = paper_executor
+        self._universe = market_universe
+        # Per-token rolling price buffer for velocity detection.
+        # {token_id: [(ts, price), ...]} — trimmed to last 30 minutes on insert.
+        self._price_buffer: dict[str, list[tuple[int, float]]] = {}
+        # Pending ticks waiting to be batch-written to market_ticks.
+        # Each entry: (condition_id, token_id, ts, price). Flushed every 50 ticks.
+        self._tick_batch: list[tuple[str, str, int, float]] = []
+        self._tick_batch_size = 50
+        # Background polling threads (started in run())
+        self._ob_monitor: Any = None
+        self._ob_thread: Any = None
+        self._hot_scanner: Any = None
+        self._hot_thread: Any = None
 
     # ── Public API ───────────────────────────────────────────────────────────
 
@@ -121,7 +135,19 @@ class PolymarketLiveCollector:
             (m.market_id, m.question, m.volume, m.yes_token_id, m.end_date_iso, m.condition_id)
             for m in self.markets
         ])
+
+        # Resolve any pending paper trades from previous runs
+        if self._paper_executor and hasattr(self._paper_executor, "check_resolutions_v2"):
+            try:
+                resolved = self._paper_executor.check_resolutions_v2()
+                open_count = len(self._paper_executor.get_open_positions())
+                logger.info("[PAPER] Resolved %d trades on startup. Open positions: %d", len(resolved), open_count)
+                print(f"[PAPER] Resolved {len(resolved)} trades on startup. Open positions: {open_count}")
+            except Exception as exc:
+                logger.warning("[PAPER] Resolution check failed: %s", exc)
         try:
+            # Start optional background monitors (gated by env vars)
+            self._start_background_monitors()
             export_task = asyncio.create_task(self._export_loop())
             stats_task = asyncio.create_task(self._stats_loop())
             heartbeat_task = asyncio.create_task(self._heartbeat_loop())
@@ -287,6 +313,7 @@ class PolymarketLiveCollector:
             )
             self.state.ticks_stored += 1
             self.state.latest_prices[info.market_id] = price
+            self._update_velocity_buffer(asset_id, price, info)
 
     def _handle_last_trade_price(self, msg: dict[str, Any]) -> None:
         asset_id = msg.get("asset_id", "")
@@ -308,6 +335,159 @@ class PolymarketLiveCollector:
             )
             self.state.ticks_stored += 1
             self.state.latest_prices[info.market_id] = price
+            self._update_velocity_buffer(asset_id, price, info)
+
+    # ── Price velocity tracking ───────────────────────────────────────────────
+
+    def _update_velocity_buffer(
+        self,
+        token_id: str,
+        price: float,
+        info: LiveMarketInfo,
+    ) -> None:
+        """Append a price tick to the rolling 30-min buffer and emit a
+        ``price_velocity`` signal if the move qualifies (>=10¢ in <30min).
+
+        Also enqueues the tick for batched persistence into ``market_ticks``
+        so the candle synthesis backend can build denser charts than the
+        Gamma price-history snapshot allows.
+        """
+        import time as _t
+        now = int(_t.time())
+        buf = self._price_buffer.setdefault(token_id, [])
+        buf.append((now, price))
+        # Trim to last 30 minutes
+        cutoff = now - 1800
+        buf[:] = [(t, p) for t, p in buf if t >= cutoff]
+
+        # Persist tick (batched to keep write overhead minimal)
+        cid = info.condition_id or ""
+        if cid:
+            self._tick_batch.append((cid, token_id, now, float(price)))
+            if len(self._tick_batch) >= self._tick_batch_size:
+                self._flush_tick_batch()
+
+    def _flush_tick_batch(self) -> None:
+        """Write queued ticks to market_ticks in a single transaction."""
+        if not self._tick_batch:
+            return
+        try:
+            from trading_platform.polymarket.wallet_db import WalletDB
+            import sqlite3 as _sq
+            db_path = str(WalletDB()._path)
+            conn = _sq.connect(db_path)
+            try:
+                conn.executemany(
+                    """INSERT OR IGNORE INTO market_ticks
+                       (condition_id, token_id, timestamp, price)
+                       VALUES (?, ?, ?, ?)""",
+                    self._tick_batch,
+                )
+                conn.commit()
+            finally:
+                conn.close()
+            self._tick_batch = []
+        except Exception as exc:
+            logger.debug("tick batch flush failed: %s", exc)
+            # Drop the batch on failure to avoid unbounded memory growth
+            self._tick_batch = []
+
+        if len(buf) < 3 or self._signal_engine is None:
+            return
+        oldest_ts, oldest_price = buf[0]
+        newest_ts, newest_price = buf[-1]
+        price_change = newest_price - oldest_price
+        if abs(price_change) < 0.10:
+            return
+        minutes_elapsed = (newest_ts - oldest_ts) / 60.0
+        if minutes_elapsed <= 0:
+            return
+        velocity = price_change / max(minutes_elapsed, 0.5)
+        try:
+            self._signal_engine.on_price_velocity(
+                condition_id=info.condition_id or "",
+                token_id=token_id,
+                price_change=price_change,
+                velocity=velocity,
+                current_price=newest_price,
+                minutes_elapsed=minutes_elapsed,
+                question=info.question or "",
+                category="other",
+            )
+        except Exception as exc:
+            logger.debug("velocity signal failed: %s", exc)
+
+    # ── Background pollers (order book monitor + hot market scanner) ─────────
+
+    def _start_background_monitors(self) -> None:
+        """Optionally start the order book monitor and hot market scanner.
+
+        Both are opt-in via the ``POLYMARKET_ENABLE_OB_MONITOR`` and
+        ``POLYMARKET_ENABLE_HOT_SCANNER`` env vars to avoid surprising
+        existing deployments.
+        """
+        import os as _os
+        import threading as _th
+        import time as _t
+
+        if _os.environ.get("POLYMARKET_ENABLE_OB_MONITOR", "").lower() in ("1", "true", "yes"):
+            try:
+                from trading_platform.polymarket.order_book_monitor import OrderBookMonitor
+                from trading_platform.polymarket.wallet_db import WalletDB
+                self._ob_monitor = OrderBookMonitor(db_path=str(WalletDB()._path))
+
+                def _ob_loop() -> None:
+                    while True:
+                        try:
+                            import requests as _req
+                            import json as _json
+                            r = _req.get(
+                                "https://gamma-api.polymarket.com/markets",
+                                params={"active": "true", "closed": "false",
+                                        "limit": 50, "order": "volume24hr",
+                                        "ascending": "false"},
+                                timeout=10,
+                            )
+                            top = r.json() if isinstance(r.json(), list) else []
+                            ob_markets = []
+                            for m in top:
+                                tids_raw = m.get("clobTokenIds", "[]")
+                                tids = _json.loads(tids_raw) if isinstance(tids_raw, str) else tids_raw
+                                if not tids:
+                                    continue
+                                ob_markets.append({
+                                    "condition_id": m.get("conditionId", ""),
+                                    "token_id": tids[0],
+                                    "question": m.get("question", ""),
+                                    "category": m.get("category", "other"),
+                                })
+                            signals = self._ob_monitor.run_scan(ob_markets)
+                            if self._signal_engine:
+                                for s in signals:
+                                    if s.get("severity") in ("high", "critical"):
+                                        self._signal_engine.on_order_book_signal(s)
+                        except Exception as exc:
+                            logger.error("[OB_POLL] cycle failed: %s", exc)
+                        _t.sleep(120)
+
+                self._ob_thread = _th.Thread(target=_ob_loop, daemon=True, name="ob_monitor")
+                self._ob_thread.start()
+                logger.info("[INIT] Order book monitor started (2-min interval, top 50 markets)")
+            except Exception as exc:
+                logger.warning("OB monitor failed to start: %s", exc)
+
+        if _os.environ.get("POLYMARKET_ENABLE_HOT_SCANNER", "").lower() in ("1", "true", "yes"):
+            if self._universe is None:
+                logger.warning("Hot scanner requested but no market_universe provided")
+            else:
+                try:
+                    from trading_platform.polymarket.hot_market_scanner import HotMarketScanner
+                    from trading_platform.polymarket.wallet_db import WalletDB
+                    self._hot_scanner = HotMarketScanner(self._universe, db_path=str(WalletDB()._path))
+                    self._hot_thread = self._hot_scanner.run_background(interval=300)
+                    logger.info("[INIT] Hot market scanner started (5-min interval)")
+                except Exception as exc:
+                    logger.warning("Hot scanner failed to start: %s", exc)
 
     # ── Whale detection ───────────────────────────────────────────────────────
 
@@ -330,33 +510,77 @@ class PolymarketLiveCollector:
         """Poll Data API every 15 min for tier-1 wallet trades.
 
         Catches trades on markets outside the WebSocket universe.
+        First poll happens 60s after startup, then every 15 min.
         """
         _POLL_INTERVAL = 900  # 15 minutes
-        _last_seen: dict[str, int] = {}  # wallet → last seen trade timestamp
+        _last_seen: dict[str, int] = {}
+
+        # Initial delay (let WebSocket settle), then run immediately
+        await asyncio.sleep(60)
+
+        if self._tripwire and self._tripwire.watched_tier1:
+            n_wallets = len(self._tripwire.watched_tier1)
+            logger.info("Tier-1 poll loop starting: %d wallets", n_wallets)
+            print(f"[TIER1-POLL] Starting loop with {n_wallets} wallets")
 
         while True:
-            await asyncio.sleep(_POLL_INTERVAL)
-            if not self._tripwire or not self._tripwire.watched_tier1:
-                continue
             try:
-                await self._poll_tier1_wallets(_last_seen)
+                if self._tripwire and self._tripwire.watched_tier1:
+                    polled = await self._poll_tier1_wallets(_last_seen)
+                    self._write_tier1_poll_status(polled, success=True)
+                else:
+                    self._write_tier1_poll_status(0, success=True)
             except Exception as exc:
-                logger.debug("Tier-1 poll error: %s", exc)
+                logger.warning("Tier-1 poll error: %s", exc)
+                print(f"[TIER1-POLL] Error: {exc}")
+                self._write_tier1_poll_status(0, success=False)
+            await asyncio.sleep(_POLL_INTERVAL)
 
-    async def _poll_tier1_wallets(self, last_seen: dict[str, int]) -> None:
-        """Fetch recent trades for tier-1 wallets from Data API."""
+    def _write_tier1_poll_status(self, wallets_polled: int, success: bool) -> None:
+        """Update monitor_status.json with tier-1 poll status."""
         try:
-            from trading_platform.polymarket.data_api_fetcher import PolymarketDataAPIFetcher
-        except ImportError:
-            return
+            _proj_root = Path(__file__).resolve().parents[3]
+            status_path = _proj_root / "data" / "system" / "monitor_status.json"
+            status_path.parent.mkdir(parents=True, exist_ok=True)
+            existing = {}
+            if status_path.exists():
+                try:
+                    existing = json.loads(status_path.read_text(encoding="utf-8"))
+                except Exception:
+                    pass
+            now = int(datetime.now(tz=timezone.utc).timestamp())
+            existing["tier1_poll"] = {
+                "last_poll_at": now,
+                "last_poll_age_seconds": 0,
+                "wallets_polled": wallets_polled,
+                "last_poll_success": success,
+            }
+            status_path.write_text(json.dumps(existing, indent=2), encoding="utf-8")
+        except Exception as exc:
+            logger.debug("Failed to write tier1_poll_status: %s", exc)
 
-        fetcher = PolymarketDataAPIFetcher()
+    async def _poll_tier1_wallets(self, last_seen: dict[str, int]) -> int:
+        """Fetch recent trades for tier-1 wallets from Data API. Returns count polled."""
+        try:
+            from trading_platform.polymarket.data_api_fetcher import PolymarketDataApiFetcher
+        except ImportError as exc:
+            logger.warning("Tier-1 poll: cannot import fetcher: %s", exc)
+            return 0
+
+        fetcher = PolymarketDataApiFetcher()
+        polled = 0
         for wallet in list(self._tripwire.watched_tier1)[:50]:
             try:
-                trades = fetcher.get_wallet_trades(wallet, limit=10)
-            except Exception:
+                # Use _fetch_page directly for non-blocking poll
+                trades = await asyncio.get_event_loop().run_in_executor(
+                    None,
+                    lambda w=wallet: fetcher._fetch_page({"user": w, "limit": 10}),
+                )
+            except Exception as exc:
+                logger.debug("Poll failed for %s: %s", wallet[:10], exc)
                 continue
 
+            polled += 1
             if not trades:
                 continue
 
@@ -365,14 +589,17 @@ class PolymarketLiveCollector:
                 ts = trade.get("timestamp") or trade.get("createdAt") or 0
                 if isinstance(ts, str):
                     try:
-                        from datetime import datetime as _dt, timezone as _tz
+                        from datetime import datetime as _dt
                         ts = int(_dt.fromisoformat(ts.replace("Z", "+00:00")).timestamp())
                     except Exception:
                         ts = 0
+                try:
+                    ts = int(ts)
+                except (TypeError, ValueError):
+                    ts = 0
                 if ts <= cutoff:
                     continue
 
-                # Build a synthetic event and run through whale check
                 event = {
                     "maker": wallet,
                     "side": trade.get("side", "BUY"),
@@ -384,20 +611,14 @@ class PolymarketLiveCollector:
                 }
                 self._check_whale(event)
 
-            # Update last_seen
-            all_ts = [
-                t.get("timestamp") or t.get("createdAt") or 0
-                for t in trades
-            ]
-            int_ts = []
-            for t in all_ts:
-                if isinstance(t, (int, float)):
-                    int_ts.append(int(t))
+            all_ts = [t.get("timestamp") or t.get("createdAt") or 0 for t in trades]
+            int_ts = [int(t) for t in all_ts if isinstance(t, (int, float))]
             if int_ts:
                 last_seen[wallet] = max(int_ts)
 
-            # Small delay between wallets
             await asyncio.sleep(0.2)
+
+        return polled
 
     # ── Hourly export ────────────────────────────────────────────────────────
 
@@ -487,31 +708,33 @@ class PolymarketLiveCollector:
         stats_path.write_text(json.dumps(stats, indent=2), encoding="utf-8")
 
         # Write ws_status.json for the API
-        ws_status_path = Path("data/polymarket/ws_status.json")
+        _proj_root = Path(__file__).resolve().parents[3]
+        ws_status_path = _proj_root / "data" / "polymarket" / "ws_status.json"
         ws_status_path.parent.mkdir(parents=True, exist_ok=True)
         t1 = len(self._tripwire.watched_tier1) if self._tripwire else 0
         t2 = len(self._tripwire.watched_tier2) if self._tripwire else 0
 
         # Category counts — use MarketUniverse for accurate classification
         categories: dict[str, int] = {}
-        if self._tripwire and self._tripwire.universe:
-            for m in self.markets:
-                cid = m.condition_id or m.market_id
-                cat = self._tripwire.universe.get_category(cid)
-                categories[cat] = categories.get(cat, 0) + 1
+        _universe = None
+        if self._tripwire and getattr(self._tripwire, "universe", None):
+            _universe = self._tripwire.universe
         else:
             try:
                 from trading_platform.polymarket.market_universe import MarketUniverse
                 _u = MarketUniverse()
-                if _u.load_cached():
-                    for m in self.markets:
-                        cid = m.condition_id or m.market_id
-                        cat = _u.get_category(cid)
-                        categories[cat] = categories.get(cat, 0) + 1
-                else:
-                    categories["unknown"] = len(self.markets)
+                if _u.load_cached() and len(_u.get_all_condition_ids()) > 0:
+                    _universe = _u
             except Exception:
-                categories["unknown"] = len(self.markets)
+                pass
+
+        if _universe and len(_universe.get_all_condition_ids()) > 0:
+            for m in self.markets:
+                cid = m.condition_id or m.market_id
+                cat = _universe.get_category(cid) or "other"
+                categories[cat] = categories.get(cat, 0) + 1
+        else:
+            categories["unknown"] = len(self.markets)
 
         # Count signals today
         signals_today = 0
@@ -521,11 +744,27 @@ class PolymarketLiveCollector:
             except Exception:
                 pass
 
+        # Count wallet-derived markets if tripwire universe is loaded
+        wallet_derived_count = 0
+        if self._tripwire and getattr(self._tripwire, "universe", None):
+            try:
+                wallet_cids = self._tripwire.universe.get_wallet_derived_markets(days_back=14)
+                subscribed_cids = {m.condition_id for m in self.markets if m.condition_id}
+                wallet_derived_count = len(wallet_cids & subscribed_cids)
+            except Exception:
+                pass
+
+        # Track tier1h count from tripwire
+        t1h = sum(1 for p in (self._tripwire.leaderboard.values() if self._tripwire else [])
+                  if p.get("tier") == "tier1h")
+
         ws_status = {
             "connected": True,
             "markets_subscribed": len(self.markets),
+            "wallet_derived_markets": wallet_derived_count,
             "watched_wallets": t1 + t2,
             "tier1_wallets": t1,
+            "tier1h_wallets": t1h,
             "tier2_wallets": t2,
             "signals_today": signals_today,
             "last_event_ts": now_ts,

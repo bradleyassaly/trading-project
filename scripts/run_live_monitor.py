@@ -24,10 +24,16 @@ WS_STATUS_PATH = PROJECT_ROOT / "data" / "polymarket" / "ws_status.json"
 UNIVERSE_PATH = PROJECT_ROOT / "data" / "polymarket" / "market_universe.json"
 DB_PATH = PROJECT_ROOT / "data" / "polymarket" / "wallet_intelligence.db"
 
+MONITOR_STATUS_PATH = PROJECT_ROOT / "data" / "system" / "monitor_status.json"
+
 MAX_RESTARTS_PER_HOUR = 10
 STALE_THRESHOLD_SECONDS = 600  # 10 minutes
-HEALTH_CHECK_INTERVAL = 300  # 5 minutes
+HEALTH_CHECK_INTERVAL = 60  # 1 minute (also writes monitor status)
 RESTART_DELAY = 30
+
+_started_at = int(time.time())
+_restarts_today = 0
+_consecutive_failures = 0
 
 
 def check_prerequisites() -> list[str]:
@@ -83,14 +89,16 @@ def check_prerequisites() -> list[str]:
 
 def check_health() -> bool:
     """Check ws_status.json for stale connection. Returns True if healthy."""
+    _write_monitor_status()
+
     if not WS_STATUS_PATH.exists():
-        return True  # No status file yet, assume starting up
+        return True
     try:
         data = json.loads(WS_STATUS_PATH.read_text(encoding="utf-8"))
         written_at = data.get("written_at", 0)
         age = time.time() - written_at
         if age > STALE_THRESHOLD_SECONDS:
-            print(f"  [HEALTH] Connection stale — last event {age:.0f}s ago")
+            print(f"  [HEALTH] Connection stale - last event {age:.0f}s ago")
             return False
         markets = data.get("markets_subscribed", 0)
         if markets < 50:
@@ -98,6 +106,48 @@ def check_health() -> bool:
         return True
     except Exception:
         return True
+
+
+def _write_monitor_status() -> None:
+    """Write current monitor state to data/system/monitor_status.json."""
+    global _restarts_today
+    MONITOR_STATUS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    now = int(time.time())
+
+    # Read ws_status for WebSocket info
+    ws_info = {"connected": False, "markets_subscribed": 0, "last_event_ts": 0}
+    if WS_STATUS_PATH.exists():
+        try:
+            ws_data = json.loads(WS_STATUS_PATH.read_text(encoding="utf-8"))
+            ws_info = {
+                "connected": ws_data.get("connected", False),
+                "markets_subscribed": ws_data.get("markets_subscribed", 0),
+                "last_event_ts": ws_data.get("last_event_ts", 0),
+                "last_event_age_seconds": now - (ws_data.get("last_event_ts") or now),
+            }
+        except Exception:
+            pass
+
+    status = {
+        "started_at": _started_at,
+        "last_heartbeat": now,
+        "restarts_today": _restarts_today,
+        "websocket": ws_info,
+        "tier1_poll": {
+            "last_poll_at": None,
+            "last_poll_age_seconds": None,
+            "wallets_polled": 0,
+            "last_poll_success": True,
+        },
+        "signals": {
+            "fired_today": ws_data.get("signals_today", 0) if WS_STATUS_PATH.exists() else 0,
+            "last_signal_at": None,
+        },
+    }
+    try:
+        MONITOR_STATUS_PATH.write_text(json.dumps(status, indent=2), encoding="utf-8")
+    except Exception:
+        pass
 
 
 def run_collector() -> subprocess.Popen:
@@ -114,6 +164,7 @@ def run_collector() -> subprocess.Popen:
 
 
 def main() -> None:
+    global _restarts_today, _consecutive_failures
     parser = argparse.ArgumentParser(description="Polymarket continuous monitor")
     parser.add_argument("--once", action="store_true", help="Run without restart loop")
     args = parser.parse_args()
@@ -148,16 +199,23 @@ def main() -> None:
 
         proc = run_collector()
         restart_times.append(now)
+        _consecutive_failures = 0
 
         try:
             while True:
                 try:
                     proc.wait(timeout=HEALTH_CHECK_INTERVAL)
-                    # Process exited
                     print(f"  [RESTART] Process exited with code {proc.returncode}")
+                    _restarts_today += 1
+                    _consecutive_failures += 1
+                    if _consecutive_failures >= 3:
+                        try:
+                            from trading_platform.polymarket.telegram_alerts import get_alerter
+                            get_alerter().send_pipeline_alert("websocket", f"Failed to reconnect ({_consecutive_failures} attempts)", "critical")
+                        except Exception:
+                            pass
                     break
                 except subprocess.TimeoutExpired:
-                    # Process still running — check health
                     if not check_health():
                         print("  [RESTART] Killing stale process")
                         proc.terminate()
@@ -165,6 +223,7 @@ def main() -> None:
                             proc.wait(timeout=10)
                         except subprocess.TimeoutExpired:
                             proc.kill()
+                        _restarts_today += 1
                         break
         except KeyboardInterrupt:
             proc.terminate()

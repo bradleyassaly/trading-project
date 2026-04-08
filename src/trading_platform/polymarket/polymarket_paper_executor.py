@@ -1,20 +1,25 @@
 """
-Polymarket paper trade executor using smart money signals.
+Polymarket paper trade executor.
 
-Shares the same SQLite database as KalshiPaperExecutor but tracks
-Polymarket trades separately via a ``platform`` column.
+Two execution paths:
+  1. on_signal() / execute_trade() — legacy path, writes to kalshi/paper_trades.db
+     with platform='polymarket' (preserved for back-compat).
+  2. execute_signal() — new path, writes to wallet_intelligence.db
+     polymarket_paper_trades table with $100K bankroll and SIGNAL_BANKROLL
+     allocations per signal type.
 
 Usage::
 
     from trading_platform.polymarket.polymarket_paper_executor import PolymarketPaperExecutor
     executor = PolymarketPaperExecutor()
-    executor.execute_trade(signal, market_price=0.65)
+    executor.execute_signal(signal_dict)
 """
 from __future__ import annotations
 
 import logging
 import sqlite3
 import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -22,6 +27,60 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 _STARTING_CASH = 500.0
+_PROJECT_ROOT = Path(__file__).resolve().parents[3]
+_WALLET_DB_PATH = _PROJECT_ROOT / "data" / "polymarket" / "wallet_intelligence.db"
+
+SIGNAL_BANKROLL = {
+    "wallet_reversal":    18_000,
+    "cascade":            15_000,
+    "oversized_bet":      15_000,
+    "accumulation":       12_000,
+    "market_maker_flip":  12_000,
+    "convergence":        12_000,
+    "price_velocity":     10_000,
+    "specialist_entry":    8_000,
+    "whale_exit":          8_000,
+    "no_position_entry":   8_000,
+    "pre_deadline_surge":  5_000,
+    "position_reduction":  5_000,
+    "whale_entry":         3_000,
+}
+
+MIN_CONFIDENCE = 0.35
+
+# Per-signal-type confidence floor overrides. Velocity signals top out at
+# 0.85 with the 30%-move ceiling and start at 0.30 for a 10% move; the
+# default 0.35 cap drops ~75% of them, so we lower the floor for them.
+MIN_CONFIDENCE_BY_TYPE = {
+    "price_velocity": 0.25,
+}
+MAX_POSITION_PCT = 0.15
+MIN_STAKE = 25.0
+STARTING_BANKROLL = 100_000
+
+_PAPER_TRADES_SCHEMA = """
+CREATE TABLE IF NOT EXISTS polymarket_paper_trades (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    condition_id TEXT NOT NULL,
+    question TEXT,
+    category TEXT,
+    side TEXT NOT NULL,
+    entry_price REAL,
+    size_usd REAL NOT NULL,
+    signal_type TEXT NOT NULL,
+    confidence REAL,
+    wallet TEXT,
+    entry_ts INTEGER,
+    exit_price REAL,
+    exit_ts INTEGER,
+    outcome TEXT,
+    return_pct REAL,
+    realized_pnl REAL,
+    archived INTEGER DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_ppt_open ON polymarket_paper_trades(condition_id, exit_ts);
+CREATE INDEX IF NOT EXISTS idx_ppt_signal ON polymarket_paper_trades(signal_type);
+"""
 
 
 class PolymarketPaperExecutor:
@@ -34,6 +93,13 @@ class PolymarketPaperExecutor:
         self._conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._migrate()
+
+        # New polymarket_paper_trades table lives in wallet_intelligence.db
+        self._wallet_db_path = _WALLET_DB_PATH
+        self._wallet_lock = threading.Lock()
+        self._wallet_conn = sqlite3.connect(str(self._wallet_db_path), check_same_thread=False)
+        self._wallet_conn.executescript(_PAPER_TRADES_SCHEMA)
+        self._wallet_conn.commit()
 
     def _migrate(self) -> None:
         """Create tables if missing, add columns for Polymarket fields."""
@@ -140,6 +206,356 @@ class PolymarketPaperExecutor:
             signal.top_wallet_edge * 100, signal.weighted_net_volume,
         )
         return True
+
+    # ── New $100K bankroll path (writes to wallet_intelligence.db) ──────────
+
+    def _compute_stake(self, signal_type: str, confidence: float, wallet: str) -> float:
+        """Compute stake using wallet's Kelly fraction and Sharpe ratio.
+
+        Falls back to confidence-based sizing if analytics unavailable.
+        """
+        bankroll = SIGNAL_BANKROLL.get(signal_type, 3000)
+        try:
+            with self._wallet_lock:
+                row = self._wallet_conn.execute(
+                    """SELECT kelly_fraction, sharpe_ratio, pnl_trend
+                       FROM wallet_profiles WHERE wallet = ?""",
+                    (wallet,),
+                ).fetchone()
+        except Exception:
+            row = None
+
+        if not row or row[0] is None:
+            # No analytics yet — fall back to confidence-based sizing
+            return round(bankroll * min(confidence, MAX_POSITION_PCT), 2)
+
+        kelly, sharpe, trend = row[0], row[1], row[2]
+        base_pct = kelly if kelly is not None else min(confidence, MAX_POSITION_PCT)
+
+        # Sharpe multiplier (conservative when unknown or poor)
+        if sharpe is not None and sharpe > 0:
+            sharpe_mult = min(max(sharpe / 1.0, 0.5), 1.5)
+        else:
+            sharpe_mult = 0.75
+
+        # Trend multiplier
+        if trend is not None:
+            if trend > 1.2:
+                trend_mult = 1.1
+            elif trend < 0.5:
+                trend_mult = 0.8
+            else:
+                trend_mult = 1.0
+        else:
+            trend_mult = 1.0
+
+        final_pct = base_pct * sharpe_mult * trend_mult
+        final_pct = max(0.01, min(final_pct, MAX_POSITION_PCT))
+        return max(MIN_STAKE, round(bankroll * final_pct, 2))
+
+    def execute_signal(self, signal: dict[str, Any]) -> dict[str, Any] | None:
+        """Place a paper trade for a fired signal in polymarket_paper_trades.
+
+        Returns the trade dict if placed, None if skipped.
+        """
+        confidence = signal.get("confidence", 0) or 0
+        signal_type = signal.get("signal_type", "")
+        # Allow per-signal floors so velocity-style signals (which top out
+        # at 0.85 by formula) aren't filtered out by the global threshold.
+        floor = MIN_CONFIDENCE_BY_TYPE.get(signal_type, MIN_CONFIDENCE)
+        if confidence < floor:
+            return None
+
+        if signal_type not in SIGNAL_BANKROLL:
+            return None
+
+        direction = (signal.get("direction") or "").upper()
+        if direction not in ("BUY", "SELL"):
+            return None
+
+        condition_id = signal.get("condition_id") or signal.get("token_id", "")
+        if not condition_id:
+            return None
+
+        # Check for existing open position on same market
+        with self._wallet_lock:
+            existing = self._wallet_conn.execute(
+                """SELECT id FROM polymarket_paper_trades
+                   WHERE condition_id = ? AND exit_ts IS NULL AND archived = 0""",
+                (condition_id,),
+            ).fetchone()
+        if existing:
+            return None
+
+        wallet = signal.get("wallet", "")
+        # Compute stake — uses Kelly + Sharpe + trend if analytics available
+        stake = self._compute_stake(signal_type, confidence, wallet)
+        if stake < MIN_STAKE:
+            return None
+
+        side = "YES" if direction == "BUY" else "NO"
+        category = signal.get("category", "other")
+        question = signal.get("question", "")
+        entry_price = signal.get("price")
+        now_ts = int(time.time())
+
+        try:
+            with self._wallet_lock:
+                cursor = self._wallet_conn.execute(
+                    """INSERT INTO polymarket_paper_trades
+                       (condition_id, question, category, side, entry_price,
+                        size_usd, signal_type, confidence, wallet, entry_ts, archived)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)""",
+                    (condition_id, question, category, side, entry_price,
+                     stake, signal_type, confidence, wallet, now_ts),
+                )
+                trade_id = cursor.lastrowid
+                self._wallet_conn.commit()
+
+            print(f"[PAPER] Placed ${stake:.0f} {side} {signal_type} conf={confidence:.2f} | {question[:40]}")
+
+            return {
+                "id": trade_id, "condition_id": condition_id, "question": question,
+                "category": category, "side": side, "entry_price": entry_price,
+                "size_usd": stake, "signal_type": signal_type, "confidence": confidence,
+                "wallet": wallet, "entry_ts": now_ts,
+            }
+        except Exception as exc:
+            logger.warning("execute_signal failed: %s", exc)
+            return None
+
+    def check_and_resolve_open_trades(self) -> dict[str, int]:
+        """Resolve any open paper trades whose underlying market has settled.
+
+        For each row in ``polymarket_paper_trades`` with ``exit_ts IS NULL``,
+        query Gamma for the market's resolution state. If the market is
+        resolved, write back ``exit_ts``, ``exit_price``, ``realized_pnl``,
+        ``return_pct``, and ``outcome``, and fire a Telegram alert (best
+        effort). Returns ``{checked, resolved}``.
+        """
+        import json as _json
+        try:
+            import requests as _req
+        except Exception:
+            return {"checked": 0, "resolved": 0}
+
+        with self._wallet_lock:
+            open_trades = self._wallet_conn.execute(
+                """SELECT id, condition_id, side, entry_price, size_usd,
+                          signal_type, entry_ts, question
+                   FROM polymarket_paper_trades
+                   WHERE archived = 0 AND exit_ts IS NULL"""
+            ).fetchall()
+
+        resolved_count = 0
+        for trade in open_trades:
+            trade_id, cid, side, entry_price, size_usd, sig_type, entry_ts, question = trade
+            if not cid or entry_price is None or not size_usd:
+                continue
+            try:
+                # Use the verified ``condition_ids`` (plural) param. The
+                # singular ``conditionId`` is silently ignored by Gamma.
+                r = _req.get(
+                    "https://gamma-api.polymarket.com/markets",
+                    params={"condition_ids": cid},
+                    timeout=10,
+                )
+                if r.status_code != 200:
+                    time.sleep(0.2)
+                    continue
+                data = r.json()
+                m = data[0] if isinstance(data, list) and data else None
+                if not m or (m.get("conditionId") or "").lower() != cid.lower():
+                    time.sleep(0.2)
+                    continue
+
+                # Settlement detection: ``closed`` flag + outcomePrices at
+                # extremes (0 / 1) is the most reliable Gamma signal.
+                closed = bool(m.get("closed"))
+                resolution_price: float | None = None
+                op_raw = m.get("outcomePrices")
+                if op_raw:
+                    try:
+                        op = _json.loads(op_raw) if isinstance(op_raw, str) else op_raw
+                        if op:
+                            resolution_price = float(op[0])
+                    except Exception:
+                        resolution_price = None
+                if resolution_price is None and m.get("lastTradePrice") is not None:
+                    try:
+                        resolution_price = float(m["lastTradePrice"])
+                    except (TypeError, ValueError):
+                        resolution_price = None
+
+                # Treat as resolved only when the market is closed AND the
+                # YES price is at an extreme (>0.99 or <0.01).
+                is_resolved = (
+                    closed
+                    and resolution_price is not None
+                    and (resolution_price >= 0.99 or resolution_price <= 0.01)
+                )
+                if not is_resolved:
+                    time.sleep(0.2)
+                    continue
+
+                # Compute P&L. Long the chosen outcome at entry_price.
+                # YES side: pays out resolution_price; NO side: pays out 1-resolution_price.
+                if side == "YES":
+                    final_value = resolution_price
+                else:
+                    final_value = 1.0 - resolution_price
+                # shares = size_usd / entry_price; pnl = shares * (final - entry)
+                if entry_price <= 0:
+                    time.sleep(0.2)
+                    continue
+                shares = size_usd / entry_price
+                pnl = round(shares * (final_value - entry_price), 2)
+                return_pct = round(((final_value - entry_price) / entry_price) * 100, 2)
+                outcome = "win" if pnl > 0 else "loss"
+
+                with self._wallet_lock:
+                    self._wallet_conn.execute(
+                        """UPDATE polymarket_paper_trades
+                           SET exit_ts = ?, exit_price = ?, realized_pnl = ?,
+                               return_pct = ?, outcome = ?
+                           WHERE id = ?""",
+                        (int(time.time()), round(final_value, 4), pnl,
+                         return_pct, outcome, trade_id),
+                    )
+                    self._wallet_conn.commit()
+                resolved_count += 1
+                logger.info(
+                    "[RESOLVE] %s %s pnl=$%.2f (%.1f%%) — %s",
+                    sig_type, outcome, pnl, return_pct, (question or "")[:40],
+                )
+
+                # Telegram alert (best effort)
+                try:
+                    from trading_platform.polymarket.telegram_alerts import get_alerter
+                    alerter = get_alerter()
+                    if alerter.enabled:
+                        signal_stats = self._get_signal_stats(sig_type)
+                        alerter.send_trade_resolved({
+                            "signal_type": sig_type,
+                            "side": side,
+                            "size_usd": size_usd,
+                            "entry_price": entry_price,
+                            "exit_price": final_value,
+                            "return_pct": return_pct / 100,
+                            "outcome": outcome,
+                            "question": question,
+                        }, signal_stats)
+                except Exception:
+                    pass
+
+                time.sleep(0.2)
+            except Exception as exc:
+                logger.debug("resolve check failed for %s: %s", (cid or "")[:18], exc)
+                time.sleep(0.2)
+                continue
+
+        logger.info("Resolution check: %d open, %d resolved", len(open_trades), resolved_count)
+        return {"checked": len(open_trades), "resolved": resolved_count}
+
+    def _get_signal_stats(self, signal_type: str) -> dict[str, Any]:
+        """Aggregate stats for one signal type for inclusion in resolution alerts."""
+        with self._wallet_lock:
+            row = self._wallet_conn.execute(
+                """SELECT COUNT(*), SUM(CASE WHEN outcome='win' THEN 1 ELSE 0 END),
+                          SUM(realized_pnl)
+                   FROM polymarket_paper_trades
+                   WHERE signal_type = ? AND archived = 0 AND exit_ts IS NOT NULL""",
+                (signal_type,),
+            ).fetchone()
+        return {
+            "total_resolved": (row[0] or 0) if row else 0,
+            "wins": (row[1] or 0) if row else 0,
+            "total_pnl": float(row[2] or 0) if row else 0.0,
+        }
+
+    def get_open_positions(self) -> list[dict[str, Any]]:
+        """Return open paper trades from polymarket_paper_trades."""
+        with self._wallet_lock:
+            rows = self._wallet_conn.execute(
+                """SELECT id, condition_id, question, category, side, entry_price,
+                          size_usd, signal_type, confidence, wallet, entry_ts
+                   FROM polymarket_paper_trades
+                   WHERE exit_ts IS NULL AND archived = 0
+                   ORDER BY entry_ts DESC"""
+            ).fetchall()
+        cols = ["id", "condition_id", "question", "category", "side", "entry_price",
+                "size_usd", "signal_type", "confidence", "wallet", "entry_ts"]
+        return [dict(zip(cols, r)) for r in rows]
+
+    def check_resolutions_v2(self) -> list[dict[str, Any]]:
+        """Check open positions against wallet_trades for resolution."""
+        open_positions = self.get_open_positions()
+        resolved: list[dict[str, Any]] = []
+        for pos in open_positions:
+            cid = pos["condition_id"]
+            with self._wallet_lock:
+                row = self._wallet_conn.execute(
+                    """SELECT pnl, market_outcome FROM wallet_trades
+                       WHERE condition_id = ? AND market_resolved = 1
+                       AND market_outcome IS NOT NULL LIMIT 1""",
+                    (cid,),
+                ).fetchone()
+            if not row:
+                continue
+            pnl_per_dollar, outcome = row
+            outcome_yes = (outcome or "").upper() in ("YES", "1", "TRUE")
+            won = (pos["side"] == "YES" and outcome_yes) or (pos["side"] == "NO" and not outcome_yes)
+            entry = pos.get("entry_price") or 0.5
+            if won:
+                exit_price = 1.0
+                return_pct = (1.0 / entry - 1) if entry > 0 else 0
+            else:
+                exit_price = 0.0
+                return_pct = -1.0
+            realized = pos["size_usd"] * return_pct
+            now_ts = int(time.time())
+            try:
+                with self._wallet_lock:
+                    self._wallet_conn.execute(
+                        """UPDATE polymarket_paper_trades
+                           SET exit_price = ?, exit_ts = ?, outcome = ?,
+                               return_pct = ?, realized_pnl = ?
+                           WHERE id = ?""",
+                        (exit_price, now_ts, "win" if won else "loss",
+                         round(return_pct, 4), round(realized, 2), pos["id"]),
+                    )
+                    self._wallet_conn.commit()
+                resolved.append({**pos, "outcome": "win" if won else "loss",
+                                 "realized_pnl": round(realized, 2)})
+            except Exception as exc:
+                logger.warning("Could not update resolved trade %d: %s", pos["id"], exc)
+        return resolved
+
+    def get_summary_v2(self) -> dict[str, Any]:
+        """Portfolio summary from polymarket_paper_trades."""
+        with self._wallet_lock:
+            row = self._wallet_conn.execute(
+                """SELECT COUNT(*) total,
+                          SUM(CASE WHEN exit_ts IS NULL THEN 1 ELSE 0 END) open_count,
+                          SUM(CASE WHEN outcome IS NOT NULL THEN 1 ELSE 0 END) resolved,
+                          SUM(CASE WHEN outcome='win' THEN 1 ELSE 0 END) wins,
+                          COALESCE(SUM(realized_pnl), 0) realized_pnl,
+                          COALESCE(SUM(CASE WHEN exit_ts IS NULL THEN size_usd ELSE 0 END), 0) deployed
+                   FROM polymarket_paper_trades WHERE archived = 0"""
+            ).fetchone()
+
+        total, open_count, resolved, wins, realized_pnl, deployed = row
+        return {
+            "starting_bankroll": STARTING_BANKROLL,
+            "current_bankroll": round(STARTING_BANKROLL - (deployed or 0) + (realized_pnl or 0), 2),
+            "total_trades": total or 0,
+            "open_trades": open_count or 0,
+            "resolved_trades": resolved or 0,
+            "wins": wins or 0,
+            "realized_pnl": round(realized_pnl or 0, 2),
+            "deployed": round(deployed or 0, 2),
+            "win_rate": round(wins / resolved, 3) if resolved else None,
+        }
 
     def on_signal(self, signal: dict[str, Any]) -> bool:
         """Place paper trade from a whale signal dict. Returns True if placed."""

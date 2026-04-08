@@ -21,6 +21,9 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+_PROJECT_ROOT = Path(__file__).resolve().parents[3]
+_DEFAULT_DB = str(_PROJECT_ROOT / "data" / "polymarket" / "wallet_intelligence.db")
+
 
 @dataclass
 class WhaleTrade:
@@ -51,16 +54,33 @@ class WhaleTripwire:
 
     def __init__(
         self,
-        db_path: str | Path = "data/polymarket/wallet_intelligence.db",
+        db_path: str | Path | None = None,
         universe: Any | None = None,
     ) -> None:
-        self.db_path = str(db_path)
+        # Accept either a path or a WalletDB instance
+        if db_path is None:
+            self.db_path = _DEFAULT_DB
+        elif hasattr(db_path, "_path"):
+            # WalletDB instance
+            self.db_path = str(db_path._path)
+        else:
+            self.db_path = str(db_path)
         self.universe = universe
+        # watched_tier1 = combined tier1 + tier1h (used by check_event lookup)
         self.watched_tier1: set[str] = set()
         self.watched_tier2: set[str] = set()
+        # Distinct sets for tier1h vs tier1 (used by signal engine + telegram)
+        self._tier1h: set[str] = set()
+        self._tier1: set[str] = set()
+        self._tier2: set[str] = set()
         self.leaderboard: dict[str, dict] = {}
         self._last_reload: float = 0
         self.reload()
+
+    @property
+    def all_watched(self) -> set[str]:
+        """Combined set of all watched wallet addresses."""
+        return self._tier1h | self._tier1 | self._tier2
 
     def reload(self) -> None:
         """Load watched wallets from leaderboard table (atomic, version-checked).
@@ -69,6 +89,9 @@ class WhaleTripwire:
         """
         self.watched_tier1.clear()
         self.watched_tier2.clear()
+        self._tier1h.clear()
+        self._tier1.clear()
+        self._tier2.clear()
         self.leaderboard.clear()
 
         try:
@@ -84,7 +107,7 @@ class WhaleTripwire:
                 rows = conn.execute(
                     """SELECT wallet, tier, directional_win_rate, rolling_20_wr,
                               conviction_score, resolved_trades, total_volume_usdc,
-                              wallet_type, version
+                              wallet_type, version, net_pnl_usdc, leaderboard_source, pseudonym
                        FROM leaderboard"""
                 ).fetchall()
                 conn.close()
@@ -93,16 +116,31 @@ class WhaleTripwire:
                     w = row["wallet"]
                     profile = dict(row)
                     self.leaderboard[w] = profile
-                    if row["tier"] == "tier1":
+                    # tier1h wallets join watched_tier1 set (treated as tier1 for confidence)
+                    if row["tier"] == "tier1h":
                         self.watched_tier1.add(w)
+                        self._tier1h.add(w)
+                    elif row["tier"] == "tier1":
+                        self.watched_tier1.add(w)
+                        self._tier1.add(w)
                     elif row["tier"] == "tier2":
                         self.watched_tier2.add(w)
+                        self._tier2.add(w)
 
                 self._last_reload = time.time()
                 t1 = len(self.watched_tier1)
                 t2 = len(self.watched_tier2)
+                t1h = sum(1 for p in self.leaderboard.values() if p.get("tier") == "tier1h")
+                pm_sourced = sum(
+                    1 for p in self.leaderboard.values()
+                    if (p.get("leaderboard_source") or "").startswith("polymarket_")
+                )
+                local_sourced = t1h - pm_sourced
                 ver = meta["current_version"]
-                print(f"[WhaleTripwire] Loaded {t1 + t2} wallets from leaderboard v{ver} — tier1: {t1}, tier2: {t2}")
+                print(
+                    f"[WhaleTripwire] Loaded {t1 + t2} wallets from leaderboard v{ver} — "
+                    f"tier1+1h: {t1} (incl {t1h} high-conviction: {local_sourced} local, {pm_sourced} polymarket), tier2: {t2}"
+                )
 
                 if t1 + t2 == 0:
                     print("[WhaleTripwire] WARNING: Leaderboard valid but 0 wallets.")
@@ -137,10 +175,12 @@ class WhaleTripwire:
                     and resolved >= self.TIER1_MIN_RESOLVED
                     and volume >= self.TIER1_MIN_VOLUME):
                 self.watched_tier1.add(w)
+                self._tier1.add(w)
             elif (wr >= self.TIER2_MIN_WR
                   and resolved >= self.TIER2_MIN_RESOLVED
                   and volume >= self.TIER2_MIN_VOLUME):
                 self.watched_tier2.add(w)
+                self._tier2.add(w)
 
         self._last_reload = time.time()
         t1 = len(self.watched_tier1)
@@ -261,6 +301,10 @@ class WhaleTripwire:
     def tier(self, wallet: str) -> str | None:
         w = wallet.strip().lower()
         if w in self.watched_tier1:
+            # Distinguish tier1h from tier1 by looking at leaderboard profile
+            profile = self.leaderboard.get(w) or self.leaderboard.get(wallet)
+            if profile and profile.get("tier") == "tier1h":
+                return "tier1h"
             return "tier1"
         if w in self.watched_tier2:
             return "tier2"

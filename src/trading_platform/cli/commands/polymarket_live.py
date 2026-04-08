@@ -113,6 +113,34 @@ def cmd_polymarket_live_collect(args: argparse.Namespace) -> None:
         for m in all_markets
     ]
 
+    # Merge wallet-derived markets — markets where our watched wallets traded
+    # recently. These MUST be subscribed regardless of volume filters.
+    try:
+        from trading_platform.polymarket.market_universe import MarketUniverse as _MU
+        _u = _MU()
+        if _u.load_cached():
+            wallet_cids = _u.get_wallet_derived_markets(days_back=14)
+            existing_cids = {li.condition_id for li in live_infos if li.condition_id}
+            new_cids = wallet_cids - existing_cids
+            print(f"Wallet-derived markets: {len(wallet_cids)} total, {len(new_cids)} new")
+
+            added = 0
+            for cid in list(new_cids)[:300]:  # cap at 300 extra
+                entry = _u._by_condition.get(cid)
+                if entry and entry.get("token_ids"):
+                    live_infos.append(LiveMarketInfo(
+                        market_id=cid,
+                        question=entry.get("question") or cid[:20],
+                        yes_token_id=entry["token_ids"][0],
+                        volume=entry.get("volume", 0),
+                        end_date_iso=entry.get("end_date_iso", ""),
+                        condition_id=cid,
+                    ))
+                    added += 1
+            print(f"Added {added} wallet-derived markets to subscription")
+    except Exception as exc:
+        print(f"[WARN] Wallet-derived merge failed: {exc}")
+
     db_path = str(_project_relative(cfg_raw.get("live_db_path", "data/polymarket/live/prices.db")))
     bars_dir = str(_project_relative(cfg_raw.get("live_hourly_bars_dir", "data/polymarket/live/hourly_bars")))
 

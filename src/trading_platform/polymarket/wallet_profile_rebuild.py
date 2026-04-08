@@ -37,11 +37,15 @@ def _compute_profit_score(net_pnl: float) -> float:
 
 def rebuild_profiles(*, db: WalletDB | None = None) -> dict[str, Any]:
     """Rebuild all wallet profiles from trade data. Returns summary."""
+    from trading_platform.polymarket.wallet_analytics import WalletAnalyticsEngine
+
     db = db or WalletDB()
     wallets = db.get_all_wallets()
     t0 = time.time()
+    analytics_engine = WalletAnalyticsEngine()
 
     updated = 0
+    analytics_count = 0
     for i, wallet in enumerate(wallets):
         if (i + 1) % 50 == 0 or i == 0:
             print(f"  Rebuilding profile {i+1}/{len(wallets)}: {wallet[:16]}...")
@@ -51,11 +55,25 @@ def rebuild_profiles(*, db: WalletDB | None = None) -> dict[str, Any]:
             continue
 
         profile = _compute_profile(trades)
+
+        # Compute analytics (non-blocking — empty dict if insufficient data)
+        try:
+            analytics = analytics_engine.compute_all(wallet, db._path)
+            if analytics:
+                profile.update(analytics)
+                analytics_count += 1
+        except Exception as exc:
+            logger.debug("analytics failed for %s: %s", wallet[:12], exc)
+
         db.upsert_profile(wallet, **profile)
         updated += 1
 
     elapsed = time.time() - t0
-    return {"wallets_rebuilt": updated, "elapsed_seconds": round(elapsed, 1)}
+    return {
+        "wallets_rebuilt": updated,
+        "wallets_with_analytics": analytics_count,
+        "elapsed_seconds": round(elapsed, 1),
+    }
 
 
 def _compute_profile(trades: list[dict[str, Any]]) -> dict[str, Any]:
@@ -151,7 +169,12 @@ def _compute_profile(trades: list[dict[str, Any]]) -> dict[str, Any]:
     net_pnl = total_won - total_lost
     avg_win = total_won / len(pnl_wins) if pnl_wins else 0
     avg_loss = total_lost / len(pnl_losses) if pnl_losses else 0
-    profit_factor = total_won / max(total_lost, 0.01)
+    # Profit factor capped at 10x; null if insufficient losses for a meaningful ratio
+    _MAX_PF = 10.0
+    if total_lost < 0.01 or len(pnl_losses) < 3:
+        profit_factor = None  # insufficient data for meaningful PF
+    else:
+        profit_factor = min(total_won / total_lost, _MAX_PF)
 
     # Conviction score: equity * log(avg_position_size + 1)
     conviction_score = equity_score * math.log10(max(avg_pos_size, 1) + 1)
@@ -191,7 +214,7 @@ def _compute_profile(trades: list[dict[str, Any]]) -> dict[str, Any]:
         "net_pnl_usdc": round(net_pnl, 2),
         "avg_win_size_usdc": round(avg_win, 2),
         "avg_loss_size_usdc": round(avg_loss, 2),
-        "profit_factor": round(profit_factor, 3),
+        "profit_factor": round(profit_factor, 3) if profit_factor is not None else None,
         "conviction_score": round(conviction_score, 4),
         "volume_tier": volume_tier,
         "large_bet_threshold": round(large_bet_threshold, 2),

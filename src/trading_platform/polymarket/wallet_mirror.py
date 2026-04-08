@@ -1,3 +1,7 @@
+# DEPRECATED: This module used EWR-based smart money detection.
+# Replaced by whale_tripwire.py + whale_signal_engine.py (9-signal system).
+# Do not run or import this module in new code.
+# Preserved for reference only.
 """
 Wallet mirroring — track and mirror top smart money wallets in real time.
 

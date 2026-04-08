@@ -169,13 +169,20 @@ class TestProfileRebuild:
 
     def test_pnl_computation(self, tmp_path: Path) -> None:
         from trading_platform.polymarket.wallet_profile_rebuild import _compute_profile
+        # Need >= 3 losses for non-None profit_factor (anti-outlier guard)
         trades = [
             {"asset": "t1", "side": "BUY", "size": 100, "price": 0.4, "category": "crypto",
              "timestamp": 1000, "market_resolved": True, "market_outcome": "YES",
-             "event_slug": "", "outcome": "", "pnl": 60.0},  # won: 100*(1-0.4)=60
+             "event_slug": "", "outcome": "", "pnl": 60.0},
             {"asset": "t2", "side": "BUY", "size": 50, "price": 0.6, "category": "crypto",
              "timestamp": 2000, "market_resolved": True, "market_outcome": "NO",
-             "event_slug": "", "outcome": "", "pnl": -30.0},  # lost: -50*0.6=-30
+             "event_slug": "", "outcome": "", "pnl": -10.0},
+            {"asset": "t3", "side": "BUY", "size": 50, "price": 0.6, "category": "crypto",
+             "timestamp": 3000, "market_resolved": True, "market_outcome": "NO",
+             "event_slug": "", "outcome": "", "pnl": -10.0},
+            {"asset": "t4", "side": "BUY", "size": 50, "price": 0.6, "category": "crypto",
+             "timestamp": 4000, "market_resolved": True, "market_outcome": "NO",
+             "event_slug": "", "outcome": "", "pnl": -10.0},
         ]
         p = _compute_profile(trades)
         assert p["total_won_usdc"] == 60.0
@@ -183,7 +190,18 @@ class TestProfileRebuild:
         assert p["net_pnl_usdc"] == 30.0
         assert p["profit_factor"] == 2.0
         assert p["avg_win_size_usdc"] == 60.0
-        assert p["avg_loss_size_usdc"] == 30.0
+        assert p["avg_loss_size_usdc"] == 10.0
+
+    def test_pnl_insufficient_losses_returns_null_pf(self) -> None:
+        """Profit factor should be None when fewer than 3 losses (anti-outlier)."""
+        from trading_platform.polymarket.wallet_profile_rebuild import _compute_profile
+        trades = [
+            {"asset": "t1", "side": "BUY", "size": 100, "price": 0.4, "category": "crypto",
+             "timestamp": 1000, "market_resolved": True, "market_outcome": "YES",
+             "event_slug": "", "outcome": "", "pnl": 100.0},
+        ]
+        p = _compute_profile(trades)
+        assert p["profit_factor"] is None
 
     def test_conviction_score(self, tmp_path: Path) -> None:
         from trading_platform.polymarket.wallet_profile_rebuild import _compute_profile

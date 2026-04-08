@@ -22,7 +22,8 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_PATH = "data/polymarket/wallet_intelligence.db"
+_PROJECT_ROOT = Path(__file__).resolve().parents[3]
+_DEFAULT_PATH = str(_PROJECT_ROOT / "data" / "polymarket" / "wallet_intelligence.db")
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS wallet_profiles (
@@ -83,6 +84,7 @@ CREATE TABLE IF NOT EXISTS wallet_positions (
     title TEXT,
     slug TEXT,
     outcome TEXT,
+    side TEXT,
     size REAL,
     avg_price REAL,
     initial_value REAL,
@@ -91,8 +93,11 @@ CREATE TABLE IF NOT EXISTS wallet_positions (
     percent_pnl REAL,
     realized_pnl REAL,
     cur_price REAL,
+    total_bought REAL,
+    redeemable INTEGER,
     end_date TEXT,
     last_updated INTEGER,
+    updated_at INTEGER,
     UNIQUE(wallet, asset)
 );
 CREATE INDEX IF NOT EXISTS idx_wp_wallet ON wallet_positions(wallet);
@@ -147,6 +152,44 @@ CREATE TABLE IF NOT EXISTS category_performance (
     total_pnl REAL DEFAULT 0,
     last_updated INTEGER
 );
+
+CREATE TABLE IF NOT EXISTS market_price_history (
+    condition_id TEXT NOT NULL,
+    token_id TEXT,
+    question TEXT,
+    category TEXT,
+    t INTEGER NOT NULL,
+    p REAL NOT NULL,
+    PRIMARY KEY (condition_id, t)
+);
+CREATE INDEX IF NOT EXISTS idx_mph_cid ON market_price_history(condition_id);
+
+CREATE TABLE IF NOT EXISTS wallet_market_positions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    wallet TEXT NOT NULL,
+    condition_id TEXT NOT NULL,
+    token_id TEXT,
+    question TEXT,
+    category TEXT,
+    side TEXT,
+    first_entry_ts INTEGER,
+    last_entry_ts INTEGER,
+    exit_ts INTEGER,
+    avg_entry_price REAL,
+    avg_exit_price REAL,
+    total_shares REAL,
+    total_cost_usdc REAL,
+    total_proceeds_usdc REAL,
+    realized_pnl REAL,
+    market_resolved INTEGER DEFAULT 0,
+    market_outcome TEXT,
+    resolution_price REAL,
+    end_date_ts INTEGER,
+    hours_before_close REAL,
+    UNIQUE(wallet, condition_id, side)
+);
+CREATE INDEX IF NOT EXISTS idx_wmp_wallet ON wallet_market_positions(wallet);
+CREATE INDEX IF NOT EXISTS idx_wmp_cid ON wallet_market_positions(condition_id);
 
 CREATE TABLE IF NOT EXISTS leaderboard (
     wallet TEXT PRIMARY KEY,
@@ -230,6 +273,72 @@ class WalletDB:
         self._conn.commit()
         self._migrate_profiles()
         self._migrate_signals()
+        self._migrate_positions()
+        self._migrate_anomalies()
+
+    def _migrate_anomalies(self) -> None:
+        """Create market_anomalies + market_ticks tables for live monitor pipelines."""
+        self._conn.execute("""
+            CREATE TABLE IF NOT EXISTS market_ticks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                condition_id TEXT NOT NULL,
+                token_id TEXT,
+                timestamp INTEGER NOT NULL,
+                price REAL NOT NULL,
+                UNIQUE(condition_id, timestamp)
+            )
+        """)
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_ticks_cid_ts ON market_ticks(condition_id, timestamp DESC)"
+        )
+        self._conn.execute("""
+            CREATE TABLE IF NOT EXISTS market_anomalies (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                detected_at INTEGER NOT NULL,
+                condition_id TEXT NOT NULL,
+                token_id TEXT,
+                question TEXT,
+                category TEXT,
+                anomaly_type TEXT NOT NULL,
+                severity TEXT,
+                detail TEXT,
+                imbalance REAL,
+                bid_usd REAL,
+                ask_usd REAL,
+                signal_fired INTEGER DEFAULT 0
+            )
+        """)
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_anom_detected ON market_anomalies(detected_at DESC)"
+        )
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_anom_cid ON market_anomalies(condition_id)"
+        )
+        self._conn.commit()
+
+    def _migrate_positions(self) -> None:
+        """Add columns to wallet_positions for full position fetcher payload."""
+        existing = {r[1] for r in self._conn.execute("PRAGMA table_info(wallet_positions)").fetchall()}
+        for col, typedef in [
+            ("side", "TEXT"),
+            ("total_bought", "REAL"),
+            ("redeemable", "INTEGER"),
+            ("updated_at", "INTEGER"),
+        ]:
+            if col not in existing:
+                self._conn.execute(f"ALTER TABLE wallet_positions ADD COLUMN {col} {typedef}")
+        # Add net/exit columns to wallet_market_positions for buy+sell aware reconstruction.
+        wmp_existing = {r[1] for r in self._conn.execute("PRAGMA table_info(wallet_market_positions)").fetchall()}
+        for col, typedef in [
+            ("net_shares", "REAL"),
+            ("total_sold", "REAL"),
+            ("sell_volume_usdc", "REAL"),
+            ("is_fully_exited", "INTEGER DEFAULT 0"),
+            ("asset", "TEXT"),
+        ]:
+            if col not in wmp_existing:
+                self._conn.execute(f"ALTER TABLE wallet_market_positions ADD COLUMN {col} {typedef}")
+        self._conn.commit()
 
     def _migrate_profiles(self) -> None:
         """Add columns that may not exist in older DBs."""
@@ -245,6 +354,34 @@ class WalletDB:
             ("volume_tier", "TEXT"),
             ("large_bet_threshold", "REAL"),
             ("profit_score", "REAL"),
+            ("wallet_bucket", "TEXT"),
+            ("pseudonym", "TEXT"),
+            # PnL Dynamics
+            ("pnl_7d", "REAL"), ("pnl_30d", "REAL"), ("pnl_90d", "REAL"),
+            ("pnl_trend", "REAL"), ("pnl_consistency", "REAL"),
+            ("performance_decay", "REAL"),
+            # Risk / Volatility
+            ("pnl_volatility", "REAL"), ("sharpe_ratio", "REAL"),
+            ("sortino_ratio", "REAL"), ("max_drawdown_pct", "REAL"),
+            ("max_drawdown_usd", "REAL"), ("recovery_factor", "REAL"),
+            ("calmar_ratio", "REAL"), ("win_streak_max", "INTEGER"),
+            ("loss_streak_max", "INTEGER"),
+            # Expected Value / Edge
+            ("expected_value", "REAL"), ("kelly_fraction", "REAL"),
+            ("ev_politics", "REAL"), ("ev_sports", "REAL"),
+            ("ev_crypto", "REAL"), ("ev_economics", "REAL"),
+            ("edge_vs_market", "REAL"),
+            # Behavioral / Timing
+            ("avg_hours_before_resolution", "REAL"),
+            ("early_entry_rate", "REAL"),
+            ("position_concentration", "REAL"),
+            ("avg_hold_hours", "REAL"),
+            ("size_scaling_quality", "REAL"),
+            ("category_specialization", "REAL"),
+            # Position-level
+            ("open_positions_count", "INTEGER"),
+            ("open_positions_value", "REAL"),
+            ("unrealized_pnl_estimate", "REAL"),
         ]
         for col, typedef in new_cols:
             if col not in existing:
@@ -264,6 +401,10 @@ class WalletDB:
             ("status", "TEXT DEFAULT 'open'"),
             ("updated_confidence", "REAL"),
             ("convergence_count", "INTEGER DEFAULT 0"),
+            ("question", "TEXT"),
+            ("stake_usd", "REAL"),
+            ("paper_trade_id", "INTEGER"),
+            ("executed", "INTEGER DEFAULT 0"),
         ]
         for col, typedef in new_cols:
             if col not in existing:
