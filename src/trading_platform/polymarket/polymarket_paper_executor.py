@@ -306,8 +306,33 @@ class PolymarketPaperExecutor:
 
         # Tri-factor fusion gate. Skip the trade entirely if the fusion
         # score is below the floor; halve the stake when the score is
-        # mid-range; full stake when high.
+        # mid-range; full stake when high. Pulls pmxt microstructure when
+        # available for the enhanced market signal.
         fusion_dict: dict[str, Any] | None = None
+        microstructure: dict[str, Any] | None = None
+        try:
+            from trading_platform.polymarket.market_data_service import MarketDataService
+            mds = MarketDataService(str(self._wallet_db_path))
+            if mds.is_available():
+                microstructure = mds.get_market_microstructure(
+                    condition_id=condition_id,
+                    direction="YES" if direction == "BUY" else "NO",
+                    whale_entry_ts=int(signal.get("timestamp") or 0) or None,
+                )
+        except Exception as exc:
+            logger.debug("microstructure lookup failed: %s", exc)
+
+        # Dynamic per-wallet per-category tier multiplier (replaces the
+        # static tier1h/tier1/tier2 mapping when a profile exists).
+        dynamic_tier_mult = None
+        try:
+            from trading_platform.polymarket.wallet_tiering import WalletTieringEngine
+            dynamic_tier_mult = WalletTieringEngine(str(self._wallet_db_path)).get_tier_multiplier(
+                wallet, signal.get("category", "other"),
+            )
+        except Exception as exc:
+            logger.debug("dynamic tier lookup failed: %s", exc)
+
         try:
             from trading_platform.polymarket.fusion_score import compute_fusion
             fusion = compute_fusion(
@@ -320,6 +345,8 @@ class PolymarketPaperExecutor:
                 days_since_last_trade=signal.get("days_since_last_trade"),
                 minutes_since_whale_entry=signal.get("minutes_since_whale_entry"),
                 convergence_count=int(signal.get("converging_wallets") or 0),
+                microstructure=microstructure,
+                dynamic_tier_multiplier=dynamic_tier_mult,
             )
             fusion_dict = fusion.to_dict()
             if fusion.decision == "skip":
@@ -504,8 +531,53 @@ class PolymarketPaperExecutor:
                 continue
 
         # After any resolution, refresh calibration. If a status transition
-        # occurred for any signal type, fire a Telegram alert.
+        # occurred for any signal type, fire a Telegram alert. Also
+        # incrementally re-evaluate the dynamic tiers for the wallets
+        # whose paper trades just resolved.
         if resolved_count > 0:
+            try:
+                from trading_platform.polymarket.wallet_tiering import WalletTieringEngine
+                tiering = WalletTieringEngine(str(self._wallet_db_path))
+                seen_wallets: set[str] = set()
+                for trade in open_trades:
+                    wallet_addr = (trade[3] if len(trade) > 3 else "") or ""
+                    # ``open_trades`` tuple positions: (id, cid, side, entry, size, sig, ts, q)
+                    # but the executor's selection includes wallet via signal context elsewhere;
+                    # safer to walk the wallets via the resolved IDs.
+                # Pull wallets from resolved trades directly
+                with self._wallet_lock:
+                    rows = self._wallet_conn.execute(
+                        """SELECT DISTINCT wallet, category FROM polymarket_paper_trades
+                           WHERE archived = 0 AND exit_ts IS NOT NULL
+                             AND id IN (SELECT id FROM polymarket_paper_trades
+                                        WHERE archived = 0 AND exit_ts IS NOT NULL
+                                        ORDER BY exit_ts DESC LIMIT ?)""",
+                        (resolved_count,),
+                    ).fetchall()
+                tier_changes_total: list[dict[str, Any]] = []
+                for wallet_addr, cat in rows:
+                    if not wallet_addr:
+                        continue
+                    try:
+                        result = tiering.evaluate_single_wallet(wallet_addr, cat or None)
+                        for ch in result.get("changes", []):
+                            tier_changes_total.append(ch)
+                    except Exception as exc:
+                        logger.debug("tier eval failed for %s: %s", (wallet_addr or "")[:14], exc)
+
+                # Telegram on significant tier changes
+                if tier_changes_total:
+                    try:
+                        from trading_platform.polymarket.telegram_alerts import get_alerter
+                        alerter = get_alerter()
+                        if alerter.enabled:
+                            for ch in tier_changes_total:
+                                self._send_tier_change_alert(alerter, ch)
+                    except Exception as exc:
+                        logger.debug("tier alert dispatch failed: %s", exc)
+            except Exception as exc:
+                logger.debug("incremental tier evaluation failed: %s", exc)
+
             try:
                 from trading_platform.polymarket.signal_evaluator import SignalEvaluator
                 from trading_platform.polymarket.bankroll_allocator import BankrollAllocator
@@ -533,6 +605,49 @@ class PolymarketPaperExecutor:
 
         logger.info("Resolution check: %d open, %d resolved", len(open_trades), resolved_count)
         return {"checked": len(open_trades), "resolved": resolved_count}
+
+    def _send_tier_change_alert(self, alerter: Any, change: dict[str, Any]) -> None:
+        """Telegram alert for significant wallet tier movements.
+
+        Only fires for S/A demotions and promotions to B or above —
+        avoids spamming on C/D oscillations.
+        """
+        old = (change.get("old_tier") or "").upper()
+        new = (change.get("new_tier") or "").upper()
+        wallet = (change.get("wallet") or "")[:14]
+        category = change.get("category") or ""
+        trigger = change.get("trigger_metric") or ""
+        wr30 = change.get("win_rate_30d_at_change")
+
+        rank = {"S": 0, "A": 1, "B": 2, "C": 3, "D": 4}
+        old_rank = rank.get(old, 5)
+        new_rank = rank.get(new, 5)
+        is_demotion = new_rank > old_rank
+        is_promotion = new_rank < old_rank
+
+        # Filter: significant only
+        if is_demotion and old not in ("S", "A"):
+            return
+        if is_promotion and new not in ("S", "A", "B"):
+            return
+
+        emoji = "📉" if is_demotion else "📈"
+        msg = (
+            f"{emoji} <b>WALLET TIER {'DEMOTION' if is_demotion else 'PROMOTION'}</b>\n"
+            f"<code>{wallet}…</code> in <b>{category}</b>\n"
+            f"{old or '?'} → {new}\n\n"
+        )
+        if trigger:
+            msg += f"Trigger: {trigger}\n"
+        if wr30 is not None:
+            msg += f"30d WR: {wr30 * 100:.0f}%\n"
+        if change.get("pnl_at_change") is not None:
+            msg += f"Cumulative PnL: ${change['pnl_at_change']:,.0f}\n"
+        msg += "\n──────────\n🖥 localhost:5173/signals"
+        try:
+            alerter._send(msg, disable_notification=is_promotion)
+        except Exception:
+            pass
 
     def _send_status_transition_alert(self, alerter: Any, row: Any, prev_status: str) -> None:
         """Telegram alert when a signal type changes calibration status."""

@@ -276,6 +276,95 @@ class WalletDB:
         self._migrate_positions()
         self._migrate_anomalies()
         self._migrate_calibration()
+        self._migrate_market_data_cache()
+        self._migrate_wallet_tiering()
+
+    def _migrate_wallet_tiering(self) -> None:
+        """Per-wallet per-category dynamic tier table + change history."""
+        self._conn.execute("""
+            CREATE TABLE IF NOT EXISTS wallet_category_profiles (
+                wallet TEXT NOT NULL,
+                category TEXT NOT NULL,
+                tier TEXT NOT NULL DEFAULT 'D',
+                tier_score REAL,
+                win_rate REAL,
+                win_rate_30d REAL,
+                win_rate_90d REAL,
+                resolved_trades INTEGER DEFAULT 0,
+                avg_bet_size REAL,
+                monthly_pnl REAL,
+                consistency_score REAL,
+                category_purity REAL,
+                trend_score REAL,
+                last_trade_at INTEGER,
+                last_evaluated INTEGER,
+                resolved_since_last_change INTEGER DEFAULT 0,
+                last_change_at INTEGER,
+                PRIMARY KEY (wallet, category)
+            )
+        """)
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_wcp_category ON wallet_category_profiles(category)"
+        )
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_wcp_tier ON wallet_category_profiles(tier, category)"
+        )
+        self._conn.execute("""
+            CREATE TABLE IF NOT EXISTS wallet_tier_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                wallet TEXT NOT NULL,
+                category TEXT NOT NULL,
+                old_tier TEXT,
+                new_tier TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                trigger_metric TEXT,
+                old_tier_score REAL,
+                new_tier_score REAL,
+                win_rate_at_change REAL,
+                win_rate_30d_at_change REAL,
+                pnl_at_change REAL,
+                changed_at INTEGER NOT NULL
+            )
+        """)
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_tier_hist_wallet ON wallet_tier_history(wallet, changed_at DESC)"
+        )
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_tier_hist_changed ON wallet_tier_history(changed_at DESC)"
+        )
+        self._conn.commit()
+
+    def _migrate_market_data_cache(self) -> None:
+        """Cache for pmxt outcome_id lookups + health metrics."""
+        self._conn.execute("""
+            CREATE TABLE IF NOT EXISTS outcome_id_cache (
+                condition_id TEXT NOT NULL,
+                market_slug TEXT,
+                direction TEXT NOT NULL,
+                outcome_id TEXT,
+                cached_at INTEGER NOT NULL,
+                PRIMARY KEY (condition_id, direction)
+            )
+        """)
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_outcome_cache_slug ON outcome_id_cache(market_slug)"
+        )
+        self._conn.execute("""
+            CREATE TABLE IF NOT EXISTS pmxt_health (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                last_call_at INTEGER,
+                last_success_at INTEGER,
+                total_calls INTEGER DEFAULT 0,
+                total_errors INTEGER DEFAULT 0,
+                cache_hits INTEGER DEFAULT 0,
+                cache_misses INTEGER DEFAULT 0,
+                last_error TEXT
+            )
+        """)
+        self._conn.execute(
+            "INSERT OR IGNORE INTO pmxt_health (id) VALUES (1)"
+        )
+        self._conn.commit()
 
     def _migrate_calibration(self) -> None:
         """Create signal_calibration + calibration_reports tables for the

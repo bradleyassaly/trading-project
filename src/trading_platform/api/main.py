@@ -207,6 +207,67 @@ def alerts_anomalies(limit: int = 50, severity: str | None = None) -> dict[str, 
 # ── Market Intelligence endpoints ────────────────────────────────────────────
 
 
+# ── Wallet tiering endpoints ────────────────────────────────────────────────
+
+
+@app.get("/api/tiers/summary")
+def tiers_summary() -> dict[str, Any]:
+    """Per-category tier distribution + recent changes."""
+    return reader.read_tiers_summary()
+
+
+@app.get("/api/tiers/category/{category}")
+def tiers_category(category: str) -> dict[str, Any]:
+    """Per-category wallet leaderboard."""
+    return reader.read_tiers_category(category)
+
+
+@app.get("/api/tiers/wallet/{wallet}")
+def tiers_wallet(wallet: str) -> dict[str, Any]:
+    """All category profiles + history for a single wallet."""
+    return reader.read_tiers_wallet(wallet)
+
+
+@app.get("/api/tiers/history")
+def tiers_history(category: str | None = None, days: int = 30) -> dict[str, Any]:
+    """Tier change history (filterable by category + lookback days)."""
+    return reader.read_tiers_history(category=category, days=days)
+
+
+@app.post("/api/tiers/rebuild")
+def tiers_rebuild() -> dict[str, Any]:
+    """Run a full WalletTieringEngine rebuild."""
+    return reader.trigger_tier_rebuild()
+
+
+# ── Market microstructure endpoints (pmxt) ─────────────────────────────────
+
+
+@app.get("/api/market-data/health")
+def market_data_health() -> dict[str, Any]:
+    """pmxt sidecar status + cache hit rate + error count."""
+    return reader.read_market_data_health()
+
+
+@app.get("/api/market-data/{condition_id}")
+def market_data(condition_id: str, direction: str = "YES") -> dict[str, Any]:
+    """Full pmxt microstructure (velocity + book + baseline + quality score)."""
+    return reader.read_market_data(condition_id, direction=direction)
+
+
+@app.get("/api/market-data/{condition_id}/candles")
+def market_data_candles(
+    condition_id: str,
+    direction: str = "YES",
+    resolution: str = "1h",
+    hours: int = 24,
+) -> dict[str, Any]:
+    """Raw OHLCV candles for charting."""
+    return reader.read_market_data_candles(
+        condition_id, direction=direction, resolution=resolution, hours=hours,
+    )
+
+
 # ── Calibration endpoints ───────────────────────────────────────────────────
 
 

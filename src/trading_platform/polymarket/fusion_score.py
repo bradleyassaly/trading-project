@@ -58,10 +58,21 @@ def wallet_signal(
     wallet_tier: str | None,
     trade_size_usd: float,
     wallet_avg_bet_usd: float,
+    *,
+    dynamic_tier_multiplier: float | None = None,
 ) -> float:
-    """0..1 measure of how strong the wallet evidence is."""
+    """0..1 measure of how strong the wallet evidence is.
+
+    When ``dynamic_tier_multiplier`` is supplied (from
+    :class:`WalletTieringEngine`), it overrides the static
+    tier1h/tier1/tier2 lookup. Pass it explicitly to use the per-wallet
+    per-category dynamic tier system.
+    """
     base = 0.5 if wallet_wr is None else _clamp(wallet_wr, 0.0, 1.0)
-    tier_mult = _TIER_MULT.get((wallet_tier or "unknown").lower(), 0.40)
+    if dynamic_tier_multiplier is not None:
+        tier_mult = _clamp(dynamic_tier_multiplier, 0.0, 1.5)
+    else:
+        tier_mult = _TIER_MULT.get((wallet_tier or "unknown").lower(), 0.40)
 
     # Conviction: this bet vs wallet's typical bet
     if wallet_avg_bet_usd and wallet_avg_bet_usd > 0:
@@ -130,6 +141,73 @@ class FusionResult:
         return {k: getattr(self, k) for k in self.__dataclass_fields__}
 
 
+def market_signal_enhanced(microstructure: dict[str, Any] | None) -> float | None:
+    """Enhanced market_signal that uses pmxt microstructure data.
+
+    Returns ``None`` if microstructure is missing/unavailable so the
+    caller can fall back to the basic ``market_signal`` formula. When
+    available, combines:
+
+    * **liquidity_component** — derived from order_book spread_pct
+      (tighter spread = higher score)
+    * **volume_component** — derived from velocity.volume_ratio
+      (1h volume vs 24h average — surge detection)
+    * **timing_component** — derived from baseline.info_already_priced
+      and baseline.whale_impact (penalizes "whale is late" patterns)
+
+    Final score = 0.3*liquidity + 0.3*volume + 0.4*timing.
+    """
+    if not microstructure or not microstructure.get("available"):
+        return None
+
+    components: list[tuple[float, float]] = []
+
+    book = microstructure.get("order_book") or {}
+    spread_pct = book.get("spread_pct")
+    if spread_pct is not None:
+        if spread_pct < 0.02:
+            liquidity = 1.0
+        elif spread_pct < 0.05:
+            liquidity = 0.8
+        elif spread_pct < 0.10:
+            liquidity = 0.5
+        else:
+            liquidity = 0.2
+        components.append((liquidity, 0.3))
+
+    velocity = microstructure.get("velocity") or {}
+    volume_ratio = velocity.get("volume_ratio")
+    if volume_ratio is not None:
+        if volume_ratio > 3.0:
+            vol_score = 0.9
+        elif volume_ratio > 1.5:
+            vol_score = 0.7
+        elif volume_ratio > 0.5:
+            vol_score = 0.5
+        else:
+            vol_score = 0.3
+        components.append((vol_score, 0.3))
+
+    baseline = microstructure.get("baseline") or {}
+    if baseline.get("available"):
+        if baseline.get("info_already_priced"):
+            timing = 0.2
+        elif (baseline.get("whale_impact") or 0) > 0.05:
+            timing = 0.6
+        else:
+            timing = 1.0
+        components.append((timing, 0.4))
+
+    if not components:
+        return None
+
+    total_weight = sum(w for _, w in components)
+    if total_weight <= 0:
+        return None
+    weighted = sum(score * w for score, w in components)
+    return _clamp(weighted / total_weight, 0.0, 1.0)
+
+
 def compute_fusion(
     *,
     wallet_wr: float | None = None,
@@ -141,10 +219,29 @@ def compute_fusion(
     days_since_last_trade: float | None = None,
     minutes_since_whale_entry: float | None = None,
     convergence_count: int = 0,
+    microstructure: dict[str, Any] | None = None,
+    dynamic_tier_multiplier: float | None = None,
 ) -> FusionResult:
-    """Compute the tri-factor fusion score and decision."""
-    w = wallet_signal(wallet_wr, wallet_tier, trade_size_usd, wallet_avg_bet_usd)
-    m = market_signal(market_volume_usd, current_price, days_since_last_trade)
+    """Compute the tri-factor fusion score and decision.
+
+    When a pmxt ``microstructure`` dict is supplied (from
+    :class:`MarketDataService.get_market_microstructure`), the
+    enhanced market signal is used. Falls back to the basic formula
+    when microstructure is missing or pmxt is unavailable.
+
+    When ``dynamic_tier_multiplier`` is supplied (from
+    :class:`WalletTieringEngine.get_tier_multiplier`), it replaces the
+    static tier1h/tier1/tier2 multiplier in wallet_signal.
+    """
+    w = wallet_signal(
+        wallet_wr, wallet_tier, trade_size_usd, wallet_avg_bet_usd,
+        dynamic_tier_multiplier=dynamic_tier_multiplier,
+    )
+    enhanced_m = market_signal_enhanced(microstructure)
+    if enhanced_m is not None:
+        m = enhanced_m
+    else:
+        m = market_signal(market_volume_usd, current_price, days_since_last_trade)
     t = timing_signal(minutes_since_whale_entry, convergence_count)
     score = w * m * t
 

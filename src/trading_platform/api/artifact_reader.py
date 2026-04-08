@@ -3033,6 +3033,269 @@ def read_paper_positions_enriched() -> dict[str, Any]:
     }
 
 
+def read_tiers_summary() -> dict[str, Any]:
+    """Per-category tier distribution + recent changes."""
+    import sqlite3 as _sq
+    db = _get_wallet_db()
+    if not db:
+        return {"available": False}
+    try:
+        conn = _sq.connect(str(db._path))
+        try:
+            dist_rows = conn.execute(
+                """SELECT category, tier, COUNT(*)
+                   FROM wallet_category_profiles
+                   GROUP BY category, tier
+                   ORDER BY category, tier"""
+            ).fetchall()
+            recent_rows = conn.execute(
+                """SELECT wallet, category, old_tier, new_tier, reason,
+                          trigger_metric, changed_at
+                   FROM wallet_tier_history
+                   ORDER BY changed_at DESC LIMIT 10"""
+            ).fetchall()
+            last_eval_row = conn.execute(
+                "SELECT MAX(last_evaluated) FROM wallet_category_profiles"
+            ).fetchone()
+        finally:
+            conn.close()
+    except Exception as exc:
+        return {"available": False, "error": str(exc)}
+
+    categories: dict[str, dict[str, int]] = {}
+    for cat, tier, n in dist_rows:
+        cat = cat or "other"
+        categories.setdefault(cat, {"S": 0, "A": 0, "B": 0, "C": 0, "D": 0, "total": 0})
+        categories[cat][tier or "D"] = n
+        categories[cat]["total"] += n
+
+    return {
+        "available": True,
+        "categories": categories,
+        "recent_changes": [
+            {
+                "wallet": r[0], "category": r[1], "old_tier": r[2],
+                "new_tier": r[3], "reason": r[4], "trigger_metric": r[5],
+                "changed_at": r[6],
+            }
+            for r in recent_rows
+        ],
+        "last_full_rebuild": last_eval_row[0] if last_eval_row and last_eval_row[0] else None,
+    }
+
+
+def read_tiers_category(category: str) -> dict[str, Any]:
+    """Per-category leaderboard sorted by tier_score DESC."""
+    import sqlite3 as _sq
+    db = _get_wallet_db()
+    if not db:
+        return {"available": False}
+    try:
+        conn = _sq.connect(str(db._path))
+        try:
+            rows = conn.execute(
+                """SELECT wallet, tier, tier_score, win_rate, win_rate_30d,
+                          win_rate_90d, trend_score, consistency_score,
+                          resolved_trades, avg_bet_size, monthly_pnl,
+                          category_purity, last_trade_at,
+                          last_evaluated, resolved_since_last_change, last_change_at
+                   FROM wallet_category_profiles
+                   WHERE LOWER(category) = ?
+                   ORDER BY tier_score DESC""",
+                (category.lower(),),
+            ).fetchall()
+        finally:
+            conn.close()
+    except Exception as exc:
+        return {"available": False, "error": str(exc)}
+
+    cols = [
+        "wallet", "tier", "tier_score", "win_rate", "win_rate_30d",
+        "win_rate_90d", "trend_score", "consistency_score", "resolved_trades",
+        "avg_bet_size", "monthly_pnl", "category_purity", "last_trade_at",
+        "last_evaluated", "resolved_since_last_change", "last_change_at",
+    ]
+    return {
+        "available": True,
+        "category": category,
+        "wallets": [dict(zip(cols, r)) for r in rows],
+    }
+
+
+def read_tiers_wallet(wallet: str) -> dict[str, Any]:
+    """All category profiles for a single wallet + tier history."""
+    import sqlite3 as _sq
+    db = _get_wallet_db()
+    if not db:
+        return {"available": False}
+    try:
+        conn = _sq.connect(str(db._path))
+        try:
+            wallet = (wallet or "").lower()
+            prof_rows = conn.execute(
+                """SELECT category, tier, tier_score, win_rate, win_rate_30d,
+                          win_rate_90d, trend_score, consistency_score,
+                          resolved_trades, monthly_pnl, last_trade_at, last_evaluated
+                   FROM wallet_category_profiles
+                   WHERE wallet = ?
+                   ORDER BY tier_score DESC""",
+                (wallet,),
+            ).fetchall()
+            hist_rows = conn.execute(
+                """SELECT category, old_tier, new_tier, reason, trigger_metric,
+                          old_tier_score, new_tier_score, changed_at
+                   FROM wallet_tier_history
+                   WHERE wallet = ?
+                   ORDER BY changed_at DESC LIMIT 20""",
+                (wallet,),
+            ).fetchall()
+        finally:
+            conn.close()
+    except Exception as exc:
+        return {"available": False, "error": str(exc)}
+
+    pcols = [
+        "category", "tier", "tier_score", "win_rate", "win_rate_30d",
+        "win_rate_90d", "trend_score", "consistency_score", "resolved_trades",
+        "monthly_pnl", "last_trade_at", "last_evaluated",
+    ]
+    hcols = [
+        "category", "old_tier", "new_tier", "reason", "trigger_metric",
+        "old_tier_score", "new_tier_score", "changed_at",
+    ]
+    return {
+        "available": True,
+        "wallet": wallet,
+        "categories": {row[0]: dict(zip(pcols, row)) for row in prof_rows},
+        "tier_history": [dict(zip(hcols, r)) for r in hist_rows],
+    }
+
+
+def read_tiers_history(category: str | None = None, days: int = 30) -> dict[str, Any]:
+    """Tier change history for the GUI's tier movement chart."""
+    import sqlite3 as _sq
+    import time as _time
+    db = _get_wallet_db()
+    if not db:
+        return {"available": False}
+    cutoff = int(_time.time()) - int(days) * 86400
+    try:
+        conn = _sq.connect(str(db._path))
+        try:
+            if category:
+                rows = conn.execute(
+                    """SELECT wallet, category, old_tier, new_tier, reason,
+                              trigger_metric, changed_at
+                       FROM wallet_tier_history
+                       WHERE LOWER(category) = ? AND changed_at >= ?
+                       ORDER BY changed_at DESC""",
+                    (category.lower(), cutoff),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """SELECT wallet, category, old_tier, new_tier, reason,
+                              trigger_metric, changed_at
+                       FROM wallet_tier_history
+                       WHERE changed_at >= ?
+                       ORDER BY changed_at DESC""",
+                    (cutoff,),
+                ).fetchall()
+        finally:
+            conn.close()
+    except Exception as exc:
+        return {"available": False, "error": str(exc), "changes": []}
+
+    cols = [
+        "wallet", "category", "old_tier", "new_tier", "reason",
+        "trigger_metric", "changed_at",
+    ]
+    return {
+        "available": True,
+        "category": category,
+        "days": days,
+        "changes": [dict(zip(cols, r)) for r in rows],
+        "count": len(rows),
+    }
+
+
+def trigger_tier_rebuild() -> dict[str, Any]:
+    """Run a full nightly rebuild (also exposed as POST /api/tiers/rebuild)."""
+    db = _get_wallet_db()
+    if not db:
+        return {"available": False}
+    try:
+        from trading_platform.polymarket.wallet_tiering import WalletTieringEngine
+        return WalletTieringEngine(str(db._path)).build_all_profiles()
+    except Exception as exc:
+        return {"available": False, "error": str(exc)}
+
+
+def read_market_data(condition_id: str, direction: str = "YES") -> dict[str, Any]:
+    """Full pmxt microstructure for a market (or empty dict if pmxt down)."""
+    db = _get_wallet_db()
+    if not db:
+        return {"available": False, "error": "wallet_db unavailable"}
+    try:
+        from trading_platform.polymarket.market_data_service import MarketDataService
+        mds = MarketDataService(str(db._path))
+        return mds.get_market_microstructure(
+            condition_id=condition_id, direction=direction,
+        )
+    except Exception as exc:
+        return {"available": False, "error": str(exc)}
+
+
+def read_market_data_candles(
+    condition_id: str,
+    direction: str = "YES",
+    resolution: str = "1h",
+    hours: int = 24,
+) -> dict[str, Any]:
+    """Raw OHLCV candles for charting."""
+    db = _get_wallet_db()
+    if not db:
+        return {"available": False}
+    try:
+        from trading_platform.polymarket.market_data_service import MarketDataService
+        mds = MarketDataService(str(db._path))
+        outcome_id = mds.resolve_outcome_id(
+            condition_id=condition_id, direction=direction,
+        )
+        if not outcome_id:
+            return {"available": False, "error": "outcome_id not resolved", "candles": []}
+        ex = mds._get_exchange()
+        if ex is None:
+            return {"available": False, "error": "pmxt unavailable", "candles": []}
+        try:
+            candles = ex.fetch_ohlcv(outcome_id, resolution=resolution, limit=int(hours))
+            mds._record_call(success=True)
+        except Exception as exc:
+            mds._record_call(success=False, error=str(exc))
+            return {"available": False, "error": str(exc), "candles": []}
+        velocity = mds._velocity_from_candles(candles)
+        return {
+            "available": True,
+            "outcome_id": outcome_id,
+            "resolution": resolution,
+            "hours": hours,
+            "candles": velocity.get("candles", []),
+        }
+    except Exception as exc:
+        return {"available": False, "error": str(exc), "candles": []}
+
+
+def read_market_data_health() -> dict[str, Any]:
+    """pmxt sidecar status + cache hit rate + error count."""
+    db = _get_wallet_db()
+    if not db:
+        return {"available": False}
+    try:
+        from trading_platform.polymarket.market_data_service import MarketDataService
+        return MarketDataService(str(db._path)).get_health()
+    except Exception as exc:
+        return {"available": False, "error": str(exc)}
+
+
 def read_calibration_status() -> dict[str, Any]:
     """Per-signal calibration + current allocation plan + bankroll snapshot."""
     import sqlite3 as _sq
