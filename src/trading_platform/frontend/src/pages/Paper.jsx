@@ -53,24 +53,20 @@ function PortfolioSummary({ data }) {
   const polymarketCash = data.polymarket_cash ?? startingBankroll
   const polymarketDeployed = data.polymarket_deployed || 0
   const polymarketOpen = data.polymarket_open_count || 0
-  const kalshiCash = data.kalshi_cash || 0
-  const kalshiOpen = data.kalshi_open_count || 0
   const realizedPnl = data.portfolio?.realized_pnl || 0
   const totalTrades = data.total_trades || 0
 
   return (
     <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
       <div className="bg-surface-card rounded-lg p-4">
-        <p className="text-xs text-gray-500 mb-1">Polymarket Whale Signals</p>
+        <p className="text-xs text-gray-500 mb-1">Cash Available</p>
         <p className="text-xl font-bold font-mono text-gray-200">${polymarketCash.toLocaleString(undefined, {maximumFractionDigits: 0})}</p>
-        <p className="text-[10px] text-gray-500">
-          {polymarketOpen} open · ${polymarketDeployed.toLocaleString(undefined, {maximumFractionDigits: 0})} deployed
-        </p>
+        <p className="text-[10px] text-gray-500">starting: ${startingBankroll.toLocaleString()}</p>
       </div>
       <div className="bg-surface-card rounded-lg p-4">
-        <p className="text-xs text-gray-500 mb-1">Kalshi (legacy)</p>
-        <p className="text-lg font-bold font-mono text-gray-400">${kalshiCash.toFixed(2)}</p>
-        <p className="text-[10px] text-gray-600">{kalshiOpen} positions archived</p>
+        <p className="text-xs text-gray-500 mb-1">Deployed</p>
+        <p className="text-xl font-bold font-mono text-gray-200">${polymarketDeployed.toLocaleString(undefined, {maximumFractionDigits: 0})}</p>
+        <p className="text-[10px] text-gray-500">{polymarketOpen} open positions</p>
       </div>
       <div className="bg-surface-card rounded-lg p-4">
         <p className="text-xs text-gray-500 mb-1">Realized P&L</p>
@@ -81,9 +77,6 @@ function PortfolioSummary({ data }) {
       <div className="bg-surface-card rounded-lg p-4">
         <p className="text-xs text-gray-500 mb-1">Total Trades</p>
         <p className="text-xl font-bold font-mono text-gray-200">{totalTrades}</p>
-        <p className="text-[10px] text-gray-500">
-          starting: ${startingBankroll.toLocaleString()}
-        </p>
       </div>
     </div>
   )
@@ -133,10 +126,21 @@ function OpenPositions({ positions }) {
   )
 }
 
+// Wallet Intelligence — signals fired by whale_signal_engine in
+// response to a real watched wallet's trade.
 const WHALE_SIGNALS = [
   'wallet_reversal', 'cascade', 'oversized_bet', 'accumulation',
-  'market_maker_flip', 'convergence', 'specialist_entry',
+  'convergence', 'specialist_entry',
   'pre_deadline_surge', 'whale_entry',
+  'whale_exit', 'no_position_entry', 'position_reduction',
+]
+
+// Technical scanners — fired by velocity_detector / order_book_monitor
+// without any wallet basis. These pollute fusion / Kelly calibration
+// and the previous validation report flagged them as the source of
+// the fictional +$4.97M PnL on degenerate cheap-NO trades.
+const TECHNICAL_SIGNALS = [
+  'price_velocity', 'market_maker_flip',
 ]
 
 function WhaleSignalAttribution({ attribution }) {
@@ -269,16 +273,21 @@ export default function Paper() {
           <GoLiveProgress positions={positions} attribution={attribution} />
 
           <div className="card">
-            <h2 className="text-sm font-medium text-gray-400 mb-4">Polymarket Whale Signals</h2>
-            <WhaleSignalAttribution attribution={attribution} />
-            {attribution?.some(a => a.signal_type?.startsWith('kalshi') || a.signal_type === 'smart_money') && (
-              <details className="mt-4">
-                <summary className="text-[10px] text-gray-600 cursor-pointer hover:text-gray-400">Kalshi legacy trades ({attribution.filter(a => a.signal_type?.startsWith('kalshi') || a.signal_type === 'smart_money').reduce((s,a) => s + (a.total_trades||0), 0)})</summary>
-                <div className="mt-2">
-                  <SignalAttribution attribution={attribution.filter(a => a.signal_type?.startsWith('kalshi') || a.signal_type === 'smart_money')} />
-                </div>
-              </details>
-            )}
+            <h2 className="text-sm font-medium text-gray-400 mb-4">
+              <span className="mr-2">🧠</span>Wallet Intelligence Signals
+            </h2>
+            <p className="text-[10px] text-gray-600 mb-3">Fired by the smart-money pipeline in response to watched-wallet trades.</p>
+            <WhaleSignalAttribution attribution={(attribution || []).filter(a => WHALE_SIGNALS.includes(a.signal_type))} />
+          </div>
+
+          <div className="card">
+            <h2 className="text-sm font-medium text-gray-400 mb-4">
+              <span className="mr-2">📊</span>Technical Scanners
+            </h2>
+            <p className="text-[10px] text-gray-600 mb-3">
+              Price-velocity and order-book-imbalance signals — no wallet basis. Historical trades placed before the fillability filter (entry_price 0.05–0.95) bias these stats; treat with care.
+            </p>
+            <SignalAttribution attribution={(attribution || []).filter(a => TECHNICAL_SIGNALS.includes(a.signal_type))} />
           </div>
 
           <div className="card">

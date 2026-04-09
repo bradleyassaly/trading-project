@@ -6,9 +6,29 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
-from sklearn.ensemble import HistGradientBoostingClassifier
-from sklearn.isotonic import IsotonicRegression
-from sklearn.linear_model import LogisticRegression
+# scikit-learn is an optional dependency. The Polymarket pipeline (api,
+# scheduler, watchdog) does NOT need it, but it gets pulled in via the
+# `paper.service` import chain. Guarding it here lets the trading-cli
+# load even when sklearn isn't installed in the runtime image. Functions
+# that actually use sklearn raise a clear RuntimeError on call.
+try:
+    from sklearn.ensemble import HistGradientBoostingClassifier  # type: ignore
+    from sklearn.isotonic import IsotonicRegression  # type: ignore
+    from sklearn.linear_model import LogisticRegression  # type: ignore
+    HAS_SKLEARN = True
+except ImportError:  # pragma: no cover
+    HistGradientBoostingClassifier = None  # type: ignore
+    IsotonicRegression = None  # type: ignore
+    LogisticRegression = None  # type: ignore
+    HAS_SKLEARN = False
+
+
+def _require_sklearn() -> None:
+    if not HAS_SKLEARN:
+        raise RuntimeError(
+            "scikit-learn is required for trade_ev_reliability training/calibration. "
+            "Install with: pip install scikit-learn"
+        )
 
 RELIABILITY_NUMERIC_FEATURE_COLUMNS = [
     "predicted_return",
@@ -197,6 +217,8 @@ def _fit_probability_calibrator(
     max_iter: int,
 ) -> tuple[Any | None, np.ndarray]:
     calibration_method = str(method or "none").lower()
+    if calibration_method in ("isotonic", "sigmoid"):
+        _require_sklearn()
     if calibration_method == "isotonic":
         calibrator = IsotonicRegression(out_of_bounds="clip")
         calibrator.fit(raw_scores, labels)
@@ -799,6 +821,7 @@ def train_trade_ev_reliability_model(
             "calibration_method": calibration_method_normalized,
             "audit_summary": base_summary,
         }
+    _require_sklearn()
     if normalized_model_type == "gradient_boosting":
         estimator = HistGradientBoostingClassifier(
             max_depth=3,

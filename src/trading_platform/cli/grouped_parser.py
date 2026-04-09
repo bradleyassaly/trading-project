@@ -3009,6 +3009,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     data_polymarket_classify.set_defaults(func=cmd_classify_wallet_buckets)
 
+    data_polymarket_alpha = data_polymarket_subparsers.add_parser(
+        "compute-alpha-scores",
+        help="Compute per-wallet, per-category copyability alpha scores from clean trades.",
+    )
+    from trading_platform.cli.commands.polymarket_compute_alpha import cmd_polymarket_compute_alpha
+    data_polymarket_alpha.set_defaults(func=cmd_polymarket_compute_alpha)
+
     data_polymarket_seed_lb = data_polymarket_subparsers.add_parser(
         "seed-from-leaderboard", help="Seed wallet intelligence DB from Polymarket leaderboard wallets.",
     )

@@ -66,6 +66,9 @@ research_diagnostics = [
   "alphalens-reloaded>=0.4",
   "quantstats>=0.0.62"
 ]
+trade_ev_reliability = [
+  "scikit-learn>=1.3"
+]
 portfolio_optimizers = [
   "PyPortfolioOpt>=1.5"
 ]

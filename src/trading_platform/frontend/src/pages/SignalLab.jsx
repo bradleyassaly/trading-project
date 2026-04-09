@@ -100,10 +100,21 @@ function PerformanceTab() {
   }
 
   if (loading && !data) return <LoadingSkeleton rows={6} />
-  if (!data || !data.available) return <p className="text-xs text-gray-500">Signal performance unavailable.</p>
-
-  const portfolio = data.portfolio || {}
-  const byType = data.by_type || []
+  // Render whenever the endpoint returns ANY usable data — don't gate
+  // on a specific `available` flag. The previous strict check
+  // (`!data || !data.available`) showed "Signal performance unavailable"
+  // even when by_type was populated, because the API response shape
+  // changed and the flag isn't always present on every payload variant.
+  const portfolio = data?.portfolio || {}
+  const byType = data?.by_type || []
+  if (!data) return <p className="text-xs text-gray-500">Signal performance unavailable.</p>
+  if (!byType.length && !portfolio.bankroll) {
+    return (
+      <p className="text-xs text-gray-500">
+        No signal data yet — paper trades will appear here as they accumulate.
+      </p>
+    )
+  }
 
   return (
     <div className="space-y-4">

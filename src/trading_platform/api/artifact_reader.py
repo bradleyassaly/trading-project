@@ -489,8 +489,8 @@ def read_polymarket_live_markets() -> dict[str, Any]:
                 "data": [], "count": 0, "markets_subscribed": 0, "started_at": None}
     try:
         import sqlite3
-        conn = sqlite3.connect(str(db_path), check_same_thread=False)
-        conn.execute("PRAGMA journal_mode=WAL")
+        conn = sqlite3.connect(str(db_path), check_same_thread=False, timeout=30)
+        conn.execute("PRAGMA journal_mode=DELETE")  # bind-mount safe
         # Latest trade price per market (exclude orderbook price_change ticks)
         price_rows = conn.execute("""
             SELECT market_id, price, timestamp
@@ -558,8 +558,8 @@ def read_polymarket_market_ticks(market_id: str) -> dict[str, Any]:
         return {"available": False, "reason": "Live collector not running"}
     try:
         import sqlite3
-        conn = sqlite3.connect(str(db_path), check_same_thread=False)
-        conn.execute("PRAGMA journal_mode=WAL")
+        conn = sqlite3.connect(str(db_path), check_same_thread=False, timeout=30)
+        conn.execute("PRAGMA journal_mode=DELETE")  # bind-mount safe
 
         # Market metadata
         meta_row = conn.execute(

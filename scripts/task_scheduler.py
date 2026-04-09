@@ -105,7 +105,7 @@ SCHEDULE: list[Task] = [
     ),
     Task(
         name="open_positions",
-        cmd="trading-cli data polymarket open-positions",
+        cmd="trading-cli data polymarket compute-open-positions",
         interval_seconds=2 * 3600,
         description="Compute open-position P&L snapshots",
     ),
@@ -165,10 +165,57 @@ SCHEDULE: list[Task] = [
         description="Midnight reset of circuit breaker daily loss state",
     ),
     Task(
+        name="thesis_daily_snapshot",
+        # Daily KPI snapshot for the thesis scorecard. Runs after the
+        # daily digest so the digest's "today" numbers and the snapshot's
+        # historical row use the same compute pass.
+        cmd="curl -fsS -X POST http://api:8001/api/thesis/snapshot",
+        interval_seconds=24 * 3600,
+        description="Daily thesis scorecard snapshot",
+    ),
+    Task(
+        name="alpha_score_recompute",
+        # Daily recomputation of per-wallet, per-category copyability
+        # alpha scores. Reads only pnl_reliable=1 trades; output drives
+        # the get_wallet_alpha() lookup in the signal engine. See
+        # reports/pnl_investigation.md and src/.../alpha_scores.py.
+        cmd="curl -fsS -X POST http://api:8001/api/alpha/recompute",
+        interval_seconds=24 * 3600,
+        description="Daily alpha-score recompute (per-wallet, per-category copyability)",
+    ),
+    Task(
+        name="enrich_trade_resolution",
+        # Weekly PnL enrichment for backfilled trades. Without this,
+        # leaderboard wallets that came in via the PM scrape end up
+        # with `directional_win_rate=NULL` because their trades sit
+        # in wallet_trades with `pnl=NULL` until enrichment runs. The
+        # one-shot ad-hoc run closed the WR gap from 51% to 63% on
+        # the active leaderboard — keeping it weekly catches new
+        # backfills + new resolutions automatically.
+        cmd="trading-cli data polymarket enrich-trade-resolution",
+        interval_seconds=7 * 24 * 3600,
+        description="Weekly trade-resolution enrichment (computes pnl on resolved trades)",
+    ),
+    Task(
+        name="daily_digest",
+        # Once-per-day Telegram digest. All routine Telegram traffic
+        # routes through this; everything else is event-driven (trade
+        # placed, trade resolved, circuit breaker, service down).
+        cmd="curl -fsS -X POST http://api:8001/api/alerts/send-digest",
+        interval_seconds=24 * 3600,
+        description="Daily Telegram digest (overnight summary)",
+    ),
+    Task(
         name="categories_backfill_weekly",
+        # NOTE: `backfill-categories` is not a polymarket CLI subcommand.
+        # The category backfill is invoked via the API endpoint
+        # /api/categories/backfill or directly via market_categorizer.
+        # Disabled until the CLI command exists; categories are currently
+        # at 0% null so the weekly catch-up is not load-bearing.
         cmd="trading-cli data polymarket backfill-categories --no-reclassify-other",
         interval_seconds=7 * 24 * 3600,
-        description="Weekly catch-up for any null-category rows",
+        description="Weekly catch-up for any null-category rows (DISABLED — missing CLI cmd)",
+        enabled=False,
     ),
 
     # ── TODO — wire when underlying commands are stable ────────────────

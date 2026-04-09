@@ -1,10 +1,12 @@
 """
-Tests for the pmxt-backed MarketDataService.
+Tests for the direct-CLOB MarketDataService.
 
-Mocks the pmxt exchange object so the tests run without Node.js, the
-sidecar, or any network access. Verifies the pure-function transforms
-(velocity / imbalance / baseline) and the fallback path through
-fusion_score when pmxt is unavailable.
+The previous version of this module wrapped a pmxt sidecar that was
+never deployed; the rewrite uses direct CLOB / Gamma HTTP calls. These
+tests mock either the legacy ``svc._exchange`` (for the still-relevant
+pure-function tests on ``_velocity_from_history``, ``_imbalance_from_book``,
+``_baseline_from_candles``) or the requests session for end-to-end
+verification of the new HTTP path.
 """
 from __future__ import annotations
 
@@ -270,44 +272,75 @@ class TestMarketQualityScore:
 # ── Service class with mocked exchange ─────────────────────────────────────
 
 
-class TestServiceMockedExchange:
-    def test_fallback_when_pmxt_unavailable(self, tmp_path: Path):
-        db_path = _bootstrap_db(tmp_path)
-        svc = MarketDataService(str(db_path))
-        # Simulate pmxt missing
-        svc._exchange_failed = True
-        out = svc.get_price_velocity("any_token")
-        assert out == _EMPTY_VELOCITY
+class _FakeResponse:
+    def __init__(self, payload, status: int = 200):
+        self._payload = payload
+        self.status_code = status
+        self.ok = status == 200
 
-    def test_get_price_velocity_with_mock(self, tmp_path: Path):
-        db_path = _bootstrap_db(tmp_path)
-        svc = MarketDataService(str(db_path))
-        svc._exchange = _FakeExchange(
-            candles=_make_candles([0.45] * 20 + [0.50, 0.50, 0.50, 0.55])
-        )
+    def json(self):
+        return self._payload
+
+
+class _FakeSession:
+    """Captures GET calls and returns scripted responses."""
+
+    def __init__(self, responses: dict[str, Any] | None = None):
+        # Map: substring -> _FakeResponse (or callable taking params)
+        self._responses = responses or {}
+        self.calls: list[tuple[str, dict]] = []
+
+    def get(self, url: str, params=None, timeout=None):
+        self.calls.append((url, dict(params or {})))
+        for key, resp in self._responses.items():
+            if key in url:
+                return resp(params) if callable(resp) else resp
+        return _FakeResponse({}, status=404)
+
+
+class TestServiceDirectCLOB:
+    def test_is_available_always_true(self, tmp_path: Path):
+        svc = MarketDataService(str(_bootstrap_db(tmp_path)))
+        assert svc.is_available() is True
+
+    def test_get_price_velocity_with_mock_session(self, tmp_path: Path):
+        svc = MarketDataService(str(_bootstrap_db(tmp_path)))
+        # 24 ticks at 1h spacing, last few showing an upward move
+        now = int(time.time())
+        history = [{"t": now - (24 - i) * 3600, "p": 0.45} for i in range(20)]
+        history += [
+            {"t": now - 3 * 3600, "p": 0.50},
+            {"t": now - 2 * 3600, "p": 0.50},
+            {"t": now - 3600, "p": 0.50},
+            {"t": now, "p": 0.55},
+        ]
+        svc._session = _FakeSession({
+            "/prices-history": _FakeResponse({"history": history}),
+        })
         out = svc.get_price_velocity("token_x")
         assert out["available"] is True
         assert out["current_price"] == 0.55
         assert out["velocity_1h"] is not None
 
-    def test_get_price_velocity_handles_exception(self, tmp_path: Path):
-        db_path = _bootstrap_db(tmp_path)
-        svc = MarketDataService(str(db_path))
-        svc._exchange = _FakeExchange(raise_on={"fetch_ohlcv"})
+    def test_get_price_velocity_handles_http_error(self, tmp_path: Path):
+        svc = MarketDataService(str(_bootstrap_db(tmp_path)))
+        svc._session = _FakeSession({
+            "/prices-history": _FakeResponse({}, status=500),
+        })
         out = svc.get_price_velocity("token_x")
         assert out == _EMPTY_VELOCITY
 
-    def test_get_order_book_with_mock(self, tmp_path: Path):
-        db_path = _bootstrap_db(tmp_path)
-        svc = MarketDataService(str(db_path))
-        svc._exchange = _FakeExchange(
-            book=_Book(
-                bids=[_Level(0.50, 1000)],
-                asks=[_Level(0.51, 100)],
-            )
-        )
+    def test_get_order_book_with_mock_session(self, tmp_path: Path):
+        svc = MarketDataService(str(_bootstrap_db(tmp_path)))
+        svc._session = _FakeSession({
+            "/book": _FakeResponse({
+                "bids": [{"price": "0.50", "size": "1000"}],
+                "asks": [{"price": "0.51", "size": "100"}],
+            }),
+        })
         out = svc.get_order_book_imbalance("token_x")
         assert out["available"] is True
+        # bid_depth >> ask_depth → strong positive imbalance
         assert out["imbalance"] > 0.5
 
     def test_outcome_id_cache_hit(self, tmp_path: Path):
@@ -324,29 +357,24 @@ class TestServiceMockedExchange:
         conn.close()
 
         svc = MarketDataService(str(db_path))
-        # Sentinel: any pmxt call would fail, but cache should short-circuit
-        svc._exchange_failed = True
+        # If the session were called we'd 404; cache must short-circuit.
+        svc._session = _FakeSession({})
         out = svc.resolve_outcome_id(condition_id="0xabc", direction="YES")
         assert out == "cached_outcome"
-        # Cache hit should be recorded
         h = svc.get_health()
         assert h["cache_hits"] >= 1
 
     def test_resolve_outcome_id_writes_cache(self, tmp_path: Path):
         db_path = _bootstrap_db(tmp_path)
         svc = MarketDataService(str(db_path))
-        svc._exchange = _FakeExchange(
-            market=_Market(
-                question="Test",
-                outcomes=[
-                    _Outcome(label="Yes", outcome_id="yes_id_123"),
-                    _Outcome(label="No", outcome_id="no_id_456"),
-                ],
-            )
-        )
+        svc._session = _FakeSession({
+            "/markets": _FakeResponse([{
+                "conditionId": "0xnewcid",
+                "clobTokenIds": '["yes_id_123", "no_id_456"]',
+            }]),
+        })
         out = svc.resolve_outcome_id(condition_id="0xnewcid", direction="YES")
         assert out == "yes_id_123"
-        # Verify it's now in the SQLite cache
         conn = sqlite3.connect(str(db_path))
         row = conn.execute(
             "SELECT outcome_id FROM outcome_id_cache WHERE condition_id='0xnewcid' AND direction='YES'"
@@ -355,15 +383,16 @@ class TestServiceMockedExchange:
         assert row is not None and row[0] == "yes_id_123"
 
     def test_get_market_microstructure_combines_all(self, tmp_path: Path):
-        db_path = _bootstrap_db(tmp_path)
-        svc = MarketDataService(str(db_path))
-        svc._exchange = _FakeExchange(
-            candles=_make_candles([0.50] * 24, [10.0] * 24),
-            book=_Book(
-                bids=[_Level(0.49, 500)],
-                asks=[_Level(0.51, 500)],
-            ),
-        )
+        svc = MarketDataService(str(_bootstrap_db(tmp_path)))
+        now = int(time.time())
+        history = [{"t": now - (24 - i) * 3600, "p": 0.50} for i in range(25)]
+        svc._session = _FakeSession({
+            "/prices-history": _FakeResponse({"history": history}),
+            "/book": _FakeResponse({
+                "bids": [{"price": "0.49", "size": "500"}],
+                "asks": [{"price": "0.51", "size": "500"}],
+            }),
+        })
         out = svc.get_market_microstructure(outcome_id="token_x")
         assert out["available"] is True
         assert out["velocity"]["available"] is True

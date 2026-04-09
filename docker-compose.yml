@@ -61,6 +61,25 @@ services:
       api:
         condition: service_healthy
 
+  # ─── Live signal collector ─────────────────────────────────────────────
+  # Long-running CLOB WebSocket collector + signal engine. Subscribes
+  # to the top N markets, watches whale wallets in wallet_intelligence.db,
+  # and emits wallet_alerts → polymarket_paper_trades through the
+  # whale_signal_engine. Without this service, the smart-money pipeline
+  # is dark — see reports/data_validation.md DV-2 and the signal-flow
+  # validation report.
+  live-collect:
+    build: .
+    container_name: polymarket-live-collect
+    command: trading-cli data polymarket live-collect
+    volumes:
+      - .:/app
+    env_file: .env
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+
   # ─── Health watchdog ───────────────────────────────────────────────────
   # Polls the API + scheduler every 5 minutes and fires Telegram alerts
   # on degradation / recovery. See scripts/health_watchdog.py.

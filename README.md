@@ -1,16 +1,70 @@
-# Trading Platform
+# Polymarket Autonomous Trading Platform
 
-Automated prediction market trading via smart money detection. Tracks 16K+ Polymarket wallets, identifies top performers by category and PnL, monitors them in real time via WebSocket, detects when they trade, converts activity into signals, and executes paper trades. Kalshi Economics paper trading runs in parallel with calibration and volume signals.
+## Thesis
+
+> Some Polymarket wallets have **persistent, category-specific informational
+> edge**. This system identifies those wallets, monitors their trades in
+> real-time, and copies them when their historical edge in the relevant
+> category exceeds a statistical threshold.
+
+Every component of this codebase exists to test one piece of this claim.
+See [`THESIS.md`](THESIS.md) for the canonical statement of sub-claims,
+evidence, and the decision framework.
+
+## Five Claims Under Test
+
+1. **Persistent edge exists** — some wallets win >55% over 50+ trades and the rate persists across rolling windows
+2. **Edge is category-specific** — the same wallet can have edge in politics but not crypto; the unit of analysis is `(wallet, category)`
+3. **We can identify who has edge** — alpha scoring separates copyable from non-copyable wallets
+4. **We can copy in real-time** — live-collect WebSocket + alpha gate detect and act on whale trades fast enough that the edge isn't already priced in
+5. **Edge survives transaction costs** — only verifiable in live trading
 
 ## Current Status
 
-- **Wallet intelligence DB**: 16,259 wallets, 108K trades, 31K resolved with PnL
-- **Watched wallets**: 50 tier1, 26 tier2 (directional win rate >= 53-58%)
-- **Market universe**: 226 markets across 9 categories (politics, economics, crypto, finance, sports, culture, tech, mentions, weather)
-- **Kalshi paper trades**: active on Economics markets, resolving through April 2026
-- **WebSocket**: subscribing to 75+ live Polymarket markets with whale detection enabled
-- **Signal types**: whale_entry + convergence (Polymarket), calibration_drift + volume_spike + time_decay (Kalshi)
-- **Test suite**: 1,817 passing tests
+| Claim | Status | Evidence |
+|---|---|---|
+| 1. Persistent edge | ✅ confirmed | 77.9% WR on 61,122 clean reliable trades |
+| 2. Category-specific | ✅ confirmed | 7 categories with copyable wallets |
+| 3. Identification | ✅ confirmed | 130 copyable / 387 scored = 34% selectivity, 56 distinct wallets |
+| 4. Real-time copy | 🔄 testing | Alpha gate live, accumulating hypothesis-bearing trades |
+| 5. Transaction costs | ⏳ not started | Gated on Phase 4 (paper accuracy ≥70% on 50+ trades) |
+
+## Daily Validation
+
+Hypothesis accuracy is the single number that summarizes everything. The
+daily Telegram digest at 08:00 UTC and the Command Center hero card both
+display the same scorecard pulled from `KPITracker._thesis_scorecard()`.
+
+| Sample | Accuracy | Verdict |
+|---|---|---|
+| < 10 | n/a | ACCUMULATING |
+| 10–49 | n/a | PRELIMINARY |
+| ≥ 50 | ≥ 70% | ✅ GO LIVE |
+| ≥ 50 | 55–69% | 🟡 PROMISING — keep paper trading |
+| ≥ 50 | 50–54% | ⚠️ MARGINAL |
+| ≥ 50 | < 50% | 🔴 REJECTED — stop trading |
+
+## How It Works
+
+```
+Polymarket WebSocket → live_collector
+   ↓ (whale trade detected)
+whale_signal_engine → ALPHA GATE (per-wallet, per-category copyability)
+   ↓ (only copyable wallets pass)
+trade_hypotheses (rationale generated + persisted)
+   ↓
+polymarket_paper_executor → fillability + circuit breaker + fusion gates
+   ↓
+polymarket_paper_trades INSERT
+   ↓ (24h+ later, market resolves)
+check_and_resolve_open_trades → mark hypothesis correct/incorrect
+   ↓
+KPITracker.compute_all() → daily digest + dashboard scorecard
+   ↓ (if accuracy ≥70% on 50+ trades)
+Phase 4 unlocked: live executor with $500 starting capital
+```
+
+**Test suite:** 622 passing (1 environmentally-fragile test deselected on contended live DB).
 
 ## Two-Process Architecture
 

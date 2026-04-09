@@ -13,6 +13,11 @@ COPY pyproject.toml ./
 COPY src/ src/
 RUN pip install --no-cache-dir -e .
 
+# scikit-learn is an optional dep used by trade_ev_reliability and pulled
+# into the import chain via paper.service. Install in the runtime image so
+# `trading-cli polymarket *` commands can load without ImportError.
+RUN pip install --no-cache-dir scikit-learn
+
 # Scripts + configs (data is mounted at runtime)
 COPY scripts/ scripts/
 COPY configs/ configs/

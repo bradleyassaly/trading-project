@@ -1,28 +1,46 @@
 """
-pmxt-backed market microstructure service.
+Market microstructure service.
 
-Wraps the third-party ``pmxt`` library to provide market-level OHLCV,
-order book, and trade data that the existing Polymarket Data API and
-Gamma API integrations don't offer. The fusion score uses this to
-make smarter paper-trading decisions: did the whale move the market,
-or did the market already price in the information before they
-entered?
+Provides market-level OHLCV, order book, and pre-entry baseline data
+that the wallet-level Polymarket Data API and Gamma API don't expose.
+The fusion score uses this to make smarter paper-trading decisions:
+did the whale move the market, or did the market already price in
+the information before they entered?
+
+Implementation
+--------------
+
+The previous version of this module was backed by the third-party
+``pmxt`` library, which required a Node.js sidecar that was never
+deployed in our Docker stack. Result: ``is_available()`` always
+returned False and the fusion score's market_signal component was
+permanently dark (see reports/data_validation.md DV-8).
+
+This rewrite uses direct HTTP calls to the public CLOB and Gamma
+APIs, which give us everything we need:
+
+* CLOB ``/book?token_id=`` → bids/asks for order_book_imbalance
+* CLOB ``/prices-history?market=&startTs=&endTs=&fidelity=``
+  → minute-level price candles for velocity + baseline
+* Gamma ``/markets?condition_ids=`` → token_id resolution from
+  condition_id (replaces pmxt fetch_market)
+
+The pmxt code path is left in place as a commented fallback in case
+the sidecar is ever deployed.
 
 Critical contracts
 ------------------
 
-* **pmxt is optional.** If ``import pmxt`` fails or any pmxt call
-  raises, every public method on this class returns a sensible
-  empty/null dict and logs the error. The signal engine, paper
-  trading, calibration system, and live executor must keep working.
-* **Lazy initialization.** ``pmxt.Polymarket()`` may take seconds to
-  spin up the first time. We don't instantiate it until the first
-  call that actually needs market data.
-* **Outcome ID caching.** Translation from condition_id (what the
-  rest of the system uses) to pmxt's outcome_id is cached in the
-  ``outcome_id_cache`` table so we don't pay the lookup cost twice.
-* **Health tracking.** Every call updates the singleton ``pmxt_health``
-  row so the GUI can show reliability metrics.
+* **Always available.** ``is_available()`` returns True now — direct
+  HTTP works in every container without sidecars or extra deps.
+* **Graceful degradation.** Every public method returns a sensible
+  empty/null dict on HTTP failure and logs the error. The signal
+  engine, paper trading, calibration, and live executor never crash.
+* **Outcome ID caching.** Translation from condition_id → CLOB
+  token_id is cached in ``outcome_id_cache`` for 7 days.
+* **Health tracking.** Every call updates the singleton
+  ``pmxt_health`` row (kept under that legacy name so the GUI keeps
+  rendering) so we can see error rate / freshness in the dashboard.
 """
 from __future__ import annotations
 
@@ -38,6 +56,11 @@ logger = logging.getLogger(__name__)
 
 # Cache TTL for outcome_id mappings — these almost never change
 _OUTCOME_CACHE_TTL_SECONDS = 7 * 86400  # 7 days
+
+# Direct API endpoints
+_CLOB_BASE = "https://clob.polymarket.com"
+_GAMMA_BASE = "https://gamma-api.polymarket.com"
+_HTTP_TIMEOUT = 6.0
 
 # Default fallback structure returned when pmxt is unavailable
 _EMPTY_VELOCITY = {
@@ -96,47 +119,47 @@ class MarketDataService:
     """
 
     def __init__(self, db_path: str | Path | None = None) -> None:
-        self._exchange = None
-        self._exchange_failed = False
         self._memo_cache: dict[tuple[str, str], str | None] = {}
         if db_path is None:
             from trading_platform.polymarket.wallet_db import WalletDB
             db_path = str(WalletDB()._path)
         self._db_path = str(db_path)
+        # Lazy-imported requests session, shared across calls.
+        self._session = None
 
-    # ── pmxt lifecycle ──────────────────────────────────────────────────────
+    # ── HTTP session ────────────────────────────────────────────────────────
 
-    def _get_exchange(self) -> Any:
-        """Lazy-import + lazy-init pmxt.Polymarket().
-
-        Returns ``None`` and sets ``_exchange_failed=True`` on any
-        failure so callers can short-circuit to fallback paths.
-        """
-        if self._exchange_failed:
-            return None
-        if self._exchange is not None:
-            return self._exchange
-        try:
-            import pmxt  # noqa: F401
-            self._exchange = pmxt.Polymarket()
-            return self._exchange
-        except Exception as exc:
-            logger.warning("pmxt unavailable: %s", exc)
-            self._exchange_failed = True
-            self._record_error(f"init failed: {exc}")
-            return None
+    def _http(self):
+        """Lazy-init a requests Session for connection reuse."""
+        if self._session is None:
+            import requests
+            self._session = requests.Session()
+        return self._session
 
     def is_available(self) -> bool:
-        """Cheap check used by the fusion score to decide whether to call."""
-        if self._exchange_failed:
-            return False
-        if self._exchange is not None:
-            return True
-        try:
-            import pmxt  # noqa: F401
-            return True
-        except Exception:
-            return False
+        """Always True — direct HTTP needs no sidecar."""
+        return True
+
+    # ── pmxt lifecycle (legacy fallback, kept for reference) ────────────────
+    # The previous implementation depended on a pmxt Node.js sidecar that
+    # was never deployed. Direct CLOB / Gamma HTTP calls cover the same
+    # surface in 3 endpoints — see methods below. Restore this block if
+    # the sidecar ever ships.
+    #
+    # def _get_exchange(self):
+    #     if self._exchange_failed:
+    #         return None
+    #     if self._exchange is not None:
+    #         return self._exchange
+    #     try:
+    #         import pmxt
+    #         self._exchange = pmxt.Polymarket()
+    #         return self._exchange
+    #     except Exception as exc:
+    #         logger.warning("pmxt unavailable: %s", exc)
+    #         self._exchange_failed = True
+    #         self._record_error(f"init failed: {exc}")
+    #         return None
 
     # ── Health tracking ─────────────────────────────────────────────────────
 
@@ -264,36 +287,35 @@ class MarketDataService:
 
         self._record_cache(hit=False)
 
-        # Live pmxt lookup
-        ex = self._get_exchange()
-        if ex is None:
-            self._memo_cache[memo_key] = None
-            return None
-
+        # Live Gamma lookup — replaces pmxt fetch_market.
+        # Gamma returns clobTokenIds: [yes_token_id, no_token_id].
         outcome_id: str | None = None
         try:
             params: dict[str, Any] = {}
             if condition_id:
-                params["condition_id"] = condition_id
-            if market_slug:
+                params["condition_ids"] = condition_id
+            elif market_slug:
                 params["slug"] = market_slug
-            market = ex.fetch_market(**params) if params else None
-            if market is not None and getattr(market, "outcomes", None):
-                for o in market.outcomes:
-                    label = (getattr(o, "label", "") or "").strip().upper()
-                    if direction == "YES" and label in ("YES", "TRUE", "1"):
-                        outcome_id = getattr(o, "outcome_id", None)
-                        break
-                    if direction == "NO" and label in ("NO", "FALSE", "0"):
-                        outcome_id = getattr(o, "outcome_id", None)
-                        break
-                # Fallback: first outcome for YES, second for NO
-                if outcome_id is None and market.outcomes:
-                    if direction == "YES":
-                        outcome_id = getattr(market.outcomes[0], "outcome_id", None)
-                    elif len(market.outcomes) >= 2:
-                        outcome_id = getattr(market.outcomes[1], "outcome_id", None)
-            self._record_call(success=True)
+            r = self._http().get(
+                f"{_GAMMA_BASE}/markets", params=params, timeout=_HTTP_TIMEOUT,
+            )
+            if r.ok:
+                data = r.json()
+                if isinstance(data, list) and data:
+                    m = data[0]
+                    tids_raw = m.get("clobTokenIds") or "[]"
+                    tids = json.loads(tids_raw) if isinstance(tids_raw, str) else tids_raw
+                    if tids:
+                        # Convention: clobTokenIds[0] = YES, [1] = NO
+                        if direction == "YES":
+                            outcome_id = str(tids[0])
+                        elif len(tids) >= 2:
+                            outcome_id = str(tids[1])
+                        else:
+                            outcome_id = str(tids[0])
+                self._record_call(success=True)
+            else:
+                self._record_call(success=False, error=f"gamma {r.status_code}")
         except Exception as exc:
             logger.debug("resolve_outcome_id failed: %s", exc)
             self._record_call(success=False, error=str(exc))
@@ -324,22 +346,91 @@ class MarketDataService:
     # ── Public market-data methods ──────────────────────────────────────────
 
     def get_price_velocity(self, outcome_id: str, window_hours: int = 24) -> dict[str, Any]:
-        """24h of 1h candles + computed velocities at 1h / 6h / 24h windows."""
+        """24h of 1h candles + computed velocities at 1h / 6h / 24h windows.
+
+        Direct CLOB call: ``/prices-history?market=&startTs=&endTs=&fidelity=60``
+        returns minute-granularity ticks within the time range. We
+        downsample into hourly candles in :func:`_velocity_from_history`.
+        Note: the older ``interval=1h&fidelity=60`` parameter form
+        returns only 1 candle (a CLOB API quirk discovered during the
+        signal-flow audit) — always pass startTs/endTs.
+        """
         if not outcome_id:
             return dict(_EMPTY_VELOCITY)
-        ex = self._get_exchange()
-        if ex is None:
-            return dict(_EMPTY_VELOCITY)
-
         try:
-            candles = ex.fetch_ohlcv(outcome_id, resolution="1h", limit=int(window_hours))
+            now = int(time.time())
+            r = self._http().get(
+                f"{_CLOB_BASE}/prices-history",
+                params={
+                    "market": outcome_id,
+                    "startTs": now - int(window_hours) * 3600,
+                    "endTs": now,
+                    "fidelity": 60,  # 60-minute downsampling
+                },
+                timeout=_HTTP_TIMEOUT,
+            )
+            if not r.ok:
+                self._record_call(success=False, error=f"clob {r.status_code}")
+                return dict(_EMPTY_VELOCITY)
+            history = r.json().get("history", [])
             self._record_call(success=True)
         except Exception as exc:
-            logger.debug("fetch_ohlcv failed: %s", exc)
+            logger.debug("get_price_velocity http failed: %s", exc)
             self._record_call(success=False, error=str(exc))
             return dict(_EMPTY_VELOCITY)
 
-        return self._velocity_from_candles(candles)
+        return self._velocity_from_history(history)
+
+    @staticmethod
+    def _velocity_from_history(history: list[dict[str, Any]]) -> dict[str, Any]:
+        """Convert CLOB /prices-history rows into the velocity dict.
+
+        Each history row is ``{"t": unix_ts, "p": price}``. We compute
+        1h, 6h, 24h velocities by indexing back from the latest tick.
+        """
+        if not history:
+            return dict(_EMPTY_VELOCITY)
+        rows = sorted(
+            ((int(h.get("t", 0)), float(h.get("p", 0))) for h in history if h.get("t")),
+            key=lambda x: x[0],
+        )
+        if not rows:
+            return dict(_EMPTY_VELOCITY)
+        latest_t, current = rows[-1]
+
+        def _price_at(seconds_ago: int) -> float | None:
+            target = latest_t - seconds_ago
+            best: float | None = None
+            for t, p in rows:
+                if t <= target:
+                    best = p
+                else:
+                    break
+            return best
+
+        p1 = _price_at(3600)
+        p6 = _price_at(6 * 3600)
+        p24 = _price_at(24 * 3600)
+
+        def _vel(prev: float | None) -> float | None:
+            if prev is None or prev == 0:
+                return None
+            return round((current - prev) / prev, 4)
+
+        # CLOB /prices-history returns ticks not OHLCV — volume is not
+        # available from this endpoint. Leave volume_* as None.
+        return {
+            "current_price": round(current, 4),
+            "price_1h_ago": round(p1, 4) if p1 is not None else None,
+            "velocity_1h": _vel(p1),
+            "velocity_6h": _vel(p6),
+            "velocity_24h": _vel(p24),
+            "volume_1h": None,
+            "volume_24h": None,
+            "volume_ratio": None,
+            "candles": [{"t": t, "c": p, "o": p, "h": p, "l": p, "v": 0} for t, p in rows],
+            "available": True,
+        }
 
     @staticmethod
     def _velocity_from_candles(candles: list[Any]) -> dict[str, Any]:
@@ -412,18 +503,25 @@ class MarketDataService:
         }
 
     def get_order_book_imbalance(self, outcome_id: str) -> dict[str, Any]:
-        """Bid/ask imbalance over the top of book + 10% depth window."""
+        """Bid/ask imbalance over the top of book + 10% depth window.
+
+        Direct CLOB call: ``/book?token_id=``.
+        """
         if not outcome_id:
             return dict(_EMPTY_BOOK)
-        ex = self._get_exchange()
-        if ex is None:
-            return dict(_EMPTY_BOOK)
-
         try:
-            book = ex.fetch_order_book(outcome_id)
+            r = self._http().get(
+                f"{_CLOB_BASE}/book",
+                params={"token_id": outcome_id},
+                timeout=_HTTP_TIMEOUT,
+            )
+            if not r.ok:
+                self._record_call(success=False, error=f"clob {r.status_code}")
+                return dict(_EMPTY_BOOK)
+            book = r.json()
             self._record_call(success=True)
         except Exception as exc:
-            logger.debug("fetch_order_book failed: %s", exc)
+            logger.debug("get_order_book_imbalance http failed: %s", exc)
             self._record_call(success=False, error=str(exc))
             return dict(_EMPTY_BOOK)
 
@@ -495,23 +593,29 @@ class MarketDataService:
         """
         if not outcome_id or not whale_entry_ts:
             return dict(_EMPTY_BASELINE)
-        ex = self._get_exchange()
-        if ex is None:
-            return dict(_EMPTY_BASELINE)
-
-        from datetime import datetime, timezone
         try:
-            start = datetime.fromtimestamp(whale_entry_ts - 7200, tz=timezone.utc)
-            end = datetime.fromtimestamp(int(time.time()), tz=timezone.utc)
-            candles = ex.fetch_ohlcv(
-                outcome_id, resolution="5m", start=start, end=end,
+            r = self._http().get(
+                f"{_CLOB_BASE}/prices-history",
+                params={
+                    "market": outcome_id,
+                    "startTs": int(whale_entry_ts) - 7200,
+                    "endTs": int(time.time()),
+                    "fidelity": 5,  # 5-minute granularity for baseline
+                },
+                timeout=_HTTP_TIMEOUT,
             )
+            if not r.ok:
+                self._record_call(success=False, error=f"clob {r.status_code}")
+                return dict(_EMPTY_BASELINE)
+            history = r.json().get("history", [])
             self._record_call(success=True)
         except Exception as exc:
-            logger.debug("fetch_ohlcv (5m) failed: %s", exc)
+            logger.debug("get_pre_entry_baseline http failed: %s", exc)
             self._record_call(success=False, error=str(exc))
             return dict(_EMPTY_BASELINE)
 
+        # Adapt the dict-style history to what _baseline_from_candles wants.
+        candles = [{"t": h.get("t"), "c": h.get("p")} for h in history]
         return self._baseline_from_candles(candles, whale_entry_ts)
 
     @staticmethod

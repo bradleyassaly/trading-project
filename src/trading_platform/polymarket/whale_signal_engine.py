@@ -533,23 +533,17 @@ class WhaleSignalEngine:
                 "[VELOCITY] %s: %+.0f%% in %.0fmin at %.2f",
                 question[:40], price_change * 100, minutes_elapsed, current_price,
             )
-            # LOUD telegram alert — time-sensitive
+            # Velocity-spike Telegram alerts were the noisiest source in the
+            # historical 5,197-alert flood. Removed per the alert-system
+            # rebuild — velocity is a technical scanner, not a real wallet
+            # signal, and the thesis is that it should not page anyone.
+            # The skip is recorded in AlertManager so the daily digest
+            # surfaces the count instead of spamming individual messages.
             try:
-                from trading_platform.polymarket.telegram_alerts import get_alerter
-                alerter = get_alerter()
-                if alerter.enabled:
-                    alerter.send_velocity_spike(
-                        question=question,
-                        category=category,
-                        price_change=price_change,
-                        velocity=velocity,
-                        current_price=current_price,
-                        minutes_elapsed=minutes_elapsed,
-                        signal_fired=True,
-                        paper_trade=sig if isinstance(sig, dict) else None,
-                    )
-            except Exception as exc:
-                logger.debug("velocity telegram failed: %s", exc)
+                from trading_platform.polymarket.alert_manager import get_alert_manager
+                get_alert_manager().record_signal_skipped("velocity_spike_no_wallet")
+            except Exception:
+                pass
             return sig
         except Exception as exc:
             logger.debug("on_price_velocity failed: %s", exc)
@@ -591,6 +585,33 @@ class WhaleSignalEngine:
         }
         if extra:
             signal.update(extra)
+
+        # Alpha gate (Phase 1 of the signal_analysis_clean.md rollout):
+        # only let real-wallet signals through if the firing wallet has
+        # proven category-specific edge. Synthetic-wallet signals
+        # (velocity_detector / order_book_monitor) bypass — they're
+        # gated by the fillability floor in the executor instead.
+        if trade.wallet and trade.wallet not in ("velocity_detector", "order_book_monitor"):
+            try:
+                from trading_platform.polymarket.alpha_scores import get_wallet_alpha
+                alpha = get_wallet_alpha(
+                    str(self.db._path), trade.wallet, trade.category or "other",
+                )
+                if alpha <= 0:
+                    logger.info(
+                        "[ALPHA_GATE] wallet %s NOT copyable in %s, SKIP %s",
+                        trade.wallet[:14], trade.category, signal_type,
+                    )
+                    return None
+                # Stash on the signal so the executor reuses it without
+                # re-querying the DB.
+                signal["alpha_score"] = alpha
+                logger.info(
+                    "[ALPHA_GATE] wallet %s copyable in %s, score=%.3f, signal=%s",
+                    trade.wallet[:14], trade.category, alpha, signal_type,
+                )
+            except Exception as exc:
+                logger.debug("alpha gate (engine) lookup failed: %s", exc)
 
         # Write to market_signals (with question for joins)
         self.db.insert_signal(
@@ -654,7 +675,15 @@ class WhaleSignalEngine:
             if paper_trade:
                 signal["paper_stake"] = paper_trade["size_usd"]
                 signal["paper_trade_id"] = paper_trade["id"]
+                logger.info(
+                    "[SIGNAL\u2192TRADE] PLACED: %s %s %s stake=$%s wallet=%s tier=%s",
+                    signal_type, trade.side, (trade.question or "")[:30],
+                    paper_trade.get("size_usd"), trade.wallet[:14],
+                    trade.wallet_tier,
+                )
                 # Mark the most recent matching market_signals row as executed
+                # AND set wallet_alerts.paper_trade_fired = 1 so the
+                # signal->trade link can be queried downstream.
                 try:
                     with self.db._lock:
                         self.db._conn.execute(
@@ -665,11 +694,24 @@ class WhaleSignalEngine:
                             (paper_trade["size_usd"], paper_trade["id"],
                              trade.condition_id, signal_type, now_ts),
                         )
+                        self.db._conn.execute(
+                            """UPDATE wallet_alerts
+                               SET paper_trade_fired = 1
+                               WHERE wallet = ? AND token_id = ? AND side = ?
+                                 AND detected_at >= ?""",
+                            (trade.wallet, trade.condition_id, trade.side,
+                             now_ts - 5),
+                        )
                         self.db._conn.commit()
                 except Exception:
                     pass
+            else:
+                logger.info(
+                    "[SIGNAL\u2192TRADE] SKIP: %s %s wallet=%s — executor returned None (gate/dup/price-floor)",
+                    signal_type, trade.side, trade.wallet[:14],
+                )
         except Exception as exc:
-            logger.warning("[PAPER] Executor failed: %s", exc)
+            logger.warning("[SIGNAL\u2192TRADE] EXECUTOR_FAILED: %s", exc)
 
         # Live executor — DRY_RUN by default. Will be blocked by KillSwitch
         # unless POLYMARKET_LIVE_ENABLED=1 in .env. This is purely

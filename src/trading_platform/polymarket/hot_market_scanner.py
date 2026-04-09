@@ -212,16 +212,21 @@ class HotMarketScanner:
                     "added": False,
                 })
 
-        # Telegram batch alert for newly added markets only.
+        # SILENCED on Telegram per signal_analysis_clean.md follow-up:
+        # hot-market discoveries are technical scanner output with no
+        # wallet basis, and the previous alert flood (5,197 messages
+        # over 24h) was largely from these. They're still recorded in
+        # the AlertManager skip counter so the daily digest surfaces
+        # the count, but no individual messages are sent.
         added = [m for m in new_markets if m.get("added")]
         if added:
             try:
-                from trading_platform.polymarket.telegram_alerts import get_alerter
-                alerter = get_alerter()
-                if alerter.enabled:
-                    alerter.send_hot_market_discovered(added)
-            except Exception as exc:
-                logger.debug("hot market telegram failed: %s", exc)
+                from trading_platform.polymarket.alert_manager import get_alert_manager
+                am = get_alert_manager()
+                for _ in added:
+                    am.record_signal_skipped("hot_market_no_wallet")
+            except Exception:
+                pass
 
         return new_markets
 

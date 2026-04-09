@@ -266,19 +266,55 @@ class WalletDB:
         self._path = Path(db_path)
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
-        self._conn = sqlite3.connect(str(self._path), check_same_thread=False)
-        self._conn.execute("PRAGMA journal_mode=WAL")
-        self._conn.execute("PRAGMA busy_timeout=5000")
-        self._conn.executescript(_SCHEMA)
-        self._conn.commit()
-        self._migrate_profiles()
-        self._migrate_signals()
-        self._migrate_positions()
-        self._migrate_anomalies()
-        self._migrate_calibration()
-        self._migrate_market_data_cache()
-        self._migrate_wallet_tiering()
-        self._migrate_circuit_breaker()
+        self._conn = sqlite3.connect(str(self._path), check_same_thread=False, timeout=30)
+        # DELETE mode (not WAL): WAL needs shared-memory mmap, which fails
+        # on NTFS bind-mounts inside WSL2 Docker containers. DELETE works
+        # everywhere at the cost of slightly more writer contention.
+        # Wrap the PRAGMAs + schema bootstrap in try/except so we don't
+        # fail when another process holds the wallet DB open (api +
+        # scheduler + live-collect commonly do, plus pytest constructs
+        # multiple WalletDB instances concurrently). The mode is
+        # per-database not per-connection, and the schema is idempotent
+        # CREATE-IF-NOT-EXISTS, so swallowing here is safe.
+        try:
+            self._conn.execute("PRAGMA journal_mode=DELETE")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            self._conn.execute("PRAGMA busy_timeout=30000")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            self._conn.executescript(_SCHEMA)
+            self._conn.commit()
+        except sqlite3.OperationalError as exc:
+            if "locked" not in str(exc).lower():
+                raise
+            logger.debug("WalletDB schema executescript skipped (db locked): %s", exc)
+        # Migrations open additional write locks; same defensive
+        # try/except as the schema bootstrap above so a constructor
+        # racing the live api/scheduler doesn't hard-fail.
+        for _migrate in (self._migrate_profiles, self._migrate_signals, self._migrate_positions):
+            try:
+                _migrate()
+            except sqlite3.OperationalError as exc:
+                # Only swallow lock contention — let real schema bugs raise.
+                if "locked" not in str(exc).lower():
+                    raise
+                logger.debug("%s skipped (db locked): %s", _migrate.__name__, exc)
+        for _migrate in (
+            self._migrate_anomalies,
+            self._migrate_calibration,
+            self._migrate_market_data_cache,
+            self._migrate_wallet_tiering,
+            self._migrate_circuit_breaker,
+        ):
+            try:
+                _migrate()
+            except sqlite3.OperationalError as exc:
+                if "locked" not in str(exc).lower():
+                    raise
+                logger.debug("%s skipped (db locked): %s", _migrate.__name__, exc)
 
     def _migrate_circuit_breaker(self) -> None:
         """Singleton circuit_breaker_state row + append-only log."""

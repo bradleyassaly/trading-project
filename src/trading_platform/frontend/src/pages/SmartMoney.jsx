@@ -372,7 +372,18 @@ function WinnersTab({ onSelectWallet }) {
       </div>
 
       {loading && !data ? <LoadingSkeleton rows={8} /> :
-       !rows.length ? <EmptyState title="No wallets match filters" message="Adjust filter criteria" /> : (
+       !rawRows.length ? <EmptyState title="No leaderboard data" message="Run: trading-cli data polymarket build-leaderboard" /> :
+       !rows.length ? (
+         <div>
+           <EmptyState title="No wallets match the active filters" message={`${rawRows.length} wallets in dataset — try resetting filters`} />
+           <div className="mt-3 text-center">
+             <button
+               onClick={() => { setTierFilter('all'); setCatFilter('all'); setBucketFilter('all'); setSearch('') }}
+               className="px-3 py-1.5 text-[10px] rounded bg-accent-blue/20 text-accent-blue hover:bg-accent-blue/30"
+             >Reset filters</button>
+           </div>
+         </div>
+       ) : (
         <div className="overflow-x-auto">
           <table className="w-full text-xs">
             <thead>

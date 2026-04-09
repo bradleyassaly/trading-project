@@ -250,23 +250,26 @@ class TestProfileRebuild:
         assert p["large_bet_threshold"] >= 140
         assert p["large_bet_threshold"] <= 160
 
-    def test_directional_win_rate_excludes_tweets(self, tmp_path: Path) -> None:
+    def test_directional_win_rate_uses_full_resolved_pool(self, tmp_path: Path) -> None:
+        # Headline directional WR is now computed at the trade level
+        # over every resolved trade with a populated pnl, regardless of
+        # category — see reports/data_validation.md DV-1.
         from trading_platform.polymarket.wallet_profile_rebuild import _compute_profile
         trades = [
-            {"asset": "t1", "side": "BUY", "size": 100, "category": "crypto",
-             "timestamp": 1000, "market_resolved": True, "market_outcome": "YES",
-             "event_slug": "", "outcome": ""},
-            {"asset": "t2", "side": "BUY", "size": 100, "category": "tweet_count",
-             "timestamp": 2000, "market_resolved": True, "market_outcome": "YES",
-             "event_slug": "", "outcome": ""},
-            {"asset": "t3", "side": "BUY", "size": 100, "category": "crypto",
-             "timestamp": 3000, "market_resolved": True, "market_outcome": "NO",
-             "event_slug": "", "outcome": ""},
+            {"asset": "t1", "side": "BUY", "size": 100, "price": 0.5,
+             "category": "crypto", "timestamp": 1000, "market_resolved": True,
+             "market_outcome": "YES", "event_slug": "", "outcome": "", "pnl": 50.0},
+            {"asset": "t2", "side": "BUY", "size": 100, "price": 0.5,
+             "category": "tweet_count", "timestamp": 2000, "market_resolved": True,
+             "market_outcome": "YES", "event_slug": "", "outcome": "", "pnl": 25.0},
+            {"asset": "t3", "side": "BUY", "size": 100, "price": 0.5,
+             "category": "crypto", "timestamp": 3000, "market_resolved": True,
+             "market_outcome": "NO", "event_slug": "", "outcome": "", "pnl": -100.0},
         ]
         profile = _compute_profile(trades)
-        # t1 win (BUY+YES), t3 loss (BUY+NO), t2 excluded (tweet_count)
-        assert profile["directional_win_rate"] == 0.5  # 1/2
-        assert profile["crypto_win_rate"] == 0.5
+        # 2 wins (t1, t2), 1 loss (t3) → 2/3
+        assert profile["resolved_trades"] == 3
+        assert abs(profile["directional_win_rate"] - 2 / 3) < 0.001
 
 
 class TestWinners:

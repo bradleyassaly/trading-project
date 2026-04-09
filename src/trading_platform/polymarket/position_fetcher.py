@@ -49,9 +49,32 @@ class PositionFetcher:
             return []
 
     def fetch_and_store(self, wallet: str, db_path: str) -> int:
-        """Fetch and upsert positions for one wallet. Returns count stored."""
+        """Fetch and upsert positions for one wallet. Returns count stored.
+
+        After upserting the live set, deletes any rows for this wallet
+        whose ``updated_at`` is older than the start of this refresh —
+        those represent positions Polymarket no longer returns (because
+        the market resolved and the user was paid out, or they sold to
+        zero). Without this prune, ``wallet_positions`` accumulates
+        zombie rows for resolved markets — see data_validation.md DV-7.
+        """
         positions = self.fetch_wallet_positions(wallet)
+        # Mark when this refresh started so the post-upsert prune can
+        # identify rows the API didn't return this time around.
+        refresh_started = int(time.time())
         if not positions:
+            # Empty response can mean "wallet has no open positions" —
+            # also a valid signal to clear stale rows.
+            try:
+                conn = sqlite3.connect(db_path)
+                conn.execute(
+                    "DELETE FROM wallet_positions WHERE wallet = ?",
+                    (wallet,),
+                )
+                conn.commit()
+                conn.close()
+            except Exception as exc:
+                logger.debug("empty-response prune failed for %s: %s", wallet[:14], exc)
             return 0
 
         conn = sqlite3.connect(db_path)
@@ -113,6 +136,23 @@ class PositionFetcher:
                 stored += 1
             except Exception as exc:
                 logger.debug("Position upsert failed: %s", exc)
+
+        # Prune: any row for this wallet not touched in the current
+        # refresh is a position the API no longer returns. Delete it.
+        try:
+            cur = conn.execute(
+                """DELETE FROM wallet_positions
+                   WHERE wallet = ? AND updated_at < ?""",
+                (wallet, refresh_started),
+            )
+            pruned = cur.rowcount or 0
+            if pruned:
+                logger.info(
+                    "[POSITIONS] pruned %d stale rows for %s",
+                    pruned, wallet[:14],
+                )
+        except Exception as exc:
+            logger.debug("prune failed for %s: %s", wallet[:14], exc)
 
         conn.commit()
         conn.close()

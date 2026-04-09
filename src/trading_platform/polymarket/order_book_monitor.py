@@ -365,18 +365,17 @@ class OrderBookMonitor:
         if persist and self._db_path and all_signals:
             self._persist_anomalies(all_signals)
 
-        # Telegram dispatch for high/critical anomalies. Best-effort —
-        # never let alerter failures break the polling loop.
+        # SILENCED on Telegram per signal_analysis_clean.md follow-up:
+        # order-book anomalies are technical scanner output with no
+        # wallet alpha basis. The historical flood was largely from
+        # this and the velocity scanner. Skips are accumulated in the
+        # AlertManager daily digest counter instead.
         try:
-            from trading_platform.polymarket.telegram_alerts import get_alerter
-            alerter = get_alerter()
-            if alerter.enabled:
-                for s in all_signals:
-                    if (s.get("severity") or "") in ("critical", "high"):
-                        try:
-                            alerter.send_order_book_anomaly(s)
-                        except Exception as exc:
-                            logger.debug("OB telegram send failed: %s", exc)
+            from trading_platform.polymarket.alert_manager import get_alert_manager
+            am = get_alert_manager()
+            for s in all_signals:
+                if (s.get("severity") or "") in ("critical", "high"):
+                    am.record_signal_skipped("order_book_anomaly_no_wallet")
         except Exception:
             pass
 

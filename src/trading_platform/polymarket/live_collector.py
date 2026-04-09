@@ -367,31 +367,11 @@ class PolymarketLiveCollector:
             if len(self._tick_batch) >= self._tick_batch_size:
                 self._flush_tick_batch()
 
-    def _flush_tick_batch(self) -> None:
-        """Write queued ticks to market_ticks in a single transaction."""
-        if not self._tick_batch:
-            return
-        try:
-            from trading_platform.polymarket.wallet_db import WalletDB
-            import sqlite3 as _sq
-            db_path = str(WalletDB()._path)
-            conn = _sq.connect(db_path)
-            try:
-                conn.executemany(
-                    """INSERT OR IGNORE INTO market_ticks
-                       (condition_id, token_id, timestamp, price)
-                       VALUES (?, ?, ?, ?)""",
-                    self._tick_batch,
-                )
-                conn.commit()
-            finally:
-                conn.close()
-            self._tick_batch = []
-        except Exception as exc:
-            logger.debug("tick batch flush failed: %s", exc)
-            # Drop the batch on failure to avoid unbounded memory growth
-            self._tick_batch = []
-
+        # Velocity-signal firing must live in this method's scope so ``buf``
+        # is defined. A previous refactor accidentally moved this block past
+        # the next ``def`` and into ``_flush_tick_batch``, causing every
+        # WebSocket message to crash with ``NameError: name 'buf' is not
+        # defined`` and the live-collector to reconnect-loop forever.
         if len(buf) < 3 or self._signal_engine is None:
             return
         oldest_ts, oldest_price = buf[0]
@@ -416,6 +396,31 @@ class PolymarketLiveCollector:
             )
         except Exception as exc:
             logger.debug("velocity signal failed: %s", exc)
+
+    def _flush_tick_batch(self) -> None:
+        """Write queued ticks to market_ticks in a single transaction."""
+        if not self._tick_batch:
+            return
+        try:
+            from trading_platform.polymarket.wallet_db import WalletDB
+            import sqlite3 as _sq
+            db_path = str(WalletDB()._path)
+            conn = _sq.connect(db_path)
+            try:
+                conn.executemany(
+                    """INSERT OR IGNORE INTO market_ticks
+                       (condition_id, token_id, timestamp, price)
+                       VALUES (?, ?, ?, ?)""",
+                    self._tick_batch,
+                )
+                conn.commit()
+            finally:
+                conn.close()
+            self._tick_batch = []
+        except Exception as exc:
+            logger.debug("tick batch flush failed: %s", exc)
+            # Drop the batch on failure to avoid unbounded memory growth
+            self._tick_batch = []
 
     # ── Background pollers (order book monitor + hot market scanner) ─────────
 

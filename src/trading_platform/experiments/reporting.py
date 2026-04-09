@@ -2,11 +2,30 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import matplotlib.pyplot as plt
 import pandas as pd
+
+# matplotlib is an optional dependency. The Polymarket runtime image
+# does not need it, but this module gets pulled transitively by the
+# CLI parser. Guarding the import lets `trading-cli polymarket *`
+# commands load without it; functions that actually plot raise on call.
+try:
+    import matplotlib.pyplot as plt  # type: ignore
+    HAS_MATPLOTLIB = True
+except ImportError:  # pragma: no cover
+    plt = None  # type: ignore
+    HAS_MATPLOTLIB = False
+
+
+def _require_matplotlib() -> None:
+    if not HAS_MATPLOTLIB:
+        raise RuntimeError(
+            "matplotlib is required for walkforward plotting. "
+            "Install with: pip install matplotlib"
+        )
 
 
 def save_walkforward_return_plot(df: pd.DataFrame, output_path: Path) -> Path:
+    _require_matplotlib()
     plot_path = output_path.with_name(output_path.stem + "_returns.png")
 
     working = df.copy()
@@ -32,6 +51,7 @@ def save_walkforward_return_plot(df: pd.DataFrame, output_path: Path) -> Path:
 
 
 def save_walkforward_param_plot(df: pd.DataFrame, output_path: Path) -> Path | None:
+    _require_matplotlib()
     plot_path = output_path.with_name(output_path.stem + "_params.png")
 
     working = df.copy()

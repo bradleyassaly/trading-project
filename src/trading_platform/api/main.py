@@ -608,6 +608,144 @@ def alerts_telegram_test() -> dict[str, Any]:
         return {"success": False, "error": str(exc)}
 
 
+# ── AlertManager endpoints ──────────────────────────────────────────────────
+
+
+@app.post("/api/alerts/send-digest")
+def alerts_send_digest() -> dict[str, Any]:
+    """Manually trigger the daily digest. Used by the scheduler at 08:00
+    UTC and available here for ad-hoc / dev triggering."""
+    try:
+        from trading_platform.polymarket.alert_manager import get_alert_manager
+        sent = get_alert_manager().send_daily_digest()
+        return {"success": bool(sent)}
+    except Exception as exc:
+        return {"success": False, "error": str(exc)}
+
+
+@app.get("/api/alerts/recent")
+def alerts_recent(limit: int = 20) -> dict[str, Any]:
+    """Recent alerts dispatched through AlertManager (in-memory log)."""
+    try:
+        from trading_platform.polymarket.alert_manager import get_alert_manager
+        return {"available": True, "alerts": get_alert_manager().get_recent(limit)}
+    except Exception as exc:
+        return {"available": False, "error": str(exc), "alerts": []}
+
+
+@app.get("/api/alerts/config")
+def alerts_config() -> dict[str, Any]:
+    """Current AlertManager configuration + counters."""
+    try:
+        from trading_platform.polymarket.alert_manager import get_alert_manager
+        return get_alert_manager().get_config()
+    except Exception as exc:
+        return {"telegram_configured": False, "error": str(exc)}
+
+
+# ── Per-wallet alpha scores (Part 4-5 of pnl_investigation followup) ────────
+
+
+def _alpha_db_path() -> str:
+    from trading_platform.polymarket.wallet_db import WalletDB
+    return str(WalletDB()._path)
+
+
+@app.get("/api/alpha/summary")
+def alpha_summary() -> dict[str, Any]:
+    try:
+        from trading_platform.polymarket.alpha_scores import get_summary
+        return get_summary(_alpha_db_path())
+    except Exception as exc:
+        return {"available": False, "error": str(exc)}
+
+
+@app.get("/api/alpha/leaderboard")
+def alpha_leaderboard(category: str, min_score: float = 0.5, limit: int = 50) -> dict[str, Any]:
+    try:
+        from trading_platform.polymarket.alpha_scores import get_category_leaderboard
+        rows = get_category_leaderboard(
+            _alpha_db_path(), category=category, min_score=min_score, limit=limit,
+        )
+        return {"available": True, "category": category, "wallets": rows}
+    except Exception as exc:
+        return {"available": False, "error": str(exc), "wallets": []}
+
+
+@app.get("/api/wallet/{address}/alpha")
+def wallet_alpha(address: str) -> dict[str, Any]:
+    try:
+        from trading_platform.polymarket.alpha_scores import get_wallet_alpha_full
+        rows = get_wallet_alpha_full(_alpha_db_path(), address)
+        return {"available": True, "wallet": address, "categories": rows}
+    except Exception as exc:
+        return {"available": False, "error": str(exc), "categories": []}
+
+
+@app.post("/api/alpha/recompute")
+def alpha_recompute() -> dict[str, Any]:
+    """Manually trigger an alpha-score recompute (also runs daily via scheduler)."""
+    try:
+        from trading_platform.polymarket.alpha_scores import compute_alpha_scores
+        return compute_alpha_scores(_alpha_db_path())
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
+@app.get("/api/hypotheses/recent")
+def hypotheses_recent(limit: int = 20) -> dict[str, Any]:
+    """Recent trade hypotheses (rationale rows for paper trades)."""
+    try:
+        from trading_platform.polymarket.trade_hypotheses import get_recent_hypotheses
+        return {"available": True, "hypotheses": get_recent_hypotheses(_alpha_db_path(), limit)}
+    except Exception as exc:
+        return {"available": False, "error": str(exc), "hypotheses": []}
+
+
+# ── Thesis scorecard endpoints (KPI tracker) ────────────────────────────────
+
+
+@app.get("/api/thesis/scorecard")
+def thesis_scorecard() -> dict[str, Any]:
+    """The single endpoint that summarizes whether the trading thesis
+    is being confirmed. Drives the Command Center hero card."""
+    try:
+        from trading_platform.polymarket.kpi_tracker import KPITracker
+        return KPITracker(_alpha_db_path()).compute_all()
+    except Exception as exc:
+        return {"available": False, "error": str(exc)}
+
+
+@app.get("/api/thesis/claims")
+def thesis_claims() -> dict[str, Any]:
+    """Lightweight version — just the 5 claim statuses + scorecard."""
+    try:
+        from trading_platform.polymarket.kpi_tracker import KPITracker
+        return KPITracker(_alpha_db_path()).claims_only()
+    except Exception as exc:
+        return {"available": False, "error": str(exc)}
+
+
+@app.get("/api/thesis/history")
+def thesis_history(days: int = 30) -> dict[str, Any]:
+    """Daily snapshots of hypothesis accuracy over time."""
+    try:
+        from trading_platform.polymarket.kpi_tracker import KPITracker
+        return {"available": True, "snapshots": KPITracker(_alpha_db_path()).get_history(days)}
+    except Exception as exc:
+        return {"available": False, "error": str(exc), "snapshots": []}
+
+
+@app.post("/api/thesis/snapshot")
+def thesis_snapshot() -> dict[str, Any]:
+    """Manually trigger a daily snapshot save (also runs daily via scheduler)."""
+    try:
+        from trading_platform.polymarket.kpi_tracker import KPITracker
+        return KPITracker(_alpha_db_path()).save_daily_snapshot()
+    except Exception as exc:
+        return {"saved": False, "error": str(exc)}
+
+
 @app.get("/api/system/execution-policy")
 def get_execution_policy() -> dict[str, Any]:
     return reader.read_execution_policy()

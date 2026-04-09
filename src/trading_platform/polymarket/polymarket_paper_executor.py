@@ -58,6 +58,16 @@ MAX_POSITION_PCT = 0.15
 MIN_STAKE = 25.0
 STARTING_BANKROLL = 100_000
 
+# Fillability floor: don't trade markets priced in the extreme tails. The
+# previous executor produced 11/16 "winning" trades by buying NO at
+# 0.001-0.023 on degenerate long-tail markets ("Will random unknown win
+# election X"); the +$4.97M PnL was mathematically valid but would not
+# fill at those prices on the real CLOB. The Bayesian win-rate / Kelly
+# fraction downstream then read those fictional fills as evidence the
+# strategy worked. See reports/data_validation.md DV-5.
+MIN_ENTRY_PRICE = 0.05
+MAX_ENTRY_PRICE = 0.95
+
 _PAPER_TRADES_SCHEMA = """
 CREATE TABLE IF NOT EXISTS polymarket_paper_trades (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -90,16 +100,44 @@ class PolymarketPaperExecutor:
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
-        self._conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
-        self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn = sqlite3.connect(str(self.db_path), check_same_thread=False, timeout=30)
+        # DELETE mode (not WAL) — bind-mount safe for Docker on WSL2.
+        self._conn.execute("PRAGMA journal_mode=DELETE")
+        self._conn.execute("PRAGMA busy_timeout=30000")
         self._migrate()
 
         # New polymarket_paper_trades table lives in wallet_intelligence.db
         self._wallet_db_path = _WALLET_DB_PATH
         self._wallet_lock = threading.Lock()
-        self._wallet_conn = sqlite3.connect(str(self._wallet_db_path), check_same_thread=False)
-        self._wallet_conn.executescript(_PAPER_TRADES_SCHEMA)
-        self._wallet_conn.commit()
+        self._wallet_conn = sqlite3.connect(str(self._wallet_db_path), check_same_thread=False, timeout=30)
+        # The wallet DB may already be open in another process (api,
+        # scheduler, live-collect) — those processes have already set
+        # DELETE mode, and trying to set it again here can raise
+        # "database is locked" because PRAGMA journal_mode acquires an
+        # exclusive lock briefly. The mode is per-database not per-
+        # connection, so swallowing the error is safe.
+        try:
+            self._wallet_conn.execute("PRAGMA journal_mode=DELETE")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            self._wallet_conn.execute("PRAGMA busy_timeout=30000")
+        except sqlite3.OperationalError:
+            pass
+        # The schema is idempotent (CREATE TABLE IF NOT EXISTS) and is
+        # already present in the production DB. Tests construct multiple
+        # executors against a wallet DB another process holds open, which
+        # makes this executescript contend on the global write lock. The
+        # schema check itself isn't load-bearing on init — the table
+        # exists in any deployed environment — so swallowing the lock
+        # error here is safe.
+        try:
+            self._wallet_conn.executescript(_PAPER_TRADES_SCHEMA)
+            self._wallet_conn.commit()
+        except sqlite3.OperationalError as exc:
+            if "locked" not in str(exc).lower():
+                raise
+            logger.debug("paper_trades schema executescript skipped (db locked): %s", exc)
 
     def _migrate(self) -> None:
         """Create tables if missing, add columns for Polymarket fields."""
@@ -290,6 +328,47 @@ class PolymarketPaperExecutor:
         if not condition_id:
             return None
 
+        # Alpha gate — only execute if the firing wallet has proven
+        # category-specific edge in our clean-data alpha scoring. Synthetic
+        # wallets (velocity_detector / order_book_monitor) bypass the gate
+        # because they don't have wallet-derived alpha — they're already
+        # rate-limited by the fillability floor + per-signal-type floors.
+        # See reports/signal_analysis_clean.md and alpha_scores.py.
+        gate_wallet = signal.get("wallet") or ""
+        gate_category = signal.get("category") or "other"
+        if gate_wallet and gate_wallet not in ("velocity_detector", "order_book_monitor"):
+            try:
+                from trading_platform.polymarket.alpha_scores import get_wallet_alpha
+                alpha = get_wallet_alpha(str(self._wallet_db_path), gate_wallet, gate_category)
+                if alpha <= 0:
+                    logger.info(
+                        "[ALPHA_GATE] wallet %s NOT copyable in %s, SKIP %s",
+                        gate_wallet[:14], gate_category, signal_type,
+                    )
+                    return None
+                logger.info(
+                    "[ALPHA_GATE] wallet %s copyable in %s, score=%.3f, signal=%s",
+                    gate_wallet[:14], gate_category, alpha, signal_type,
+                )
+                # Stash for downstream consumers (sizing, fusion, telemetry).
+                signal["alpha_score"] = alpha
+            except Exception as exc:
+                logger.debug("alpha gate lookup failed: %s", exc)
+
+        # Fillability floor — reject extreme-tail entry prices.
+        entry_price_check = signal.get("price")
+        if entry_price_check is not None:
+            try:
+                ep = float(entry_price_check)
+                if ep < MIN_ENTRY_PRICE or ep > MAX_ENTRY_PRICE:
+                    logger.info(
+                        "[SIGNAL\u2192TRADE] SKIP: %s entry_price=%.4f outside fillable band [%s, %s]",
+                        signal_type, ep, MIN_ENTRY_PRICE, MAX_ENTRY_PRICE,
+                    )
+                    return None
+            except (TypeError, ValueError):
+                pass
+
         # Check for existing open position on same market
         with self._wallet_lock:
             existing = self._wallet_conn.execute(
@@ -337,14 +416,20 @@ class PolymarketPaperExecutor:
 
         # Dynamic per-wallet per-category tier multiplier (replaces the
         # static tier1h/tier1/tier2 mapping when a profile exists).
-        dynamic_tier_mult = None
-        try:
-            from trading_platform.polymarket.wallet_tiering import WalletTieringEngine
-            dynamic_tier_mult = WalletTieringEngine(str(self._wallet_db_path)).get_tier_multiplier(
-                wallet, signal.get("category", "other"),
-            )
-        except Exception as exc:
-            logger.debug("dynamic tier lookup failed: %s", exc)
+        # Wallet-signal multiplier source: prefer the alpha score (clean
+        # data, per-wallet, per-category) when available; fall back to the
+        # legacy WalletTieringEngine multiplier for wallets we haven't
+        # scored yet (sample size < MIN_SAMPLE in alpha_scores).
+        dynamic_tier_mult = signal.get("alpha_score")  # set by the alpha gate above
+        if dynamic_tier_mult is None or dynamic_tier_mult <= 0:
+            try:
+                from trading_platform.polymarket.wallet_tiering import WalletTieringEngine
+                dynamic_tier_mult = WalletTieringEngine(str(self._wallet_db_path)).get_tier_multiplier(
+                    wallet, signal.get("category", "other"),
+                )
+            except Exception as exc:
+                logger.debug("dynamic tier lookup failed: %s", exc)
+                dynamic_tier_mult = None
 
         try:
             from trading_platform.polymarket.fusion_score import compute_fusion
@@ -403,6 +488,49 @@ class PolymarketPaperExecutor:
 
             print(f"[PAPER] Placed ${stake:.0f} {side} {signal_type} conf={confidence:.2f} | {question[:40]}")
 
+            # Telegram trade alert + persisted trade hypothesis.
+            # Skipped for technical-scanner trades (velocity_detector /
+            # order_book_monitor) — those have no wallet basis and the
+            # hypothesis generator has nothing meaningful to say.
+            if wallet and wallet not in ("velocity_detector", "order_book_monitor"):
+                hypothesis_text = None
+                try:
+                    from trading_platform.polymarket.trade_hypotheses import (
+                        build_hypothesis, persist_hypothesis,
+                    )
+                    hypo = build_hypothesis(
+                        str(self._wallet_db_path),
+                        wallet=wallet,
+                        category=category,
+                        signal_type=signal_type,
+                        market_slug=signal.get("slug") or "",
+                        market_question=question or "",
+                        direction=side,
+                        entry_price=float(entry_price or 0),
+                        convergence_count=int(signal.get("converging_wallets") or 0),
+                    )
+                    hypothesis_text = hypo.thesis
+                    persist_hypothesis(str(self._wallet_db_path), hypo, trade_id=trade_id)
+                except Exception as exc:
+                    logger.debug("hypothesis generation failed: %s", exc)
+
+                try:
+                    from trading_platform.polymarket.alert_manager import get_alert_manager
+                    get_alert_manager().alert_trade_placed(
+                        signal_type=signal_type,
+                        wallet=wallet,
+                        market=question,
+                        direction=side,
+                        stake=float(stake),
+                        entry_price=float(entry_price or 0),
+                        fusion_score=fusion_score_val,
+                        wallet_tier=signal.get("wallet_tier"),
+                        hypothesis=hypothesis_text,
+                        alpha_score=signal.get("alpha_score"),
+                    )
+                except Exception as exc:
+                    logger.debug("AlertManager trade_placed failed: %s", exc)
+
             return {
                 "id": trade_id, "condition_id": condition_id, "question": question,
                 "category": category, "side": side, "entry_price": entry_price,
@@ -437,6 +565,13 @@ class PolymarketPaperExecutor:
             ).fetchall()
 
         resolved_count = 0
+        # Trades older than this with no Gamma record are written off
+        # as expired (pnl=0). Without this, paper trades placed against
+        # markets that later get deindexed sit "open" forever and the
+        # whole bankroll stays locked. See data_validation.md DV-12.
+        EXPIRY_GRACE_SECONDS = 7 * 24 * 3600
+
+        expired_count = 0
         for trade in open_trades:
             trade_id, cid, side, entry_price, size_usd, sig_type, entry_ts, question = trade
             if not cid or entry_price is None or not size_usd:
@@ -455,6 +590,38 @@ class PolymarketPaperExecutor:
                 data = r.json()
                 m = data[0] if isinstance(data, list) and data else None
                 if not m or (m.get("conditionId") or "").lower() != cid.lower():
+                    # Market vanished from Gamma. If the trade is older
+                    # than the grace period, mark it expired so it doesn't
+                    # sit open forever.
+                    age = int(time.time()) - int(entry_ts or 0)
+                    if age > EXPIRY_GRACE_SECONDS:
+                        with self._wallet_lock:
+                            self._wallet_conn.execute(
+                                """UPDATE polymarket_paper_trades
+                                   SET exit_ts = ?, exit_price = NULL,
+                                       realized_pnl = 0, return_pct = 0,
+                                       outcome = 'expired'
+                                   WHERE id = ?""",
+                                (int(time.time()), trade_id),
+                            )
+                            self._wallet_conn.commit()
+                        expired_count += 1
+                        logger.info(
+                            "[EXPIRE] %s id=%d age=%dd — Gamma deindexed market %s",
+                            sig_type, trade_id, age // 86400, (cid or "")[:18],
+                        )
+                        # Mark hypothesis as expired so the scorecard
+                        # doesn't count it as either a win or a loss.
+                        try:
+                            from trading_platform.polymarket.trade_hypotheses import mark_resolved
+                            mark_resolved(
+                                str(self._wallet_db_path),
+                                trade_id=trade_id,
+                                outcome="expired",
+                                realized_pnl=0,
+                            )
+                        except Exception:
+                            pass
                     time.sleep(0.2)
                     continue
 
@@ -517,6 +684,51 @@ class PolymarketPaperExecutor:
                     "[RESOLVE] %s %s pnl=$%.2f (%.1f%%) — %s",
                     sig_type, outcome, pnl, return_pct, (question or "")[:40],
                 )
+
+                # Mark the trade's hypothesis (if any) as resolved so the
+                # KPI tracker can update the thesis scorecard. Hypothesis
+                # rows only exist for real-wallet trades — synthetic trades
+                # never generated one.
+                try:
+                    from trading_platform.polymarket.trade_hypotheses import mark_resolved
+                    mark_resolved(
+                        str(self._wallet_db_path),
+                        trade_id=trade_id,
+                        outcome=outcome,
+                        realized_pnl=pnl,
+                    )
+                except Exception as exc:
+                    logger.debug("hypothesis mark_resolved failed: %s", exc)
+
+                # Telegram trade-resolved alert via AlertManager.
+                try:
+                    from trading_platform.polymarket.alert_manager import get_alert_manager
+                    # Compute cumulative P&L + win rate from the wallet DB.
+                    with self._wallet_lock:
+                        agg = self._wallet_conn.execute(
+                            """SELECT COALESCE(SUM(realized_pnl), 0),
+                                      SUM(CASE WHEN outcome='win' THEN 1 ELSE 0 END),
+                                      COUNT(*)
+                               FROM polymarket_paper_trades
+                               WHERE archived = 0 AND exit_ts IS NOT NULL"""
+                        ).fetchone()
+                    cum_pnl = float(agg[0] or 0)
+                    wins = int(agg[1] or 0)
+                    total = int(agg[2] or 0)
+                    wr = (wins / total) if total else None
+                    get_alert_manager().alert_trade_resolved(
+                        signal_type=sig_type,
+                        market=question or "",
+                        direction=side,
+                        entry_price=float(entry_price or 0),
+                        exit_price=float(final_value),
+                        pnl=float(pnl),
+                        cumulative_pnl=cum_pnl,
+                        win_rate=wr,
+                        resolved_count=total,
+                    )
+                except Exception as exc:
+                    logger.debug("AlertManager trade_resolved failed: %s", exc)
 
                 # Feed the cumulative-drawdown circuit breaker
                 try:
@@ -632,8 +844,15 @@ class PolymarketPaperExecutor:
             except Exception as exc:
                 logger.debug("post-resolution calibration failed: %s", exc)
 
-        logger.info("Resolution check: %d open, %d resolved", len(open_trades), resolved_count)
-        return {"checked": len(open_trades), "resolved": resolved_count}
+        logger.info(
+            "Resolution check: %d open, %d resolved, %d expired",
+            len(open_trades), resolved_count, expired_count,
+        )
+        return {
+            "checked": len(open_trades),
+            "resolved": resolved_count,
+            "expired": expired_count,
+        }
 
     def _send_tier_change_alert(self, alerter: Any, change: dict[str, Any]) -> None:
         """Telegram alert for significant wallet tier movements.

@@ -313,9 +313,8 @@ class TelegramAlerter:
         markets_discovered = stats.get("markets_discovered", 0)
         pipeline_ok = stats.get("pipeline_success", True)
         pipeline_dur = stats.get("pipeline_duration", 0)
-        pipeline_line = (
-            f"Pipeline: {'\u2705 OK' if pipeline_ok else '\u274c FAILED'} ({pipeline_dur:.0f}s)"
-        )
+        _pipe_icon = "\u2705 OK" if pipeline_ok else "\u274c FAILED"
+        pipeline_line = f"Pipeline: {_pipe_icon} ({pipeline_dur:.0f}s)"
 
         if not positions:
             msg = (

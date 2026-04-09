@@ -23,7 +23,10 @@ from trading_platform.polymarket.wallet_db import WalletDB, _now_ts
 
 logger = logging.getLogger(__name__)
 
-# Categories excluded from directional win rate
+# Categories excluded from the per-asset *category* win rates
+# (`crypto_win_rate`, `politics_win_rate`). NOT used by the headline
+# `directional_win_rate` — that one is computed at the trade level
+# across ALL resolved trades regardless of category.
 _EXCLUDED_CATEGORIES = {"tweet_count", "sports"}
 
 
@@ -134,21 +137,20 @@ def _compute_profile(trades: list[dict[str, Any]]) -> dict[str, Any]:
     # Wallet type classification
     wallet_type = _classify_wallet_type(trades, asset_positions)
 
-    # Directional win rate (excluding tweet_count and sports)
-    dir_wins = 0
-    dir_total = 0
-    for asset, ap in asset_positions.items():
-        if ap["category"] in _EXCLUDED_CATEGORIES:
-            continue
-        if not ap["resolved"] or not ap["outcome"]:
-            continue
-        dir_total += 1
-        # Win = net long and resolved YES, or net short and resolved NO
-        net_long = ap["net_size"] > 0
-        resolved_yes = ap["outcome"].upper() in ("YES", "1", "TRUE")
-        if (net_long and resolved_yes) or (not net_long and not resolved_yes):
-            dir_wins += 1
-
+    # Directional win rate — computed at the TRADE level over the full
+    # resolved-trade pool. The previous implementation aggregated per
+    # asset (one win/loss per unique token) which collapsed e.g. 461
+    # resolved trades for Wallet A down to 32 unique resolved assets,
+    # then excluded sports/tweet_count, leaving a tiny biased sample
+    # that overstated the headline WR by 20-46 points across the top
+    # conviction wallets. See reports/data_validation.md DV-1.
+    #
+    # New rule: count every trade where ``pnl`` is populated (which
+    # the resolution enricher writes for resolved trades). pnl > 0 is
+    # a win, pnl < 0 is a loss, pnl == 0 is neither (rare break-even).
+    dir_wins = len(pnl_wins)
+    dir_losses = len(pnl_losses)
+    dir_total = dir_wins + dir_losses
     directional_wr = dir_wins / dir_total if dir_total > 0 else None
 
     # Category-specific win rates

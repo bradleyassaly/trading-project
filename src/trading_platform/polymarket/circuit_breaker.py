@@ -488,15 +488,32 @@ class CircuitBreaker:
         new_daily_halt: bool,
         prev_drawdown_pct: float,
     ) -> None:
+        # Route through AlertManager so the same dedup / rate-limit
+        # state applies to circuit-breaker alerts as everything else.
+        try:
+            from trading_platform.polymarket.alert_manager import get_alert_manager
+            am = get_alert_manager()
+        except Exception:
+            am = None
+
         from trading_platform.polymarket.telegram_alerts import get_alerter
         alerter = get_alerter()
-        if not alerter.enabled:
+        if not alerter.enabled and am is None:
             return
         headroom_pct = max(0.0, max_dd - drawdown_pct)
         headroom_dollars = peak_after * headroom_pct
         footer = "\n\u2500\u2500\u2500\u2500\u2500\u2500\n\U0001f5a5 localhost:5173/live"
 
         if new_halt:
+            if am is not None:
+                am.alert_circuit_breaker_triggered(
+                    equity=float(equity_after),
+                    peak=float(peak_after),
+                    drawdown_pct=float(drawdown_pct),
+                    reason=new_halt_reason or "max drawdown exceeded",
+                )
+                return
+            # Fallback path if AlertManager is unavailable for any reason.
             msg = (
                 f"\U0001f6d1 <b>CIRCUIT BREAKER TRIGGERED \u2014 ALL TRADING HALTED</b>\n"
                 f"Equity: ${equity_after:,.0f} | Peak: ${peak_after:,.0f}\n"
@@ -510,6 +527,13 @@ class CircuitBreaker:
             return
 
         if new_daily_halt:
+            if am is not None:
+                am.alert_daily_loss_limit(
+                    daily_pnl=float(daily_pnl),
+                    limit=float(daily_limit) * float(peak_after),
+                    equity=float(equity_after),
+                )
+                return
             msg = (
                 f"\u26a0\ufe0f <b>DAILY LOSS LIMIT HIT \u2014 trading paused until midnight</b>\n"
                 f"Daily P&L: ${daily_pnl:,.0f}\n"

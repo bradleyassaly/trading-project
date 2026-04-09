@@ -39,8 +39,13 @@ def classify_wallets(*, db: WalletDB | None = None) -> dict[str, Any]:
             continue
 
         bucket, confidence, metrics = _classify_one(trades)
+        # Write to BOTH wallet_type (legacy column some downstream code
+        # still reads) AND wallet_bucket (the canonical bucket column).
+        # Previously this only wrote wallet_type, leaving wallet_bucket
+        # NULL on 100% of rows — see reports/data_validation.md DV-14.
         db.upsert_profile(wallet,
-                          wallet_type=bucket,  # reuse wallet_type for bucket
+                          wallet_type=bucket,
+                          wallet_bucket=bucket,
                           **metrics)
         counts[bucket] += 1
         classified += 1
