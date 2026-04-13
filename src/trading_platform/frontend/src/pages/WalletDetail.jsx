@@ -78,13 +78,43 @@ export default function WalletDetail() {
   const navigate = useNavigate()
   const fetcher = useCallback(() => api.smartMoneyWalletDetail(address), [address])
   const { data, loading } = useApi(fetcher)
+  // Alpha scores by category — full return distribution
+  const alphaFetcher = useCallback(
+    () => fetch(`/api/wallet/${encodeURIComponent(address)}/expected-returns`).then(r => r.ok ? r.json() : null),
+    [address],
+  )
+  const { data: alphaData } = useApi(alphaFetcher, 0)
 
   if (loading && !data) return <div className="p-6"><LoadingSkeleton rows={10} /></div>
   if (!data?.available) {
+    // If wallet detail failed but alpha endpoint returned leaderboard data, show it
+    const alphaProfile = alphaData?.profile
     return (
-      <div className="p-6">
-        <p className="text-sm text-gray-400">{data?.reason || 'Wallet not found'}</p>
-        <Link to="/wallets" className="text-xs text-accent-blue hover:underline mt-2 inline-block">Back to Wallet Intel</Link>
+      <div className="p-6 space-y-4">
+        <div>
+          <Link to="/wallets" className="text-xs text-accent-blue hover:underline">&larr; Back to Wallet Intel</Link>
+          <h1 className="text-base font-semibold text-gray-200 font-mono mt-2">{address}</h1>
+        </div>
+        {alphaProfile ? (
+          <div className="space-y-3">
+            <div className="bg-surface-card rounded-lg p-3 border border-surface-border">
+              <p className="text-[10px] text-gray-500 mb-2">LEADERBOARD PROFILE</p>
+              <div className="grid grid-cols-3 gap-3 text-[10px]">
+                <div><span className="text-gray-500">Tier: </span><span className="text-gray-200">{alphaProfile.tier}</span></div>
+                <div><span className="text-gray-500">WR: </span><span className="text-gray-200">{alphaProfile.directional_win_rate ? `${(alphaProfile.directional_win_rate*100).toFixed(0)}%` : '—'}</span></div>
+                <div><span className="text-gray-500">Resolved: </span><span className="text-gray-200">{alphaProfile.resolved_trades ?? '—'}</span></div>
+                <div><span className="text-gray-500">PnL: </span><span className="text-gray-200">{alphaProfile.net_pnl_usdc ? fmtUsd(alphaProfile.net_pnl_usdc) : '—'}</span></div>
+                <div><span className="text-gray-500">Volume: </span><span className="text-gray-200">{alphaProfile.total_volume_usdc ? fmtUsd(alphaProfile.total_volume_usdc) : '—'}</span></div>
+                <div><span className="text-gray-500">Source: </span><span className="text-gray-200">{alphaProfile.leaderboard_source || '—'}</span></div>
+              </div>
+            </div>
+            {alphaData.note && (
+              <p className="text-[10px] text-gray-500">{alphaData.note}</p>
+            )}
+          </div>
+        ) : (
+          <p className="text-sm text-gray-500">{data?.reason || 'Wallet profile not available. This wallet may not have enough resolved trades for analysis.'}</p>
+        )}
       </div>
     )
   }
@@ -188,6 +218,70 @@ export default function WalletDetail() {
         <h2 className="text-sm font-medium text-gray-400 mb-2">Category Breakdown</h2>
         <CategoryBars breakdown={data.category_breakdown} />
       </div>
+
+      {/* Alpha scores by category — full return distribution */}
+      {alphaData?.available && alphaData.categories && Object.keys(alphaData.categories).length > 0 && (
+        <div className="card">
+          <h2 className="text-sm font-medium text-gray-400 mb-2">Alpha Scores by Category</h2>
+          <table className="w-full text-[10px]">
+            <thead>
+              <tr className="border-b border-surface-border text-gray-500 text-left">
+                <th className="pb-1 pr-2">Category</th>
+                <th className="pb-1 pr-2 text-right">WR</th>
+                <th className="pb-1 pr-2 text-right">Trades</th>
+                <th className="pb-1 pr-2 text-right">Avg Win</th>
+                <th className="pb-1 pr-2 text-right">Avg Loss</th>
+                <th className="pb-1 pr-2 text-right">PF</th>
+                <th className="pb-1 pr-2 text-right">Sharpe</th>
+                <th className="pb-1 pr-2 text-right">Kelly</th>
+                <th className="pb-1 pr-2">Streak</th>
+                <th className="pb-1">Copyable</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-surface-border">
+              {Object.entries(alphaData.categories)
+                .sort(([,a], [,b]) => (b.copyability || 0) - (a.copyability || 0))
+                .map(([cat, a]) => {
+                  const wr = a.win_rate
+                  const wrCls = wr >= 0.6 ? 'text-accent-green' : wr >= 0.5 ? 'text-yellow-400' : 'text-accent-red'
+                  return (
+                    <tr key={cat} className={`hover:bg-surface-hover ${a.is_copyable ? 'bg-accent-green/5' : ''}`}>
+                      <td className="py-1.5 pr-2 capitalize text-gray-300">{cat}</td>
+                      <td className={`py-1.5 pr-2 text-right font-mono ${wrCls}`}>{fmtPct(wr, 0)}</td>
+                      <td className="py-1.5 pr-2 text-right font-mono text-gray-400">{a.resolved_trades}</td>
+                      <td className="py-1.5 pr-2 text-right font-mono text-accent-green">
+                        {a.avg_win_pnl != null ? `+${fmtUsd(a.avg_win_pnl)}` : '—'}
+                      </td>
+                      <td className="py-1.5 pr-2 text-right font-mono text-accent-red">
+                        {a.avg_loss_pnl != null ? fmtUsd(a.avg_loss_pnl) : '—'}
+                      </td>
+                      <td className="py-1.5 pr-2 text-right font-mono text-gray-400">
+                        {a.profit_factor != null ? `${a.profit_factor.toFixed(1)}x` : '—'}
+                      </td>
+                      <td className="py-1.5 pr-2 text-right font-mono text-gray-400">
+                        {a.sharpe_ratio != null ? a.sharpe_ratio.toFixed(2) : '—'}
+                      </td>
+                      <td className="py-1.5 pr-2 text-right font-mono text-gray-400">
+                        {a.kelly_fraction != null ? `${(a.kelly_fraction * 100).toFixed(1)}%` : '—'}
+                      </td>
+                      <td className="py-1.5 pr-2 text-gray-400">
+                        {a.streak_current != null
+                          ? `${a.streak_current > 0 ? 'W' : 'L'}${Math.abs(a.streak_current)}`
+                          : '—'}
+                        {a.streak_max_win ? ` (best: W${a.streak_max_win})` : ''}
+                      </td>
+                      <td className="py-1.5">
+                        {a.is_copyable
+                          ? <span className="px-1.5 py-0.5 rounded text-[8px] font-bold bg-accent-green/20 text-accent-green">YES</span>
+                          : <span className="text-gray-600 text-[9px]">no</span>}
+                      </td>
+                    </tr>
+                  )
+                })}
+            </tbody>
+          </table>
+        </div>
+      )}
 
       {/* Row 6: PnL chart */}
       <div className="card">

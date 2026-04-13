@@ -149,22 +149,31 @@ function SignalItem({ signal, expanded, onToggle }) {
 
 export default function MarketScanner() {
   const { data: statusData } = useApi(api.polymarketSubscriptionStatus, 30_000)
-  const { data: feedData, loading: feedL } = useApi(api.polymarketWhaleFeed, 10_000)
+  const { data: feedData, loading: feedL } = useApi(api.polymarketWhaleFeed, 30_000)
   const { data: catData } = useApi(api.polymarketCategoryPerformance, 60_000)
-  const { data: sigData } = useApi(api.polymarketSignalsFeed, 10_000)
+  const { data: sigData } = useApi(api.polymarketSignalsFeed, 30_000)
   const [expandedAlert, setExpandedAlert] = useState(null)
   const [expandedSignal, setExpandedSignal] = useState(null)
 
   const status = statusData || {}
-  const alerts = feedData?.data ?? []
+  // Filter out sports noise from feeds
+  const _SPORT_PAT = ['vs.', 'vs ', 'O/U ', 'Spread:', 'NBA', 'NFL', 'NHL', 'MLB', 'Premier League', 'La Liga', 'UFC ']
+  const _isSport = (item) => {
+    const cat = (item.category || '').toLowerCase()
+    if (cat === 'sports' || cat === 'soccer') return true
+    const q = item.question || item.market_title || ''
+    return _SPORT_PAT.some(p => q.includes(p))
+  }
+  const alerts = (feedData?.data ?? []).filter(a => !_isSport(a) && a.wallet !== 'velocity_detector' && a.wallet !== 'order_book_monitor')
   const categories = catData?.data ?? []
-  const signals = sigData?.data ?? []
+  const signals = (sigData?.data ?? []).filter(s => !_isSport(s))
 
   return (
     <div className="p-6 space-y-4">
       <div>
-        <p className="text-xs text-gray-600 mb-1">Trading Platform &gt; <span className="text-gray-400">Whale Monitor</span></p>
-        <h1 className="text-lg font-semibold text-gray-200">Whale Monitor</h1>
+        <p className="text-xs text-gray-600 mb-1">Trading Platform &gt; <span className="text-gray-400">Market Scanner</span></p>
+        <h1 className="text-lg font-semibold text-gray-200">Market Scanner</h1>
+        <p className="text-xs text-gray-500 mt-0.5">What markets have smart money? — Live whale activity across all watched markets</p>
       </div>
 
       <StatusBar status={status} />

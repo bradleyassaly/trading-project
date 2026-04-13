@@ -27,8 +27,10 @@ _SIGNAL_EMOJIS = {
     "wallet_reversal": "\U0001f504", "cascade": "\U0001f4c8",
     "oversized_bet": "\U0001f4a5", "accumulation": "\U0001f4e6",
     "market_maker_flip": "\U0001f3af", "convergence": "\U0001f91d",
-    "specialist_entry": "\U0001f393", "pre_deadline_surge": "\u23f0",
+    "specialist_entry": "\U0001f3af", "pre_deadline_surge": "\u23f0",
     "whale_entry": "\U0001f40b",
+    "late_conviction": "\U0001f525", "tier_entry": "\U0001f451",
+    "whale_entry_filtered": "\U0001f40b",
 }
 
 _BUCKET_LABELS = {
@@ -48,6 +50,34 @@ def _fmt_usd(v: float) -> str:
     return f"${v:.0f}"
 
 
+def _fmt_wallet(w: str) -> str:
+    """Truncate to 0xAbCd...eF12 format."""
+    if not w or len(w) < 10:
+        return w or "?"
+    return f"{w[:6]}...{w[-4:]}"
+
+
+def _fmt_et(ts: int | float | None) -> str:
+    """Unix timestamp to Eastern Time string."""
+    if not ts:
+        return ""
+    try:
+        from datetime import datetime, timezone, timedelta
+        et = timezone(timedelta(hours=-4))
+        dt = datetime.fromtimestamp(int(ts), tz=et)
+        return dt.strftime("%b %d %I:%M%p ET")
+    except Exception:
+        return ""
+
+
+def _market_link(slug: str | None, cid: str | None) -> str:
+    if slug:
+        return f"https://polymarket.com/event/{slug}"
+    if cid:
+        return f"https://polymarket.com/event/{cid[:16]}"
+    return ""
+
+
 class TelegramAlerter:
     """Non-blocking Telegram alert sender with rich context.
 
@@ -60,6 +90,25 @@ class TelegramAlerter:
 
     MAX_NONCRITICAL_PER_HOUR = 20
 
+    # Only alert on wallet-based signals — NOT technical scanners.
+    # velocity_detector and order_book_monitor are noise.
+    SIGNAL_WHITELIST = {
+        "whale_entry", "whale_exit",
+        "convergence", "cascade",
+        "specialist_entry", "accumulation",
+        "oversized_bet", "wallet_reversal",
+        "market_maker_flip", "no_position_entry",
+        "position_reduction", "pre_deadline_surge",
+        "late_conviction", "tier_entry",
+        "whale_entry_filtered", "insider_entry",
+    }
+
+    # Minimum trade size (USD) to alert on whale detection
+    MIN_WHALE_SIZE = 50
+
+    # Per-market cooldown to prevent spam when multiple whales pile in
+    MARKET_COOLDOWN_SECONDS = 900  # 15 minutes
+
     def __init__(self) -> None:
         self.bot_token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
         self.chat_id = os.getenv("TELEGRAM_CHAT_ID", "").strip()
@@ -69,6 +118,19 @@ class TelegramAlerter:
         self._last_hot_market_alert: float = 0
         # Sliding 1h window of non-critical send timestamps
         self._noncrit_send_log: list[float] = []
+        # Per-market cooldown to prevent alert spam
+        self._market_alert_times: dict[str, float] = {}
+
+    def _check_market_cooldown(self, condition_id: str | None) -> bool:
+        """True if we should send, False if this market is in cooldown."""
+        if not condition_id:
+            return True
+        now = time.time()
+        last = self._market_alert_times.get(condition_id, 0)
+        if now - last < self.MARKET_COOLDOWN_SECONDS:
+            return False
+        self._market_alert_times[condition_id] = now
+        return True
 
     def _within_noncrit_budget(self) -> bool:
         """True if a non-critical send is allowed under the 20/hour cap."""
@@ -125,6 +187,16 @@ class TelegramAlerter:
         if tier not in ("tier1", "tier1h"):
             return False
 
+        # Filter: minimum trade size
+        size = getattr(trade, "size", 0) or 0
+        if size < self.MIN_WHALE_SIZE:
+            return False
+
+        # Filter: per-market cooldown
+        cid = getattr(trade, "condition_id", None)
+        if not self._check_market_cooldown(cid):
+            return False
+
         side = getattr(trade, "side", "BUY")
         side_e = "\U0001f7e2" if side == "BUY" else "\U0001f534"
         question = (getattr(trade, "question", "") or "")[:80]
@@ -173,6 +245,15 @@ class TelegramAlerter:
     def send_signal(self, signal: dict, paper_result: dict | None = None) -> bool:
         """Rich alert when a signal fires, with paper trade details if placed."""
         sig_type = signal.get("signal_type", "")
+
+        # Only wallet-based signals — silently drop velocity/order_book noise
+        if sig_type not in self.SIGNAL_WHITELIST:
+            return False
+
+        # Per-market cooldown
+        cid = signal.get("condition_id")
+        if not self._check_market_cooldown(cid):
+            return False
         emoji = _SIGNAL_EMOJIS.get(sig_type, "\U0001f4e1")
         side_e = "\U0001f7e2" if signal.get("direction") == "BUY" else "\U0001f534"
         question = (signal.get("question") or signal.get("condition_id", ""))[:80]
@@ -182,7 +263,16 @@ class TelegramAlerter:
         cat = (signal.get("category") or "").upper()
         wr = signal.get("directional_win_rate", 0) or 0
 
-        # Signal-specific context
+        # Dispatch to signal-type-specific formatters for the three
+        # validated signals. Everything else gets the generic template.
+        if sig_type == "specialist_entry":
+            return self._send_specialist_entry(signal, conf, paper_result)
+        if sig_type == "late_conviction":
+            return self._send_late_conviction(signal, conf, paper_result)
+        if sig_type == "tier_entry":
+            return self._send_tier_entry(signal, conf, paper_result)
+
+        # ── Generic template (accumulation, cascade, etc.) ──
         detail = ""
         if sig_type == "cascade":
             n = signal.get("cascade_wallets") or signal.get("converging_wallets", 0)
@@ -190,17 +280,11 @@ class TelegramAlerter:
         elif sig_type == "convergence":
             n = signal.get("converging_wallets", 0)
             detail = f"\u251c Type: convergence ({n} wallets same side)\n"
-        elif sig_type == "oversized_bet":
-            detail = f"\u251c Type: oversized bet (above wallet threshold)\n"
-        elif sig_type == "wallet_reversal":
-            detail = f"\u251c Type: wallet reversal (flipped direction)\n"
         elif sig_type == "accumulation":
             n = signal.get("accumulation_count", 0)
             detail = f"\u251c Type: accumulation ({n} entries)\n"
-        elif sig_type == "market_maker_flip":
-            detail = f"\u251c Type: market maker went directional\n"
         else:
-            detail = f"\u251c Type: {sig_type}\n"
+            detail = f"\u251c Type: {sig_type.replace('_', ' ')}\n"
 
         msg = (
             f"{emoji} <b>SIGNAL: {sig_type.upper().replace('_', ' ')}</b>\n"
@@ -209,21 +293,191 @@ class TelegramAlerter:
             f"Signal details:\n"
             f"{detail}"
             f"\u251c Confidence: {conf:.0%}\n"
-            f"\u2514 Wallet: <code>{wallet}...</code> | WR: {wr:.0%}\n"
+            f"\u2514 Wallet: <code>{_fmt_wallet(signal.get('wallet',''))}</code> | WR: {wr:.0%}\n"
         )
-
-        # Paper trade info
-        if paper_result and paper_result.get("placed"):
-            stake = paper_result.get("stake", 0)
-            bankroll = paper_result.get("bankroll_remaining", 0)
-            msg += (
-                f"\n\u2705 <b>PAPER TRADE PLACED</b>\n"
-                f"\u2514 {signal.get('direction', 'BUY')} {_fmt_usd(stake)} @ {signal.get('price', 0):.3f}\n"
-                f"   Bankroll: {_fmt_usd(bankroll)} remaining"
-            )
-
+        msg += self._paper_trade_block(signal, paper_result)
         msg += _FOOTER
         return self._send(msg)
+
+    # ── Signal-type-specific templates ──────────────────────────────────
+
+    def _send_specialist_entry(self, signal: dict, conf: float, paper: dict | None) -> bool:
+        """Specialist wallet trading in their domain category."""
+        w = _fmt_wallet(signal.get("wallet", ""))
+        tier = signal.get("wallet_tier", "")
+        cat = (signal.get("category") or "").upper()
+        q = (signal.get("question") or "")[:80]
+        direction = signal.get("direction", "BUY")
+        price = signal.get("price") or signal.get("entry_price") or 0
+        size = signal.get("size", 0) or 0
+        cat_wr = signal.get("directional_win_rate") or 0
+        slug = signal.get("slug")
+        cid = signal.get("condition_id")
+
+        loud = tier in ("tier1h",) or conf > 0.70
+        link = _market_link(slug, cid)
+
+        msg = (
+            f"\U0001f3af <b>SPECIALIST ENTRY</b>\n"
+            f"Wallet <code>{w}</code> ({tier})\n"
+            f"Domain: <b>{cat}</b> specialist\n\n"
+            f"\U0001f4ca {q}\n"
+            f"{'<a href=\"' + link + '\">View market</a>' if link else ''}\n"
+            f"\n{'BUY \U0001f7e2' if direction == 'BUY' else 'SELL \U0001f534'} @ ${price:.3f}"
+            f"  |  {_fmt_usd(size)}\n"
+            f"Cat WR: {cat_wr:.0%}  |  Confidence: {conf:.0%}"
+        )
+        msg += self._paper_trade_block(signal, paper)
+        msg += _FOOTER
+        return self._send(msg, disable_notification=not loud)
+
+    def _send_late_conviction(self, signal: dict, conf: float, paper: dict | None) -> bool:
+        """Late-life high-conviction trade from a top-tier wallet."""
+        w = _fmt_wallet(signal.get("wallet", ""))
+        tier = signal.get("wallet_tier", "")
+        q = (signal.get("question") or "")[:80]
+        direction = signal.get("direction", "BUY")
+        price = signal.get("price") or signal.get("entry_price") or 0
+        size = signal.get("size", 0) or 0
+        life_pct = signal.get("market_life_pct") or 0
+        cat = (signal.get("category") or "").upper()
+        slug = signal.get("slug")
+        cid = signal.get("condition_id")
+
+        loud = conf > 0.70
+        link = _market_link(slug, cid)
+
+        msg = (
+            f"\U0001f525 <b>LATE CONVICTION</b>\n"
+            f"Wallet <code>{w}</code> ({tier})\n"
+            f"Market is <b>{life_pct*100:.0f}%</b> through its lifetime\n\n"
+            f"\U0001f4ca {q}\n"
+            f"{'<a href=\"' + link + '\">View market</a>' if link else ''}\n"
+            f"\n{'BUY \U0001f7e2' if direction == 'BUY' else 'SELL \U0001f534'} @ ${price:.3f}"
+            f"  |  {_fmt_usd(size)}  |  {cat}\n"
+            f"Confidence: {conf:.0%}"
+        )
+        msg += self._paper_trade_block(signal, paper)
+        msg += _FOOTER
+        return self._send(msg, disable_notification=not loud)
+
+    def _send_tier_entry(self, signal: dict, conf: float, paper: dict | None) -> bool:
+        """S/A tier wallet entering an uncertain-zone market."""
+        w = _fmt_wallet(signal.get("wallet", ""))
+        cat_tier = signal.get("wallet_cat_tier") or "A"
+        cat_wr = signal.get("wallet_cat_wr") or 0
+        cat = (signal.get("category") or "").upper()
+        q = (signal.get("question") or "")[:80]
+        direction = signal.get("direction", "BUY")
+        price = signal.get("price") or signal.get("entry_price") or 0
+        size = signal.get("size", 0) or 0
+        slug = signal.get("slug")
+        cid = signal.get("condition_id")
+
+        loud = cat_tier == "S"
+        link = _market_link(slug, cid)
+
+        msg = (
+            f"\U0001f451 <b>TIER ENTRY ({cat_tier}-TIER)</b>\n"
+            f"Wallet <code>{w}</code>\n"
+            f"{cat} WR: <b>{cat_wr:.0%}</b>\n\n"
+            f"\U0001f4ca {q}\n"
+            f"{'<a href=\"' + link + '\">View market</a>' if link else ''}\n"
+            f"\nUncertain zone: {'BUY \U0001f7e2' if direction == 'BUY' else 'SELL \U0001f534'}"
+            f" @ ${price:.3f}  |  {_fmt_usd(size)}\n"
+            f"Confidence: {conf:.0%}"
+        )
+        msg += self._paper_trade_block(signal, paper)
+        msg += _FOOTER
+        return self._send(msg, disable_notification=not loud)
+
+    @staticmethod
+    def _paper_trade_block(signal: dict, paper: dict | None) -> str:
+        if not paper or not paper.get("placed"):
+            return ""
+        stake = paper.get("stake", 0)
+        return (
+            f"\n\n\U0001f4dd <b>PAPER TRADE</b>\n"
+            f"{signal.get('direction', 'BUY')} {_fmt_usd(stake)} @ {signal.get('price', 0):.3f}"
+        )
+
+    # ── Insider entry alert ──────────────────────────────────────────────
+
+    def send_insider_entry(self, signal: dict) -> bool:
+        """Alert when an insider-flagged wallet enters a market."""
+        cid = signal.get("condition_id")
+        if not self._check_market_cooldown(cid):
+            return False
+
+        wallet = (signal.get("wallet") or "")[:12]
+        question = (signal.get("question") or "")[:90]
+        direction = signal.get("direction") or ""
+        price = signal.get("price") or signal.get("entry_price") or 0
+        conf = signal.get("confidence") or 0
+        acc = signal.get("insider_accuracy") or signal.get("wallet_accuracy") or 0
+        n = signal.get("insider_sample") or signal.get("wallet_sample_size") or 0
+        score = signal.get("insider_score") or signal.get("wallet_insider_score") or 0
+        cat = (signal.get("category") or "").upper()
+
+        loud = acc >= 0.80
+
+        msg = (
+            f"\U0001f50d <b>INSIDER ENTRY DETECTED</b>\n"
+            f"Wallet: <code>{wallet}...</code> ({acc:.0%} accuracy, {n} trades)\n\n"
+            f"\U0001f4ca <b>Market:</b> {question}\n"
+            f"Category: <b>{cat}</b>\n"
+            f"Action: <b>{direction}</b> @ ${price:.3f}\n"
+            f"Confidence: {conf:.0%} | Score: {score:.3f}"
+            f"{_FOOTER}"
+        )
+        return self._send(msg, disable_notification=not loud)
+
+    # ── Political whale alert ───────────────────────────────────────────────
+
+    def send_political_whale(
+        self,
+        signal: dict,
+        tier: str,
+        win_rate: float | None = None,
+        pnl_30d: float | None = None,
+    ) -> bool:
+        """Loud alert: S/A tier political / geopolitical wallet just moved.
+
+        B tier uses silent notification; C and below don't alert here.
+        """
+        tier_u = (tier or "").upper()
+        if tier_u not in ("S", "A", "B"):
+            return False
+
+        sig_type = signal.get("signal_type", "")
+        cid = signal.get("condition_id")
+        if not self._check_market_cooldown(cid):
+            return False
+
+        loud = tier_u in ("S", "A")
+        whale_emoji = "\U0001f40b"  # 🐋
+        category = (signal.get("category") or "").upper()
+        question = (signal.get("question") or "")[:90]
+        wallet = (signal.get("wallet") or "")[:12]
+        direction = signal.get("direction") or ""
+        price = signal.get("price") or 0
+        size = signal.get("size") or 0
+        conf = signal.get("confidence") or 0
+
+        wr_str = f"WR: {win_rate:.0%}" if win_rate is not None else "WR: n/a"
+        pnl_str = f"30d: {_fmt_usd(pnl_30d)}" if pnl_30d is not None else ""
+        stats = " | ".join(s for s in [f"{tier_u}-tier {category}", wr_str, pnl_str] if s)
+
+        msg = (
+            f"{whale_emoji} <b>POLITICAL WHALE ALERT</b>\n"
+            f"<b>{stats}</b>\n\n"
+            f"Wallet: <code>{wallet}...</code>\n"
+            f"\U0001f4ca <b>Market:</b> {question}\n"
+            f"Action: <b>{direction}</b> @ ${price:.3f}  \u2014  size {_fmt_usd(size)}\n"
+            f"Signal: <code>{sig_type}</code>  |  Confidence: {conf:.0%}"
+            f"{_FOOTER}"
+        )
+        return self._send(msg, disable_notification=not loud)
 
     # ── Paper trade ──────────────────────────────────────────────────────────
 
@@ -375,6 +629,8 @@ class TelegramAlerter:
         signal_fired: bool = False,
         paper_trade: dict | None = None,
     ) -> bool:
+        """Suppressed — order book anomalies are noise, not actionable alpha."""
+        return False  # silently drop
         """Immediate alert for a critical/high-severity order book anomaly.
 
         Critical alerts arrive loud (sound + vibration). High severity is
@@ -481,6 +737,9 @@ class TelegramAlerter:
         signal_fired: bool = False,
         paper_trade: dict | None = None,
     ) -> bool:
+        """Suppressed — velocity spikes are noise, not actionable alpha."""
+        return False  # silently drop all velocity alerts
+        # Original code below kept for reference:
         """LOUD alert for a price velocity spike (>=10% move in <30 min)."""
         direction = "\U0001f4c8" if price_change > 0 else "\U0001f4c9"
         start_price = current_price - price_change

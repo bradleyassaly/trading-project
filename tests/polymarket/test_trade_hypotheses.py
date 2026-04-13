@@ -31,6 +31,11 @@ def _bootstrap(tmp_path: Path) -> Path:
             avg_pnl REAL, total_pnl REAL, profit_factor REAL, avg_bet_size REAL,
             recency_score REAL, copyability REAL, is_copyable INTEGER,
             last_trade_at INTEGER, computed_at INTEGER,
+            avg_win_pnl REAL, avg_loss_pnl REAL, median_pnl REAL,
+            pnl_stddev REAL, max_win REAL, max_loss REAL,
+            avg_entry_price REAL, sharpe_ratio REAL, avg_hold_days REAL,
+            kelly_fraction REAL, streak_current INTEGER,
+            streak_max_win INTEGER, streak_max_loss INTEGER,
             PRIMARY KEY (wallet, category)
         );
         CREATE TABLE wallet_trades (

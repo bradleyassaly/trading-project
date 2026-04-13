@@ -10,6 +10,7 @@ import Backtest from './pages/Backtest'
 import MarketMonitor from './pages/MarketMonitor'
 import SignalLab from './pages/SignalLab'
 import LiveReadiness from './pages/LiveReadiness'
+import LiveTrading from './pages/LiveTrading'
 import WalletDetail from './pages/WalletDetail'
 
 export default function App() {
@@ -23,6 +24,7 @@ export default function App() {
             <Route path="/dashboard" element={<Dashboard />} />
             <Route path="/wallets" element={<SmartMoney />} />
             <Route path="/smart-money" element={<Navigate to="/wallets" replace />} />
+            <Route path="/wallets/:address" element={<WalletDetail />} />
             <Route path="/smart-money/:address" element={<WalletDetail />} />
             <Route path="/scanner" element={<MarketScanner />} />
             <Route path="/monitor" element={<MarketMonitor />} />
@@ -32,7 +34,8 @@ export default function App() {
             <Route path="/market/:conditionId" element={<MarketDetail />} />
             <Route path="/paper" element={<Paper />} />
             <Route path="/paper-trading" element={<Navigate to="/paper" replace />} />
-            <Route path="/live" element={<LiveReadiness />} />
+            <Route path="/live" element={<LiveTrading />} />
+            <Route path="/live-readiness" element={<LiveReadiness />} />
             <Route path="/engine" element={<Navigate to="/live" replace />} />
             <Route path="/signals" element={<SignalLab />} />
             <Route path="/control" element={<Navigate to="/live" replace />} />

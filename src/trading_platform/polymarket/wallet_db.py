@@ -266,24 +266,23 @@ class WalletDB:
         self._path = Path(db_path)
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
-        self._conn = sqlite3.connect(str(self._path), check_same_thread=False, timeout=30)
-        # DELETE mode (not WAL): WAL needs shared-memory mmap, which fails
-        # on NTFS bind-mounts inside WSL2 Docker containers. DELETE works
-        # everywhere at the cost of slightly more writer contention.
-        # Wrap the PRAGMAs + schema bootstrap in try/except so we don't
-        # fail when another process holds the wallet DB open (api +
-        # scheduler + live-collect commonly do, plus pytest constructs
-        # multiple WalletDB instances concurrently). The mode is
-        # per-database not per-connection, and the schema is idempotent
-        # CREATE-IF-NOT-EXISTS, so swallowing here is safe.
-        try:
-            self._conn.execute("PRAGMA journal_mode=DELETE")
-        except sqlite3.OperationalError:
-            pass
-        try:
-            self._conn.execute("PRAGMA busy_timeout=30000")
-        except sqlite3.OperationalError:
-            pass
+        self._conn = sqlite3.connect(str(self._path), check_same_thread=False, timeout=60)
+        # DELETE journal mode: WAL broke repeatedly on the Docker Desktop
+        # Windows bind mount — a single orphaned handle from live-collect
+        # would exclusive-lock the DB and block every short-lived scheduler
+        # task with "unable to open database file". DELETE mode has no
+        # -wal/-shm sidecars to get stuck, and the busy_timeout serialises
+        # writers cleanly for this workload. See
+        # reports/system_diagnostic_2026-04-11.md for the post-mortem.
+        for stmt in (
+            "PRAGMA busy_timeout=60000",
+            "PRAGMA journal_mode=DELETE",
+            "PRAGMA synchronous=NORMAL",
+        ):
+            try:
+                self._conn.execute(stmt)
+            except sqlite3.OperationalError:
+                pass
         try:
             self._conn.executescript(_SCHEMA)
             self._conn.commit()
@@ -308,6 +307,8 @@ class WalletDB:
             self._migrate_market_data_cache,
             self._migrate_wallet_tiering,
             self._migrate_circuit_breaker,
+            self._migrate_equity_snapshots,
+            self._migrate_fill_tracking,
         ):
             try:
                 _migrate()
@@ -492,6 +493,21 @@ class WalletDB:
             ("wallet_tier_at_fire", "TEXT"),
             ("wallet_bucket_at_fire", "TEXT"),
             ("kelly_stake_pct", "REAL"),
+            ("source_wallet", "TEXT"),
+            # Cost modeling + exit tracking (paper trading overhaul)
+            ("exit_reason", "TEXT"),
+            ("raw_entry_price", "REAL"),
+            ("spread_cost", "REAL"),
+            ("slippage_cost", "REAL"),
+            ("raw_exit_price", "REAL"),
+            ("exit_spread_cost", "REAL"),
+            ("exit_slippage_cost", "REAL"),
+            ("total_costs", "REAL"),
+            ("last_mark_price", "REAL"),
+            ("last_mark_ts", "INTEGER"),
+            ("unrealized_pnl", "REAL"),
+            ("detection_lag_seconds", "INTEGER"),
+            ("whale_entry_price", "REAL"),
         ]:
             if col not in ppt_cols:
                 try:
@@ -500,6 +516,44 @@ class WalletDB:
                     )
                 except sqlite3.OperationalError:
                     pass
+        self._conn.commit()
+
+    def _migrate_equity_snapshots(self) -> None:
+        """Create paper_equity_snapshots for portfolio equity tracking."""
+        self._conn.execute("""
+            CREATE TABLE IF NOT EXISTS paper_equity_snapshots (
+                ts INTEGER PRIMARY KEY,
+                cash REAL,
+                positions_value REAL,
+                total_equity REAL,
+                open_count INTEGER,
+                realized_pnl_cumulative REAL,
+                unrealized_pnl REAL
+            )
+        """)
+        self._conn.commit()
+
+    def _migrate_fill_tracking(self) -> None:
+        """Create trade_fills table for live order fill tracking."""
+        self._conn.execute("""
+            CREATE TABLE IF NOT EXISTS trade_fills (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                trade_id INTEGER,
+                order_id TEXT,
+                order_type TEXT,
+                intended_price REAL,
+                actual_fill_price REAL,
+                intended_size REAL,
+                actual_fill_size REAL,
+                slippage REAL,
+                slippage_pct REAL,
+                fees REAL,
+                fill_time_ms INTEGER,
+                order_status TEXT,
+                raw_response TEXT,
+                created_at INTEGER
+            )
+        """)
         self._conn.commit()
 
     def _migrate_anomalies(self) -> None:

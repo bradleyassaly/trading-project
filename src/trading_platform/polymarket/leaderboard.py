@@ -297,21 +297,84 @@ def build_leaderboard(db: WalletDB | None = None) -> dict[str, Any]:
 
     # Restore polymarket-sourced wallets not already locally classified.
     # These keep their tier1h status from Polymarket's leaderboard.
+    # ENRICHMENT: also compute WR from wallet_trades if available.
     pm_restored = 0
+    pm_enriched = 0
     for pm_row in pm_sourced:
         pm_wallet, pm_tier, pm_src, pm_pnl, pm_name, pm_cat, pm_rank = pm_row
         if pm_wallet in locally_inserted:
             continue
+
+        # Try to compute stats from wallet_trades
+        pm_wr = None
+        pm_resolved = None
+        pm_volume = None
+        pm_pf = None
+        pm_rolling = None
+        pm_wtype = None
+        pm_category = pm_cat or "unknown"
+        try:
+            # Try reliable trades first, fall back to all trades
+            stats = conn.execute("""
+                SELECT COUNT(*) AS resolved,
+                       SUM(CASE WHEN pnl > 0 THEN 1.0 ELSE 0 END) / NULLIF(COUNT(*), 0) AS wr,
+                       SUM(ABS(pnl * size)) AS volume,
+                       SUM(CASE WHEN pnl > 0 THEN pnl ELSE 0 END) AS gross_win,
+                       SUM(CASE WHEN pnl < 0 THEN -pnl ELSE 0 END) AS gross_loss
+                FROM wallet_trades
+                WHERE wallet = ? AND pnl IS NOT NULL AND pnl != 0 AND pnl_reliable = 1
+            """, (pm_wallet,)).fetchone()
+            # If no reliable trades, use all trades (estimated WR)
+            if not stats or not stats[0] or stats[0] == 0:
+                stats = conn.execute("""
+                    SELECT COUNT(*) AS resolved,
+                           SUM(CASE WHEN pnl > 0 THEN 1.0 ELSE 0 END) / NULLIF(COUNT(*), 0) AS wr,
+                           SUM(ABS(pnl * size)) AS volume,
+                           SUM(CASE WHEN pnl > 0 THEN pnl ELSE 0 END) AS gross_win,
+                           SUM(CASE WHEN pnl < 0 THEN -pnl ELSE 0 END) AS gross_loss
+                    FROM wallet_trades
+                    WHERE wallet = ? AND pnl IS NOT NULL AND pnl != 0
+                """, (pm_wallet,)).fetchone()
+            if stats and stats[0] and stats[0] > 0:
+                pm_resolved = stats[0]
+                pm_wr = round(stats[1], 4) if stats[1] else None
+                pm_volume = round(stats[2] or 0, 2)
+                gw, gl = stats[3] or 0, stats[4] or 0
+                pm_pf = round(min(gw / gl, 99.0), 3) if gl > 0 else None
+                pm_enriched += 1
+
+                # Compute best category (use all trades, not just reliable)
+                cat_row = conn.execute("""
+                    SELECT category, COUNT(*) as n FROM wallet_trades
+                    WHERE wallet = ? AND category IS NOT NULL
+                      AND category NOT IN ('other', 'mentions')
+                    GROUP BY category ORDER BY n DESC LIMIT 1
+                """, (pm_wallet,)).fetchone()
+                if cat_row:
+                    pm_category = cat_row[0]
+        except Exception:
+            pass
+
+        # Compute rolling WR
+        try:
+            pm_rolling = db.compute_rolling_wr(pm_wallet, n=20)
+        except Exception:
+            pass
+
         conn.execute("""
             INSERT OR REPLACE INTO leaderboard
                 (wallet, tier, leaderboard_source, net_pnl_usdc, pseudonym,
-                 primary_category, rank, version, updated_at)
-            VALUES (?, 'tier1h', ?, ?, ?, ?, ?, ?, ?)
-        """, (pm_wallet, pm_src, pm_pnl, pm_name, pm_cat or "unknown", pm_rank, version, int(time.time())))
+                 primary_category, rank, version, updated_at,
+                 directional_win_rate, rolling_20_wr, resolved_trades,
+                 total_volume_usdc, profit_factor)
+            VALUES (?, 'tier1h', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (pm_wallet, pm_src, pm_pnl, pm_name, pm_category,
+              pm_rank, version, int(time.time()),
+              pm_wr, pm_rolling, pm_resolved, pm_volume, pm_pf))
         pm_restored += 1
 
     if pm_restored:
-        print(f"[LEADERBOARD] Restored {pm_restored} polymarket-sourced tier1h wallets")
+        print(f"[LEADERBOARD] Restored {pm_restored} polymarket-sourced tier1h wallets ({pm_enriched} enriched with trade data)")
         tier1h_list.extend(["pm:" + str(i) for i in range(pm_restored)])
     # Sync wallet_bucket from leaderboard back to wallet_profiles
     conn.execute("""

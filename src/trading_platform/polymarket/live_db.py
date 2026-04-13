@@ -21,11 +21,16 @@ class LiveTickStore:
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
-        self._conn = sqlite3.connect(str(self.db_path), check_same_thread=False, timeout=30)
-        # DELETE mode (not WAL) — bind-mount safe for Docker on WSL2.
-        self._conn.execute("PRAGMA journal_mode=DELETE")
-        self._conn.execute("PRAGMA busy_timeout=30000")
-        self._conn.execute("PRAGMA synchronous=NORMAL")
+        self._conn = sqlite3.connect(str(self.db_path), check_same_thread=False, timeout=60)
+        for stmt in (
+            "PRAGMA busy_timeout=60000",
+            "PRAGMA journal_mode=WAL",
+            "PRAGMA synchronous=NORMAL",
+        ):
+            try:
+                self._conn.execute(stmt)
+            except sqlite3.OperationalError:
+                pass
         self._create_tables()
 
     def _create_tables(self) -> None:

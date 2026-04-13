@@ -36,6 +36,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from trading_platform.polymarket.db import connect_wallet_db
+
 logger = logging.getLogger(__name__)
 
 
@@ -74,7 +76,7 @@ class CircuitBreaker:
         if existing:
             return existing
         now = int(time.time())
-        conn = sqlite3.connect(self._db_path)
+        conn = connect_wallet_db(self._db_path)
         try:
             conn.execute(
                 """INSERT OR REPLACE INTO circuit_breaker_state
@@ -165,7 +167,7 @@ class CircuitBreaker:
                 new_daily_halt = True
 
         now = int(time.time())
-        conn = sqlite3.connect(self._db_path)
+        conn = connect_wallet_db(self._db_path)
         try:
             conn.execute(
                 """UPDATE circuit_breaker_state SET
@@ -232,7 +234,7 @@ class CircuitBreaker:
     def reset_daily(self) -> dict[str, Any]:
         """Midnight reset — clears daily_pnl and daily_halted."""
         now = int(time.time())
-        conn = sqlite3.connect(self._db_path)
+        conn = connect_wallet_db(self._db_path)
         try:
             conn.execute(
                 """UPDATE circuit_breaker_state
@@ -266,7 +268,7 @@ class CircuitBreaker:
         now = int(time.time())
         new_peak = float(s["current_equity"]) if reset_peak else float(s["peak_equity"])
         new_dd = 0.0 if reset_peak else float(s["current_drawdown_pct"])
-        conn = sqlite3.connect(self._db_path)
+        conn = connect_wallet_db(self._db_path)
         try:
             conn.execute(
                 """UPDATE circuit_breaker_state SET
@@ -325,7 +327,7 @@ class CircuitBreaker:
         now = int(time.time())
         new_max = float(max_drawdown_pct) if max_drawdown_pct is not None else float(s["max_drawdown_pct"])
         new_daily = float(daily_loss_limit) if daily_loss_limit is not None else float(s["daily_loss_limit"])
-        conn = sqlite3.connect(self._db_path)
+        conn = connect_wallet_db(self._db_path)
         try:
             conn.execute(
                 """UPDATE circuit_breaker_state
@@ -356,7 +358,7 @@ class CircuitBreaker:
         headroom_dollars = peak * headroom_pct
         # Recent log
         try:
-            conn = sqlite3.connect(self._db_path)
+            conn = connect_wallet_db(self._db_path)
             try:
                 rows = conn.execute(
                     """SELECT event_type, equity_before, equity_after,
@@ -386,7 +388,7 @@ class CircuitBreaker:
 
     def get_log(self, limit: int = 50) -> list[dict[str, Any]]:
         try:
-            conn = sqlite3.connect(self._db_path)
+            conn = connect_wallet_db(self._db_path)
             try:
                 rows = conn.execute(
                     """SELECT id, event_type, equity_before, equity_after,
@@ -413,7 +415,7 @@ class CircuitBreaker:
 
     def _read_state(self) -> dict[str, Any] | None:
         try:
-            conn = sqlite3.connect(self._db_path)
+            conn = connect_wallet_db(self._db_path)
             try:
                 row = conn.execute(
                     """SELECT starting_capital, peak_equity, current_equity,
@@ -454,7 +456,7 @@ class CircuitBreaker:
         details: dict[str, Any] | None,
     ) -> None:
         try:
-            conn = sqlite3.connect(self._db_path)
+            conn = connect_wallet_db(self._db_path)
             try:
                 conn.execute(
                     """INSERT INTO circuit_breaker_log

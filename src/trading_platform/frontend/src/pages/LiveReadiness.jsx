@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import { api } from '../api/client'
+import { useApi } from '../hooks/useApi'
 import LoadingSkeleton from '../components/LoadingSkeleton'
 
 function fmtUsd(n) {
@@ -88,18 +89,80 @@ export default function LiveReadiness() {
     setBusy(false)
   }
 
+  // Thesis claims — MUST be before any early return to satisfy React hooks rules.
+  const { data: thesis } = useApi(() => fetch('/api/thesis/claims').then(r => r.ok ? r.json() : null), 60_000)
+
   if (loading && !data) return <div className="p-6"><LoadingSkeleton rows={6} /></div>
+
   if (!data || !data.available) return <div className="p-6 text-xs text-gray-500">Live readiness unavailable.</div>
 
   const sg = data.system_gates || {}
   const limits = data.kill_switch_limits || {}
   const signalGates = data.signal_gates || []
 
+  // Thesis gate derived from KPITracker verdict (support both endpoint formats)
+  const sc = thesis?.thesis_scorecard ?? thesis?.scorecard ?? {}
+  const thesisAccuracy = sc.accuracy
+  const thesisTotal = sc.total_hypotheses ?? 0
+  const thesisVerdict = sc.verdict || ''
+  const thesisReady = thesisAccuracy != null && thesisAccuracy >= 0.70 && thesisTotal >= 50
+
   return (
     <div className="p-6 space-y-4">
       <div>
         <p className="text-xs text-gray-600 mb-1">Trading Platform &gt; <span className="text-gray-400">Live Readiness</span></p>
-        <h1 className="text-lg font-semibold text-gray-200">Live Trading Readiness</h1>
+        <h1 className="text-lg font-semibold text-gray-200">Live Readiness</h1>
+        <p className="text-xs text-gray-500 mt-0.5">Are we ready for real money? — Operational gates, thesis validation, and risk controls</p>
+      </div>
+
+      {/* Thesis Gate — must pass before any live trading */}
+      <div className={`card border ${thesisReady ? 'border-accent-green/40 bg-accent-green/5' : 'border-accent-yellow/40 bg-accent-yellow/5'}`}>
+        <div className="flex items-center justify-between mb-2">
+          <h2 className="text-sm font-medium text-gray-300">Thesis Gate</h2>
+          <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${thesisReady ? 'bg-accent-green/20 text-accent-green' : 'bg-accent-yellow/20 text-accent-yellow'}`}>
+            {thesisReady ? 'PASSED' : 'NOT YET'}
+          </span>
+        </div>
+        <div className="flex items-baseline gap-4 text-[11px]">
+          <span className="font-mono text-lg font-bold text-gray-200">
+            {thesisAccuracy != null ? `${(thesisAccuracy * 100).toFixed(0)}%` : '—'}
+          </span>
+          <span className="text-gray-500">accuracy on {thesisTotal} hypotheses (need 70% on 50+)</span>
+        </div>
+        {thesisVerdict && (
+          <p className="text-[10px] text-gray-400 mt-1">{thesisVerdict}</p>
+        )}
+      </div>
+
+      {/* Recommended First-Live Params */}
+      <div className="card">
+        <h2 className="text-sm font-medium text-gray-300 mb-2">Recommended First-Live Parameters</h2>
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-[10px]">
+          <div className="bg-surface-card rounded p-2">
+            <div className="text-gray-500">Starting Capital</div>
+            <div className="text-gray-200 font-mono font-bold">$1,000</div>
+            <div className="text-[8px] text-gray-600">1% of paper bankroll</div>
+          </div>
+          <div className="bg-surface-card rounded p-2">
+            <div className="text-gray-500">Max Trade Size</div>
+            <div className="text-gray-200 font-mono font-bold">$50</div>
+            <div className="text-[8px] text-gray-600">5% of live capital</div>
+          </div>
+          <div className="bg-surface-card rounded p-2">
+            <div className="text-gray-500">Signal Types</div>
+            <div className="text-gray-200 font-mono font-bold">T1 only</div>
+            <div className="text-[8px] text-gray-600">convergence + specialist</div>
+          </div>
+          <div className="bg-surface-card rounded p-2">
+            <div className="text-gray-500">Max Open</div>
+            <div className="text-gray-200 font-mono font-bold">5</div>
+            <div className="text-[8px] text-gray-600">limit exposure</div>
+          </div>
+        </div>
+        <p className="text-[9px] text-gray-600 mt-2">
+          These are conservative defaults for first-week live trading. Scale up only after
+          confirming live execution matches paper results.
+        </p>
       </div>
 
       {/* Master switch banner */}

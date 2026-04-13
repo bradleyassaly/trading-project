@@ -86,7 +86,61 @@ class WhaleTripwire:
         """Load watched wallets from leaderboard table (atomic, version-checked).
 
         Falls back to wallet_profiles if leaderboard is not yet populated.
+
+        Resilience: retries up to 5× with exponential backoff on
+        ``database is locked``. If all retries fail, keeps the last
+        successfully-loaded wallet sets in memory rather than going
+        blind. This is the **single most critical resilience point**
+        in the system: a WhaleTripwire with 0 watched wallets means
+        whale detection is silently disabled. Recorded as a CRITICAL
+        log line so operators can act.
         """
+        # Snapshot the previous state so we can restore on failure.
+        prev_t1 = set(self.watched_tier1)
+        prev_t2 = set(self.watched_tier2)
+        prev_t1h = set(self._tier1h)
+        prev_t1_only = set(self._tier1)
+        prev_t2_only = set(self._tier2)
+        prev_lb = dict(self.leaderboard)
+
+        for attempt in range(5):
+            try:
+                self._reload_inner()
+                return
+            except sqlite3.OperationalError as exc:
+                if "locked" not in str(exc).lower() and "busy" not in str(exc).lower():
+                    raise
+                delay = 1.0 * (2 ** attempt)
+                print(
+                    f"[WhaleTripwire] DB locked on reload attempt {attempt+1}/5, "
+                    f"retrying in {delay:.0f}s..."
+                )
+                time.sleep(delay)
+            except Exception as exc:
+                print(f"[WhaleTripwire] reload failed: {exc}")
+                break
+
+        # All retries exhausted — restore previous state if we had one,
+        # otherwise we're going blind and that needs to be loud.
+        if prev_t1 or prev_t2:
+            self.watched_tier1 = prev_t1
+            self.watched_tier2 = prev_t2
+            self._tier1h = prev_t1h
+            self._tier1 = prev_t1_only
+            self._tier2 = prev_t2_only
+            self.leaderboard = prev_lb
+            print(
+                f"[WhaleTripwire] DB locked after 5 retries — using cached "
+                f"wallet set ({len(prev_t1)} tier1+1h, {len(prev_t2)} tier2)"
+            )
+        else:
+            print(
+                "[WhaleTripwire] CRITICAL: DB locked, no cached wallets — "
+                "whale detection BLIND. Run: trading-cli data polymarket build-leaderboard"
+            )
+
+    def _reload_inner(self) -> None:
+        """Actual reload logic — separated so reload() can wrap it in retry."""
         self.watched_tier1.clear()
         self.watched_tier2.clear()
         self._tier1h.clear()
@@ -95,7 +149,8 @@ class WhaleTripwire:
         self.leaderboard.clear()
 
         try:
-            conn = sqlite3.connect(self.db_path)
+            conn = sqlite3.connect(self.db_path, timeout=60)
+            conn.execute("PRAGMA busy_timeout=60000")
             conn.row_factory = sqlite3.Row
 
             # Try leaderboard first (atomic, with rolling WR demotion applied)
@@ -109,6 +164,19 @@ class WhaleTripwire:
                               conviction_score, resolved_trades, total_volume_usdc,
                               wallet_type, version, net_pnl_usdc, leaderboard_source, pseudonym
                        FROM leaderboard"""
+                ).fetchall()
+                # Also pull alpha-copyable wallets that are NOT in the
+                # leaderboard. These are per-category specialists whose
+                # lifetime WR is below the leaderboard cutoff but who
+                # have proven edge in a specific category. Without this
+                # join, the alpha gate has them but live-collect doesn't
+                # watch them — they're invisible. See
+                # ground_truth_validation.md for the diagnosis.
+                alpha_extras = conn.execute(
+                    """SELECT DISTINCT wa.wallet
+                       FROM wallet_alpha_scores wa
+                       WHERE wa.is_copyable = 1
+                         AND wa.wallet NOT IN (SELECT wallet FROM leaderboard)"""
                 ).fetchall()
                 conn.close()
 
@@ -127,6 +195,19 @@ class WhaleTripwire:
                         self.watched_tier2.add(w)
                         self._tier2.add(w)
 
+                # Add the alpha-only wallets as tier2 watchers (they
+                # don't pass the leaderboard's lifetime gate but they
+                # have category-specific edge worth watching).
+                alpha_added = 0
+                for r in alpha_extras:
+                    w = r["wallet"]
+                    if w not in self.leaderboard:
+                        self.leaderboard[w] = {"wallet": w, "tier": "tier2_alpha",
+                                               "leaderboard_source": "alpha_only"}
+                        self.watched_tier2.add(w)
+                        self._tier2.add(w)
+                        alpha_added += 1
+
                 self._last_reload = time.time()
                 t1 = len(self.watched_tier1)
                 t2 = len(self.watched_tier2)
@@ -139,7 +220,8 @@ class WhaleTripwire:
                 ver = meta["current_version"]
                 print(
                     f"[WhaleTripwire] Loaded {t1 + t2} wallets from leaderboard v{ver} — "
-                    f"tier1+1h: {t1} (incl {t1h} high-conviction: {local_sourced} local, {pm_sourced} polymarket), tier2: {t2}"
+                    f"tier1+1h: {t1} (incl {t1h} high-conviction: {local_sourced} local, {pm_sourced} polymarket), "
+                    f"tier2: {t2} (incl {alpha_added} alpha-copyable specialists)"
                 )
 
                 if t1 + t2 == 0:

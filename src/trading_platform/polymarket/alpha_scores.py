@@ -31,6 +31,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+from trading_platform.polymarket.db import connect_wallet_db
+
 logger = logging.getLogger(__name__)
 
 # ── Tunables ────────────────────────────────────────────────────────────────
@@ -71,8 +73,34 @@ CREATE INDEX IF NOT EXISTS idx_alpha_score ON wallet_alpha_scores(copyability DE
 """
 
 
+# Columns added in the decision-evaluation layer. ALTER TABLE migration
+# runs in _ensure_schema so existing DBs get the columns without rebuild.
+_DISTRIBUTION_COLS = [
+    ("avg_win_pnl", "REAL"),
+    ("avg_loss_pnl", "REAL"),
+    ("median_pnl", "REAL"),
+    ("pnl_stddev", "REAL"),
+    ("max_win", "REAL"),
+    ("max_loss", "REAL"),
+    ("avg_entry_price", "REAL"),
+    ("sharpe_ratio", "REAL"),
+    ("avg_hold_days", "REAL"),
+    ("kelly_fraction", "REAL"),
+    ("streak_current", "INTEGER"),
+    ("streak_max_win", "INTEGER"),
+    ("streak_max_loss", "INTEGER"),
+]
+
+
 def _ensure_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(_SCHEMA)
+    existing = {r[1] for r in conn.execute("PRAGMA table_info(wallet_alpha_scores)").fetchall()}
+    for col, typedef in _DISTRIBUTION_COLS:
+        if col not in existing:
+            try:
+                conn.execute(f"ALTER TABLE wallet_alpha_scores ADD COLUMN {col} {typedef}")
+            except sqlite3.OperationalError:
+                pass
     conn.commit()
 
 
@@ -82,7 +110,7 @@ def compute_alpha_scores(db_path: str | Path) -> dict[str, Any]:
     Reads only ``pnl_reliable = 1`` trades. Returns a summary dict.
     """
     t0 = time.time()
-    conn = sqlite3.connect(str(db_path), timeout=30)
+    conn = connect_wallet_db(db_path)
     _ensure_schema(conn)
 
     now = int(time.time())
@@ -174,6 +202,12 @@ def compute_alpha_scores(db_path: str | Path) -> dict[str, Any]:
         inserted += 1
 
     conn.commit()
+
+    # Second pass: compute distribution stats for each copyable wallet×category.
+    # These are expensive per-trade queries so we only do them for copyable combos.
+    _compute_distribution_stats(conn)
+    conn.commit()
+
     conn.close()
     elapsed = round(time.time() - t0, 1)
     logger.info(
@@ -185,6 +219,105 @@ def compute_alpha_scores(db_path: str | Path) -> dict[str, Any]:
         "copyable": copyable,
         "elapsed_seconds": elapsed,
     }
+
+
+def _compute_distribution_stats(conn: sqlite3.Connection) -> None:
+    """Compute return-distribution stats for copyable wallet×category combos."""
+    import statistics
+
+    combos = conn.execute(
+        "SELECT wallet, category FROM wallet_alpha_scores WHERE is_copyable = 1"
+    ).fetchall()
+
+    for wallet, category in combos:
+        trades = conn.execute(
+            """SELECT pnl, price, timestamp
+               FROM wallet_trades
+               WHERE wallet = ? AND category = ?
+                 AND pnl IS NOT NULL AND pnl != 0 AND pnl_reliable = 1
+               ORDER BY timestamp ASC""",
+            (wallet, category),
+        ).fetchall()
+
+        if not trades:
+            continue
+
+        pnls = [t[0] for t in trades]
+        wins = [p for p in pnls if p > 0]
+        losses = [p for p in pnls if p < 0]
+        prices = [t[1] for t in trades if t[1] and t[1] > 0]
+        timestamps = [t[2] for t in trades if t[2]]
+
+        avg_win = statistics.mean(wins) if wins else 0
+        avg_loss = statistics.mean(losses) if losses else 0
+        median = statistics.median(pnls)
+        stddev = statistics.stdev(pnls) if len(pnls) > 1 else 0
+        max_win = max(pnls) if pnls else 0
+        max_loss = min(pnls) if pnls else 0
+        avg_price = statistics.mean(prices) if prices else None
+
+        # Sharpe: mean(pnl) / stdev(pnl)
+        sharpe = (statistics.mean(pnls) / stddev) if stddev > 0 else 0
+
+        # Average hold: rough estimate from timestamp spread
+        avg_hold = None
+        if len(timestamps) >= 2:
+            span_days = (max(timestamps) - min(timestamps)) / 86400
+            avg_hold = span_days / len(timestamps) if len(timestamps) > 0 else None
+
+        # Kelly: (wr * avg_win - (1-wr) * |avg_loss|) / avg_win
+        wr = len(wins) / len(pnls) if pnls else 0
+        if avg_win > 0:
+            kelly = (wr * avg_win - (1 - wr) * abs(avg_loss)) / avg_win
+            kelly = max(0.0, min(kelly, 0.25))
+        else:
+            kelly = 0.0
+
+        # Streaks
+        outcomes = ["W" if p > 0 else "L" for p in pnls]
+        cur_streak, max_w, max_l = _compute_streaks(outcomes)
+
+        conn.execute(
+            """UPDATE wallet_alpha_scores SET
+                   avg_win_pnl = ?, avg_loss_pnl = ?, median_pnl = ?,
+                   pnl_stddev = ?, max_win = ?, max_loss = ?,
+                   avg_entry_price = ?, sharpe_ratio = ?, avg_hold_days = ?,
+                   kelly_fraction = ?, streak_current = ?,
+                   streak_max_win = ?, streak_max_loss = ?
+               WHERE wallet = ? AND category = ?""",
+            (
+                round(avg_win, 2), round(avg_loss, 2), round(median, 2),
+                round(stddev, 2), round(max_win, 2), round(max_loss, 2),
+                round(avg_price, 4) if avg_price else None,
+                round(sharpe, 4), round(avg_hold, 2) if avg_hold else None,
+                round(kelly, 4), cur_streak, max_w, max_l,
+                wallet, category,
+            ),
+        )
+
+
+def _compute_streaks(outcomes: list[str]) -> tuple[int, int, int]:
+    """Return (current_streak, max_win_streak, max_loss_streak).
+
+    current_streak is positive for wins, negative for losses.
+    """
+    if not outcomes:
+        return 0, 0, 0
+
+    cur = 0
+    max_w = 0
+    max_l = 0
+    run = 0
+
+    for o in outcomes:
+        if o == "W":
+            run = run + 1 if run > 0 else 1
+            max_w = max(max_w, run)
+        else:
+            run = run - 1 if run < 0 else -1
+            max_l = max(max_l, abs(run))
+    cur = run
+    return cur, max_w, max_l
 
 
 def get_wallet_alpha(
@@ -200,7 +333,7 @@ def get_wallet_alpha(
     if not wallet or not category:
         return 0.0
     try:
-        conn = sqlite3.connect(str(db_path), timeout=10)
+        conn = connect_wallet_db(db_path)
         try:
             row = conn.execute(
                 "SELECT copyability, is_copyable FROM wallet_alpha_scores WHERE wallet = ? AND category = ?",
@@ -222,7 +355,7 @@ def get_wallet_alpha_full(
 ) -> list[dict[str, Any]]:
     """Return every category alpha row for one wallet."""
     try:
-        conn = sqlite3.connect(str(db_path), timeout=10)
+        conn = connect_wallet_db(db_path)
         try:
             cur = conn.execute(
                 """SELECT category, resolved_trades, win_rate, win_rate_30d,
@@ -249,7 +382,7 @@ def get_category_leaderboard(
 ) -> list[dict[str, Any]]:
     """Top copyable wallets in a category, ranked by copyability."""
     try:
-        conn = sqlite3.connect(str(db_path), timeout=10)
+        conn = connect_wallet_db(db_path)
         try:
             cur = conn.execute(
                 """SELECT wallet, resolved_trades, win_rate, win_rate_30d,
@@ -270,7 +403,7 @@ def get_category_leaderboard(
 def get_summary(db_path: str | Path) -> dict[str, Any]:
     """High-level overview for ``GET /api/alpha/summary``."""
     try:
-        conn = sqlite3.connect(str(db_path), timeout=10)
+        conn = connect_wallet_db(db_path)
         try:
             total = conn.execute("SELECT COUNT(*) FROM wallet_alpha_scores").fetchone()[0]
             copyable = conn.execute("SELECT COUNT(*) FROM wallet_alpha_scores WHERE is_copyable = 1").fetchone()[0]

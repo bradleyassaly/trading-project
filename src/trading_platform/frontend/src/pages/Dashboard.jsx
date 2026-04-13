@@ -5,6 +5,9 @@ import { useApi } from '../hooks/useApi'
 import LoadingSkeleton from '../components/LoadingSkeleton'
 import EmptyState from '../components/EmptyState'
 import { SignalBadge, TierBadge } from '../components/Badges'
+import AccuracySparkline from '../components/charts/AccuracySparkline'
+import CumulativePnLChart from '../components/charts/CumulativePnLChart'
+import { fmtUsd, fmtPct, fmtRelTime } from '../lib/format'
 
 function relTime(ts) {
   if (!ts) return '?'
@@ -65,8 +68,8 @@ function StatCards({ whaleFeed, health, status, bankroll, cb, universe, leaderbo
   const lbTotal = tier1h + tier1 + tier2
 
   // Bankroll — paper/bankroll endpoint gives current equity vs starting
-  const equity = bankroll?.current_equity ?? bankroll?.bankroll ?? 100000
-  const starting = bankroll?.starting_capital ?? 100000
+  const equity = bankroll?.current_equity ?? bankroll?.bankroll ?? 10000
+  const starting = bankroll?.starting_capital ?? 10000
   const equityPnl = equity - starting
 
   // Drawdown gauge from circuit breaker
@@ -114,10 +117,25 @@ function StatCards({ whaleFeed, health, status, bankroll, cb, universe, leaderbo
   )
 }
 
+// Synthetic "wallets" from technical scanners — not real wallet activity.
+const SYNTHETIC_WALLETS = new Set(['velocity_detector', 'order_book_monitor'])
+
+// Sports markets are high-noise in feeds. Filter from display (not from trading).
+const SPORTS_PATTERNS = ['vs.', 'vs ', 'O/U ', 'Spread:', 'NBA', 'NFL', 'NHL', 'MLB',
+  'Premier League', 'La Liga', 'Serie A', 'Bundesliga', 'Champions League',
+  'UFC ', 'ATP ', 'WTA ', 'Winner -', 'winner -']
+function isSportsMarket(item) {
+  if (!item) return false
+  const cat = String(item.category || '').toLowerCase()
+  if (cat === 'sports' || cat === 'soccer' || cat === 'basketball') return true
+  const q = String(item.question || item.market_title || '')
+  return SPORTS_PATTERNS.some(p => q.includes(p))
+}
+
 // ── Whale Feed ──────────────────────────────────────────────────────────────
 function WhaleFeed({ data, loading }) {
   const [expanded, setExpanded] = useState(null)
-  const alerts = data?.data ?? []
+  const alerts = (data?.data ?? []).filter(a => !SYNTHETIC_WALLETS.has(a.wallet) && !isSportsMarket(a))
 
   if (loading && !data) return <LoadingSkeleton rows={6} />
 
@@ -202,7 +220,7 @@ function SignalPerfTable({ data }) {
       <tr key={t.signal_type} className="hover:bg-surface-hover">
         <td className="py-1 pr-2"><SignalBadge type={t.signal_type} /></td>
         <td className="py-1 pr-2 text-right text-gray-400">{t.fired || 0}</td>
-        <td className="py-1 pr-2 text-right font-mono text-gray-500">{t.win_rate != null ? `${(t.win_rate * 100).toFixed(0)}%` : '—'}</td>
+        <td className="py-1 pr-2 text-right font-mono text-gray-500">{t.fired > 0 && t.win_rate != null ? `${(t.win_rate * 100).toFixed(0)}%` : '—'}</td>
         <td className="py-1"><span className={`px-1.5 py-0.5 rounded text-[8px] font-semibold ${statusCls}`}>{t.status}</span></td>
       </tr>
     )
@@ -240,13 +258,15 @@ function SignalPerfTable({ data }) {
 }
 
 // ── Thesis Scorecard ────────────────────────────────────────────────────────
-function ThesisScorecard({ data }) {
-  const sc = data?.thesis_scorecard ?? {}
-  const c1 = data?.claim_1_persistence ?? {}
-  const c2 = data?.claim_2_category ?? {}
-  const c3 = data?.claim_3_identification ?? {}
-  const c4 = data?.claim_4_timing ?? {}
-  const c5 = data?.claim_5_execution ?? {}
+function ThesisScorecard({ data, history }) {
+  // Support both /api/thesis/claims (scorecard, claim_1, ...)
+  // and /api/thesis/scorecard (thesis_scorecard, claim_1_persistence, ...)
+  const sc = data?.thesis_scorecard ?? data?.scorecard ?? {}
+  const c1 = data?.claim_1_persistence ?? data?.claim_1 ?? {}
+  const c2 = data?.claim_2_category ?? data?.claim_2 ?? {}
+  const c3 = data?.claim_3_identification ?? data?.claim_3 ?? {}
+  const c4 = data?.claim_4_timing ?? data?.claim_4 ?? {}
+  const c5 = data?.claim_5_execution ?? data?.claim_5 ?? {}
 
   const total = sc.total_hypotheses ?? 0
   const correct = sc.correct ?? 0
@@ -309,13 +329,19 @@ function ThesisScorecard({ data }) {
           <h2 className="text-xs uppercase tracking-wide text-gray-500">Hypothesis Accuracy</h2>
           <span className="text-[10px] text-gray-600">target: {Math.round(target * 100)}% on {sample_target}+ trades</span>
         </div>
-        <div className="flex items-baseline gap-3 mb-2">
-          <span className="text-4xl font-bold font-mono text-gray-200">
-            {accPct != null ? `${accPct}%` : '—'}
-          </span>
-          <span className="text-sm text-gray-500">
-            ({correct}/{total} correct)
-          </span>
+        <div className="flex items-end gap-4 mb-2">
+          <div className="flex items-baseline gap-3">
+            <span className="text-4xl font-bold font-mono text-gray-200">
+              {accPct != null ? `${accPct}%` : '—'}
+            </span>
+            <span className="text-sm text-gray-500">
+              ({correct}/{total} correct)
+            </span>
+          </div>
+          {/* 60-day accuracy trend — see THESIS.md for the target line. */}
+          <div className="flex-1 min-w-[120px]">
+            <AccuracySparkline snapshots={history?.snapshots} target={target} />
+          </div>
         </div>
         <div className="w-full bg-gray-800 rounded-full h-2 mb-3 relative">
           <div
@@ -356,10 +382,57 @@ function ThesisScorecard({ data }) {
   )
 }
 
+// ── Recent Hypotheses ───────────────────────────────────────────────────────
+// Shows the last few thesis-driven paper trades. Resolved hypotheses are
+// tagged ✅/❌ so the operator can eyeball whether the framework is
+// being validated in real time.
+function RecentHypotheses({ data }) {
+  const rows = data?.hypotheses ?? []
+  if (!data?.available) {
+    return <p className="text-[10px] text-gray-600">Hypotheses endpoint unavailable</p>
+  }
+  if (!rows.length) {
+    return <p className="text-[10px] text-gray-600">No hypotheses recorded yet — fire a paper trade to populate.</p>
+  }
+  return (
+    <div className="space-y-1 max-h-[220px] overflow-auto pr-1">
+      {rows.map((h) => {
+        const resolved = h.hypothesis_correct != null
+        const correct = h.hypothesis_correct === 1
+        const status = !resolved
+          ? <span className="text-[9px] text-gray-500">open</span>
+          : correct
+            ? <span className="text-[9px] text-accent-green">✓</span>
+            : <span className="text-[9px] text-accent-red">✗</span>
+        return (
+          <div
+            key={h.id}
+            className="flex items-start gap-2 text-[10px] py-1 border-b border-surface-border/60 last:border-0"
+          >
+            <span className="w-3 mt-0.5">{status}</span>
+            <div className="flex-1 min-w-0">
+              <div className="flex items-center gap-1.5 mb-0.5">
+                <span className={`px-1 py-0.5 rounded text-[8px] font-bold ${h.direction === 'BUY' ? 'bg-accent-green/20 text-accent-green' : 'bg-accent-red/20 text-accent-red'}`}>
+                  {h.direction}
+                </span>
+                <span className="px-1 py-0.5 rounded bg-surface-hover text-[8px] text-gray-400">{h.category || '—'}</span>
+                <span className="font-mono text-[9px] text-gray-500">α {h.alpha_score != null ? h.alpha_score.toFixed(2) : '—'}</span>
+                <span className="text-gray-600 ml-auto">{fmtRelTime(h.created_at)}</span>
+              </div>
+              <p className="text-gray-400 truncate">{h.market_question || '—'}</p>
+              <p className="text-gray-600 text-[9px] truncate">{h.thesis || ''}</p>
+            </div>
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
 // ── Main Dashboard ──────────────────────────────────────────────────────────
 export default function Dashboard() {
   const { data: status } = useApi(api.polymarketSubscriptionStatus, 30_000)
-  const { data: whaleFeed, loading: feedL } = useApi(api.polymarketWhaleFeed, 10_000)
+  const { data: whaleFeed, loading: feedL } = useApi(api.polymarketWhaleFeed, 30_000)
   const { data: health } = useApi(api.intelligenceHealth, 60_000)
   const { data: sigPerf } = useApi(api.signalsPerformance, 60_000)
   // Live data sources added when the post-validation pipeline came online.
@@ -370,10 +443,16 @@ export default function Dashboard() {
   // does not. See StatCards for the rationale.
   const { data: leaderboard } = useApi(() => api.smartMoneyWinners('all'), 60_000)
   // Circuit breaker status — endpoint added in the e2e validation session.
-  const { data: cb } = useApi(() => fetch('/api/circuit-breaker/status').then(r => r.json()), 30_000)
-  // Thesis scorecard — the most important card on the page. See
-  // src/trading_platform/polymarket/kpi_tracker.py and THESIS.md.
-  const { data: thesis } = useApi(() => fetch('/api/thesis/scorecard').then(r => r.json()), 60_000)
+  const { data: cb } = useApi(() => fetch('/api/circuit-breaker/status').then(r => r.ok ? r.json() : null), 30_000)
+  // Thesis claims — lightweight endpoint that returns scorecard + 5 claims.
+  // Uses /api/thesis/claims (fast) instead of /api/thesis/scorecard (slow,
+  // includes daily_metrics which adds heavy DB queries and can timeout).
+  const { data: thesis } = useApi(() => fetch('/api/thesis/claims').then(r => r.ok ? r.json() : null), 60_000)
+  // Daily snapshots — drives the sparkline next to the hero accuracy number.
+  const { data: thesisHistory } = useApi(() => fetch('/api/thesis/history?days=60').then(r => r.ok ? r.json() : null), 60_000)
+  // Paper equity curve + recent hypotheses for the new dashboard panels.
+  const { data: equity } = useApi(api.equityCurve, 60_000)
+  const { data: hypotheses } = useApi(() => fetch('/api/hypotheses/recent?limit=15').then(r => r.ok ? r.json() : null), 30_000)
 
   return (
     <div className="p-6 space-y-4">
@@ -382,10 +461,29 @@ export default function Dashboard() {
         <h1 className="text-lg font-semibold text-gray-200">Command Center</h1>
       </div>
 
-      <ThesisScorecard data={thesis} />
+      <ThesisScorecard data={thesis} history={thesisHistory} />
 
       <StatusBar status={status} />
       <StatCards whaleFeed={whaleFeed} health={health} status={status} bankroll={bankroll} cb={cb} universe={universe} leaderboard={leaderboard} />
+
+      {/* P&L curve + Recent Hypotheses — answers "are hypothesis trades
+          actually compounding?" alongside "what did we just bet on?". */}
+      <div className="grid grid-cols-1 lg:grid-cols-5 gap-4">
+        <div className="lg:col-span-3 card">
+          <div className="flex items-baseline justify-between mb-2">
+            <h2 className="text-sm font-medium text-gray-300">Cumulative Paper P&amp;L</h2>
+            <span className="text-[10px] text-gray-600">starting bankroll dashed</span>
+          </div>
+          <CumulativePnLChart
+            rows={equity?.data}
+            starting={bankroll?.starting_capital ?? 10000}
+          />
+        </div>
+        <div className="lg:col-span-2 card">
+          <h2 className="text-sm font-medium text-gray-300 mb-2">Recent Hypotheses</h2>
+          <RecentHypotheses data={hypotheses} />
+        </div>
+      </div>
 
       <div className="flex gap-4">
         {/* Left: Whale Feed */}
@@ -412,7 +510,7 @@ export default function Dashboard() {
               <p className="text-[10px] text-gray-600">Alerts appear when watched wallets trade</p>
             ) : (
               <div className="space-y-1">
-                {(whaleFeed.data || []).slice(0, 5).map((a, i) => (
+                {(whaleFeed.data || []).filter(a => !SYNTHETIC_WALLETS.has(a.wallet) && !isSportsMarket(a)).slice(0, 5).map((a, i) => (
                   <div key={i} className="flex items-center gap-1.5 text-[10px] py-0.5">
                     <TierBadge tier={a.tier} />
                     <span className="font-mono text-[9px] text-gray-500">{a.wallet}</span>

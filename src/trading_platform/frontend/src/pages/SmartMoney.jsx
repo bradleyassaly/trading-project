@@ -1,8 +1,10 @@
 import { useState, useEffect, useCallback } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { api } from '../api/client'
 import { useApi } from '../hooks/useApi'
 import LoadingSkeleton from '../components/LoadingSkeleton'
 import EmptyState from '../components/EmptyState'
+import { pmGetUser } from '../lib/polymarket'
 
 const TYPE_STYLES = {
   directional: { bg: 'bg-green-900/60', text: 'text-green-300', label: 'Dir' },
@@ -275,8 +277,8 @@ function ColoredWr({ value }) {
 }
 
 function WinnersTab({ onSelectWallet }) {
-  const [window, setWindow] = useState('all')
-  const fetcher = useCallback(() => api.smartMoneyWinners(window), [window])
+  const [period, setPeriod] = useState('all')
+  const fetcher = useCallback(() => api.smartMoneyWinners(period), [period])
   const { data, loading } = useApi(fetcher, 300_000)
   const rawRows = data?.data ?? []
 
@@ -328,8 +330,8 @@ function WinnersTab({ onSelectWallet }) {
       <div className="flex gap-1 mb-3">
         {periods.map(p => (
           <button key={p.key}
-            className={`px-3 py-1 text-[10px] rounded ${window === p.key ? 'bg-accent-blue/20 text-accent-blue' : 'text-gray-500 hover:text-gray-300'}`}
-            onClick={() => setWindow(p.key)}>{p.label}</button>
+            className={`px-3 py-1 text-[10px] rounded ${period === p.key ? 'bg-accent-blue/20 text-accent-blue' : 'text-gray-500 hover:text-gray-300'}`}
+            onClick={() => setPeriod(p.key)}>{p.label}</button>
         ))}
       </div>
 
@@ -401,7 +403,7 @@ function WinnersTab({ onSelectWallet }) {
               </tr>
             </thead>
             <tbody className="divide-y divide-surface-border">
-              {rows.slice(0, 50).map((w, i) => {
+              {rows.slice(0, 200).map((w, i) => {
                 const pnl = w.display_pnl ?? w.pm_pnl ?? w.net_pnl_usdc ?? w.profit ?? 0
                 return (
                   <tr key={w.wallet} className="hover:bg-surface-hover cursor-pointer"
@@ -449,8 +451,7 @@ function WinnersTab({ onSelectWallet }) {
 
 function AlertsTab() {
   const { data, loading } = useApi(useCallback(() => api.smartMoneyAlerts({ limit: 100 }), []), 120_000)
-  const raw = data?.data ?? []
-  const alerts = raw.filter(a => a.wallet !== '0xaaa' && a.wallet !== '0xbbb')
+  const alerts = data?.data ?? []
 
   if (loading && !data) return <LoadingSkeleton rows={6} />
   if (!alerts.length) return (
@@ -620,17 +621,57 @@ function CategoryBars2({ breakdown }) {
   )
 }
 
+function PolymarketProfile({ data }) {
+  const pm = Array.isArray(data) ? data[0] : data
+  if (!pm) return null
+  return (
+    <div className="bg-surface-card rounded p-2">
+      <p className="text-[9px] text-gray-500 mb-1.5">POLYMARKET PROFILE</p>
+      <div className="grid grid-cols-2 gap-2 text-[10px]">
+        {pm.username && (
+          <div>
+            <p className="text-[8px] text-gray-600">Username</p>
+            <p className="text-gray-300">{pm.username}</p>
+          </div>
+        )}
+        {pm.volume != null && (
+          <div>
+            <p className="text-[8px] text-gray-600">PM Volume</p>
+            <p className="text-gray-300 font-mono">{fmtUsd2(Number(pm.volume))}</p>
+          </div>
+        )}
+        {pm.positions != null && (
+          <div>
+            <p className="text-[8px] text-gray-600">PM Positions</p>
+            <p className="text-gray-300 font-mono">{pm.positions}</p>
+          </div>
+        )}
+        {pm.marketsTraded != null && (
+          <div>
+            <p className="text-[8px] text-gray-600">Markets Traded</p>
+            <p className="text-gray-300 font-mono">{pm.marketsTraded}</p>
+          </div>
+        )}
+      </div>
+      <p className="text-[8px] text-gray-600 mt-1">Source: gamma-api.polymarket.com (cached 60s)</p>
+    </div>
+  )
+}
+
 function WalletPanel({ address, onClose }) {
   const [detail, setDetail] = useState(null)
   const [loading, setLoading] = useState(true)
+  const [pmProfile, setPmProfile] = useState(null)
 
   useEffect(() => {
     if (!address) return
     setLoading(true)
-    fetch(`/api/wallets/${address}`)
-      .then(r => r.json())
+    fetch(`/api/smart-money/wallet/${encodeURIComponent(address)}`)
+      .then(r => r.ok ? r.json() : null)
       .then(d => { setDetail(d); setLoading(false) })
       .catch(() => { setDetail(null); setLoading(false) })
+    // Fetch Polymarket profile in parallel (client-side, 60s cached)
+    pmGetUser(address).then(d => setPmProfile(d)).catch(() => {})
   }, [address])
 
   // Close on ESC
@@ -682,7 +723,7 @@ function WalletPanel({ address, onClose }) {
             </div>
 
             {/* KPI row 1: Core */}
-            <div className="grid grid-cols-3 gap-2">
+            <div className="grid grid-cols-4 gap-2">
               <div className="bg-surface-card rounded p-2">
                 <p className="text-[9px] text-gray-500">DIR WR</p>
                 <p className="text-sm font-bold font-mono text-gray-200">{fmtPct2(d.directional_win_rate)}</p>
@@ -694,6 +735,15 @@ function WalletPanel({ address, onClose }) {
               <div className="bg-surface-card rounded p-2">
                 <p className="text-[9px] text-gray-500">CONVICTION</p>
                 <p className="text-sm font-bold font-mono text-gray-200">{d.conviction_score?.toFixed(3) ?? '—'}</p>
+              </div>
+              <div className="bg-surface-card rounded p-2">
+                <p className="text-[9px] text-gray-500">ALPHA COPYABLE</p>
+                <p className={`text-sm font-bold font-mono ${d.is_copyable ? 'text-accent-green' : 'text-gray-600'}`}>
+                  {d.is_copyable ? 'YES' : d.alpha_score != null ? 'NO' : '—'}
+                </p>
+                {d.alpha_score != null && (
+                  <p className="text-[8px] text-gray-600">score: {d.alpha_score.toFixed(3)}</p>
+                )}
               </div>
             </div>
 
@@ -869,6 +919,9 @@ function WalletPanel({ address, onClose }) {
               )}
             </div>
 
+            {/* Polymarket Profile Comparison */}
+            <PolymarketProfile data={pmProfile} />
+
             {/* Recent trades */}
             <div>
               <p className="text-[10px] text-gray-500 mb-1.5 font-medium">Recent Trades ({trades.length})</p>
@@ -925,6 +978,8 @@ function WalletPanel({ address, onClose }) {
 export default function SmartMoney() {
   const [activeTab, setActiveTab] = useState('winners')
   const [selectedWallet, setSelectedWallet] = useState(null)
+  const navigate = useNavigate()
+  const handleWalletClick = (addr) => navigate(`/wallets/${addr}`)
 
   const tabs = [
     { key: 'winners', label: 'Winners' },
@@ -942,7 +997,7 @@ export default function SmartMoney() {
           <span className="text-gray-400">Wallet Intel</span>
         </p>
         <h1 className="text-lg font-semibold text-gray-200">Wallet Intelligence</h1>
-        <p className="text-xs text-gray-500 mt-0.5">Track and analyze Polymarket's top directional traders</p>
+        <p className="text-xs text-gray-500 mt-0.5">Which wallets have edge? — Track and analyze Polymarket's top directional traders</p>
       </div>
 
       <ActionableStrip />
@@ -962,16 +1017,14 @@ export default function SmartMoney() {
       </div>
 
       <div className="card min-h-[400px]">
-        {activeTab === 'leaderboard' && <LeaderboardTab onSelectWallet={setSelectedWallet} />}
-        {activeTab === 'winners' && <WinnersTab onSelectWallet={setSelectedWallet} />}
+        {activeTab === 'leaderboard' && <LeaderboardTab onSelectWallet={handleWalletClick} />}
+        {activeTab === 'winners' && <WinnersTab onSelectWallet={handleWalletClick} />}
         {activeTab === 'positions' && <OpenPositionsTab />}
         {activeTab === 'alerts' && <AlertsTab />}
         {activeTab === 'live' && <LiveSignalsTab />}
       </div>
 
-      {selectedWallet && (
-        <WalletPanel address={selectedWallet} onClose={() => setSelectedWallet(null)} />
-      )}
+      {/* Wallet detail is now a separate page at /wallets/:address */}
     </div>
   )
 }

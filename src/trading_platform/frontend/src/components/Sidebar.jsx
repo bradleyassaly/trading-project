@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { NavLink } from 'react-router-dom'
-import { LayoutGrid, Eye, Search, DollarSign, Shield, FlaskConical, ChevronLeft, ChevronRight } from 'lucide-react'
+import { LayoutGrid, Eye, Search, DollarSign, Shield, FlaskConical, ChevronLeft, ChevronRight, TrendingUp } from 'lucide-react'
 import { useApi } from '../hooks/useApi'
 import { api } from '../api/client'
 
@@ -10,11 +10,12 @@ import { api } from '../api/client'
 // in the nav — see reports/frontend_audit.md.
 const NAV = [
   { to: '/dashboard', label: 'Command Center',     Icon: LayoutGrid   },
+  { to: '/live',      label: 'Live Trading',       Icon: TrendingUp   },
+  { to: '/paper',     label: 'Paper Trading',      Icon: DollarSign   },
   { to: '/wallets',   label: 'Wallet Intelligence', Icon: Eye         },
   { to: '/scanner',   label: 'Market Scanner',     Icon: Search       },
   { to: '/signals',   label: 'Signal Lab',         Icon: FlaskConical },
-  { to: '/paper',     label: 'Paper Trading',      Icon: DollarSign   },
-  { to: '/live',      label: 'Live Readiness',     Icon: Shield       },
+  { to: '/live-readiness', label: 'Live Readiness', Icon: Shield      },
 ]
 
 const STATE_LABELS = {

@@ -79,14 +79,25 @@ def enrich_trades(*, db: WalletDB | None = None) -> dict[str, Any]:
             continue
 
         # This token resolved. rp=100 means this specific token paid out.
-        # Determine market_outcome: if rp=100, the token the trader holds won.
-        # The "outcome" field from the data API tells us what this token represents.
-        # For binary markets: if rp=100, this token's outcome won.
+        # The "outcome" field from the data API tells us what this token
+        # represents — "Yes", "No", "Up", "Down", team names, etc. For
+        # binary markets (Yes/No), we can derive the market-level outcome:
+        #   YES token won (rp=100) → market outcome is YES
+        #   YES token lost (rp=0) → market outcome is NO
+        #   NO token won (rp=100) → market outcome is NO
+        #   NO token lost (rp=0)  → market outcome is YES
+        # The previous code used `"YES" if token_won else "NO"` which is
+        # wrong for NO-token trades (inverts the market outcome).
         token_won = rp >= 99.0
-
-        # Determine the market-level outcome string
-        # outcome_name is like "Yes" or "No" from the data API
-        market_outcome = "YES" if token_won else "NO"
+        on_str = (outcome_name or "").strip().lower()
+        if on_str in ("yes", ""):
+            market_outcome = "YES" if token_won else "NO"
+        elif on_str == "no":
+            market_outcome = "NO" if token_won else "YES"
+        else:
+            # Non-binary market (sports team, Up/Down, Over/Under, etc.)
+            # We don't know what "YES" means here — label by the token name
+            market_outcome = outcome_name if token_won else f"NOT_{outcome_name}"
 
         # PnL calculation:
         # BUY side: trader paid (size * price) for the token

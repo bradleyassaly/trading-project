@@ -2,6 +2,8 @@ import { useState, useEffect } from 'react'
 import { useParams, useNavigate, Link } from 'react-router-dom'
 import { TierBadge, SignalBadge } from '../components/Badges'
 import LoadingSkeleton from '../components/LoadingSkeleton'
+import DepthChart from '../components/charts/DepthChart'
+import PriceHistoryChart from '../components/charts/PriceHistoryChart'
 
 function fmtUsd(n) {
   if (n == null) return '—'
@@ -15,16 +17,23 @@ export default function MarketDetail() {
   const navigate = useNavigate()
   const [data, setData] = useState(null)
   const [loading, setLoading] = useState(true)
+  const [book, setBook] = useState(null)
+  const [candles, setCandles] = useState(null)
 
   useEffect(() => {
     const load = async () => {
       try {
         const resp = await fetch(`/api/market/${encodeURIComponent(conditionId)}`)
-        setData(await resp.json())
+        if (resp.ok) setData(await resp.json())
       } catch (e) { console.error(e) }
       setLoading(false)
     }
     load()
+    // Fetch order book and price candles in parallel
+    fetch(`/api/market/${encodeURIComponent(conditionId)}/order-book`)
+      .then(r => r.ok ? r.json() : null).then(d => { if (d) setBook(d) }).catch(() => {})
+    fetch(`/api/market/${encodeURIComponent(conditionId)}/candles?interval=1d`)
+      .then(r => r.ok ? r.json() : null).then(d => { if (d) setCandles(d) }).catch(() => {})
   }, [conditionId])
 
   if (loading) return <div className="p-6"><LoadingSkeleton rows={10} /></div>
@@ -100,6 +109,18 @@ export default function MarketDetail() {
           </div>
         </div>
       )}
+
+      {/* Price History + Order Book Depth */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <div className="card">
+          <h2 className="text-sm font-medium text-gray-300 mb-2">Price History</h2>
+          <PriceHistoryChart data={candles?.candles || candles?.data} height={200} />
+        </div>
+        <div className="card">
+          <h2 className="text-sm font-medium text-gray-300 mb-2">Order Book Depth</h2>
+          <DepthChart book={book?.available !== false ? book : null} height={200} />
+        </div>
+      </div>
 
       {/* Two columns */}
       <div className="flex gap-4">

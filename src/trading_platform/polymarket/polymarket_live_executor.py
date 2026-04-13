@@ -107,8 +107,19 @@ class PolymarketLiveExecutor:
         except Exception as exc:
             logger.debug("circuit breaker check failed (proceeding): %s", exc)
 
-        # 1. Kelly size
+        # 1. Kelly size (capped at WEEK1_MAX_TRADE for safety ramp)
+        WEEK1_MAX_TRADE = 25
         size_usd = self._sizer.get_trade_size(sig_type, confidence)
+        if size_usd > WEEK1_MAX_TRADE:
+            size_usd = WEEK1_MAX_TRADE
+        if size_usd <= 0:
+            return self._result(False, reason=f"Kelly says no edge for {sig_type}")
+
+        # 1b. Stale price guard — abort if signal is old or price moved
+        fired_at = signal.get("fired_at") or 0
+        age_sec = time.time() - fired_at
+        if age_sec > 900:
+            return self._result(False, reason=f"Signal too old ({age_sec/60:.0f}m)")
 
         # 2. Kill switch check
         ks = self._kill.check(sig_type, size_usd, confidence)
@@ -124,10 +135,30 @@ class PolymarketLiveExecutor:
         if not token_id:
             return self._result(False, reason=f"No token_id for {condition_id[:20]}")
 
-        # 4. Current price (for slippage + logging)
+        # 4. Current price + liquidity check
         current_price = self._clob.get_mid_price(token_id)
         if current_price is None:
             return self._result(False, reason="Could not fetch current price from CLOB")
+
+        # Stale-price guard: if price moved > 5% since signal fired, abort
+        entry_price = float(signal.get("entry_price") or signal.get("price") or 0)
+        if entry_price > 0:
+            slippage = abs(current_price - entry_price) / entry_price
+            if slippage > 0.05:
+                return self._result(
+                    False,
+                    reason=f"Price moved {slippage:.1%} since signal (entry={entry_price:.3f} now={current_price:.3f})",
+                )
+
+        # Liquidity guard: check orderbook depth
+        book = self._clob.get_order_book(token_id)
+        asks = book.get("asks") or []
+        ask_depth = sum(float(a.get("size", 0)) * float(a.get("price", 0)) for a in asks[:5])
+        if ask_depth < size_usd * 2:
+            return self._result(
+                False,
+                reason=f"Thin liquidity (ask depth ${ask_depth:.0f} < 2x trade ${size_usd:.0f})",
+            )
 
         direction = (signal.get("direction") or "BUY").upper()
         outcome_label = "YES" if direction == "BUY" else "NO"

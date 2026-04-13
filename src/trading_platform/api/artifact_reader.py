@@ -46,6 +46,19 @@ ARTIFACTS_ROOT = Path(os.environ.get("ARTIFACTS_ROOT", "artifacts"))
 DATA_ROOT = Path(os.environ.get("DATA_ROOT", "data"))
 
 
+# ── SQLite connection helper ─────────────────────────────────────────────────
+
+
+def _safe_connect(db_path: Path | str, **kwargs) -> "sqlite3.Connection":
+    """Open a SQLite connection via the centralized db module.
+
+    Handles WAL mode, busy_timeout, retry, and NTFS /tmp fallback.
+    """
+    from trading_platform.polymarket.db import connect_wallet_db
+    check = kwargs.pop("check_same_thread", False)
+    return connect_wallet_db(db_path, check_same_thread=check)
+
+
 # ── Low-level helpers ────────────────────────────────────────────────────────
 
 
@@ -489,8 +502,12 @@ def read_polymarket_live_markets() -> dict[str, Any]:
                 "data": [], "count": 0, "markets_subscribed": 0, "started_at": None}
     try:
         import sqlite3
-        conn = sqlite3.connect(str(db_path), check_same_thread=False, timeout=30)
-        conn.execute("PRAGMA journal_mode=DELETE")  # bind-mount safe
+        conn = _safe_connect(db_path, check_same_thread=False)
+        try:
+            conn.execute("PRAGMA busy_timeout=60000")
+            conn.execute("PRAGMA journal_mode=WAL")
+        except Exception:
+            pass
         # Latest trade price per market (exclude orderbook price_change ticks)
         price_rows = conn.execute("""
             SELECT market_id, price, timestamp
@@ -558,8 +575,12 @@ def read_polymarket_market_ticks(market_id: str) -> dict[str, Any]:
         return {"available": False, "reason": "Live collector not running"}
     try:
         import sqlite3
-        conn = sqlite3.connect(str(db_path), check_same_thread=False, timeout=30)
-        conn.execute("PRAGMA journal_mode=DELETE")  # bind-mount safe
+        conn = _safe_connect(db_path, check_same_thread=False)
+        try:
+            conn.execute("PRAGMA busy_timeout=60000")
+            conn.execute("PRAGMA journal_mode=WAL")
+        except Exception:
+            pass
 
         # Market metadata
         meta_row = conn.execute(
@@ -2444,7 +2465,22 @@ def _get_wallet_db() -> Any:
     db_path = DATA_ROOT / "polymarket" / "wallet_intelligence.db"
     if not db_path.exists():
         return None
-    return WalletDB(db_path)
+    try:
+        return WalletDB(db_path)
+    except Exception:
+        # On Windows Docker bind mounts, SQLite can't open the DB
+        # directly due to NTFS-over-9P locking limitations. Fall back
+        # to a temporary copy on the container's native filesystem.
+        import shutil, tempfile
+        tmp = Path(tempfile.gettempdir()) / "wallet_intelligence_ro.db"
+        try:
+            src_mtime = db_path.stat().st_mtime
+            # Re-copy only if source is newer (avoid redundant 600MB copies)
+            if not tmp.exists() or tmp.stat().st_mtime < src_mtime - 60:
+                shutil.copy2(str(db_path), str(tmp))
+            return WalletDB(tmp)
+        except Exception:
+            return None
 
 
 def read_smart_money_actionable_signals() -> dict[str, Any]:
@@ -2620,7 +2656,7 @@ def read_paper_bankroll() -> dict[str, Any]:
     if db_path.exists():
         try:
             import sqlite3
-            conn = sqlite3.connect(str(db_path), check_same_thread=False)
+            conn = _safe_connect(db_path, check_same_thread=False)
             rows = conn.execute("""
                 SELECT COALESCE(signal_family, 'unknown'), COUNT(*),
                        SUM(CASE WHEN status='closed' THEN 1 ELSE 0 END),
@@ -2693,7 +2729,7 @@ def read_paper_pnl_history() -> dict[str, Any]:
     if db_path.exists():
         try:
             import sqlite3
-            conn = sqlite3.connect(str(db_path), check_same_thread=False)
+            conn = _safe_connect(db_path, check_same_thread=False)
             rows = conn.execute("""
                 SELECT DATE(exit_ts) as d, COALESCE(signal_family, 'unknown'),
                        SUM(return_pct), COUNT(*)
@@ -3979,7 +4015,7 @@ def read_paper_dashboard() -> dict[str, Any]:
         return {"available": False, "reason": "No paper trading DB found"}
     try:
         import sqlite3
-        conn = sqlite3.connect(str(db_path), check_same_thread=False)
+        conn = _safe_connect(db_path, check_same_thread=False)
 
         # Open positions — Polymarket whale signals only (non-archived)
         open_trades = conn.execute("""
@@ -4070,7 +4106,7 @@ def read_paper_dashboard() -> dict[str, Any]:
         poly_db = DATA_ROOT / "polymarket" / "wallet_intelligence.db"
         if poly_db.exists():
             try:
-                pconn = sqlite3.connect(str(poly_db), check_same_thread=False)
+                pconn = _safe_connect(poly_db, check_same_thread=False)
                 ppt_rows = pconn.execute("""
                     SELECT id, condition_id, question, category, side, entry_price,
                            size_usd, signal_type, confidence, wallet, entry_ts
@@ -4654,8 +4690,9 @@ def read_latest_replay_drift_summary() -> dict[str, Any]:
 def read_polymarket_whale_feed() -> dict[str, Any]:
     """Recent whale alerts for the live feed."""
     try:
-        from trading_platform.polymarket.wallet_db import WalletDB
-        db = WalletDB()
+        db = _get_wallet_db()
+        if not db:
+            return {"available": False, "reason": "Wallet DB not available", "data": []}
         alerts = db.get_alerts(limit=50)
         import time
         now = int(time.time())
@@ -4718,17 +4755,20 @@ def read_polymarket_subscription_status() -> dict[str, Any]:
 def read_polymarket_signals_feed() -> dict[str, Any]:
     """Recent signals for the signal feed panel."""
     try:
+        db = _get_wallet_db()
+        if not db:
+            return {"available": False, "reason": "Wallet DB not available", "data": []}
         from trading_platform.polymarket.whale_signal_engine import WhaleSignalEngine
-        engine = WhaleSignalEngine()
+        engine = WhaleSignalEngine(db=db)
         signals = engine.get_recent_signals(hours=24.0)
         import time
         now = int(time.time())
 
-        # Check which signals had paper trades
-        from trading_platform.polymarket.polymarket_paper_executor import PolymarketPaperExecutor
-        executor = PolymarketPaperExecutor()
+        # Check which signals had paper trades (may fail on NTFS — not critical)
         open_tickers = set()
         try:
+            from trading_platform.polymarket.polymarket_paper_executor import PolymarketPaperExecutor
+            executor = PolymarketPaperExecutor()
             with executor._lock:
                 rows = executor._conn.execute(
                     "SELECT ticker FROM trades WHERE platform='polymarket' AND status='open'"
@@ -4773,8 +4813,9 @@ def read_polymarket_signals_feed() -> dict[str, Any]:
 def read_polymarket_category_performance() -> dict[str, Any]:
     """Category-level signal performance."""
     try:
-        from trading_platform.polymarket.wallet_db import WalletDB
-        db = WalletDB()
+        db = _get_wallet_db()
+        if not db:
+            raise Exception("Wallet DB not available")
         rows = db.get_category_performance()
         return {"available": True, "data": rows}
     except Exception as exc:
@@ -4789,8 +4830,9 @@ def read_intelligence_health() -> dict[str, Any]:
 
     # Intelligence pipeline health
     try:
-        from trading_platform.polymarket.wallet_db import WalletDB
-        db = WalletDB()
+        db = _get_wallet_db()
+        if not db:
+            raise Exception("Wallet DB not available")
         now = int(_time.time())
 
         # Leaderboard status
@@ -4839,7 +4881,7 @@ def read_intelligence_health() -> dict[str, Any]:
         import sqlite3
         paper_db = DATA_ROOT.parent / "kalshi" / "paper_trades.db"
         if paper_db.exists():
-            conn = sqlite3.connect(str(paper_db))
+            conn = _safe_connect(paper_db)
             open_count = conn.execute(
                 "SELECT COUNT(*) FROM trades WHERE platform='polymarket' AND status='open'"
             ).fetchone()[0]
@@ -4856,8 +4898,9 @@ def read_intelligence_health() -> dict[str, Any]:
 
     # Category status
     try:
-        from trading_platform.polymarket.wallet_db import WalletDB
-        db = WalletDB()
+        db = _get_wallet_db()
+        if not db:
+            raise Exception("Wallet DB not available")
         cats = db.get_category_performance()
         result["categories"] = [
             {
@@ -4968,8 +5011,9 @@ def read_pipeline_status() -> dict[str, Any]:
     lb_age = None
     lb_ver = 0
     try:
-        from trading_platform.polymarket.wallet_db import WalletDB
-        db = WalletDB()
+        db = _get_wallet_db()
+        if not db:
+            raise Exception("Wallet DB not available")
         with db._lock:
             meta = db._conn.execute("SELECT current_version, built_at FROM leaderboard_meta WHERE id=1").fetchone()
         if meta:

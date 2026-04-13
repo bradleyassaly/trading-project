@@ -6,9 +6,8 @@
 #   docker compose logs -f scheduler  # tail one service
 #   docker compose down               # stop everything
 #
-# All services share the project root as a bind mount so the SQLite
-# DB at data/polymarket/wallet_intelligence.db, the .env file, and the
-# scripts/ directory are accessible from every container.
+# The DB uses DELETE journal mode (not WAL) so bind-mount locking works
+# correctly on Docker Desktop Windows. See reports/data_audit_2026-04-12.md.
 
 services:
 
@@ -23,6 +22,8 @@ services:
     volumes:
       - .:/app
     env_file: .env
+    environment:
+      - WALLET_DB_PATH=/app/data/polymarket/wallet_intelligence.db
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8001/api/system/status"]
@@ -38,6 +39,8 @@ services:
     container_name: polymarket-frontend
     ports:
       - "5173:5173"
+    environment:
+      - VITE_API_TARGET=http://api:8001
     volumes:
       - ./src/trading_platform/frontend:/app
       - /app/node_modules
@@ -56,6 +59,8 @@ services:
     volumes:
       - .:/app
     env_file: .env
+    environment:
+      - WALLET_DB_PATH=/app/data/polymarket/wallet_intelligence.db
     restart: unless-stopped
     depends_on:
       api:
@@ -75,6 +80,8 @@ services:
     volumes:
       - .:/app
     env_file: .env
+    environment:
+      - WALLET_DB_PATH=/app/data/polymarket/wallet_intelligence.db
     restart: unless-stopped
     depends_on:
       api:
@@ -90,6 +97,8 @@ services:
     volumes:
       - .:/app
     env_file: .env
+    environment:
+      - WALLET_DB_PATH=/app/data/polymarket/wallet_intelligence.db
     restart: unless-stopped
     depends_on:
       api:

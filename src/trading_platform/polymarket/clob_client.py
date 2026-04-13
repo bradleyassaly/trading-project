@@ -58,7 +58,7 @@ class ClobClient:
     def __init__(self) -> None:
         self._api_key = os.getenv("POLYMARKET_API_KEY", "").strip()
         self._api_secret = os.getenv("POLYMARKET_API_SECRET", "").strip()
-        self._passphrase = os.getenv("POLYMARKET_API_PASSPHRASE", "").strip()
+        self._passphrase = (os.getenv("POLYMARKET_API_PASSPHRASE") or os.getenv("POLYMARKET_PASSPHRASE") or "").strip()
         self._private_key = os.getenv("POLYMARKET_PRIVATE_KEY", "").strip()
         self._wallet = os.getenv("POLYMARKET_WALLET_ADDRESS", "").strip()
         self._configured = bool(

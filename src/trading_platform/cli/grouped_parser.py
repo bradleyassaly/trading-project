@@ -146,6 +146,7 @@ from trading_platform.cli.commands.polymarket_ingest_top_wallets import (
     cmd_polymarket_backfill_top_wallets,
     cmd_polymarket_discover_market_wallets,
 )
+from trading_platform.cli.commands.polymarket_poll_wallet_trades import _run as cmd_poll_wallet_trades
 from trading_platform.cli.commands.manifold_parse import cmd_manifold_parse
 from trading_platform.cli.commands.predictit_parse import cmd_predictit_parse
 from trading_platform.cli.commands.news_tagger import cmd_news_upcoming, cmd_news_label_moves
@@ -3142,7 +3143,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="Show what would be fetched without fetching.")
     data_polymarket_discover.set_defaults(func=cmd_polymarket_discover_market_wallets)
 
-    # ── data manifold ─────────────────────���──────────────────────────��───────
+    data_polymarket_poll = data_polymarket_subparsers.add_parser(
+        "poll-wallet-trades",
+        help="Poll Data API for recent trades by copyable wallets and fire signals.",
+    )
+    data_polymarket_poll.add_argument("--db", type=str, default=None,
+        help="Path to wallet_intelligence.db")
+    data_polymarket_poll.add_argument("--dry-run", action="store_true",
+        help="Detect trades but don't fire signals")
+    data_polymarket_poll.set_defaults(func=cmd_poll_wallet_trades)
+
+    #── data manifold ─────────────────────���──────────────────────────��───────
     data_manifold = data_subparsers.add_parser(
         "manifold", help="Manifold Markets data dump parsing commands"
     )

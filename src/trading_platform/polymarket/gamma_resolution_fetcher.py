@@ -128,25 +128,32 @@ class GammaResolutionFetcher:
                     close_time = m.get("endDateIso") or m.get("closedTime") or ""
                     volume = m.get("volume") or 0
 
+                    # `resolves_yes` is a per-MARKET fact: did the YES outcome win?
+                    # The previous version set it from `rp >= 99.0` per row, which
+                    # accidentally collapsed both NO-won and YES-won markets to the
+                    # same True value (the second row of a NO-won market has rp=100
+                    # because it's the NO token). The result was every market in the
+                    # CSV reading as "YES won". See reports/data_audit_2026-04-12.md.
+                    yes_won = rp >= 50.0
                     # Write row for YES token (index 0)
                     if clob_ids:
                         writer.writerow({
                             "ticker": clob_ids[0],
                             "condition_id": cond_id,
-                            "resolution_price": rp,
-                            "resolves_yes": rp >= 99.0,
+                            "resolution_price": rp,            # YES token's payout
+                            "resolves_yes": yes_won,
                             "question": question,
                             "close_time": close_time,
                             "volume": volume,
                         })
                         rows_written += 1
-                    # Write row for NO token (index 1) with inverted resolution
+                    # Write row for NO token (index 1)
                     if len(clob_ids) > 1:
                         writer.writerow({
                             "ticker": clob_ids[1],
                             "condition_id": cond_id,
-                            "resolution_price": 100.0 - rp,
-                            "resolves_yes": rp < 1.0,
+                            "resolution_price": 100.0 - rp,    # NO token's payout
+                            "resolves_yes": yes_won,           # same per-market fact
                             "question": question,
                             "close_time": close_time,
                             "volume": volume,

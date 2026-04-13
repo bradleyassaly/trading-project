@@ -34,6 +34,62 @@ VALID_SIGNAL_TYPES = [
     "price_velocity",
 ]
 
+# Signals proven to have zero or negative edge in the validation data.
+# They still get LOGGED (for future analysis) but are blocked from
+# reaching the paper executor. See reports/signal_analysis_clean.md.
+DISABLED_SIGNAL_TYPES = {
+    "price_velocity",      # not a wallet signal, fictional trades
+    "oversized_bet",       # negative edge on corrected data (WR 10.6%, EV -0.39)
+    "whale_entry",         # break-even raw; replaced by whale_entry_filtered
+    "insider_entry",       # DISABLED: sampling bias invalidates accuracy metric
+    "cascade",             # by the time 5 wallets are in, info is priced in
+    "convergence",         # 87.7% WR = no edge over whale_entry alone (87.5%)
+    "no_position_entry",   # redundant with whale_entry (same wallet, same gate)
+    "market_maker_flip",   # negative EV on corrected data (-0.057)
+    "wallet_reversal",     # negative EV on corrected data (-0.033)
+}
+
+# Signals active but unproven — place paper trades at minimum stake,
+# gather data for future validation. All pass through the alpha gate.
+PROBATION_SIGNAL_TYPES = {
+    "market_maker_flip",   # MM changes direction — no historical backtest
+    "wallet_reversal",     # wallet flips side — thin data
+    "pre_deadline_surge",  # activity near close — needs temporal analysis
+}
+
+# Informational signals — logged and alerted but never trade.
+INFORMATIONAL_SIGNALS = {
+    "whale_exit",          # warning for our positions, not actionable
+    "position_reduction",  # partial exit, informational only
+}
+
+# Sports markets dominate the feed and resolve unpredictably (game outcomes).
+# Even with 86.6% copyable-wallet WR, they flood the funnel and slow time-to-50.
+# Exclude all sports to focus on politics/crypto/economics where thesis is strongest.
+EXCLUDED_CATEGORIES = {
+    "sports", "soccer", "basketball", "football", "baseball",
+    "hockey", "mma", "tennis", "esports", "motorsport",
+}
+
+_SPORTS_PATTERNS = [
+    "vs.", "vs ", "O/U ", "Spread:", "over/under",
+    "NBA", "NFL", "NHL", "MLB", "MLS", "EPL",
+    "Premier League", "La Liga", "Serie A", "Bundesliga",
+    "Champions League", "UFC", "ATP", "WTA", "PGA",
+    "NASCAR", "F1", "Grand Prix", "World Cup",
+]
+
+
+def _is_sports_market(category: str | None, question: str | None) -> bool:
+    """True if the market is sports — excluded from trading."""
+    if category and category.lower() in EXCLUDED_CATEGORIES:
+        return True
+    if question:
+        q = question.lower()
+        return any(p.lower() in q for p in _SPORTS_PATTERNS)
+    return False
+
+
 # Debounce: order-book and velocity signals only fire once per market every N
 # minutes — they trigger from continuous polling so we don't want a flood.
 ORDER_BOOK_DEBOUNCE_SECONDS = 30 * 60
@@ -113,6 +169,15 @@ class WhaleSignalEngine:
             signals_fired.append(sig)
 
         sig = self._check_no_position_entry(trade, now_ts)
+        if sig:
+            signals_fired.append(sig)
+
+        # New validated signals (v3)
+        sig = self._check_late_conviction(trade, now_ts)
+        if sig:
+            signals_fired.append(sig)
+
+        sig = self._check_tier_entry(trade, now_ts)
         if sig:
             signals_fired.append(sig)
 
@@ -320,6 +385,80 @@ class WhaleSignalEngine:
                        if w in (getattr(self, '_tripwire_tier1', set())))
         confidence = min(activity["total_trades"] / 3.0, 1.0) * 0.72
         return self._fire_signal("pre_deadline_surge", trade, round(confidence, 4), now_ts)
+
+    def _check_late_conviction(self, trade: WhaleTrade, now_ts: int) -> dict | None:
+        """Top-tier wallet makes a large trade past 90% of market lifetime.
+
+        Backtested: N=173 OOS, WR=73%, EV=+0.227, p<0.001.
+        """
+        # Must be a tracked-tier wallet
+        if trade.wallet_tier not in ("tier1h", "tier1", "tier2"):
+            return None
+        # Must be in uncertain zone
+        if trade.price is None or trade.price < 0.15 or trade.price > 0.85:
+            return None
+        # Check market lifetime percentage
+        if not self.universe:
+            return None
+        entry = self.universe._by_condition.get(trade.condition_id)
+        if not entry:
+            return None
+        end_iso = entry.get("end_date_iso") or entry.get("end_date")
+        if not end_iso:
+            return None
+        try:
+            from datetime import datetime, timezone
+            end_dt = datetime.fromisoformat(end_iso.replace("Z", "+00:00"))
+            created_iso = entry.get("created_at") or entry.get("start_date_iso")
+            if created_iso:
+                created_dt = datetime.fromisoformat(created_iso.replace("Z", "+00:00"))
+            else:
+                created_dt = end_dt  # fallback: unknown start → skip
+            now_dt = datetime.fromtimestamp(now_ts, tz=timezone.utc)
+            total_life = (end_dt - created_dt).total_seconds()
+            elapsed = (now_dt - created_dt).total_seconds()
+            if total_life <= 0:
+                return None
+            life_pct = elapsed / total_life
+        except Exception:
+            return None
+        if life_pct < 0.90:
+            return None
+        # Check trade size is top-25% for this wallet (conviction)
+        profile = self.db.get_profile(trade.wallet)
+        if profile:
+            avg_size = profile.get("avg_position_size_usdc") or profile.get("avg_win_size_usdc") or 0
+            if avg_size > 0 and trade.size < avg_size * 0.75:
+                return None
+        # Confidence: higher for tier1h, boosted by life_pct closeness to 1.0
+        base = 0.60 if trade.wallet_tier == "tier1h" else 0.55 if trade.wallet_tier == "tier1" else 0.50
+        confidence = min(base + (life_pct - 0.90) * 3.0, 0.85)
+        return self._fire_signal("late_conviction", trade, round(confidence, 4), now_ts,
+                                 extra={"market_life_pct": round(life_pct, 3)})
+
+    def _check_tier_entry(self, trade: WhaleTrade, now_ts: int) -> dict | None:
+        """S/A tier wallet enters an uncertain-zone market.
+
+        Backtested: N=20 OOS, WR=80%, EV=+0.195, p=0.009.
+        Uses wallet_category_profiles S/A tiers (per-category, not global).
+        """
+        if trade.price is None or trade.price < 0.25 or trade.price > 0.75:
+            return None
+        # Check category-specific tier from wallet_category_profiles
+        with self.db._lock:
+            row = self.db._conn.execute(
+                "SELECT tier, win_rate FROM wallet_category_profiles WHERE wallet = ? AND category = ?",
+                (trade.wallet, trade.category),
+            ).fetchone()
+        if not row or row[0] not in ("S", "A"):
+            return None
+        tier_letter = row[0]
+        tier_wr = row[1] or 0.5
+        confidence = min(0.55 + (tier_wr - 0.50) * 1.5, 0.85)
+        if tier_letter == "S":
+            confidence = min(confidence + 0.05, 0.90)
+        return self._fire_signal("tier_entry", trade, round(confidence, 4), now_ts,
+                                 extra={"wallet_cat_tier": tier_letter, "wallet_cat_wr": tier_wr})
 
     def _check_cascade(self, trade: WhaleTrade, now_ts: int) -> dict | None:
         """3+ distinct tier-1 wallets sequentially entering same side."""
@@ -659,6 +798,13 @@ class WhaleSignalEngine:
         # Track category
         self.db.increment_category_signal(trade.category)
 
+        # Record in signal_outcomes for EV / live-readiness tracking.
+        # Non-fatal — this must never block signal processing.
+        try:
+            self._record_signal_outcome(signal, trade, signal_type, confidence, now_ts)
+        except Exception as exc:
+            logger.debug("signal_outcomes record failed: %s", exc)
+
         print(
             f"[SIGNAL] {signal_type} | {trade.wallet_tier.upper()} | "
             f"{trade.wallet[:10]}... | {trade.side} | "
@@ -666,7 +812,26 @@ class WhaleSignalEngine:
             f"conf={confidence:.2f} | ${trade.size:.0f}"
         )
 
-        # Paper executor — place trade for $100K bankroll system
+        # Paper executor — place trade for $100K bankroll system.
+        # Block signals that are proven to have zero/negative edge.
+        _NON_TRADEABLE = ("velocity_detector", "order_book_monitor")
+        if trade.wallet in _NON_TRADEABLE:
+            return signal  # log but don't trade
+        if signal_type in DISABLED_SIGNAL_TYPES:
+            # whale_entry is disabled from direct execution, but if the
+            # firing wallet is a copyable archetype (not a bot), fork a
+            # whale_entry_filtered signal that IS eligible for execution.
+            if signal_type == "whale_entry":
+                self._maybe_fire_filtered_whale_entry(signal, trade, now_ts)
+                self._maybe_fire_insider_entry(signal, trade, now_ts)
+            logger.info("[DISABLED] %s signal blocked from trading", signal_type)
+            return signal  # log but don't trade
+        if signal_type in INFORMATIONAL_SIGNALS:
+            logger.info("[INFO_ONLY] %s logged as informational, not trading", signal_type)
+            return signal  # log but don't trade
+        if _is_sports_market(trade.category, trade.question):
+            return signal  # log but don't trade
+
         try:
             from trading_platform.polymarket.polymarket_paper_executor import PolymarketPaperExecutor
             if not hasattr(self, "_paper"):
@@ -695,6 +860,14 @@ class WhaleSignalEngine:
                              trade.condition_id, signal_type, now_ts),
                         )
                         self.db._conn.execute(
+                            """UPDATE signal_outcomes
+                               SET paper_trade_id=?, paper_stake_usd=?
+                               WHERE condition_id=? AND signal_type=?
+                                 AND fired_at=?""",
+                            (paper_trade["id"], paper_trade["size_usd"],
+                             trade.condition_id, signal_type, now_ts),
+                        )
+                        self.db._conn.execute(
                             """UPDATE wallet_alerts
                                SET paper_trade_fired = 1
                                WHERE wallet = ? AND token_id = ? AND side = ?
@@ -714,20 +887,23 @@ class WhaleSignalEngine:
             logger.warning("[SIGNAL\u2192TRADE] EXECUTOR_FAILED: %s", exc)
 
         # Live executor — DRY_RUN by default. Will be blocked by KillSwitch
-        # unless POLYMARKET_LIVE_ENABLED=1 in .env. This is purely
-        # additive: failures here never affect paper trading.
-        try:
-            from trading_platform.polymarket.polymarket_live_executor import PolymarketLiveExecutor
-            if not hasattr(self, "_live"):
-                self._live = PolymarketLiveExecutor()
-            live_result = self._live.execute(signal)
-            if live_result.get("success"):
-                if live_result.get("mode") == "dry_run":
-                    logger.info("[LIVE_DRY] would trade: %s", live_result)
-                elif live_result.get("mode") == "live":
-                    logger.warning("[LIVE_TRADE] EXECUTED: %s", live_result)
-        except Exception as exc:
-            logger.debug("[LIVE] Executor error: %s", exc)
+        # unless POLYMARKET_LIVE_ENABLED=1 in .env. Purely additive:
+        # failures here never affect paper trading.
+        # LIVE_SIGNAL_TYPES is a code-level whitelist on top of KillSwitch.
+        LIVE_SIGNAL_TYPES = {"accumulation", "whale_entry_filtered"}
+        if signal_type in LIVE_SIGNAL_TYPES:
+            try:
+                from trading_platform.polymarket.polymarket_live_executor import PolymarketLiveExecutor
+                if not hasattr(self, "_live"):
+                    self._live = PolymarketLiveExecutor()
+                live_result = self._live.execute(signal)
+                if live_result.get("success"):
+                    if live_result.get("mode") == "dry_run":
+                        logger.info("[LIVE_DRY] would trade: %s", live_result)
+                    elif live_result.get("mode") == "live":
+                        logger.warning("[LIVE_TRADE] EXECUTED: %s", live_result)
+            except Exception as exc:
+                logger.debug("[LIVE] Executor error: %s", exc)
 
         # Telegram alerts (non-blocking, enriched with profile)
         try:
@@ -737,10 +913,167 @@ class WhaleSignalEngine:
             if trade.wallet_tier in ("tier1", "tier1h"):
                 alerter.send_whale_detection(trade, profile=profile)
             alerter.send_signal(signal)
+
+            # Political/geopolitical whale alert: if the firing wallet is
+            # S/A/B tier in politics or geopolitics, route it through the
+            # dedicated loud alert path so operator doesn't miss it.
+            if trade.category in ("politics", "geopolitics") and trade.wallet:
+                with self.db._lock:
+                    tier_row = self.db._conn.execute(
+                        """SELECT tier, win_rate, monthly_pnl
+                           FROM wallet_category_profiles
+                           WHERE wallet = ? AND category = ?""",
+                        (trade.wallet, trade.category),
+                    ).fetchone()
+                if tier_row and tier_row[0] in ("S", "A", "B"):
+                    alerter.send_political_whale(
+                        signal,
+                        tier=tier_row[0],
+                        win_rate=float(tier_row[1] or 0),
+                        pnl_30d=float(tier_row[2] or 0),
+                    )
+
+            # Insider entry alert
+            if signal_type == "insider_entry":
+                alerter.send_insider_entry(signal)
         except Exception:
             pass
 
         return signal
+
+    # ── signal_outcomes recorder ───────────────────────────────────────────
+
+    def _record_signal_outcome(
+        self,
+        signal: dict,
+        trade: WhaleTrade,
+        signal_type: str,
+        confidence: float,
+        now_ts: int,
+    ) -> None:
+        """Insert a row into signal_outcomes for EV tracking. Idempotent."""
+        with self.db._lock:
+            self.db._conn.execute(
+                """INSERT OR IGNORE INTO signal_outcomes
+                    (signal_type, fired_at, condition_id, token_id, question,
+                     category, direction, confidence, entry_price, wallet,
+                     wallet_tier, paper_trade_id, paper_stake_usd)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    signal_type,
+                    now_ts,
+                    trade.condition_id,
+                    signal.get("token_id"),
+                    (trade.question or "")[:200],
+                    trade.category,
+                    trade.side,
+                    float(confidence),
+                    float(trade.price) if trade.price is not None else None,
+                    trade.wallet,
+                    trade.wallet_tier,
+                    signal.get("paper_trade_id"),
+                    signal.get("paper_stake") or signal.get("stake_usd"),
+                ),
+            )
+            self.db._conn.commit()
+
+    # ── whale_entry_filtered fork ─────────────────────────────────────────────
+
+    def _maybe_fire_filtered_whale_entry(
+        self,
+        signal: dict,
+        trade: "WhaleTrade",
+        now_ts: int,
+    ) -> None:
+        """If the whale_entry wallet is a copyable archetype, fire a
+        whale_entry_filtered signal that IS eligible for paper/live execution."""
+        try:
+            from trading_platform.polymarket.wallet_archetype import WalletArchetypeClassifier
+            if not hasattr(self, "_archetype_clf"):
+                self._archetype_clf = WalletArchetypeClassifier(str(self.db._path))
+            wallet = trade.wallet or ""
+            if not wallet:
+                return
+            archetype = self._archetype_clf.get_archetype(wallet)
+            if not self._archetype_clf.is_copyable(wallet):
+                logger.debug(
+                    "[FILTERED] skip whale_entry from %s wallet %s",
+                    archetype or "unknown", wallet[:14],
+                )
+                return
+
+            confidence = float(signal.get("confidence") or 0)
+            # Boost for specialist/conviction in geopolitics only.
+            # Politics has no demonstrated positive EV on any signal type
+            # (see reports/category_grouping_analysis_2026-04-12.md).
+            if archetype in ("specialist", "conviction") and trade.category == "geopolitics":
+                confidence = min(1.0, confidence + 0.15)
+
+            filtered = {**signal}
+            filtered["signal_type"] = "whale_entry_filtered"
+            filtered["original_type"] = "whale_entry"
+            filtered["wallet_archetype"] = archetype
+            filtered["confidence"] = confidence
+
+            self._fire_signal(
+                "whale_entry_filtered", trade, confidence, now_ts,
+                extra={"wallet_archetype": archetype, "original_type": "whale_entry"},
+            )
+        except Exception as exc:
+            logger.debug("filtered whale_entry fork failed: %s", exc)
+
+    # ── insider_entry fork ─────────────────────────────────────────────────
+
+    _ELECTION_KW = frozenset({"election", "vote", "primary", "nominee", "ballot"})
+
+    def _maybe_fire_insider_entry(
+        self,
+        signal: dict,
+        trade: "WhaleTrade",
+        now_ts: int,
+    ) -> None:
+        """Fire insider_entry if the wallet is a detected insider."""
+        try:
+            from trading_platform.polymarket.insider_detector import InsiderDetector
+            if not hasattr(self, "_insider_det"):
+                self._insider_det = InsiderDetector(str(self.db._path))
+
+            wallet = trade.wallet or ""
+            if not self._insider_det.is_insider(wallet):
+                return
+
+            price = float(trade.price or 0)
+            if price < 0.15 or price > 0.85:
+                return
+
+            # Election exclusion (insiders underperform on elections)
+            q = (trade.question or "").lower()
+            if any(k in q for k in self._ELECTION_KW):
+                return
+
+            profile = self._insider_det.get_insider_profile(wallet) or {}
+            acc = profile.get("uncertain_accuracy", 0.5)
+
+            # Confidence: base + accuracy boost + category boosts
+            confidence = 0.50 + (acc - 0.50) * 1.0
+            confidence += min(profile.get("uncertain_trades", 0) / 200, 0.10)
+            if trade.category == profile.get("primary_category"):
+                confidence += 0.05
+            if trade.category in ("geopolitics", "politics"):
+                confidence += 0.05
+            confidence = max(0.30, min(0.95, confidence))
+
+            self._fire_signal(
+                "insider_entry", trade, round(confidence, 4), now_ts,
+                extra={
+                    "insider_score": profile.get("insider_score"),
+                    "insider_accuracy": acc,
+                    "insider_sample": profile.get("uncertain_trades"),
+                    "original_type": "whale_entry",
+                },
+            )
+        except Exception as exc:
+            logger.debug("insider_entry fork failed: %s", exc)
 
     # ── Resolution + queries ─────────────────────────────────────────────────
 

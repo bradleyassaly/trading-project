@@ -43,12 +43,13 @@ class TestLiveTickStore:
         assert row is not None
         store.close()
 
-    def test_journal_mode_delete(self, tmp_path: Path) -> None:
-        # DELETE mode (not WAL) — WAL fails on NTFS bind-mounts inside
-        # the WSL2 Docker stack we deploy with. See db_connection.py.
+    def test_journal_mode_wal(self, tmp_path: Path) -> None:
+        # WAL mode — switched back from DELETE after the orphaned .db-shm
+        # cleanup proved WAL works on this Docker bind-mount. See
+        # OPERATIONS.md and db_connection.py.
         store = LiveTickStore(tmp_path / "test.db")
         mode = store._conn.execute("PRAGMA journal_mode").fetchone()[0]
-        assert mode == "delete"
+        assert mode == "wal"
         store.close()
 
     def test_insert_and_retrieve_tick(self, tmp_path: Path) -> None:

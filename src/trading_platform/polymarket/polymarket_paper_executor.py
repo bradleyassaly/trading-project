@@ -31,19 +31,24 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[3]
 _WALLET_DB_PATH = _PROJECT_ROOT / "data" / "polymarket" / "wallet_intelligence.db"
 
 SIGNAL_BANKROLL = {
-    "wallet_reversal":    18_000,
-    "cascade":            15_000,
-    "oversized_bet":      15_000,
-    "accumulation":       12_000,
-    "market_maker_flip":  12_000,
-    "convergence":        12_000,
-    "price_velocity":     10_000,
-    "specialist_entry":    8_000,
-    "whale_exit":          8_000,
-    "no_position_entry":   8_000,
-    "pre_deadline_surge":  5_000,
-    "position_reduction":  5_000,
-    "whale_entry":         3_000,
+    "accumulation":            20_000,  # strongest structural signal (WR 80%, EV +0.28)
+    "late_conviction":         15_000,  # late entry + large size (N=173, WR 73%, EV +0.23)
+    "specialist_entry":        12_000,  # specialist in own category (N=25, WR 76%, EV +0.27)
+    "tier_entry":              10_000,  # S/A tier in uncertain zone (N=20, WR 80%, EV +0.20)
+    "insider_entry":           15_000,  # disabled: sampling bias
+    "whale_entry_filtered":    15_000,  # copyable wallets only (WR 72%, EV +0.15)
+    "wallet_reversal":         18_000,
+    "cascade":                 15_000,
+    "oversized_bet":           15_000,
+    "market_maker_flip":       12_000,
+    "convergence":             12_000,
+    "price_velocity":          10_000,
+    "specialist_entry":         8_000,
+    "whale_exit":               8_000,
+    "no_position_entry":        8_000,
+    "pre_deadline_surge":       5_000,
+    "position_reduction":       5_000,
+    "whale_entry":              3_000,
 }
 
 MIN_CONFIDENCE = 0.35
@@ -56,7 +61,7 @@ MIN_CONFIDENCE_BY_TYPE = {
 }
 MAX_POSITION_PCT = 0.15
 MIN_STAKE = 25.0
-STARTING_BANKROLL = 100_000
+STARTING_BANKROLL = 10_000  # Paper validation phase — not production size
 
 # Fillability floor: don't trade markets priced in the extreme tails. The
 # previous executor produced 11/16 "winning" trades by buying NO at
@@ -65,8 +70,23 @@ STARTING_BANKROLL = 100_000
 # fill at those prices on the real CLOB. The Bayesian win-rate / Kelly
 # fraction downstream then read those fictional fills as evidence the
 # strategy worked. See reports/data_validation.md DV-5.
-MIN_ENTRY_PRICE = 0.05
-MAX_ENTRY_PRICE = 0.95
+# Entry price bounds — validated via reports/win_rate_validation.md.
+# Alpha concentrates in 0.20-0.60; tokens <0.10 are noise, >0.80 are poor R/R.
+MIN_ENTRY_PRICE = 0.10
+MAX_ENTRY_PRICE = 0.80
+
+# Optimal band where historical profit is highest (72-74% WR, $67-229 avg PnL).
+OPTIMAL_BAND_LOW = 0.20
+OPTIMAL_BAND_HIGH = 0.60
+OPTIMAL_BAND_BOOST = 1.15  # confidence multiplier for sweet spot
+
+# Kelly sizing — Half-Kelly from validated 0.10-0.80 data (WR=73%, odds=0.82)
+HALF_KELLY = 0.05  # 5% of available bankroll (quarter-Kelly, conservative for paper phase)
+MIN_STAKE_USD = 5.0
+MAX_STAKE_USD = 500.0
+MAX_PORTFOLIO_PCT = 0.30  # never deploy >30% of bankroll
+MAX_CATEGORY_PCT = 0.40   # max 40% of bankroll in any single category
+MAX_SLIPPAGE = 0.05       # reject if price moved >5% since whale traded
 
 _PAPER_TRADES_SCHEMA = """
 CREATE TABLE IF NOT EXISTS polymarket_paper_trades (
@@ -100,30 +120,28 @@ class PolymarketPaperExecutor:
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
-        self._conn = sqlite3.connect(str(self.db_path), check_same_thread=False, timeout=30)
-        # DELETE mode (not WAL) — bind-mount safe for Docker on WSL2.
-        self._conn.execute("PRAGMA journal_mode=DELETE")
-        self._conn.execute("PRAGMA busy_timeout=30000")
+        self._conn = sqlite3.connect(str(self.db_path), check_same_thread=False, timeout=60)
+        for stmt in ("PRAGMA busy_timeout=60000", "PRAGMA journal_mode=DELETE", "PRAGMA synchronous=NORMAL"):
+            try:
+                self._conn.execute(stmt)
+            except sqlite3.OperationalError:
+                pass
         self._migrate()
 
         # New polymarket_paper_trades table lives in wallet_intelligence.db
         self._wallet_db_path = _WALLET_DB_PATH
         self._wallet_lock = threading.Lock()
-        self._wallet_conn = sqlite3.connect(str(self._wallet_db_path), check_same_thread=False, timeout=30)
-        # The wallet DB may already be open in another process (api,
-        # scheduler, live-collect) — those processes have already set
-        # DELETE mode, and trying to set it again here can raise
-        # "database is locked" because PRAGMA journal_mode acquires an
-        # exclusive lock briefly. The mode is per-database not per-
-        # connection, so swallowing the error is safe.
         try:
-            self._wallet_conn.execute("PRAGMA journal_mode=DELETE")
-        except sqlite3.OperationalError:
-            pass
-        try:
-            self._wallet_conn.execute("PRAGMA busy_timeout=30000")
-        except sqlite3.OperationalError:
-            pass
+            from trading_platform.polymarket.db import connect_wallet_db
+            self._wallet_conn = connect_wallet_db(self._wallet_db_path, check_same_thread=False)
+        except Exception:
+            # Fallback for tests or when db module isn't available
+            self._wallet_conn = sqlite3.connect(str(self._wallet_db_path), check_same_thread=False, timeout=60)
+            for stmt in ("PRAGMA busy_timeout=60000", "PRAGMA journal_mode=DELETE", "PRAGMA synchronous=NORMAL"):
+                try:
+                    self._wallet_conn.execute(stmt)
+                except sqlite3.OperationalError:
+                    pass
         # The schema is idempotent (CREATE TABLE IF NOT EXISTS) and is
         # already present in the production DB. Tests construct multiple
         # executors against a wallet DB another process holds open, which
@@ -247,12 +265,40 @@ class PolymarketPaperExecutor:
 
     # ── New $100K bankroll path (writes to wallet_intelligence.db) ──────────
 
-    def _compute_stake(self, signal_type: str, confidence: float, wallet: str) -> float:
-        """Compute stake using wallet's Kelly fraction and Sharpe ratio.
+    def _compute_stake(self, signal_type: str, confidence: float,
+                        wallet: str, category: str = "other") -> tuple[float, str]:
+        """Compute stake using half-Kelly from alpha_scores distribution.
 
+        Returns (stake, reason) where reason explains the sizing decision.
         Falls back to confidence-based sizing if analytics unavailable.
         """
         bankroll = SIGNAL_BANKROLL.get(signal_type, 3000)
+
+        # Try alpha_scores Kelly first (per wallet×category)
+        try:
+            alpha_row = self._wallet_conn.execute(
+                """SELECT kelly_fraction, sharpe_ratio, avg_win_pnl,
+                          avg_loss_pnl, profit_factor
+                   FROM wallet_alpha_scores
+                   WHERE wallet = ? AND category = ? AND is_copyable = 1""",
+                (wallet, category),
+            ).fetchone()
+        except Exception:
+            alpha_row = None
+
+        if alpha_row and alpha_row[0] is not None and alpha_row[0] > 0:
+            kelly = alpha_row[0]
+            fraction = kelly * 0.5  # half-Kelly for safety
+            raw = bankroll * fraction
+            stake = max(MIN_STAKE, min(raw, 50.0))  # $10 min, $50 max for paper
+            reason = (
+                f"half-Kelly: K={kelly*100:.1f}%, hK={fraction*100:.1f}%, "
+                f"raw=${raw:.0f}, bounded=${stake:.0f} "
+                f"(bankroll=${bankroll:,}, PF={alpha_row[4] or 0:.1f}x)"
+            )
+            return round(stake, 2), reason
+
+        # Fallback: wallet_profiles Kelly
         try:
             with self._wallet_lock:
                 row = self._wallet_conn.execute(
@@ -264,32 +310,25 @@ class PolymarketPaperExecutor:
             row = None
 
         if not row or row[0] is None:
-            # No analytics yet — fall back to confidence-based sizing
-            return round(bankroll * min(confidence, MAX_POSITION_PCT), 2)
+            stake = round(bankroll * min(confidence, MAX_POSITION_PCT), 2)
+            return max(MIN_STAKE, stake), f"confidence-based: {confidence:.2f} * ${bankroll:,}"
 
         kelly, sharpe, trend = row[0], row[1], row[2]
         base_pct = kelly if kelly is not None else min(confidence, MAX_POSITION_PCT)
 
-        # Sharpe multiplier (conservative when unknown or poor)
         if sharpe is not None and sharpe > 0:
             sharpe_mult = min(max(sharpe / 1.0, 0.5), 1.5)
         else:
             sharpe_mult = 0.75
 
-        # Trend multiplier
         if trend is not None:
-            if trend > 1.2:
-                trend_mult = 1.1
-            elif trend < 0.5:
-                trend_mult = 0.8
-            else:
-                trend_mult = 1.0
+            trend_mult = 1.1 if trend > 1.2 else 0.8 if trend < 0.5 else 1.0
         else:
             trend_mult = 1.0
 
-        final_pct = base_pct * sharpe_mult * trend_mult
-        final_pct = max(0.01, min(final_pct, MAX_POSITION_PCT))
-        return max(MIN_STAKE, round(bankroll * final_pct, 2))
+        final_pct = max(0.01, min(base_pct * sharpe_mult * trend_mult, MAX_POSITION_PCT))
+        stake = max(MIN_STAKE, round(bankroll * final_pct, 2))
+        return stake, f"profile-Kelly: K={kelly}, S={sharpe}, T={trend}"
 
     def execute_signal(self, signal: dict[str, Any]) -> dict[str, Any] | None:
         """Place a paper trade for a fired signal in polymarket_paper_trades.
@@ -307,6 +346,19 @@ class PolymarketPaperExecutor:
         if signal_type not in SIGNAL_BANKROLL:
             return None
 
+        # Category exclusions per signal type. Crypto accumulation: 7 signals,
+        # 0 wins, EV=-0.50 on corrected data. Sports/entertainment are also
+        # negative. See reports/category_grouping_analysis_2026-04-12.md.
+        _EXCLUDED_CATS = {
+            "accumulation": {"crypto", "entertainment", "sports"},
+            "insider_entry": {"crypto", "entertainment", "sports"},
+        }
+        category = signal.get("category") or "other"
+        excluded = _EXCLUDED_CATS.get(signal_type, set())
+        if category in excluded:
+            logger.info("[PAPER] SKIP %s in excluded category %s", signal_type, category)
+            return None
+
         # Layer 3: cumulative drawdown circuit breaker. Blocks ALL trades
         # — paper or live — once cumulative drawdown from peak crosses
         # the threshold. Initialized lazily; absent state means no block.
@@ -319,6 +371,23 @@ class PolymarketPaperExecutor:
                 return None
         except Exception as exc:
             logger.debug("circuit breaker check failed (proceeding): %s", exc)
+
+        # Layer 4: KillSwitch. Battle-tested on paper now so the exact
+        # same gate guards live trades once POLYMARKET_LIVE_ENABLED=1.
+        # In paper mode the master-switch check is bypassed — we want
+        # to keep collecting paper data to let the edge gates mature —
+        # but the emergency stop file, position cap, and size cap still
+        # apply so the switch can be exercised.
+        try:
+            from trading_platform.polymarket.kill_switch import KillSwitch
+            if not hasattr(self, "_kill_switch"):
+                self._kill_switch = KillSwitch(str(self._wallet_db_path))
+            stopped, stop_reason = self._kill_switch.is_emergency_stopped()
+            if stopped:
+                logger.warning("[KILL_SWITCH] BLOCKED: emergency stop active: %s", stop_reason)
+                return None
+        except Exception as exc:
+            logger.debug("kill switch check failed (proceeding): %s", exc)
 
         direction = (signal.get("direction") or "").upper()
         if direction not in ("BUY", "SELL"):
@@ -355,11 +424,14 @@ class PolymarketPaperExecutor:
             except Exception as exc:
                 logger.debug("alpha gate lookup failed: %s", exc)
 
-        # Fillability floor — reject extreme-tail entry prices.
+        # Entry price filter — validated bounds from win_rate_validation.md.
         entry_price_check = signal.get("price")
         if entry_price_check is not None:
             try:
                 ep = float(entry_price_check)
+                # Optimal band confidence boost
+                if OPTIMAL_BAND_LOW <= ep <= OPTIMAL_BAND_HIGH:
+                    confidence = min(0.95, confidence * OPTIMAL_BAND_BOOST)
                 if ep < MIN_ENTRY_PRICE or ep > MAX_ENTRY_PRICE:
                     logger.info(
                         "[SIGNAL\u2192TRADE] SKIP: %s entry_price=%.4f outside fillable band [%s, %s]",
@@ -381,20 +453,79 @@ class PolymarketPaperExecutor:
 
         wallet = signal.get("wallet", "")
 
-        # Calibrated stake: prefer the bankroll allocator's recommendation
-        # (Kelly-weighted from real outcomes) over the legacy compute_stake
-        # path. Fall back to legacy if calibration hasn't been built yet.
+        # ── Execution gates ─────────────────────────────────────────────
+        # Check spread, depth, staleness, exposure, drawdown BEFORE sizing.
+        # All gates fail-open on API errors (don't block on flaky CLOB).
+        gate_results: dict = {}
         try:
-            from trading_platform.polymarket.bankroll_allocator import BankrollAllocator
-            calibrated_stake = BankrollAllocator(str(self._wallet_db_path)).get_stake_for(signal_type)
-        except Exception:
-            calibrated_stake = 0.0
-        if calibrated_stake and calibrated_stake > 0:
-            stake = calibrated_stake
+            from trading_platform.polymarket.execution_gates import ExecutionGates
+            gates = ExecutionGates(db_path=str(self._wallet_db_path), mode="paper")
+            ev = signal.get("alpha_score", 0) or 0  # rough EV proxy
+            should_trade, gate_results = gates.run_all_gates(
+                token_id=signal.get("asset_id") or signal.get("token_id"),
+                expected_ev=ev,
+                stake=MIN_STAKE,  # pre-sizing check with minimum
+                category=category,
+                bankroll=STARTING_BANKROLL,
+                starting_bankroll=STARTING_BANKROLL,
+                whale_trade_price=signal.get("price"),
+                whale_trade_ts=signal.get("timestamp") or signal.get("trade_ts"),
+            )
+            if not should_trade:
+                failed = [k for k, v in gate_results.items()
+                          if isinstance(v, dict) and not v.get("passed", True)]
+                logger.info("[EXEC_GATE] SKIP: %s — %s", failed, signal_type)
+                return None
+        except Exception as exc:
+            logger.debug("execution gates failed (pass-through): %s", exc)
+
+        # Kelly-based position sizing — validated from win_rate_validation.md.
+        # PROBATION signals get minimum stake; others use half-Kelly.
+        from trading_platform.polymarket.whale_signal_engine import PROBATION_SIGNAL_TYPES
+        ep = float(signal.get("price") or 0.50)
+
+        with self._wallet_lock:
+            deployed = self._wallet_conn.execute(
+                "SELECT COALESCE(SUM(size_usd), 0) FROM polymarket_paper_trades WHERE exit_ts IS NULL AND archived = 0"
+            ).fetchone()[0]
+
+        if signal_type in PROBATION_SIGNAL_TYPES:
+            stake = MIN_STAKE_USD
+            size_reason = f"probation: ${MIN_STAKE_USD:.0f} (gathering data)"
         else:
-            stake = self._compute_stake(signal_type, confidence, wallet)
-        if stake < MIN_STAKE:
+            available = max(0, STARTING_BANKROLL - deployed)
+            base = available * HALF_KELLY * confidence
+            # Optimal band gets full size; edge band gets 70%
+            if OPTIMAL_BAND_LOW <= ep <= OPTIMAL_BAND_HIGH:
+                band_adj = 1.0
+            else:
+                band_adj = 0.7
+            stake = round(max(MIN_STAKE_USD, min(base * band_adj, MAX_STAKE_USD)), 2)
+            # Check portfolio concentration
+            if deployed + stake > STARTING_BANKROLL * MAX_PORTFOLIO_PCT:
+                stake = max(0, round(STARTING_BANKROLL * MAX_PORTFOLIO_PCT - deployed, 2))
+            size_reason = (
+                f"half-Kelly={HALF_KELLY:.0%} conf={confidence:.2f} "
+                f"band={'optimal' if band_adj == 1.0 else 'edge'} "
+                f"stake=${stake:.0f}"
+            )
+
+        if stake < MIN_STAKE_USD:
             return None
+
+        # Category concentration limit
+        try:
+            with self._wallet_lock:
+                cat_deployed = self._wallet_conn.execute(
+                    "SELECT COALESCE(SUM(size_usd), 0) FROM polymarket_paper_trades WHERE exit_ts IS NULL AND archived=0 AND category=?",
+                    (category,),
+                ).fetchone()[0]
+            if cat_deployed + stake > STARTING_BANKROLL * MAX_CATEGORY_PCT:
+                logger.info("[GATE] %s category at $%.0f (%.0f%%), cap is %.0f%% — rejected",
+                            category, cat_deployed, cat_deployed / STARTING_BANKROLL * 100, MAX_CATEGORY_PCT * 100)
+                return None
+        except Exception:
+            pass
 
         # Tri-factor fusion gate. Skip the trade entirely if the fusion
         # score is below the floor; halve the stake when the score is
@@ -456,7 +587,7 @@ class PolymarketPaperExecutor:
                 )
                 return None
             stake = round(stake * fusion.stake_multiplier, 2)
-            if stake < MIN_STAKE:
+            if stake < MIN_STAKE_USD:
                 return None
         except Exception as exc:
             logger.debug("fusion gate skipped: %s", exc)
@@ -509,6 +640,21 @@ class PolymarketPaperExecutor:
                         entry_price=float(entry_price or 0),
                         convergence_count=int(signal.get("converging_wallets") or 0),
                     )
+                    # Attach execution context to hypothesis
+                    hypo.position_size_reason = size_reason
+                    if signal.get("trade_ts") and signal.get("fired_at"):
+                        hypo.time_since_whale_trade = int(signal["fired_at"]) - int(signal["trade_ts"])
+                    elif signal.get("timestamp") and signal.get("fired_at"):
+                        hypo.time_since_whale_trade = int(signal["fired_at"]) - int(signal["timestamp"])
+                    # Attach gate results for post-trade analysis
+                    if gate_results:
+                        import json as _json
+                        hypo.gate_results_json = _json.dumps(gate_results, default=str)
+                        spread_data = gate_results.get("spread", {})
+                        hypo.market_spread_at_entry = spread_data.get("spread_pct")
+                        dd_data = gate_results.get("drawdown", {})
+                        hypo.drawdown_at_entry = dd_data.get("drawdown")
+                        hypo.size_multiplier = dd_data.get("size_multiplier")
                     hypothesis_text = hypo.thesis
                     persist_hypothesis(str(self._wallet_db_path), hypo, trade_id=trade_id)
                 except Exception as exc:
@@ -516,6 +662,25 @@ class PolymarketPaperExecutor:
 
                 try:
                     from trading_platform.polymarket.alert_manager import get_alert_manager
+                    # Build enhanced context for the Telegram alert
+                    extra_context = ""
+                    try:
+                        if hypo and hypo.expected_avg_win:
+                            extra_context = (
+                                f"\nEXPECTED: avg win +${hypo.expected_avg_win:.0f} "
+                                f"avg loss ${hypo.expected_avg_loss:.0f}"
+                            )
+                            if hypo.expected_profit_factor and hypo.expected_profit_factor < 99:
+                                extra_context += f" PF:{hypo.expected_profit_factor:.1f}x"
+                            if hypo.expected_kelly:
+                                extra_context += f" Kelly:{hypo.expected_kelly*100:.0f}%"
+                            if hypo.wallet_streak:
+                                extra_context += f" streak:{hypo.wallet_streak}"
+                        if size_reason:
+                            extra_context += f"\nSIZING: {size_reason}"
+                    except Exception:
+                        pass
+                    full_hypothesis = (hypothesis_text or "") + extra_context
                     get_alert_manager().alert_trade_placed(
                         signal_type=signal_type,
                         wallet=wallet,
@@ -525,7 +690,7 @@ class PolymarketPaperExecutor:
                         entry_price=float(entry_price or 0),
                         fusion_score=fusion_score_val,
                         wallet_tier=signal.get("wallet_tier"),
-                        hypothesis=hypothesis_text,
+                        hypothesis=full_hypothesis,
                         alpha_score=signal.get("alpha_score"),
                     )
                 except Exception as exc:
@@ -936,6 +1101,189 @@ class PolymarketPaperExecutor:
             "total_resolved": (row[0] or 0) if row else 0,
             "wins": (row[1] or 0) if row else 0,
             "total_pnl": float(row[2] or 0) if row else 0.0,
+        }
+
+    # ── Exit logic + mark-to-market ────────────────────────────────────────
+
+    STOP_LOSS = -0.25         # exit if unrealized loss > 25%
+    TAKE_PROFIT = 0.40        # exit if unrealized gain > 40%
+    TIME_DECAY_DAYS = 30      # exit if held > 30 days with no resolution
+    TIME_DECAY_MIN_MOVE = 0.05
+
+    def check_exits(self) -> dict[str, int]:
+        """Check all open positions for exit conditions.
+
+        Runs alongside check_and_resolve_open_trades(). Closes positions
+        that hit stop-loss, take-profit, or time-decay thresholds.
+        Returns {checked, exited, exit_reasons: {reason: count}}.
+        """
+        positions = self.get_open_positions()
+        exited = 0
+        reasons: dict[str, int] = {}
+
+        for pos in positions:
+            cid = pos.get("condition_id")
+            side = pos.get("side", "YES")
+            entry = float(pos.get("entry_price") or 0)
+            if not cid or entry <= 0:
+                continue
+
+            current = self._fetch_mid_price(cid)
+            if current is None:
+                continue
+
+            # Compute unrealized return
+            if side in ("YES", "BUY"):
+                unrealized = (current - entry) / entry
+            else:
+                unrealized = (entry - current) / max(1 - entry, 0.01)
+
+            # Update mark-to-market
+            self._update_mark(pos["id"], current, unrealized * float(pos.get("size_usd") or 0))
+
+            exit_reason = None
+
+            if unrealized <= self.STOP_LOSS:
+                exit_reason = "stop_loss"
+            elif unrealized >= self.TAKE_PROFIT:
+                exit_reason = "take_profit"
+            else:
+                age_days = (time.time() - (pos.get("entry_ts") or time.time())) / 86400
+                if age_days > self.TIME_DECAY_DAYS and abs(unrealized) < self.TIME_DECAY_MIN_MOVE:
+                    exit_reason = "time_decay"
+
+            if exit_reason:
+                self._close_position_early(pos, current, exit_reason)
+                exited += 1
+                reasons[exit_reason] = reasons.get(exit_reason, 0) + 1
+
+        return {"checked": len(positions), "exited": exited, "exit_reasons": reasons}
+
+    def _fetch_mid_price(self, condition_id: str) -> float | None:
+        """Fetch current mid-price for a market from signals or live ticks."""
+        try:
+            with self._wallet_lock:
+                row = self._wallet_conn.execute(
+                    """SELECT price FROM market_signals
+                       WHERE condition_id = ?
+                       ORDER BY fired_at DESC LIMIT 1""",
+                    (condition_id,),
+                ).fetchone()
+                if row and row[0]:
+                    return float(row[0])
+        except Exception:
+            pass
+        return None
+
+    def _update_mark(self, trade_id: int, current_price: float, unrealized: float) -> None:
+        """Update mark-to-market on an open position."""
+        try:
+            with self._wallet_lock:
+                self._wallet_conn.execute(
+                    """UPDATE polymarket_paper_trades
+                       SET last_mark_price = ?, last_mark_ts = ?, unrealized_pnl = ?
+                       WHERE id = ?""",
+                    (current_price, int(time.time()), round(unrealized, 2), trade_id),
+                )
+                self._wallet_conn.commit()
+        except Exception as exc:
+            logger.debug("mark update failed: %s", exc)
+
+    def _close_position_early(self, pos: dict, exit_price: float, reason: str) -> None:
+        """Close a paper trade early (not via resolution)."""
+        from trading_platform.polymarket.cost_model import CostModel
+        cm = CostModel()
+
+        side = pos.get("side", "YES")
+        size = float(pos.get("size_usd") or 0)
+        entry = float(pos.get("entry_price") or 0)
+
+        exit_cost = cm.exit_cost(exit_price, side, size)
+
+        if side in ("YES", "BUY"):
+            pnl = (exit_cost.effective_price - entry) * size / max(entry, 0.01)
+        else:
+            pnl = (entry - exit_cost.effective_price) * size / max(1 - entry, 0.01)
+
+        return_pct = pnl / size if size > 0 else 0
+        outcome = "win" if pnl > 0 else "loss"
+
+        try:
+            with self._wallet_lock:
+                self._wallet_conn.execute(
+                    """UPDATE polymarket_paper_trades
+                       SET exit_price = ?, exit_ts = ?, outcome = ?,
+                           return_pct = ?, realized_pnl = ?, exit_reason = ?,
+                           raw_exit_price = ?, exit_spread_cost = ?,
+                           exit_slippage_cost = ?, total_costs = ?
+                       WHERE id = ?""",
+                    (exit_cost.effective_price, int(time.time()), outcome,
+                     round(return_pct, 4), round(pnl, 2), reason,
+                     exit_price, exit_cost.spread_cost, exit_cost.slippage_cost,
+                     round(exit_cost.total_cost + float(pos.get("spread_cost") or 0) + float(pos.get("slippage_cost") or 0), 4),
+                     pos["id"]),
+                )
+                self._wallet_conn.commit()
+            logger.info(
+                "[EXIT] %s trade #%d: %s @ %.3f → %.3f pnl=$%.2f (%s)",
+                reason, pos["id"], side, entry, exit_cost.effective_price, pnl, outcome,
+            )
+        except Exception as exc:
+            logger.debug("close_position_early failed: %s", exc)
+
+    def snapshot_equity(self) -> dict[str, Any]:
+        """Record a point on the equity curve."""
+        positions = self.get_open_positions()
+        realized = 0.0
+        positions_value = 0.0
+
+        with self._wallet_lock:
+            row = self._wallet_conn.execute(
+                """SELECT COALESCE(SUM(realized_pnl), 0)
+                   FROM polymarket_paper_trades
+                   WHERE exit_ts IS NOT NULL AND archived = 0"""
+            ).fetchone()
+            realized = float(row[0]) if row else 0
+
+        unrealized = 0.0
+        for pos in positions:
+            mark = pos.get("last_mark_price") or pos.get("entry_price") or 0
+            entry = pos.get("entry_price") or 0
+            size = pos.get("size_usd") or 0
+            side = pos.get("side", "YES")
+            if side in ("YES", "BUY"):
+                u = (float(mark) - float(entry)) * float(size) / max(float(entry), 0.01)
+            else:
+                u = (float(entry) - float(mark)) * float(size) / max(1 - float(entry), 0.01)
+            unrealized += u
+            positions_value += float(size) + u
+
+        starting = STARTING_BANKROLL
+        cash = starting + realized - sum(float(p.get("size_usd") or 0) for p in positions)
+        total_equity = cash + positions_value
+
+        try:
+            with self._wallet_lock:
+                self._wallet_conn.execute(
+                    """INSERT OR REPLACE INTO paper_equity_snapshots
+                       (ts, cash, positions_value, total_equity, open_count,
+                        realized_pnl_cumulative, unrealized_pnl)
+                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    (int(time.time()), round(cash, 2), round(positions_value, 2),
+                     round(total_equity, 2), len(positions),
+                     round(realized, 2), round(unrealized, 2)),
+                )
+                self._wallet_conn.commit()
+        except Exception as exc:
+            logger.debug("equity snapshot failed: %s", exc)
+
+        return {
+            "cash": round(cash, 2),
+            "positions_value": round(positions_value, 2),
+            "total_equity": round(total_equity, 2),
+            "open_positions": len(positions),
+            "realized_pnl": round(realized, 2),
+            "unrealized_pnl": round(unrealized, 2),
         }
 
     def get_open_positions(self) -> list[dict[str, Any]]:

@@ -1,7 +1,9 @@
 import { useState, useEffect } from 'react'
 import { Link } from 'react-router-dom'
 import { api } from '../api/client'
+import { useApi } from '../hooks/useApi'
 import LoadingSkeleton from '../components/LoadingSkeleton'
+import SignalHistoryChart from '../components/charts/SignalHistoryChart'
 
 const TABS = [
   { id: 'performance', label: '📊 Performance' },
@@ -116,8 +118,51 @@ function PerformanceTab() {
     )
   }
 
+  // Compute alpha gate stats from by_type data
+  const totalFired = byType.reduce((s, t) => s + (t.n_resolved || 0) + (t.n_open || 0), 0)
+  const totalResolved = byType.reduce((s, t) => s + (t.n_resolved || 0), 0)
+  const totalWins = byType.reduce((s, t) => s + (t.wins || 0), 0)
+  const overallWR = totalResolved > 0 ? totalWins / totalResolved : null
+  const totalSkipped = data?.alpha_gate?.skipped ?? null
+  const totalSeen = data?.alpha_gate?.seen ?? null
+
   return (
     <div className="space-y-4">
+      {/* Alpha gate summary */}
+      <div className="grid grid-cols-2 lg:grid-cols-5 gap-3">
+        <div className="bg-surface-card rounded-lg p-3">
+          <p className="text-[10px] text-gray-500 mb-1">SIGNALS FIRED</p>
+          <p className="text-xl font-bold font-mono text-gray-200">{totalFired}</p>
+          <p className="text-[9px] text-gray-500">{totalResolved} resolved · {totalFired - totalResolved} open</p>
+        </div>
+        <div className="bg-surface-card rounded-lg p-3">
+          <p className="text-[10px] text-gray-500 mb-1">OVERALL WIN RATE</p>
+          <p className={`text-xl font-bold font-mono ${overallWR != null && overallWR >= 0.55 ? 'text-accent-green' : overallWR != null && overallWR < 0.45 ? 'text-accent-red' : 'text-gray-200'}`}>
+            {overallWR != null ? `${(overallWR * 100).toFixed(1)}%` : '—'}
+          </p>
+          <p className="text-[9px] text-gray-500">{totalWins}W / {totalResolved - totalWins}L</p>
+        </div>
+        <div className="bg-surface-card rounded-lg p-3">
+          <p className="text-[10px] text-gray-500 mb-1">TOTAL P&L</p>
+          <p className={`text-xl font-bold font-mono ${(portfolio.total_pnl || 0) >= 0 ? 'text-accent-green' : 'text-accent-red'}`}>
+            {fmtSignedUsd(portfolio.total_pnl)}
+          </p>
+          <p className="text-[9px] text-gray-500">{portfolio.pnl_pct != null ? `${portfolio.pnl_pct >= 0 ? '+' : ''}${portfolio.pnl_pct}%` : ''}</p>
+        </div>
+        <div className="bg-surface-card rounded-lg p-3">
+          <p className="text-[10px] text-gray-500 mb-1">SIGNAL TYPES</p>
+          <p className="text-xl font-bold font-mono text-gray-200">{byType.length}</p>
+          <p className="text-[9px] text-gray-500">{byType.filter(t => t.status === 'mature' || t.status === 'active').length} active</p>
+        </div>
+        {totalSkipped != null && (
+          <div className="bg-surface-card rounded-lg p-3">
+            <p className="text-[10px] text-gray-500 mb-1">ALPHA GATED</p>
+            <p className="text-xl font-bold font-mono text-gray-200">{totalSeen ?? '—'}</p>
+            <p className="text-[9px] text-gray-500">{totalSkipped} skipped by gate</p>
+          </div>
+        )}
+      </div>
+
       {/* Portfolio summary */}
       <div className="card">
         <div className="flex flex-wrap items-center gap-x-6 gap-y-2 text-[11px]">
@@ -315,6 +360,96 @@ function PerformanceTab() {
           </p>
         )}
       </div>
+
+      {/* Signal P&L History — one line per signal type */}
+      <div className="card">
+        <h2 className="text-sm font-medium text-gray-300 mb-2">Signal P&amp;L History</h2>
+        <SignalHistoryChart byType={byType} height={240} />
+      </div>
+
+      {/* Calibration table — predicted vs actual win rate */}
+      <CalibrationTable />
+    </div>
+  )
+}
+
+// ── Calibration Table (predicted vs actual WR) ──
+function CalibrationTable() {
+  const { data, loading } = useApi(api.calibrationStatus, 120_000)
+
+  if (loading && !data) return null
+  if (!data?.available) return null
+
+  const rows = data?.by_type ?? data?.calibration ?? []
+  if (!rows.length) return null
+
+  return (
+    <div className="card">
+      <h2 className="text-sm font-medium text-gray-300 mb-2">Signal Calibration</h2>
+      <p className="text-[10px] text-gray-600 mb-3">Bayesian win rate vs rolling win rate — divergence suggests regime change.</p>
+      <table className="w-full text-[10px]">
+        <thead>
+          <tr className="border-b border-surface-border text-gray-500 text-left">
+            <th className="pb-1 pr-2">Signal</th>
+            <th className="pb-1 pr-2 text-right">Sample</th>
+            <th className="pb-1 pr-2 text-right">Bayesian WR</th>
+            <th className="pb-1 pr-2 text-right">Rolling 10</th>
+            <th className="pb-1 pr-2 text-right">EV/Trade</th>
+            <th className="pb-1 pr-2 text-right">P.Factor</th>
+            <th className="pb-1 pr-2 text-right">Sharpe</th>
+            <th className="pb-1 pr-2 text-right">Kelly</th>
+            <th className="pb-1 pr-2 text-right">Stake</th>
+            <th className="pb-1">Status</th>
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-surface-border">
+          {rows.map(r => {
+            const wrColor =
+              r.bayesian_wr >= 0.55 ? 'text-accent-green' :
+              r.bayesian_wr >= 0.45 ? 'text-accent-yellow' : 'text-accent-red'
+            const evColor = (r.ev_per_trade || 0) > 0 ? 'text-accent-green' : 'text-accent-red'
+            const statusCls = {
+              live: 'bg-accent-green/20 text-accent-green',
+              weak: 'bg-accent-yellow/20 text-accent-yellow',
+              building: 'bg-gray-700 text-gray-400',
+              disabled: 'bg-gray-800 text-gray-600',
+            }[r.status] || 'bg-gray-700 text-gray-400'
+
+            return (
+              <tr key={r.signal_type} className="hover:bg-surface-hover">
+                <td className="py-1.5 pr-2 text-gray-300">
+                  {(r.signal_type || '').replace(/_/g, ' ')}
+                </td>
+                <td className="py-1.5 pr-2 text-right font-mono text-gray-400">{r.sample_size}</td>
+                <td className={`py-1.5 pr-2 text-right font-mono ${wrColor}`}>
+                  {r.bayesian_wr != null ? `${(r.bayesian_wr * 100).toFixed(1)}%` : '—'}
+                </td>
+                <td className="py-1.5 pr-2 text-right font-mono text-gray-400">
+                  {r.rolling_10_wr != null ? `${(r.rolling_10_wr * 100).toFixed(0)}%` : '—'}
+                </td>
+                <td className={`py-1.5 pr-2 text-right font-mono ${evColor}`}>
+                  {r.ev_per_trade != null ? `${r.ev_per_trade >= 0 ? '+' : ''}$${r.ev_per_trade.toFixed(0)}` : '—'}
+                </td>
+                <td className="py-1.5 pr-2 text-right font-mono text-gray-400">
+                  {r.profit_factor != null ? `${r.profit_factor.toFixed(1)}x` : '—'}
+                </td>
+                <td className="py-1.5 pr-2 text-right font-mono text-gray-400">
+                  {r.sharpe_ratio != null ? r.sharpe_ratio.toFixed(2) : '—'}
+                </td>
+                <td className="py-1.5 pr-2 text-right font-mono text-gray-400">
+                  {r.kelly_fraction != null ? `${(r.kelly_fraction * 100).toFixed(1)}%` : '—'}
+                </td>
+                <td className="py-1.5 pr-2 text-right font-mono text-gray-300">
+                  {r.recommended_stake_usd != null ? `$${r.recommended_stake_usd.toFixed(0)}` : '—'}
+                </td>
+                <td className="py-1.5">
+                  <span className={`px-1.5 py-0.5 rounded text-[8px] font-semibold ${statusCls}`}>{r.status}</span>
+                </td>
+              </tr>
+            )
+          })}
+        </tbody>
+      </table>
     </div>
   )
 }
@@ -456,6 +591,7 @@ export default function SignalLab() {
       <div>
         <p className="text-xs text-gray-600 mb-1">Trading Platform &gt; <span className="text-gray-400">Signal Lab</span></p>
         <h1 className="text-lg font-semibold text-gray-200">Signal Lab</h1>
+        <p className="text-xs text-gray-500 mt-0.5">Which signals work? — Track alpha-gated signal performance across all types</p>
       </div>
 
       <div className="flex gap-1 border-b border-surface-border">

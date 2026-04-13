@@ -223,4 +223,13 @@ export const api = {
   polymarketSubscriptionStatus: () => get('/polymarket/subscription-status'),
   polymarketSignalsFeed: () => get('/polymarket/signals-feed'),
   polymarketCategoryPerformance: () => get('/polymarket/category-performance'),
+  livePositions: () => get('/live/positions'),
+  liveHistory: (limit = 50) => get(`/live/history?limit=${limit}`),
+  liveExecutionQuality: () => get('/live/execution-quality'),
+  systemHealth: () => get('/system/health'),
+  killSwitch: () => get('/system/kill-switch'),
+  killSwitchTrip: (reason) => post('/system/kill-switch/trip', { reason }),
+  killSwitchReset: () => post('/system/kill-switch/reset'),
+  signalLiveReadiness: () => get('/signals/live-readiness'),
+  insidersList: () => get('/insiders/list'),
 }

@@ -71,6 +71,7 @@ class TestFillabilityFloor:
         assert executor.execute_signal(_signal(price=MAX_ENTRY_PRICE + 0.001)) is None
 
     def test_constants_are_what_we_expect(self) -> None:
-        # Guard against accidental loosening of the floor.
-        assert MIN_ENTRY_PRICE == 0.05
-        assert MAX_ENTRY_PRICE == 0.95
+        # Validated bounds from reports/win_rate_validation.md.
+        # Tightened from 0.05-0.95 to 0.10-0.80 based on profit-by-band analysis.
+        assert MIN_ENTRY_PRICE == 0.10
+        assert MAX_ENTRY_PRICE == 0.80

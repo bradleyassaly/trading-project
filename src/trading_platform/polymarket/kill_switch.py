@@ -47,17 +47,16 @@ class KillSwitchResult:
 class KillSwitch:
     """Multi-layer pre-trade safety check."""
 
-    # Tuneable hard limits — keep these conservative until live confidence builds.
-    MAX_DAILY_LOSS_PCT = 0.05
+    MAX_DAILY_LOSS_PCT = 0.10
     MAX_OPEN_POSITIONS = 10
-    MAX_TRADE_USD = 100
+    MAX_TRADE_USD = 25  # week 1 hard cap
     MIN_WIN_RATE = 0.52
     MIN_RESOLVED_HARD = 15
     PREFERRED_MIN_RESOLVED = 30
-    BANKROLL = 100_000  # TODO: read from live wallet balance
 
-    def __init__(self, db_path: str) -> None:
+    def __init__(self, db_path: str, bankroll: float = 350) -> None:
         self._db_path = str(db_path)
+        self.BANKROLL = bankroll
 
     # ── Per-trade gate ─────────────────────────────────────────────────────
 

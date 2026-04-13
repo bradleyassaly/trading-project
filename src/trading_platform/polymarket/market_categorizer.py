@@ -73,16 +73,55 @@ SPORTS_LEAGUE_PREFIXES = (
 # means political markets that mention bitcoin still classify as politics,
 # which is the desired behavior.
 
+GEOPOLITICS_KEYWORDS = frozenset({
+    # Foreign leaders / actors
+    "zelenskyy", "zelensky", "putin", "xi-jinping", "xi-", "netanyahu",
+    "khamenei", "ayatollah", "supreme-leader", "ayatollah-out",
+    "kim-jong", "kim-jong-un", "mohammed-bin-salman", "mbs-",
+    "erdogan", "orban", "tisza", "respect-and-freedom",
+    "macron", "merkel", "scholz", "starmer", "sunak", "johnson-boris",
+    "milei", "lula", "modi", "maduro", "assad",
+    # Countries / regions with heavy Polymarket geopolitical volume
+    "iran", "iranian", "tehran", "fordow", "natanz", "iraq", "iraqi",
+    "israel", "israeli", "idf", "idf-", "gaza", "west-bank",
+    "palestine", "palestinian", "lebanon", "lebanese",
+    "ukraine", "ukrainian", "kyiv", "kiev", "donbas", "crimea",
+    "russia", "russian", "kremlin", "wagner", "moscow",
+    "china-taiwan", "taiwan", "cross-strait",
+    "north-korea", "dprk", "pyongyang",
+    "venezuela", "syria", "yemen", "houthi", "houthis",
+    "hamas", "hezbollah", "irgc", "taliban",
+    "afghanistan", "pakistan", "india-pakistan", "myanmar", "sudan",
+    "ethiopia", "eritrea", "saudi-arabia", "saudi",
+    "hungary", "orban-out",
+    # Institutions and actions
+    "nato", "un-", "united-nations", "unsc", "ic-c", "icc-",
+    "iaea", "g7", "g20", "brics", "eu-sanctions",
+    "sanctions", "sanction", "embargo", "blockade",
+    "ceasefire", "peace-deal", "peace-talks", "peace-treaty",
+    "war", "wars", "invasion", "invasions", "territorial",
+    "sovereignty", "regime", "regime-fall", "regime-change", "coup",
+    "airstrike", "drone-strike", "missile-strike", "missile",
+    "nuclear", "nuclear-facility", "nuclear-deal", "nuclear-weapon",
+    "us-forces", "us-strikes", "us-x-iran", "us-x-russia",
+    "us-troops", "troop-withdrawal", "withdrawal",
+    "iran-deal", "jcpoa", "putin-fall", "putin-out",
+    "summit", "bilateral", "diplomatic", "embassy", "consulate",
+    "arms-deal", "defense-pact", "alliance", "treaty",
+    "refugee", "refugees", "humanitarian",
+    "military-action", "military-operation", "strike-on",
+    "hormuz", "kharg", "strait-of-hormuz", "red-sea",
+    "ukraine-war", "russia-ukraine", "israel-hamas", "israel-iran",
+    "iran-x-israel", "iran-israel",
+})
+
 POLITICS_KEYWORDS = frozenset({
-    # People — high priority for politics
+    # US politicians
     "trump", "biden", "harris", "pence", "obama", "clinton", "kamala",
     "vance", "desantis", "ramaswamy", "newsom", "musk-political",
     "vivek", "pelosi", "schumer", "mcconnell", "gaetz", "jordan",
     "powell", "yellen", "comer", "barr", "garland", "wray", "bondi",
     "hegseth", "rubio", "kennedy-rfk", "rfk", "rfk-jr", "tulsi",
-    "zelenskyy", "zelensky", "putin", "xi-jinping", "netanyahu",
-    "macron", "merkel", "scholz", "starmer", "sunak", "johnson-boris",
-    "milei", "lula", "modi", "kim-jong",
     # Offices and institutions
     "election", "elections", "election-day", "president", "presidential",
     "vice-president", "potus", "congress", "senate", "senator",
@@ -96,24 +135,17 @@ POLITICS_KEYWORDS = frozenset({
     "scotus", "supreme-court", "judge", "justice", "doj", "fbi", "cia",
     "nsa", "pentagon", "white-house", "whitehouse", "state-of-the-union",
     "us-politics", "us-election", "presidential-election",
-    # Geopolitics
-    "nato", "un-", "united-nations", "sanctions", "ceasefire", "war",
-    "wars", "treaty", "summit", "iran", "israel", "ukraine", "russia",
-    "russian", "taiwan", "china-taiwan", "china", "north-korea",
-    "venezuela", "syria", "yemen", "houthi", "gaza", "hamas", "lebanon",
+    # Domestic policy / border / law
     "border", "immigration", "deportation", "tariff", "tariffs",
-    "trade-war", "executive", "habeas-corpus", "martial-law",
-    "khamenei", "ayatollah", "regime", "fordow", "natanz", "iaea",
-    "nuclear-facility", "nuclear-deal", "nuclear", "missile-strike",
-    "airstrike", "drone-strike", "iranian", "tehran", "iran-deal",
-    "us-forces", "us-strikes", "us-x-iran", "us-x-russia",
-    "putin-fall", "putin-out", "regime-fall", "regime-change",
-    "supreme-leader", "ayatollah-out",
+    "trade-war", "habeas-corpus", "martial-law",
     "constitution", "constitutional", "amendment", "ratify", "law",
     "legislation", "policy", "bill-",
     # Cabinet / agency picks
     "cabinet-pick", "secretary-of-state", "treasury-secretary",
     "attorney-general", "fed-chair", "confirmation-hearing",
+    # Foreign elections (domestic to the target country, still "politics")
+    "peruvian-presidential", "peruvian-election",
+    "prime-minister", "next-prime-minister",
 })
 
 CRYPTO_KEYWORDS = frozenset({
@@ -235,8 +267,11 @@ SPORTS_KEYWORDS = frozenset({
 })
 
 
-# Priority order — first match wins
+# Priority order — first match wins. Geopolitics is checked BEFORE politics
+# because markets like "Will Biden sanction Iran" are primarily geopolitical
+# even though they mention a US politician.
 _KEYWORD_LISTS = (
+    ("geopolitics", GEOPOLITICS_KEYWORDS),
     ("politics", POLITICS_KEYWORDS),
     ("crypto", CRYPTO_KEYWORDS),
     ("economics", ECONOMICS_KEYWORDS),
@@ -246,7 +281,7 @@ _KEYWORD_LISTS = (
 )
 
 # Output categories (also used by the dynamic tier engine)
-CATEGORIES = ("politics", "crypto", "sports", "economics", "entertainment", "science", "other")
+CATEGORIES = ("politics", "geopolitics", "crypto", "sports", "economics", "entertainment", "science", "other")
 
 
 def _normalize(text: str) -> str:

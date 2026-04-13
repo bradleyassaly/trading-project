@@ -383,6 +383,15 @@ class PolymarketLiveCollector:
         if minutes_elapsed <= 0:
             return
         velocity = price_change / max(minutes_elapsed, 0.5)
+        # Classify the market at fire time so price_velocity signals carry
+        # a real category. Previously hardcoded to "other", which is why
+        # every velocity-fired signal was mis-tagged and the political /
+        # geopolitical wallet tiering path was never consulted.
+        try:
+            from trading_platform.polymarket.market_categorizer import classify_keywords
+            cat, _ = classify_keywords("", info.question or "")
+        except Exception:
+            cat = "other"
         try:
             self._signal_engine.on_price_velocity(
                 condition_id=info.condition_id or "",
@@ -392,7 +401,7 @@ class PolymarketLiveCollector:
                 current_price=newest_price,
                 minutes_elapsed=minutes_elapsed,
                 question=info.question or "",
-                category="other",
+                category=cat,
             )
         except Exception as exc:
             logger.debug("velocity signal failed: %s", exc)
@@ -611,7 +620,14 @@ class PolymarketLiveCollector:
                     "price": trade.get("price", 0),
                     "size": trade.get("size") or trade.get("amount", 0),
                     "asset_id": trade.get("asset") or trade.get("token_id", ""),
-                    "condition_id": trade.get("condition_id", ""),
+                    # Data API returns camelCase "conditionId", not "condition_id"
+                    "condition_id": (
+                        trade.get("conditionId")
+                        or trade.get("condition_id")
+                        or ""
+                    ),
+                    "question": trade.get("title", ""),
+                    "outcome": trade.get("outcome", ""),
                     "timestamp": ts,
                 }
                 self._check_whale(event)

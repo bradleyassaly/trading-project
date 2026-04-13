@@ -40,6 +40,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from trading_platform.polymarket.db import connect_wallet_db
 from trading_platform.polymarket.trade_hypotheses import ensure_schema as ensure_hypotheses_schema
 
 logger = logging.getLogger(__name__)
@@ -117,7 +118,7 @@ class KPITracker:
         dm = snapshot.get("daily_metrics", {}) or {}
         cumulative_pnl = (snapshot.get("claim_1_persistence") or {}).get("clean_cohort_pnl") or 0
         try:
-            conn = sqlite3.connect(self._db_path, timeout=30)
+            conn = connect_wallet_db(self._db_path)
             try:
                 conn.execute(
                     """INSERT OR REPLACE INTO thesis_daily_snapshots
@@ -147,7 +148,7 @@ class KPITracker:
 
     def get_history(self, days: int = 30) -> list[dict[str, Any]]:
         try:
-            conn = sqlite3.connect(self._db_path, timeout=10)
+            conn = connect_wallet_db(self._db_path)
             try:
                 cur = conn.execute(
                     """SELECT date, total_hypotheses, accuracy, trades_placed,
@@ -166,7 +167,7 @@ class KPITracker:
     # ── Internal: schemas ───────────────────────────────────────────────────
 
     def _ensure_snapshot_schema(self) -> None:
-        conn = sqlite3.connect(self._db_path, timeout=30)
+        conn = connect_wallet_db(self._db_path)
         try:
             conn.executescript(_SNAPSHOT_SCHEMA)
             conn.commit()
@@ -174,7 +175,7 @@ class KPITracker:
             conn.close()
 
     def _connect(self) -> sqlite3.Connection:
-        return sqlite3.connect(self._db_path, timeout=30)
+        return connect_wallet_db(self._db_path)
 
     # ── Thesis scorecard ────────────────────────────────────────────────────
 

@@ -165,6 +165,27 @@ SCHEDULE: list[Task] = [
         description="Midnight reset of circuit breaker daily loss state",
     ),
     Task(
+        name="db_backup",
+        # Daily SQLite backup using sqlite3's native .backup() API,
+        # which is safe to run while the DB is open and being written
+        # to (unlike a file copy which can race the WAL checkpoint).
+        # Keeps the last 7 daily backups; older ones are pruned.
+        cmd=(
+            "python -c \""
+            "import sqlite3, os, glob, time; "
+            "src='/app/data/polymarket/wallet_intelligence.db'; "
+            "os.makedirs('/app/data/backups', exist_ok=True); "
+            "dst=f'/app/data/backups/wallet_intelligence_{time.strftime(\\\"%Y%m%d\\\")}.db'; "
+            "s=sqlite3.connect(src); d=sqlite3.connect(dst); "
+            "s.backup(d); s.close(); d.close(); "
+            "files=sorted(glob.glob('/app/data/backups/wallet_intelligence_*.db')); "
+            "[os.remove(f) for f in files[:-7]]; "
+            "print(f'backup ok: {dst}')\""
+        ),
+        interval_seconds=24 * 3600,
+        description="Daily SQLite backup (rotates last 7 days)",
+    ),
+    Task(
         name="thesis_daily_snapshot",
         # Daily KPI snapshot for the thesis scorecard. Runs after the
         # daily digest so the digest's "today" numbers and the snapshot's
@@ -216,6 +237,40 @@ SCHEDULE: list[Task] = [
         interval_seconds=7 * 24 * 3600,
         description="Weekly catch-up for any null-category rows (DISABLED — missing CLI cmd)",
         enabled=False,
+    ),
+
+    Task(
+        name="paper_check_exits",
+        cmd="curl -fsS -X POST http://api:8001/api/paper/check-exits",
+        interval_seconds=15 * 60,
+        description="Check open paper trades for stop-loss, take-profit, time-decay exits (every 15min)",
+    ),
+    Task(
+        name="paper_equity_snapshot",
+        cmd="curl -fsS -X POST http://api:8001/api/paper/snapshot-equity",
+        interval_seconds=60 * 60,
+        description="Record equity curve data point (hourly)",
+    ),
+    Task(
+        name="position_mark_to_market",
+        cmd=(
+            "python -c \""
+            "from trading_platform.polymarket.position_monitor import mark_to_market; "
+            "r = mark_to_market(); print(f'[MTM] {r}')\""
+        ),
+        interval_seconds=30 * 60,
+        description="Snapshot open positions with current unrealized P&L (every 30 min)",
+    ),
+    Task(
+        name="wallet_trade_poller",
+        # The missing link: polls the Data API for recent trades by
+        # our 56 copyable wallets and feeds them through the signal
+        # engine (alpha gate → hypothesis → paper trade → Telegram).
+        # The CLOB WebSocket only streams market-level data, not
+        # per-wallet trades.  This poller bridges the gap.
+        cmd="trading-cli data polymarket poll-wallet-trades",
+        interval_seconds=5 * 60,
+        description="Poll Data API for copyable wallet trades → fire signals (every 5 min)",
     ),
 
     # ── TODO — wire when underlying commands are stable ────────────────
