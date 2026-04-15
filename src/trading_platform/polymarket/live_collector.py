@@ -794,6 +794,26 @@ class PolymarketLiveCollector:
         }
         ws_status_path.write_text(json.dumps(ws_status, indent=2), encoding="utf-8")
 
+        # Heartbeat into service_health so the watchdog can detect a silent
+        # WS death. Without this, a stalled WS only shows up indirectly
+        # through wallet_trades freshness — often hours later. This table
+        # is the ground truth for "is the collector alive right now?".
+        try:
+            from trading_platform.polymarket.db_connection import get_connection
+            conn = get_connection()
+            try:
+                detail = f"markets={len(self.markets)} ticks={self.state.ticks_stored}"
+                conn.execute(
+                    "INSERT INTO service_health (service, status, error_message, checked_at) VALUES (?, ?, ?, ?)",
+                    ("live_collect", "ok", detail, now_ts),
+                )
+                conn.commit()
+            finally:
+                try: conn.close()
+                except Exception: pass
+        except Exception as exc:
+            logger.debug("heartbeat write failed: %s", exc)
+
         # Periodic tripwire reload
         if self._tripwire:
             self._tripwire.maybe_reload()

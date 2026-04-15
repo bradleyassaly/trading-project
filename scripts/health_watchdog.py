@@ -143,6 +143,44 @@ def check_scheduler() -> ComponentState:
     return ComponentState("scheduler", True, f"{len(data.get('tasks', []))} tasks tracked")
 
 
+def check_live_collect() -> ComponentState:
+    """Detect silent WebSocket death via service_health heartbeat.
+
+    live_collector writes ("live_collect", "ok") every cycle (~5s). We
+    flag the service stale if the most recent heartbeat is >3 min old —
+    a real WS stall would otherwise go unnoticed until wallet_trades
+    freshness alerts fire much later.
+    """
+    STALE_THRESHOLD_S = 180
+    backend = os.environ.get("DB_BACKEND", "postgres").lower()
+    if backend != "postgres":
+        return ComponentState("live_collect", True, "skipped (sqlite backend)")
+    try:
+        import psycopg
+        host = os.environ.get("POSTGRES_HOST", "postgres")
+        port = int(os.environ.get("POSTGRES_PORT", "5432"))
+        user = os.environ.get("POSTGRES_USER", "polymarket")
+        pwd = os.environ.get("POSTGRES_PASSWORD", "polymarket_dev")
+        dbn = os.environ.get("POSTGRES_DB", "polymarket")
+        with psycopg.connect(host=host, port=port, user=user,
+                             password=pwd, dbname=dbn, connect_timeout=3) as conn:
+            cur = conn.execute(
+                "SELECT MAX(checked_at) FROM service_health WHERE service = 'live_collect'"
+            )
+            row = cur.fetchone()
+        last = int(row[0]) if row and row[0] else 0
+        age = time.time() - last
+        if not last:
+            return ComponentState("live_collect", False, "no heartbeat yet")
+        if age > STALE_THRESHOLD_S:
+            return ComponentState(
+                "live_collect", False, f"last heartbeat {age:.0f}s ago (threshold {STALE_THRESHOLD_S}s)",
+            )
+        return ComponentState("live_collect", True, f"heartbeat {age:.0f}s ago")
+    except Exception as e:
+        return ComponentState("live_collect", False, f"heartbeat check err: {str(e)[:80]}")
+
+
 def check_disk() -> ComponentState:
     try:
         free_bytes = shutil.disk_usage(str(PROJECT_ROOT)).free
@@ -182,7 +220,7 @@ def main() -> None:
     fail_count: dict[str, int] = {}       # consecutive-failure counter
     while True:
         now = time.time()
-        states = [check_api(), check_db(), check_scheduler(), check_disk()]
+        states = [check_api(), check_db(), check_scheduler(), check_live_collect(), check_disk()]
         in_grace = (now - startup_ts) < STARTUP_GRACE_SECONDS
         if in_grace and any(not s.healthy for s in states):
             logger.info("[grace] suppressed alerts during startup window")

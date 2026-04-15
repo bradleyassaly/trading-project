@@ -204,13 +204,25 @@ class WalletTradePoller:
         requests.Session with correct headers (the Data API returns 403
         for Python's default urllib user-agent).
         """
+        # Circuit breaker: skip immediately if the Data API host is in a
+        # cooldown window from consecutive failures. Avoids cascading slow-
+        # fails across every wallet in a crowded poll cycle.
+        from trading_platform.polymarket.http_circuit import (
+            allow_request, record_success, record_failure,
+        )
+        HOST = "data-api.polymarket.com"
+        if not allow_request(HOST):
+            return []
         try:
             from trading_platform.polymarket.data_api_fetcher import PolymarketDataApiFetcher
             if not hasattr(self, '_fetcher'):
                 self._fetcher = PolymarketDataApiFetcher()
             # Data API uses "user" parameter (not "maker")
-            return self._fetcher._fetch_page({"user": wallet, "limit": limit})
+            result = self._fetcher._fetch_page({"user": wallet, "limit": limit})
+            record_success(HOST)
+            return result
         except Exception as exc:
+            record_failure(HOST)
             logger.debug("Data API fetch failed for %s: %s", wallet[:10], exc)
             return []
 

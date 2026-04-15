@@ -90,6 +90,9 @@ services:
     command: python scripts/task_scheduler.py
     volumes:
       - .:/app
+      # Postgres backup volume — scripts/pg_backup.sh writes compressed
+      # dumps here nightly. 7-day retention managed by the script.
+      - ./backups:/backups
     env_file: .env
     environment:
       - WALLET_DB_PATH=/app/data/polymarket/wallet_intelligence.db
@@ -99,6 +102,7 @@ services:
       - POSTGRES_PASSWORD=polymarket_dev
       - POSTGRES_DB=polymarket
       - DB_BACKEND=postgres
+      - BACKUP_DIR=/backups
     restart: unless-stopped
     depends_on:
       api:

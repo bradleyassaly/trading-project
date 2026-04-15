@@ -2668,6 +2668,15 @@ def read_smart_money_universe_stats() -> dict[str, Any]:
         return {"available": False, "reason": str(exc)}
 
 
+def read_http_circuit_state() -> dict[str, Any]:
+    """Return the outbound HTTP circuit breaker state for diagnostics."""
+    try:
+        from trading_platform.polymarket.http_circuit import snapshot
+        return {"available": True, "hosts": snapshot()}
+    except Exception as exc:
+        return {"available": False, "error": str(exc)}
+
+
 def read_pipeline_funnel(hours: int = 24) -> dict[str, Any]:
     """Return the signal→paper-trade conversion funnel for the last `hours`.
 

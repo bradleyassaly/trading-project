@@ -388,6 +388,15 @@ SCHEDULE: list[Task] = [
         interval_seconds=30 * 60,
         description="Snapshot open positions with current unrealized P&L (every 30 min)",
     ),
+    Task(
+        name="pg_backup",
+        # Nightly dump of the Postgres DB to /backups (bind-mounted).
+        # Keeps 7 daily snapshots. pg_backup.sh handles retention pruning.
+        cmd="sh /app/scripts/pg_backup.sh",
+        interval_seconds=24 * 3600,
+        description="Nightly Postgres dump with 7-day retention",
+    ),
+
     # wallet_trade_poller moved to its own docker-compose service
     # (polymarket-wallet-poller) on 2026-04-15. A single cycle ~140s was
     # starving the scheduler's sequential queue and tripping stale-task

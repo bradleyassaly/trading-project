@@ -920,6 +920,12 @@ def pipeline_funnel(hours: int = 24) -> dict[str, Any]:
     return reader.read_pipeline_funnel(hours=max(1, min(168, hours)))
 
 
+@app.get("/api/system/http-circuit")
+def http_circuit() -> dict[str, Any]:
+    """Outbound-HTTP circuit breaker state (per host)."""
+    return reader.read_http_circuit_state()
+
+
 @app.get("/api/paper/pnl-history")
 def paper_pnl_history() -> dict[str, Any]:
     return reader.read_paper_pnl_history()
