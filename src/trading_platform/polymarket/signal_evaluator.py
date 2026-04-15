@@ -52,6 +52,7 @@ ALL_SIGNAL_TYPES = (
     "price_velocity", "specialist_entry", "whale_exit",
     "no_position_entry", "pre_deadline_surge",
     "position_reduction", "whale_entry",
+    "high_conviction_insider",
 )
 
 # Status thresholds — see module docstring

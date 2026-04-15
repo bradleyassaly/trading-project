@@ -99,7 +99,12 @@ STARTING_BANKROLL = 10_000  # Paper validation phase — not production size
 #   (0.80, 0.90]:  WR=72% PnL=-$4.5K
 # So 0.65-0.80 is a win-rate trap: looks good on paper, bleeds in practice.
 MIN_ENTRY_PRICE = 0.10
-MAX_ENTRY_PRICE = 0.65
+# Raised from 0.65 → 0.85 to catch Pattern A (Late Big Favorite). Top-
+# category insider wallets (0x96489abcb9 econ PF 3.8, 0x5bffcf561b
+# politics PF 10) enter at 0.70–0.85 on liquid markets right before
+# resolution. The 0.65 cap was originally set to avoid penny-odds bugs
+# at 0.95+, which are still excluded. 0.85 is comfortably liquid.
+MAX_ENTRY_PRICE = 0.85
 
 # Optimal band where PnL-per-trade is densest ($0.10-$0.50 earned $488K combined).
 OPTIMAL_BAND_LOW = 0.10

@@ -32,6 +32,11 @@ VALID_SIGNAL_TYPES = [
     "whale_exit", "position_reduction", "no_position_entry",
     # Order-book + price-velocity signals (no wallet, market-derived)
     "price_velocity",
+    # High-conviction insider: wallet in insider_wallets AND trade
+    # ≥5× their avg size AND price ≥0.70 AND market has ≥7d life.
+    # Captures Pattern A (late big favorite) strategy pattern — highest
+    # observed PF in the wallet taxonomy (10–200).
+    "high_conviction_insider",
 ]
 
 # Signals proven to have zero or negative edge in the validation data.
@@ -161,6 +166,13 @@ class WhaleSignalEngine:
 
         # Check cascade (needs multiple wallets)
         sig = self._check_cascade(trade, now_ts)
+        if sig:
+            signals_fired.append(sig)
+
+        # High-conviction insider — Pattern A/E. Fires on the same
+        # trade iff the wallet is in insider_wallets AND position is
+        # ≥5× their historical avg AND entry ≥0.70 AND ≥7d to resolution.
+        sig = self._check_high_conviction_insider(trade, now_ts)
         if sig:
             signals_fired.append(sig)
 
@@ -1470,6 +1482,88 @@ class WhaleSignalEngine:
     # ── insider_entry fork ─────────────────────────────────────────────────
 
     _ELECTION_KW = frozenset({"election", "vote", "primary", "nominee", "ballot"})
+
+    # Cache for insider wallet profiles. Refreshed when a new wallet
+    # hits the check path with no cache entry — not time-based, since
+    # insider_wallets is rebuilt manually.
+    _insider_profile_cache: dict = {}
+
+    _MIN_HIGH_CONV_PRICE = 0.70
+    _MIN_HIGH_CONV_SIZE_MULT = 5.0
+    _MIN_HIGH_CONV_TIME_TO_CLOSE_S = 7 * 24 * 3600  # 7 days
+
+    def _check_high_conviction_insider(self, trade: "WhaleTrade", now_ts: int) -> dict | None:
+        """Pattern A/E high-conviction insider bet.
+
+        Fires iff ALL of:
+          1. Wallet is in insider_wallets (uncertain-zone WR >= 60%).
+          2. Trade size USDC is >= 5x the wallet's avg_trade_size.
+          3. Entry price >= 0.70 (late favorite territory).
+          4. Market has at least 7 days to close.
+
+        These four constraints define the "insider loading up on a
+        likely winner" pattern. Observed profit-factors of 10–200 in
+        the top-3-per-category taxonomy.
+        """
+        try:
+            price = float(trade.price or 0)
+            if price < self._MIN_HIGH_CONV_PRICE:
+                return None
+            trade_usdc = float(trade.size or 0) * price
+            if trade_usdc <= 0:
+                return None
+
+            wallet_key = (trade.wallet or "").lower()
+            prof = self._insider_profile_cache.get(wallet_key)
+            if prof is None:
+                from trading_platform.polymarket.db_connection import get_connection
+                conn = get_connection()
+                try:
+                    row = conn.execute(
+                        "SELECT insider_score, uncertain_accuracy, avg_trade_size "
+                        "FROM insider_wallets WHERE LOWER(wallet) = ?",
+                        (wallet_key,),
+                    ).fetchone()
+                finally:
+                    try: conn.close()
+                    except Exception: pass
+                prof = dict(zip(
+                    ("insider_score", "uncertain_accuracy", "avg_trade_size"),
+                    row,
+                )) if row else {}
+                self._insider_profile_cache[wallet_key] = prof
+
+            if not prof:
+                return None
+            avg_size = float(prof.get("avg_trade_size") or 0)
+            if avg_size <= 0 or trade_usdc < self._MIN_HIGH_CONV_SIZE_MULT * avg_size:
+                return None
+
+            # Time-to-close gate. Pattern A entries too close to expiry
+            # are brittle — if the wallet is right 1h before close the
+            # price moves instantly and we miss. Require 7+ days runway.
+            close_ts = int(trade.market_end_ts or 0) if hasattr(trade, "market_end_ts") else 0
+            if close_ts and (close_ts - now_ts) < self._MIN_HIGH_CONV_TIME_TO_CLOSE_S:
+                return None
+
+            # Confidence ramps with accuracy + size multiple
+            acc = float(prof.get("uncertain_accuracy") or 0.5)
+            size_mult = min(trade_usdc / avg_size, 20.0)
+            confidence = 0.60 + (acc - 0.60) * 0.8 + min(size_mult / 20.0, 0.2)
+            confidence = max(0.40, min(0.95, confidence))
+
+            return self._fire_signal(
+                "high_conviction_insider", trade, round(confidence, 4), now_ts,
+                extra={
+                    "insider_score": prof.get("insider_score"),
+                    "insider_accuracy": acc,
+                    "size_mult_vs_avg": round(size_mult, 2),
+                    "avg_wallet_size_usdc": round(avg_size, 0),
+                },
+            )
+        except Exception as exc:
+            logger.debug("high_conviction_insider check failed: %s", exc)
+            return None
 
     def _maybe_fire_insider_entry(
         self,
