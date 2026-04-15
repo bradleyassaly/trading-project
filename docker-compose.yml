@@ -131,6 +131,43 @@ services:
       api:
         condition: service_healthy
 
+  # ─── Wallet trade poller ───────────────────────────────────────────────
+  # Moved out of the scheduler queue 2026-04-15 because a single 140s
+  # poll cycle (219 wallets + API round-trips) would starve other
+  # scheduled tasks and trip the stale-task alert. Dedicated container
+  # loops forever with an explicit inter-cycle sleep; scheduler is now
+  # free to stay on-cadence for its other (fast) jobs.
+  wallet-poller:
+    build: .
+    container_name: polymarket-wallet-poller
+    # Inter-cycle sleep in seconds (600 = 10 min). Override via
+    # POLLER_INTERVAL_SECONDS env if we want to tune cadence without
+    # rebuilding. On transient CLI failure, sleep a short recovery
+    # window and try again rather than exiting the container.
+    command: >
+      sh -c '
+      set -e;
+      while true; do
+        trading-cli data polymarket poll-wallet-trades || echo "[poller] cycle failed, retrying after short backoff";
+        sleep "${POLLER_INTERVAL_SECONDS:-600}";
+      done'
+    volumes:
+      - .:/app
+    env_file: .env
+    environment:
+      - WALLET_DB_PATH=/app/data/polymarket/wallet_intelligence.db
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_USER=polymarket
+      - POSTGRES_PASSWORD=polymarket_dev
+      - POSTGRES_DB=polymarket
+      - DB_BACKEND=postgres
+      - POLLER_INTERVAL_SECONDS=600
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+
   # ─── Health watchdog ───────────────────────────────────────────────────
   # Polls the API + scheduler every 5 minutes and fires Telegram alerts
   # on degradation / recovery. See scripts/health_watchdog.py.

@@ -388,19 +388,11 @@ SCHEDULE: list[Task] = [
         interval_seconds=30 * 60,
         description="Snapshot open positions with current unrealized P&L (every 30 min)",
     ),
-    Task(
-        name="wallet_trade_poller",
-        # The missing link: polls the Data API for recent trades by our
-        # copyable wallets and feeds them through the signal engine
-        # (alpha gate → hypothesis → paper trade → Telegram). The CLOB
-        # WebSocket only streams market-level data, not per-wallet trades.
-        # Extended to 10 min from 5 min after widening the copyable pool
-        # to 219 wallets — poll cycles now take ~140s, the 5-min
-        # interval gave a 150s timeout which was timing out repeatedly.
-        cmd="trading-cli data polymarket poll-wallet-trades",
-        interval_seconds=10 * 60,
-        description="Poll Data API for copyable wallet trades → fire signals (every 10 min)",
-    ),
+    # wallet_trade_poller moved to its own docker-compose service
+    # (polymarket-wallet-poller) on 2026-04-15. A single cycle ~140s was
+    # starving the scheduler's sequential queue and tripping stale-task
+    # alerts. The dedicated container runs an explicit sleep loop at
+    # POLLER_INTERVAL_SECONDS (default 600s). No Task() here.
 
     # ── TODO — wire when underlying commands are stable ────────────────
     # Task(
