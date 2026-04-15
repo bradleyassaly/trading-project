@@ -42,6 +42,14 @@ SCHEDULER_STATE = PROJECT_ROOT / "data" / "scheduler" / "state.json"
 DB_PATH = PROJECT_ROOT / "data" / "polymarket" / "wallet_intelligence.db"
 POLL_INTERVAL_SECONDS = 5 * 60
 FREE_DISK_WARN_GB = 5.0
+# Dampen: require N consecutive failures before alerting. Stops spurious
+# alerts from single-cycle blips (the 03:33 + 04:01 + 16:02 API alerts
+# were all 1-cycle false positives during container startup).
+CONSECUTIVE_FAILURES_TO_ALERT = 2
+# Scheduler tasks are flagged stale only if overdue by more than this
+# multiple of their interval. 2x was too tight — a 5-min poller that
+# takes 140s on a crowded cycle would trip the alert.
+SCHEDULER_STALE_MULTIPLIER = 3
 
 
 @dataclass
@@ -72,6 +80,26 @@ def check_api() -> ComponentState:
 
 
 def check_db() -> ComponentState:
+    """Check the canonical Postgres DB (the SQLite file is stale post-cutover).
+    Falls back to the SQLite health check only if psycopg isn't installed.
+    """
+    backend = os.environ.get("DB_BACKEND", "postgres").lower()
+    if backend == "postgres":
+        try:
+            import psycopg
+            host = os.environ.get("POSTGRES_HOST", "postgres")
+            port = int(os.environ.get("POSTGRES_PORT", "5432"))
+            user = os.environ.get("POSTGRES_USER", "polymarket")
+            pwd = os.environ.get("POSTGRES_PASSWORD", "polymarket_dev")
+            dbn = os.environ.get("POSTGRES_DB", "polymarket")
+            with psycopg.connect(host=host, port=port, user=user,
+                                 password=pwd, dbname=dbn, connect_timeout=3) as conn:
+                cur = conn.execute("SELECT COUNT(*) FROM wallet_trades")
+                n = cur.fetchone()[0]
+            return ComponentState("db", True, f"{n} wallet_trades (pg)")
+        except Exception as e:
+            return ComponentState("db", False, f"pg: {str(e)[:80]}")
+
     if not DB_PATH.exists():
         return ComponentState("db", False, f"missing: {DB_PATH}")
     try:
@@ -80,7 +108,7 @@ def check_db() -> ComponentState:
             n = conn.execute("SELECT COUNT(*) FROM wallet_trades").fetchone()[0]
         finally:
             conn.close()
-        return ComponentState("db", True, f"{n} wallet_trades")
+        return ComponentState("db", True, f"{n} wallet_trades (sqlite)")
     except Exception as e:
         return ComponentState("db", False, str(e)[:80])
 
@@ -102,7 +130,7 @@ def check_scheduler() -> ComponentState:
         if last_run is None:
             continue  # not yet run, OK on first cycle
         # Stale if more than 2x its interval overdue
-        if interval and now - float(last_run) > 2 * interval:
+        if interval and now - float(last_run) > SCHEDULER_STALE_MULTIPLIER * interval:
             stale.append(t["name"])
     if stale:
         return ComponentState(
@@ -141,15 +169,24 @@ def format_status(states: list[ComponentState]) -> str:
 
 
 def main() -> None:
-    logger.info("health watchdog starting (poll interval %ds)", POLL_INTERVAL_SECONDS)
+    logger.info("health watchdog starting (poll interval %ds, requires %d consecutive failures)",
+                POLL_INTERVAL_SECONDS, CONSECUTIVE_FAILURES_TO_ALERT)
     failure_state: dict[str, float] = {}  # component_name → first_failure_ts
+    fail_count: dict[str, int] = {}       # consecutive-failure counter
     while True:
         now = time.time()
         states = [check_api(), check_db(), check_scheduler(), check_disk()]
 
-        # Compute new failures and recoveries
+        # Compute new failures and recoveries. Require N consecutive cycles
+        # to avoid alerting on single-cycle blips (container restart, slow
+        # healthcheck on startup, etc.).
         for s in states:
-            if not s.healthy and s.name not in failure_state:
+            if not s.healthy:
+                fail_count[s.name] = fail_count.get(s.name, 0) + 1
+            else:
+                fail_count.pop(s.name, None)
+
+            if not s.healthy and fail_count.get(s.name, 0) >= CONSECUTIVE_FAILURES_TO_ALERT and s.name not in failure_state:
                 failure_state[s.name] = now
                 msg = (
                     f"\U0001f534 <b>SYSTEM ALERT</b>\n"

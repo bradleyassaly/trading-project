@@ -390,14 +390,16 @@ SCHEDULE: list[Task] = [
     ),
     Task(
         name="wallet_trade_poller",
-        # The missing link: polls the Data API for recent trades by
-        # our 56 copyable wallets and feeds them through the signal
-        # engine (alpha gate → hypothesis → paper trade → Telegram).
-        # The CLOB WebSocket only streams market-level data, not
-        # per-wallet trades.  This poller bridges the gap.
+        # The missing link: polls the Data API for recent trades by our
+        # copyable wallets and feeds them through the signal engine
+        # (alpha gate → hypothesis → paper trade → Telegram). The CLOB
+        # WebSocket only streams market-level data, not per-wallet trades.
+        # Extended to 10 min from 5 min after widening the copyable pool
+        # to 219 wallets — poll cycles now take ~140s, the 5-min
+        # interval gave a 150s timeout which was timing out repeatedly.
         cmd="trading-cli data polymarket poll-wallet-trades",
-        interval_seconds=5 * 60,
-        description="Poll Data API for copyable wallet trades → fire signals (every 5 min)",
+        interval_seconds=10 * 60,
+        description="Poll Data API for copyable wallet trades → fire signals (every 10 min)",
     ),
 
     # ── TODO — wire when underlying commands are stable ────────────────

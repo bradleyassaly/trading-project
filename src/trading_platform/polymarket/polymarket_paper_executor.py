@@ -416,7 +416,12 @@ class PolymarketPaperExecutor:
         # in (130/134 resolved trades landed in "other" this way).
         sig_cat_raw = signal.get("category") or ""
         sig_cat = sig_cat_raw.lower() if isinstance(sig_cat_raw, str) else ""
-        if not sig_cat or sig_cat == "other":
+        # wallet_derived is an internal marker (this market was discovered
+        # via wallet trade activity) NOT a real category — if we don't
+        # reclassify, every wallet-derived signal gets rejected here and
+        # we lose the signal flow (0 paper trades in 24h happened from
+        # exactly this). Re-classify on empty/other/wallet_derived.
+        if not sig_cat or sig_cat in ("other", "wallet_derived"):
             try:
                 from trading_platform.polymarket.market_categorizer import classify_keywords
                 resolved, _src = classify_keywords(
