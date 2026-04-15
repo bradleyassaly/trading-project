@@ -38,7 +38,11 @@ logger = logging.getLogger(__name__)
 # ── Tunables ────────────────────────────────────────────────────────────────
 
 MIN_SAMPLE = 10           # minimum resolved clean trades to score
-MIN_WR_COPYABLE = 0.55    # minimum WR to be flagged copyable
+# Align with kill_switch.MIN_WIN_RATE (0.52). Previously 0.55 — the stricter
+# gate locked out ~147 wallet-category rows that are positive-EV (avg_pnl>0)
+# just with lower raw WR. Cost model covers the 52% boundary. Widens the
+# copyable set ~50% which accelerates sample accumulation for signal calibration.
+MIN_WR_COPYABLE = 0.52
 RECENCY_DECAY_DAYS = 90   # linear decay over 90 days for recency_score
 COPYABLE_MIN_RECENCY = 0.30  # ~63 days max stale-ness
 

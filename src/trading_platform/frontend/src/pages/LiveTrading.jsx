@@ -79,7 +79,7 @@ function PortfolioSummary({ positions, history, killSwitch }) {
   const closed = history?.trades || []
   const exposure = positions?.total_exposure || 0
   const realized = history?.total_realized_pnl || 0
-  const bankroll = killSwitch?.config?.BANKROLL || 350
+  const bankroll = killSwitch?.config?.BANKROLL || 10000
   const available = bankroll - exposure + realized
 
   return (

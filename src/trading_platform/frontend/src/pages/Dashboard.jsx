@@ -139,12 +139,17 @@ function WhaleFeed({ data, loading }) {
 
   if (loading && !data) return <LoadingSkeleton rows={6} />
 
-  if (!alerts.length) return (
-    <EmptyState
-      title="No whale activity detected"
-      message={`Monitoring markets across 9 categories`}
-    />
-  )
+  if (!alerts.length) {
+    const marketsMsg = data?.markets_subscribed
+      ? `Monitoring ${data.markets_subscribed} markets`
+      : 'Monitoring markets'
+    return (
+      <EmptyState
+        title="No whale activity detected"
+        message={marketsMsg}
+      />
+    )
+  }
 
   return (
     <div className="space-y-1.5">
@@ -200,7 +205,7 @@ const WHALE_SIG_TYPES = new Set([
 const TECH_SIG_TYPES = new Set(['price_velocity', 'market_maker_flip'])
 
 // ── Signal Performance Table ────────────────────────────────────────────────
-function SignalPerfTable({ data }) {
+function SignalPerfTable({ data, status }) {
   const types = data?.by_type ?? []
   const whaleRows = types.filter(t => WHALE_SIG_TYPES.has(t.signal_type))
   const techRows = types.filter(t => TECH_SIG_TYPES.has(t.signal_type))
@@ -240,7 +245,9 @@ function SignalPerfTable({ data }) {
         </thead>
         <tbody className="divide-y divide-surface-border">
           {whaleRows.length ? whaleRows.map(renderRow) : (
-            <tr><td colSpan={4} className="py-2 text-[10px] text-gray-600 text-center">No whale signals fired yet — live-collect monitoring 207 markets / 235 wallets.</td></tr>
+            <tr><td colSpan={4} className="py-2 text-[10px] text-gray-600 text-center">
+              No whale signals fired yet{status?.markets_subscribed ? ` — live-collect monitoring ${status.markets_subscribed} markets / ${status.watched_wallets ?? 0} wallets` : ''}.
+            </td></tr>
           )}
           {otherRows.map(renderRow)}
         </tbody>
@@ -386,6 +393,72 @@ function ThesisScorecard({ data, history }) {
 // Shows the last few thesis-driven paper trades. Resolved hypotheses are
 // tagged ✅/❌ so the operator can eyeball whether the framework is
 // being validated in real time.
+function LiveReadinessTile({ data }) {
+  if (!data || !data.available) {
+    return <div className="text-[10px] text-gray-600">Loading readiness…</div>
+  }
+  const gates = data.system_gates || {}
+  const gateEntries = [
+    ['master_switch', 'Master'],
+    ['clob_reachable', 'CLOB'],
+    ['clob_configured', 'CLOB cfg'],
+    ['wallet_set', 'Wallet'],
+    ['py_clob_client', 'clob_sdk'],
+    ['emergency_stop_clear', 'E-stop'],
+  ]
+  const totalGates = gateEntries.length
+  const passed = gateEntries.filter(([k]) => gates[k]).length
+  const sigGates = data.signal_gates || []
+  const minResolved = data.kill_switch_limits?.min_resolved_hard ?? 15
+  const ready = data.n_ready ?? 0
+  return (
+    <div>
+      <div className="flex items-baseline justify-between mb-2">
+        <h2 className="text-sm font-medium text-gray-300">Live Readiness</h2>
+        <span className="text-[10px] text-gray-600">{passed}/{totalGates} gates · {ready} signal(s) ready</span>
+      </div>
+      <div className="flex flex-wrap gap-1.5 mb-3">
+        {gateEntries.map(([k, label]) => (
+          <span key={k}
+            className={`px-1.5 py-0.5 rounded text-[9px] ${gates[k] ? 'bg-accent-green/20 text-accent-green' : 'bg-accent-red/20 text-accent-red'}`}
+            title={`${label}: ${gates[k] ? 'OK' : 'fail'}`}>
+            {gates[k] ? '●' : '○'} {label}
+          </span>
+        ))}
+      </div>
+      {sigGates.length ? (
+        <div className="space-y-1">
+          {sigGates.slice(0, 5).map((s) => {
+            const n = s.n_resolved || 0
+            const pct = Math.min(100, (n / minResolved) * 100)
+            const wrOk = s.gates?.win_rate_ok
+            const evOk = s.gates?.ev_positive
+            return (
+              <div key={s.signal_type} className="text-[10px]">
+                <div className="flex justify-between mb-0.5">
+                  <span className="text-gray-400">{s.signal_type}</span>
+                  <span className="text-gray-500">
+                    {n}/{minResolved} · WR {((s.win_rate ?? 0) * 100).toFixed(0)}%
+                    {' '}
+                    <span className={evOk ? 'text-accent-green' : 'text-accent-red'} title="EV gate">EV</span>
+                    {' '}
+                    <span className={wrOk ? 'text-accent-green' : 'text-accent-red'} title="WR gate">WR</span>
+                  </span>
+                </div>
+                <div className="h-1 bg-surface-hover rounded overflow-hidden">
+                  <div className={`h-full ${s.ready ? 'bg-accent-green' : 'bg-accent-blue'}`} style={{ width: `${pct}%` }} />
+                </div>
+              </div>
+            )
+          })}
+        </div>
+      ) : (
+        <div className="text-[10px] text-gray-600">No signals have fired yet.</div>
+      )}
+    </div>
+  )
+}
+
 function RecentHypotheses({ data }) {
   const rows = data?.hypotheses ?? []
   if (!data?.available) {
@@ -453,6 +526,7 @@ export default function Dashboard() {
   // Paper equity curve + recent hypotheses for the new dashboard panels.
   const { data: equity } = useApi(api.equityCurve, 60_000)
   const { data: hypotheses } = useApi(() => fetch('/api/hypotheses/recent?limit=15').then(r => r.ok ? r.json() : null), 30_000)
+  const { data: readiness } = useApi(() => fetch('/api/live/readiness').then(r => r.ok ? r.json() : null), 30_000)
 
   return (
     <div className="p-6 space-y-4">
@@ -480,6 +554,12 @@ export default function Dashboard() {
           />
         </div>
         <div className="lg:col-span-2 card">
+          <LiveReadinessTile data={readiness} />
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-5 gap-4">
+        <div className="lg:col-span-5 card">
           <h2 className="text-sm font-medium text-gray-300 mb-2">Recent Hypotheses</h2>
           <RecentHypotheses data={hypotheses} />
         </div>
@@ -501,7 +581,7 @@ export default function Dashboard() {
         {/* Right: Signal Intelligence */}
         <div className="flex-[35] space-y-4">
           <div className="card">
-            <SignalPerfTable data={sigPerf} />
+            <SignalPerfTable data={sigPerf} status={status} />
           </div>
 
           <div className="card">

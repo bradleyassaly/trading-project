@@ -279,7 +279,7 @@ function MarketIntelligence() {
     min_wallets: 2,
     delay_seconds: 86400,
     slippage_pct: 0.02,
-    starting_bankroll: 100000,
+    starting_bankroll: 10000,
     stake_per_trade_pct: 0.02,
     wallet_tier: 'tier1',
     start_date: '2024-01-01',
@@ -598,7 +598,7 @@ export default function Backtest() {
     end_date: new Date().toISOString().slice(0, 10),
     delay_seconds: 300,
     slippage_pct: 0.02,
-    starting_bankroll: 100000,
+    starting_bankroll: 10000,
     stake_per_trade_pct: 0.02,
   })
   const [result, setResult] = useState(null)

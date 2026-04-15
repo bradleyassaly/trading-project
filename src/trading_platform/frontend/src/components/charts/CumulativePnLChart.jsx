@@ -19,7 +19,7 @@ function pickValue(row, keys) {
   return null
 }
 
-export default function CumulativePnLChart({ rows, starting = 100000, height = 220 }) {
+export default function CumulativePnLChart({ rows, starting = 10000, height = 220 }) {
   const data = (rows || [])
     .map((r) => {
       const ts = pickValue(r, ['timestamp', 'date', 'day', 'time'])
