@@ -3754,6 +3754,10 @@ def read_live_readiness() -> dict[str, Any]:
         sample_ok = n >= ks.MIN_RESOLVED_HARD
         ev_ok = ev > 0
         wr_ok = wr >= ks.MIN_WIN_RATE if n >= 20 else True
+        probation_ok = (
+            n >= ks.PROBATION_MIN_RESOLVED and n < ks.MIN_RESOLVED_HARD
+            and ev_ok and wr_ok
+        )
         ready = sample_ok and ev_ok and wr_ok
         signal_gates.append({
             "signal_type": sig_type,
@@ -3768,6 +3772,8 @@ def read_live_readiness() -> dict[str, Any]:
                 "win_rate_ok": wr_ok,
             },
             "ready": ready,
+            "probation_eligible": probation_ok,
+            "probation_cap_usd": ks.PROBATION_MAX_STAKE_USD if probation_ok else None,
         })
     signal_gates.sort(key=lambda s: (-int(s["ready"]), -s["n_resolved"]))
 

@@ -44,6 +44,11 @@ class KillSwitchResult:
     allowed: bool
     reason: str | None = None
     warnings: list[str] = field(default_factory=list)
+    # Set when a signal passes probation gates but hasn't hit the full
+    # MIN_RESOLVED_HARD sample size yet. Callers MUST clamp the trade size
+    # to this value when set. Enables small live stakes on borderline
+    # signals so they accumulate live data without material exposure.
+    probation_cap: float | None = None
 
 
 class KillSwitch:
@@ -59,6 +64,14 @@ class KillSwitch:
     MIN_WIN_RATE = 0.52
     MIN_RESOLVED_HARD = 15
     PREFERRED_MIN_RESOLVED = 30
+    # Probation tier: signals below MIN_RESOLVED_HARD but above
+    # PROBATION_MIN_RESOLVED get approved at tiny stakes so we collect
+    # *live* resolution data. Without this, every new signal type needs
+    # 15 paper resolutions before it can ever trade live — which in the
+    # current whale_entry case means weeks of waiting on a single-wallet
+    # sample. Probation requires positive EV and WR>=MIN_WIN_RATE.
+    PROBATION_MIN_RESOLVED = 5
+    PROBATION_MAX_STAKE_USD = 5.0
 
     def __init__(self, db_path: str, bankroll: float | None = None) -> None:
         self._db_path = str(db_path)
@@ -150,13 +163,28 @@ class KillSwitch:
             # doesn't pay real-world costs.
             effective_n = n_live + int(bt_n * 0.5)
 
+            probation = False
             if effective_n < self.MIN_RESOLVED_HARD:
-                return KillSwitchResult(
-                    False,
-                    f"{signal_type}: effective n={effective_n} "
-                    f"(live={n_live} + 0.5×backtest={bt_n}), need {self.MIN_RESOLVED_HARD}",
-                    warnings,
-                )
+                # Check probation path: enough samples to see the signal's
+                # direction, not enough to trust it at full size. Requires
+                # positive EV + acceptable WR. Evaluated later in this
+                # function, but we mark it here so the sample gate doesn't
+                # reject outright.
+                if effective_n >= self.PROBATION_MIN_RESOLVED:
+                    probation = True
+                    warnings.append(
+                        f"PROBATION (effective n={effective_n}/{self.MIN_RESOLVED_HARD}) — "
+                        f"capped at ${self.PROBATION_MAX_STAKE_USD:.0f}"
+                    )
+                else:
+                    return KillSwitchResult(
+                        False,
+                        f"{signal_type}: effective n={effective_n} "
+                        f"(live={n_live} + 0.5×backtest={bt_n}), need "
+                        f"{self.PROBATION_MIN_RESOLVED} for probation or "
+                        f"{self.MIN_RESOLVED_HARD} for full",
+                        warnings,
+                    )
             if effective_n < self.PREFERRED_MIN_RESOLVED:
                 warnings.append(
                     f"Below preferred sample size (effective n={effective_n}/{self.PREFERRED_MIN_RESOLVED})"
@@ -223,7 +251,10 @@ class KillSwitch:
                     warnings,
                 )
 
-            return KillSwitchResult(True, None, warnings)
+            return KillSwitchResult(
+                True, None, warnings,
+                probation_cap=self.PROBATION_MAX_STAKE_USD if probation else None,
+            )
         finally:
             conn.close()
 

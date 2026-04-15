@@ -144,10 +144,19 @@ class PolymarketLiveExecutor:
         if age_sec > 900:
             return self._result(False, reason=f"Signal too old ({age_sec/60:.0f}m)")
 
-        # 2. Kill switch check
+        # 2. Kill switch check. If the switch returns a probation_cap,
+        # the signal passed probation gates (>=5 resolved, positive EV,
+        # acceptable WR) but hasn't hit MIN_RESOLVED_HARD — clamp size
+        # to the probation cap so we collect live data at minimal risk.
         ks = self._kill.check(sig_type, size_usd, confidence)
         for w in ks.warnings:
             logger.warning("[LIVE] KillSwitch warning: %s", w)
+        if ks.allowed and ks.probation_cap is not None and size_usd > ks.probation_cap:
+            logger.info(
+                "[LIVE] PROBATION: clamping %s size $%.2f → $%.2f",
+                sig_type, size_usd, ks.probation_cap,
+            )
+            size_usd = float(ks.probation_cap)
         if not ks.allowed:
             # "POLYMARKET_LIVE_ENABLED not set" is the expected state
             # when running paper-only. Don't spam warnings for that.

@@ -1288,11 +1288,32 @@ class PolymarketPaperExecutor:
 
             exit_reason = None
 
-            if unrealized <= self.STOP_LOSS:
+            # Whale-mirror exit: if the source wallet has SOLD this market
+            # since we entered, they're out — we should be too. The whale's
+            # alpha is in timing both sides, not just entry. Previously
+            # whale_exit fired as informational-only (59 exits all HOLD).
+            source_wallet = pos.get("wallet") or ""
+            entry_ts_val = int(pos.get("entry_ts") or 0)
+            if source_wallet and source_wallet not in ("velocity_detector", "order_book_monitor") and entry_ts_val:
+                try:
+                    with self._wallet_lock:
+                        sell_row = self._wallet_conn.execute(
+                            """SELECT 1 FROM wallet_trades
+                               WHERE wallet = ? AND condition_id = ?
+                                 AND side = 'SELL' AND timestamp > ?
+                               LIMIT 1""",
+                            (source_wallet.lower(), cid, entry_ts_val),
+                        ).fetchone()
+                    if sell_row:
+                        exit_reason = "whale_mirror_exit"
+                except Exception as exc:
+                    logger.debug("whale-mirror check failed for %s: %s", cid[:14], exc)
+
+            if exit_reason is None and unrealized <= self.STOP_LOSS:
                 exit_reason = "stop_loss"
-            elif unrealized >= self.TAKE_PROFIT:
+            elif exit_reason is None and unrealized >= self.TAKE_PROFIT:
                 exit_reason = "take_profit"
-            else:
+            elif exit_reason is None:
                 age_days = (time.time() - (pos.get("entry_ts") or time.time())) / 86400
                 if age_days > self.TIME_DECAY_DAYS and abs(unrealized) < self.TIME_DECAY_MIN_MOVE:
                     exit_reason = "time_decay"

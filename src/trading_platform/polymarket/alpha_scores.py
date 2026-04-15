@@ -43,6 +43,12 @@ MIN_SAMPLE = 10           # minimum resolved clean trades to score
 # just with lower raw WR. Cost model covers the 52% boundary. Widens the
 # copyable set ~50% which accelerates sample accumulation for signal calibration.
 MIN_WR_COPYABLE = 0.52
+# Longshot alternative gate: profit factor >= 1.5 captures wallets that
+# lose >50% of trades but win big when they hit. Several whales we were
+# missing: 0xd7375270e4 (45.8% WR, +$453k PnL), 0xa7c1f91472 (45% WR,
+# +$36k), 0x9d63202c6d (48% WR). Combined with WR >= 0.35 floor to
+# reject random-walk wallets.
+MIN_PF_LONGSHOT = 1.5
 RECENCY_DECAY_DAYS = 90   # linear decay over 90 days for recency_score
 COPYABLE_MIN_RECENCY = 0.30  # ~63 days max stale-ness
 
@@ -181,10 +187,21 @@ def compute_alpha_scores(db_path: str | Path) -> dict[str, Any]:
         )
         copyability = round(min(1.0, max(0.0, copyability)), 4)
 
-        is_copy = (
-            wr >= MIN_WR_COPYABLE
-            and resolved >= MIN_SAMPLE
+        # Dual-gate copyability: admit either
+        #   (a) mean-WR strategies: WR >= 0.52 with positive avg_pnl, OR
+        #   (b) longshot strategies: high profit_factor (>= 1.5) — wallets
+        #       that lose 55%+ of trades but pick massive asymmetric payoffs.
+        #       0xd7375270e4 is the canonical example: 72 trades, 45.8% WR,
+        #       +$453k total PnL — previously rejected by the WR gate alone.
+        mean_strategy = wr >= MIN_WR_COPYABLE and (avg_pnl or 0) > 0
+        longshot_strategy = (
+            (pf is not None and pf >= MIN_PF_LONGSHOT)
             and (avg_pnl or 0) > 0
+            and wr >= 0.35  # floor: below this is likely noise/negative-skew
+        )
+        is_copy = (
+            (mean_strategy or longshot_strategy)
+            and resolved >= MIN_SAMPLE
             and recency >= COPYABLE_MIN_RECENCY
         )
         if is_copy:
