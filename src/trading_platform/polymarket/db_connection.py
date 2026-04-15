@@ -79,6 +79,13 @@ _STRFTIME_NOW_RE = re.compile(
     re.IGNORECASE,
 )
 _UNIXEPOCH_RE = re.compile(r"\bunixepoch\s*\(\s*\)", re.IGNORECASE)
+# GROUP_CONCAT(col)          → STRING_AGG(col::text, ',')
+# GROUP_CONCAT(col, 'sep')   → STRING_AGG(col::text, 'sep')
+# GROUP_CONCAT(DISTINCT col) → STRING_AGG(DISTINCT col::text, ',')
+_GROUP_CONCAT_RE = re.compile(
+    r"\bGROUP_CONCAT\s*\(\s*(DISTINCT\s+)?([^,)]+?)\s*(?:,\s*(['\"][^'\"]*['\"]))?\s*\)",
+    re.IGNORECASE,
+)
 
 
 def _convert_create_ddl(sql: str) -> str:
@@ -132,6 +139,13 @@ def _convert_sqlite_sql(sql: str, table_pk_cache: dict | None = None) -> str:
 
     sql = _STRFTIME_NOW_RE.sub(_strftime_sub, sql)
     sql = _UNIXEPOCH_RE.sub("(EXTRACT(EPOCH FROM NOW())::BIGINT)", sql)
+
+    def _gc_sub(m):
+        distinct = (m.group(1) or "").strip()
+        expr = m.group(2).strip()
+        sep = m.group(3) or "','"
+        return f"STRING_AGG({distinct} ({expr})::text, {sep})"
+    sql = _GROUP_CONCAT_RE.sub(_gc_sub, sql)
 
     # `INSERT OR IGNORE INTO` → `INSERT INTO … ON CONFLICT DO NOTHING`
     if _INSERT_OR_IGNORE_RE.search(sql):

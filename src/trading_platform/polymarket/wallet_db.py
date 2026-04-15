@@ -279,7 +279,8 @@ class WalletDB:
         # PRAGMA calls are no-ops under Postgres; only applied for sqlite.
         for stmt in (
             "PRAGMA busy_timeout=60000",
-            "PRAGMA journal_mode=DELETE",
+            "PRAGMA journal_mode=WAL",
+            "PRAGMA wal_autocheckpoint=1000",
             "PRAGMA synchronous=NORMAL",
         ):
             try:

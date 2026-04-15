@@ -100,6 +100,40 @@ class CircuitBreaker:
         )
         return self._read_state() or {}
 
+    def rebase(self, starting_capital: float) -> dict[str, Any]:
+        """Reset starting_capital / peak_equity / current_equity to the given
+        value. Use when the breaker was initialized against a different
+        bankroll (e.g. $100k placeholder vs real $10k paper book) and the
+        drawdown math is against the wrong anchor. Clears halt state.
+        """
+        now = int(time.time())
+        existing = self._read_state()
+        conn = connect_wallet_db(self._db_path)
+        try:
+            conn.execute(
+                """UPDATE circuit_breaker_state
+                   SET starting_capital = ?, peak_equity = ?, current_equity = ?,
+                       current_drawdown_pct = 0.0, is_halted = 0,
+                       halted_at = NULL, halted_reason = NULL,
+                       daily_pnl = 0.0, daily_halted = 0, daily_reset_at = ?,
+                       last_reset_at = ?, last_reset_by = 'rebase',
+                       last_updated = ?
+                   WHERE id = 1""",
+                (float(starting_capital), float(starting_capital),
+                 float(starting_capital), now, now, now),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        self._log_event(
+            "rebase",
+            equity_before=float(existing.get("current_equity")) if existing else None,
+            equity_after=starting_capital,
+            drawdown_pct=0.0, daily_pnl=0.0,
+            details={"prev_starting_capital": existing.get("starting_capital") if existing else None},
+        )
+        return self._read_state() or {}
+
     def can_trade(self) -> tuple[bool, str]:
         """Return ``(allowed, reason)``. Used as the pre-trade gate."""
         s = self._read_state()

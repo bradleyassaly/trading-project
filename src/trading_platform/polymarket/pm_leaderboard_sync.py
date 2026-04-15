@@ -179,9 +179,10 @@ def _promote_pm_whales(min_pnl: float = 100_000) -> int:
             try:
                 conn.execute(
                     """INSERT INTO leaderboard
-                       (wallet, tier, leaderboard_source, net_pnl_usdc, pseudonym, updated_at)
-                       VALUES (?, 'tier1h', 'pm_authoritative', ?, ?, ?)
+                       (wallet, category, tier, leaderboard_source, net_pnl_usdc, pseudonym, updated_at)
+                       VALUES (?, 'overall', 'tier1h', 'pm_authoritative', ?, ?, ?)
                        ON CONFLICT (wallet) DO UPDATE SET
+                         category = COALESCE(leaderboard.category, 'overall'),
                          tier = 'tier1h',
                          leaderboard_source = 'pm_authoritative',
                          net_pnl_usdc = EXCLUDED.net_pnl_usdc,

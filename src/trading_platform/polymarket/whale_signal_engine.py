@@ -47,6 +47,7 @@ DISABLED_SIGNAL_TYPES = {
     "no_position_entry",   # redundant with whale_entry (same wallet, same gate)
     "market_maker_flip",   # negative EV on corrected data (-0.057)
     "wallet_reversal",     # negative EV on corrected data (-0.033)
+    "accumulation",        # 3W/11L, -$4.5k on live paper book — calibration.status='disabled'
 }
 
 # Signals active but unproven — place paper trades at minimum stake,

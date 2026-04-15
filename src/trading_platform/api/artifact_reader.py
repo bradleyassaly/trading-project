@@ -3676,11 +3676,20 @@ def trigger_calibration_rebalance(dry_run: bool = False) -> dict[str, Any]:
     except Exception as exc:
         return {"available": False, "error": f"calibration modules unavailable: {exc}"}
     db_path = str(db._path)
+    # Anchor the allocator to the real paper bankroll (STARTING_BANKROLL)
+    # instead of the allocator's $100k default. Otherwise every signal gets
+    # a 10× allocation relative to actual capital.
+    try:
+        from trading_platform.polymarket.polymarket_paper_executor import STARTING_BANKROLL
+        bankroll = float(STARTING_BANKROLL)
+    except Exception:
+        bankroll = 10_000.0
     SignalEvaluator(db_path).update_all()
-    plan = BankrollAllocator(db_path).rebalance(dry_run=dry_run)
+    plan = BankrollAllocator(db_path, bankroll=bankroll).rebalance(dry_run=dry_run)
     return {
         "available": True,
         "dry_run": dry_run,
+        "bankroll": bankroll,
         "plan": plan.to_dict(),
     }
 

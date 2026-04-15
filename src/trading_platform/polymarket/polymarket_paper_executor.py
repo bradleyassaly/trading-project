@@ -161,7 +161,7 @@ class PolymarketPaperExecutor:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
         self._conn = sqlite3.connect(str(self.db_path), check_same_thread=False, timeout=60)
-        for stmt in ("PRAGMA busy_timeout=60000", "PRAGMA journal_mode=DELETE", "PRAGMA synchronous=NORMAL"):
+        for stmt in ("PRAGMA busy_timeout=60000", "PRAGMA journal_mode=WAL", "PRAGMA synchronous=NORMAL"):
             try:
                 self._conn.execute(stmt)
             except sqlite3.OperationalError:
@@ -177,7 +177,7 @@ class PolymarketPaperExecutor:
         except Exception:
             # Fallback for tests or when db module isn't available
             self._wallet_conn = sqlite3.connect(str(self._wallet_db_path), check_same_thread=False, timeout=60)
-            for stmt in ("PRAGMA busy_timeout=60000", "PRAGMA journal_mode=DELETE", "PRAGMA synchronous=NORMAL"):
+            for stmt in ("PRAGMA busy_timeout=60000", "PRAGMA journal_mode=WAL", "PRAGMA synchronous=NORMAL"):
                 try:
                     self._wallet_conn.execute(stmt)
                 except sqlite3.OperationalError:
@@ -196,6 +196,23 @@ class PolymarketPaperExecutor:
             if "locked" not in str(exc).lower():
                 raise
             logger.debug("paper_trades schema executescript skipped (db locked): %s", exc)
+
+        # Self-heal circuit breaker anchor. The breaker row was historically
+        # initialized against a $100k placeholder while the paper book runs
+        # at STARTING_BANKROLL; any drawdown math against the wrong anchor
+        # is meaningless. Rebase when the gap exceeds ~5%.
+        try:
+            from trading_platform.polymarket.circuit_breaker import CircuitBreaker
+            cb = CircuitBreaker(str(self._wallet_db_path))
+            state = cb.initialize(starting_capital=STARTING_BANKROLL)
+            sc = float(state.get("starting_capital") or 0)
+            if sc > 0 and abs(sc - STARTING_BANKROLL) / sc > 0.05:
+                logger.info(
+                    "[CB] rebasing starting_capital %.0f → %.0f", sc, STARTING_BANKROLL,
+                )
+                cb.rebase(STARTING_BANKROLL)
+        except Exception as exc:
+            logger.debug("circuit breaker rebase check failed: %s", exc)
 
     def _migrate(self) -> None:
         """Create tables if missing, add columns for Polymarket fields."""
@@ -393,15 +410,29 @@ class PolymarketPaperExecutor:
             return None
 
         # Category gate (global): proven positive-EV categories only.
-        # Empty/unknown category is allowed through so new categories
-        # aren't silently killed before we have data on them.
+        # Resolve unknown categories via the classifier BEFORE gating —
+        # previously, a missing category bypassed the allowlist entirely
+        # and got INSERTed as "other", letting non-allowlist trades sneak
+        # in (130/134 resolved trades landed in "other" this way).
         sig_cat_raw = signal.get("category") or ""
         sig_cat = sig_cat_raw.lower() if isinstance(sig_cat_raw, str) else ""
+        if not sig_cat or sig_cat == "other":
+            try:
+                from trading_platform.polymarket.market_categorizer import classify_keywords
+                resolved, _src = classify_keywords(
+                    signal.get("slug") or "",
+                    signal.get("question") or "",
+                )
+                if resolved and resolved != "other":
+                    sig_cat = resolved.lower()
+                    signal["category"] = sig_cat
+            except Exception as exc:
+                logger.debug("category classifier failed: %s", exc)
         if sig_cat in EXCLUDE_CATEGORIES:
             logger.info("[CAT_GATE] SKIP %s in excluded category %s", signal_type, sig_cat)
             return None
-        if sig_cat and sig_cat not in PAPER_TRADE_CATEGORIES:
-            logger.info("[CAT_GATE] SKIP %s in unproven category %s", signal_type, sig_cat)
+        if sig_cat not in PAPER_TRADE_CATEGORIES:
+            logger.info("[CAT_GATE] SKIP %s in unproven category %s", signal_type, sig_cat or "<empty>")
             return None
 
         # Tier gate for TIER1_ONLY_CATEGORIES (e.g. sports): the full
@@ -1418,7 +1449,7 @@ class PolymarketPaperExecutor:
         else:
             pnl = (entry - exit_cost.effective_price) * size / max(1 - entry, 0.01)
 
-        return_pct = pnl / size if size > 0 else 0
+        return_pct = round((pnl / size) * 100, 2) if size > 0 else 0
         outcome = "win" if pnl > 0 else "loss"
 
         try:

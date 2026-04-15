@@ -38,6 +38,7 @@ from __future__ import annotations
 import logging
 import math
 import sqlite3
+from trading_platform.polymarket.db import connect_wallet_db
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -182,7 +183,7 @@ class SignalEvaluator:
 
     def compute_metrics(self, signal_type: str) -> CalibrationRow:
         """Compute the full metric set for one signal type. Pure read."""
-        conn = sqlite3.connect(self._db_path)
+        conn = connect_wallet_db(self._db_path)
         try:
             trades = self._fetch_resolved(conn, signal_type)
             existing_status = self._read_status(conn, signal_type)
@@ -288,7 +289,7 @@ class SignalEvaluator:
         Returns (new_row, prev_status). ``prev_status`` is None on first
         write. Use the prev/new status pair to fire transition alerts.
         """
-        conn = sqlite3.connect(self._db_path)
+        conn = connect_wallet_db(self._db_path)
         try:
             prev_status = self._read_status(conn, signal_type)
         finally:
@@ -309,7 +310,7 @@ class SignalEvaluator:
         return results
 
     def _write(self, row: CalibrationRow) -> None:
-        conn = sqlite3.connect(self._db_path)
+        conn = connect_wallet_db(self._db_path)
         try:
             conn.execute(
                 """INSERT INTO signal_calibration
@@ -346,7 +347,7 @@ class SignalEvaluator:
 
     def manual_enable(self, signal_type: str) -> None:
         """Reset a signal back to ``building`` so it can re-accumulate."""
-        conn = sqlite3.connect(self._db_path)
+        conn = connect_wallet_db(self._db_path)
         try:
             conn.execute(
                 """UPDATE signal_calibration
@@ -359,7 +360,7 @@ class SignalEvaluator:
             conn.close()
 
     def manual_disable(self, signal_type: str) -> None:
-        conn = sqlite3.connect(self._db_path)
+        conn = connect_wallet_db(self._db_path)
         try:
             conn.execute(
                 """INSERT INTO signal_calibration (signal_type, status, last_updated)

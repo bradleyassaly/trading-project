@@ -389,9 +389,10 @@ class PolymarketLeaderboardIngestor:
                 # net_pnl_usdc kept in sync for back-compat with existing queries
                 conn.execute("""
                     INSERT INTO leaderboard
-                        (wallet, tier, leaderboard_source, net_pnl_usdc, pm_pnl, pseudonym, rank, pm_rank, updated_at)
-                    VALUES (?, 'tier1h', ?, ?, ?, ?, ?, ?, ?)
+                        (wallet, category, tier, leaderboard_source, net_pnl_usdc, pm_pnl, pseudonym, rank, pm_rank, updated_at)
+                    VALUES (?, 'overall', 'tier1h', ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(wallet) DO UPDATE SET
+                        category = COALESCE(leaderboard.category, 'overall'),
                         tier = 'tier1h',
                         leaderboard_source = excluded.leaderboard_source,
                         net_pnl_usdc = excluded.net_pnl_usdc,

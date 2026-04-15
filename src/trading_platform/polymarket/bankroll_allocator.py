@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+from trading_platform.polymarket.db import connect_wallet_db
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -76,7 +77,7 @@ class BankrollAllocator:
         self._bankroll = float(bankroll)
 
     def _read_calibration(self) -> list[dict[str, Any]]:
-        conn = sqlite3.connect(self._db_path)
+        conn = connect_wallet_db(self._db_path)
         try:
             rows = conn.execute(
                 """SELECT signal_type, sample_size, kelly_fraction, status
@@ -188,7 +189,7 @@ class BankrollAllocator:
         plan = self.compute_plan()
         if dry_run:
             return plan
-        conn = sqlite3.connect(self._db_path)
+        conn = connect_wallet_db(self._db_path)
         try:
             now = int(time.time())
             for row in plan.rows:
@@ -226,7 +227,7 @@ class BankrollAllocator:
         back to MIN_STAKE_USD when the calibration row is missing
         entirely (first-trade scenario for an unseen signal type).
         """
-        conn = sqlite3.connect(self._db_path)
+        conn = connect_wallet_db(self._db_path)
         try:
             row = conn.execute(
                 "SELECT recommended_stake_usd, status FROM signal_calibration WHERE signal_type = ?",

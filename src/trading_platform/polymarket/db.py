@@ -53,24 +53,25 @@ def connect_wallet_db(
     timeout: int = 30,
     check_same_thread: bool = False,
     readonly: bool = False,
-) -> sqlite3.Connection:
-    """Connect to the wallet intelligence DB with WAL + retry + NTFS fallback.
+):
+    """Connect to the wallet intelligence DB.
 
-    Parameters
-    ----------
-    path : optional explicit DB path (overrides env/defaults)
-    timeout : SQLite timeout in seconds
-    check_same_thread : passed to sqlite3.connect
-    readonly : if True, don't attempt WAL mode switch
-
-    Returns
-    -------
-    sqlite3.Connection with WAL mode and busy_timeout set.
-
-    Raises
-    ------
-    sqlite3.OperationalError if all attempts fail.
+    Under DB_BACKEND=postgres (the default post-cutover), delegates to
+    db_connection.get_connection() so all 13 callers of this helper hit
+    Postgres without needing individual rewrites. Under DB_BACKEND=sqlite,
+    preserves the legacy WAL + NTFS-fallback SQLite path.
     """
+    import os as _os
+    if _os.environ.get("DB_BACKEND", "postgres").lower() == "postgres":
+        try:
+            from trading_platform.polymarket.db_connection import get_connection
+            return get_connection(
+                db_path=str(path) if path else None,
+                check_same_thread=check_same_thread,
+            )
+        except Exception as exc:
+            logger.warning("Postgres route failed, falling back to SQLite: %s", exc)
+
     resolved = _resolve_path(path)
     if not resolved:
         raise sqlite3.OperationalError(
@@ -129,10 +130,14 @@ def _try_connect(
     conn.execute("SELECT 1")  # verify the connection works
     conn.execute("PRAGMA busy_timeout=10000")
     if not readonly:
+        # WAL is crash-safe + allows concurrent readers while one writer
+        # is active. DELETE mode is what produced 3 CORRUPTED snapshots in
+        # 18h under concurrent write load. Cap the WAL file via autocheckpoint.
         try:
-            conn.execute("PRAGMA journal_mode=DELETE")
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA wal_autocheckpoint=1000")
         except sqlite3.OperationalError:
-            pass  # read-only FS
+            pass  # read-only FS or concurrent writer blocking mode change
     conn.execute("PRAGMA synchronous=NORMAL")
     return conn
 
