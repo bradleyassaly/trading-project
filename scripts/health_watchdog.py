@@ -144,6 +144,40 @@ def check_scheduler() -> ComponentState:
     return ComponentState("scheduler", True, f"{len(data.get('tasks', []))} tasks tracked")
 
 
+def _check_heartbeat(service_key: str, stale_s: int = 180) -> ComponentState:
+    """Generic service_health-row freshness check."""
+    if os.environ.get("DB_BACKEND", "postgres").lower() != "postgres":
+        return ComponentState(service_key, True, "skipped (sqlite backend)")
+    try:
+        import psycopg
+        host = os.environ.get("POSTGRES_HOST", "postgres")
+        port = int(os.environ.get("POSTGRES_PORT", "5432"))
+        user = os.environ.get("POSTGRES_USER", "polymarket")
+        pwd = os.environ.get("POSTGRES_PASSWORD", "polymarket_dev")
+        dbn = os.environ.get("POSTGRES_DB", "polymarket")
+        with psycopg.connect(host=host, port=port, user=user,
+                             password=pwd, dbname=dbn, connect_timeout=3) as conn:
+            cur = conn.execute(
+                "SELECT MAX(checked_at) FROM service_health WHERE service = %s",
+                (service_key,),
+            )
+            row = cur.fetchone()
+        last = int(row[0]) if row and row[0] else 0
+        if not last:
+            return ComponentState(service_key, False, "no heartbeat yet")
+        age = time.time() - last
+        if age > stale_s:
+            return ComponentState(service_key, False, f"last heartbeat {age:.0f}s ago (threshold {stale_s}s)")
+        return ComponentState(service_key, True, f"heartbeat {age:.0f}s ago")
+    except Exception as e:
+        return ComponentState(service_key, False, f"heartbeat check err: {str(e)[:80]}")
+
+
+def check_wallet_stream() -> ComponentState:
+    """Polygon WS listener heartbeat. Stale >3 min = likely disconnected."""
+    return _check_heartbeat("wallet_stream", stale_s=180)
+
+
 def check_live_collect() -> ComponentState:
     """Detect silent WebSocket death via service_health heartbeat.
 
@@ -221,7 +255,8 @@ def main() -> None:
     fail_count: dict[str, int] = {}       # consecutive-failure counter
     while True:
         now = time.time()
-        states = [check_api(), check_db(), check_scheduler(), check_live_collect(), check_disk()]
+        states = [check_api(), check_db(), check_scheduler(),
+                  check_live_collect(), check_wallet_stream(), check_disk()]
         in_grace = (now - startup_ts) < STARTUP_GRACE_SECONDS
         if in_grace and any(not s.healthy for s in states):
             logger.info("[grace] suppressed alerts during startup window")

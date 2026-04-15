@@ -473,6 +473,91 @@ class WalletTradePoller:
 
         return summary
 
+    def process_wallet(self, wallet: str, raw_trades: list[dict]) -> dict[str, int]:
+        """Process a single wallet's fetched trades through the signal engine.
+
+        Used by wallet_stream.py to dispatch a single wallet's events
+        immediately (~2s WS latency) without waiting for the 10-minute
+        poll cycle. Returns {new_trades, signals_fired} so callers can
+        log it. Idempotent — relies on wallet_poll_state dedup via
+        last_checked_ts so replaying the same trades is safe.
+        """
+        if not raw_trades:
+            return {"new_trades": 0, "signals_fired": 0}
+
+        # Lazy-init signal engine + tripwire (shared across calls).
+        if not hasattr(self, "_signal_engine_cache"):
+            try:
+                from trading_platform.polymarket.wallet_db import WalletDB
+                from trading_platform.polymarket.whale_signal_engine import WhaleSignalEngine
+                db = WalletDB(self.db_path)
+                self._signal_engine_cache = WhaleSignalEngine(db=db)
+            except Exception as exc:
+                logger.debug("signal engine init failed: %s", exc)
+                self._signal_engine_cache = None
+        if not hasattr(self, "_tripwire_cache"):
+            try:
+                from trading_platform.polymarket.whale_tripwire import WhaleTripwire
+                self._tripwire_cache = WhaleTripwire(db_path=self.db_path)
+            except Exception:
+                self._tripwire_cache = None
+
+        last_checked = self._get_last_checked()
+        cutoff_ts = last_checked.get(wallet, 0)
+
+        # Load this wallet's copyable categories for _map_trade.
+        categories: set[str] = set()
+        try:
+            conn = connect_wallet_db(self.db_path)
+            try:
+                row = conn.execute(
+                    "SELECT GROUP_CONCAT(category) FROM wallet_alpha_scores "
+                    "WHERE wallet = ? AND is_copyable = 1", (wallet,),
+                ).fetchone()
+                if row and row[0]:
+                    categories = set((row[0] or "").split(","))
+            finally:
+                conn.close()
+        except Exception:
+            pass
+
+        new_trades = []
+        max_ts = cutoff_ts
+        for raw in raw_trades:
+            pt = self._map_trade(wallet, raw, categories)
+            if pt is None:
+                continue
+            if pt.timestamp <= cutoff_ts:
+                continue
+            new_trades.append(pt)
+            if pt.timestamp > max_ts:
+                max_ts = pt.timestamp
+
+        signals_fired = 0
+        if new_trades and not self.dry_run and self._signal_engine_cache:
+            from trading_platform.polymarket.whale_signal_engine import _is_sports_market
+            for pt in new_trades:
+                # Gap-catchup sanity: skip if older than threshold (shouldn't
+                # happen on WS path but guard regardless).
+                age = int(time.time()) - pt.timestamp
+                if age > STALE_SIGNAL_THRESHOLD:
+                    self._record_stale(pt, age, "ws_gap_catchup")
+                    continue
+                if _is_sports_market(pt.category, pt.title):
+                    continue
+                try:
+                    whale = self._build_whale_trade(pt, self._tripwire_cache)
+                    signal = self._signal_engine_cache.on_whale_trade(whale)
+                    if signal:
+                        signals_fired += 1
+                except Exception as exc:
+                    logger.debug("stream signal error %s: %s", wallet[:10], exc)
+                if pt.side == "SELL":
+                    self._check_whale_exit(pt)
+            last_hash = new_trades[-1].tx_hash if new_trades else ""
+            self._update_last_checked(wallet, max_ts, len(new_trades), last_hash)
+        return {"new_trades": len(new_trades), "signals_fired": signals_fired}
+
     def _build_whale_trade(self, pt: PolledTrade, tripwire: Any) -> Any:
         """Convert a PolledTrade to a WhaleTrade using cached tripwire."""
         from trading_platform.polymarket.whale_tripwire import WhaleTrade

@@ -184,6 +184,39 @@ services:
       api:
         condition: service_healthy
 
+  # ─── Polygon WS wallet-stream ──────────────────────────────────────────
+  # Real-time wallet activity tracker. Subscribes to USDC Transfer logs
+  # on Polygon where one side of the transfer is the Polymarket
+  # CTFExchange — any matching event for a watched wallet triggers an
+  # immediate single-wallet Data API poll. ~2-5s latency vs the 10-min
+  # cadence of the polymarket-wallet-poller service (kept running as a
+  # safety net until WS coverage is validated).
+  #
+  # Requires POLYGON_WS_URL in .env — Alchemy free tier (300M CU/mo)
+  # covers 200+ watched wallets indefinitely at our event volume.
+  wallet-stream:
+    build: .
+    container_name: polymarket-wallet-stream
+    command: python -m trading_platform.polymarket.wallet_stream
+    volumes:
+      - .:/app
+    env_file: .env
+    environment:
+      - WALLET_DB_PATH=/app/data/polymarket/wallet_intelligence.db
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_USER=polymarket
+      - POSTGRES_PASSWORD=polymarket_dev
+      - POSTGRES_DB=polymarket
+      - DB_BACKEND=postgres
+      - WATCHED_WALLETS_SRC=both
+    restart: unless-stopped
+    mem_limit: 512m
+    memswap_limit: 512m
+    depends_on:
+      api:
+        condition: service_healthy
+
   # ─── Health watchdog ───────────────────────────────────────────────────
   # Polls the API + scheduler every 5 minutes and fires Telegram alerts
   # on degradation / recovery. See scripts/health_watchdog.py.
