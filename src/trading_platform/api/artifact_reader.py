@@ -901,7 +901,7 @@ def read_market_order_book(condition_id: str) -> dict[str, Any]:
     OrderBookMonitor.fetch_snapshot, and returns it alongside any anomalies
     persisted in market_anomalies for this market in the last 24 hours.
     """
-    import sqlite3 as _sq
+    from trading_platform.polymarket.db_connection import get_connection
     import json as _json
     import time as _time
     try:
@@ -957,7 +957,7 @@ def read_market_order_book(condition_id: str) -> dict[str, Any]:
         # Recent persisted anomalies for this market
         recent_anomalies: list[dict[str, Any]] = []
         try:
-            conn = _sq.connect(str(db._path))
+            conn = get_connection(str(db._path))
             cutoff = int(_time.time()) - 86400
             rows = conn.execute(
                 """SELECT detected_at, anomaly_type, severity, detail,
@@ -1022,12 +1022,12 @@ def read_market_order_book(condition_id: str) -> dict[str, Any]:
 
 def read_anomaly_alerts(limit: int = 50, severity: str | None = None) -> dict[str, Any]:
     """Recent anomalies from the market_anomalies table."""
-    import sqlite3 as _sq
+    from trading_platform.polymarket.db_connection import get_connection
     db = _get_wallet_db()
     if not db:
         return {"available": False, "alerts": []}
     try:
-        conn = _sq.connect(str(db._path))
+        conn = get_connection(str(db._path))
         sql = """SELECT id, detected_at, condition_id, question, category,
                         anomaly_type, severity, detail, imbalance, bid_usd, ask_usd
                  FROM market_anomalies"""
@@ -1099,7 +1099,7 @@ def read_top_markets(
     null-category markets when no category is specified and skip them
     when one is.
     """
-    import sqlite3 as _sq
+    from trading_platform.polymarket.db_connection import get_connection
     import time as _time
 
     cache_key = (sort, (category or "").lower(), int(limit))
@@ -1197,7 +1197,7 @@ def read_top_markets(
     # ── Whale-mode: read straight from our DB ───────────────────────────────
     if sort == "whale" and db_path:
         try:
-            conn = _sq.connect(db_path)
+            conn = get_connection(db_path)
             try:
                 if category:
                     rows = conn.execute(
@@ -1249,7 +1249,7 @@ def read_top_markets(
     # ── Enrich with whale_count from our DB ─────────────────────────────────
     if results and db_path and sort != "whale":
         try:
-            conn = _sq.connect(db_path)
+            conn = get_connection(db_path)
             try:
                 cids = [r["condition_id"] for r in results if r["condition_id"]]
                 if cids:
@@ -1293,7 +1293,7 @@ def read_market_candles(
     the same window for buy/sell volume. Buckets with no price points
     use the previous close (flat candle, no body).
     """
-    import sqlite3 as _sq
+    from trading_platform.polymarket.db_connection import get_connection
     import time as _time
 
     if interval not in _BUCKET_SIZE_SECONDS:
@@ -1310,7 +1310,7 @@ def read_market_candles(
         return {"available": False, "error": "wallet_db unavailable", "candles": []}
 
     try:
-        conn = _sq.connect(str(db._path))
+        conn = get_connection(str(db._path))
         try:
             # Price points
             ph_query = "SELECT t, p FROM market_price_history WHERE condition_id = ?"
@@ -1500,13 +1500,13 @@ def read_market_trade_flow(
     Untracked trades come from ``data-api.polymarket.com/trades?market={cid}``
     and are deduplicated by ``transaction_hash``.
     """
-    import sqlite3 as _sq
+    from trading_platform.polymarket.db_connection import get_connection
     db = _get_wallet_db()
     if not db:
         return {"available": False, "error": "wallet_db unavailable", "trades": []}
 
     try:
-        conn = _sq.connect(str(db._path))
+        conn = get_connection(str(db._path))
         try:
             wt_query = (
                 """SELECT wt.timestamp, wt.price, wt.size, wt.side, wt.outcome,
@@ -1632,12 +1632,12 @@ def read_market_trade_flow(
 
 def read_market_signals_and_trades(condition_id: str) -> dict[str, Any]:
     """Signals + paper trades fired for a market."""
-    import sqlite3 as _sq
+    from trading_platform.polymarket.db_connection import get_connection
     db = _get_wallet_db()
     if not db:
         return {"available": False, "signals": [], "paper_trades": []}
     try:
-        conn = _sq.connect(str(db._path))
+        conn = get_connection(str(db._path))
         try:
             sig_cols_present = {r[1] for r in conn.execute("PRAGMA table_info(market_signals)").fetchall()}
             select_pt = "paper_trade_id" if "paper_trade_id" in sig_cols_present else "NULL"
@@ -1710,12 +1710,12 @@ def read_market_intelligence(condition_id: str) -> dict[str, Any]:
     """Return full market intelligence: price history, all tier1/1h wallet
     activity, aggregated consensus, and convergence signal.
     """
-    import sqlite3 as _sq
+    from trading_platform.polymarket.db_connection import get_connection
     db = _get_wallet_db()
     if not db:
         return {"available": False}
     try:
-        conn = _sq.connect(str(db._path))
+        conn = get_connection(str(db._path))
         try:
             meta = conn.execute(
                 """SELECT question, category, token_id FROM market_price_history
@@ -1994,12 +1994,12 @@ def search_markets(
     limit: int = 50,
 ) -> dict[str, Any]:
     """Search markets, ordered by tier1/1h whale count desc."""
-    import sqlite3 as _sq
+    from trading_platform.polymarket.db_connection import get_connection
     db = _get_wallet_db()
     if not db:
         return {"available": False, "results": []}
     try:
-        conn = _sq.connect(str(db._path))
+        conn = get_connection(str(db._path))
         try:
             sql = """
                 SELECT mph.condition_id,
@@ -2057,7 +2057,7 @@ def run_convergence_backtest(request: dict[str, Any]) -> dict[str, Any]:
     the market's resolution_price.
     """
     import datetime as _dt
-    import sqlite3 as _sq
+    from trading_platform.polymarket.db_connection import get_connection
     from collections import defaultdict as _dd
 
     db = _get_wallet_db()
@@ -2092,7 +2092,7 @@ def run_convergence_backtest(request: dict[str, Any]) -> dict[str, Any]:
             cat_clause = f" AND wmp.category IN ({','.join('?'*len(categories))})"
             cat_params.extend(categories)
 
-        conn = _sq.connect(str(db._path))
+        conn = get_connection(str(db._path))
         try:
             # Group resolved positions by (condition_id, side); collect ordered entry timestamps
             rows = conn.execute(
@@ -2313,9 +2313,8 @@ def read_smart_money_wallet_detail(address: str) -> dict[str, Any]:
         return {"available": False, "reason": "Wallet intelligence DB not found"}
 
     try:
-        import sqlite3 as _sq
-
-        conn = _sq.connect(str(db._path))
+        from trading_platform.polymarket.db_connection import get_connection
+        conn = get_connection(str(db._path))
 
         # Profile + leaderboard join (RIGHT JOIN-style: include PM-only wallets)
         row = conn.execute("""
@@ -2716,8 +2715,8 @@ def read_paper_bankroll() -> dict[str, Any]:
     kalshi_cash = 0.0
     if db_path.exists():
         try:
-            import sqlite3 as _sq
-            conn = _sq.connect(str(db_path), check_same_thread=False)
+            from trading_platform.polymarket.db_connection import get_connection
+            conn = get_connection(str(db_path), check_same_thread=False)
             poly_open = conn.execute(
                 "SELECT COUNT(*) FROM trades WHERE platform='polymarket' AND status='open' AND (archived=0 OR archived IS NULL)"
             ).fetchone()[0]
@@ -2908,10 +2907,10 @@ def read_market_detail(condition_id: str) -> dict[str, Any]:
     # Paper position
     paper_position = None
     try:
-        import sqlite3 as _sq
+        from trading_platform.polymarket.db_connection import get_connection
         paper_db = DATA_ROOT / "kalshi" / "paper_trades.db"
         if paper_db.exists():
-            conn = _sq.connect(str(paper_db))
+            conn = get_connection(str(paper_db))
             pr = conn.execute("""
                 SELECT ticker, side, entry_price, size_usd, confidence, signal_type, entry_ts
                 FROM trades
@@ -3020,7 +3019,7 @@ def read_paper_positions_enriched() -> dict[str, Any]:
     paper-trade table inside ``wallet_intelligence.db``), enriches each
     position with the current Gamma price, and computes unrealized PnL.
     """
-    import sqlite3 as _sq
+    from trading_platform.polymarket.db_connection import get_connection
     db = _get_wallet_db()
     if not db:
         return {
@@ -3029,7 +3028,7 @@ def read_paper_positions_enriched() -> dict[str, Any]:
         }
 
     try:
-        conn = _sq.connect(str(db._path))
+        conn = get_connection(str(db._path))
         rows = conn.execute(
             """SELECT id, condition_id, question, category, side,
                       entry_price, size_usd, signal_type, confidence,
@@ -3201,12 +3200,12 @@ def read_scheduler_status() -> dict[str, Any]:
 
 def read_tiers_summary() -> dict[str, Any]:
     """Per-category tier distribution + recent changes."""
-    import sqlite3 as _sq
+    from trading_platform.polymarket.db_connection import get_connection
     db = _get_wallet_db()
     if not db:
         return {"available": False}
     try:
-        conn = _sq.connect(str(db._path))
+        conn = get_connection(str(db._path))
         try:
             dist_rows = conn.execute(
                 """SELECT category, tier, COUNT(*)
@@ -3252,12 +3251,12 @@ def read_tiers_summary() -> dict[str, Any]:
 
 def read_tiers_category(category: str) -> dict[str, Any]:
     """Per-category leaderboard sorted by tier_score DESC."""
-    import sqlite3 as _sq
+    from trading_platform.polymarket.db_connection import get_connection
     db = _get_wallet_db()
     if not db:
         return {"available": False}
     try:
-        conn = _sq.connect(str(db._path))
+        conn = get_connection(str(db._path))
         try:
             rows = conn.execute(
                 """SELECT wallet, tier, tier_score, win_rate, win_rate_30d,
@@ -3290,12 +3289,12 @@ def read_tiers_category(category: str) -> dict[str, Any]:
 
 def read_tiers_wallet(wallet: str) -> dict[str, Any]:
     """All category profiles for a single wallet + tier history."""
-    import sqlite3 as _sq
+    from trading_platform.polymarket.db_connection import get_connection
     db = _get_wallet_db()
     if not db:
         return {"available": False}
     try:
-        conn = _sq.connect(str(db._path))
+        conn = get_connection(str(db._path))
         try:
             wallet = (wallet or "").lower()
             prof_rows = conn.execute(
@@ -3339,14 +3338,14 @@ def read_tiers_wallet(wallet: str) -> dict[str, Any]:
 
 def read_tiers_history(category: str | None = None, days: int = 30) -> dict[str, Any]:
     """Tier change history for the GUI's tier movement chart."""
-    import sqlite3 as _sq
+    from trading_platform.polymarket.db_connection import get_connection
     import time as _time
     db = _get_wallet_db()
     if not db:
         return {"available": False}
     cutoff = int(_time.time()) - int(days) * 86400
     try:
-        conn = _sq.connect(str(db._path))
+        conn = get_connection(str(db._path))
         try:
             if category:
                 rows = conn.execute(
@@ -3464,14 +3463,14 @@ def read_market_data_health() -> dict[str, Any]:
 
 def read_calibration_status() -> dict[str, Any]:
     """Per-signal calibration + current allocation plan + bankroll snapshot."""
-    import sqlite3 as _sq
+    from trading_platform.polymarket.db_connection import get_connection
     db = _get_wallet_db()
     if not db:
         return {"available": False, "error": "wallet_db unavailable"}
     db_path = str(db._path)
 
     try:
-        conn = _sq.connect(db_path)
+        conn = get_connection(db_path)
         try:
             rows = conn.execute(
                 """SELECT signal_type, sample_size, wins, losses, bayesian_wr,
@@ -3525,13 +3524,13 @@ def read_calibration_status() -> dict[str, Any]:
 
 def read_calibration_report(date: str | None = None) -> dict[str, Any]:
     """Read a stored calibration report by date, or the latest if date is None."""
-    import sqlite3 as _sq
+    from trading_platform.polymarket.db_connection import get_connection
     import json as _json
     db = _get_wallet_db()
     if not db:
         return {"available": False}
     try:
-        conn = _sq.connect(str(db._path))
+        conn = get_connection(str(db._path))
         try:
             if date:
                 row = conn.execute(
@@ -3571,7 +3570,7 @@ def read_calibration_report(date: str | None = None) -> dict[str, Any]:
 
 def write_calibration_report() -> dict[str, Any]:
     """Generate and persist a daily calibration report. Returns the report."""
-    import sqlite3 as _sq
+    from trading_platform.polymarket.db_connection import get_connection
     import json as _json
     import time as _time
     from datetime import datetime as _dt, timezone as _tz
@@ -3589,7 +3588,7 @@ def write_calibration_report() -> dict[str, Any]:
     total_pnl_today = 0.0
     bankroll = 100_000.0
     try:
-        conn = _sq.connect(db_path)
+        conn = get_connection(db_path)
         try:
             row = conn.execute(
                 """SELECT COALESCE(SUM(realized_pnl), 0)
@@ -3639,7 +3638,7 @@ def write_calibration_report() -> dict[str, Any]:
     }
     report_date = _dt.now(tz=_tz.utc).strftime("%Y-%m-%d")
     try:
-        conn = _sq.connect(db_path)
+        conn = get_connection(db_path)
         try:
             conn.execute(
                 """INSERT INTO calibration_reports
@@ -3702,7 +3701,7 @@ def read_live_readiness() -> dict[str, Any]:
     current KillSwitch hard limits for display.
     """
     import os as _os
-    import sqlite3 as _sq
+    from trading_platform.polymarket.db_connection import get_connection
     db = _get_wallet_db()
     if not db:
         return {"available": False, "error": "wallet_db unavailable"}
@@ -3723,7 +3722,7 @@ def read_live_readiness() -> dict[str, Any]:
     sig_rows: list[tuple] = []
     live_trades_count = 0
     try:
-        conn = _sq.connect(db_path)
+        conn = get_connection(db_path)
         try:
             sig_rows = conn.execute(
                 """SELECT signal_type,
@@ -3739,7 +3738,7 @@ def read_live_readiness() -> dict[str, Any]:
                 live_trades_count = conn.execute(
                     "SELECT COUNT(*) FROM live_trades WHERE dry_run = 0"
                 ).fetchone()[0]
-            except _sq.OperationalError:
+            except Exception:
                 live_trades_count = 0
         finally:
             conn.close()
@@ -3810,12 +3809,12 @@ def read_live_readiness() -> dict[str, Any]:
 
 def read_live_trades(limit: int = 50) -> dict[str, Any]:
     """Recent rows from the live_trades audit table."""
-    import sqlite3 as _sq
+    from trading_platform.polymarket.db_connection import get_connection
     db = _get_wallet_db()
     if not db:
         return {"available": False, "trades": []}
     try:
-        conn = _sq.connect(str(db._path))
+        conn = get_connection(str(db._path))
         try:
             rows = conn.execute(
                 """SELECT id, attempted_at, signal_type, condition_id, question,
@@ -3856,13 +3855,13 @@ def read_signals_performance() -> dict[str, Any]:
     Returns per-signal stats including win rate, profit factor, max
     drawdown, equity curve and recent trades, plus a portfolio summary.
     """
-    import sqlite3 as _sq
+    from trading_platform.polymarket.db_connection import get_connection
     db = _get_wallet_db()
     if not db:
         return {"available": False, "by_type": [], "portfolio": {}}
 
     try:
-        conn = _sq.connect(str(db._path))
+        conn = get_connection(str(db._path))
         try:
             resolved_rows = conn.execute(
                 """SELECT signal_type, side, entry_price, exit_price, size_usd,

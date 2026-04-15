@@ -218,16 +218,25 @@ class SignalResolver:
                 (res_price, outcome_delta, res_price, ptid),
             )
             paper_updated = bool(cur.rowcount)
-            # Propagate MAE from the paper trade so signal_outcomes.mae
-            # reflects the worst excursion we saw during hold. Only if
-            # the paper-trade column exists (lazy schema) and we have a
-            # value. This enables risk-adjusted EV analysis per signal.
+            # Propagate MAE + paper_pnl + paper_stake_usd back from the
+            # paper trade so signal_outcomes is the one-stop calibration
+            # source. paper_pnl=NULL was blocking every signal from
+            # graduating to live (calibration.ev_per_trade can't compute
+            # without a $PnL value).
             try:
                 conn.execute(
                     """UPDATE signal_outcomes
-                       SET mae = (SELECT mae FROM polymarket_paper_trades WHERE id = ?)
-                       WHERE id = ? AND mae IS NULL""",
-                    (ptid, sid),
+                       SET mae = COALESCE(
+                             signal_outcomes.mae,
+                             (SELECT mae FROM polymarket_paper_trades WHERE id = ?)),
+                           paper_pnl = COALESCE(
+                             signal_outcomes.paper_pnl,
+                             (SELECT realized_pnl FROM polymarket_paper_trades WHERE id = ?)),
+                           paper_stake_usd = COALESCE(
+                             signal_outcomes.paper_stake_usd,
+                             (SELECT size_usd FROM polymarket_paper_trades WHERE id = ?))
+                       WHERE id = ?""",
+                    (ptid, ptid, ptid, sid),
                 )
             except Exception:
                 pass  # mae column may not exist on older DBs
