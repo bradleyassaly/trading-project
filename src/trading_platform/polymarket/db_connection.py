@@ -70,6 +70,54 @@ try:
 except ImportError:
     _psycopg_available = False
 
+try:
+    from psycopg_pool import ConnectionPool
+    _psycopg_pool_available = True
+except ImportError:
+    _psycopg_pool_available = False
+
+
+_pool_instance = None
+_pool_lock = __import__("threading").Lock()
+
+POOL_MIN_SIZE = int(os.environ.get("PG_POOL_MIN_SIZE", "2"))
+POOL_MAX_SIZE = int(os.environ.get("PG_POOL_MAX_SIZE", "10"))
+
+
+def _get_pool():
+    """Return a process-wide Postgres connection pool (lazy-init).
+
+    A single pool per process replaces per-call psycopg.connect() which
+    was adding 10-50ms of TCP + auth + role-setup overhead to every API
+    request. Connections are returned via wrapper.close() → pool.putconn.
+    """
+    global _pool_instance
+    if _pool_instance is not None:
+        return _pool_instance
+    with _pool_lock:
+        if _pool_instance is not None:
+            return _pool_instance
+        if not _psycopg_pool_available:
+            raise RuntimeError(
+                "psycopg_pool not installed. Run: pip install 'psycopg-pool>=3.2'"
+            )
+        conninfo = (
+            f"host={PG_HOST} port={PG_PORT} user={PG_USER} "
+            f"password={PG_PASSWORD} dbname={PG_DB}"
+        )
+        _pool_instance = ConnectionPool(
+            conninfo=conninfo,
+            min_size=POOL_MIN_SIZE,
+            max_size=POOL_MAX_SIZE,
+            kwargs={"autocommit": True},
+            open=True,
+        )
+        logger.info(
+            "[pg_pool] opened min=%d max=%d host=%s",
+            POOL_MIN_SIZE, POOL_MAX_SIZE, PG_HOST,
+        )
+        return _pool_instance
+
 
 _PLACEHOLDER_RE = re.compile(r"\?")
 _INSERT_OR_REPLACE_RE = re.compile(r"\bINSERT\s+OR\s+REPLACE\s+INTO\b", re.IGNORECASE)
@@ -319,12 +367,17 @@ class _PgCursorWrapper:
 
 
 class _PgConnectionWrapper:
-    """sqlite3.Connection-like wrapper around psycopg.Connection."""
+    """sqlite3.Connection-like wrapper around psycopg.Connection.
+    When `_pool` is provided, close() returns the connection to the pool
+    instead of actually closing it. The wrapper still presents a
+    sqlite3.Connection-like surface to callers.
+    """
 
-    def __init__(self, pg_conn, row_factory=None):
+    def __init__(self, pg_conn, row_factory=None, _pool=None):
         self._conn = pg_conn
         self._rewrite_cache: dict = {}
         self.row_factory = row_factory  # attr exists for compat; sqlite3.Row becomes dict rows
+        self._pool = _pool
 
     def cursor(self):
         kw = {}
@@ -358,8 +411,13 @@ class _PgConnectionWrapper:
         return self
 
     def close(self):
+        # Return the underlying connection to the pool rather than closing
+        # it outright — keeps the TCP + auth setup warm across API calls.
         try:
-            self._conn.close()
+            if self._pool is not None:
+                self._pool.putconn(self._conn)
+            else:
+                self._conn.close()
         except Exception:
             pass
 
@@ -381,29 +439,19 @@ def get_connection(
 ) -> Any:
     """Open a connection. Returns a wrapper that looks like sqlite3.Connection.
 
-    Under DB_BACKEND=postgres (default), returns a Postgres-backed wrapper.
-    Under DB_BACKEND=sqlite, returns a real sqlite3.Connection (legacy path).
+    Postgres is the only supported backend post-cutover. The DB_BACKEND=sqlite
+    fallback was removed to eliminate split-brain risk — two writers to two
+    databases was the root cause of multiple data-drift incidents.
     """
-    if DB_BACKEND == "sqlite":
-        return _get_sqlite_connection(
-            db_path, check_same_thread=check_same_thread, row_factory=row_factory,
-        )
     if not _psycopg_available:
         raise RuntimeError(
-            "DB_BACKEND=postgres but psycopg is not installed. "
-            "Run: pip install 'psycopg[binary]>=3.1'"
+            "psycopg is not installed. Run: pip install 'psycopg[binary]>=3.1'"
         )
-    # autocommit=True mirrors SQLite's default per-statement auto-commit.
-    # Legacy code assumes a failed SELECT doesn't poison subsequent queries;
-    # Postgres otherwise requires explicit rollback after any error. The
-    # `db()` context manager below handles explicit transactions for
-    # call-sites that need atomicity.
-    pg = psycopg.connect(
-        host=PG_HOST, port=PG_PORT, user=PG_USER, password=PG_PASSWORD,
-        dbname=PG_DB, autocommit=True,
-    )
+    # Pooled connection. See _get_pool() for why pooling matters — prior
+    # per-call psycopg.connect added 10-50ms overhead per API endpoint.
+    pg = _get_pool().getconn()
     rf = sqlite3.Row if row_factory else None
-    return _PgConnectionWrapper(pg, row_factory=rf)
+    return _PgConnectionWrapper(pg, row_factory=rf, _pool=_get_pool())
 
 
 def _get_sqlite_connection(
@@ -412,7 +460,7 @@ def _get_sqlite_connection(
     check_same_thread: bool,
     row_factory: bool,
 ) -> sqlite3.Connection:
-    """Legacy SQLite path kept for DB_BACKEND=sqlite rollback/tests."""
+    """Legacy SQLite path — unused post-cutover but retained for tests."""
     path = str(db_path) if db_path is not None else DEFAULT_DB_PATH
     conn = sqlite3.connect(path, timeout=DEFAULT_TIMEOUT_SEC, check_same_thread=check_same_thread)
     for stmt in (

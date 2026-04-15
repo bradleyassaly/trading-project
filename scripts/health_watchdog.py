@@ -31,10 +31,11 @@ try:
 except ImportError:
     pass
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-)
+try:
+    from trading_platform.polymarket.logging_config import setup_logging
+    setup_logging(service="watchdog")
+except Exception:
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("watchdog")
 
 API_URL = os.environ.get("WATCHDOG_API_URL", "http://api:8001")

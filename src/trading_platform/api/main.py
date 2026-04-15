@@ -11,6 +11,14 @@ from __future__ import annotations
 from dotenv import load_dotenv
 load_dotenv()
 
+# Configure JSON logs once at import time so uvicorn + app records
+# share the same structured format across all services.
+try:
+    from trading_platform.polymarket.logging_config import setup_logging
+    setup_logging(service="api")
+except Exception:
+    pass
+
 
 import subprocess
 import threading
@@ -18,11 +26,33 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from trading_platform.api import artifact_reader as reader
+
+# Prometheus metrics. Must be importable even if the lib is absent so a
+# fresh checkout without deps still boots — hence the try/except + noop
+# shims. Real metrics kick in once prometheus-client is installed.
+try:
+    from prometheus_client import (
+        Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST,
+    )
+    _req_count = Counter(
+        "api_requests_total",
+        "Total API requests",
+        ["method", "path", "status"],
+    )
+    _req_latency = Histogram(
+        "api_request_latency_seconds",
+        "API request latency",
+        ["method", "path"],
+        buckets=(0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0),
+    )
+    _METRICS_ENABLED = True
+except ImportError:
+    _METRICS_ENABLED = False
 
 
 app = FastAPI(
@@ -42,6 +72,39 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def _metrics_middleware(request: Request, call_next):
+    """Record per-request latency + status. Scrapable at /metrics."""
+    import time as _t
+    if not _METRICS_ENABLED:
+        return await call_next(request)
+    start = _t.perf_counter()
+    # Route template (eg. /api/smart-money/wallet/{addr}/trades) not raw
+    # path, so cardinality stays bounded. Falls back to raw path if
+    # routing hasn't matched yet.
+    route = request.scope.get("route")
+    path = getattr(route, "path", request.url.path) if route else request.url.path
+    try:
+        response = await call_next(request)
+        status = str(response.status_code)
+    except Exception:
+        _req_count.labels(request.method, path, "500").inc()
+        _req_latency.labels(request.method, path).observe(_t.perf_counter() - start)
+        raise
+    _req_count.labels(request.method, path, status).inc()
+    _req_latency.labels(request.method, path).observe(_t.perf_counter() - start)
+    return response
+
+
+@app.get("/metrics")
+def metrics() -> Response:
+    """Prometheus scrape endpoint. No auth — internal network only."""
+    if not _METRICS_ENABLED:
+        return Response("# prometheus_client not installed\n",
+                        media_type="text/plain")
+    return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 # In-memory job registry for async research runs
 _jobs: dict[str, dict[str, Any]] = {}

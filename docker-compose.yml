@@ -27,6 +27,8 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
     restart: unless-stopped
+    mem_limit: 2g
+    memswap_limit: 2g
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U polymarket -d polymarket"]
       interval: 10s
@@ -57,6 +59,8 @@ services:
       postgres:
         condition: service_healthy
     restart: unless-stopped
+    mem_limit: 1g
+    memswap_limit: 1g
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8001/api/system/status"]
       interval: 30s
@@ -65,18 +69,20 @@ services:
       start_period: 15s
 
   frontend:
+    # Now builds a static bundle via Vite and serves it with nginx
+    # (see src/trading_platform/frontend/Dockerfile). Port stays 5173
+    # externally for habit / bookmarks; nginx listens on 80 internally.
+    # Dev workflow lives outside docker — run `npm run dev` on the host
+    # and hit http://localhost:5173 as before.
     build:
       context: ./src/trading_platform/frontend
       dockerfile: Dockerfile
     container_name: polymarket-frontend
     ports:
-      - "5173:5173"
-    environment:
-      - VITE_API_TARGET=http://api:8001
-    volumes:
-      - ./src/trading_platform/frontend:/app
-      - /app/node_modules
+      - "5173:80"
     restart: unless-stopped
+    mem_limit: 256m
+    memswap_limit: 256m
     depends_on:
       api:
         condition: service_healthy
@@ -104,6 +110,8 @@ services:
       - DB_BACKEND=postgres
       - BACKUP_DIR=/backups
     restart: unless-stopped
+    mem_limit: 512m
+    memswap_limit: 512m
     depends_on:
       api:
         condition: service_healthy
@@ -131,6 +139,8 @@ services:
       - POSTGRES_DB=polymarket
       - DB_BACKEND=postgres
     restart: unless-stopped
+    mem_limit: 2g
+    memswap_limit: 2g
     depends_on:
       api:
         condition: service_healthy
@@ -168,6 +178,8 @@ services:
       - DB_BACKEND=postgres
       - POLLER_INTERVAL_SECONDS=600
     restart: unless-stopped
+    mem_limit: 512m
+    memswap_limit: 512m
     depends_on:
       api:
         condition: service_healthy
@@ -191,6 +203,8 @@ services:
       - POSTGRES_DB=polymarket
       - DB_BACKEND=postgres
     restart: unless-stopped
+    mem_limit: 256m
+    memswap_limit: 256m
     depends_on:
       api:
         condition: service_started

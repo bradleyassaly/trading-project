@@ -46,10 +46,11 @@ STATE_PATH = STATE_DIR / "state.json"
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 STATE_DIR.mkdir(parents=True, exist_ok=True)
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-)
+try:
+    from trading_platform.polymarket.logging_config import setup_logging
+    setup_logging(service="scheduler")
+except Exception:
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("scheduler")
 
 
@@ -387,6 +388,14 @@ SCHEDULE: list[Task] = [
         ),
         interval_seconds=30 * 60,
         description="Snapshot open positions with current unrealized P&L (every 30 min)",
+    ),
+    Task(
+        name="pg_prune",
+        # Weekly pruning: market_ticks >90d, service_health >7d,
+        # circuit_breaker_log >90d. VACUUM ANALYZE at the end.
+        cmd="sh /app/scripts/pg_prune.sh",
+        interval_seconds=7 * 24 * 3600,
+        description="Weekly Postgres pruning + VACUUM ANALYZE",
     ),
     Task(
         name="pg_backup",
