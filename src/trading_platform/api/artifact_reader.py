@@ -2668,6 +2668,77 @@ def read_smart_money_universe_stats() -> dict[str, Any]:
         return {"available": False, "reason": str(exc)}
 
 
+def read_pipeline_funnel(hours: int = 24) -> dict[str, Any]:
+    """Return the signal→paper-trade conversion funnel for the last `hours`.
+
+    Added after the 915-signals/0-trades incident. Makes gate drop-off
+    visible so category/tier/disable filters that are rejecting the full
+    signal flow get noticed immediately.
+    """
+    db = _get_wallet_db()
+    if not db:
+        return {"available": False}
+    from trading_platform.polymarket.db_connection import get_connection
+    cutoff_sql = f"EXTRACT(EPOCH FROM (NOW() - INTERVAL '{int(hours)} hours'))::BIGINT"
+    db_path = str(db._path)
+    try:
+        conn = get_connection(db_path)
+        by_signal = conn.execute(f"""
+            SELECT signal_type,
+                   COUNT(*) AS fires,
+                   COUNT(paper_trade_id) AS placed
+            FROM signal_outcomes
+            WHERE fired_at >= {cutoff_sql}
+            GROUP BY signal_type
+            ORDER BY fires DESC
+        """).fetchall()
+        by_category = conn.execute(f"""
+            SELECT COALESCE(category, 'unknown') AS category,
+                   COUNT(*) AS fires,
+                   COUNT(paper_trade_id) AS placed
+            FROM signal_outcomes
+            WHERE fired_at >= {cutoff_sql}
+            GROUP BY category
+            ORDER BY fires DESC
+        """).fetchall()
+        resolved_trades = conn.execute(f"""
+            SELECT COUNT(*)
+            FROM polymarket_paper_trades
+            WHERE archived = 0 AND exit_ts >= {cutoff_sql}
+        """).fetchone()
+        open_trades = conn.execute("""
+            SELECT COUNT(*)
+            FROM polymarket_paper_trades
+            WHERE archived = 0 AND exit_ts IS NULL
+        """).fetchone()
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+    total_fires = sum(r[1] for r in by_signal)
+    total_placed = sum(r[2] for r in by_signal)
+    return {
+        "available": True,
+        "window_hours": hours,
+        "totals": {
+            "signals_fired": total_fires,
+            "paper_trades_placed": total_placed,
+            "conversion_rate": round(total_placed / total_fires, 4) if total_fires else 0,
+            "paper_trades_resolved_in_window": resolved_trades[0] if resolved_trades else 0,
+            "paper_trades_currently_open": open_trades[0] if open_trades else 0,
+        },
+        "by_signal": [
+            {"signal_type": r[0], "fires": r[1], "placed": r[2]}
+            for r in by_signal
+        ],
+        "by_category": [
+            {"category": r[0], "fires": r[1], "placed": r[2]}
+            for r in by_category
+        ],
+    }
+
+
 def read_paper_bankroll() -> dict[str, Any]:
     """Return bankroll allocation structure + actual paper trade performance."""
     db_path = DATA_ROOT / "kalshi" / "paper_trades.db"

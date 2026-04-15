@@ -393,6 +393,56 @@ function ThesisScorecard({ data, history }) {
 // Shows the last few thesis-driven paper trades. Resolved hypotheses are
 // tagged ✅/❌ so the operator can eyeball whether the framework is
 // being validated in real time.
+function PipelineFunnelTile({ data }) {
+  if (!data || !data.available) {
+    return <div className="text-[10px] text-gray-600">Loading funnel…</div>
+  }
+  const t = data.totals || {}
+  const fires = t.signals_fired || 0
+  const placed = t.paper_trades_placed || 0
+  const conv = Math.round((t.conversion_rate || 0) * 100)
+  const convColor = conv >= 2 ? 'text-accent-green' : conv >= 1 ? 'text-accent-orange' : 'text-accent-red'
+  const bySignal = (data.by_signal || []).slice(0, 6)
+  const byCat = (data.by_category || []).slice(0, 6)
+  return (
+    <div>
+      <div className="flex items-baseline justify-between mb-2">
+        <h2 className="text-sm font-medium text-gray-300">Signal → Paper-trade Funnel ({data.window_hours}h)</h2>
+        <span className={`text-[10px] ${convColor}`}>
+          {fires.toLocaleString()} fires → {placed} placed ({conv}%)
+        </span>
+      </div>
+      <div className="grid grid-cols-2 gap-3 text-[10px]">
+        <div>
+          <div className="text-gray-500 mb-1">By signal_type</div>
+          {bySignal.map((r) => (
+            <div key={r.signal_type} className="flex justify-between py-0.5">
+              <span className="text-gray-400">{r.signal_type}</span>
+              <span className="text-gray-500">
+                {r.fires} → <span className={r.placed ? 'text-accent-green' : 'text-gray-600'}>{r.placed}</span>
+              </span>
+            </div>
+          ))}
+        </div>
+        <div>
+          <div className="text-gray-500 mb-1">By category</div>
+          {byCat.map((r) => (
+            <div key={r.category} className="flex justify-between py-0.5">
+              <span className="text-gray-400">{r.category}</span>
+              <span className="text-gray-500">
+                {r.fires} → <span className={r.placed ? 'text-accent-green' : 'text-gray-600'}>{r.placed}</span>
+              </span>
+            </div>
+          ))}
+        </div>
+      </div>
+      <div className="mt-2 pt-2 border-t border-surface-border text-[9px] text-gray-600">
+        Open: {t.paper_trades_currently_open} · Resolved in window: {t.paper_trades_resolved_in_window}
+      </div>
+    </div>
+  )
+}
+
 function LiveReadinessTile({ data }) {
   if (!data || !data.available) {
     return <div className="text-[10px] text-gray-600">Loading readiness…</div>
@@ -527,6 +577,7 @@ export default function Dashboard() {
   const { data: equity } = useApi(api.equityCurve, 60_000)
   const { data: hypotheses } = useApi(() => fetch('/api/hypotheses/recent?limit=15').then(r => r.ok ? r.json() : null), 30_000)
   const { data: readiness } = useApi(() => fetch('/api/live/readiness').then(r => r.ok ? r.json() : null), 30_000)
+  const { data: funnel } = useApi(() => api.pipelineFunnel(24), 60_000)
 
   return (
     <div className="p-6 space-y-4">
@@ -559,7 +610,10 @@ export default function Dashboard() {
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-5 gap-4">
-        <div className="lg:col-span-5 card">
+        <div className="lg:col-span-3 card">
+          <PipelineFunnelTile data={funnel} />
+        </div>
+        <div className="lg:col-span-2 card">
           <h2 className="text-sm font-medium text-gray-300 mb-2">Recent Hypotheses</h2>
           <RecentHypotheses data={hypotheses} />
         </div>

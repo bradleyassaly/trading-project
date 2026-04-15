@@ -449,35 +449,69 @@ def _send_failure_alert(task: Task, error: str) -> None:
         pass
 
 
+def _is_transient_error(output: str) -> bool:
+    """Return True for errors worth retrying once.
+
+    Connection refused / curl exit 7 / (7) Failed to connect are the
+    typical transient-API-hiccup patterns. Everything else we treat as
+    a legitimate failure so we don't paper over real bugs.
+    """
+    if not output:
+        return False
+    o = output.lower()
+    return any(p in o for p in (
+        "connection refused",
+        "curl: (7)",
+        "curl: (28)",            # timeout
+        "curl: (56)",            # recv failure
+        "temporary failure in name resolution",
+    ))
+
+
 def _run_task(task: Task) -> None:
     started = time.time()
     log_path = LOG_DIR / f"{task.name}.log"
     logger.info("[run] %s — %s", task.name, task.cmd[:80])
+    attempts = 0
+    max_attempts = 2  # try once, retry once on transient errors
+    result = None
     try:
-        result = subprocess.run(
-            task.cmd,
-            shell=True,
-            cwd=str(PROJECT_ROOT),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            timeout=max(60, task.interval_seconds // 2),
-        )
+        while attempts < max_attempts:
+            attempts += 1
+            result = subprocess.run(
+                task.cmd,
+                shell=True,
+                cwd=str(PROJECT_ROOT),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                timeout=max(60, task.interval_seconds // 2),
+            )
+            if result.returncode == 0:
+                break
+            if attempts >= max_attempts:
+                break
+            if _is_transient_error(result.stdout or ""):
+                logger.info("[retry] %s transient error, retrying in 3s", task.name)
+                time.sleep(3)
+                continue
+            break  # non-transient failure — don't retry
         elapsed = time.time() - started
         ts = datetime.now(tz=timezone.utc).isoformat()
         with log_path.open("a", encoding="utf-8") as f:
-            f.write(f"\n=== {ts} (exit={result.returncode}, {elapsed:.1f}s) ===\n")
+            f.write(f"\n=== {ts} (exit={result.returncode}, {elapsed:.1f}s, attempts={attempts}) ===\n")
             f.write(result.stdout or "")
         task.last_run_at = started
         task.last_duration_s = round(elapsed, 1)
         if result.returncode == 0:
             task.last_status = "ok"
             task.last_error = None
-            logger.info("[ok ] %s in %.1fs", task.name, elapsed)
+            logger.info("[ok ] %s in %.1fs%s", task.name, elapsed,
+                        f" ({attempts} attempts)" if attempts > 1 else "")
         else:
             task.last_status = "failed"
             task.last_error = (result.stdout or "")[-500:]
-            logger.warning("[fail] %s exit=%d", task.name, result.returncode)
+            logger.warning("[fail] %s exit=%d (after %d attempts)", task.name, result.returncode, attempts)
             _send_failure_alert(task, task.last_error or f"exit {result.returncode}")
     except subprocess.TimeoutExpired:
         task.last_run_at = started

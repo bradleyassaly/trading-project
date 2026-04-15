@@ -178,6 +178,7 @@ export const api = {
   smartMoneyOpenPositions: () => get('/smart-money/open-positions'),
   smartMoneyUniverseStats: () => get('/smart-money/universe-stats'),
   paperBankroll: () => get('/paper/bankroll'),
+  pipelineFunnel: (hours = 24) => get(`/pipeline/funnel?hours=${hours}`),
   paperPnlHistory: () => get('/paper/pnl-history'),
   signalsPerformance: () => get('/signals/performance'),
   smartMoneyWalletPositions: (addr) => get(`/smart-money/wallet/${encodeURIComponent(addr)}/positions`),

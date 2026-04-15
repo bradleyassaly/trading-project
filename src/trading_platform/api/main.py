@@ -914,6 +914,12 @@ def paper_bankroll() -> dict[str, Any]:
     return reader.read_paper_bankroll()
 
 
+@app.get("/api/pipeline/funnel")
+def pipeline_funnel(hours: int = 24) -> dict[str, Any]:
+    """Signal→paper-trade conversion funnel by signal_type + category."""
+    return reader.read_pipeline_funnel(hours=max(1, min(168, hours)))
+
+
 @app.get("/api/paper/pnl-history")
 def paper_pnl_history() -> dict[str, Any]:
     return reader.read_paper_pnl_history()

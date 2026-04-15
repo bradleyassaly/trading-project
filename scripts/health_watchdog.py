@@ -50,6 +50,10 @@ CONSECUTIVE_FAILURES_TO_ALERT = 2
 # multiple of their interval. 2x was too tight — a 5-min poller that
 # takes 140s on a crowded cycle would trip the alert.
 SCHEDULER_STALE_MULTIPLIER = 3
+# Grace period after watchdog start: don't alert until this many seconds
+# have elapsed. Prevents the classic "API not up yet" alert when the whole
+# stack starts at once. Covers FastAPI boot + DB ready + initial healthcheck.
+STARTUP_GRACE_SECONDS = 120
 
 
 @dataclass
@@ -169,13 +173,19 @@ def format_status(states: list[ComponentState]) -> str:
 
 
 def main() -> None:
-    logger.info("health watchdog starting (poll interval %ds, requires %d consecutive failures)",
-                POLL_INTERVAL_SECONDS, CONSECUTIVE_FAILURES_TO_ALERT)
+    startup_ts = time.time()
+    logger.info(
+        "health watchdog starting (poll %ds, %d consecutive failures to alert, %ds grace)",
+        POLL_INTERVAL_SECONDS, CONSECUTIVE_FAILURES_TO_ALERT, STARTUP_GRACE_SECONDS,
+    )
     failure_state: dict[str, float] = {}  # component_name → first_failure_ts
     fail_count: dict[str, int] = {}       # consecutive-failure counter
     while True:
         now = time.time()
         states = [check_api(), check_db(), check_scheduler(), check_disk()]
+        in_grace = (now - startup_ts) < STARTUP_GRACE_SECONDS
+        if in_grace and any(not s.healthy for s in states):
+            logger.info("[grace] suppressed alerts during startup window")
 
         # Compute new failures and recoveries. Require N consecutive cycles
         # to avoid alerting on single-cycle blips (container restart, slow
@@ -186,7 +196,12 @@ def main() -> None:
             else:
                 fail_count.pop(s.name, None)
 
-            if not s.healthy and fail_count.get(s.name, 0) >= CONSECUTIVE_FAILURES_TO_ALERT and s.name not in failure_state:
+            if (
+                not s.healthy
+                and fail_count.get(s.name, 0) >= CONSECUTIVE_FAILURES_TO_ALERT
+                and s.name not in failure_state
+                and not in_grace
+            ):
                 failure_state[s.name] = now
                 msg = (
                     f"\U0001f534 <b>SYSTEM ALERT</b>\n"
