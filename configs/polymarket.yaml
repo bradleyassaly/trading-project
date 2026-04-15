@@ -12,7 +12,7 @@ market_selection:
   mode: top_by_volume
   end_date_max_days: 30
   min_volume: 10000
-  max_markets: 200
+  max_markets: 1000
 
 require_order_book: true
 raw_markets_dir: data/polymarket/raw/markets

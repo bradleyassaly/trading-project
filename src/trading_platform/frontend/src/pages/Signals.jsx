@@ -166,6 +166,79 @@ function CorrelationHeatmap({ signals, matrix }) {
   )
 }
 
+function BacktestResultsTable({ data }) {
+  if (!data || !data.rows || data.rows.length === 0) {
+    return (
+      <EmptyState
+        title="No backtest run yet"
+        icon="⎄"
+        hint="python scripts/signal_engine_backtest.py --days 60 --write"
+      />
+    )
+  }
+  const runAgo = data.run_ts
+    ? Math.round((Date.now() / 1000 - data.run_ts) / 3600)
+    : null
+  return (
+    <div>
+      <div className="text-[10px] text-gray-500 mb-2">
+        Last run {runAgo != null ? `${runAgo}h ago` : '—'} ·
+        {' '}lookback {data.rows[0]?.lookback_days ?? '?'}d · {data.n_signal_types} signal types
+      </div>
+      <div className="overflow-x-auto">
+        <table className="w-full text-xs">
+          <thead>
+            <tr className="border-b border-surface-border text-gray-500 text-left">
+              <th className="pb-2 pr-4">Signal</th>
+              <th className="pb-2 pr-4 text-right">Fires</th>
+              <th className="pb-2 pr-4 text-right">Resolved</th>
+              <th className="pb-2 pr-4 text-right">WR</th>
+              <th className="pb-2 pr-4 text-right">EV</th>
+              <th className="pb-2 pr-4 text-right">ΣΔ</th>
+              <th className="pb-2 pr-4 text-right">Live n</th>
+              <th className="pb-2 pr-4">Verdict</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-surface-border">
+            {data.rows.map((r, i) => {
+              const ev = r.backtest_ev
+              const wr = r.backtest_wr != null ? r.backtest_wr * 100 : null
+              const verdict =
+                r.backtest_resolved == null || r.backtest_resolved < 5 ? { label: '◌ no data', cls: 'text-gray-500' }
+                : r.backtest_resolved < 20 ? { label: `? n=${r.backtest_resolved}`, cls: 'text-gray-400' }
+                : ev > 0.05 ? { label: '✓ positive', cls: 'text-accent-green' }
+                : ev < -0.02 ? { label: '✗ negative', cls: 'text-accent-red' }
+                : { label: '◐ flat', cls: 'text-gray-400' }
+              return (
+                <tr key={i} className="hover:bg-surface-hover transition-colors">
+                  <td className="py-2 pr-4 text-gray-200 font-medium">{r.signal_type}</td>
+                  <td className="py-2 pr-4 text-right text-gray-400 font-mono">{(r.backtest_fires ?? 0).toLocaleString()}</td>
+                  <td className="py-2 pr-4 text-right text-gray-400 font-mono">{(r.backtest_resolved ?? 0).toLocaleString()}</td>
+                  <td className="py-2 pr-4 text-right font-mono">
+                    <span className={wr != null && wr >= 52 ? 'text-accent-green' : 'text-gray-400'}>
+                      {wr != null ? `${wr.toFixed(0)}%` : '—'}
+                    </span>
+                  </td>
+                  <td className="py-2 pr-4 text-right font-mono">
+                    <span className={ev == null ? 'text-gray-500' : ev > 0 ? 'text-accent-green' : 'text-accent-red'}>
+                      {ev != null ? (ev > 0 ? '+' : '') + ev.toFixed(3) : '—'}
+                    </span>
+                  </td>
+                  <td className="py-2 pr-4 text-right text-gray-400 font-mono">
+                    {r.backtest_total_delta != null ? (r.backtest_total_delta >= 0 ? '+' : '') + r.backtest_total_delta.toFixed(1) : '—'}
+                  </td>
+                  <td className="py-2 pr-4 text-right text-gray-400 font-mono">{r.live_resolved ?? 0}</td>
+                  <td className={`py-2 pr-4 text-xs ${verdict.cls}`}>{verdict.label}</td>
+                </tr>
+              )
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  )
+}
+
 function BacktestRunner() {
   const [jobId, setJobId] = useState(null)
   const [jobStatus, setJobStatus] = useState(null)
@@ -227,9 +300,11 @@ export default function Signals() {
 
   const perfFetcher = useCallback(() => api.signalsPerformance(), [])
   const corrFetcher = useCallback(() => api.signalsCorrelation(), [])
+  const btFetcher = useCallback(() => api.signalsBacktestResults(), [])
 
   const { data: perf, loading: perfLoading } = useApi(perfFetcher, 60_000)
   const { data: corr, loading: corrLoading } = useApi(corrFetcher, 120_000)
+  const { data: bt, loading: btLoading } = useApi(btFetcher, 300_000)
 
   function handleSort(key) {
     if (sortKey === key) {
@@ -259,6 +334,14 @@ export default function Signals() {
           <h1 className="text-lg font-semibold text-gray-200">Signal Research Lab</h1>
         </div>
         <BacktestRunner />
+      </div>
+
+      {/* Backtest Results — EV per signal type from 60d replay */}
+      <div className="card">
+        <h2 className="text-sm font-medium text-gray-400 mb-4">
+          Backtest Results <span className="text-gray-600 font-normal">— signal-engine replay over historical trades</span>
+        </h2>
+        {btLoading ? <LoadingSkeleton rows={5} /> : <BacktestResultsTable data={bt} />}
       </div>
 
       {/* Performance Table */}

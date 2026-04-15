@@ -15,6 +15,8 @@ from __future__ import annotations
 import sqlite3
 from typing import Any
 
+from trading_platform.polymarket.db_connection import get_connection
+
 
 class KellySizer:
     """Compute trade size from real outcome history."""
@@ -24,21 +26,35 @@ class KellySizer:
     MIN_TRADE_USD = 10
     MAX_TRADE_USD = 250
     MIN_LIVE_SAMPLE = 10    # below this we only return the probe size
-    BANKROLL = 350          # live bankroll
 
     def __init__(self, db_path: str, bankroll: float | None = None) -> None:
         self._db_path = str(db_path)
         if bankroll is not None:
             self.BANKROLL = bankroll
+        else:
+            # Pull live bankroll from the bankroll module (falls back to
+            # env var POLYMARKET_LIVE_BANKROLL_USD or default if live
+            # fetch fails). Recomputed on each KellySizer instance so
+            # operators can refresh without restarting services.
+            from trading_platform.polymarket.bankroll import get_bankroll
+            self.BANKROLL = get_bankroll()
 
     def _fetch_outcomes(
         self,
         signal_type: str,
         category: str | None = None,
     ) -> list[tuple[float, int]]:
-        """Return [(outcome_delta, is_win), ...] from signal_outcomes."""
+        """Return [(outcome_delta, is_win), ...].
+
+        Primary source: signal_outcomes (live-fired signals with resolutions).
+        Fallback: signal_backtest_results — if a signal type has <5 live
+        resolved outcomes but has backtest evidence, use the backtest's
+        (ev, wr, resolved) to synthesise pseudo-rows so Kelly has something
+        to size against. Backtest rows are under-weighted by using only
+        50% of their count — same approach as the kill switch blend.
+        """
         try:
-            conn = sqlite3.connect(self._db_path)
+            conn = get_connection(self._db_path)
         except Exception:
             return []
         try:
@@ -59,7 +75,6 @@ class KellySizer:
                     (signal_type,),
                 ).fetchall()
         except sqlite3.OperationalError:
-            # signal_outcomes missing — fall back to polymarket_paper_trades
             rows = conn.execute(
                 """SELECT return_pct/100.0,
                           CASE WHEN outcome='win' THEN 1 ELSE 0 END
@@ -69,35 +84,92 @@ class KellySizer:
                 (signal_type,),
             ).fetchall()
         finally:
-            conn.close()
+            try:
+                conn.close()
+            except Exception:
+                pass
         return [(float(r[0]), int(r[1] or 0)) for r in rows if r[0] is not None]
+
+    def _fetch_backtest_stats(self, signal_type: str) -> dict[str, Any] | None:
+        """Pull the most recent backtest aggregate for a signal type."""
+        try:
+            conn = get_connection(self._db_path)
+        except Exception:
+            return None
+        try:
+            row = conn.execute(
+                "SELECT resolved, wr, ev FROM signal_backtest_results "
+                "WHERE signal_type = ? ORDER BY run_ts DESC LIMIT 1",
+                (signal_type,),
+            ).fetchone()
+        except Exception:
+            row = None
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+        if not row or row[0] is None or row[1] is None or row[2] is None:
+            return None
+        return {"n": int(row[0]), "wr": float(row[1]), "ev": float(row[2])}
 
     def compute_kelly(
         self,
         signal_type: str,
         category: str | None = None,
     ) -> dict[str, Any]:
-        """Compute fractional Kelly + recommended USD size for a signal type."""
+        """Compute fractional Kelly + recommended USD size for a signal type.
+
+        Data priority:
+          1. Live signal_outcomes (primary)
+          2. If fewer than MIN_LIVE_SAMPLE live rows, pull backtest
+             aggregate (wr, ev, resolved) from signal_backtest_results
+             and use it directly — backtest is downweighted via
+             weighted blend, but we trust its (wr, ev) since those
+             come from real market resolutions against replayed fires.
+        """
         rows = self._fetch_outcomes(signal_type, category)
-
         n = len(rows)
+
+        bt_stats = self._fetch_backtest_stats(signal_type)
+
+        # If live data is thin, fall back to backtest aggregate directly.
         if n < 5:
-            return {
-                "kelly_full": 0.0, "kelly_fraction": self.KELLY_FRACTION,
-                "kelly_fractional": 0.0,
-                "recommended_usd": float(self.MIN_TRADE_USD),
-                "n": n, "wr": None, "ev": None,
-                "avg_win": None, "avg_loss": None,
-                "reason": "Insufficient data (need ≥5 resolved outcomes)",
-            }
-
-        wins = [delta for delta, is_win in rows if is_win == 1]
-        losses = [abs(delta) for delta, is_win in rows if is_win == 0]
-
-        wr = len(wins) / n if n > 0 else 0.0
-        avg_win = sum(wins) / len(wins) if wins else 0.0
-        avg_loss = sum(losses) / len(losses) if losses else 0.0
-        ev = wr * avg_win - (1 - wr) * avg_loss
+            if bt_stats is None or bt_stats["n"] < 10:
+                return {
+                    "kelly_full": 0.0, "kelly_fraction": self.KELLY_FRACTION,
+                    "kelly_fractional": 0.0,
+                    "recommended_usd": 0.0,
+                    "n": n, "wr": None, "ev": None,
+                    "avg_win": None, "avg_loss": None,
+                    "reason": f"Insufficient data (live n={n}, backtest n={bt_stats['n'] if bt_stats else 0})",
+                }
+            # Use the backtest aggregate as if it were live data.
+            wr = bt_stats["wr"]
+            ev = bt_stats["ev"]
+            # Kelly needs (avg_win, avg_loss) but (wr, ev) alone is
+            # under-determined. Assume symmetric outcome magnitudes as
+            # a starting point — works out mathematically to:
+            #   avg = |ev| / (2*wr - 1)   when wr > 0.5
+            # Then avg_win = avg_loss = avg. This is conservative because
+            # it treats both legs equally; actual markets tend to have
+            # asymmetric payoffs which Kelly will discover from live
+            # data once enough live_outcomes accumulate.
+            if wr <= 0.5 or ev <= 0:
+                avg_win, avg_loss = 0.10, 0.10   # Kelly will return 0 anyway
+            else:
+                avg = abs(ev) / max(2 * wr - 1, 0.01)
+                avg_win = avg_loss = max(0.05, min(0.95, avg))
+            n_effective = bt_stats["n"] // 2  # half-weight backtest
+        else:
+            wins = [delta for delta, is_win in rows if is_win == 1]
+            losses = [abs(delta) for delta, is_win in rows if is_win == 0]
+            wr = len(wins) / n if n > 0 else 0.0
+            avg_win = sum(wins) / len(wins) if wins else 0.0
+            avg_loss = sum(losses) / len(losses) if losses else 0.0
+            ev = wr * avg_win - (1 - wr) * avg_loss
+            n_effective = n
+        n = n_effective
 
         # Kelly fraction f* = (p*b - q) / b where b = avg_win/avg_loss
         if avg_win > 0 and avg_loss > 0:
@@ -155,7 +227,7 @@ class KellySizer:
     def get_sizing_report(self) -> dict[str, Any]:
         """Return sizing recommendations for every signal_type with resolved data."""
         try:
-            conn = sqlite3.connect(self._db_path)
+            conn = get_connection(self._db_path)
         except Exception as exc:
             return {"error": str(exc)}
         try:

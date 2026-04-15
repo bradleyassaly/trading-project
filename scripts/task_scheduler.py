@@ -116,6 +116,117 @@ SCHEDULE: list[Task] = [
         description="Mark resolved markets in wallet_trades (daily)",
     ),
     Task(
+        name="signal_resolver",
+        cmd="python -m trading_platform.polymarket.signal_resolver",
+        interval_seconds=4 * 3600,
+        description="Resolve signal_outcomes from gamma CSV (every 4h)",
+    ),
+    Task(
+        name="sync_wallet_trades",
+        # Persists Data-API trades into the wallet_trades SQLite table.
+        # Separate from `poll-wallet-trades` (signal-firing) and
+        # `data-api-fetch` (directory dump). Without this, wallet_trades
+        # goes stale and backtest/analytics queries lie — see 2026-04-14
+        # audit where the table sat 31h old despite poller running.
+        cmd="trading-cli data polymarket sync-wallet-trades --top-n 200",
+        interval_seconds=2 * 3600,
+        description="Persist recent trades for tracked wallets into wallet_trades",
+    ),
+    Task(
+        name="signal_engine_backtest",
+        # Replays last 60d of wallet_trades through the current signal
+        # engine and computes per-signal-type EV from gamma resolutions.
+        # Faster validation than waiting for live fires to resolve —
+        # lets us reject negative-EV signals before they consume paper
+        # bankroll. Writes to signal_backtest_results.
+        cmd="python scripts/signal_engine_backtest.py --days 60 --write",
+        interval_seconds=7 * 24 * 3600,
+        description="Weekly signal-engine backtest (EV validation)",
+    ),
+    Task(
+        name="wallet_copy_graph",
+        # Mines wallet_trades for copy-relationships (wallet B follows A
+        # within 2h on same market/side). Populates wallet_copy_relationships
+        # — used by network_leader_entry signal. Runs daily; relationships
+        # shift slowly and 90d lookback is ~plenty.
+        cmd="python -m trading_platform.polymarket.wallet_copy_graph",
+        interval_seconds=24 * 3600,
+        description="Detect wallet copy-relationships (leader/follower graph)",
+    ),
+    Task(
+        name="wallet_strategy_observer",
+        # Scans wallet_trades and tags each per behavioral strategy
+        # (accumulator, flipper, longshot, etc.), then writes per-wallet
+        # per-strategy PnL to `wallet_strategy_profiles`. Underlying data
+        # for: strategy-level alpha attribution, copyable-wallet discovery,
+        # and weekly digest highlights. Runs every 12h — data shifts slowly.
+        cmd="python -m trading_platform.polymarket.wallet_strategy_observer",
+        interval_seconds=12 * 3600,
+        description="Per-wallet × per-strategy alpha attribution",
+    ),
+    Task(
+        name="bankroll_refresh",
+        # Pulls live USDC balance from the Polymarket CLOB + open-position
+        # notional from the Data API, caches to data/polymarket/bankroll.json.
+        # KellySizer and KillSwitch both read from that cache so sizing
+        # and daily-loss limits always reflect actual account balance.
+        cmd="python -m trading_platform.polymarket.bankroll",
+        interval_seconds=15 * 60,
+        description="Refresh live Polymarket bankroll (CLOB + env fallback)",
+    ),
+    Task(
+        name="markets_refresh",
+        # Pulls Gamma metadata (endDate, volume, outcomes, tags, UMA
+        # status) for every market we care about — open paper positions
+        # first, then pending signals, then recently-active trade markets.
+        # Back-fills the gap where 65% of wallet_trades markets had no
+        # persistent metadata (2026-04-14 audit). Enables badge, exit
+        # timing, and volume-filter queries to join instantly.
+        cmd="python -m trading_platform.polymarket.markets_table",
+        interval_seconds=6 * 3600,
+        description="Refresh per-market metadata cache (endDate/volume/tags)",
+    ),
+    Task(
+        name="orphan_wallet_onboarder",
+        # Auto-ingest wallets that live-collect has been firing signals on
+        # but which we don't track in wallet_trades yet. 10+ signals in 7d
+        # is the bar. Turns "orphan" signal noise into candidate tier1/2
+        # wallets once their trade history is profiled.
+        cmd="python -m trading_platform.polymarket.orphan_wallet_onboarder",
+        interval_seconds=12 * 3600,
+        description="Auto-onboard recurring orphan wallets into wallet_trades",
+    ),
+    Task(
+        name="ingest_top_wallets_daily",
+        # Discovers new top whales each day via Polymarket Data API
+        # leaderboard (1d window). Seeds wallet_profiles for wallets we
+        # haven't seen before. Without this, the tracked set goes stale
+        # as top performers rotate. Was part of run_daily_intelligence.py
+        # but never wired into the container scheduler — pipeline gap
+        # surfaced in the 2026-04-14 audit.
+        cmd="trading-cli data polymarket ingest-top-wallets --limit 50 --window 1d",
+        interval_seconds=24 * 3600,
+        description="Ingest top-50 wallets over last 24h (daily whale discovery)",
+    ),
+    Task(
+        name="ingest_top_wallets_weekly",
+        cmd="trading-cli data polymarket ingest-top-wallets --limit 50 --window 7d",
+        interval_seconds=7 * 24 * 3600,
+        description="Ingest top-50 wallets over last 7 days (weekly discovery)",
+    ),
+    Task(
+        name="daily_digest",
+        cmd="python -m trading_platform.polymarket.daily_digest",
+        interval_seconds=24 * 3600,
+        description="Telegram digest showing live-gate progress (daily)",
+    ),
+    Task(
+        name="weekly_digest",
+        cmd="python -m trading_platform.polymarket.weekly_digest",
+        interval_seconds=7 * 24 * 3600,
+        description="Weekly strategic digest: category EV, signal volume, wallet ranking",
+    ),
+    Task(
         name="wallet_profiles_rebuild",
         cmd="trading-cli data polymarket wallet-profiles --from-db",
         interval_seconds=24 * 3600,
@@ -218,14 +329,30 @@ SCHEDULE: list[Task] = [
         description="Weekly trade-resolution enrichment (computes pnl on resolved trades)",
     ),
     Task(
-        name="daily_digest",
-        # Once-per-day Telegram digest. All routine Telegram traffic
-        # routes through this; everything else is event-driven (trade
-        # placed, trade resolved, circuit breaker, service down).
-        cmd="curl -fsS -X POST http://api:8001/api/alerts/send-digest",
+        name="pm_leaderboard_sync",
+        # Pulls Polymarket's authoritative PnL + volume leaderboard into
+        # wallet_profiles.pm_pnl_usdc and promotes wallets with
+        # pm_pnl >= $100K to tier1h. Our internal net_pnl_usdc only
+        # counts resolved trades and undercounts active traders by
+        # 100-1000×, so the PM leaderboard is the ground truth for
+        # whale identification.
+        cmd="python -m trading_platform.polymarket.pm_leaderboard_sync",
         interval_seconds=24 * 3600,
-        description="Daily Telegram digest (overnight summary)",
+        description="Daily PM authoritative leaderboard sync + tier1h promotion",
     ),
+    Task(
+        name="pnl_reconstruction",
+        # FIFO lot-matching across wallet_trades to compute realized PnL
+        # from pre-resolution sells (not just resolved markets). Writes
+        # realized_pnl_closed per fill and realized_pnl_total on
+        # wallet_profiles. Must run after wallet_trade_sync.
+        cmd="python -m trading_platform.polymarket.wallet_pnl_reconstruction",
+        interval_seconds=24 * 3600,
+        description="Daily FIFO PnL reconstruction (captures sells-before-resolution)",
+    ),
+    # `daily_digest` above (Python module) supersedes the earlier
+    # curl-based API digest task — removed 2026-04-14 to eliminate the
+    # duplicate name that was causing Task dict collisions.
     Task(
         name="categories_backfill_weekly",
         # NOTE: `backfill-categories` is not a polymarket CLI subcommand.

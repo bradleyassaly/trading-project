@@ -1,48 +1,362 @@
-"""
-Standard SQLite connection helper for Polymarket modules.
+"""Database connection helper — PostgreSQL backend with SQLite fallback.
 
-Uses ``journal_mode=DELETE`` (rollback journal) rather than WAL. WAL
-mode was tried twice and broke both times on the Docker Desktop Windows
-bind-mount: the ``-shm``/``-wal`` sidecars don't survive cross-container
-opens cleanly, and a single orphaned handle from live-collect takes an
-exclusive lock that blocks every short-lived scheduler task with
-"unable to open database file". See reports/system_diagnostic_2026-04-11.md
-for the full post-mortem. DELETE mode serializes writers through the
-existing ``busy_timeout`` path, which is fine for this workload — the
-only hot writer is live-collect, everything else writes in short bursts.
+Migrated from SQLite to PostgreSQL on 2026-04-14 after repeated corruption
+under concurrent-writer load. Previous SQLite deployment kept hitting
+"database disk image is malformed" under Docker bind-mount + multi-process
+writes. Postgres's MVCC makes that class of error impossible.
 
-Generic usage::
+Public API unchanged — all callers keep using:
 
-    from trading_platform.polymarket.db_connection import get_connection, db, execute_with_retry
-    conn = get_connection()                          # one-shot
-    with db() as conn: ...                            # context manager (auto-commit + close)
-    cur = execute_with_retry(conn, "SELECT ...")     # retries on lock
+    from trading_platform.polymarket.db_connection import get_connection, db
+    conn = get_connection()
+    with db() as conn: ...
+    cur = execute_with_retry(conn, "SELECT ...")
 
-Pass an explicit ``db_path`` whenever the caller knows it. The
-``WALLET_INTELLIGENCE_DB`` env var can override the default for ad-hoc
-container deployments.
+Backward-compat details:
+  * `?` placeholders in callers are auto-converted to `$N` for Postgres.
+    (psycopg v3 uses `%s`, but we wrap to preserve the dominant ? style.)
+  * `INSERT OR REPLACE INTO` is the only SQLite-specific upsert pattern
+    callers use; we auto-rewrite to Postgres ON CONFLICT semantics
+    when the target table's primary key can be inferred.
+  * PRAGMA calls become no-ops under Postgres.
+  * `.execute` / `.executemany` / `.fetchone` / `.fetchall` preserved.
+
+Env toggle: DB_BACKEND=sqlite keeps the legacy path for rollback / tests.
 """
 from __future__ import annotations
 
 import logging
 import os
+import re
 import sqlite3
 import time
 from contextlib import contextmanager
 from pathlib import Path
+from typing import Any
 
 logger = logging.getLogger(__name__)
+
+
+# ── Config ────────────────────────────────────────────────────────────────
 
 DEFAULT_DB_PATH = os.environ.get(
     "WALLET_INTELLIGENCE_DB",
     "data/polymarket/wallet_intelligence.db",
 )
+DB_BACKEND = os.environ.get("DB_BACKEND", "postgres").lower()
 
-# Tunables — agreed defaults across the stack.
-DEFAULT_TIMEOUT_SEC = 60         # Python sqlite3 connect() timeout
-DEFAULT_BUSY_TIMEOUT_MS = 60000  # SQLite-side busy_timeout
+PG_HOST = os.environ.get("POSTGRES_HOST", "localhost")
+PG_PORT = int(os.environ.get("POSTGRES_PORT", "5432"))
+PG_USER = os.environ.get("POSTGRES_USER", "polymarket")
+PG_PASSWORD = os.environ.get("POSTGRES_PASSWORD", "polymarket_dev")
+PG_DB = os.environ.get("POSTGRES_DB", "polymarket")
+
+# SQLite legacy tunables (only used when DB_BACKEND=sqlite)
+DEFAULT_TIMEOUT_SEC = 60
+DEFAULT_BUSY_TIMEOUT_MS = 60000
 RETRY_MAX_ATTEMPTS = 5
 RETRY_BASE_DELAY = 1.0
+
+
+# ── Postgres adapter ──────────────────────────────────────────────────────
+# The adapter provides a sqlite3-compatible surface so existing callers
+# work unchanged (``conn.execute(sql, params)``, ``fetchone``, ``fetchall``,
+# ``cursor()``, ``commit()``, ``close()``, ``row_factory`` attribute).
+
+try:
+    import psycopg
+    from psycopg.rows import tuple_row, dict_row
+    _psycopg_available = True
+except ImportError:
+    _psycopg_available = False
+
+
+_PLACEHOLDER_RE = re.compile(r"\?")
+_INSERT_OR_REPLACE_RE = re.compile(r"\bINSERT\s+OR\s+REPLACE\s+INTO\b", re.IGNORECASE)
+_INSERT_OR_IGNORE_RE = re.compile(r"\bINSERT\s+OR\s+IGNORE\s+INTO\b", re.IGNORECASE)
+_STRFTIME_NOW_RE = re.compile(
+    r"strftime\s*\(\s*['\"]%s['\"]\s*,\s*['\"]now['\"](?:\s*,\s*['\"][^'\"]+['\"])*\s*\)",
+    re.IGNORECASE,
+)
+_UNIXEPOCH_RE = re.compile(r"\bunixepoch\s*\(\s*\)", re.IGNORECASE)
+
+
+def _convert_create_ddl(sql: str) -> str:
+    """Convert SQLite-flavored CREATE TABLE/INDEX to Postgres equivalents.
+    Mirrors the migration-tool logic so new modules calling
+    ``ensure_schema()`` succeed under Postgres without changes.
+    """
+    sql = re.sub(
+        r"INTEGER\s+PRIMARY\s+KEY\s+AUTOINCREMENT",
+        "BIGSERIAL PRIMARY KEY", sql, flags=re.IGNORECASE,
+    )
+    sql = re.sub(
+        r"INTEGER\s+PRIMARY\s+KEY", "BIGINT PRIMARY KEY", sql, flags=re.IGNORECASE,
+    )
+    sql = re.sub(r"COLLATE\s+\w+", "", sql, flags=re.IGNORECASE)
+    sql = re.sub(r"\)\s*(WITHOUT\s+ROWID|STRICT)\s*;?\s*$", ")", sql, flags=re.IGNORECASE)
+    sql = re.sub(r"\bINTEGER\b", "BIGINT", sql, flags=re.IGNORECASE)
+    sql = re.sub(r"\bREAL\b", "DOUBLE PRECISION", sql, flags=re.IGNORECASE)
+    sql = re.sub(r"\bBLOB\b", "BYTEA", sql, flags=re.IGNORECASE)
+    sql = re.sub(
+        r"unixepoch\s*\(\s*('now')?\s*\)",
+        "(EXTRACT(EPOCH FROM NOW())::BIGINT)", sql, flags=re.IGNORECASE,
+    )
+    sql = re.sub(
+        r"strftime\s*\(\s*['\"]\%s['\"]\s*,\s*['\"]now['\"]\s*\)",
+        "(EXTRACT(EPOCH FROM NOW())::BIGINT)", sql, flags=re.IGNORECASE,
+    )
+    return sql
+
+
+def _convert_sqlite_sql(sql: str, table_pk_cache: dict | None = None) -> str:
+    """Convert SQLite-flavored SQL to Postgres-compatible.
+
+    - `?` placeholders → `%s`
+    - `strftime('%s','now','-N days')` → time arithmetic
+    - `unixepoch()` → `EXTRACT(EPOCH FROM NOW())::BIGINT`
+    - `INSERT OR REPLACE INTO foo(...)` → `INSERT INTO foo(...) ON CONFLICT DO UPDATE ...`
+      (only works when the target PK is known at runtime; otherwise leaves
+      the statement unchanged and relies on the caller to have handled it)
+    """
+    # Time expressions: handle these BEFORE placeholder conversion because
+    # the rewrites may introduce new strings.
+    def _strftime_sub(m):
+        # Grab optional modifier group like ',''-30 days'''
+        raw = m.group(0)
+        # Extract a '-N days' modifier if present
+        mod = re.search(r",\s*['\"]([+-]?\d+\s+\w+)['\"]", raw)
+        if mod:
+            return f"(EXTRACT(EPOCH FROM (NOW() + INTERVAL '{mod.group(1)}'))::BIGINT)"
+        return "(EXTRACT(EPOCH FROM NOW())::BIGINT)"
+
+    sql = _STRFTIME_NOW_RE.sub(_strftime_sub, sql)
+    sql = _UNIXEPOCH_RE.sub("(EXTRACT(EPOCH FROM NOW())::BIGINT)", sql)
+
+    # `INSERT OR IGNORE INTO` → `INSERT INTO … ON CONFLICT DO NOTHING`
+    if _INSERT_OR_IGNORE_RE.search(sql):
+        sql = _INSERT_OR_IGNORE_RE.sub("INSERT INTO", sql)
+        # Append ON CONFLICT DO NOTHING if not already present
+        if not re.search(r"\bON\s+CONFLICT\b", sql, flags=re.IGNORECASE):
+            sql = sql.rstrip(";") + " ON CONFLICT DO NOTHING"
+
+    # `INSERT OR REPLACE` — very common in our codebase.
+    # Translate to INSERT ... ON CONFLICT DO UPDATE using the PK detected
+    # at runtime via a cached lookup.
+    if _INSERT_OR_REPLACE_RE.search(sql):
+        sql = _rewrite_insert_or_replace(sql, table_pk_cache)
+
+    # `?` → `%s`. Cheap and safe as long as no `?` appears inside quoted
+    # strings in the SQL. Our codebase doesn't use `?` in string literals.
+    sql = _PLACEHOLDER_RE.sub("%s", sql)
+    return sql
+
+
+def _rewrite_insert_or_replace(sql: str, pk_cache: dict | None) -> str:
+    """INSERT OR REPLACE INTO foo (a,b,c) VALUES (?,?,?) →
+       INSERT INTO foo (a,b,c) VALUES (?,?,?) ON CONFLICT (pk) DO UPDATE
+         SET a=EXCLUDED.a, b=EXCLUDED.b, c=EXCLUDED.c
+    """
+    # Match: INSERT OR REPLACE INTO <table> (col1, col2, ...) VALUES ...
+    m = re.search(
+        r"INSERT\s+OR\s+REPLACE\s+INTO\s+['\"]?(\w+)['\"]?\s*\(\s*([^)]+)\s*\)",
+        sql, flags=re.IGNORECASE,
+    )
+    if not m:
+        return sql
+    table, cols_str = m.group(1), m.group(2)
+    cols = [c.strip().strip('"') for c in cols_str.split(",")]
+    pk_cols = None
+    if pk_cache and table in pk_cache:
+        pk_cols = pk_cache[table]
+    if not pk_cols:
+        # Ask Postgres what the PK is, cache
+        try:
+            with _pg_raw_conn() as _c:
+                pk_cols = _lookup_pk(_c, table)
+            if pk_cache is not None:
+                pk_cache[table] = pk_cols
+        except Exception:
+            return sql  # give up; caller deals with it
+    if not pk_cols:
+        return sql
+
+    new_sql = _INSERT_OR_REPLACE_RE.sub("INSERT INTO", sql)
+    # Append ON CONFLICT clause (only if not already present)
+    if re.search(r"\bON\s+CONFLICT\b", new_sql, flags=re.IGNORECASE):
+        return new_sql
+    non_pk_cols = [c for c in cols if c not in pk_cols]
+    set_clause = ", ".join(f'"{c}" = EXCLUDED."{c}"' for c in non_pk_cols)
+    conflict_cols = ", ".join(f'"{c}"' for c in pk_cols)
+    if non_pk_cols:
+        new_sql = f"{new_sql} ON CONFLICT ({conflict_cols}) DO UPDATE SET {set_clause}"
+    else:
+        new_sql = f"{new_sql} ON CONFLICT ({conflict_cols}) DO NOTHING"
+    return new_sql
+
+
+def _pg_raw_conn():
+    """Underlying psycopg connection, for internal uses only."""
+    return psycopg.connect(
+        host=PG_HOST, port=PG_PORT, user=PG_USER, password=PG_PASSWORD,
+        dbname=PG_DB, autocommit=False,
+    )
+
+
+def _lookup_pk(pg_conn, table: str) -> list[str]:
+    with pg_conn.cursor() as cur:
+        cur.execute(
+            "SELECT a.attname FROM pg_index i "
+            "JOIN pg_attribute a ON a.attrelid = i.indrelid "
+            "  AND a.attnum = ANY(i.indkey) "
+            "WHERE i.indrelid = %s::regclass AND i.indisprimary",
+            (table,),
+        )
+        return [r[0] for r in cur.fetchall()]
+
+
+class _PgCursorWrapper:
+    """Mimics sqlite3.Cursor. Auto-rewrites SQL on execute/executemany.
+
+    Tracks rowcount + lastrowid; returns tuples by default (set
+    row_factory='dict' for dict rows)."""
+
+    def __init__(self, pg_cur, rewrite_cache: dict, row_factory=None):
+        self._cur = pg_cur
+        self._rewrite_cache = rewrite_cache
+        self._row_factory = row_factory
+        self._last_rewritten = None
+
+    @property
+    def description(self):
+        return self._cur.description
+
+    @property
+    def rowcount(self):
+        return self._cur.rowcount
+
+    @property
+    def lastrowid(self):
+        # psycopg doesn't auto-populate lastrowid; callers needing it must
+        # use RETURNING id.
+        return None
+
+    def execute(self, sql, params=None):
+        # PRAGMA statements: most no-op under Postgres. One is special —
+        # `PRAGMA table_info(tbl)` is used widely in our codebase to
+        # enumerate columns; translate to information_schema.columns.
+        stripped = sql.lstrip()
+        if stripped[:6].upper() == "PRAGMA":
+            m = re.match(
+                r"PRAGMA\s+table_info\s*\(\s*['\"]?(\w+)['\"]?\s*\)",
+                stripped, flags=re.IGNORECASE,
+            )
+            if m:
+                table = m.group(1)
+                self._cur.execute(
+                    "SELECT ordinal_position - 1 AS cid, column_name AS name, "
+                    "data_type AS type, "
+                    "CASE WHEN is_nullable = 'NO' THEN 1 ELSE 0 END AS notnull, "
+                    "column_default AS dflt_value, "
+                    "0 AS pk "
+                    "FROM information_schema.columns "
+                    "WHERE table_schema = 'public' AND table_name = %s "
+                    "ORDER BY ordinal_position",
+                    (table,),
+                )
+                return self
+            # Other PRAGMAs are pure no-ops on postgres (busy_timeout,
+            # journal_mode, synchronous, foreign_keys, integrity_check…)
+            return self
+        self._last_rewritten = _convert_sqlite_sql(sql, self._rewrite_cache)
+        # CREATE TABLE / CREATE INDEX from legacy code uses SQLite type
+        # keywords — route through the column-type converter so new
+        # modules can still call ensure_schema() under Postgres.
+        if re.match(r"\s*CREATE\s+(TABLE|INDEX|UNIQUE\s+INDEX)", self._last_rewritten, re.IGNORECASE):
+            self._last_rewritten = _convert_create_ddl(self._last_rewritten)
+        try:
+            if params is None:
+                self._cur.execute(self._last_rewritten)
+            else:
+                self._cur.execute(self._last_rewritten, params)
+        except psycopg.errors.InFailedSqlTransaction:
+            raise
+        return self
+
+    def executemany(self, sql, param_seq):
+        self._last_rewritten = _convert_sqlite_sql(sql, self._rewrite_cache)
+        self._cur.executemany(self._last_rewritten, list(param_seq))
+        return self
+
+    def fetchone(self):
+        return self._cur.fetchone()
+
+    def fetchall(self):
+        return self._cur.fetchall()
+
+    def fetchmany(self, size=None):
+        return self._cur.fetchmany(size)
+
+    def __iter__(self):
+        return iter(self._cur)
+
+    def close(self):
+        self._cur.close()
+
+
+class _PgConnectionWrapper:
+    """sqlite3.Connection-like wrapper around psycopg.Connection."""
+
+    def __init__(self, pg_conn, row_factory=None):
+        self._conn = pg_conn
+        self._rewrite_cache: dict = {}
+        self.row_factory = row_factory  # attr exists for compat; sqlite3.Row becomes dict rows
+
+    def cursor(self):
+        kw = {}
+        if self.row_factory is not None and hasattr(sqlite3, "Row") and self.row_factory is sqlite3.Row:
+            kw["row_factory"] = dict_row
+        cur = self._conn.cursor(**kw) if kw else self._conn.cursor()
+        return _PgCursorWrapper(cur, self._rewrite_cache, row_factory=self.row_factory)
+
+    def execute(self, sql, params=None):
+        cur = self.cursor()
+        return cur.execute(sql, params)
+
+    def executemany(self, sql, param_seq):
+        cur = self.cursor()
+        return cur.executemany(sql, param_seq)
+
+    def commit(self):
+        self._conn.commit()
+
+    def rollback(self):
+        self._conn.rollback()
+
+    def executescript(self, script: str):
+        """Multi-statement SQLite shim. Under Postgres, schema is already
+        migrated via migrate_sqlite_to_postgres.py — legacy SCHEMA blobs
+        from WalletDB init would re-declare SQLite-flavored DDL which
+        Postgres doesn't accept. Silently no-op; schema is authoritative
+        in Postgres. Callers needing ad-hoc DDL should use conn.execute.
+        """
+        logger.debug("executescript() is a no-op under Postgres backend (schema is migrated authoritatively)")
+        return self
+
+    def close(self):
+        try:
+            self._conn.close()
+        except Exception:
+            pass
+
+    # ── SQLite-compat no-ops ────────────────────────────────────────────
+    def create_function(self, *a, **kw):
+        logger.debug("create_function() is a no-op under Postgres backend")
+
+    # ── SQLite-specific lock emulation (match WalletDB expectation) ────
+    # Some legacy code uses `with self._lock:` — this doesn't need to be
+    # a DB-side lock; a thread lock suffices. WalletDB provides its own
+    # _lock attribute separately, so this connection doesn't need one.
 
 
 def get_connection(
@@ -50,21 +364,41 @@ def get_connection(
     *,
     check_same_thread: bool = True,
     row_factory: bool = False,
-) -> sqlite3.Connection:
-    """Open a SQLite connection with DELETE journal + busy_timeout pragmas.
+) -> Any:
+    """Open a connection. Returns a wrapper that looks like sqlite3.Connection.
 
-    The connection is returned with:
-
-    * ``journal_mode = DELETE`` — rollback journal; no -wal/-shm sidecars
-      on the Windows bind mount, so fresh opens always succeed
-    * ``busy_timeout = 60000``  — wait up to 60s for a lock
-    * ``synchronous = NORMAL``  — faster commits, still durable across crashes
-    * ``foreign_keys = ON``     — match the schema migrations
-
-    PRAGMA failures (e.g. another process is checkpointing) are
-    swallowed — the connection remains usable on whatever the
-    persisted journal_mode is. Real schema bugs still raise.
+    Under DB_BACKEND=postgres (default), returns a Postgres-backed wrapper.
+    Under DB_BACKEND=sqlite, returns a real sqlite3.Connection (legacy path).
     """
+    if DB_BACKEND == "sqlite":
+        return _get_sqlite_connection(
+            db_path, check_same_thread=check_same_thread, row_factory=row_factory,
+        )
+    if not _psycopg_available:
+        raise RuntimeError(
+            "DB_BACKEND=postgres but psycopg is not installed. "
+            "Run: pip install 'psycopg[binary]>=3.1'"
+        )
+    # autocommit=True mirrors SQLite's default per-statement auto-commit.
+    # Legacy code assumes a failed SELECT doesn't poison subsequent queries;
+    # Postgres otherwise requires explicit rollback after any error. The
+    # `db()` context manager below handles explicit transactions for
+    # call-sites that need atomicity.
+    pg = psycopg.connect(
+        host=PG_HOST, port=PG_PORT, user=PG_USER, password=PG_PASSWORD,
+        dbname=PG_DB, autocommit=True,
+    )
+    rf = sqlite3.Row if row_factory else None
+    return _PgConnectionWrapper(pg, row_factory=rf)
+
+
+def _get_sqlite_connection(
+    db_path: str | Path | None,
+    *,
+    check_same_thread: bool,
+    row_factory: bool,
+) -> sqlite3.Connection:
+    """Legacy SQLite path kept for DB_BACKEND=sqlite rollback/tests."""
     path = str(db_path) if db_path is not None else DEFAULT_DB_PATH
     conn = sqlite3.connect(path, timeout=DEFAULT_TIMEOUT_SEC, check_same_thread=check_same_thread)
     for stmt in (
@@ -86,16 +420,18 @@ def get_connection(
 
 @contextmanager
 def db(db_path: str | Path | None = None, *, row_factory: bool = False):
-    """Context manager that opens, yields, commits, and closes a connection.
+    """Context manager: open, yield, commit on clean exit, rollback on error, close.
 
-    Use this in any code path that does a small number of writes:
-
-        with db() as conn:
-            conn.execute("INSERT INTO ...", (...))
-            conn.execute("UPDATE ...", (...))
-        # auto-commit on clean exit, auto-rollback on exception, always closes
+    Under Postgres, temporarily disables autocommit inside the block so
+    the whole block is one transaction. Mirrors the SQLite semantics
+    callers expect.
     """
     conn = get_connection(db_path, row_factory=row_factory)
+    # For the Postgres wrapper, scope a transaction by toggling autocommit.
+    raw = getattr(conn, "_conn", None)
+    was_autocommit = getattr(raw, "autocommit", None)
+    if raw is not None and was_autocommit is True:
+        raw.autocommit = False
     try:
         yield conn
         conn.commit()
@@ -106,6 +442,11 @@ def db(db_path: str | Path | None = None, *, row_factory: bool = False):
             pass
         raise
     finally:
+        if raw is not None and was_autocommit is True:
+            try:
+                raw.autocommit = True
+            except Exception:
+                pass
         try:
             conn.close()
         except Exception:
@@ -113,88 +454,64 @@ def db(db_path: str | Path | None = None, *, row_factory: bool = False):
 
 
 def execute_with_retry(
-    conn: sqlite3.Connection,
-    sql: str,
-    params: tuple | list | dict | None = None,
-    *,
+    conn, sql, params=None, *,
     max_retries: int = RETRY_MAX_ATTEMPTS,
     base_delay: float = RETRY_BASE_DELAY,
-) -> sqlite3.Cursor:
-    """Execute a single SQL statement with exponential-backoff retry on lock.
+):
+    """Execute with retry on transient lock/busy errors.
 
-    Use this on the hot write paths (live_collector, paper_executor) where
-    a lock contention should NOT crash the caller. Logs every retry at
-    WARNING level so contention shows up in the operator's view.
+    Under Postgres these errors are vanishingly rare (MVCC) so this is
+    effectively a pass-through except for deadlocks. Retained for API
+    compatibility with all the call-sites that import it.
     """
-    last_exc: Exception | None = None
+    last_exc = None
     for attempt in range(max_retries):
         try:
             if params is None:
                 return conn.execute(sql)
             return conn.execute(sql, params)
-        except sqlite3.OperationalError as exc:
+        except Exception as exc:  # psycopg.OperationalError or sqlite3.OperationalError
             last_exc = exc
             msg = str(exc).lower()
-            if "locked" not in msg and "busy" not in msg:
+            if "locked" not in msg and "busy" not in msg and "deadlock" not in msg:
                 raise
             if attempt == max_retries - 1:
                 break
             delay = base_delay * (2 ** attempt)
             logger.warning(
-                "[DB_RETRY] locked, attempt %d/%d, waiting %.1fs: %s",
-                attempt + 1, max_retries, delay, sql[:60].replace("\n", " "),
-            )
-            time.sleep(delay)
-    # Re-raise so callers can fail fast or queue.
-    assert last_exc is not None
-    raise last_exc
-
-
-def commit_with_retry(
-    conn: sqlite3.Connection,
-    *,
-    max_retries: int = RETRY_MAX_ATTEMPTS,
-    base_delay: float = RETRY_BASE_DELAY,
-) -> None:
-    """Commit with retry on lock — pairs with execute_with_retry."""
-    last_exc: Exception | None = None
-    for attempt in range(max_retries):
-        try:
-            conn.commit()
-            return
-        except sqlite3.OperationalError as exc:
-            last_exc = exc
-            if "locked" not in str(exc).lower() and "busy" not in str(exc).lower():
-                raise
-            if attempt == max_retries - 1:
-                break
-            delay = base_delay * (2 ** attempt)
-            logger.warning(
-                "[DB_RETRY] commit locked, attempt %d/%d, waiting %.1fs",
-                attempt + 1, max_retries, delay,
+                "[DB_RETRY] transient error, attempt %d/%d, waiting %.1fs: %s",
+                attempt + 1, max_retries, delay, msg[:100],
             )
             time.sleep(delay)
     assert last_exc is not None
     raise last_exc
+
+
+def commit_with_retry(conn, **_kwargs) -> None:
+    """Commit with no-op retry — Postgres commit either succeeds or raises."""
+    conn.commit()
 
 
 def force_journal_mode_wal(db_path: str | Path) -> str:
-    """One-shot helper: open the DB and force WAL mode persistently."""
-    conn = sqlite3.connect(str(db_path), timeout=DEFAULT_TIMEOUT_SEC)
-    try:
-        result = conn.execute("PRAGMA journal_mode=WAL").fetchone()
-        conn.commit()
-        return result[0] if result else ""
-    finally:
-        conn.close()
+    """No-op under Postgres; retained for API compat."""
+    if DB_BACKEND == "sqlite":
+        conn = sqlite3.connect(str(db_path), timeout=DEFAULT_TIMEOUT_SEC)
+        try:
+            result = conn.execute("PRAGMA journal_mode=WAL").fetchone()
+            conn.commit()
+            return result[0] if result else ""
+        finally:
+            conn.close()
+    return "n/a (postgres)"
 
 
 def force_journal_mode_delete(db_path: str | Path) -> str:
-    """One-shot helper: force DELETE mode (legacy migration helper)."""
-    conn = sqlite3.connect(str(db_path), timeout=DEFAULT_TIMEOUT_SEC)
-    try:
-        result = conn.execute("PRAGMA journal_mode=DELETE").fetchone()
-        conn.commit()
-        return result[0] if result else ""
-    finally:
-        conn.close()
+    if DB_BACKEND == "sqlite":
+        conn = sqlite3.connect(str(db_path), timeout=DEFAULT_TIMEOUT_SEC)
+        try:
+            result = conn.execute("PRAGMA journal_mode=DELETE").fetchone()
+            conn.commit()
+            return result[0] if result else ""
+        finally:
+            conn.close()
+    return "n/a (postgres)"

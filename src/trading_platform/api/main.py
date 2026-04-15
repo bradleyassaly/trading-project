@@ -113,6 +113,73 @@ def signals_correlation() -> dict[str, Any]:
     return reader.read_signals_correlation()
 
 
+@app.get("/api/bankroll")
+def bankroll_info() -> dict[str, Any]:
+    """Current live-account bankroll snapshot (cached)."""
+    from trading_platform.polymarket.bankroll import get_bankroll_info
+    return get_bankroll_info()
+
+
+@app.post("/api/bankroll/refresh")
+def bankroll_refresh() -> dict[str, Any]:
+    """Force a live refresh (CLOB balance + positions). Returns fresh snapshot."""
+    from trading_platform.polymarket.bankroll import refresh_bankroll
+    return refresh_bankroll()
+
+
+@app.get("/api/signals/backtest-results")
+def signals_backtest_results() -> dict[str, Any]:
+    """Latest per-signal-type EV from signal_engine_backtest, blended with
+    live paper-trade resolutions. Sorted by EV descending."""
+    from trading_platform.polymarket.db_connection import get_connection
+    try:
+        c = get_connection(_alpha_db_path())
+    except Exception as exc:
+        return {"error": str(exc), "rows": [], "run_ts": None}
+    try:
+        latest = c.execute("SELECT MAX(run_ts) FROM signal_backtest_results").fetchone()
+        if not latest or not latest[0]:
+            return {"rows": [], "run_ts": None, "note": "no backtest run yet"}
+        run_ts = int(latest[0])
+        bt_rows = c.execute(
+            "SELECT signal_type, fires, resolved, wr, ev, total_delta, pending, lookback_days "
+            "FROM signal_backtest_results WHERE run_ts = ?",
+            (run_ts,),
+        ).fetchall()
+        live_map: dict[str, dict] = {}
+        for st, n, ev, wins, pnl in c.execute(
+            "SELECT signal_type, COUNT(*), AVG(return_pct)/100.0, "
+            " SUM(CASE WHEN outcome='win' THEN 1 ELSE 0 END), "
+            " SUM(COALESCE(realized_pnl,0)) "
+            "FROM polymarket_paper_trades WHERE archived=0 AND exit_ts IS NOT NULL "
+            "GROUP BY signal_type"
+        ).fetchall():
+            live_map[st] = {
+                "live_resolved": n or 0, "live_ev": ev,
+                "live_wins": wins or 0, "live_pnl": pnl or 0,
+            }
+        rows = []
+        for st, fires, resolved, wr, ev, total_delta, pending, lookback in bt_rows:
+            row = {
+                "signal_type": st,
+                "backtest_fires": fires,
+                "backtest_resolved": resolved,
+                "backtest_wr": wr,
+                "backtest_ev": ev,
+                "backtest_total_delta": total_delta,
+                "backtest_pending": pending,
+                "lookback_days": lookback,
+            }
+            row.update(live_map.get(st, {
+                "live_resolved": 0, "live_ev": None, "live_wins": 0, "live_pnl": 0,
+            }))
+            rows.append(row)
+        rows.sort(key=lambda x: -(x["backtest_ev"] if x["backtest_ev"] is not None else -999))
+        return {"run_ts": run_ts, "rows": rows, "n_signal_types": len(rows)}
+    finally:
+        c.close()
+
+
 @app.get("/api/signals/sizing")
 def signals_sizing() -> dict[str, Any]:
     """Kelly-based sizing recommendations per signal type (from signal_outcomes)."""

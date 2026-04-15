@@ -2335,6 +2335,8 @@ def read_smart_money_wallet_detail(address: str) -> dict[str, Any]:
                 p.category_trades, p.equity_score,
                 l.primary_category, l.profit_factor as lb_pf,
                 l.pm_pnl, l.pm_rank, l.leaderboard_source, l.pseudonym,
+                p.pm_pnl_usdc, p.pm_volume_usdc, p.realized_pnl_total,
+                p.unrealized_pnl_estimate, p.closed_trades_count,
                 p.pnl_7d, p.pnl_30d, p.pnl_90d, p.pnl_trend, p.pnl_consistency,
                 p.pnl_volatility, p.sharpe_ratio, p.sortino_ratio,
                 p.max_drawdown_pct, p.max_drawdown_usd, p.recovery_factor,
@@ -2359,6 +2361,8 @@ def read_smart_money_wallet_detail(address: str) -> dict[str, Any]:
                 "politics_win_rate", "crypto_win_rate", "category_trades", "equity_score",
                 "primary_category", "lb_profit_factor",
                 "pm_pnl", "pm_rank", "leaderboard_source", "pseudonym",
+                "pm_pnl_usdc", "pm_volume_usdc", "realized_pnl_total",
+                "unrealized_pnl_estimate", "closed_trades_count",
                 "pnl_7d", "pnl_30d", "pnl_90d", "pnl_trend", "pnl_consistency",
                 "pnl_volatility", "sharpe_ratio", "sortino_ratio",
                 "max_drawdown_pct", "max_drawdown_usd", "recovery_factor",
@@ -2370,9 +2374,22 @@ def read_smart_money_wallet_detail(address: str) -> dict[str, Any]:
                 "open_positions_count", "open_positions_value"]
         profile = dict(zip(cols, row))
         profile["wallet"] = address
-        # Display PnL prefers Polymarket-reported value
-        profile["display_pnl"] = profile.get("pm_pnl") or profile.get("net_pnl_usdc")
-        profile["display_pnl_source"] = "polymarket" if profile.get("pm_pnl") is not None else "local_estimate"
+        # Display PnL preference: PM authoritative > FIFO reconstructed > legacy
+        # resolved-only. `pm_pnl_usdc` is the newest (from pm_leaderboard_sync),
+        # falls back to the older `pm_pnl` on the leaderboard row, then to
+        # our FIFO-reconstructed realized_pnl_total which captures pre-resolution
+        # sells, and finally to the legacy net_pnl_usdc (resolved trades only).
+        pm_authoritative = profile.get("pm_pnl_usdc") or profile.get("pm_pnl")
+        reconstructed = profile.get("realized_pnl_total")
+        if pm_authoritative is not None:
+            profile["display_pnl"] = pm_authoritative
+            profile["display_pnl_source"] = "pm_authoritative"
+        elif reconstructed is not None:
+            profile["display_pnl"] = reconstructed
+            profile["display_pnl_source"] = "reconstructed_fifo"
+        else:
+            profile["display_pnl"] = profile.get("net_pnl_usdc")
+            profile["display_pnl_source"] = "resolved_only"
 
         # Category breakdown from category_trades JSON
         cat_breakdown = {}
@@ -2520,11 +2537,13 @@ def read_smart_money_winners(*, window: str = "all") -> dict[str, Any]:
                           l.directional_win_rate, l.rolling_20_wr, l.conviction_score,
                           l.profit_factor, l.primary_category, l.wallet_bucket,
                           l.resolved_trades, l.total_volume_usdc, l.net_pnl_usdc,
-                          l.rank, l.pm_pnl, l.pm_rank, l.wallet_type
+                          l.rank, l.pm_pnl, l.pm_rank, l.wallet_type,
+                          p.pm_pnl_usdc, p.realized_pnl_total
                    FROM leaderboard l
+                   LEFT JOIN wallet_profiles p ON p.wallet = l.wallet
                    ORDER BY
                      CASE l.tier WHEN 'tier1h' THEN 1 WHEN 'tier1' THEN 2 WHEN 'tier2' THEN 3 ELSE 4 END,
-                     COALESCE(l.pm_pnl, l.net_pnl_usdc, 0) DESC,
+                     COALESCE(p.pm_pnl_usdc, l.pm_pnl, p.realized_pnl_total, l.net_pnl_usdc, 0) DESC,
                      COALESCE(l.conviction_score, 0) DESC
                    LIMIT 100"""
             ).fetchall()
@@ -2533,13 +2552,24 @@ def read_smart_money_winners(*, window: str = "all") -> dict[str, Any]:
                 "directional_win_rate", "rolling_20_wr", "conviction_score",
                 "profit_factor", "primary_category", "wallet_bucket",
                 "resolved_trades", "total_volume_usdc", "net_pnl_usdc",
-                "rank", "pm_pnl", "pm_rank", "wallet_type"]
+                "rank", "pm_pnl", "pm_rank", "wallet_type",
+                "pm_pnl_usdc", "realized_pnl_total"]
         rows = []
         for r in lb_rows:
             row = dict(zip(cols, r))
-            # Display PnL: prefer Polymarket-reported when available
-            row["display_pnl"] = row.get("pm_pnl") or row.get("net_pnl_usdc")
-            row["display_pnl_source"] = "polymarket" if row.get("pm_pnl") is not None else "local_estimate"
+            # Display PnL preference: PM authoritative > leaderboard pm_pnl >
+            # FIFO reconstructed > legacy resolved-only.
+            pm_auth = row.get("pm_pnl_usdc") or row.get("pm_pnl")
+            rec = row.get("realized_pnl_total")
+            if pm_auth is not None:
+                row["display_pnl"] = pm_auth
+                row["display_pnl_source"] = "pm_authoritative"
+            elif rec is not None:
+                row["display_pnl"] = rec
+                row["display_pnl_source"] = "reconstructed_fifo"
+            else:
+                row["display_pnl"] = row.get("net_pnl_usdc")
+                row["display_pnl_source"] = "resolved_only"
             # Compat fields for GUI
             row["profit"] = row["display_pnl"]
             row["volume"] = row.get("total_volume_usdc")

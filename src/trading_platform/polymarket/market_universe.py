@@ -125,10 +125,10 @@ class MarketUniverse:
         # Wallet-derived markets bucket — populated below
         wallet_bucket: list[dict] = []
         try:
-            import sqlite3 as _sq
+            from trading_platform.polymarket.db_connection import get_connection
             db_path = _PROJECT_ROOT / "data" / "polymarket" / "wallet_intelligence.db"
             if db_path.exists():
-                conn = _sq.connect(str(db_path))
+                conn = get_connection(db_path)
                 watched = [r[0] for r in conn.execute(
                     "SELECT wallet FROM leaderboard WHERE tier IN ('tier1','tier1h','tier2')"
                 ).fetchall()]
@@ -419,6 +419,59 @@ class MarketUniverse:
             self._path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
         return added
+
+    # ── Duration helpers ──────────────────────────────────────────────────
+    #
+    # Validated via scripts/wallet_deep_dive.py: short-duration markets
+    # provide a faster feedback loop (resolution within 1-30 days) which
+    # is what unblocks live-trading validation. Not a hard filter on the
+    # universe — callers opt in so long-dated conviction plays still
+    # appear in the main subscription.
+
+    @staticmethod
+    def _days_until_resolution(entry: dict) -> float | None:
+        """Parse end_date_iso → days-from-now. None if missing/unparseable."""
+        raw = entry.get("end_date_iso") or ""
+        if not raw:
+            return None
+        try:
+            from datetime import datetime, timezone
+            raw_clean = raw.replace("Z", "+00:00") if raw.endswith("Z") else raw
+            dt = datetime.fromisoformat(raw_clean)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            now = datetime.now(tz=timezone.utc)
+            return (dt - now).total_seconds() / 86400.0
+        except Exception:
+            return None
+
+    def short_duration_markets(
+        self,
+        *,
+        max_days: float = 30.0,
+        min_days: float = 0.0,
+        categories: list[str] | None = None,
+    ) -> list[dict]:
+        """Return markets resolving within the [min_days, max_days] window.
+
+        Useful for signal engine runs that want to bias paper-trading
+        toward faster-feedback markets — accelerates the validation loop
+        against the live-trading gate of 20+ resolved outcomes.
+        """
+        out: list[dict] = []
+        buckets = self._by_category.items()
+        for cat, items in buckets:
+            if categories and cat not in categories:
+                continue
+            for m in items:
+                d = self._days_until_resolution(m)
+                if d is None:
+                    continue
+                if min_days <= d <= max_days:
+                    out.append(m)
+        # Sort by soonest-resolving first
+        out.sort(key=lambda m: self._days_until_resolution(m) or float("inf"))
+        return out
 
     def load_cached(self, max_age_hours: float = 6.0) -> bool:
         """Load from JSON if fresh enough. Return True if loaded."""

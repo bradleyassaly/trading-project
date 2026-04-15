@@ -25,9 +25,15 @@ STATUS_DIR = PROJECT_ROOT / "data" / "system"
 PIPELINE_STATUS_PATH = STATUS_DIR / "pipeline_status.json"
 PIPELINE_RUNS_PATH = STATUS_DIR / "pipeline_runs.jsonl"
 
-STEP_KEYS = ["ingest_daily", "ingest_weekly", "ingest_monthly", "data_fetch", "profile_rebuild", "classify_buckets", "build_leaderboard", "refresh_universe"]
+STEP_KEYS = ["fetch_resolutions", "resolve_signals", "ingest_daily", "ingest_weekly", "ingest_monthly", "data_fetch", "profile_rebuild", "classify_buckets", "build_leaderboard", "refresh_universe"]
 
 STEPS = [
+    {"key": "fetch_resolutions", "name": "Fetching gamma market resolutions",
+     "command": ["trading-cli", "data", "polymarket", "fetch-resolutions"],
+     "timeout": 600, "fatal": False},
+    {"key": "resolve_signals", "name": "Resolving signal outcomes",
+     "command": [sys.executable, "-m", "trading_platform.polymarket.signal_resolver"],
+     "timeout": 300, "fatal": False},
     {"key": "ingest_daily", "name": "Ingesting daily top wallets",
      "command": ["trading-cli", "data", "polymarket", "ingest-top-wallets",
                  "--limit", "50", "--window", "1d"],

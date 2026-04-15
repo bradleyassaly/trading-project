@@ -31,6 +31,7 @@ export const api = {
   pnlSummary: () => get('/pnl/summary'),
   signalsPerformance: () => get('/signals/performance'),
   signalsCorrelation: () => get('/signals/correlation'),
+  signalsBacktestResults: () => get('/signals/backtest-results'),
   kalshiMarkets: () => get('/kalshi/markets'),
   kalshiMarketHistory: (ticker) => get(`/kalshi/market/${encodeURIComponent(ticker)}/history`),
   reasoningTrades: () => get('/reasoning/trades'),

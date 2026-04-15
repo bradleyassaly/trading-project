@@ -13,12 +13,12 @@ Two questions:
 from __future__ import annotations
 
 import csv
-import sqlite3
 from pathlib import Path
 
 import pandas as pd
 
-DB = "data/polymarket/wallet_intelligence.db"
+from trading_platform.polymarket.db_connection import get_connection
+
 CSV = Path("data/polymarket/gamma_resolution.csv")
 
 pd.set_option("display.max_columns", None)
@@ -30,7 +30,7 @@ def banner(t: str) -> None:
     print(f"\n{bar}\n  {t}\n{bar}")
 
 
-conn = sqlite3.connect(DB, timeout=60)
+conn = get_connection()
 
 # ─────────────────────────────────────────────────────────────────────
 # Q1: signal direction vs whale's actual trade side

@@ -31,24 +31,42 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[3]
 _WALLET_DB_PATH = _PROJECT_ROOT / "data" / "polymarket" / "wallet_intelligence.db"
 
 SIGNAL_BANKROLL = {
-    "accumulation":            20_000,  # strongest structural signal (WR 80%, EV +0.28)
+    # ─── Backtest-validated (EV > 0 on n ≥ 20 over 60d) ───
+    # Values set from 2026-04-14 signal_engine_backtest results:
+    #   specialist_entry  n=32  EV=+0.411  ← highest validated EV
+    #   wallet_reversal   n=98  EV=+0.147
+    #   network_leader    n=81  EV=+0.078
+    #   tier_entry        n=98  EV=+0.057
+    "specialist_entry":        20_000,  # 60d-backtest EV=+0.411 strongest
+    "wallet_reversal":         18_000,  # 60d-backtest EV=+0.147
+    "tier_entry":              15_000,  # 60d-backtest EV=+0.057
+    "network_leader_entry":    15_000,  # 60d-backtest EV=+0.078
+
+    # ─── New strategy-specific signals (small sample, positive early) ───
+    "copyable_contrarian":     12_000,  # n=10 EV=+0.18 (strong early)
+    "strategy_specialist":     10_000,  # n=5 EV=+0.11 (early)
+
+    # ─── Historical validations (may be stale) ───
+    "accumulation":            20_000,  # structural signal (historical WR 80%, EV +0.28)
     "late_conviction":         15_000,  # late entry + large size (N=173, WR 73%, EV +0.23)
-    "specialist_entry":        12_000,  # specialist in own category (N=25, WR 76%, EV +0.27)
-    "tier_entry":              10_000,  # S/A tier in uncertain zone (N=20, WR 80%, EV +0.20)
-    "insider_entry":           15_000,  # disabled: sampling bias
     "whale_entry_filtered":    15_000,  # copyable wallets only (WR 72%, EV +0.15)
-    "wallet_reversal":         18_000,
-    "cascade":                 15_000,
-    "oversized_bet":           15_000,
-    "market_maker_flip":       12_000,
-    "convergence":             12_000,
-    "price_velocity":          10_000,
-    "specialist_entry":         8_000,
-    "whale_exit":               8_000,
-    "no_position_entry":        8_000,
-    "pre_deadline_surge":       5_000,
-    "position_reduction":       5_000,
-    "whale_entry":              3_000,
+    "insider_entry":           15_000,  # disabled: sampling bias
+
+    # ─── Awaiting data ───
+    "consensus_follower":      12_000,  # 3+ leaderboard wallets same-side 24h
+    "news_reactor":            10_000,  # trade within 1h of ≥20pp spike
+    "cascade":                 10_000,  # no backtest data
+    "convergence":             10_000,  # no backtest data
+
+    # ─── Backtest-negative or demoted ───
+    "oversized_bet":           3_000,   # 60d-backtest EV=-0.127 — capped
+    "market_maker_flip":       2_000,   # 60d-backtest EV=-0.268 — near-disabled
+    "whale_entry":             1_000,   # 60d-backtest EV=-0.047 — baseline, demoted
+    "no_position_entry":       3_000,   # small sample, unproven
+    "pre_deadline_surge":      5_000,
+    "price_velocity":          3_000,   # velocity noise; already excluded at gate
+    "whale_exit":              3_000,   # informational — small alloc
+    "position_reduction":      3_000,   # informational
 }
 
 MIN_CONFIDENCE = 0.35
@@ -70,15 +88,37 @@ STARTING_BANKROLL = 10_000  # Paper validation phase — not production size
 # fill at those prices on the real CLOB. The Bayesian win-rate / Kelly
 # fraction downstream then read those fictional fills as evidence the
 # strategy worked. See reports/data_validation.md DV-5.
-# Entry price bounds — validated via reports/win_rate_validation.md.
-# Alpha concentrates in 0.20-0.60; tokens <0.10 are noise, >0.80 are poor R/R.
+# Entry price bounds — validated via scripts/wallet_deep_dive.py on 3,418
+# resolved top-wallet trades. Bucketed PnL (full sample):
+#   (0.05, 0.10]:  WR=86% PnL=-$4.8K   (longshot noise, losers just exceed winners)
+#   (0.10, 0.20]:  WR=63% PnL=+$229K   *** sweet spot
+#   (0.20, 0.35]:  WR=58% PnL=+$176K   *** sweet spot
+#   (0.35, 0.50]:  WR=61% PnL=+$83K    good
+#   (0.50, 0.65]:  WR=60% PnL=+$41K    good
+#   (0.65, 0.80]:  WR=67% PnL=-$18K    <-- high WR BUT loses money (late-momentum trap)
+#   (0.80, 0.90]:  WR=72% PnL=-$4.5K
+# So 0.65-0.80 is a win-rate trap: looks good on paper, bleeds in practice.
 MIN_ENTRY_PRICE = 0.10
-MAX_ENTRY_PRICE = 0.80
+MAX_ENTRY_PRICE = 0.65
 
-# Optimal band where historical profit is highest (72-74% WR, $67-229 avg PnL).
-OPTIMAL_BAND_LOW = 0.20
-OPTIMAL_BAND_HIGH = 0.60
+# Optimal band where PnL-per-trade is densest ($0.10-$0.50 earned $488K combined).
+OPTIMAL_BAND_LOW = 0.10
+OPTIMAL_BAND_HIGH = 0.50
 OPTIMAL_BAND_BOOST = 1.15  # confidence multiplier for sweet spot
+
+# Category gate — only paper-trade where we have proven positive EV.
+# Signals still fire and record to signal_outcomes for every category
+# so we can flip this list as new categories mature. See Fix 6.
+# Sports moved OUT of EXCLUDE into TIER1-ONLY on 2026-04-14 after
+# wallet_deep_dive.py showed tier1-only sports is +$55K/863 trades @ 67% WR,
+# while the full sports population is -$44K. See TIER1_ONLY_CATEGORIES below.
+PAPER_TRADE_CATEGORIES = {"politics", "geopolitics", "crypto", "economics", "sports"}
+TIER1_ONLY_CATEGORIES = {"sports"}  # require wallet_tier='tier1' for these
+EXCLUDE_CATEGORIES: set[str] = set()  # no hard exclusions; tier-gating handles it
+# Live trading: strict allowlist (statistically significant positive EV only).
+LIVE_TRADE_CATEGORIES = {"politics", "geopolitics"}
+# Signal types to exclude from paper bankroll (fire+record only, no capital).
+EXCLUDE_SIGNAL_TYPES = {"price_velocity"}  # 95% WR, EV +0.004 = noise
 
 # Kelly sizing — Half-Kelly from validated 0.10-0.80 data (WR=73%, odds=0.82)
 HALF_KELLY = 0.05  # 5% of available bankroll (quarter-Kelly, conservative for paper phase)
@@ -346,6 +386,36 @@ class PolymarketPaperExecutor:
         if signal_type not in SIGNAL_BANKROLL:
             return None
 
+        # Signal-type gate (global): exclude low-edge / high-volume types
+        # from bankroll deployment. They still fire and record for analysis.
+        if signal_type in EXCLUDE_SIGNAL_TYPES:
+            logger.debug("[CAT_GATE] SKIP excluded signal_type=%s", signal_type)
+            return None
+
+        # Category gate (global): proven positive-EV categories only.
+        # Empty/unknown category is allowed through so new categories
+        # aren't silently killed before we have data on them.
+        sig_cat_raw = signal.get("category") or ""
+        sig_cat = sig_cat_raw.lower() if isinstance(sig_cat_raw, str) else ""
+        if sig_cat in EXCLUDE_CATEGORIES:
+            logger.info("[CAT_GATE] SKIP %s in excluded category %s", signal_type, sig_cat)
+            return None
+        if sig_cat and sig_cat not in PAPER_TRADE_CATEGORIES:
+            logger.info("[CAT_GATE] SKIP %s in unproven category %s", signal_type, sig_cat)
+            return None
+
+        # Tier gate for TIER1_ONLY_CATEGORIES (e.g. sports): the full
+        # sports population is -$44K over 4,707 trades, but tier1-only
+        # sports is +$55K over 863 trades at 67% WR. Require tier1.
+        if sig_cat in TIER1_ONLY_CATEGORIES:
+            tier = signal.get("wallet_tier") or ""
+            if tier not in ("tier1", "tier1h"):
+                logger.info(
+                    "[TIER_GATE] SKIP %s in %s — wallet_tier=%s (need tier1/tier1h)",
+                    signal_type, sig_cat, tier or "NULL",
+                )
+                return None
+
         # Category exclusions per signal type. Crypto accumulation: 7 signals,
         # 0 wins, EV=-0.50 on corrected data. Sports/entertainment are also
         # negative. See reports/category_grouping_analysis_2026-04-12.md.
@@ -409,37 +479,45 @@ class PolymarketPaperExecutor:
             try:
                 from trading_platform.polymarket.alpha_scores import get_wallet_alpha
                 alpha = get_wallet_alpha(str(self._wallet_db_path), gate_wallet, gate_category)
+                gate_tier = signal.get("wallet_tier")
                 if alpha <= 0:
+                    if gate_tier in ("tier1h", "tier1"):
+                        signal["alpha_score"] = 0.0
+                        logger.info(
+                            "[ALPHA_GATE] wallet %s %s bypass (no alpha row), signal=%s",
+                            gate_wallet[:14], gate_tier, signal_type,
+                        )
+                    else:
+                        logger.info(
+                            "[ALPHA_GATE] wallet %s NOT copyable in %s, SKIP %s",
+                            gate_wallet[:14], gate_category, signal_type,
+                        )
+                        return None
+                else:
                     logger.info(
-                        "[ALPHA_GATE] wallet %s NOT copyable in %s, SKIP %s",
-                        gate_wallet[:14], gate_category, signal_type,
+                        "[ALPHA_GATE] wallet %s copyable in %s, score=%.3f, signal=%s",
+                        gate_wallet[:14], gate_category, alpha, signal_type,
                     )
-                    return None
-                logger.info(
-                    "[ALPHA_GATE] wallet %s copyable in %s, score=%.3f, signal=%s",
-                    gate_wallet[:14], gate_category, alpha, signal_type,
-                )
-                # Stash for downstream consumers (sizing, fusion, telemetry).
-                signal["alpha_score"] = alpha
+                    signal["alpha_score"] = alpha
             except Exception as exc:
                 logger.debug("alpha gate lookup failed: %s", exc)
 
         # Entry price filter — validated bounds from win_rate_validation.md.
+        # Hard-reject missing or out-of-band prices so penny-market noise
+        # (0.001 entries resolving to 1.0 = $1.5M phantom PnL) can't slip in.
         entry_price_check = signal.get("price")
-        if entry_price_check is not None:
-            try:
-                ep = float(entry_price_check)
-                # Optimal band confidence boost
-                if OPTIMAL_BAND_LOW <= ep <= OPTIMAL_BAND_HIGH:
-                    confidence = min(0.95, confidence * OPTIMAL_BAND_BOOST)
-                if ep < MIN_ENTRY_PRICE or ep > MAX_ENTRY_PRICE:
-                    logger.info(
-                        "[SIGNAL\u2192TRADE] SKIP: %s entry_price=%.4f outside fillable band [%s, %s]",
-                        signal_type, ep, MIN_ENTRY_PRICE, MAX_ENTRY_PRICE,
-                    )
-                    return None
-            except (TypeError, ValueError):
-                pass
+        try:
+            ep = float(entry_price_check) if entry_price_check is not None else None
+        except (TypeError, ValueError):
+            ep = None
+        if ep is None or ep < MIN_ENTRY_PRICE or ep > MAX_ENTRY_PRICE:
+            logger.info(
+                "[SIGNAL\u2192TRADE] SKIP: %s entry_price=%s outside fillable band [%s, %s]",
+                signal_type, ep, MIN_ENTRY_PRICE, MAX_ENTRY_PRICE,
+            )
+            return None
+        if OPTIMAL_BAND_LOW <= ep <= OPTIMAL_BAND_HIGH:
+            confidence = min(0.95, confidence * OPTIMAL_BAND_BOOST)
 
         # Check for existing open position on same market
         with self._wallet_lock:
@@ -461,8 +539,15 @@ class PolymarketPaperExecutor:
             from trading_platform.polymarket.execution_gates import ExecutionGates
             gates = ExecutionGates(db_path=str(self._wallet_db_path), mode="paper")
             ev = signal.get("alpha_score", 0) or 0  # rough EV proxy
+            # Pick the side-correct clob token for depth/spread checks.
+            # Signal now carries yes_token_id / no_token_id explicitly;
+            # falls back to the generic token_id field if missing.
+            _want_yes = (signal.get("direction") or "BUY").upper() == "BUY"
+            _tok = (
+                signal.get("yes_token_id") if _want_yes else signal.get("no_token_id")
+            ) or signal.get("token_id") or signal.get("asset_id")
             should_trade, gate_results = gates.run_all_gates(
-                token_id=signal.get("asset_id") or signal.get("token_id"),
+                token_id=_tok,
                 expected_ev=ev,
                 stake=MIN_STAKE,  # pre-sizing check with minimum
                 category=category,
@@ -595,8 +680,27 @@ class PolymarketPaperExecutor:
         side = "YES" if direction == "BUY" else "NO"
         category = signal.get("category", "other")
         question = signal.get("question", "")
-        entry_price = signal.get("price")
+        raw_entry_price = signal.get("price")
         now_ts = int(time.time())
+
+        # Apply CostModel on entry so paper P&L mirrors real execution.
+        # Previously: raw signal price was stored; costs only applied on
+        # _close_position_early (exits). That left resolution-exit trades
+        # uncosted at entry, systematically over-reporting paper EV by
+        # ~2% per trade — inflating the kill switch's EV gate above reality.
+        entry_price = raw_entry_price
+        entry_spread_cost = None
+        entry_slippage_cost = None
+        try:
+            if raw_entry_price is not None:
+                from trading_platform.polymarket.cost_model import CostModel
+                cm = CostModel()
+                ec = cm.entry_cost(float(raw_entry_price), side, float(stake))
+                entry_price = ec.effective_price
+                entry_spread_cost = ec.spread_cost
+                entry_slippage_cost = ec.slippage_cost
+        except Exception as exc:
+            logger.debug("entry cost model failed: %s", exc)
 
         try:
             import json as _json
@@ -606,11 +710,13 @@ class PolymarketPaperExecutor:
                 cursor = self._wallet_conn.execute(
                     """INSERT INTO polymarket_paper_trades
                        (condition_id, question, category, side, entry_price,
+                        raw_entry_price, spread_cost, slippage_cost,
                         size_usd, signal_type, confidence, wallet, entry_ts,
                         fusion_score, fusion_components, wallet_tier_at_fire,
                         archived)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)""",
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)""",
                     (condition_id, question, category, side, entry_price,
+                     raw_entry_price, entry_spread_cost, entry_slippage_cost,
                      stake, signal_type, confidence, wallet, now_ts,
                      fusion_score_val, fusion_blob, signal.get("wallet_tier")),
                 )
@@ -1109,6 +1215,14 @@ class PolymarketPaperExecutor:
     TAKE_PROFIT = 0.40        # exit if unrealized gain > 40%
     TIME_DECAY_DAYS = 30      # exit if held > 30 days with no resolution
     TIME_DECAY_MIN_MOVE = 0.05
+    # Market-life exit: a position past 80% of market lifetime rarely improves —
+    # either resolve naturally (captured by check_and_resolve_open_trades) or
+    # is stuck. Close and free the capital. See scripts/wallet_deep_dive.py.
+    MARKET_LIFE_PCT_EXIT = 0.80
+    # Implied-probability shift exit: YES-token moved 30pp since entry is a
+    # strong signal the market has resolved directionally (even if UMA hasn't
+    # finalized yet). Lock in the PnL at mark.
+    IMPLIED_SHIFT_EXIT = 0.30
 
     def check_exits(self) -> dict[str, int]:
         """Check all open positions for exit conditions.
@@ -1152,12 +1266,91 @@ class PolymarketPaperExecutor:
                 if age_days > self.TIME_DECAY_DAYS and abs(unrealized) < self.TIME_DECAY_MIN_MOVE:
                     exit_reason = "time_decay"
 
+                # Implied-probability shift: YES-token price moved 30pp+ since
+                # entry — likely directionally resolved even if UMA hasn't
+                # finalized. Exit to lock in PnL at mark.
+                if not exit_reason:
+                    implied_shift = abs(current - entry)
+                    if implied_shift >= self.IMPLIED_SHIFT_EXIT:
+                        exit_reason = "implied_shift"
+
+                # Market-life % exit: position is past 80% of market lifetime
+                # and hasn't resolved. Free the capital rather than tie it up
+                # waiting for a late resolution. Needs endDate from universe.
+                if not exit_reason:
+                    try:
+                        end_iso = self._lookup_market_end_date(cid)
+                        if end_iso:
+                            from datetime import datetime, timezone
+                            clean = end_iso.replace("Z", "+00:00") if end_iso.endswith("Z") else end_iso
+                            end_dt = datetime.fromisoformat(clean)
+                            if end_dt.tzinfo is None:
+                                end_dt = end_dt.replace(tzinfo=timezone.utc)
+                            entry_ts = pos.get("entry_ts") or time.time()
+                            entry_dt = datetime.fromtimestamp(float(entry_ts), tz=timezone.utc)
+                            now_dt = datetime.fromtimestamp(time.time(), tz=timezone.utc)
+                            life_total = (end_dt - entry_dt).total_seconds()
+                            life_elapsed = (now_dt - entry_dt).total_seconds()
+                            if life_total > 0:
+                                life_pct = life_elapsed / life_total
+                                if life_pct >= self.MARKET_LIFE_PCT_EXIT:
+                                    exit_reason = "market_life_expired"
+                    except Exception as exc:
+                        logger.debug("market_life check failed for %s: %s", cid[:14], exc)
+
             if exit_reason:
                 self._close_position_early(pos, current, exit_reason)
                 exited += 1
                 reasons[exit_reason] = reasons.get(exit_reason, 0) + 1
 
         return {"checked": len(positions), "exited": exited, "exit_reasons": reasons}
+
+    def _lookup_market_end_date(self, condition_id: str) -> str | None:
+        """Return the market's endDate ISO string.
+
+        Two-tier lookup:
+        1. MarketUniverse cached JSON (cheap, covers subscribed markets)
+        2. Gamma API on-demand (for paper-trade markets outside the universe).
+           Result cached on the executor instance so subsequent calls are free.
+        """
+        if not hasattr(self, "_universe_end_dates"):
+            self._universe_end_dates: dict[str, str | None] = {}
+            try:
+                from trading_platform.polymarket.market_universe import MarketUniverse
+                mu = MarketUniverse()
+                mu.load_cached(max_age_hours=24.0)
+                for cat, items in mu._by_category.items():
+                    for m in items:
+                        cid = m.get("condition_id")
+                        ed = m.get("end_date_iso")
+                        if cid and ed:
+                            self._universe_end_dates[cid] = ed
+            except Exception as exc:
+                logger.debug("universe lookup init failed: %s", exc)
+
+        if condition_id in self._universe_end_dates:
+            return self._universe_end_dates[condition_id]
+
+        # Fallback: Gamma API on-demand. Cache both hits and None-misses.
+        try:
+            import requests
+            r = requests.get(
+                "https://gamma-api.polymarket.com/markets",
+                params={"condition_ids": condition_id},
+                timeout=5,
+            )
+            if r.status_code == 200:
+                data = r.json()
+                m = data[0] if isinstance(data, list) and data else None
+                if isinstance(m, dict):
+                    ed = m.get("endDate") or m.get("endDateIso")
+                    self._universe_end_dates[condition_id] = ed or None
+                    return ed or None
+        except Exception as exc:
+            logger.debug("gamma endDate fallback failed: %s", exc)
+
+        self._universe_end_dates[condition_id] = None
+        return None
 
     def _fetch_mid_price(self, condition_id: str) -> float | None:
         """Fetch current mid-price for a market from signals or live ticks."""
@@ -1176,14 +1369,34 @@ class PolymarketPaperExecutor:
         return None
 
     def _update_mark(self, trade_id: int, current_price: float, unrealized: float) -> None:
-        """Update mark-to-market on an open position."""
+        """Update mark-to-market on an open position, including MAE/MFE.
+
+        MAE (Maximum Adverse Excursion) and MFE (Maximum Favorable Excursion)
+        are the worst and best unrealized PnL points the position reached
+        during its life. Tracking these enables risk-adjusted EV analysis
+        per signal type and exit-rule tuning. Schema columns auto-created
+        if missing — lazy migration pattern.
+        """
         try:
             with self._wallet_lock:
+                # Lazy-add the mae/mfe columns; idempotent via IF NOT EXISTS
+                for col in ("mae", "mfe"):
+                    try:
+                        self._wallet_conn.execute(
+                            f"ALTER TABLE polymarket_paper_trades ADD COLUMN {col} REAL"
+                        )
+                    except Exception:
+                        pass  # already exists
+                # MAE = minimum unrealized (most negative). MFE = maximum.
+                unr_rounded = round(unrealized, 2)
                 self._wallet_conn.execute(
                     """UPDATE polymarket_paper_trades
-                       SET last_mark_price = ?, last_mark_ts = ?, unrealized_pnl = ?
+                       SET last_mark_price = ?, last_mark_ts = ?, unrealized_pnl = ?,
+                           mae = CASE WHEN mae IS NULL OR ? < mae THEN ? ELSE mae END,
+                           mfe = CASE WHEN mfe IS NULL OR ? > mfe THEN ? ELSE mfe END
                        WHERE id = ?""",
-                    (current_price, int(time.time()), round(unrealized, 2), trade_id),
+                    (current_price, int(time.time()), unr_rounded,
+                     unr_rounded, unr_rounded, unr_rounded, unr_rounded, trade_id),
                 )
                 self._wallet_conn.commit()
         except Exception as exc:

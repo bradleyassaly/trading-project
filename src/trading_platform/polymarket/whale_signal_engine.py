@@ -181,6 +181,30 @@ class WhaleSignalEngine:
         if sig:
             signals_fired.append(sig)
 
+        # Strategy-specific alpha signals (wallet_strategy_profiles-driven)
+        sig = self._check_copyable_contrarian(trade, now_ts)
+        if sig:
+            signals_fired.append(sig)
+
+        sig = self._check_strategy_specialist(trade, now_ts)
+        if sig:
+            signals_fired.append(sig)
+
+        # Consensus follower — 3+ leaderboard wallets already same-side in 24h
+        sig = self._check_consensus_follower(trade, now_ts)
+        if sig:
+            signals_fired.append(sig)
+
+        # Network leader — wallet has proven downstream followers
+        sig = self._check_network_leader_entry(trade, now_ts)
+        if sig:
+            signals_fired.append(sig)
+
+        # News reactor — wallet trades within 1h of a ≥20pp price spike
+        sig = self._check_news_reactor(trade, now_ts)
+        if sig:
+            signals_fired.append(sig)
+
         # Always fire baseline whale_entry
         base = self._fire_whale_entry(trade, now_ts)
         if base:
@@ -291,8 +315,29 @@ class WhaleSignalEngine:
         if len(distinct) < CONVERGENCE_MIN_WALLETS:
             return None
 
-        base_conf = trade.directional_win_rate * min(trade.conviction_score / 10.0, 1.0)
-        boosted = round(min(base_conf * 1.20, 0.95), 4)
+        # Graduated boost by convergence count — validated by scripts/wallet_deep_dive.py:
+        #   2+ wallets: WR=78%  PnL=+$347K (n=251 markets)
+        #   3+ wallets: WR=75%  PnL=+$279K (n=53)
+        #   4+ wallets: WR=77%  PnL=+$251K (n=13)
+        #   5+ wallets: WR=90%  PnL=+$207K (n=3)
+        # More convergence = harder evidence. Bigger boost rewards the rare signal.
+        n_conv = len(distinct)
+        if n_conv >= 5:
+            boost_mult = 1.45
+        elif n_conv >= 4:
+            boost_mult = 1.35
+        elif n_conv >= 3:
+            boost_mult = 1.25
+        else:
+            boost_mult = 1.15  # 2-wallet convergence
+
+        # Conviction-score divisor lowered 10.0 → 5.0 on 2026-04-14 after
+        # audit showed stored conviction_scores cap at ~6.9 (actual range
+        # 0-7, typical leaderboard 1-4). Old divisor under-predicted WR by
+        # ~45pp across the [0.0, 0.3) confidence bucket. See
+        # reports/live_execution_audit_followups_2026-04-14.md §Audit#3.
+        base_conf = trade.directional_win_rate * min(trade.conviction_score / 5.0, 1.0)
+        boosted = round(min(base_conf * boost_mult, 0.95), 4)
 
         # Count how many of the converging wallets are tier1h.
         # Backtest data (see Market Intelligence convergence backtest) shows
@@ -351,7 +396,8 @@ class WhaleSignalEngine:
             return None
 
         conv = profile.get("conviction_score") or 0
-        confidence = min(cat_wr * min(conv / 10.0, 1.0), 0.80)
+        # Divisor 10→5 per calibration audit (2026-04-14).
+        confidence = min(cat_wr * min(conv / 5.0, 1.0), 0.80)
         return self._fire_signal("specialist_entry", trade, round(confidence, 4), now_ts)
 
     def _check_pre_deadline_surge(self, trade: WhaleTrade, now_ts: int) -> dict | None:
@@ -433,8 +479,350 @@ class WhaleSignalEngine:
         # Confidence: higher for tier1h, boosted by life_pct closeness to 1.0
         base = 0.60 if trade.wallet_tier == "tier1h" else 0.55 if trade.wallet_tier == "tier1" else 0.50
         confidence = min(base + (life_pct - 0.90) * 3.0, 0.85)
+        # Compute hours remaining + size vs avg for Telegram context
+        hours_left = max(0, (end_dt.timestamp() - now_ts) / 3600)
+        size_vs_avg = round(trade.size / avg_size, 1) if avg_size and avg_size > 0 else None
         return self._fire_signal("late_conviction", trade, round(confidence, 4), now_ts,
-                                 extra={"market_life_pct": round(life_pct, 3)})
+                                 extra={
+                                     "market_life_pct": round(life_pct, 3),
+                                     "hours_remaining": round(hours_left, 1),
+                                     "size_vs_avg": size_vs_avg,
+                                 })
+
+    # ── Strategy-specific alpha signals ──────────────────────────────────
+    #
+    # These signals leverage wallet_strategy_profiles (populated by
+    # wallet_strategy_observer every 12h). Instead of gating on overall
+    # wallet WR/PnL, they gate on whether THIS wallet has proven alpha
+    # ON THIS SPECIFIC STRATEGY. Key insight from 2026-04-14 observer
+    # audit: most top-strategy wallets have NEGATIVE overall PnL — the
+    # alpha is inside one strategy, masked by losses elsewhere.
+    # e.g., 0x00425c has +$73K contrarian but overall just +$5K.
+
+    # Minimum alpha bar for a wallet's strategy to be considered copyable.
+    # Dual-gate: EITHER high WR OR demonstrably profitable per-trade.
+    # A flipper wallet with 52% WR and +$51K PnL is a valid alpha source —
+    # wins are larger than losses. A contrarian wallet with 98% WR is also
+    # valid even if raw WR is what drives it. Per-trade profitability
+    # (avg_pnl > 0) captures both.
+    _STRATEGY_MIN_PNL = 5_000
+    _STRATEGY_MIN_RESOLVED = 20    # wins + losses combined
+    _STRATEGY_MIN_WR = 0.55         # primary gate
+    _STRATEGY_MIN_AVG_PNL = 50      # fallback if WR gate fails: per-trade profit
+
+    def _get_wallet_strategy_alpha(
+        self, wallet: str, strategy: str,
+    ) -> dict | None:
+        """Return strategy stats from wallet_strategy_profiles, or None.
+
+        Returns {n_trades, n_markets, wins, losses, net_pnl, wr, avg_pnl}.
+        None if no row or below the alpha bar.
+        """
+        if not wallet:
+            return None
+        try:
+            with self.db._lock:
+                row = self.db._conn.execute(
+                    "SELECT n_trades, n_markets, wins, losses, net_pnl_usd, avg_pnl_per_trade "
+                    "FROM wallet_strategy_profiles WHERE wallet = ? AND strategy = ?",
+                    (wallet, strategy),
+                ).fetchone()
+        except Exception:
+            return None
+        if not row:
+            return None
+        n, mkts, wins, losses, pnl, avg = row
+        resolved = (wins or 0) + (losses or 0)
+        if resolved < self._STRATEGY_MIN_RESOLVED:
+            return None
+        if (pnl or 0) < self._STRATEGY_MIN_PNL:
+            return None
+        wr = wins / resolved if resolved else 0
+        # Pass if EITHER high WR OR positive per-trade average PnL (which
+        # catches low-WR/high-payoff strategies like flipper and longshot).
+        wr_ok = wr >= self._STRATEGY_MIN_WR
+        avg_ok = (avg or 0) >= self._STRATEGY_MIN_AVG_PNL
+        if not (wr_ok or avg_ok):
+            return None
+        return {
+            "n_trades": n, "n_markets": mkts, "wins": wins, "losses": losses,
+            "net_pnl": pnl, "wr": wr, "avg_pnl": avg,
+        }
+
+    def _check_copyable_contrarian(
+        self, trade: WhaleTrade, now_ts: int,
+    ) -> dict | None:
+        """Wallet with proven contrarian alpha takes a contrarian position.
+
+        Contrarian definition: BUY at price > 0.70 (betting high implied YES
+        will not hit) OR SELL at price < 0.30 (betting low implied YES
+        will hit against the crowd). Alpha bar: >= $5K profit + 30 resolved
+        contrarian trades + WR >= 55% per wallet_strategy_profiles.
+
+        Discovered by the 2026-04-14 strategy observer audit; candidates:
+        0x00425c ($73K, 98%), 0x63c743 ($14K, 97%), 0xef43652 ($10K, 91%).
+        """
+        # Contrarian entry conditions
+        side = (trade.side or "").upper()
+        price = trade.price if trade.price is not None else 0.5
+        if side == "BUY" and price <= 0.70:
+            return None
+        if side == "SELL" and price >= 0.30:
+            return None
+        # Proven alpha required
+        alpha = self._get_wallet_strategy_alpha(trade.wallet, "contrarian")
+        if not alpha:
+            return None
+        # Confidence scales with measured strategy WR (not overall WR)
+        confidence = round(min(alpha["wr"] * 0.95, 0.90), 4)
+        return self._fire_signal(
+            "copyable_contrarian", trade, confidence, now_ts,
+            extra={
+                "strategy_wr": round(alpha["wr"], 3),
+                "strategy_pnl_observed": round(alpha["net_pnl"], 2),
+                "strategy_n_trades": alpha["n_trades"],
+            },
+        )
+
+    def _check_strategy_specialist(
+        self, trade: WhaleTrade, now_ts: int,
+    ) -> dict | None:
+        """Generalized version of copyable_contrarian for other strategies.
+
+        At signal time we infer which strategy THIS TRADE matches:
+          - longshot: price < 0.15
+          - high_conviction: trade.size >= 3x wallet avg_position_size
+          - flipper: wallet has prior SELL on same market in last 24h
+                    (or BUY after prior SELL)
+
+        For the matched strategy, require the wallet has proven alpha
+        (via _get_wallet_strategy_alpha). Skips if trade matches 'contrarian'
+        since copyable_contrarian already covers that.
+        """
+        price = trade.price if trade.price is not None else 0.5
+        strategy_match: str | None = None
+
+        # 1) longshot — price < 0.15
+        if price < 0.15:
+            strategy_match = "longshot"
+
+        # 2) high_conviction — size >= 3x wallet's own avg
+        if strategy_match is None:
+            profile = self.db.get_profile(trade.wallet)
+            if profile:
+                avg_size = profile.get("avg_position_size_usdc") or 0
+                if avg_size > 0 and trade.size >= 3 * avg_size:
+                    strategy_match = "high_conviction"
+
+        # 3) flipper — this trade flips the wallet's side on the same market
+        if strategy_match is None:
+            try:
+                with self.db._lock:
+                    prior = self.db._conn.execute(
+                        "SELECT side FROM wallet_trades "
+                        "WHERE wallet = ? AND condition_id = ? AND timestamp < ? "
+                        "ORDER BY timestamp DESC LIMIT 1",
+                        (trade.wallet, trade.condition_id, now_ts),
+                    ).fetchone()
+            except Exception:
+                prior = None
+            if prior and prior[0] and prior[0] != trade.side:
+                # Was there a recent opposite-side trade within 24h?
+                cutoff = now_ts - 24 * 3600
+                with self.db._lock:
+                    has_recent = self.db._conn.execute(
+                        "SELECT COUNT(*) FROM wallet_trades "
+                        "WHERE wallet = ? AND condition_id = ? "
+                        "AND timestamp >= ? AND side != ?",
+                        (trade.wallet, trade.condition_id, cutoff, trade.side),
+                    ).fetchone()
+                if has_recent and has_recent[0] > 0:
+                    strategy_match = "flipper"
+
+        if strategy_match is None:
+            return None
+        alpha = self._get_wallet_strategy_alpha(trade.wallet, strategy_match)
+        if not alpha:
+            return None
+
+        confidence = round(min(alpha["wr"] * 0.95, 0.90), 4)
+        return self._fire_signal(
+            "strategy_specialist", trade, confidence, now_ts,
+            extra={
+                "matched_strategy": strategy_match,
+                "strategy_wr": round(alpha["wr"], 3),
+                "strategy_pnl_observed": round(alpha["net_pnl"], 2),
+                "strategy_n_trades": alpha["n_trades"],
+            },
+        )
+
+    # ── News reactor (trade follows a price spike) ─────────────────────────
+    _NEWS_REACTOR_WINDOW_SEC = 3600  # 1h lookback for the price move
+    _NEWS_REACTOR_MIN_MOVE = 0.20    # ≥20pp absolute price range triggers
+
+    def _check_news_reactor(
+        self, trade: WhaleTrade, now_ts: int,
+    ) -> dict | None:
+        """Fires when a wallet trades within 1h of a price spike.
+
+        Uses market_ticks (price-only; volume not stored) as a proxy for
+        news impact. A 20pp price move in 1h is news-sized — wallets
+        reacting to it are either fast to the news or exploiting
+        post-move mispricing.
+
+        Gate: only fires for known tier1/tier2 wallets with positive
+        overall PnL. Without this we'd flood with noise from every
+        trader that happened to trade near a move. Stricter gating
+        kicks in once the strategy observer tracks a 'news_reactor'
+        strategy column (future work).
+        """
+        tier = trade.wallet_tier
+        if tier not in ("tier1", "tier1h", "tier2"):
+            return None
+        profile = self.db.get_profile(trade.wallet)
+        if not profile or (profile.get("net_pnl_usdc") or 0) <= 0:
+            return None
+
+        cutoff = now_ts - self._NEWS_REACTOR_WINDOW_SEC
+        try:
+            with self.db._lock:
+                rows = self.db._conn.execute(
+                    "SELECT price FROM market_ticks "
+                    "WHERE condition_id = ? AND timestamp BETWEEN ? AND ?",
+                    (trade.condition_id, cutoff, now_ts),
+                ).fetchall()
+        except Exception:
+            return None
+        if len(rows) < 3:
+            return None  # too few ticks to establish a move
+
+        prices = [float(r[0]) for r in rows if r[0] is not None]
+        if len(prices) < 3:
+            return None
+        price_range = max(prices) - min(prices)
+        if price_range < self._NEWS_REACTOR_MIN_MOVE:
+            return None
+
+        # Confidence: scale with move magnitude + wallet's base WR
+        wr = profile.get("directional_win_rate") or 0.5
+        move_boost = min(price_range / 0.50, 1.0)  # 50pp caps the boost
+        confidence = round(min(wr * (0.6 + 0.3 * move_boost), 0.85), 4)
+        return self._fire_signal(
+            "news_reactor", trade, confidence, now_ts,
+            extra={
+                "price_range_1h": round(price_range, 3),
+                "n_ticks": len(prices),
+            },
+        )
+
+    # ── Network leader (wallet has quality followers) ──────────────────────
+    _NETWORK_LEADER_MIN_FOLLOWERS = 3
+    _NETWORK_LEADER_MIN_LAG_MIN = 10  # filters MM-bot clusters
+
+    def _check_network_leader_entry(
+        self, trade: WhaleTrade, now_ts: int,
+    ) -> dict | None:
+        """Fires when a wallet with a proven follower network enters a market.
+
+        Uses wallet_copy_graph's `wallet_copy_relationships` — a wallet
+        with 3+ downstream followers at lag > 10min is a "leader": their
+        trades systematically precede other wallets' same-side entries.
+        Copying the LEADER as early as possible is higher-EV than
+        copying a follower because info is freshest.
+
+        Filters:
+          - Exclude MM-bot clusters (lag < 10min)
+          - Require the leader has non-negative PnL (their calls are
+            at least break-even — we're not copying losers)
+        """
+        if not trade.wallet:
+            return None
+        try:
+            with self.db._lock:
+                row = self.db._conn.execute(
+                    "SELECT COUNT(*) AS n_followers, AVG(avg_lag_minutes) AS avg_lag "
+                    "FROM wallet_copy_relationships "
+                    "WHERE leader_wallet = ? AND avg_lag_minutes > ?",
+                    (trade.wallet, self._NETWORK_LEADER_MIN_LAG_MIN),
+                ).fetchone()
+        except Exception:
+            return None
+        if not row or not row[0]:
+            return None
+        n_followers, avg_lag = row[0], row[1]
+        if n_followers < self._NETWORK_LEADER_MIN_FOLLOWERS:
+            return None
+
+        # Require leader's own WR is non-negative (from profile)
+        profile = self.db.get_profile(trade.wallet)
+        if not profile:
+            return None
+        if (profile.get("net_pnl_usdc") or 0) < 0:
+            return None
+
+        # Confidence scales with follower count + uses own WR
+        wr = profile.get("directional_win_rate") or 0.5
+        base = 0.55 + min(0.05 * (n_followers - 3), 0.25)  # 0.55 → 0.80 as followers grow
+        confidence = round(min(wr * (base + 0.15), 0.90), 4)
+        return self._fire_signal(
+            "network_leader_entry", trade, confidence, now_ts,
+            extra={
+                "n_followers": n_followers,
+                "avg_follower_lag_min": round(avg_lag or 0, 1),
+            },
+        )
+
+    # ── Consensus follower ─────────────────────────────────────────────────
+    _CONSENSUS_WINDOW_HOURS = 24.0
+    _CONSENSUS_MIN_LEADERS = 3
+
+    def _check_consensus_follower(
+        self, trade: WhaleTrade, now_ts: int,
+    ) -> dict | None:
+        """Fires when THIS trade joins an established leaderboard consensus.
+
+        Distinct from ``convergence`` (2h window, queries market_signals):
+          - Longer 24h lookback captures slow-forming consensus
+          - Queries wallet_trades directly — leader wallets don't need to
+            have had a signal fired; their raw activity counts
+          - Requires 3+ distinct leaderboard wallets already same-side on
+            this market BEFORE this trade
+          - The current wallet does NOT count toward the threshold
+
+        Hypothesis: by the time 3+ leaderboard wallets agree, the edge
+        direction is clear — but there's still room to profit if we join
+        before retail catches on. Audit with SignalResolver outcomes.
+        """
+        if not trade.condition_id or not trade.wallet or not trade.side:
+            return None
+        cutoff = now_ts - int(self._CONSENSUS_WINDOW_HOURS * 3600)
+        with self.db._lock:
+            rows = self.db._conn.execute(
+                "SELECT DISTINCT wt.wallet FROM wallet_trades wt "
+                "JOIN leaderboard l ON wt.wallet = l.wallet "
+                "WHERE wt.condition_id = ? AND wt.side = ? "
+                "  AND wt.timestamp BETWEEN ? AND ? "
+                "  AND wt.wallet != ?",
+                (trade.condition_id, trade.side, cutoff, now_ts, trade.wallet),
+            ).fetchall()
+        n_leaders = len(rows)
+        if n_leaders < self._CONSENSUS_MIN_LEADERS:
+            return None
+
+        # Scale confidence with consensus strength; cap at 0.85
+        if n_leaders >= 5:
+            confidence = 0.85
+        elif n_leaders == 4:
+            confidence = 0.75
+        else:
+            confidence = 0.65
+        return self._fire_signal(
+            "consensus_follower", trade, confidence, now_ts,
+            extra={
+                "leader_count": n_leaders,
+                "consensus_window_h": self._CONSENSUS_WINDOW_HOURS,
+            },
+        )
 
     def _check_tier_entry(self, trade: WhaleTrade, now_ts: int) -> dict | None:
         """S/A tier wallet enters an uncertain-zone market.
@@ -538,7 +926,8 @@ class WhaleSignalEngine:
             return None
 
         wr = trade.directional_win_rate or 0.5
-        conv = min((trade.conviction_score or 0) / 10.0, 1.0)
+        # Divisor 10→5 per calibration audit (2026-04-14).
+        conv = min((trade.conviction_score or 0) / 5.0, 1.0)
         tier_mult = 1.10 if trade.wallet_tier == "tier1h" else 1.0
         confidence = round(min(wr * conv * tier_mult * 1.05, 0.95), 4)
         if confidence < 0.10:
@@ -692,7 +1081,11 @@ class WhaleSignalEngine:
         """Baseline signal for any watched wallet trade."""
         wr = trade.directional_win_rate
         conv = trade.conviction_score
-        confidence = wr * min(conv / 10.0, 1.0)
+        # Divisor 10→5 per calibration audit (2026-04-14). Previous 10.0
+        # assumed 0-10 conv_score scale; actual range is 0-7 clustered at 1-4.
+        # Audit showed stored confidence at [0,0.3) had 68% actual WR — +45pp
+        # under-prediction — causing Kelly to undersize winners ~30%.
+        confidence = wr * min(conv / 5.0, 1.0)
         tier_mult = 1.1 if trade.wallet_tier == "tier1h" else 1.0 if trade.wallet_tier == "tier1" else 0.75
         confidence = round(min(confidence * tier_mult, 0.95), 4)
 
@@ -708,6 +1101,19 @@ class WhaleSignalEngine:
         now_ts: int, extra: dict | None = None,
     ) -> dict[str, Any]:
         """Write signal to DB and print to stdout."""
+        # Resolve YES/NO token IDs from the cached markets table so
+        # downstream ExecutionGates and live-executor code have real
+        # clob_token_ids to hit. Cached hits are free; misses yield None
+        # and the live executor falls back to live Gamma resolution.
+        yes_tid, no_tid = None, None
+        try:
+            from trading_platform.polymarket.markets_table import get_token_ids
+            yes_tid, no_tid = get_token_ids(trade.condition_id)
+        except Exception:
+            pass
+        want_yes = (trade.side or "").upper() == "BUY"
+        trade_token_id = yes_tid if want_yes else no_tid
+
         signal = {
             "signal_type": signal_type,
             "condition_id": trade.condition_id,
@@ -721,6 +1127,13 @@ class WhaleSignalEngine:
             "wallet_tier": trade.wallet_tier,
             "directional_win_rate": trade.directional_win_rate,
             "fired_at": now_ts,
+            # Real clob token_ids (may be None if markets table not yet
+            # populated for this cid). token_id is the side we'd trade;
+            # yes/no ids are provided so both executors can make their
+            # own choice without re-resolving.
+            "token_id": trade_token_id,
+            "yes_token_id": yes_tid,
+            "no_token_id": no_tid,
         }
         if extra:
             signal.update(extra)
@@ -736,25 +1149,56 @@ class WhaleSignalEngine:
                 alpha = get_wallet_alpha(
                     str(self.db._path), trade.wallet, trade.category or "other",
                 )
+                # Tiered bypass: tier1h always fires; tier1 allows cold-start
+                # (no alpha row yet) so coverage gaps don't zero out signals
+                # from known-good wallets. tier2 still requires a positive score.
+                tier = trade.wallet_tier
                 if alpha <= 0:
+                    if tier == "tier1h":
+                        signal["alpha_score"] = 0.0
+                        logger.info(
+                            "[ALPHA_GATE] wallet %s tier1h BYPASS, signal=%s",
+                            trade.wallet[:14], signal_type,
+                        )
+                    elif tier == "tier1":
+                        signal["alpha_score"] = 0.0
+                        logger.info(
+                            "[ALPHA_GATE] wallet %s tier1 COLD-START allow, signal=%s cat=%s",
+                            trade.wallet[:14], signal_type, trade.category,
+                        )
+                    else:
+                        logger.info(
+                            "[ALPHA_GATE] wallet %s NOT copyable in %s, SKIP %s",
+                            trade.wallet[:14], trade.category, signal_type,
+                        )
+                        return None
+                else:
+                    signal["alpha_score"] = alpha
                     logger.info(
-                        "[ALPHA_GATE] wallet %s NOT copyable in %s, SKIP %s",
-                        trade.wallet[:14], trade.category, signal_type,
+                        "[ALPHA_GATE] wallet %s copyable in %s, score=%.3f, signal=%s",
+                        trade.wallet[:14], trade.category, alpha, signal_type,
                     )
-                    return None
-                # Stash on the signal so the executor reuses it without
-                # re-querying the DB.
-                signal["alpha_score"] = alpha
-                logger.info(
-                    "[ALPHA_GATE] wallet %s copyable in %s, score=%.3f, signal=%s",
-                    trade.wallet[:14], trade.category, alpha, signal_type,
-                )
             except Exception as exc:
                 logger.debug("alpha gate (engine) lookup failed: %s", exc)
 
+        # Resolve the actual clob token_id for the side we'd trade.
+        # Historical bug: this column was set to condition_id, causing
+        # downstream ExecutionGates depth/spread checks to fail-open on
+        # every signal (CLOB /book returns 404 for a condition_id). Fix
+        # pulls from the cached markets table first; falls back to None
+        # (downstream will resolve via Gamma on-demand or skip the gate).
+        resolved_tid: str | None = None
+        try:
+            from trading_platform.polymarket.markets_table import get_token_ids
+            yes_tid, no_tid = get_token_ids(trade.condition_id)
+            want_yes = (trade.side or "").upper() == "BUY"
+            resolved_tid = yes_tid if want_yes else no_tid
+        except Exception as exc:
+            logger.debug("token_id lookup failed in _fire_signal: %s", exc)
+
         # Write to market_signals (with question for joins)
         self.db.insert_signal(
-            token_id=trade.condition_id,
+            token_id=resolved_tid,
             market_title=trade.question[:200],
             question=trade.question[:200],
             category=trade.category,

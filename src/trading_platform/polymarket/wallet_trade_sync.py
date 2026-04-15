@@ -112,27 +112,55 @@ def _sync_one_wallet(db: WalletDB, wallet: str, addr_map: Any = None) -> tuple[i
     return new, skipped
 
 
-def _fetch_trades(wallet: str, limit: int = 500) -> list[dict[str, Any]]:
-    """Fetch trades from Polymarket Data API."""
-    try:
-        resp = requests.get(
-            f"{_DATA_API}/trades",
-            params={"user": wallet, "limit": limit},
-            timeout=15,
-        )
-        if resp.status_code == 429:
-            logger.debug("Rate limited for %s, sleeping 5s", wallet[:16])
-            time.sleep(5)
-            return []
-        if resp.status_code != 200:
-            return []
-        data = resp.json()
-        if isinstance(data, list):
-            return data
-        return data.get("data", data.get("trades", []))
-    except Exception as exc:
-        logger.debug("Trade fetch failed for %s: %s", wallet[:16], exc)
-        return []
+def _fetch_trades(wallet: str, limit: int = 500, max_pages: int = 20) -> list[dict[str, Any]]:
+    """Fetch trades from Polymarket Data API with pagination.
+
+    Paginates until fewer than ``limit`` results are returned or
+    ``max_pages`` is reached. Each page sleeps 0.5s for rate limiting.
+    """
+    all_trades: list[dict[str, Any]] = []
+    cursor: str | None = None
+
+    for page in range(max_pages):
+        try:
+            params: dict[str, Any] = {"user": wallet, "limit": limit}
+            if cursor:
+                params["cursor"] = cursor
+            resp = requests.get(
+                f"{_DATA_API}/trades",
+                params=params,
+                timeout=15,
+            )
+            if resp.status_code == 429:
+                logger.debug("Rate limited for %s, sleeping 5s", wallet[:16])
+                time.sleep(5)
+                continue
+            if resp.status_code != 200:
+                break
+            data = resp.json()
+            if isinstance(data, list):
+                batch = data
+                cursor = None
+            else:
+                batch = data.get("data", data.get("trades", []))
+                cursor = data.get("next_cursor", data.get("nextCursor"))
+
+            if not batch:
+                break
+            all_trades.extend(batch)
+
+            # If fewer than limit returned, we've exhausted the history
+            if len(batch) < limit:
+                break
+            # If no cursor-based pagination, stop after first page
+            if cursor is None:
+                break
+            time.sleep(0.5)
+        except Exception as exc:
+            logger.debug("Trade fetch page %d failed for %s: %s", page, wallet[:16], exc)
+            break
+
+    return all_trades
 
 
 def _parse_ts(val: Any) -> int:

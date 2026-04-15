@@ -11,6 +11,29 @@
 
 services:
 
+  # ─── Database — PostgreSQL ─────────────────────────────────────────────
+  # Migrated from SQLite on 2026-04-14 after repeated corruption under
+  # concurrent-writer load. Postgres's MVCC makes the whole class of
+  # "database disk image is malformed" errors impossible.
+  postgres:
+    image: postgres:16-alpine
+    container_name: polymarket-postgres
+    environment:
+      POSTGRES_USER: polymarket
+      POSTGRES_PASSWORD: polymarket_dev
+      POSTGRES_DB: polymarket
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U polymarket -d polymarket"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+
   # ─── Always-on services ────────────────────────────────────────────────
 
   api:
@@ -24,6 +47,15 @@ services:
     env_file: .env
     environment:
       - WALLET_DB_PATH=/app/data/polymarket/wallet_intelligence.db
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_USER=polymarket
+      - POSTGRES_PASSWORD=polymarket_dev
+      - POSTGRES_DB=polymarket
+      - DB_BACKEND=postgres
+    depends_on:
+      postgres:
+        condition: service_healthy
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8001/api/system/status"]
@@ -61,6 +93,12 @@ services:
     env_file: .env
     environment:
       - WALLET_DB_PATH=/app/data/polymarket/wallet_intelligence.db
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_USER=polymarket
+      - POSTGRES_PASSWORD=polymarket_dev
+      - POSTGRES_DB=polymarket
+      - DB_BACKEND=postgres
     restart: unless-stopped
     depends_on:
       api:
@@ -82,6 +120,12 @@ services:
     env_file: .env
     environment:
       - WALLET_DB_PATH=/app/data/polymarket/wallet_intelligence.db
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_USER=polymarket
+      - POSTGRES_PASSWORD=polymarket_dev
+      - POSTGRES_DB=polymarket
+      - DB_BACKEND=postgres
     restart: unless-stopped
     depends_on:
       api:
@@ -99,6 +143,12 @@ services:
     env_file: .env
     environment:
       - WALLET_DB_PATH=/app/data/polymarket/wallet_intelligence.db
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_USER=polymarket
+      - POSTGRES_PASSWORD=polymarket_dev
+      - POSTGRES_DB=polymarket
+      - DB_BACKEND=postgres
     restart: unless-stopped
     depends_on:
       api:
@@ -121,3 +171,8 @@ services:
   # pmxt-sidecar: pmxt 2.26.x is a Python package, NOT a Node sidecar.
   # No separate container needed. The api/scheduler/watchdog containers
   # import pmxt directly.
+
+# Postgres persistent volume
+volumes:
+  postgres_data:
+

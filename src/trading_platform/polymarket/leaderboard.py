@@ -31,7 +31,12 @@ DEMOTION_ROLLING_WR = 0.45
 
 # High-conviction tier — captures top Polymarket whales who make
 # few but extremely large profitable bets
-TIER1H_MIN_PNL = 500_000
+# Lowered from $500K → $100K on 2026-04-14 after data showed the top-earning
+# wallet on our leaderboard has $238K PnL, so no wallet ever qualified as tier1h.
+# See scripts/wallet_deep_dive.py: wallet 0x514550b8 (100% geopolitics specialist)
+# has 25 resolved, 84% WR, $11K avg win vs $2.5K avg loss — the exact profile
+# we want "always-fire" tier1h treatment for.
+TIER1H_MIN_PNL = 100_000
 TIER1H_MIN_AVG_TRADE = 5_000
 TIER1H_MIN_WR = 0.50
 TIER1H_MIN_RESOLVED = 3
@@ -178,6 +183,17 @@ def build_leaderboard(db: WalletDB | None = None) -> dict[str, Any]:
         rolling = db.compute_rolling_wr(wallet, n=20)
         if rolling is not None and rolling < DEMOTION_ROLLING_WR:
             demoted += 1
+            continue
+
+        # Activity staleness gate — a tracked wallet that hasn't traded
+        # in 60+ days stops earning a tier. Their past edge means nothing
+        # if they're dormant; signals copied from them go stale. Drop
+        # them from the leaderboard entirely so they don't consume a
+        # tier slot that could go to an active wallet.
+        # Per 2026-04-14 audit: 16 of 56 leaderboard wallets were 30-90d stale.
+        import time as _time
+        if last_ts and (_time.time() - last_ts) > 60 * 86400:
+            insufficient += 1
             continue
 
         # Tier assignment — check tier1h first (high-conviction whales)

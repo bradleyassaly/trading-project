@@ -260,20 +260,23 @@ def categorize_slug(slug: str) -> str:
 
 
 class WalletDB:
-    """SQLite-backed wallet intelligence database."""
+    """Wallet intelligence database — Postgres-backed via db_connection helper.
+
+    Migrated from SQLite to Postgres on 2026-04-14 after recurring corruption.
+    The `_path` attribute is retained for backward compatibility (callers
+    read it) but is only a display string under Postgres.
+    """
 
     def __init__(self, db_path: str | Path = _DEFAULT_PATH) -> None:
         self._path = Path(db_path)
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
-        self._conn = sqlite3.connect(str(self._path), check_same_thread=False, timeout=60)
-        # DELETE journal mode: WAL broke repeatedly on the Docker Desktop
-        # Windows bind mount — a single orphaned handle from live-collect
-        # would exclusive-lock the DB and block every short-lived scheduler
-        # task with "unable to open database file". DELETE mode has no
-        # -wal/-shm sidecars to get stuck, and the busy_timeout serialises
-        # writers cleanly for this workload. See
-        # reports/system_diagnostic_2026-04-11.md for the post-mortem.
+        # Route through the shared connection helper so the backend is
+        # configurable (DB_BACKEND=postgres default; sqlite for rollback).
+        from trading_platform.polymarket.db_connection import get_connection, DB_BACKEND
+        self._backend = DB_BACKEND
+        self._conn = get_connection(str(self._path), check_same_thread=False)
+        # PRAGMA calls are no-ops under Postgres; only applied for sqlite.
         for stmt in (
             "PRAGMA busy_timeout=60000",
             "PRAGMA journal_mode=DELETE",
@@ -1170,11 +1173,15 @@ class WalletDB:
 
     def increment_category_signal(self, category: str) -> None:
         with self._lock:
+            # Table-qualify `signals_fired` in the UPDATE clause — Postgres
+            # requires disambiguation between the existing row and the row
+            # being inserted; SQLite accepts either form.
             self._conn.execute(
                 """INSERT INTO category_performance (category, signals_fired, last_updated)
                    VALUES (?, 1, ?)
                    ON CONFLICT(category) DO UPDATE SET
-                   signals_fired = signals_fired + 1, last_updated = ?""",
+                   signals_fired = category_performance.signals_fired + 1,
+                   last_updated = ?""",
                 (category, _now_ts(), _now_ts()),
             )
             self._conn.commit()

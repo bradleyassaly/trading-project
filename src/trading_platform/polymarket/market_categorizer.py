@@ -264,6 +264,15 @@ SPORTS_KEYWORDS = frozenset({
     "tiger-woods", "scottie-scheffler", "rory-mcilroy",
     "indian-premier-league", "ipl", "cricket", "test-match",
     "race", "grand-prix", "qualifying", "pole-position",
+    # Soccer club suffix tokens + major clubs that show up in wallet trades
+    # as "Will <Club FC> win on YYYY-MM-DD?" style match questions.
+    "fc", "cf", "afc", "sc", "ac-milan", "atletico", "atletico-madrid",
+    "real-madrid", "barcelona", "liverpool", "manchester-city",
+    "manchester-united", "chelsea", "arsenal", "tottenham",
+    "paris-saint-germain", "psg", "bayern", "borussia", "dortmund",
+    "juventus", "inter", "napoli", "roma", "lazio", "sao-paulo",
+    "santos", "gremio", "flamengo", "palmeiras", "corinthians",
+    "river-plate", "boca-juniors", "banfield", "lanus",
 })
 
 
@@ -325,6 +334,12 @@ def classify_keywords(slug: str | None, title: str | None = None) -> tuple[str, 
                 needle = f"-{kw.strip('-')}-"
                 if needle in padded_t:
                     return category, "title_keyword"
+
+        # 4. Heuristic fallback: "Will <team> win on YYYY-MM-DD?" pattern
+        # is nearly always a per-match sports market that slipped past the
+        # slug/keyword lists (obscure clubs, foreign leagues).
+        if re.search(r"win-on-\d{4}-\d{2}-\d{2}", norm_title):
+            return "sports", "match_date_heuristic"
 
     return "other", "fallback"
 

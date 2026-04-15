@@ -27,6 +27,8 @@ import logging
 import os
 import sqlite3
 import time
+
+from trading_platform.polymarket.db_connection import get_connection
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -49,14 +51,30 @@ class KillSwitch:
 
     MAX_DAILY_LOSS_PCT = 0.10
     MAX_OPEN_POSITIONS = 10
-    MAX_TRADE_USD = 25  # week 1 hard cap
+    # Per-trade cap derived dynamically from live bankroll (7% of account
+    # as phase-1 safety ramp; capped at $25 hard ceiling). Scales with
+    # account growth without code changes.
+    MAX_TRADE_USD_PCT = 0.07
+    MAX_TRADE_USD_ABS_CAP = 25.0
     MIN_WIN_RATE = 0.52
     MIN_RESOLVED_HARD = 15
     PREFERRED_MIN_RESOLVED = 30
 
-    def __init__(self, db_path: str, bankroll: float = 350) -> None:
+    def __init__(self, db_path: str, bankroll: float | None = None) -> None:
         self._db_path = str(db_path)
-        self.BANKROLL = bankroll
+        if bankroll is not None:
+            self.BANKROLL = bankroll
+        else:
+            # Same live-bankroll source as KellySizer so daily-loss
+            # limits and sizing caps stay in sync with real USDC
+            # available. Falls back to POLYMARKET_LIVE_BANKROLL_USD env
+            # then a conservative default.
+            from trading_platform.polymarket.bankroll import get_bankroll
+            self.BANKROLL = get_bankroll()
+        # Compute the dynamic MAX_TRADE_USD from current bankroll.
+        self.MAX_TRADE_USD = max(
+            5.0, min(self.MAX_TRADE_USD_ABS_CAP, self.BANKROLL * self.MAX_TRADE_USD_PCT),
+        )
 
     # ── Per-trade gate ─────────────────────────────────────────────────────
 
@@ -91,7 +109,7 @@ class KillSwitch:
 
         # 4-7: read paper-trade history
         try:
-            conn = sqlite3.connect(self._db_path)
+            conn = get_connection(self._db_path)
         except Exception as exc:
             return KillSwitchResult(False, f"DB unavailable: {exc}", warnings)
 
@@ -105,34 +123,73 @@ class KillSwitch:
                      AND exit_ts IS NOT NULL""",
                 (signal_type,),
             ).fetchone()
-            n_resolved = (row[0] or 0) if row else 0
+            n_live = (row[0] or 0) if row else 0
             avg_return_pct = (row[1] or 0.0) if row else 0.0
             wins = (row[2] or 0) if row else 0
 
-            if n_resolved < self.MIN_RESOLVED_HARD:
+            # Pull most-recent backtest evidence for this signal type.
+            # Backtest fires are "simulated resolutions" — they count
+            # toward the sample floor at half weight (they're less reliable
+            # than live paper resolutions but still provide EV evidence).
+            bt_n, bt_ev, bt_wr = 0, None, None
+            try:
+                bt_row = conn.execute(
+                    "SELECT resolved, ev, wr FROM signal_backtest_results "
+                    "WHERE signal_type = ? ORDER BY run_ts DESC LIMIT 1",
+                    (signal_type,),
+                ).fetchone()
+                if bt_row:
+                    bt_n = int(bt_row[0] or 0)
+                    bt_ev = bt_row[1]
+                    bt_wr = bt_row[2]
+            except Exception:
+                pass  # table may not exist yet — fail quiet
+
+            # Effective sample = live paper + 0.5 * backtest. Backtest is
+            # half-weighted because it's replay, not live execution, and
+            # doesn't pay real-world costs.
+            effective_n = n_live + int(bt_n * 0.5)
+
+            if effective_n < self.MIN_RESOLVED_HARD:
                 return KillSwitchResult(
                     False,
-                    f"{signal_type}: only {n_resolved} resolved trades, need {self.MIN_RESOLVED_HARD}",
+                    f"{signal_type}: effective n={effective_n} "
+                    f"(live={n_live} + 0.5×backtest={bt_n}), need {self.MIN_RESOLVED_HARD}",
                     warnings,
                 )
-            if n_resolved < self.PREFERRED_MIN_RESOLVED:
+            if effective_n < self.PREFERRED_MIN_RESOLVED:
                 warnings.append(
-                    f"Below preferred sample size ({n_resolved}/{self.PREFERRED_MIN_RESOLVED})"
+                    f"Below preferred sample size (effective n={effective_n}/{self.PREFERRED_MIN_RESOLVED})"
                 )
 
-            ev = avg_return_pct / 100.0  # convert pct to fraction
+            # Blended EV — live data gets 2x weight when both exist.
+            ev_live = avg_return_pct / 100.0 if n_live else None
+            if ev_live is not None and bt_ev is not None:
+                ev = (2 * ev_live * n_live + bt_ev * bt_n) / (2 * n_live + bt_n)
+            elif ev_live is not None:
+                ev = ev_live
+            elif bt_ev is not None:
+                ev = bt_ev
+                warnings.append(f"EV from backtest only (no live paper resolutions yet)")
+            else:
+                ev = 0.0
             if ev <= 0:
                 return KillSwitchResult(
                     False,
-                    f"{signal_type}: EV={ev:.3f} not positive — no measured edge",
+                    f"{signal_type}: blended EV={ev:.3f} not positive — no measured edge",
                     warnings,
                 )
 
-            wr = wins / n_resolved if n_resolved > 0 else 0
-            if n_resolved >= 20 and wr < self.MIN_WIN_RATE:
+            # Blended WR same approach.
+            wr_live = wins / n_live if n_live > 0 else None
+            if wr_live is not None and bt_wr is not None:
+                wr = (2 * wr_live * n_live + bt_wr * bt_n) / (2 * n_live + bt_n)
+            else:
+                wr = wr_live if wr_live is not None else (bt_wr or 0)
+            if effective_n >= 20 and wr < self.MIN_WIN_RATE:
                 return KillSwitchResult(
                     False,
-                    f"{signal_type}: win rate {wr:.0%} below minimum {self.MIN_WIN_RATE:.0%}",
+                    f"{signal_type}: blended WR {wr:.0%} below minimum {self.MIN_WIN_RATE:.0%}",
                     warnings,
                 )
 

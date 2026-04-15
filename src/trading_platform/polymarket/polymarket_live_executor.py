@@ -90,6 +90,22 @@ class PolymarketLiveExecutor:
         confidence = float(signal.get("confidence") or 0)
         condition_id = signal.get("condition_id") or ""
 
+        # 0a. Category allowlist — live trades restricted to categories
+        # with statistically significant positive resolved EV.
+        from trading_platform.polymarket.polymarket_paper_executor import (
+            LIVE_TRADE_CATEGORIES, EXCLUDE_SIGNAL_TYPES,
+        )
+        if sig_type in EXCLUDE_SIGNAL_TYPES:
+            # Routine config-level rejection — not a warning. DEBUG it so
+            # operators only see exceptional blocks at WARNING level.
+            logger.debug("[LIVE] BLOCKED signal_type=%s (excluded)", sig_type)
+            return self._result(False, reason=f"signal_type {sig_type} excluded from live")
+        raw_cat = signal.get("category") or ""
+        cat = raw_cat.lower() if isinstance(raw_cat, str) else ""
+        if not cat or cat not in LIVE_TRADE_CATEGORIES:
+            logger.debug("[LIVE] BLOCKED category=%s — not in live allowlist", cat)
+            return self._result(False, reason=f"category '{cat}' not approved for live")
+
         # 0. Emergency stop check
         stopped, stop_reason = self._kill.is_emergency_stopped()
         if stopped:
@@ -107,11 +123,18 @@ class PolymarketLiveExecutor:
         except Exception as exc:
             logger.debug("circuit breaker check failed (proceeding): %s", exc)
 
-        # 1. Kelly size (capped at WEEK1_MAX_TRADE for safety ramp)
-        WEEK1_MAX_TRADE = 25
+        # 1. Kelly size. Hard cap at 7% of current live bankroll so a
+        # single bad trade can't blow out the account — derived from
+        # live bankroll rather than hardcoded $25 so the cap tracks
+        # funding changes. Kelly is ALSO capped at MAX_PCT_OF_BANKROLL=2%
+        # separately; this is a belt-and-suspenders ceiling for sizing
+        # errors or future signal-type additions that might over-size.
+        from trading_platform.polymarket.bankroll import get_bankroll
+        live_bankroll = get_bankroll()
+        phase1_cap = max(5.0, min(25.0, live_bankroll * 0.07))
         size_usd = self._sizer.get_trade_size(sig_type, confidence)
-        if size_usd > WEEK1_MAX_TRADE:
-            size_usd = WEEK1_MAX_TRADE
+        if size_usd > phase1_cap:
+            size_usd = phase1_cap
         if size_usd <= 0:
             return self._result(False, reason=f"Kelly says no edge for {sig_type}")
 
@@ -126,42 +149,70 @@ class PolymarketLiveExecutor:
         for w in ks.warnings:
             logger.warning("[LIVE] KillSwitch warning: %s", w)
         if not ks.allowed:
-            logger.warning("[LIVE] KillSwitch blocked: %s", ks.reason)
+            # "POLYMARKET_LIVE_ENABLED not set" is the expected state
+            # when running paper-only. Don't spam warnings for that.
+            # Any other kill-switch reason stays at WARNING.
+            reason_str = str(ks.reason or "")
+            if "POLYMARKET_LIVE_ENABLED" in reason_str:
+                logger.debug("[LIVE] KillSwitch blocked: %s", reason_str)
+            else:
+                logger.warning("[LIVE] KillSwitch blocked: %s", reason_str)
             self._record_attempt(signal, size_usd, None, None, dry_run=self.DRY_RUN, status="blocked", error_msg=ks.reason)
             return self._result(False, reason=ks.reason)
 
-        # 3. Resolve token_id (Gamma)
-        token_id = signal.get("token_id") or self._resolve_token_id(condition_id)
-        if not token_id:
-            return self._result(False, reason=f"No token_id for {condition_id[:20]}")
+        # 3. Resolve YES/NO token_ids (Gamma)
+        # ── CRITICAL: A SELL signal means "buy NO token", not "sell YES token".
+        # Polymarket CLOB always uses side=BUY and chooses YES/NO via token_id.
+        # Previous code hardcoded tids[0] (YES) + side=BUY, which executed
+        # the wrong direction on every SELL signal. Fixed 2026-04-14.
+        direction = (signal.get("direction") or "BUY").upper()
+        want_yes = direction == "BUY"
+        outcome_label = "YES" if want_yes else "NO"
 
-        # 4. Current price + liquidity check
+        # Prefer cached token_ids from the signal dict (set by signal
+        # engine from markets table). Fall back to live Gamma resolution.
+        yes_tid = signal.get("yes_token_id")
+        no_tid = signal.get("no_token_id")
+        token_id = yes_tid if want_yes else no_tid
+        if not token_id:
+            # Cached miss — hit Gamma live for this one cid
+            tids = self._resolve_token_ids(condition_id)
+            if not tids or len(tids) < 2:
+                return self._result(False, reason=f"No token_ids for {condition_id[:20]}")
+            token_id = tids[0] if want_yes else tids[1]
+        if not token_id:
+            return self._result(False, reason=f"No {outcome_label} token_id for {condition_id[:20]}")
+
+        # 4. Current price + liquidity check (ON THE TOKEN WE'RE BUYING)
         current_price = self._clob.get_mid_price(token_id)
         if current_price is None:
             return self._result(False, reason="Could not fetch current price from CLOB")
 
-        # Stale-price guard: if price moved > 5% since signal fired, abort
+        # Stale-price guard: compare against entry price in the same frame.
+        # Signal.price is in the YES-token reference frame; current_price is
+        # the token we'd actually buy. For NO trades, flip entry_price into
+        # NO-frame before comparing.
         entry_price = float(signal.get("entry_price") or signal.get("price") or 0)
         if entry_price > 0:
-            slippage = abs(current_price - entry_price) / entry_price
-            if slippage > 0.05:
-                return self._result(
-                    False,
-                    reason=f"Price moved {slippage:.1%} since signal (entry={entry_price:.3f} now={current_price:.3f})",
-                )
+            entry_in_token_frame = entry_price if want_yes else (1.0 - entry_price)
+            if entry_in_token_frame > 0:
+                slippage = abs(current_price - entry_in_token_frame) / entry_in_token_frame
+                if slippage > 0.05:
+                    return self._result(
+                        False,
+                        reason=(f"Price moved {slippage:.1%} since signal "
+                                f"(entry={entry_in_token_frame:.3f} now={current_price:.3f})"),
+                    )
 
-        # Liquidity guard: check orderbook depth
+        # Liquidity guard: check orderbook depth on THE token we're buying
         book = self._clob.get_order_book(token_id)
         asks = book.get("asks") or []
         ask_depth = sum(float(a.get("size", 0)) * float(a.get("price", 0)) for a in asks[:5])
         if ask_depth < size_usd * 2:
             return self._result(
                 False,
-                reason=f"Thin liquidity (ask depth ${ask_depth:.0f} < 2x trade ${size_usd:.0f})",
+                reason=f"Thin liquidity on {outcome_label} (ask depth ${ask_depth:.0f} < 2x trade ${size_usd:.0f})",
             )
-
-        direction = (signal.get("direction") or "BUY").upper()
-        outcome_label = "YES" if direction == "BUY" else "NO"
 
         logger.info(
             "[LIVE%s] %s %s $%.0f @ %.3f | conf=%.0f%% | %s",
@@ -179,10 +230,11 @@ class PolymarketLiveExecutor:
             return self._result(
                 True, mode="dry_run", size_usd=size_usd,
                 filled_price=current_price,
-                reason="DRY RUN — no order submitted",
+                reason=f"DRY RUN — would BUY {outcome_label} token (no order submitted)",
             )
 
-        # 6. LIVE — submit
+        # 6. LIVE — submit. Polymarket CLOB side is always BUY; YES vs NO
+        # is determined by token_id.
         if not self._clob.is_configured:
             return self._result(False, reason="CLOB not configured — set POLYMARKET_API_KEY etc.")
 
@@ -208,9 +260,14 @@ class PolymarketLiveExecutor:
 
     # ── Helpers ────────────────────────────────────────────────────────────
 
-    def _resolve_token_id(self, condition_id: str) -> str | None:
+    def _resolve_token_ids(self, condition_id: str) -> list[str]:
+        """Return both YES and NO clob token IDs for a market.
+
+        Gamma's ``clobTokenIds`` is a 2-element list ordered
+        ``[yes_token_id, no_token_id]`` for binary markets.
+        """
         if not condition_id:
-            return None
+            return []
         try:
             import requests as _req
             r = _req.get(
@@ -223,10 +280,16 @@ class PolymarketLiveExecutor:
             if m and (m.get("conditionId") or "").lower() == condition_id.lower():
                 tids_raw = m.get("clobTokenIds") or "[]"
                 tids = json.loads(tids_raw) if isinstance(tids_raw, str) else tids_raw
-                return tids[0] if tids else None
+                if isinstance(tids, list):
+                    return [str(t) for t in tids if t]
         except Exception as exc:
             logger.debug("token id resolve failed: %s", exc)
-        return None
+        return []
+
+    # Backwards-compatible shim — returns the YES token id only.
+    def _resolve_token_id(self, condition_id: str) -> str | None:
+        tids = self._resolve_token_ids(condition_id)
+        return tids[0] if tids else None
 
     def _record_attempt(
         self,

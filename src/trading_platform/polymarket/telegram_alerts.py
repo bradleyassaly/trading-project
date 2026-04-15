@@ -70,12 +70,106 @@ def _fmt_et(ts: int | float | None) -> str:
         return ""
 
 
+def _dir_label(direction: str) -> str:
+    """Direction label with emoji — safe for Python 3.11 f-strings."""
+    if direction == "BUY":
+        return "BUY \U0001f7e2"
+    return "SELL \U0001f534"
+
+
+def _yn_side(direction: str | None, side: str | None = None) -> str:
+    """Return 'YES' or 'NO' token label with color emoji.
+
+    In Polymarket convention a BUY on a condition buys the YES token and a
+    SELL buys the NO token. Some signals pass ``BUY_YES`` / ``BUY_NO`` or
+    already-normalized ``side`` fields ('YES'/'NO'); handle all shapes.
+    """
+    if side and isinstance(side, str):
+        s = side.upper().strip()
+        if s in ("YES", "NO"):
+            return f"YES \U0001f7e2" if s == "YES" else f"NO \U0001f534"
+    d = (direction or "").upper().strip()
+    if d in ("BUY", "BUY_YES", "YES"):
+        return "YES \U0001f7e2"
+    return "NO \U0001f534"
+
+
+def _price_implied(price: float | None) -> str:
+    """Format price + implied probability, e.g. '$0.350 (35% implied)'."""
+    if price is None or price <= 0:
+        return "price unknown"
+    try:
+        p = float(price)
+    except (TypeError, ValueError):
+        return "price unknown"
+    return f"${p:.3f} ({p*100:.0f}% implied)"
+
+
+def _payout_line(stake_usd: float | None, entry_price: float | None) -> str:
+    """Potential payout if the position resolves in your favor.
+
+    For a YES bet of $S at entry $p, payout if YES wins = $S / $p (shares
+    bought) * $1.00 (resolution payout per share). Profit = payout - stake.
+    Risk is the full stake (contract price at entry is just mispriced
+    probability, no leverage). Returns empty string on missing inputs.
+    """
+    try:
+        s = float(stake_usd or 0)
+        p = float(entry_price or 0)
+    except (TypeError, ValueError):
+        return ""
+    if s <= 0 or p <= 0 or p >= 1:
+        return ""
+    payout = s / p
+    profit = payout - s
+    roi_pct = profit / s * 100
+    return f"Payout if correct: {_fmt_usd(payout)} (profit {_fmt_usd(profit)}, +{roi_pct:.0f}%)"
+
+
 def _market_link(slug: str | None, cid: str | None) -> str:
     if slug:
         return f"https://polymarket.com/event/{slug}"
     if cid:
         return f"https://polymarket.com/event/{cid[:16]}"
     return ""
+
+
+def _resolution_badge(condition_id: str | None) -> str:
+    """Return a short duration badge if the market resolves soon, else empty.
+
+    Uses MarketUniverse's cached endDate lookup; gracefully degrades to ""
+    if universe isn't loaded or the market isn't tracked. Covers the
+    common case where operators want to spot short-duration trades at a
+    glance without changing gate behavior.
+    """
+    if not condition_id:
+        return ""
+    try:
+        from trading_platform.polymarket.market_universe import MarketUniverse
+        from datetime import datetime, timezone
+        mu = MarketUniverse()
+        if not mu._by_category:
+            mu.load_cached(max_age_hours=24.0)
+        entry = mu._by_condition.get(condition_id) if hasattr(mu, "_by_condition") else None
+        if not entry:
+            return ""
+        raw = entry.get("end_date_iso") or ""
+        if not raw:
+            return ""
+        clean = raw.replace("Z", "+00:00") if raw.endswith("Z") else raw
+        dt = datetime.fromisoformat(clean)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        days = (dt - datetime.now(tz=timezone.utc)).total_seconds() / 86400.0
+        if days < 0:
+            return "  \u23f1 past-due"
+        if days < 1:
+            return f"  \u23f1 {days*24:.0f}h"
+        if days < 14:
+            return f"  \u23f1 {days:.0f}d"
+        return ""  # Long-dated: no badge
+    except Exception:
+        return ""
 
 
 class TelegramAlerter:
@@ -101,6 +195,9 @@ class TelegramAlerter:
         "position_reduction", "pre_deadline_surge",
         "late_conviction", "tier_entry",
         "whale_entry_filtered", "insider_entry",
+        "copyable_contrarian", "strategy_specialist",
+        "consensus_follower", "network_leader_entry",
+        "news_reactor",
     }
 
     # Minimum trade size (USD) to alert on whale detection
@@ -286,10 +383,21 @@ class TelegramAlerter:
         else:
             detail = f"\u251c Type: {sig_type.replace('_', ' ')}\n"
 
+        price = signal.get("price") or signal.get("entry_price") or 0
+        yn = _yn_side(signal.get("direction"), signal.get("side"))
+        slug = signal.get("slug")
+        link = _market_link(slug, cid)
+        link_line = (
+            f"<a href=\"{link}\">View market</a>\n" if link else ""
+        )
+
+        badge = _resolution_badge(cid)
         msg = (
-            f"{emoji} <b>SIGNAL: {sig_type.upper().replace('_', ' ')}</b>\n"
-            f"{side_e} <b>{signal.get('direction', '')} \u2014 {cat}</b>\n\n"
-            f"\U0001f4ca <b>Market:</b> {question}\n\n"
+            f"{emoji} <b>SIGNAL: {sig_type.upper().replace('_', ' ')}</b>{badge}\n"
+            f"<b>{yn} \u2014 {cat}</b>\n\n"
+            f"\U0001f4ca <b>Market:</b> {question}\n"
+            f"{link_line}\n"
+            f"Entry: {_price_implied(price)}  |  Size: {_fmt_usd(size)}\n"
             f"Signal details:\n"
             f"{detail}"
             f"\u251c Confidence: {conf:.0%}\n"
@@ -317,14 +425,17 @@ class TelegramAlerter:
         loud = tier in ("tier1h",) or conf > 0.70
         link = _market_link(slug, cid)
 
+        yn = _yn_side(direction, signal.get("side"))
+        payout = _payout_line(size, price)
+        badge = _resolution_badge(cid)
         msg = (
-            f"\U0001f3af <b>SPECIALIST ENTRY</b>\n"
+            f"\U0001f3af <b>SPECIALIST ENTRY</b>{badge}\n"
             f"Wallet <code>{w}</code> ({tier})\n"
             f"Domain: <b>{cat}</b> specialist\n\n"
             f"\U0001f4ca {q}\n"
-            f"{'<a href=\"' + link + '\">View market</a>' if link else ''}\n"
-            f"\n{'BUY \U0001f7e2' if direction == 'BUY' else 'SELL \U0001f534'} @ ${price:.3f}"
-            f"  |  {_fmt_usd(size)}\n"
+            f"{('<a href=' + chr(34) + link + chr(34) + '>View market</a>') if link else ''}\n"
+            f"\n<b>{yn}</b> @ {_price_implied(price)}  |  Size: {_fmt_usd(size)}\n"
+            f"{payout + chr(10) if payout else ''}"
             f"Cat WR: {cat_wr:.0%}  |  Confidence: {conf:.0%}"
         )
         msg += self._paper_trade_block(signal, paper)
@@ -340,6 +451,8 @@ class TelegramAlerter:
         price = signal.get("price") or signal.get("entry_price") or 0
         size = signal.get("size", 0) or 0
         life_pct = signal.get("market_life_pct") or 0
+        hours_left = signal.get("hours_remaining")
+        size_vs_avg = signal.get("size_vs_avg")
         cat = (signal.get("category") or "").upper()
         slug = signal.get("slug")
         cid = signal.get("condition_id")
@@ -347,14 +460,28 @@ class TelegramAlerter:
         loud = conf > 0.70
         link = _market_link(slug, cid)
 
+        time_line = f"Market is <b>{life_pct*100:.0f}%</b> through its lifetime"
+        if hours_left is not None:
+            if hours_left < 24:
+                time_line += f" ({hours_left:.0f}h remaining)"
+            else:
+                time_line += f" ({hours_left/24:.1f}d remaining)"
+
+        size_line = _fmt_usd(size)
+        if size_vs_avg is not None and size_vs_avg > 0:
+            size_line += f" ({size_vs_avg:.1f}x avg)"
+
+        yn = _yn_side(direction, signal.get("side"))
+        payout = _payout_line(size, price)
+        badge = _resolution_badge(cid)
         msg = (
-            f"\U0001f525 <b>LATE CONVICTION</b>\n"
+            f"\U0001f525 <b>LATE CONVICTION</b>{badge}\n"
             f"Wallet <code>{w}</code> ({tier})\n"
-            f"Market is <b>{life_pct*100:.0f}%</b> through its lifetime\n\n"
+            f"{time_line}\n\n"
             f"\U0001f4ca {q}\n"
-            f"{'<a href=\"' + link + '\">View market</a>' if link else ''}\n"
-            f"\n{'BUY \U0001f7e2' if direction == 'BUY' else 'SELL \U0001f534'} @ ${price:.3f}"
-            f"  |  {_fmt_usd(size)}  |  {cat}\n"
+            f"{('<a href=' + chr(34) + link + chr(34) + '>View market</a>') if link else ''}\n"
+            f"\n<b>{yn}</b> @ {_price_implied(price)}  |  Size: {size_line}  |  {cat}\n"
+            f"{payout + chr(10) if payout else ''}"
             f"Confidence: {conf:.0%}"
         )
         msg += self._paper_trade_block(signal, paper)
@@ -377,14 +504,17 @@ class TelegramAlerter:
         loud = cat_tier == "S"
         link = _market_link(slug, cid)
 
+        yn = _yn_side(direction, signal.get("side"))
+        payout = _payout_line(size, price)
+        badge = _resolution_badge(cid)
         msg = (
-            f"\U0001f451 <b>TIER ENTRY ({cat_tier}-TIER)</b>\n"
+            f"\U0001f451 <b>TIER ENTRY ({cat_tier}-TIER)</b>{badge}\n"
             f"Wallet <code>{w}</code>\n"
             f"{cat} WR: <b>{cat_wr:.0%}</b>\n\n"
             f"\U0001f4ca {q}\n"
-            f"{'<a href=\"' + link + '\">View market</a>' if link else ''}\n"
-            f"\nUncertain zone: {'BUY \U0001f7e2' if direction == 'BUY' else 'SELL \U0001f534'}"
-            f" @ ${price:.3f}  |  {_fmt_usd(size)}\n"
+            f"{('<a href=' + chr(34) + link + chr(34) + '>View market</a>') if link else ''}\n"
+            f"\nUncertain zone: <b>{yn}</b> @ {_price_implied(price)}  |  Size: {_fmt_usd(size)}\n"
+            f"{payout + chr(10) if payout else ''}"
             f"Confidence: {conf:.0%}"
         )
         msg += self._paper_trade_block(signal, paper)
@@ -396,9 +526,15 @@ class TelegramAlerter:
         if not paper or not paper.get("placed"):
             return ""
         stake = paper.get("stake", 0)
+        price = signal.get("price") or signal.get("entry_price") or 0
+        yn = _yn_side(signal.get("direction"), signal.get("side"))
+        payout = _payout_line(stake, price)
         return (
-            f"\n\n\U0001f4dd <b>PAPER TRADE</b>\n"
-            f"{signal.get('direction', 'BUY')} {_fmt_usd(stake)} @ {signal.get('price', 0):.3f}"
+            f"\n\n\U0001f4dd <b>PAPER TRADE PLACED</b>\n"
+            f"{yn} {_fmt_usd(stake)} @ {_price_implied(price)}\n"
+            f"{payout}" if payout else
+            f"\n\n\U0001f4dd <b>PAPER TRADE PLACED</b>\n"
+            f"{yn} {_fmt_usd(stake)} @ {_price_implied(price)}"
         )
 
     # ── Insider entry alert ──────────────────────────────────────────────
@@ -483,17 +619,21 @@ class TelegramAlerter:
 
     def send_paper_trade(self, trade: dict) -> bool:
         """Alert when a paper trade is placed (standalone, without signal context)."""
-        side_e = "\U0001f7e2" if trade.get("side") == "BUY" else "\U0001f534"
         question = (trade.get("question") or trade.get("condition_id", ""))[:70]
         stake = trade.get("stake", 0) or 0
         conf = trade.get("confidence", 0) or 0
         sig = trade.get("signal_type", "")
+        price = trade.get("price") or trade.get("entry_price") or 0
+        yn = _yn_side(trade.get("direction"), trade.get("side"))
+        cat = (trade.get("category") or "").upper()
+        payout = _payout_line(stake, price)
 
         msg = (
             f"\U0001f4dd <b>PAPER TRADE: {sig}</b>\n"
-            f"{side_e} <b>{trade.get('side', 'BUY')}</b>\n\n"
+            f"<b>{yn}</b>  {('[' + cat + ']') if cat else ''}\n\n"
             f"\U0001f4ca {question}\n"
-            f"\U0001f4b0 Stake: {_fmt_usd(stake)} @ {trade.get('price', 0):.3f}\n"
+            f"\U0001f4b0 Stake: {_fmt_usd(stake)} @ {_price_implied(price)}\n"
+            f"{payout + chr(10) if payout else ''}"
             f"\U0001f3af Confidence: {conf:.0%}"
             f"{_FOOTER}"
         )
@@ -507,18 +647,48 @@ class TelegramAlerter:
         emoji = "\u2705" if won else "\u274c"
         sig = trade.get("signal_type") or trade.get("signal_family", "")
         question = (trade.get("question") or trade.get("ticker", ""))[:70]
-        side = trade.get("side", "")
-        entry = trade.get("entry_price", 0)
-        size = trade.get("size_usd", 0)
-        ret = trade.get("return_pct", 0) or 0
-        pnl = size * ret if size else 0
+        yn = _yn_side(trade.get("direction"), trade.get("side"))
+        entry = trade.get("entry_price", 0) or 0
+        exit_price = trade.get("exit_price")
+        size = trade.get("size_usd") or trade.get("stake") or 0
+        ret = trade.get("return_pct") or 0
+        pnl = trade.get("realized_pnl")
+        if pnl is None:
+            pnl = size * ret if size else 0
+        # Hold duration
+        entry_ts = trade.get("entry_ts")
+        exit_ts = trade.get("exit_ts")
+        hold_line = ""
+        if entry_ts and exit_ts:
+            try:
+                days = (float(exit_ts) - float(entry_ts)) / 86400.0
+                hold_line = f"  (held {days:.1f}d)"
+            except (TypeError, ValueError):
+                pass
+        # Resolution outcome label
+        resolved_yn = ""
+        if exit_price is not None:
+            try:
+                ep = float(exit_price)
+                if ep >= 0.99:
+                    resolved_yn = "Market resolved: YES \U0001f7e2"
+                elif ep <= 0.01:
+                    resolved_yn = "Market resolved: NO \U0001f534"
+                else:
+                    resolved_yn = f"Resolved @ ${ep:.3f}"
+            except (TypeError, ValueError):
+                pass
 
-        msg = (
-            f"{emoji} <b>TRADE {'WON' if won else 'LOST'}: {sig}</b>\n"
-            f"{question}\n"
-            f"{side} {_fmt_usd(size)} @ {entry:.3f}\n"
-            f"P&L: {'+'if pnl>=0 else ''}{_fmt_usd(pnl)} ({ret*100:+.1f}%)\n"
-        )
+        lines = [
+            f"{emoji} <b>TRADE {'WON' if won else 'LOST'}: {sig}</b>",
+            question,
+            f"Bet: <b>{yn}</b>  {_fmt_usd(size)} @ {_price_implied(entry)}{hold_line}",
+        ]
+        if resolved_yn:
+            lines.append(resolved_yn)
+        pnl_sign = "+" if pnl >= 0 else ""
+        lines.append(f"P&L: {pnl_sign}{_fmt_usd(pnl)} ({ret*100:+.1f}%)")
+        msg = "\n".join(lines) + "\n"
 
         if signal_stats:
             total = signal_stats.get("total_resolved", 0)
@@ -554,7 +724,15 @@ class TelegramAlerter:
         self._last_daily_update = now
         stats = stats or {}
 
-        bankroll = 100_000
+        # Paper bankroll — match paper_executor.STARTING_BANKROLL so the
+        # digest's "Cash: $X (Y%)" number reflects the actual paper budget.
+        try:
+            from trading_platform.polymarket.polymarket_paper_executor import (
+                STARTING_BANKROLL,
+            )
+            bankroll = float(STARTING_BANKROLL)
+        except Exception:
+            bankroll = 10_000.0
         n_pos = len(positions)
         deployed = sum((p.get("size_usd") or 0) for p in positions)
         unrealized_total = sum((p.get("unrealized_pnl") or 0) for p in positions)
@@ -590,21 +768,24 @@ class TelegramAlerter:
             cur = p.get("current_price")
             entry = float(p.get("entry_price") or 0)
             q = (p.get("question") or p.get("condition_id") or "")[:42]
-            side = p.get("side") or "YES"
             size = float(p.get("size_usd") or 0)
             sig = p.get("signal_type") or ""
+            yn = _yn_side(p.get("direction"), p.get("side"))
 
             if unr is not None and cur is not None:
                 icon = "\U0001f7e2" if unr >= 0 else "\U0001f534"
                 pct = p.get("unrealized_pct") or 0
+                # Implied probability move since entry
+                implied_delta_pp = (cur - entry) * 100
                 lines.append(
-                    f"{icon} {side} {_fmt_usd(size)} @ {entry:.3f}  ({sig})\n"
+                    f"{icon} {yn}  {_fmt_usd(size)} @ {entry:.3f} ({entry*100:.0f}%)  ({sig})\n"
                     f"   \"{q}\"\n"
-                    f"   Now: {cur:.3f}  \u2192  {unr:+.1f} ({pct:+.1f}%)"
+                    f"   Now: {cur:.3f} ({cur*100:.0f}%, {implied_delta_pp:+.0f}pp)  "
+                    f"\u2192  {unr:+.1f} ({pct:+.1f}%)"
                 )
             else:
                 lines.append(
-                    f"\u26aa {side} {_fmt_usd(size)} @ {entry:.3f}  ({sig})\n"
+                    f"\u26aa {yn}  {_fmt_usd(size)} @ {entry:.3f} ({entry*100:.0f}%)  ({sig})\n"
                     f"   \"{q}\"\n"
                     f"   Price: fetching..."
                 )
@@ -618,6 +799,114 @@ class TelegramAlerter:
             f"\nToday: {signals_today} signals | {whales_today} whales | {markets_discovered} markets found",
             pipeline_line,
         ])
+        msg = "\n".join(lines) + _FOOTER
+        return self._send(msg, disable_notification=True)
+
+    # ── Paper trade confirmation (LOW loudness) ─────────────────────────────
+
+    def send_paper_trade_confirmation(self, signal: dict, trade: dict) -> bool:
+        """Brief confirmation when the paper executor places a trade."""
+        sig_type = signal.get("signal_type", "")
+        q = (signal.get("question") or "")[:60]
+        price = trade.get("entry_price") or signal.get("price") or 0
+        size = trade.get("size_usd") or 0
+        yn = _yn_side(signal.get("direction"), signal.get("side") or trade.get("side"))
+        payout = _payout_line(size, price)
+
+        msg = (
+            f"\U0001f4dd <b>Paper trade placed</b>\n"
+            f"<b>{yn}</b> \"{q}\" @ {_price_implied(price)}\n"
+            f"Signal: {sig_type} | Size: {_fmt_usd(size)}"
+        )
+        if payout:
+            msg += f"\n{payout}"
+        return self._send(msg, disable_notification=True)
+
+    # ── Signal activity digest (for daily report) ─────────────────────────
+
+    def send_signal_digest(self, db_path: str) -> bool:
+        """Daily signal activity breakdown with per-type stats."""
+        try:
+            import sqlite3
+            conn = sqlite3.connect(db_path, timeout=15)
+
+            # Signals fired today by type
+            fired = conn.execute("""
+                SELECT signal_type, COUNT(*) n
+                FROM market_signals
+                WHERE fired_at > unixepoch('now', '-24 hours')
+                GROUP BY signal_type ORDER BY n DESC
+            """).fetchall()
+
+            # Signals resolved today
+            resolved = conn.execute("""
+                SELECT signal_type, COUNT(*) n,
+                       SUM(CASE WHEN is_win=1 THEN 1 ELSE 0 END) wins,
+                       ROUND(SUM(outcome_delta), 2) ev
+                FROM signal_outcomes
+                WHERE resolved_at > unixepoch('now', '-24 hours')
+                  AND resolution_price IS NOT NULL
+                GROUP BY signal_type
+            """).fetchall()
+
+            # Running totals per active signal type
+            running = conn.execute("""
+                SELECT signal_type,
+                       COUNT(*) n,
+                       SUM(is_win) wins,
+                       ROUND(AVG(outcome_delta), 4) ev
+                FROM signal_outcomes
+                WHERE signal_type IN ('accumulation','specialist_entry','late_conviction','tier_entry','whale_entry_filtered')
+                  AND resolution_price IS NOT NULL AND entry_price > 0
+                GROUP BY signal_type ORDER BY n DESC
+            """).fetchall()
+
+            # Quiet signal check (no fires in 48h)
+            quiet = conn.execute("""
+                SELECT signal_type, MAX(fired_at) last_fire
+                FROM market_signals
+                WHERE signal_type IN ('accumulation','specialist_entry','late_conviction','tier_entry')
+                GROUP BY signal_type
+                HAVING last_fire < unixepoch('now', '-48 hours')
+            """).fetchall()
+
+            conn.close()
+        except Exception as exc:
+            logger.debug("signal digest DB error: %s", exc)
+            return False
+
+        lines = ["\U0001f4ca <b>DAILY SIGNAL DIGEST</b>\n"]
+
+        # Fired today
+        if fired:
+            lines.append("<b>Fired (24h):</b>")
+            for st, n in fired:
+                lines.append(f"  {st}: {n}")
+        else:
+            lines.append("No signals fired in 24h")
+
+        # Resolved today
+        if resolved:
+            lines.append("\n<b>Resolved (24h):</b>")
+            for st, n, wins, ev in resolved:
+                wr = wins / n if n else 0
+                icon = "\u2705" if ev and ev > 0 else "\u274c"
+                lines.append(f"  {icon} {st}: {n} resolved, {wins}W, EV={ev or 0:+.2f}")
+
+        # Running stats
+        if running:
+            lines.append("\n<b>All-time (active signals):</b>")
+            for st, n, wins, ev in running:
+                wr = (wins or 0) / n if n else 0
+                lines.append(f"  {st}: N={n}, WR={wr:.0%}, EV={ev or 0:+.4f}")
+
+        # Quiet warnings
+        if quiet:
+            lines.append("")
+            for st, last in quiet:
+                hours_ago = (time.time() - (last or 0)) / 3600
+                lines.append(f"\u26a0\ufe0f {st}: silent for {hours_ago:.0f}h")
+
         msg = "\n".join(lines) + _FOOTER
         return self._send(msg, disable_notification=True)
 
