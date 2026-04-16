@@ -2668,6 +2668,61 @@ def read_smart_money_universe_stats() -> dict[str, Any]:
         return {"available": False, "reason": str(exc)}
 
 
+def read_trade_journal(limit: int = 50) -> dict[str, Any]:
+    """Trade journal with full gate-value snapshot per trade + per-signal
+    attribution for evaluating the system's decision-making.
+    """
+    db = _get_wallet_db()
+    if not db:
+        return {"available": False}
+    from trading_platform.polymarket.db_connection import get_connection
+    conn = get_connection(str(db._path))
+    try:
+        trades = conn.execute(f"""
+            SELECT id, signal_type, category, side, entry_price, exit_price,
+                   size_usd, confidence, fusion_score, wallet_tier_at_fire,
+                   alpha_score_at_fire, entry_context,
+                   outcome, realized_pnl, exit_reason, mae, mfe,
+                   entry_ts, exit_ts, question
+            FROM polymarket_paper_trades
+            WHERE archived = 0
+            ORDER BY entry_ts DESC
+            LIMIT {int(limit)}
+        """).fetchall()
+        cols = ["id", "signal_type", "category", "side", "entry_price", "exit_price",
+                "size_usd", "confidence", "fusion_score", "wallet_tier",
+                "alpha_score", "entry_context",
+                "outcome", "realized_pnl", "exit_reason", "mae", "mfe",
+                "entry_ts", "exit_ts", "question"]
+        journal = [dict(zip(cols, r)) for r in trades]
+
+        # Per-signal attribution (all-time)
+        attribution = conn.execute("""
+            SELECT signal_type,
+                   COUNT(*) trades,
+                   COUNT(*) FILTER (WHERE exit_ts IS NOT NULL) resolved,
+                   SUM(CASE WHEN outcome='win' THEN 1 ELSE 0 END) wins,
+                   ROUND(SUM(realized_pnl)::numeric, 2) total_pnl,
+                   ROUND(AVG(realized_pnl)::numeric, 2) avg_pnl,
+                   ROUND(AVG(mae)::numeric, 2) avg_mae,
+                   ROUND(AVG(mfe)::numeric, 2) avg_mfe
+            FROM polymarket_paper_trades
+            WHERE archived = 0
+            GROUP BY signal_type ORDER BY total_pnl DESC NULLS LAST
+        """).fetchall()
+        attr_cols = ["signal_type", "trades", "resolved", "wins", "total_pnl",
+                     "avg_pnl", "avg_mae", "avg_mfe"]
+        attr = [dict(zip(attr_cols, r)) for r in attribution]
+    finally:
+        try: conn.close()
+        except Exception: pass
+    return {
+        "available": True,
+        "trades": journal,
+        "attribution": attr,
+    }
+
+
 def read_http_circuit_state() -> dict[str, Any]:
     """Return the outbound HTTP circuit breaker state for diagnostics."""
     try:

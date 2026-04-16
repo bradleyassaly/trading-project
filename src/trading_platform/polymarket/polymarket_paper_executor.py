@@ -766,6 +766,18 @@ class PolymarketPaperExecutor:
             import json as _json
             fusion_blob = _json.dumps(fusion_dict) if fusion_dict else None
             fusion_score_val = fusion_dict.get("score") if fusion_dict else None
+            # Gate-value snapshot: everything the system "saw" at entry time.
+            # Enables post-trade evaluation: "which gate values predict wins?"
+            entry_ctx = _json.dumps({
+                "alpha_score": signal.get("alpha_score"),
+                "insider_score": signal.get("insider_score"),
+                "wr_at_fire": signal.get("directional_win_rate"),
+                "minutes_since_whale": signal.get("minutes_since_whale_entry"),
+                "market_volume_usd": signal.get("market_volume_usd"),
+                "converging_wallets": signal.get("converging_wallets"),
+                "fusion_decision": fusion_dict.get("decision") if fusion_dict else None,
+            }, default=str) if True else None
+            alpha_at_fire = signal.get("alpha_score")
             with self._wallet_lock:
                 cursor = self._wallet_conn.execute(
                     """INSERT INTO polymarket_paper_trades
@@ -773,12 +785,14 @@ class PolymarketPaperExecutor:
                         raw_entry_price, spread_cost, slippage_cost,
                         size_usd, signal_type, confidence, wallet, entry_ts,
                         fusion_score, fusion_components, wallet_tier_at_fire,
+                        alpha_score_at_fire, entry_context,
                         archived)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)""",
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)""",
                     (condition_id, question, category, side, entry_price,
                      raw_entry_price, entry_spread_cost, entry_slippage_cost,
                      stake, signal_type, confidence, wallet, now_ts,
-                     fusion_score_val, fusion_blob, signal.get("wallet_tier")),
+                     fusion_score_val, fusion_blob, signal.get("wallet_tier"),
+                     alpha_at_fire, entry_ctx),
                 )
                 trade_id = cursor.lastrowid
                 self._wallet_conn.commit()
@@ -1271,9 +1285,23 @@ class PolymarketPaperExecutor:
 
     # ── Exit logic + mark-to-market ────────────────────────────────────────
 
-    STOP_LOSS = -0.25         # exit if unrealized loss > 25%
-    TAKE_PROFIT = 0.40        # exit if unrealized gain > 40%
-    TIME_DECAY_DAYS = 30      # exit if held > 30 days with no resolution
+    # Default exit thresholds (overridden by _EXIT_PROFILES per signal type).
+    STOP_LOSS = -0.25
+    TAKE_PROFIT = 0.40
+    TRAILING_STOP_ACTIVATE = 0.20   # start trailing after +20% unrealized
+    TRAILING_STOP_DRAWBACK = 0.10   # close if price pulls back 10pp from peak (MFE)
+    TIME_DECAY_DAYS = 30
+
+    # Per-signal exit profiles — short-horizon signals (sports whale copies)
+    # get tighter stops; thesis-driven signals get wider bands.
+    _EXIT_PROFILES: dict[str, dict] = {
+        "whale_entry_filtered": {"sl": -0.20, "tp": 0.35, "trail_act": 0.15, "trail_back": 0.08, "time_days": 14},
+        "high_conviction_insider": {"sl": -0.15, "tp": 0.50, "trail_act": 0.25, "trail_back": 0.12, "time_days": 30},
+        "insider_entry": {"sl": -0.20, "tp": 0.40, "trail_act": 0.20, "trail_back": 0.10, "time_days": 21},
+        "specialist_entry": {"sl": -0.25, "tp": 0.45, "trail_act": 0.20, "trail_back": 0.10, "time_days": 21},
+        "network_leader_entry": {"sl": -0.20, "tp": 0.35, "trail_act": 0.15, "trail_back": 0.08, "time_days": 14},
+        "copyable_contrarian": {"sl": -0.30, "tp": 0.50, "trail_act": 0.25, "trail_back": 0.12, "time_days": 30},
+    }
     TIME_DECAY_MIN_MOVE = 0.05
     # Market-life exit: a position past 80% of market lifetime rarely improves —
     # either resolve naturally (captured by check_and_resolve_open_trades) or
@@ -1338,13 +1366,30 @@ class PolymarketPaperExecutor:
                 except Exception as exc:
                     logger.debug("whale-mirror check failed for %s: %s", cid[:14], exc)
 
-            if exit_reason is None and unrealized <= self.STOP_LOSS:
+            # Look up per-signal exit profile (tighter for short-horizon,
+            # wider for thesis-driven). Falls back to class-level defaults.
+            sig_type = pos.get("signal_type") or ""
+            prof = self._EXIT_PROFILES.get(sig_type, {})
+            sl = prof.get("sl", self.STOP_LOSS)
+            tp = prof.get("tp", self.TAKE_PROFIT)
+            trail_act = prof.get("trail_act", self.TRAILING_STOP_ACTIVATE)
+            trail_back = prof.get("trail_back", self.TRAILING_STOP_DRAWBACK)
+            time_days = prof.get("time_days", self.TIME_DECAY_DAYS)
+
+            # Trailing stop: once MFE exceeds activation, close if price
+            # has fallen trail_back from the peak. MFE is tracked by
+            # _update_mark → mfe column on each paper_trade row.
+            mfe_pct = float(pos.get("mfe") or 0) / max(float(pos.get("size_usd") or 1), 1)
+            if exit_reason is None and mfe_pct >= trail_act and unrealized <= (mfe_pct - trail_back):
+                exit_reason = "trailing_stop"
+
+            if exit_reason is None and unrealized <= sl:
                 exit_reason = "stop_loss"
-            elif exit_reason is None and unrealized >= self.TAKE_PROFIT:
+            elif exit_reason is None and unrealized >= tp:
                 exit_reason = "take_profit"
             elif exit_reason is None:
                 age_days = (time.time() - (pos.get("entry_ts") or time.time())) / 86400
-                if age_days > self.TIME_DECAY_DAYS and abs(unrealized) < self.TIME_DECAY_MIN_MOVE:
+                if age_days > time_days and abs(unrealized) < self.TIME_DECAY_MIN_MOVE:
                     exit_reason = "time_decay"
 
                 # Implied-probability shift: YES-token price moved 30pp+ since

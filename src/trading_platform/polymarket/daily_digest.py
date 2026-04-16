@@ -140,18 +140,15 @@ def send_daily_digest() -> bool:
     alerter = get_alerter()
     if not alerter.enabled:
         return False
+    # Primary path: use the restructured Postgres-native digest in the
+    # alerter (includes paper trades, exits, readiness bars). Falls back
+    # to the legacy build_digest() string if something breaks.
+    try:
+        return alerter.send_signal_digest()
+    except Exception:
+        pass
     msg = build_digest()
-    for method in ("send_pipeline_alert", "send_daily_update", "_send", "send"):
-        fn = getattr(alerter, method, None)
-        if not callable(fn):
-            continue
-        try:
-            if method == "send_pipeline_alert":
-                return bool(fn("daily_digest", msg, "info"))
-            return bool(fn(msg))
-        except Exception:
-            continue
-    return False
+    return bool(alerter._send(msg))
 
 
 def main() -> int:

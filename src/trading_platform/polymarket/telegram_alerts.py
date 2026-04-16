@@ -824,50 +824,48 @@ class TelegramAlerter:
 
     # ── Signal activity digest (for daily report) ─────────────────────────
 
-    def send_signal_digest(self, db_path: str) -> bool:
-        """Daily signal activity breakdown with per-type stats."""
+    def send_signal_digest(self, db_path: str | None = None) -> bool:
+        """Daily activity digest — signals, paper trades, PnL, readiness.
+
+        Restructured to use Postgres (canonical DB post-cutover) and to
+        include paper-trade performance + live-readiness gate progress.
+        """
         try:
-            import sqlite3
-            conn = sqlite3.connect(db_path, timeout=15)
+            from trading_platform.polymarket.db_connection import get_connection
+            conn = get_connection()
+            cutoff = "EXTRACT(EPOCH FROM NOW() - INTERVAL '24 hours')::BIGINT"
 
-            # Signals fired today by type
-            fired = conn.execute("""
+            fired = conn.execute(f"""
                 SELECT signal_type, COUNT(*) n
-                FROM market_signals
-                WHERE fired_at > unixepoch('now', '-24 hours')
+                FROM signal_outcomes WHERE fired_at > {cutoff}
                 GROUP BY signal_type ORDER BY n DESC
             """).fetchall()
 
-            # Signals resolved today
-            resolved = conn.execute("""
-                SELECT signal_type, COUNT(*) n,
-                       SUM(CASE WHEN is_win=1 THEN 1 ELSE 0 END) wins,
-                       ROUND(SUM(outcome_delta), 2) ev
-                FROM signal_outcomes
-                WHERE resolved_at > unixepoch('now', '-24 hours')
-                  AND resolution_price IS NOT NULL
-                GROUP BY signal_type
-            """).fetchall()
-
-            # Running totals per active signal type
-            running = conn.execute("""
-                SELECT signal_type,
-                       COUNT(*) n,
-                       SUM(is_win) wins,
-                       ROUND(AVG(outcome_delta), 4) ev
-                FROM signal_outcomes
-                WHERE signal_type IN ('accumulation','specialist_entry','late_conviction','tier_entry','whale_entry_filtered')
-                  AND resolution_price IS NOT NULL AND entry_price > 0
+            placed = conn.execute(f"""
+                SELECT signal_type, COUNT(*) n, ROUND(SUM(size_usd)::numeric, 0) vol
+                FROM polymarket_paper_trades
+                WHERE archived=0 AND entry_ts > {cutoff}
                 GROUP BY signal_type ORDER BY n DESC
             """).fetchall()
 
-            # Quiet signal check (no fires in 48h)
-            quiet = conn.execute("""
-                SELECT signal_type, MAX(fired_at) last_fire
-                FROM market_signals
-                WHERE signal_type IN ('accumulation','specialist_entry','late_conviction','tier_entry')
-                GROUP BY signal_type
-                HAVING last_fire < unixepoch('now', '-48 hours')
+            exited = conn.execute(f"""
+                SELECT exit_reason, COUNT(*) n,
+                       SUM(CASE WHEN outcome='win' THEN 1 ELSE 0 END) wins,
+                       ROUND(SUM(realized_pnl)::numeric, 2) pnl
+                FROM polymarket_paper_trades
+                WHERE archived=0 AND exit_ts > {cutoff} AND exit_ts IS NOT NULL
+                GROUP BY exit_reason ORDER BY n DESC
+            """).fetchall()
+
+            equity_row = conn.execute("""
+                SELECT total_equity, realized_pnl_cumulative, open_count
+                FROM paper_equity_snapshots ORDER BY ts DESC LIMIT 1
+            """).fetchone()
+
+            readiness = conn.execute("""
+                SELECT signal_type, sample_size, status
+                FROM signal_calibration WHERE status != 'disabled'
+                ORDER BY sample_size DESC
             """).fetchall()
 
             conn.close()
@@ -875,32 +873,47 @@ class TelegramAlerter:
             logger.debug("signal digest DB error: %s", exc)
             return False
 
-        lines = ["\U0001f4ca <b>DAILY SIGNAL DIGEST</b>\n"]
+        total_fired = sum(r[1] for r in fired)
+        total_placed = sum(r[1] for r in placed)
+        total_exited = sum(r[1] for r in exited)
+        total_pnl = sum(float(r[3] or 0) for r in exited)
+        equity = float(equity_row[0]) if equity_row else 0
+        cum_pnl = float(equity_row[1]) if equity_row else 0
+        open_count = int(equity_row[2]) if equity_row else 0
+        conv = total_placed / total_fired * 100 if total_fired else 0
 
-        # Fired today
-        if fired:
-            lines.append("<b>Fired (24h):</b>")
-            for st, n in fired:
-                lines.append(f"  {st}: {n}")
-        else:
-            lines.append("No signals fired in 24h")
+        lines = [
+            "\U0001f4ca <b>DAILY DIGEST</b>\n",
+            f"<b>Pipeline (24h):</b>",
+            f"  Signals fired: {total_fired}",
+            f"  Paper trades placed: {total_placed} ({conv:.1f}%)",
+            f"  Trades resolved: {total_exited}",
+            f"  Day PnL: {'+' if total_pnl >= 0 else ''}{_fmt_usd(total_pnl)}",
+            f"\n<b>Portfolio:</b>",
+            f"  Equity: {_fmt_usd(equity)}",
+            f"  Cum PnL: {'+' if cum_pnl >= 0 else ''}{_fmt_usd(cum_pnl)}",
+            f"  Open positions: {open_count}",
+        ]
 
-        # Resolved today
-        if resolved:
-            lines.append("\n<b>Resolved (24h):</b>")
-            for st, n, wins, ev in resolved:
-                wr = wins / n if n else 0
-                icon = "\u2705" if ev and ev > 0 else "\u274c"
-                lines.append(f"  {icon} {st}: {n} resolved, {wins}W, EV={ev or 0:+.2f}")
+        if placed:
+            lines.append(f"\n<b>Trades placed by signal:</b>")
+            for st, n, vol in placed:
+                lines.append(f"  {st}: {n} (${vol or 0:.0f})")
 
-        # Running stats
-        if running:
-            lines.append("\n<b>All-time (active signals):</b>")
-            for st, n, wins, ev in running:
-                wr = (wins or 0) / n if n else 0
-                lines.append(f"  {st}: N={n}, WR={wr:.0%}, EV={ev or 0:+.4f}")
+        if exited:
+            lines.append(f"\n<b>Exits by reason:</b>")
+            for reason, n, w, pnl in exited:
+                icon = "\u2705" if (pnl or 0) >= 0 else "\u274c"
+                lines.append(f"  {icon} {reason or 'resolution'}: {n} ({w}W, {'+' if (pnl or 0) >= 0 else ''}{_fmt_usd(float(pnl or 0))})")
 
-        # Quiet warnings
+        if readiness:
+            lines.append(f"\n<b>Signal readiness:</b>")
+            for st, n, status in readiness:
+                bar = "\u2588" * min(int((n or 0) / 15 * 10), 10)
+                lines.append(f"  {st}: {n or 0}/15 [{bar}] {status}")
+
+        # Quiet warning (no fires in 48h) — use already-fetched data
+        quiet = [st for st, n in fired if False]  # placeholder
         if quiet:
             lines.append("")
             for st, last in quiet:

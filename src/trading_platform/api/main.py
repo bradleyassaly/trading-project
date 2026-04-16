@@ -989,6 +989,12 @@ def http_circuit() -> dict[str, Any]:
     return reader.read_http_circuit_state()
 
 
+@app.get("/api/trade-journal")
+def trade_journal(limit: int = 50) -> dict[str, Any]:
+    """Trade journal with gate-value snapshots + per-signal attribution."""
+    return reader.read_trade_journal(limit=max(1, min(200, limit)))
+
+
 @app.get("/api/paper/pnl-history")
 def paper_pnl_history() -> dict[str, Any]:
     return reader.read_paper_pnl_history()

@@ -1362,14 +1362,14 @@ class WhaleSignalEngine:
             except Exception as exc:
                 logger.debug("[LIVE] Executor error: %s", exc)
 
-        # Telegram alerts (non-blocking, enriched with profile)
+        # Telegram alerts — ONLY on paper/live trade placement, not raw
+        # signal fires. Previously every signal fire sent a notification
+        # (1900+/day). Now: only when execute_signal actually placed a trade.
         try:
             from trading_platform.polymarket.telegram_alerts import get_alerter
             alerter = get_alerter()
-            profile = self.db.get_profile(trade.wallet)
-            if trade.wallet_tier in ("tier1", "tier1h"):
-                alerter.send_whale_detection(trade, profile=profile)
-            alerter.send_signal(signal)
+            if paper_trade:
+                alerter.send_signal(signal, paper_result=paper_trade)
 
             # Political/geopolitical whale alert: if the firing wallet is
             # S/A/B tier in politics or geopolitics, route it through the
