@@ -282,7 +282,7 @@ def wallets_archetypes() -> dict[str, Any]:
     """Wallet archetype distribution and per-archetype copy-trading stats."""
     try:
         import sqlite3
-        conn = sqlite3.connect(_alpha_db_path(), timeout=15)
+        conn = get_connection(_alpha_db_path())
         try:
             rows = conn.execute("""
                 SELECT archetype, copyable, COUNT(*) AS n
@@ -325,7 +325,7 @@ def wallets_political_leaders(limit: int = 25) -> dict[str, Any]:
     """Top tier S/A/B wallets in politics + geopolitics with current activity."""
     try:
         import sqlite3
-        conn = sqlite3.connect(_alpha_db_path(), timeout=30)
+        conn = get_connection(_alpha_db_path())
         try:
             rows = conn.execute(
                 """SELECT wcp.wallet, wcp.tier, wcp.tier_score, wcp.category,
@@ -395,7 +395,7 @@ def markets_political_activity(hours: int = 48, limit: int = 50) -> dict[str, An
     """Recent whale trades in political / geopolitical markets (tracked tier S/A/B)."""
     try:
         import sqlite3
-        conn = sqlite3.connect(_alpha_db_path(), timeout=30)
+        conn = get_connection(_alpha_db_path())
         try:
             rows = conn.execute(
                 """SELECT wt.wallet, wt.side, wt.size, wt.price,
@@ -697,7 +697,7 @@ def live_positions() -> dict[str, Any]:
     """Open live positions with current price and unrealized PnL."""
     try:
         import sqlite3
-        conn = sqlite3.connect(_alpha_db_path(), timeout=15)
+        conn = get_connection(_alpha_db_path())
         try:
             rows = conn.execute("""
                 SELECT id, condition_id, token_id, question, category, side,
@@ -729,7 +729,7 @@ def live_history(limit: int = 50) -> dict[str, Any]:
     """Closed live trades with realized PnL."""
     try:
         import sqlite3
-        conn = sqlite3.connect(_alpha_db_path(), timeout=15)
+        conn = get_connection(_alpha_db_path())
         try:
             rows = conn.execute("""
                 SELECT id, condition_id, question, category, side, signal_type,
@@ -763,7 +763,7 @@ def live_execution_quality() -> dict[str, Any]:
     """Fill rate, slippage, fill time stats."""
     try:
         import sqlite3
-        conn = sqlite3.connect(_alpha_db_path(), timeout=15)
+        conn = get_connection(_alpha_db_path())
         try:
             r = conn.execute("""
                 SELECT COUNT(*) AS total,
@@ -794,7 +794,7 @@ def system_health() -> dict[str, Any]:
     """Overall system health for the dashboard header."""
     try:
         import sqlite3, os, glob
-        conn = sqlite3.connect(_alpha_db_path(), timeout=10)
+        conn = get_connection(_alpha_db_path())
         integrity = conn.execute("PRAGMA integrity_check").fetchone()[0]
         yes_rate = conn.execute("""
             SELECT AVG(CASE WHEN resolution_price=1.0 THEN 1.0 ELSE 0.0 END)
@@ -1308,7 +1308,7 @@ def wallet_expected_returns(address: str) -> dict[str, Any]:
     """Full return distribution stats for a wallet across all categories."""
     try:
         import sqlite3
-        conn = sqlite3.connect(_alpha_db_path(), timeout=10)
+        conn = get_connection(_alpha_db_path())
         conn.row_factory = sqlite3.Row
         try:
             # Case-insensitive match (addresses may be mixed-case)
@@ -1363,7 +1363,7 @@ def trade_analysis(trade_id: int) -> dict[str, Any]:
     """Full pre-trade hypothesis + post-trade analysis for a single trade."""
     try:
         import sqlite3, json
-        conn = sqlite3.connect(_alpha_db_path(), timeout=10)
+        conn = get_connection(_alpha_db_path())
         conn.row_factory = sqlite3.Row
         try:
             hypo = conn.execute(
@@ -1439,7 +1439,7 @@ def execution_gates_status() -> dict[str, Any]:
     try:
         import sqlite3, json
         from trading_platform.polymarket.execution_gates import _PAPER_THRESHOLDS
-        conn = sqlite3.connect(_alpha_db_path(), timeout=10)
+        conn = get_connection(_alpha_db_path())
         try:
             recent = conn.execute(
                 """SELECT trade_id, gate_results_json FROM trade_hypotheses
@@ -1467,7 +1467,7 @@ def whale_exits() -> dict[str, Any]:
     """Recent whale exit signals."""
     try:
         import sqlite3
-        conn = sqlite3.connect(_alpha_db_path(), timeout=10)
+        conn = get_connection(_alpha_db_path())
         conn.row_factory = sqlite3.Row
         try:
             rows = conn.execute(
@@ -1571,7 +1571,7 @@ def paper_analytics_summary() -> dict[str, Any]:
 def paper_equity_curve() -> dict[str, Any]:
     try:
         import sqlite3
-        conn = sqlite3.connect(_alpha_db_path(), timeout=10)
+        conn = get_connection(_alpha_db_path())
         try:
             rows = conn.execute(
                 "SELECT ts, cash, positions_value, total_equity, open_count, realized_pnl_cumulative, unrealized_pnl FROM paper_equity_snapshots ORDER BY ts"
@@ -1594,7 +1594,7 @@ def daily_report() -> dict[str, Any]:
     """Daily summary for digest and Command Center."""
     try:
         import sqlite3, time
-        conn = sqlite3.connect(_alpha_db_path(), timeout=10)
+        conn = get_connection(_alpha_db_path())
         now = int(time.time())
         yesterday = now - 86400
         try:
@@ -1657,7 +1657,7 @@ def paper_sizing() -> dict[str, Any]:
             STARTING_BANKROLL,
         )
         import sqlite3
-        conn = sqlite3.connect(_alpha_db_path(), timeout=10)
+        conn = get_connection(_alpha_db_path())
         try:
             deployed = conn.execute(
                 "SELECT COALESCE(SUM(size_usd),0) FROM polymarket_paper_trades WHERE exit_ts IS NULL AND archived=0"
