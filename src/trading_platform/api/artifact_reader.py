@@ -2812,11 +2812,18 @@ def read_paper_bankroll() -> dict[str, Any]:
         except Exception:
             pass
 
+    # Anchor to STARTING_BANKROLL (real paper book) instead of the old
+    # $100k placeholder. Stale hardcode missed in the first GUI sweep.
+    try:
+        from trading_platform.polymarket.polymarket_paper_executor import STARTING_BANKROLL as _SB
+        _bankroll = float(_SB)
+    except Exception:
+        _bankroll = 10_000.0
     return {
         "available": True,
-        "total_bankroll": 100000,
-        "starting_bankroll": 100000,
-        "polymarket_cash": round(100000 - poly_deployed, 2),
+        "total_bankroll": _bankroll,
+        "starting_bankroll": _bankroll,
+        "polymarket_cash": round(_bankroll - poly_deployed, 2),
         "polymarket_open_count": poly_open,
         "polymarket_deployed": round(poly_deployed, 2),
         "kalshi_cash": round(kalshi_cash, 2),

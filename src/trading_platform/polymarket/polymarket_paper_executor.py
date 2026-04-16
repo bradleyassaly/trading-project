@@ -71,11 +71,16 @@ SIGNAL_BANKROLL = {
 
 MIN_CONFIDENCE = 0.35
 
-# Per-signal-type confidence floor overrides. Velocity signals top out at
-# 0.85 with the 30%-move ceiling and start at 0.30 for a 10% move; the
-# default 0.35 cap drops ~75% of them, so we lower the floor for them.
+# Per-signal-type confidence floor overrides. Signal types with validated
+# edge get a lower floor so we collect more resolution data — otherwise
+# whale_entry_filtered at 0.29 confidence is silently dropped. Learned
+# from the 1929-fires/1-placed ratio over a 24h window.
 MIN_CONFIDENCE_BY_TYPE = {
     "price_velocity": 0.25,
+    "whale_entry_filtered": 0.25,
+    "high_conviction_insider": 0.30,
+    "insider_entry": 0.30,
+    "specialist_entry": 0.30,
 }
 MAX_POSITION_PCT = 0.15
 MIN_STAKE = 25.0
@@ -117,7 +122,15 @@ OPTIMAL_BAND_BOOST = 1.15  # confidence multiplier for sweet spot
 # Sports moved OUT of EXCLUDE into TIER1-ONLY on 2026-04-14 after
 # wallet_deep_dive.py showed tier1-only sports is +$55K/863 trades @ 67% WR,
 # while the full sports population is -$44K. See TIER1_ONLY_CATEGORIES below.
-PAPER_TRADE_CATEGORIES = {"politics", "geopolitics", "crypto", "economics", "sports"}
+# Added entertainment, science, tech on 2026-04-15. Insider backtest
+# showed entertainment +140% ROI/trade (176 trades), science +182% (191
+# trades), and tech/tweet_count had meaningful positive PnL on insider
+# wallets. Previously these got silently rejected at the CAT_GATE and
+# we missed a large chunk of copyable signal flow.
+PAPER_TRADE_CATEGORIES = {
+    "politics", "geopolitics", "crypto", "economics", "sports",
+    "entertainment", "science", "tech", "tweet_count", "finance",
+}
 TIER1_ONLY_CATEGORIES = {"sports"}  # require wallet_tier='tier1' for these
 EXCLUDE_CATEGORIES: set[str] = set()  # no hard exclusions; tier-gating handles it
 # Live trading: strict allowlist (statistically significant positive EV only).
@@ -522,18 +535,16 @@ class PolymarketPaperExecutor:
                 alpha = get_wallet_alpha(str(self._wallet_db_path), gate_wallet, gate_category)
                 gate_tier = signal.get("wallet_tier")
                 if alpha <= 0:
-                    if gate_tier in ("tier1h", "tier1"):
-                        signal["alpha_score"] = 0.0
-                        logger.info(
-                            "[ALPHA_GATE] wallet %s %s bypass (no alpha row), signal=%s",
-                            gate_wallet[:14], gate_tier, signal_type,
-                        )
-                    else:
-                        logger.info(
-                            "[ALPHA_GATE] wallet %s NOT copyable in %s, SKIP %s",
-                            gate_wallet[:14], gate_category, signal_type,
-                        )
-                        return None
+                    # Tier1/1h bypass: known-quality wallets pass even without
+                    # per-category alpha scores. Tier2: previously hard-rejected,
+                    # but that killed 90%+ of signal flow and blocked learning.
+                    # Now bypass with zero score (fusion learn-tier handles
+                    # the sizing — 25% of already-small stakes).
+                    signal["alpha_score"] = 0.0
+                    logger.info(
+                        "[ALPHA_GATE] wallet %s %s bypass (alpha=0), signal=%s",
+                        gate_wallet[:14], gate_tier or "unknown", signal_type,
+                    )
                 else:
                     logger.info(
                         "[ALPHA_GATE] wallet %s copyable in %s, score=%.3f, signal=%s",
@@ -705,16 +716,24 @@ class PolymarketPaperExecutor:
             )
             fusion_dict = fusion.to_dict()
             if fusion.decision == "skip":
+                # Instead of hard-rejecting, place at MIN_STAKE_USD for
+                # data collection. The multiplicative fusion score collapses
+                # to near-zero whenever any component lacks data (missing
+                # market vol, untiered wallet, etc.), causing a 1929/1 fire-
+                # to-placed ratio over 24h. The gates upstream (confidence,
+                # category, price, alpha) already filter for signal quality;
+                # fusion was adding a redundant barrier that starved the
+                # calibration loop of samples.
+                stake = MIN_STAKE_USD
                 logger.info(
-                    "[FUSION_SKIP] %s score=%.2f w=%.2f m=%.2f t=%.2f | %s",
-                    signal_type, fusion.score, fusion.wallet_signal,
-                    fusion.market_signal, fusion.timing_signal,
+                    "[FUSION_LEARN] %s score=%.2f → placing at $%.0f min-stake for data | %s",
+                    signal_type, fusion.score, stake,
                     (signal.get("question") or "")[:40],
                 )
-                return None
-            stake = round(stake * fusion.stake_multiplier, 2)
-            if stake < MIN_STAKE_USD:
-                return None
+            else:
+                stake = round(stake * fusion.stake_multiplier, 2)
+                if stake < MIN_STAKE_USD:
+                    stake = MIN_STAKE_USD
         except Exception as exc:
             logger.debug("fusion gate skipped: %s", exc)
 

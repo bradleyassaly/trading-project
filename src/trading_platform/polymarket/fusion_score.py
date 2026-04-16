@@ -91,9 +91,18 @@ def market_signal(
     current_price: float | None,
     days_since_last_trade: float | None,
 ) -> float:
-    """0..1 measure of how favourable the market context is."""
-    vol = float(market_volume_usd or 0.0)
-    liquidity_score = _clamp(vol / 100_000.0, 0.0, 1.0)
+    """0..1 measure of how favourable the market context is.
+
+    Poller-sourced signals don't carry market_volume_usd (only the
+    wallet's total volume). Treating None as 0 made liquidity_score 0
+    and collapsed the fusion score to 0, which 100%-rejected those
+    signals. Treat missing volume as a neutral 0.5 so the gate still
+    considers timing + wallet signal rather than hard-failing on it.
+    """
+    if market_volume_usd is None:
+        liquidity_score = 0.5  # neutral — no data shouldn't imply zero liquidity
+    else:
+        liquidity_score = _clamp(float(market_volume_usd) / 100_000.0, 0.0, 1.0)
 
     p = 0.5 if current_price is None else _clamp(float(current_price), 0.0, 1.0)
     # Markets near 50/50 (small dislocation) have more room → higher score
@@ -245,12 +254,25 @@ def compute_fusion(
     t = timing_signal(minutes_since_whale_entry, convergence_count)
     score = w * m * t
 
+    # Tier expanded 2026-04-15 to add a quarter-Kelly "learn" band.
+    # Observed 24h funnel was 1929 fires / 1 placed — most signals died
+    # at fusion<0.4 with no data captured. Learn-tier trades at 25% of
+    # stake so we build per-signal calibration data on borderline fires
+    # without putting meaningful capital on them.
     if score >= 0.6:
         decision = "auto"
         mult = 1.0
     elif score >= 0.4:
         decision = "half"
         mult = 0.5
+    elif score >= 0.05:
+        # Learn band is generous — 0.05 captures most poller-sourced
+        # signals where WalletTieringEngine returns a low multiplier for
+        # wallets not yet in the tiering index. We want data from those
+        # signals anyway; stake is only 25% of baseline so capital risk
+        # is minimal even across many fires.
+        decision = "learn"
+        mult = 0.25
     else:
         decision = "skip"
         mult = 0.0
