@@ -184,6 +184,33 @@ services:
       api:
         condition: service_healthy
 
+  # ─── Telegram command bot ─────────────────────────────────────────────
+  # Long-polling bot that accepts a small command surface (/status,
+  # /positions, /readiness, /funnel, /insiders, /kill, /unkill, /help)
+  # and responds with live state pulled from the local API. Designed for
+  # "remote control" when you're off the dashboard; all read endpoints
+  # plus the emergency-stop switches. Auth via TELEGRAM_CHAT_ID.
+  telegram-bot:
+    build: .
+    container_name: polymarket-telegram-bot
+    command: python -m trading_platform.polymarket.telegram_bot
+    volumes:
+      - .:/app
+    env_file: .env
+    environment:
+      - TELEGRAM_BOT_API_URL=http://api:8001
+      - DB_BACKEND=postgres
+      - POSTGRES_HOST=postgres
+      - POSTGRES_USER=polymarket
+      - POSTGRES_PASSWORD=polymarket_dev
+      - POSTGRES_DB=polymarket
+    restart: unless-stopped
+    mem_limit: 256m
+    memswap_limit: 256m
+    depends_on:
+      api:
+        condition: service_healthy
+
   # ─── Polygon WS wallet-stream ──────────────────────────────────────────
   # Real-time wallet activity tracker. Subscribes to USDC Transfer logs
   # on Polygon where one side of the transfer is the Polymarket

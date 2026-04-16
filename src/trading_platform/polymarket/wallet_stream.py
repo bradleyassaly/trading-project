@@ -35,9 +35,16 @@ logger = logging.getLogger(__name__)
 # Polymarket CTFExchange + USDC on Polygon. CTFExchange is the order
 # matcher — every trade causes USDC to move to/from this contract.
 CTF_EXCHANGE = "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E"
+NEG_RISK_CTF_EXCHANGE = "0xC5d563A36AE78145C45a50134d48A1215220f80a"
 USDC_E = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"  # bridged, original
 USDC_NATIVE = "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359"  # native Polygon
 TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
+# OrderFilled(bytes32 orderHash, address maker, address taker,
+#   uint256 makerAssetId, uint256 takerAssetId, uint256 makerAmountFilled,
+#   uint256 takerAmountFilled, uint256 fee)
+# Indexed: orderHash, maker, taker  → topics[1], topics[2], topics[3]
+# Non-indexed: 5 uint256 in data (makerAssetId, takerAssetId, makerAmount, takerAmount, fee)
+ORDER_FILLED_TOPIC = "0xd0a08e8c493f9c94f29311604c9de1b4e8c8d4c06bd0c789af57f2d65bfec0f6"
 
 
 def _pad_addr(a: str) -> str:
@@ -137,41 +144,152 @@ class WalletStream:
                     },
                 ],
             },
+            # OrderFilled where MAKER is a watched wallet (they placed
+            # a resting order that got filled). 2-5s chain-native latency.
+            {
+                "jsonrpc": "2.0", "id": 3, "method": "eth_subscribe",
+                "params": [
+                    "logs",
+                    {
+                        "address": [CTF_EXCHANGE, NEG_RISK_CTF_EXCHANGE],
+                        "topics": [ORDER_FILLED_TOPIC, None, watched_padded],
+                    },
+                ],
+            },
+            # OrderFilled where TAKER is a watched wallet (they took
+            # liquidity — active market buy/sell).
+            {
+                "jsonrpc": "2.0", "id": 4, "method": "eth_subscribe",
+                "params": [
+                    "logs",
+                    {
+                        "address": [CTF_EXCHANGE, NEG_RISK_CTF_EXCHANGE],
+                        "topics": [ORDER_FILLED_TOPIC, None, None, watched_padded],
+                    },
+                ],
+            },
         ]
         for m in sub_msgs:
             await ws.send(json.dumps(m))
 
     async def _handle_log(self, params: dict) -> None:
-        """Dispatch a single Transfer event, triggering a poll if matched."""
+        """Route incoming log event by topic0 to the right handler."""
         self._stats["events_seen"] += 1
         try:
             log = params.get("result") or {}
             topics = log.get("topics") or []
-            if len(topics) < 3:
+            if not topics:
                 return
-            from_addr = _addr_from_topic(topics[1])
-            to_addr = _addr_from_topic(topics[2])
+            topic0 = topics[0].lower()
         except Exception as exc:
             logger.debug("log decode failed: %s", exc)
             return
 
-        # Exactly one side is our wallet (the other is CTFExchange).
+        if topic0 == ORDER_FILLED_TOPIC.lower():
+            await self._handle_order_filled(log, topics)
+        elif topic0 == TRANSFER_TOPIC.lower():
+            await self._handle_transfer(log, topics)
+
+    async def _handle_transfer(self, log: dict, topics: list) -> None:
+        """Transfer event → trigger single-wallet REST poll. Legacy path."""
+        if len(topics) < 3:
+            return
+        from_addr = _addr_from_topic(topics[1])
+        to_addr = _addr_from_topic(topics[2])
         wallet = from_addr if from_addr in self.watched else (
             to_addr if to_addr in self.watched else None
         )
         if not wallet:
             return
-
         self._stats["events_matched"] += 1
         now = time.time()
         last = self._last_poll.get(wallet, 0)
         if (now - last) < self.dedup_window:
-            return  # too close to last trigger — de-dupe
+            return
         self._last_poll[wallet] = now
         self._stats["polls_triggered"] += 1
+        asyncio.create_task(self._poll_wallet(wallet))
 
-        # Trigger an immediate poll of THIS wallet (cheap single-wallet
-        # API call, not the whole copyable set).
+    async def _handle_order_filled(self, log: dict, topics: list) -> None:
+        """Chain-native trade: decode OrderFilled directly — no REST lag.
+
+        Topic layout (3 indexed):
+          topics[0] = event signature
+          topics[1] = orderHash
+          topics[2] = maker
+          topics[3] = taker
+        Data layout (5 × 32 bytes, non-indexed):
+          [0]  makerAssetId
+          [1]  takerAssetId
+          [2]  makerAmountFilled
+          [3]  takerAmountFilled
+          [4]  fee
+
+        For a BUY: maker's asset = USDC (id=0), taker's asset = token.
+        For a SELL: maker's asset = token, taker's asset = USDC (id=0).
+        We infer direction from whichever side has asset_id=0.
+        """
+        if len(topics) < 4:
+            return
+        maker = _addr_from_topic(topics[2])
+        taker = _addr_from_topic(topics[3])
+        if maker in self.watched:
+            wallet, role = maker, "maker"
+        elif taker in self.watched:
+            wallet, role = taker, "taker"
+        else:
+            return
+        self._stats["events_matched"] += 1
+        self._stats["order_filled_decoded"] = self._stats.get("order_filled_decoded", 0) + 1
+
+        data_hex = (log.get("data") or "0x").lower().replace("0x", "")
+        if len(data_hex) < 64 * 5:
+            logger.debug("OrderFilled data too short: %d", len(data_hex))
+            return
+        def _u256(i: int) -> int:
+            return int(data_hex[i * 64:(i + 1) * 64], 16)
+        maker_asset_id = _u256(0)
+        taker_asset_id = _u256(1)
+        maker_amount = _u256(2)
+        taker_amount = _u256(3)
+
+        # asset_id=0 represents USDC (collateral). The other side is the
+        # binary-outcome conditional token.
+        if maker_asset_id == 0 and taker_asset_id != 0:
+            # Maker paid USDC → maker is BUYING the token
+            # Price ≈ maker_amount (USDC) / taker_amount (shares)
+            side = "BUY" if role == "maker" else "SELL"
+            token_id = taker_asset_id
+            usdc = maker_amount / 1e6
+            shares = taker_amount / 1e6
+        elif taker_asset_id == 0 and maker_asset_id != 0:
+            # Maker sold token for USDC → maker is SELLING
+            side = "SELL" if role == "maker" else "BUY"
+            token_id = maker_asset_id
+            usdc = taker_amount / 1e6
+            shares = maker_amount / 1e6
+        else:
+            # Token-to-token — rare; skip
+            return
+        price = usdc / shares if shares > 0 else 0
+        tx_hash = log.get("transactionHash") or ""
+
+        logger.info(
+            "[chain-trade] %s %s %s %.2f shares @ %.4f ($%.2f) tx=%s",
+            wallet[:10], role, side, shares, price, usdc, tx_hash[:10] + "..." if tx_hash else "?",
+        )
+
+        # Still trigger a single-wallet REST poll to hydrate the full
+        # wallet_trades record (market title, category, etc.) — chain
+        # event told us WHEN, REST tells us WHAT MARKET. But the
+        # latency improvement is real: we know a trade happened in
+        # ~2-5s instead of waiting for the 10-min poller cycle.
+        now = time.time()
+        last = self._last_poll.get(wallet, 0)
+        if (now - last) < 3:  # tighter dedup for chain events
+            return
+        self._last_poll[wallet] = now
+        self._stats["polls_triggered"] += 1
         asyncio.create_task(self._poll_wallet(wallet))
 
     async def _poll_wallet(self, wallet: str) -> None:
