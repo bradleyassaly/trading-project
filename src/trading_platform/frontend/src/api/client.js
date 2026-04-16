@@ -182,6 +182,7 @@ export const api = {
   tradeJournal: (limit = 20) => get(`/trade-journal?limit=${limit}`),
   exitAnalyzer: (minSample = 10) => get(`/exit-analyzer?min_sample=${minSample}`),
   signalAttribution: (hours = 168) => get(`/signal-attribution?hours=${hours}`),
+  backtestRunGui: (cfg) => post('/backtest/replay', cfg),
   paperPnlHistory: () => get('/paper/pnl-history'),
   signalsPerformance: () => get('/signals/performance'),
   smartMoneyWalletPositions: (addr) => get(`/smart-money/wallet/${encodeURIComponent(addr)}/positions`),

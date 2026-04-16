@@ -549,6 +549,86 @@ function TradeJournalTile({ data }) {
   )
 }
 
+function BacktestTile() {
+  const [cfg, setCfg] = useState({
+    hours: 168,
+    min_confidence: 0.30,
+    min_fusion: 0.05,
+    min_entry_price: 0.10,
+    max_entry_price: 0.85,
+    stake_usd: 50,
+    apply_spread: 0.015,
+  })
+  const [result, setResult] = useState(null)
+  const [loading, setLoading] = useState(false)
+  const run = async () => {
+    setLoading(true)
+    try {
+      const r = await api.backtestRunGui(cfg)
+      setResult(r)
+    } catch (e) {
+      setResult({ error: String(e) })
+    } finally {
+      setLoading(false)
+    }
+  }
+  const set = (k) => (e) => setCfg((c) => ({ ...c, [k]: Number(e.target.value) }))
+  const inp = "px-1.5 py-0.5 bg-surface-hover rounded text-[10px] text-gray-300 w-16 text-right"
+  return (
+    <div>
+      <div className="flex items-baseline justify-between mb-2">
+        <h2 className="text-sm font-medium text-gray-300">Backtest — Replay with Different Gates</h2>
+        <button onClick={run} disabled={loading}
+          className="px-2 py-0.5 text-[10px] bg-accent-blue/20 text-accent-blue rounded hover:bg-accent-blue/30 disabled:opacity-50">
+          {loading ? 'running...' : 'run'}
+        </button>
+      </div>
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-[10px] mb-3">
+        <label className="flex justify-between gap-1">hours <input type="number" className={inp} value={cfg.hours} onChange={set('hours')} /></label>
+        <label className="flex justify-between gap-1">min conf <input type="number" step="0.05" className={inp} value={cfg.min_confidence} onChange={set('min_confidence')} /></label>
+        <label className="flex justify-between gap-1">min fusion <input type="number" step="0.05" className={inp} value={cfg.min_fusion} onChange={set('min_fusion')} /></label>
+        <label className="flex justify-between gap-1">stake $ <input type="number" className={inp} value={cfg.stake_usd} onChange={set('stake_usd')} /></label>
+        <label className="flex justify-between gap-1">min price <input type="number" step="0.05" className={inp} value={cfg.min_entry_price} onChange={set('min_entry_price')} /></label>
+        <label className="flex justify-between gap-1">max price <input type="number" step="0.05" className={inp} value={cfg.max_entry_price} onChange={set('max_entry_price')} /></label>
+        <label className="flex justify-between gap-1">spread <input type="number" step="0.005" className={inp} value={cfg.apply_spread} onChange={set('apply_spread')} /></label>
+      </div>
+      {result?.available && (
+        <div className="text-[10px]">
+          <div className="text-gray-500 mb-1">
+            {result.totals.trades} trades · WR {(result.totals.win_rate * 100).toFixed(0)}% ·
+            ROI {(result.totals.roi * 100).toFixed(1)}% ·
+            <span className={result.totals.net_pnl >= 0 ? 'text-accent-green' : 'text-accent-red'}>
+              {' '}{result.totals.net_pnl >= 0 ? '+' : ''}${result.totals.net_pnl.toFixed(2)}
+            </span>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full">
+              <thead className="text-gray-500">
+                <tr><th className="text-left pb-1">Signal</th><th className="text-right pb-1">N</th><th className="text-right pb-1">WR</th><th className="text-right pb-1">Avg</th><th className="text-right pb-1">Net</th></tr>
+              </thead>
+              <tbody className="divide-y divide-surface-border">
+                {(result.by_signal || []).slice(0, 8).map((s) => (
+                  <tr key={s.signal_type}>
+                    <td className="py-0.5 text-gray-400">{s.signal_type}</td>
+                    <td className="py-0.5 text-right text-gray-500">{s.trades}</td>
+                    <td className="py-0.5 text-right text-gray-500">{(s.win_rate * 100).toFixed(0)}%</td>
+                    <td className="py-0.5 text-right text-gray-500">${s.avg_pnl.toFixed(2)}</td>
+                    <td className={`py-0.5 text-right ${s.net_pnl >= 0 ? 'text-accent-green' : 'text-accent-red'}`}>
+                      {s.net_pnl >= 0 ? '+' : ''}${s.net_pnl.toFixed(2)}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+      {result?.error && <div className="text-[10px] text-accent-red">{result.error}</div>}
+      {!result && <div className="text-[10px] text-gray-600">Tune the gates and click run to replay paper trades.</div>}
+    </div>
+  )
+}
+
 function SignalAttributionTile({ data }) {
   const sigs = (data?.by_signal || []).filter(s => s.placed > 0)
   if (!sigs.length) {
@@ -851,6 +931,10 @@ export default function Dashboard() {
 
       <div className="card">
         <SignalAttributionTile data={attribution} />
+      </div>
+
+      <div className="card">
+        <BacktestTile />
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-5 gap-4">

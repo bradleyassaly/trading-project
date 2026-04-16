@@ -181,6 +181,56 @@ def _cmd_unkill() -> str:
     return f"Clear failed: {r.get('_error') if r else 'no response'}"
 
 
+def _cmd_live_trade(args: str) -> str:
+    """/live-trade <condition_id> <YES|NO> [stake_usd]
+
+    Places a real $5-capped live trade. Thin wrapper over the
+    force_live_test script so the same pre-flight checks run
+    (USDC balance, Gamma lookup, book depth, tick alignment).
+    Stake is hard-capped at $5 regardless of the arg.
+    """
+    parts = args.strip().split()
+    if len(parts) < 2:
+        return (
+            "*USAGE*\n"
+            "`/live-trade <condition_id> <YES|NO> [stake_usd]`\n\n"
+            "Stake is capped at $5. Uses the same pre-flight checks "
+            "as the force-live-test CLI."
+        )
+    cid = parts[0]
+    side = parts[1].upper()
+    if side not in ("YES", "NO"):
+        return f"Side must be YES or NO, got `{side}`"
+    if not cid.startswith("0x") or len(cid) != 66:
+        return f"condition_id looks wrong: `{cid}` (expect 0x + 64 hex)"
+    stake = 5.0
+    if len(parts) >= 3:
+        try:
+            stake = min(float(parts[2]), 5.0)
+        except ValueError:
+            return f"stake must be a number, got `{parts[2]}`"
+
+    # Invoke the force_live_test module via subprocess so we pick up its
+    # full pre-flight chain. The module is importable but running it as
+    # a subprocess keeps argv handling consistent with the CLI.
+    import subprocess
+    try:
+        result = subprocess.run(
+            [
+                "python", "-m", "trading_platform.polymarket.force_live_test",
+                "--condition-id", cid, "--side", side, "--stake", str(stake),
+            ],
+            capture_output=True, text=True, timeout=120,
+            cwd="/app",
+        )
+    except subprocess.TimeoutExpired:
+        return "Trade submission timed out (>120s). Check /positions to see if it landed."
+    tail = "\n".join((result.stdout or "").splitlines()[-10:])
+    if result.returncode == 0:
+        return f"*LIVE TRADE SUBMITTED*\n```\n{tail[-500:]}\n```"
+    return f"*TRADE FAILED* (exit {result.returncode})\n```\n{tail[-500:]}\n```"
+
+
 def _cmd_help() -> str:
     return (
         "*COMMANDS*\n"
@@ -189,6 +239,7 @@ def _cmd_help() -> str:
         "/readiness — live-trade gate detail\n"
         "/funnel — 24h signal → trade funnel\n"
         "/insiders — detected insider wallets\n"
+        "/live-trade <cid> <YES|NO> [$stake] — place live trade ($5 cap)\n"
         "/kill [reason] — emergency stop\n"
         "/unkill — clear emergency stop\n"
         "/help — this menu"
@@ -201,6 +252,7 @@ _HANDLERS = {
     "/readiness": lambda args: _cmd_readiness(),
     "/funnel": lambda args: _cmd_funnel(),
     "/insiders": lambda args: _cmd_insiders(),
+    "/live-trade": lambda args: _cmd_live_trade(args),
     "/kill": lambda args: _cmd_kill(args or "remote-kill via telegram"),
     "/unkill": lambda args: _cmd_unkill(),
     "/help": lambda args: _cmd_help(),

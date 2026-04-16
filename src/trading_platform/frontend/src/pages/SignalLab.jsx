@@ -397,6 +397,9 @@ function CalibrationTable() {
             <th className="pb-1 pr-2 text-right">EV/Trade</th>
             <th className="pb-1 pr-2 text-right">P.Factor</th>
             <th className="pb-1 pr-2 text-right">Sharpe</th>
+            <th className="pb-1 pr-2 text-right">Sortino</th>
+            <th className="pb-1 pr-2 text-right">Max DD</th>
+            <th className="pb-1 pr-2 text-right">Max Streak</th>
             <th className="pb-1 pr-2 text-right">Kelly</th>
             <th className="pb-1 pr-2 text-right">Stake</th>
             <th className="pb-1">Status</th>
@@ -435,6 +438,15 @@ function CalibrationTable() {
                 </td>
                 <td className="py-1.5 pr-2 text-right font-mono text-gray-400">
                   {r.sharpe_ratio != null ? r.sharpe_ratio.toFixed(2) : '—'}
+                </td>
+                <td className="py-1.5 pr-2 text-right font-mono text-gray-400">
+                  {r.sortino_ratio != null ? r.sortino_ratio.toFixed(2) : '—'}
+                </td>
+                <td className="py-1.5 pr-2 text-right font-mono text-accent-red">
+                  {r.max_drawdown_pct != null ? `${(r.max_drawdown_pct * 100).toFixed(0)}%` : '—'}
+                </td>
+                <td className="py-1.5 pr-2 text-right font-mono text-gray-400">
+                  {r.max_consec_losses != null ? r.max_consec_losses : '—'}
                 </td>
                 <td className="py-1.5 pr-2 text-right font-mono text-gray-400">
                   {r.kelly_fraction != null ? `${(r.kelly_fraction * 100).toFixed(1)}%` : '—'}

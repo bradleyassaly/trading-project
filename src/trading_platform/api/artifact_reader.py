@@ -2668,6 +2668,123 @@ def read_smart_money_universe_stats() -> dict[str, Any]:
         return {"available": False, "reason": str(exc)}
 
 
+def run_signal_backtest(
+    *,
+    hours: int = 168,
+    signal_types: list[str] | None = None,
+    min_confidence: float = 0.30,
+    min_fusion: float = 0.05,
+    min_entry_price: float = 0.10,
+    max_entry_price: float = 0.85,
+    stake_usd: float = 50.0,
+    apply_spread: float = 0.015,
+) -> dict[str, Any]:
+    """Replay paper trades as a backtest with configurable gates.
+
+    Reads resolved paper trades in the window, re-applies the supplied
+    gates (min confidence, fusion floor, price band), simulates fills
+    with a spread haircut, and reports aggregate + per-signal PnL.
+
+    This is NOT a forward-looking backtest — it replays historical
+    fills under alternate thresholds to answer "what would PnL look
+    like with a looser fusion floor?" or "what if we only traded
+    signals with confidence >= 0.5?".
+    """
+    db = _get_wallet_db()
+    if not db:
+        return {"available": False}
+    from trading_platform.polymarket.db_connection import get_connection
+    cutoff_sql = f"EXTRACT(EPOCH FROM (NOW() - INTERVAL '{int(hours)} hours'))::BIGINT"
+    conn = get_connection(str(db._path))
+    try:
+        where_parts = [
+            f"archived = 0", f"exit_ts IS NOT NULL",
+            f"entry_ts >= {cutoff_sql}",
+            f"entry_price >= {float(min_entry_price)}",
+            f"entry_price <= {float(max_entry_price)}",
+            f"confidence >= {float(min_confidence)}",
+            f"fusion_score >= {float(min_fusion)}",
+        ]
+        if signal_types:
+            types_list = ",".join(f"'{s}'" for s in signal_types if s)
+            if types_list:
+                where_parts.append(f"signal_type IN ({types_list})")
+        sql = f"""
+            SELECT signal_type, side, entry_price, exit_price, size_usd,
+                   outcome, realized_pnl, entry_ts
+            FROM polymarket_paper_trades
+            WHERE {' AND '.join(where_parts)}
+            ORDER BY entry_ts
+        """
+        rows = conn.execute(sql).fetchall()
+    finally:
+        try: conn.close()
+        except Exception: pass
+
+    by_signal: dict[str, dict] = {}
+    total_pnl = 0.0
+    total_wins = 0
+    total_losses = 0
+    for sig_type, side, ep, xp, sz, outcome, pnl, ts in rows:
+        ep_f = float(ep or 0)
+        xp_f = float(xp or 0)
+        if ep_f <= 0 or xp_f < 0: continue
+        # Re-simulate at stake_usd with a spread haircut on entry
+        eff_entry = ep_f + apply_spread if side == "YES" else ep_f - apply_spread
+        eff_entry = max(0.01, min(0.99, eff_entry))
+        # PnL for BUY YES: shares = stake/eff_entry; payout = shares × xp
+        if side in ("YES", "BUY"):
+            shares = stake_usd / eff_entry
+            sim_pnl = shares * (xp_f - eff_entry)
+        else:
+            shares = stake_usd / max(1 - eff_entry, 0.01)
+            sim_pnl = shares * ((1 - xp_f) - (1 - eff_entry))
+        entry = by_signal.setdefault(sig_type, {
+            "signal_type": sig_type, "trades": 0, "wins": 0, "losses": 0,
+            "net_pnl": 0.0, "volume": 0.0,
+        })
+        entry["trades"] += 1
+        entry["volume"] += stake_usd
+        if sim_pnl > 0:
+            entry["wins"] += 1
+            total_wins += 1
+        else:
+            entry["losses"] += 1
+            total_losses += 1
+        entry["net_pnl"] += sim_pnl
+        total_pnl += sim_pnl
+    by_signal_list = sorted(
+        [
+            {
+                **v,
+                "net_pnl": round(v["net_pnl"], 2),
+                "avg_pnl": round(v["net_pnl"] / max(v["trades"], 1), 2),
+                "win_rate": round(v["wins"] / max(v["trades"], 1), 3),
+            }
+            for v in by_signal.values()
+        ],
+        key=lambda r: r["net_pnl"], reverse=True,
+    )
+    return {
+        "available": True,
+        "config": {
+            "hours": hours, "signal_types": signal_types,
+            "min_confidence": min_confidence, "min_fusion": min_fusion,
+            "min_entry_price": min_entry_price, "max_entry_price": max_entry_price,
+            "stake_usd": stake_usd, "apply_spread": apply_spread,
+        },
+        "totals": {
+            "trades": len(rows),
+            "wins": total_wins,
+            "losses": total_losses,
+            "net_pnl": round(total_pnl, 2),
+            "win_rate": round(total_wins / max(total_wins + total_losses, 1), 3),
+            "roi": round(total_pnl / max(len(rows) * stake_usd, 1), 4),
+        },
+        "by_signal": by_signal_list,
+    }
+
+
 def read_signal_attribution(hours: int = 168) -> dict[str, Any]:
     """Per-signal PnL attribution over the given window.
 
@@ -3782,7 +3899,8 @@ def read_calibration_status() -> dict[str, Any]:
                           kelly_fraction, rolling_10_wr, rolling_20_ev,
                           consecutive_losses, recommended_allocation_pct,
                           recommended_stake_usd, allocated_usd, status,
-                          last_updated
+                          last_updated,
+                          max_drawdown_pct, max_consec_losses, sortino_ratio
                    FROM signal_calibration
                    ORDER BY CASE status
                         WHEN 'live' THEN 1
@@ -3803,6 +3921,7 @@ def read_calibration_status() -> dict[str, Any]:
         "rolling_10_wr", "rolling_20_ev", "consecutive_losses",
         "recommended_allocation_pct", "recommended_stake_usd",
         "allocated_usd", "status", "last_updated",
+        "max_drawdown_pct", "max_consec_losses", "sortino_ratio",
     ]
     by_type = [dict(zip(cols, r)) for r in rows]
 
@@ -4028,14 +4147,21 @@ def read_live_readiness() -> dict[str, Any]:
     try:
         conn = get_connection(db_path)
         try:
+            # EV from realized_pnl/size_usd — the authoritative source of
+            # truth. return_pct column has historical mixed units (some
+            # rows ratio, some rows percentage-number) that skewed the
+            # average; whale_entry EV was reading -2.6% when real avg
+            # return was +103%. realized_pnl is always USDC dollars,
+            # size_usd is always USDC dollars, so their ratio is always
+            # a correct fractional return.
             sig_rows = conn.execute(
                 """SELECT signal_type,
                           COUNT(*) AS n,
-                          AVG(return_pct) AS avg_return_pct,
+                          AVG(realized_pnl / NULLIF(size_usd, 0)) AS avg_ev,
                           SUM(CASE WHEN outcome='win' THEN 1 ELSE 0 END) AS wins
                    FROM polymarket_paper_trades
                    WHERE archived = 0 AND exit_ts IS NOT NULL
-                     AND return_pct IS NOT NULL
+                     AND realized_pnl IS NOT NULL AND size_usd > 0
                    GROUP BY signal_type"""
             ).fetchall()
             try:
@@ -4050,9 +4176,9 @@ def read_live_readiness() -> dict[str, Any]:
         pass
 
     signal_gates: list[dict[str, Any]] = []
-    for sig_type, n, avg_return_pct, wins in sig_rows:
+    for sig_type, n, avg_ev, wins in sig_rows:
         n = n or 0
-        ev = (avg_return_pct or 0.0) / 100.0
+        ev = float(avg_ev or 0.0)
         wr = (wins or 0) / n if n > 0 else 0.0
         kelly = sizer.compute_kelly(sig_type)
         sample_ok = n >= ks.MIN_RESOLVED_HARD

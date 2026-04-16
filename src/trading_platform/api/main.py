@@ -1008,6 +1008,34 @@ def signal_attribution(hours: int = 168) -> dict[str, Any]:
     return reader.read_signal_attribution(hours=max(1, min(720, hours)))
 
 
+class BacktestConfig(BaseModel):
+    hours: int = 168
+    signal_types: list[str] | None = None
+    min_confidence: float = 0.30
+    min_fusion: float = 0.05
+    min_entry_price: float = 0.10
+    max_entry_price: float = 0.85
+    stake_usd: float = 50.0
+    apply_spread: float = 0.015
+
+
+@app.post("/api/backtest/replay")
+def backtest_replay(cfg: BacktestConfig) -> dict[str, Any]:
+    """Replay paper trades under configurable gates. Returns PnL / WR / per-signal.
+    Distinct from /api/backtest/run which runs the historical signal engine.
+    """
+    return reader.run_signal_backtest(
+        hours=max(1, min(720, cfg.hours)),
+        signal_types=cfg.signal_types,
+        min_confidence=max(0, min(1, cfg.min_confidence)),
+        min_fusion=max(0, min(1, cfg.min_fusion)),
+        min_entry_price=max(0, min(1, cfg.min_entry_price)),
+        max_entry_price=max(0, min(1, cfg.max_entry_price)),
+        stake_usd=max(1, min(1000, cfg.stake_usd)),
+        apply_spread=max(0, min(0.1, cfg.apply_spread)),
+    )
+
+
 @app.get("/api/paper/pnl-history")
 def paper_pnl_history() -> dict[str, Any]:
     return reader.read_paper_pnl_history()
