@@ -257,8 +257,27 @@ class PolymarketLiveExecutor:
             error_msg=order_result.error_msg,
         )
         if order_result.success:
-            logger.info("[LIVE] order placed: %s @ %.3f",
-                        order_result.order_id, order_result.filled_price or current_price)
+            fill = order_result.filled_price or current_price
+            logger.info("[LIVE] order placed: %s @ %.3f", order_result.order_id, fill)
+            # LOUD Telegram alert — live fills get their own format so they
+            # stand out from paper trade notifications.
+            try:
+                from trading_platform.polymarket.telegram_alerts import get_alerter
+                alerter = get_alerter()
+                question = (signal.get("question") or "")[:60]
+                alerter._send(
+                    f"\U0001f6a8 <b>LIVE TRADE EXECUTED</b> \U0001f6a8\n\n"
+                    f"<b>{sig_type.upper()}</b> | {outcome_label} @ {fill:.3f}\n"
+                    f"Stake: <b>${size_usd:.2f}</b>\n"
+                    f"Market: {question}\n"
+                    f"Order: <code>{order_result.order_id or 'n/a'}</code>\n"
+                    f"Confidence: {confidence:.0%} | "
+                    f"{'PROBATION $5 cap' if ks.probation_cap is not None else 'FULL KELLY'}\n"
+                    f"\n\U0001f4b0 Bankroll: ${live_bankroll:.0f}",
+                    disable_notification=False,  # LOUD — sound + vibration
+                )
+            except Exception:
+                pass
             return self._result(
                 True, mode="live", order_id=order_result.order_id,
                 size_usd=size_usd, filled_price=order_result.filled_price,
