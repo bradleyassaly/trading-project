@@ -31,6 +31,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from trading_platform.api import artifact_reader as reader
+from trading_platform.polymarket.db_connection import get_connection
 
 # Prometheus metrics. Must be importable even if the lib is absent so a
 # fresh checkout without deps still boots — hence the try/except + noop
