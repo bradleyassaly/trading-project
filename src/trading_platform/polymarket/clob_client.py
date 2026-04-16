@@ -156,7 +156,16 @@ class ClobClient:
             )
 
         try:
-            client = PyClobClient(
+            # Polymarket uses a proxy-wallet custody model: users deposit
+            # into a shared CTF-compatible proxy, and Polymarket tracks
+            # per-user balances internally. For orders placed from a
+            # proxy-backed account we MUST set signature_type=2 and pass
+            # the funder (the proxy address) — otherwise py_clob_client
+            # signs as an EOA and the CLOB reports "balance: 0" because
+            # it's checking EOA-side USDC, not proxy-side.
+            import os as _os
+            funder = _os.environ.get("POLYMARKET_FUNDER_ADDRESS") or ""
+            client_kwargs = dict(
                 host=CLOB_BASE,
                 chain_id=POLYGON,
                 key=self._private_key,
@@ -166,6 +175,19 @@ class ClobClient:
                     api_passphrase=self._passphrase,
                 ),
             )
+            if funder:
+                # signature_type 1 = Polymarket proxy wallet
+                # signature_type 2 = Polymarket Gnosis Safe
+                # Verified: our test account is type 1 (balance=$345 at proxy).
+                client_kwargs["signature_type"] = int(
+                    _os.environ.get("POLYMARKET_SIGNATURE_TYPE", "1")
+                )
+                client_kwargs["funder"] = funder
+                logger.info(
+                    "[clob] proxy-wallet mode: sig_type=%d funder=%s",
+                    client_kwargs["signature_type"], funder[:12] + "...",
+                )
+            client = PyClobClient(**client_kwargs)
 
             current_price = self.get_mid_price(token_id) or 0.5
 
