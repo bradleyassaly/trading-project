@@ -390,6 +390,16 @@ SCHEDULE: list[Task] = [
         description="Snapshot open positions with current unrealized P&L (every 30 min)",
     ),
     Task(
+        name="live_position_monitor",
+        # Live trades have their own exit monitor (mirrors paper exits).
+        # Runs every 5 min so SL/TP/trailing exits fire promptly. The
+        # script is safe-by-default — sell failures leave position open
+        # and log; never crash. No-op when there are zero live positions.
+        cmd="python -m trading_platform.polymarket.live_position_monitor",
+        interval_seconds=5 * 60,
+        description="Live position auto-exit monitor (every 5min)",
+    ),
+    Task(
         name="signal_anomaly_detector",
         # Detect silent or spiking signal types every 30 min. Compares
         # last-hour fires vs 7-day per-hour baseline; alerts via Telegram

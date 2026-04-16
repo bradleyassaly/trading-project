@@ -168,13 +168,61 @@ class ClobClient:
             )
 
             current_price = self.get_mid_price(token_id) or 0.5
-            order_args = MarketOrderArgs(
-                token_id=token_id,
-                amount=float(size_usdc),
-                side=side.upper(),
-            )
-            signed = client.create_market_order(order_args)
-            resp = client.post_order(signed)
+
+            # Polymarket enforces a 0.01 minimum tick. py_clob_client's
+            # create_market_order computes a slippage-adjusted price that
+            # often lands at e.g. 0.310000062 — server returns "breaks
+            # minimum tick size rule". Pass an explicit slippage-rounded
+            # price ceiling so the resulting order respects the tick grid.
+            tick = 0.01
+            try:
+                # Build a LIMIT order at worst-acceptable-price (one tick
+                # above ask for BUYs, below bid for SELLs) — fills like a
+                # market order but always tick-aligned.
+                from py_clob_client.clob_types import OrderArgs, OrderType
+                book = self.get_order_book(token_id)
+                if side.upper() == "BUY":
+                    asks = book.get("asks") or []
+                    best_ask = float(asks[0]["price"]) if asks else current_price
+                    target = round(best_ask + tick, 2)
+                else:
+                    bids = book.get("bids") or []
+                    best_bid = float(bids[0]["price"]) if bids else current_price
+                    target = round(best_bid - tick, 2)
+                target = max(0.01, min(0.99, target))
+                # Polymarket on-chain maker_amount precision is 6 decimals
+                # (USDC.e wei). Pick a SHARE quantity rounded to whole units
+                # so maker_amount = shares*price has at most 2 decimals
+                # (price has 2, shares integer = 2 total). This avoids the
+                # "max accuracy 2 decimals" rejection.
+                shares_int = max(1, int(float(size_usdc) / target))
+                actual_usdc = round(shares_int * target, 2)
+                order_args = OrderArgs(
+                    token_id=token_id,
+                    price=target,
+                    size=float(shares_int),
+                    side=side.upper(),
+                )
+                signed = client.create_order(order_args)
+                resp = client.post_order(signed, OrderType.FOK)  # fill-or-kill
+                logger.info(
+                    "[clob] order: %s %d shares @ %.2f = $%.2f",
+                    side.upper(), shares_int, target, actual_usdc,
+                )
+                logger.info(
+                    "[clob] limit-as-market %s %.2f @ %.2f (size=%.2f)",
+                    side.upper(), float(size_usdc), target, shares,
+                )
+            except Exception as exc_inner:
+                # Fallback to original MarketOrderArgs path if anything fails
+                logger.warning("limit-as-market path failed (%s); trying MarketOrderArgs", exc_inner)
+                order_args = MarketOrderArgs(
+                    token_id=token_id,
+                    amount=float(size_usdc),
+                    side=side.upper(),
+                )
+                signed = client.create_market_order(order_args)
+                resp = client.post_order(signed)
 
             order_id = resp.get("orderID") or resp.get("id")
             status = resp.get("status", "unknown")
