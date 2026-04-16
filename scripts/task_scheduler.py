@@ -390,6 +390,15 @@ SCHEDULE: list[Task] = [
         description="Snapshot open positions with current unrealized P&L (every 30 min)",
     ),
     Task(
+        name="signal_anomaly_detector",
+        # Detect silent or spiking signal types every 30 min. Compares
+        # last-hour fires vs 7-day per-hour baseline; alerts via Telegram
+        # on >10× drop or >5× spike. Dedup'd per signal type for 6h.
+        cmd="python -m trading_platform.polymarket.signal_anomaly_detector",
+        interval_seconds=30 * 60,
+        description="Signal flow anomaly detector (every 30min)",
+    ),
+    Task(
         name="pg_prune",
         # Weekly pruning: market_ticks >90d, service_health >7d,
         # circuit_breaker_log >90d. VACUUM ANALYZE at the end.

@@ -995,6 +995,12 @@ def trade_journal(limit: int = 50) -> dict[str, Any]:
     return reader.read_trade_journal(limit=max(1, min(200, limit)))
 
 
+@app.get("/api/exit-analyzer")
+def exit_analyzer(min_sample: int = 10) -> dict[str, Any]:
+    """Per-signal MAE/MFE analysis → recommended TP/SL adjustments."""
+    return reader.read_mae_mfe_analysis(min_sample=max(3, min(100, min_sample)))
+
+
 @app.get("/api/paper/pnl-history")
 def paper_pnl_history() -> dict[str, Any]:
     return reader.read_paper_pnl_history()

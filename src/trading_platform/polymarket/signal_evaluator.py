@@ -160,6 +160,9 @@ class CalibrationRow:
     rolling_20_ev: float | None
     consecutive_losses: int
     status: str
+    max_consec_losses: int = 0
+    max_drawdown_pct: float | None = None
+    sortino_ratio: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {k: getattr(self, k) for k in self.__dataclass_fields__}
@@ -220,12 +223,44 @@ class SignalEvaluator:
             profit_factor = 0.0
 
         sharpe = None
+        sortino = None
         if n >= 10:
             mean = ev
             var = sum((r - mean) ** 2 for r in returns) / n
             std = math.sqrt(var)
             if std > 0:
                 sharpe = mean / std
+            # Sortino = mean / downside-deviation. Penalises losses only,
+            # not gains. Better than Sharpe for asymmetric strategies.
+            downside = [r - mean for r in returns if r < mean]
+            if downside:
+                d_var = sum(d * d for d in downside) / len(downside)
+                d_std = math.sqrt(d_var)
+                if d_std > 0:
+                    sortino = mean / d_std
+
+        # Max consecutive losses across the full history (worst losing streak)
+        max_consec_losses = 0
+        cur_streak = 0
+        for _, o in trades:
+            if o == "loss":
+                cur_streak += 1
+                if cur_streak > max_consec_losses:
+                    max_consec_losses = cur_streak
+            else:
+                cur_streak = 0
+
+        # Max drawdown of the cumulative-return curve (peak-to-trough)
+        cum = 0.0
+        peak = 0.0
+        max_dd = 0.0
+        for r in returns:
+            cum += r
+            if cum > peak:
+                peak = cum
+            dd = peak - cum
+            if dd > max_dd:
+                max_dd = dd
 
         avg_win = (sum(win_returns) / len(win_returns)) if win_returns else 0.0
         avg_loss = (sum(loss_returns) / len(loss_returns)) if loss_returns else 0.0
@@ -275,6 +310,9 @@ class SignalEvaluator:
             rolling_20_ev=round(rolling_20_ev, 4) if rolling_20_ev is not None else None,
             consecutive_losses=consec,
             status=new_status,
+            max_consec_losses=max_consec_losses,
+            max_drawdown_pct=round(max_dd, 4),
+            sortino_ratio=round(sortino, 4) if sortino is not None else None,
         )
 
     def _read_status(self, conn: sqlite3.Connection, signal_type: str) -> str | None:
@@ -318,8 +356,9 @@ class SignalEvaluator:
                     (signal_type, sample_size, wins, losses, bayesian_wr,
                      ev_per_trade, profit_factor, sharpe_ratio, kelly_fraction,
                      rolling_10_wr, rolling_20_ev, consecutive_losses,
-                     status, last_updated)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     status, last_updated,
+                     max_consec_losses, max_drawdown_pct, sortino_ratio)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(signal_type) DO UPDATE SET
                        sample_size=excluded.sample_size,
                        wins=excluded.wins,
@@ -333,13 +372,17 @@ class SignalEvaluator:
                        rolling_20_ev=excluded.rolling_20_ev,
                        consecutive_losses=excluded.consecutive_losses,
                        status=excluded.status,
-                       last_updated=excluded.last_updated""",
+                       last_updated=excluded.last_updated,
+                       max_consec_losses=excluded.max_consec_losses,
+                       max_drawdown_pct=excluded.max_drawdown_pct,
+                       sortino_ratio=excluded.sortino_ratio""",
                 (
                     row.signal_type, row.sample_size, row.wins, row.losses,
                     row.bayesian_wr, row.ev_per_trade, row.profit_factor,
                     row.sharpe_ratio, row.kelly_fraction,
                     row.rolling_10_wr, row.rolling_20_ev,
                     row.consecutive_losses, row.status, int(time.time()),
+                    row.max_consec_losses, row.max_drawdown_pct, row.sortino_ratio,
                 ),
             )
             conn.commit()

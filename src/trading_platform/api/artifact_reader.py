@@ -2668,6 +2668,67 @@ def read_smart_money_universe_stats() -> dict[str, Any]:
         return {"available": False, "reason": str(exc)}
 
 
+def read_mae_mfe_analysis(min_sample: int = 10) -> dict[str, Any]:
+    """Per-signal MAE/MFE distribution → recommended TP/SL adjustments.
+
+    Compares the realized exit (current SL/TP) against MFE peaks (gains
+    we left on the table) and MAE troughs (how close we got to a worse SL).
+    Recommends:
+      tp_optimal: median MFE for winners — captures most upside
+      sl_tightest: 90th percentile MAE for winners — wouldn't have killed wins
+    """
+    db = _get_wallet_db()
+    if not db:
+        return {"available": False}
+    from trading_platform.polymarket.db_connection import get_connection
+    conn = get_connection(str(db._path))
+    try:
+        rows = conn.execute(f"""
+            WITH normalized AS (
+              SELECT signal_type, outcome, realized_pnl,
+                     -- Convert MAE/MFE from $ to fraction-of-stake
+                     mae / NULLIF(size_usd, 0) AS mae_pct,
+                     mfe / NULLIF(size_usd, 0) AS mfe_pct,
+                     realized_pnl / NULLIF(size_usd, 0) AS pnl_pct
+              FROM polymarket_paper_trades
+              WHERE archived = 0 AND exit_ts IS NOT NULL
+                AND mae IS NOT NULL AND mfe IS NOT NULL
+                AND size_usd > 0
+            )
+            SELECT signal_type,
+                   COUNT(*) n,
+                   COUNT(*) FILTER (WHERE outcome = 'win') wins,
+                   ROUND(AVG(mae_pct)::numeric, 4) avg_mae,
+                   ROUND(AVG(mfe_pct)::numeric, 4) avg_mfe,
+                   ROUND(AVG(pnl_pct)::numeric, 4) avg_pnl,
+                   ROUND(PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY mfe_pct)
+                         FILTER (WHERE outcome = 'win')::numeric, 4) median_winner_mfe,
+                   ROUND(PERCENTILE_CONT(0.9) WITHIN GROUP (ORDER BY mae_pct)
+                         FILTER (WHERE outcome = 'win')::numeric, 4) p90_winner_mae
+            FROM normalized
+            GROUP BY signal_type
+            HAVING COUNT(*) >= {int(min_sample)}
+            ORDER BY n DESC
+        """).fetchall()
+
+        cols = ["signal_type", "n", "wins", "avg_mae", "avg_mfe", "avg_pnl",
+                "median_winner_mfe", "p90_winner_mae"]
+        rows_dict = [dict(zip(cols, r)) for r in rows]
+        for r in rows_dict:
+            wmfe = r["median_winner_mfe"]
+            wmae = r["p90_winner_mae"]
+            r["recommended_tp"] = round(float(wmfe), 3) if wmfe is not None else None
+            # Tightest SL = 90th percentile of winner MAE (10% of wins drew down
+            # this far before recovering — anything tighter would kill 10%+ of
+            # winners). Negate sign so it's a positive "X% drawdown" threshold.
+            r["recommended_sl"] = round(float(wmae), 3) if wmae is not None else None
+            r["wr"] = round(r["wins"] / r["n"], 3) if r["n"] else None
+    finally:
+        try: conn.close()
+        except Exception: pass
+    return {"available": True, "min_sample": min_sample, "signals": rows_dict}
+
+
 def read_trade_journal(limit: int = 50) -> dict[str, Any]:
     """Trade journal with full gate-value snapshot per trade + per-signal
     attribution for evaluating the system's decision-making.
