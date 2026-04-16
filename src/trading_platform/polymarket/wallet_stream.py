@@ -95,43 +95,45 @@ class WalletStream:
         }
 
     async def _subscribe(self, ws) -> None:
-        """Register both Transfer subscriptions: USDC.e + USDC.native.
+        """Register narrow Transfer subscriptions filtered to watched wallets.
 
-        We don't topic-filter by watched wallets — there are up to 200+ and
-        providers often cap topic-array size. Instead we subscribe to any
-        Transfer involving CTFExchange and filter client-side on the
-        addresses that are padded-encoded in topics[1] / topics[2].
+        Critical for free tier survival: passing the watched-wallet set
+        into the topic filter means the provider only delivers events
+        matching our wallets (~1–3/sec) instead of the full CTFExchange
+        flow (~168/sec). First version of this file used the broad filter
+        and burned 300M CU of Alchemy credits in ~25 min.
+
+        Each JSON-RPC log filter supports arrays at topic positions. We
+        still need two subscriptions because we can't AND (from=wallet
+        AND to=CTFExchange) OR (from=CTFExchange AND to=wallet) in a
+        single filter — the AND is across positions, not OR.
         """
+        watched_padded = [_pad_addr(w) for w in self.watched]
+        ctf_padded = _pad_addr(CTF_EXCHANGE)
+        logger.info(
+            "[wallet-stream] subscribing with %d watched addresses in topic filter",
+            len(watched_padded),
+        )
         sub_msgs = [
+            # Wallet → CTFExchange (BUY side: we're sending USDC)
             {
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "eth_subscribe",
+                "jsonrpc": "2.0", "id": 1, "method": "eth_subscribe",
                 "params": [
                     "logs",
                     {
                         "address": [USDC_E, USDC_NATIVE],
-                        "topics": [
-                            TRANSFER_TOPIC,
-                            None,
-                            _pad_addr(CTF_EXCHANGE),
-                        ],
+                        "topics": [TRANSFER_TOPIC, watched_padded, ctf_padded],
                     },
                 ],
             },
+            # CTFExchange → Wallet (SELL side or payouts)
             {
-                "jsonrpc": "2.0",
-                "id": 2,
-                "method": "eth_subscribe",
+                "jsonrpc": "2.0", "id": 2, "method": "eth_subscribe",
                 "params": [
                     "logs",
                     {
                         "address": [USDC_E, USDC_NATIVE],
-                        "topics": [
-                            TRANSFER_TOPIC,
-                            _pad_addr(CTF_EXCHANGE),
-                            None,
-                        ],
+                        "topics": [TRANSFER_TOPIC, ctf_padded, watched_padded],
                     },
                 ],
             },
