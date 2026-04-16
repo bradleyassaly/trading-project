@@ -549,6 +549,70 @@ function TradeJournalTile({ data }) {
   )
 }
 
+function SignalAttributionTile({ data }) {
+  const sigs = (data?.by_signal || []).filter(s => s.placed > 0)
+  if (!sigs.length) {
+    return (
+      <div>
+        <h2 className="text-sm font-medium text-gray-300 mb-2">Signal Attribution (7d)</h2>
+        <div className="text-[10px] text-gray-600">No trades placed yet in window.</div>
+      </div>
+    )
+  }
+  const netTotal = Number(data?.totals?.net_pnl || 0)
+  const totalCls = netTotal > 0 ? 'text-accent-green' : netTotal < 0 ? 'text-accent-red' : 'text-gray-500'
+  return (
+    <div>
+      <div className="flex items-baseline justify-between mb-2">
+        <h2 className="text-sm font-medium text-gray-300">Signal Attribution (7d)</h2>
+        <span className={`text-[10px] ${totalCls}`}>
+          net {netTotal >= 0 ? '+' : ''}${netTotal.toFixed(2)} · {data?.totals?.wins}W/{data?.totals?.losses}L
+        </span>
+      </div>
+      <div className="overflow-x-auto">
+        <table className="w-full text-[10px]">
+          <thead className="text-gray-500">
+            <tr>
+              <th className="text-left pb-1">Signal</th>
+              <th className="text-right pb-1">Placed</th>
+              <th className="text-right pb-1">Res</th>
+              <th className="text-right pb-1">WR</th>
+              <th className="text-right pb-1">PF</th>
+              <th className="text-right pb-1">Avg</th>
+              <th className="text-right pb-1">Net</th>
+              <th className="text-left pb-1 pl-2">Conf</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-surface-border">
+            {sigs.slice(0, 10).map((s) => {
+              const net = s.net_pnl
+              const cls = net > 0 ? 'text-accent-green' : net < 0 ? 'text-accent-red' : 'text-gray-500'
+              const tierCls = s.confidence_tier === 'high' ? 'text-accent-green'
+                : s.confidence_tier === 'medium' ? 'text-accent-orange' : 'text-gray-600'
+              return (
+                <tr key={s.signal_type}>
+                  <td className="py-0.5 text-gray-400">{s.signal_type}</td>
+                  <td className="py-0.5 text-right text-gray-500">{s.placed}</td>
+                  <td className="py-0.5 text-right text-gray-500">{s.resolved}</td>
+                  <td className="py-0.5 text-right text-gray-500">{(s.win_rate * 100).toFixed(0)}%</td>
+                  <td className="py-0.5 text-right text-gray-500">{s.profit_factor > 0 ? s.profit_factor.toFixed(2) : '-'}</td>
+                  <td className={`py-0.5 text-right ${s.avg_pnl_per_trade >= 0 ? 'text-accent-green' : 'text-accent-red'}`}>
+                    {s.avg_pnl_per_trade >= 0 ? '+' : ''}${s.avg_pnl_per_trade.toFixed(2)}
+                  </td>
+                  <td className={`py-0.5 text-right ${cls}`}>
+                    {net >= 0 ? '+' : ''}${net.toFixed(2)}
+                  </td>
+                  <td className={`py-0.5 pl-2 ${tierCls}`}>{s.confidence_tier}</td>
+                </tr>
+              )
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  )
+}
+
 function ExitAnalyzerTile({ data }) {
   const sigs = data?.signals || []
   if (!sigs.length) {
@@ -739,6 +803,7 @@ export default function Dashboard() {
   const { data: livePositions } = useApi(() => api.livePositions(), 30_000)
   const { data: tradeJournalData } = useApi(() => api.tradeJournal(15), 60_000)
   const { data: exitAnalysis } = useApi(() => api.exitAnalyzer(5), 120_000)
+  const { data: attribution } = useApi(() => api.signalAttribution(168), 60_000)
 
   return (
     <div className="p-3 md:p-6 space-y-3 md:space-y-4">
@@ -782,6 +847,10 @@ export default function Dashboard() {
 
       <div className="card">
         <LivePositionsTile data={livePositions} />
+      </div>
+
+      <div className="card">
+        <SignalAttributionTile data={attribution} />
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-5 gap-4">

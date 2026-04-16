@@ -2668,6 +2668,91 @@ def read_smart_money_universe_stats() -> dict[str, Any]:
         return {"available": False, "reason": str(exc)}
 
 
+def read_signal_attribution(hours: int = 168) -> dict[str, Any]:
+    """Per-signal PnL attribution over the given window.
+
+    Answers the question "which signals make vs lose money?". For each
+    signal_type, reports:
+      - trades placed
+      - resolved count + WR
+      - gross wins / gross losses
+      - net PnL + PnL-per-trade
+      - profit factor
+      - sample size indicator for trust
+    """
+    db = _get_wallet_db()
+    if not db:
+        return {"available": False}
+    from trading_platform.polymarket.db_connection import get_connection
+    cutoff_sql = f"EXTRACT(EPOCH FROM (NOW() - INTERVAL '{int(hours)} hours'))::BIGINT"
+    conn = get_connection(str(db._path))
+    try:
+        rows = conn.execute(f"""
+            SELECT signal_type,
+                   COUNT(*) AS placed,
+                   COUNT(*) FILTER (WHERE exit_ts IS NOT NULL) AS resolved,
+                   COUNT(*) FILTER (WHERE outcome='win') AS wins,
+                   COUNT(*) FILTER (WHERE outcome='loss') AS losses,
+                   ROUND(COALESCE(SUM(realized_pnl), 0)::numeric, 2) AS net_pnl,
+                   ROUND(COALESCE(AVG(realized_pnl), 0)::numeric, 2) AS avg_pnl_per_trade,
+                   ROUND(COALESCE(SUM(CASE WHEN realized_pnl > 0 THEN realized_pnl END), 0)::numeric, 2) AS gross_wins,
+                   ROUND(ABS(COALESCE(SUM(CASE WHEN realized_pnl < 0 THEN realized_pnl END), 0))::numeric, 2) AS gross_losses,
+                   ROUND(COALESCE(SUM(size_usd), 0)::numeric, 2) AS volume
+            FROM polymarket_paper_trades
+            WHERE archived = 0 AND entry_ts >= {cutoff_sql}
+            GROUP BY signal_type
+            ORDER BY net_pnl DESC NULLS LAST
+        """).fetchall()
+    finally:
+        try: conn.close()
+        except Exception: pass
+
+    attribution = []
+    total_net = 0.0
+    total_wins = 0
+    total_losses = 0
+    for r in rows:
+        (sig_type, placed, resolved, wins, losses, net_pnl,
+         avg_pnl, gross_wins, gross_losses, volume) = r
+        net = float(net_pnl or 0)
+        gw = float(gross_wins or 0)
+        gl = float(gross_losses or 0)
+        pf = round(gw / gl, 2) if gl > 0 else (999.0 if gw > 0 else 0.0)
+        wr = wins / resolved if resolved else 0.0
+        attribution.append({
+            "signal_type": sig_type,
+            "placed": placed,
+            "resolved": resolved,
+            "wins": wins,
+            "losses": losses,
+            "win_rate": round(wr, 3),
+            "net_pnl": net,
+            "avg_pnl_per_trade": float(avg_pnl or 0),
+            "gross_wins": gw,
+            "gross_losses": gl,
+            "profit_factor": pf,
+            "volume_usd": float(volume or 0),
+            "confidence_tier": (
+                "high" if resolved >= 20 else "medium" if resolved >= 5 else "low"
+            ),
+        })
+        total_net += net
+        total_wins += wins or 0
+        total_losses += losses or 0
+    return {
+        "available": True,
+        "window_hours": hours,
+        "totals": {
+            "net_pnl": round(total_net, 2),
+            "wins": total_wins,
+            "losses": total_losses,
+            "win_rate": round(total_wins / (total_wins + total_losses), 3)
+                        if (total_wins + total_losses) else 0,
+        },
+        "by_signal": attribution,
+    }
+
+
 def read_mae_mfe_analysis(min_sample: int = 10) -> dict[str, Any]:
     """Per-signal MAE/MFE distribution → recommended TP/SL adjustments.
 
@@ -2808,22 +2893,38 @@ def read_pipeline_funnel(hours: int = 24) -> dict[str, Any]:
     db_path = str(db._path)
     try:
         conn = get_connection(db_path)
+        # placed count from paper_trades table directly (not via the
+        # signal_outcomes.paper_trade_id FK, which was inconsistently set
+        # — we discovered 0/3216 linkage on 24h window). Paper trades are
+        # the source of truth for "did this signal actually place?".
         by_signal = conn.execute(f"""
-            SELECT signal_type,
-                   COUNT(*) AS fires,
-                   COUNT(paper_trade_id) AS placed
-            FROM signal_outcomes
-            WHERE fired_at >= {cutoff_sql}
-            GROUP BY signal_type
+            SELECT so.signal_type,
+                   COUNT(so.id) AS fires,
+                   COALESCE(pt.placed, 0) AS placed
+            FROM signal_outcomes so
+            LEFT JOIN (
+                SELECT signal_type, COUNT(*) AS placed
+                FROM polymarket_paper_trades
+                WHERE archived = 0 AND entry_ts >= {cutoff_sql}
+                GROUP BY signal_type
+            ) pt ON pt.signal_type = so.signal_type
+            WHERE so.fired_at >= {cutoff_sql}
+            GROUP BY so.signal_type, pt.placed
             ORDER BY fires DESC
         """).fetchall()
         by_category = conn.execute(f"""
-            SELECT COALESCE(category, 'unknown') AS category,
-                   COUNT(*) AS fires,
-                   COUNT(paper_trade_id) AS placed
-            FROM signal_outcomes
-            WHERE fired_at >= {cutoff_sql}
-            GROUP BY category
+            SELECT COALESCE(so.category, 'unknown') AS category,
+                   COUNT(so.id) AS fires,
+                   COALESCE(pt.placed, 0) AS placed
+            FROM signal_outcomes so
+            LEFT JOIN (
+                SELECT category, COUNT(*) AS placed
+                FROM polymarket_paper_trades
+                WHERE archived = 0 AND entry_ts >= {cutoff_sql}
+                GROUP BY category
+            ) pt ON pt.category = so.category
+            WHERE so.fired_at >= {cutoff_sql}
+            GROUP BY so.category, pt.placed
             ORDER BY fires DESC
         """).fetchall()
         resolved_trades = conn.execute(f"""

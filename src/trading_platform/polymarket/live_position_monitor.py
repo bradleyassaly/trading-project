@@ -25,6 +25,10 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+# Process-level set of concern alerts already sent. Key:
+# (position_id, direction, pct_bucket_decile). Reset on container restart.
+_alerted_concerns: set = set()
+
 
 def _exit_profile(signal_type: str) -> dict[str, float]:
     """Per-signal exit thresholds — must mirror paper_executor's profiles
@@ -115,6 +119,45 @@ def check_live_exits() -> dict[str, int]:
             unrealized_pct = (entry - current) / max(1 - entry, 0.01)
         unrealized_dollars = unrealized_pct * float(size_usd or 0)
 
+        # Resolve the exit profile up-front so the concern-alert block
+        # can reference it when composing the Telegram message.
+        prof = _exit_profile(sig_type or "")
+
+        # Concerning-move alert: loud Telegram BEFORE the SL fires silently.
+        # Keyed by (position_id, threshold_bucket) so we alert at most
+        # once per 10pp deeper drawdown. Process-level cache resets on
+        # container restart — acceptable since restart means an operator
+        # check anyway.
+        try:
+            # Bucket the unrealized % into 10pp bands so we alert once at
+            # -20%, again at -30%, etc. Positive side only alerts once at
+            # +25% mark-move (price may still reverse).
+            concern_key = None
+            if unrealized_pct <= -0.20:
+                concern_key = (lid, "down", int(abs(unrealized_pct) * 10))
+            elif (current - entry) >= 0.25 or (entry - current) >= 0.25:
+                concern_key = (lid, "move", int(abs(current - entry) * 10))
+            if concern_key and concern_key not in _alerted_concerns:
+                _alerted_concerns.add(concern_key)
+                try:
+                    from trading_platform.polymarket.telegram_alerts import get_alerter
+                    direction = "UP" if current > entry else "DOWN"
+                    sign = "+" if unrealized_pct >= 0 else ""
+                    get_alerter()._send(
+                        f"\U000026a0 <b>LIVE POSITION MOVING</b> \U000026a0\n\n"
+                        f"<b>{sig_type}</b> #{lid}\n"
+                        f"Price: {entry:.3f} \u2192 {current:.3f} ({direction})\n"
+                        f"Unrealized: <b>{sign}{unrealized_pct:.1%}</b> "
+                        f"({sign}${unrealized_dollars:.2f})\n"
+                        f"SL @ {int(prof.get('sl', -0.25) * 100)}% \u00b7 "
+                        f"TP @ +{int(prof.get('tp', 0.4) * 100)}%",
+                        disable_notification=False,
+                    )
+                except Exception as exc:
+                    logger.debug("concern alert send failed: %s", exc)
+        except Exception as exc:
+            logger.debug("concern check failed: %s", exc)
+
         # Update mark + MAE/MFE in DB
         try:
             conn = get_connection()
@@ -156,8 +199,7 @@ def check_live_exits() -> dict[str, int]:
             except Exception:
                 pass
 
-        # Compute exit decision
-        prof = _exit_profile(sig_type or "")
+        # Compute exit decision (prof already resolved above for alerting)
         age_days = (time.time() - float(submitted_at or time.time())) / 86400
         mfe_pct = float(mfe_dollars or 0) / max(float(size_usd or 1), 1)
         exit_reason = "whale_mirror_exit" if whale_mirror_exit else _decide_exit(

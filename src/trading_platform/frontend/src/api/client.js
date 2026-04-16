@@ -181,6 +181,7 @@ export const api = {
   pipelineFunnel: (hours = 24) => get(`/pipeline/funnel?hours=${hours}`),
   tradeJournal: (limit = 20) => get(`/trade-journal?limit=${limit}`),
   exitAnalyzer: (minSample = 10) => get(`/exit-analyzer?min_sample=${minSample}`),
+  signalAttribution: (hours = 168) => get(`/signal-attribution?hours=${hours}`),
   paperPnlHistory: () => get('/paper/pnl-history'),
   signalsPerformance: () => get('/signals/performance'),
   smartMoneyWalletPositions: (addr) => get(`/smart-money/wallet/${encodeURIComponent(addr)}/positions`),

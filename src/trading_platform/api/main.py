@@ -1002,6 +1002,12 @@ def exit_analyzer(min_sample: int = 10) -> dict[str, Any]:
     return reader.read_mae_mfe_analysis(min_sample=max(3, min(100, min_sample)))
 
 
+@app.get("/api/signal-attribution")
+def signal_attribution(hours: int = 168) -> dict[str, Any]:
+    """Per-signal PnL attribution — which signals make vs lose money."""
+    return reader.read_signal_attribution(hours=max(1, min(720, hours)))
+
+
 @app.get("/api/paper/pnl-history")
 def paper_pnl_history() -> dict[str, Any]:
     return reader.read_paper_pnl_history()
