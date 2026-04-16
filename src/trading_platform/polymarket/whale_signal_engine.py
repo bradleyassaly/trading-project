@@ -1368,31 +1368,33 @@ class WhaleSignalEngine:
         try:
             from trading_platform.polymarket.telegram_alerts import get_alerter
             alerter = get_alerter()
+            # ALL signal-derived alerts now require paper_trade to have
+            # actually placed. Previously we'd fire phone notifications for
+            # every politics/geopolitics signal + every insider_entry even
+            # when the trade was rejected at downstream gates — generating
+            # phone spam with no actionable trade behind it. Daily digest
+            # still summarises everything; loud alerts gated on placement.
             if paper_trade:
                 alerter.send_signal(signal, paper_result=paper_trade)
 
-            # Political/geopolitical whale alert: if the firing wallet is
-            # S/A/B tier in politics or geopolitics, route it through the
-            # dedicated loud alert path so operator doesn't miss it.
-            if trade.category in ("politics", "geopolitics") and trade.wallet:
-                with self.db._lock:
-                    tier_row = self.db._conn.execute(
-                        """SELECT tier, win_rate, monthly_pnl
-                           FROM wallet_category_profiles
-                           WHERE wallet = ? AND category = ?""",
-                        (trade.wallet, trade.category),
-                    ).fetchone()
-                if tier_row and tier_row[0] in ("S", "A", "B"):
-                    alerter.send_political_whale(
-                        signal,
-                        tier=tier_row[0],
-                        win_rate=float(tier_row[1] or 0),
-                        pnl_30d=float(tier_row[2] or 0),
-                    )
+                if trade.category in ("politics", "geopolitics") and trade.wallet:
+                    with self.db._lock:
+                        tier_row = self.db._conn.execute(
+                            """SELECT tier, win_rate, monthly_pnl
+                               FROM wallet_category_profiles
+                               WHERE wallet = ? AND category = ?""",
+                            (trade.wallet, trade.category),
+                        ).fetchone()
+                    if tier_row and tier_row[0] in ("S", "A", "B"):
+                        alerter.send_political_whale(
+                            signal,
+                            tier=tier_row[0],
+                            win_rate=float(tier_row[1] or 0),
+                            pnl_30d=float(tier_row[2] or 0),
+                        )
 
-            # Insider entry alert
-            if signal_type == "insider_entry":
-                alerter.send_insider_entry(signal)
+                if signal_type == "insider_entry":
+                    alerter.send_insider_entry(signal)
         except Exception:
             pass
 
