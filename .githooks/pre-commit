@@ -1,0 +1,16 @@
+#!/bin/sh
+# Runs scripts/pre_commit_check.py. Handles Windows where 'python' may
+# not be on PATH — try 'py' (Windows launcher) and the known install path
+# before falling back to generic names.
+for candidate in \
+  "py" \
+  "python" \
+  "python3" \
+  "/c/Users/bradl/AppData/Local/Python/PythonCore-3.14-64/python.exe" \
+  "/c/Python314/python.exe"; do
+  if command -v "$candidate" >/dev/null 2>&1 || [ -x "$candidate" ]; then
+    exec "$candidate" scripts/pre_commit_check.py
+  fi
+done
+echo "[pre-commit] no python interpreter found on PATH — install Python or configure core.hooksPath to disable"
+exit 0

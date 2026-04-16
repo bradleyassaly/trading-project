@@ -179,6 +179,8 @@ export const api = {
   smartMoneyUniverseStats: () => get('/smart-money/universe-stats'),
   paperBankroll: () => get('/paper/bankroll'),
   pipelineFunnel: (hours = 24) => get(`/pipeline/funnel?hours=${hours}`),
+  tradeJournal: (limit = 20) => get(`/trade-journal?limit=${limit}`),
+  exitAnalyzer: (minSample = 10) => get(`/exit-analyzer?min_sample=${minSample}`),
   paperPnlHistory: () => get('/paper/pnl-history'),
   signalsPerformance: () => get('/signals/performance'),
   smartMoneyWalletPositions: (addr) => get(`/smart-money/wallet/${encodeURIComponent(addr)}/positions`),

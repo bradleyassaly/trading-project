@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { NavLink } from 'react-router-dom'
 import { LayoutGrid, Eye, Search, DollarSign, Shield, FlaskConical, ChevronLeft, ChevronRight, TrendingUp } from 'lucide-react'
 import { useApi } from '../hooks/useApi'
@@ -34,7 +34,19 @@ function StatusDot({ state }) {
 }
 
 export default function Sidebar() {
-  const [collapsed, setCollapsed] = useState(false)
+  // Default to collapsed on mobile / narrow viewports so the nav doesn't
+  // eat >30% of the screen width on phones. User can still expand.
+  const [collapsed, setCollapsed] = useState(() =>
+    typeof window !== 'undefined' && window.innerWidth < 768,
+  )
+  useEffect(() => {
+    const handler = () => {
+      if (typeof window === 'undefined') return
+      if (window.innerWidth < 768) setCollapsed(true)
+    }
+    window.addEventListener('resize', handler)
+    return () => window.removeEventListener('resize', handler)
+  }, [])
   const { data: status } = useApi(api.systemStatus, 15_000)
 
   const loopState = status?.loop_state ?? 'unknown'

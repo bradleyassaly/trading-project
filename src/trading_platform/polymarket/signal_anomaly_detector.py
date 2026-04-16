@@ -47,7 +47,20 @@ def _alert_recently_sent(key: str) -> bool:
 
 
 def detect_and_alert() -> dict:
-    """One pass: compare last 1h vs 7d baseline per signal type."""
+    """One pass: compare last 1h vs 7d baseline per signal type.
+
+    Only alerts on signals that actually trade — skips DISABLED_SIGNAL_TYPES
+    (price_velocity, market_maker_flip, accumulation, etc.) since their
+    anomalies are not actionable. This avoids phone spam during the normal
+    lifecycle of disabling a signal (the SILENT alert would fire for
+    weeks until the baseline rolls off).
+    """
+    try:
+        from trading_platform.polymarket.whale_signal_engine import DISABLED_SIGNAL_TYPES
+        skip_set = set(DISABLED_SIGNAL_TYPES)
+    except Exception:
+        skip_set = set()
+
     from trading_platform.polymarket.db_connection import get_connection
     conn = get_connection()
     try:
@@ -73,6 +86,8 @@ def detect_and_alert() -> dict:
 
     anomalies: list[dict] = []
     for sig, baseline_hourly in baselines:
+        if sig in skip_set:
+            continue  # disabled signals — anomalies not actionable
         if baseline_hourly < SILENCE_MIN_BASELINE_PER_HOUR:
             continue  # too quiet historically to flag — noise floor
         observed = recent.get(sig, 0)

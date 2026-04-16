@@ -412,7 +412,7 @@ function PipelineFunnelTile({ data }) {
           {fires.toLocaleString()} fires → {placed} placed ({conv}%)
         </span>
       </div>
-      <div className="grid grid-cols-2 gap-3 text-[10px]">
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-[10px]">
         <div>
           <div className="text-gray-500 mb-1">By signal_type</div>
           {bySignal.map((r) => (
@@ -438,6 +438,164 @@ function PipelineFunnelTile({ data }) {
       </div>
       <div className="mt-2 pt-2 border-t border-surface-border text-[9px] text-gray-600">
         Open: {t.paper_trades_currently_open} · Resolved in window: {t.paper_trades_resolved_in_window}
+      </div>
+    </div>
+  )
+}
+
+function LivePositionsTile({ data }) {
+  const positions = (data?.positions || [])
+  if (!positions.length) {
+    return (
+      <div>
+        <h2 className="text-sm font-medium text-gray-300 mb-2">Live Positions</h2>
+        <div className="text-[10px] text-gray-600">No open live positions. Will populate when a signal graduates from paper → live.</div>
+      </div>
+    )
+  }
+  return (
+    <div>
+      <div className="flex items-baseline justify-between mb-2">
+        <h2 className="text-sm font-medium text-gray-300">Live Positions</h2>
+        <span className="text-[10px] text-accent-orange">{positions.length} open · monitor every 5 min</span>
+      </div>
+      <div className="overflow-x-auto">
+        <table className="w-full text-[10px]">
+          <thead className="text-gray-500">
+            <tr>
+              <th className="text-left pb-1">Signal</th>
+              <th className="text-left pb-1">Side</th>
+              <th className="text-right pb-1">Fill</th>
+              <th className="text-right pb-1">Mark</th>
+              <th className="text-right pb-1">Stake</th>
+              <th className="text-right pb-1">Unrlz</th>
+              <th className="text-left pb-1 pl-2">Market</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-surface-border">
+            {positions.map((p) => {
+              const unr = Number(p.unrealized_pnl || 0)
+              const mark = Number(p.last_mark_price || p.fill_price || 0)
+              const cls = unr > 0 ? 'text-accent-green' : unr < 0 ? 'text-accent-red' : 'text-gray-500'
+              return (
+                <tr key={p.id} className="align-top">
+                  <td className="py-1 text-gray-400">{p.signal_type || 'n/a'}</td>
+                  <td className="py-1 text-gray-400">{p.side}</td>
+                  <td className="py-1 text-right text-gray-500">{Number(p.fill_price || 0).toFixed(3)}</td>
+                  <td className="py-1 text-right text-gray-500">{mark.toFixed(3)}</td>
+                  <td className="py-1 text-right text-gray-500">${Number(p.size_usd || 0).toFixed(2)}</td>
+                  <td className={`py-1 text-right ${cls}`}>{unr >= 0 ? '+' : ''}${unr.toFixed(2)}</td>
+                  <td className="py-1 pl-2 text-gray-500 truncate max-w-[200px]" title={p.question}>{p.question}</td>
+                </tr>
+              )
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  )
+}
+
+function TradeJournalTile({ data }) {
+  const trades = (data?.trades || []).slice(0, 10)
+  if (!trades.length) {
+    return (
+      <div>
+        <h2 className="text-sm font-medium text-gray-300 mb-2">Recent Trades — Gate Values</h2>
+        <div className="text-[10px] text-gray-600">Awaiting paper trades with entry_context.</div>
+      </div>
+    )
+  }
+  return (
+    <div>
+      <h2 className="text-sm font-medium text-gray-300 mb-2">Recent Trades — Gate Values (Latest {trades.length})</h2>
+      <div className="overflow-x-auto">
+        <table className="w-full text-[10px]">
+          <thead className="text-gray-500">
+            <tr>
+              <th className="text-left pb-1">Signal</th>
+              <th className="text-left pb-1">Cat</th>
+              <th className="text-right pb-1">Entry</th>
+              <th className="text-right pb-1">Conf</th>
+              <th className="text-right pb-1">Fusion</th>
+              <th className="text-right pb-1">Alpha</th>
+              <th className="text-right pb-1">PnL</th>
+              <th className="text-left pb-1 pl-2">Outcome</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-surface-border">
+            {trades.map((t) => {
+              const pnl = t.realized_pnl
+              const cls = pnl > 0 ? 'text-accent-green' : pnl < 0 ? 'text-accent-red' : 'text-gray-500'
+              return (
+                <tr key={t.id}>
+                  <td className="py-0.5 text-gray-400">{t.signal_type}</td>
+                  <td className="py-0.5 text-gray-500">{t.category || '-'}</td>
+                  <td className="py-0.5 text-right text-gray-500">{Number(t.entry_price || 0).toFixed(3)}</td>
+                  <td className="py-0.5 text-right text-gray-500">{((t.confidence || 0) * 100).toFixed(0)}%</td>
+                  <td className="py-0.5 text-right text-gray-500">{Number(t.fusion_score || 0).toFixed(2)}</td>
+                  <td className="py-0.5 text-right text-gray-500">{Number(t.alpha_score || 0).toFixed(2)}</td>
+                  <td className={`py-0.5 text-right ${cls}`}>
+                    {pnl !== null && pnl !== undefined ? `${pnl >= 0 ? '+' : ''}$${Number(pnl).toFixed(0)}` : '-'}
+                  </td>
+                  <td className="py-0.5 pl-2 text-gray-500">{t.exit_reason || t.outcome || 'open'}</td>
+                </tr>
+              )
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  )
+}
+
+function ExitAnalyzerTile({ data }) {
+  const sigs = data?.signals || []
+  if (!sigs.length) {
+    return (
+      <div>
+        <h2 className="text-sm font-medium text-gray-300 mb-2">Exit Analyzer</h2>
+        <div className="text-[10px] text-gray-600">
+          No signal has ≥{data?.min_sample ?? 10} resolved trades with MAE/MFE yet.
+          Recommendations will appear as data accumulates.
+        </div>
+      </div>
+    )
+  }
+  return (
+    <div>
+      <h2 className="text-sm font-medium text-gray-300 mb-2">Exit Analyzer — Recommended TP/SL</h2>
+      <div className="overflow-x-auto">
+        <table className="w-full text-[10px]">
+          <thead className="text-gray-500">
+            <tr>
+              <th className="text-left pb-1">Signal</th>
+              <th className="text-right pb-1">N</th>
+              <th className="text-right pb-1">WR</th>
+              <th className="text-right pb-1">Avg MFE</th>
+              <th className="text-right pb-1">Avg MAE</th>
+              <th className="text-right pb-1">Suggested TP</th>
+              <th className="text-right pb-1">Tightest SL</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-surface-border">
+            {sigs.map((s) => (
+              <tr key={s.signal_type}>
+                <td className="py-0.5 text-gray-400">{s.signal_type}</td>
+                <td className="py-0.5 text-right text-gray-500">{s.n}</td>
+                <td className="py-0.5 text-right text-gray-500">{((s.wr || 0) * 100).toFixed(0)}%</td>
+                <td className="py-0.5 text-right text-accent-green">+{((s.avg_mfe || 0) * 100).toFixed(1)}%</td>
+                <td className="py-0.5 text-right text-accent-red">{((s.avg_mae || 0) * 100).toFixed(1)}%</td>
+                <td className="py-0.5 text-right text-accent-orange">
+                  {s.recommended_tp !== null ? `+${(s.recommended_tp * 100).toFixed(0)}%` : '-'}
+                </td>
+                <td className="py-0.5 text-right text-accent-orange">
+                  {s.recommended_sl !== null ? `${(s.recommended_sl * 100).toFixed(0)}%` : '-'}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
       </div>
     </div>
   )
@@ -578,9 +736,12 @@ export default function Dashboard() {
   const { data: hypotheses } = useApi(() => fetch('/api/hypotheses/recent?limit=15').then(r => r.ok ? r.json() : null), 30_000)
   const { data: readiness } = useApi(() => fetch('/api/live/readiness').then(r => r.ok ? r.json() : null), 30_000)
   const { data: funnel } = useApi(() => api.pipelineFunnel(24), 60_000)
+  const { data: livePositions } = useApi(() => api.livePositions(), 30_000)
+  const { data: tradeJournalData } = useApi(() => api.tradeJournal(15), 60_000)
+  const { data: exitAnalysis } = useApi(() => api.exitAnalyzer(5), 120_000)
 
   return (
-    <div className="p-6 space-y-4">
+    <div className="p-3 md:p-6 space-y-3 md:space-y-4">
       <div>
         <p className="text-xs text-gray-600 mb-1">Trading Platform &gt; <span className="text-gray-400">Command Center</span></p>
         <h1 className="text-lg font-semibold text-gray-200">Command Center</h1>
@@ -619,9 +780,22 @@ export default function Dashboard() {
         </div>
       </div>
 
-      <div className="flex gap-4">
+      <div className="card">
+        <LivePositionsTile data={livePositions} />
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-5 gap-4">
+        <div className="lg:col-span-3 card">
+          <TradeJournalTile data={tradeJournalData} />
+        </div>
+        <div className="lg:col-span-2 card">
+          <ExitAnalyzerTile data={exitAnalysis} />
+        </div>
+      </div>
+
+      <div className="flex flex-col md:flex-row gap-3 md:gap-4">
         {/* Left: Whale Feed */}
-        <div className="flex-[65] space-y-2">
+        <div className="md:flex-[65] space-y-2 min-w-0">
           <div className="flex items-center gap-2 mb-1">
             <h2 className="text-sm font-medium text-gray-300">Whale Activity</h2>
             <span className="flex items-center gap-1 text-[9px] text-gray-500">
@@ -633,7 +807,7 @@ export default function Dashboard() {
         </div>
 
         {/* Right: Signal Intelligence */}
-        <div className="flex-[35] space-y-4">
+        <div className="md:flex-[35] space-y-3 md:space-y-4 min-w-0">
           <div className="card">
             <SignalPerfTable data={sigPerf} status={status} />
           </div>
