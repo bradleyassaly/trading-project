@@ -138,6 +138,24 @@ services:
       - POSTGRES_PASSWORD=polymarket_dev
       - POSTGRES_DB=polymarket
       - DB_BACKEND=postgres
+      # Cap numerical-library thread pools. Root cause of the 2026-04
+      # ~130MB/h RSS climb was pyarrow+OpenBLAS each auto-spawning a
+      # thread pool sized to CPU count (32 on this host → 64 extra
+      # threads), and each thread getting its own jemalloc arena
+      # (pyarrow bundles jemalloc). Arenas accumulated committed pages
+      # over hours. Capping to 2 drops thread count ~70 → ~10 and
+      # bounds the arena growth. live-collect does no heavy numerics —
+      # only hourly parquet I/O for OHLCV bars — so parallelism here
+      # is pure overhead.
+      - OMP_NUM_THREADS=2
+      - OPENBLAS_NUM_THREADS=2
+      - MKL_NUM_THREADS=2
+      - NUMEXPR_NUM_THREADS=2
+      - VECLIB_MAXIMUM_THREADS=2
+      - ARROW_IO_THREADS=2
+      # Keep tracemalloc on for one more full-day cycle to confirm the
+      # thread-pool fix holds. Flip to 0 once RSS is confirmed bounded.
+      - LIVE_COLLECT_TRACEMALLOC=1
     restart: unless-stopped
     mem_limit: 2g
     memswap_limit: 2g

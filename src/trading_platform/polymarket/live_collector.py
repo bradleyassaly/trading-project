@@ -128,6 +128,36 @@ class PolymarketLiveCollector:
 
     async def run(self) -> None:
         """Run the collector indefinitely (Ctrl+C to stop)."""
+        # Cap pyarrow's internal thread pools. The ARROW_IO_THREADS env
+        # var only controls the IO pool, not the CPU pool, and even then
+        # only if read before pyarrow is imported — we can't rely on
+        # that. Setting these explicitly at startup is the only robust
+        # cap. On containers with many visible CPUs (32 on this host)
+        # pyarrow would otherwise spawn a thread per core, each with
+        # its own jemalloc arena — the primary driver of the ~130MB/h
+        # RSS climb fixed in 2026-04.
+        try:
+            import pyarrow as _pa
+            _pa.set_cpu_count(2)
+            _pa.set_io_thread_count(2)
+        except Exception:
+            pass
+        # Optional tracemalloc profiling — gated by env so normal runs
+        # pay no overhead. Set LIVE_COLLECT_TRACEMALLOC=1 to turn on;
+        # top allocations are dumped every 15 min into the log.
+        # The task ref must be held on self — asyncio.create_task only
+        # holds a weak reference, so a fire-and-forget task whose only
+        # ref is the create_task return value gets GC'd the moment it
+        # hits its first await. Python 3.11 made that more aggressive.
+        import os as _os
+        self._tracemalloc_task = None
+        _tm_env = _os.environ.get("LIVE_COLLECT_TRACEMALLOC")
+        print(f"[startup] LIVE_COLLECT_TRACEMALLOC={_tm_env!r}", flush=True)
+        if _tm_env == "1":
+            import tracemalloc
+            tracemalloc.start(25)
+            self._tracemalloc_task = asyncio.create_task(self._tracemalloc_dump_loop())
+            print(f"[startup] tracemalloc started, task={self._tracemalloc_task!r}", flush=True)
         self._store = LiveTickStore(self.config.db_path)
         self.state.started_at = datetime.now(tz=timezone.utc)
         # Persist market metadata so the API can join question text
@@ -360,6 +390,33 @@ class PolymarketLiveCollector:
         cutoff = now - 1800
         buf[:] = [(t, p) for t, p in buf if t >= cutoff]
 
+        # Bound the _price_buffer outer dict — otherwise token_ids from
+        # resolved/delisted markets stay forever. Prune any buffer that's
+        # now empty + evict its key. Also cap total keys at 5000 (roughly
+        # 2× our peak subscription count); when over, drop the least-
+        # recently-updated keys. Prevents unbounded dict growth across
+        # weeks of operation.
+        if not buf:
+            self._price_buffer.pop(token_id, None)
+        elif len(self._price_buffer) > 5000:
+            # Evict tokens whose newest tick is older than the cutoff
+            stale_keys = [
+                k for k, v in self._price_buffer.items()
+                if not v or v[-1][0] < cutoff
+            ]
+            for k in stale_keys[:500]:
+                self._price_buffer.pop(k, None)
+
+        # Bound state.latest_prices the same way. Each new market_id adds
+        # an entry and nothing ever removes it — over weeks this dict can
+        # carry thousands of resolved markets we'll never trade again.
+        # Cap at the subscribed universe size × 2 as a safety ceiling;
+        # when over, evict the first 500 keys (insertion-order FIFO, so
+        # we drop the oldest subscribed ones which are likely resolved).
+        if len(self.state.latest_prices) > max(len(self.markets) * 2, 2000):
+            for k in list(self.state.latest_prices.keys())[:500]:
+                self.state.latest_prices.pop(k, None)
+
         # Persist tick (batched to keep write overhead minimal)
         cid = info.condition_id or ""
         if cid:
@@ -407,24 +464,28 @@ class PolymarketLiveCollector:
             logger.debug("velocity signal failed: %s", exc)
 
     def _flush_tick_batch(self) -> None:
-        """Write queued ticks to market_ticks in a single transaction."""
+        """Write queued ticks to market_ticks in a single transaction.
+
+        Uses the pooled db_connection helper — the previous raw
+        ``sqlite3.connect(WalletDB()._path)`` per-batch pattern both
+        violated our Postgres cutover (writes were going to a phantom
+        SQLite file nobody reads) and was the primary allocator in the
+        live-collect hot path — each batch opened a fresh connection
+        with its own parser/prepared-statement buffers, at 50 ticks
+        per flush that was tens of thousands of allocations per day
+        never reclaimed by the sqlite3 module's internal caches.
+        """
         if not self._tick_batch:
             return
         try:
-            from trading_platform.polymarket.wallet_db import WalletDB
-            import sqlite3 as _sq
-            db_path = str(WalletDB()._path)
-            conn = _sq.connect(db_path)
-            try:
+            from trading_platform.polymarket.db_connection import db as _db
+            with _db() as conn:
                 conn.executemany(
                     """INSERT OR IGNORE INTO market_ticks
                        (condition_id, token_id, timestamp, price)
                        VALUES (?, ?, ?, ?)""",
                     self._tick_batch,
                 )
-                conn.commit()
-            finally:
-                conn.close()
             self._tick_batch = []
         except Exception as exc:
             logger.debug("tick batch flush failed: %s", exc)
@@ -817,6 +878,55 @@ class PolymarketLiveCollector:
         # Periodic tripwire reload
         if self._tripwire:
             self._tripwire.maybe_reload()
+
+    async def _tracemalloc_dump_loop(self) -> None:
+        """Dump top memory allocators every 15 min (when LIVE_COLLECT_TRACEMALLOC=1).
+
+        Writes with ``print(flush=True)`` rather than ``logger.info`` because
+        the live-collect CLI entry point doesn't configure a logging handler,
+        so INFO-level logger calls get swallowed — the prints here reach
+        docker logs unconditionally.
+        """
+        import tracemalloc
+        print("[tracemalloc-loop] started, sleeping 300s before first dump", flush=True)
+        await asyncio.sleep(300)  # let the collector warm up 5 min first
+        print("[tracemalloc-loop] 5-min warmup complete, entering dump loop", flush=True)
+        while True:
+            try:
+                import resource as _resource
+                import threading as _threading
+                rss_kb = _resource.getrusage(_resource.RUSAGE_SELF).ru_maxrss
+                try:
+                    os_thread_count = len(list((Path("/proc/1/task")).iterdir()))
+                except Exception:
+                    os_thread_count = -1
+                py_thread_count = _threading.active_count()
+                snap = tracemalloc.take_snapshot()
+                # Filter out our own tracemalloc frames + standard lib noise
+                snap = snap.filter_traces((
+                    tracemalloc.Filter(False, "<frozen importlib._bootstrap>"),
+                    tracemalloc.Filter(False, "<frozen importlib._bootstrap_external>"),
+                    tracemalloc.Filter(False, tracemalloc.__file__),
+                ))
+                stats = snap.statistics("lineno")[:15]
+                total_traced = sum(s.size for s in snap.statistics("lineno"))
+                print(
+                    f"[tracemalloc] rss_max={rss_kb/1024:.0f}MB "
+                    f"traced={total_traced/1024/1024:.1f}MB "
+                    f"os_threads={os_thread_count} py_threads={py_thread_count} "
+                    f"price_buf={len(self._price_buffer)} "
+                    f"latest_prices={len(self.state.latest_prices)} "
+                    f"tick_batch={len(self._tick_batch)}",
+                    flush=True,
+                )
+                print("[tracemalloc] top 15 allocators by size:", flush=True)
+                for i, s in enumerate(stats, 1):
+                    frame = s.traceback[0] if s.traceback else None
+                    loc = f"{Path(frame.filename).name}:{frame.lineno}" if frame else "?"
+                    print(f"  {i:2d}. {loc:40s}  {s.size/1024:7.1f} KB  ({s.count} allocs)", flush=True)
+            except Exception as exc:
+                print(f"[tracemalloc] dump failed: {exc}", flush=True)
+            await asyncio.sleep(15 * 60)
 
     async def _heartbeat_loop(self) -> None:
         while True:
