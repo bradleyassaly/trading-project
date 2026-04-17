@@ -633,6 +633,20 @@ class PolymarketPaperExecutor:
         except Exception as exc:
             logger.debug("execution gates failed (pass-through): %s", exc)
 
+        # ── Confluence scoring ────────────────────────────────────────
+        # Count how many distinct signal types fired on the same market
+        # within the last hour. Multiple independent signals agreeing on
+        # the same condition_id is a strong conviction multiplier.
+        confluence = self._count_confluence(condition_id, signal_type)
+        if confluence >= 3:
+            confidence = min(0.95, confidence * 1.30)
+            signal["confluence_boost"] = "3+"
+        elif confluence >= 2:
+            confidence = min(0.95, confidence * 1.15)
+            signal["confluence_boost"] = "2"
+        if confluence >= 1:
+            signal["confluence_count"] = confluence + 1  # +1 for current signal
+
         # Kelly-based position sizing — validated from win_rate_validation.md.
         # PROBATION signals get minimum stake; others use half-Kelly.
         from trading_platform.polymarket.whale_signal_engine import PROBATION_SIGNAL_TYPES
@@ -1318,6 +1332,15 @@ class PolymarketPaperExecutor:
         "specialist_entry": {"sl": -0.25, "tp": 0.45, "trail_act": 0.20, "trail_back": 0.10, "time_days": 21},
         "network_leader_entry": {"sl": -0.20, "tp": 0.35, "trail_act": 0.15, "trail_back": 0.08, "time_days": 14},
         "copyable_contrarian": {"sl": -0.30, "tp": 0.50, "trail_act": 0.25, "trail_back": 0.12, "time_days": 30},
+        # Discovery signals get wide stops — we want resolution data, not
+        # early exits. Let them ride to market resolution where possible.
+        "oversized_bet": {"sl": -0.40, "tp": 0.60, "trail_act": 0.30, "trail_back": 0.15, "time_days": 21},
+        "cascade": {"sl": -0.40, "tp": 0.60, "trail_act": 0.30, "trail_back": 0.15, "time_days": 21},
+        "market_maker_flip": {"sl": -0.40, "tp": 0.60, "trail_act": 0.30, "trail_back": 0.15, "time_days": 21},
+        "accumulation": {"sl": -0.40, "tp": 0.60, "trail_act": 0.30, "trail_back": 0.15, "time_days": 21},
+        "convergence": {"sl": -0.50, "tp": 0.70, "trail_act": 0.35, "trail_back": 0.20, "time_days": 30},
+        "wallet_reversal": {"sl": -0.40, "tp": 0.60, "trail_act": 0.30, "trail_back": 0.15, "time_days": 21},
+        "no_position_entry": {"sl": -0.40, "tp": 0.60, "trail_act": 0.30, "trail_back": 0.15, "time_days": 21},
     }
     TIME_DECAY_MIN_MOVE = 0.05
     # Market-life exit: a position past 80% of market lifetime rarely improves —
@@ -1496,17 +1519,40 @@ class PolymarketPaperExecutor:
         return None
 
     def _fetch_mid_price(self, condition_id: str) -> float | None:
-        """Fetch current mid-price for a market from signals or live ticks."""
+        """Fetch current mid-price for a market from multiple sources.
+
+        Tries in order: market_ticks (freshest), market_signals (signal
+        engine prices), market_price_history (historical). Returns None
+        only if all sources fail — previously only checked market_signals,
+        which caused 10/12 positions to be skipped in check_exits().
+        """
         try:
-            with self._wallet_lock:
-                row = self._wallet_conn.execute(
-                    """SELECT price FROM market_signals
-                       WHERE condition_id = ?
-                       ORDER BY fired_at DESC LIMIT 1""",
+            from trading_platform.polymarket.db_connection import get_connection
+            conn = get_connection()
+            try:
+                # market_ticks — freshest source (live WebSocket data)
+                row = conn.execute(
+                    "SELECT price FROM market_ticks WHERE condition_id = ? ORDER BY timestamp DESC LIMIT 1",
                     (condition_id,),
                 ).fetchone()
                 if row and row[0]:
                     return float(row[0])
+                # market_signals — signal engine prices
+                row = conn.execute(
+                    "SELECT price FROM market_signals WHERE condition_id = ? ORDER BY fired_at DESC LIMIT 1",
+                    (condition_id,),
+                ).fetchone()
+                if row and row[0]:
+                    return float(row[0])
+                # market_price_history — CLOB historical
+                row = conn.execute(
+                    "SELECT p FROM market_price_history WHERE condition_id = ? ORDER BY t DESC LIMIT 1",
+                    (condition_id,),
+                ).fetchone()
+                if row and row[0]:
+                    return float(row[0])
+            finally:
+                conn.close()
         except Exception:
             pass
         return None
@@ -1641,6 +1687,29 @@ class PolymarketPaperExecutor:
             "realized_pnl": round(realized, 2),
             "unrealized_pnl": round(unrealized, 2),
         }
+
+    def _count_confluence(self, condition_id: str, current_signal_type: str) -> int:
+        """Count distinct signal types that fired on the same market in the last hour.
+
+        Excludes the current signal_type (we're counting OTHER signals that
+        agree). Returns 0 if no other signals, 1 if one other, etc.
+        """
+        try:
+            from trading_platform.polymarket.db_connection import get_connection
+            import time as _t
+            cutoff = int(_t.time()) - 3600
+            conn = get_connection()
+            try:
+                row = conn.execute(
+                    "SELECT COUNT(DISTINCT signal_type) FROM signal_outcomes "
+                    "WHERE condition_id = ? AND signal_type != ? AND fired_at >= ?",
+                    (condition_id, current_signal_type, cutoff),
+                ).fetchone()
+                return row[0] if row else 0
+            finally:
+                conn.close()
+        except Exception:
+            return 0
 
     def _count_resolved(self, signal_type: str) -> int:
         """Count resolved paper trades for a signal type (cached per cycle)."""
