@@ -1334,8 +1334,7 @@ class WhaleSignalEngine:
                     signal_type, trade.side, trade.wallet[:14],
                 )
         except Exception as exc:
-            import traceback as _tb
-            print(f"[SIGNAL→TRADE] EXECUTOR_FAILED: {exc}\n{''.join(_tb.format_exc())}", flush=True)
+            logger.warning("[SIGNAL→TRADE] EXECUTOR_FAILED: %s", exc)
 
         # Live executor — DRY_RUN by default. Will be blocked by KillSwitch
         # unless POLYMARKET_LIVE_ENABLED=1 in .env. Purely additive:
