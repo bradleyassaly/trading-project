@@ -711,6 +711,16 @@ class PolymarketLiveCollector:
                 await self._export_hourly_bars()
             except Exception as exc:
                 logger.warning("Hourly export failed: %s", exc)
+            # Prune ticks for resolved markets older than 7 days.
+            # Keeps prices.db from growing unbounded (~600 MB at 50k
+            # ticks/day with 1000 subscribed markets).
+            try:
+                if self._store:
+                    pruned = self._store.prune_old_ticks(keep_days=7)
+                    if pruned:
+                        print(f"[prune] deleted {pruned} old ticks from resolved markets", flush=True)
+            except Exception as exc:
+                logger.debug("tick prune failed: %s", exc)
 
     async def _export_hourly_bars(self) -> None:
         if not self._store:

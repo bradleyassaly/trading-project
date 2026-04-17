@@ -195,6 +195,11 @@ services:
       - POSTGRES_DB=polymarket
       - DB_BACKEND=postgres
       - POLLER_INTERVAL_SECONDS=600
+      # Same thread-pool caps as live-collect — prevents pyarrow/OpenBLAS
+      # from spawning 32 threads on first pandas import.
+      - OMP_NUM_THREADS=2
+      - OPENBLAS_NUM_THREADS=2
+      - MKL_NUM_THREADS=2
     restart: unless-stopped
     mem_limit: 512m
     memswap_limit: 512m

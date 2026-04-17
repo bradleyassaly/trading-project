@@ -136,7 +136,10 @@ EXCLUDE_CATEGORIES: set[str] = set()  # no hard exclusions; tier-gating handles 
 # Live trading: strict allowlist (statistically significant positive EV only).
 LIVE_TRADE_CATEGORIES = {"politics", "geopolitics"}
 # Signal types to exclude from paper bankroll (fire+record only, no capital).
-EXCLUDE_SIGNAL_TYPES = {"price_velocity"}  # 95% WR, EV +0.004 = noise
+EXCLUDE_SIGNAL_TYPES = {
+    "price_velocity",   # 95% WR, EV +0.004 = noise
+    "accumulation",     # 0% WR across 6 resolved, EV -0.78, PnL -$892 — disabled 2026-04-17
+}
 
 # Kelly sizing — Half-Kelly from validated 0.10-0.80 data (WR=73%, odds=0.82)
 HALF_KELLY = 0.05  # 5% of available bankroll (quarter-Kelly, conservative for paper phase)

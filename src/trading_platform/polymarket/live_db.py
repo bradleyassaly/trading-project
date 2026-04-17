@@ -240,6 +240,45 @@ class LiveTickStore:
             ).fetchall()
         return {r[0]: r[1] for r in rows}
 
+    def prune_old_ticks(self, keep_days: int = 7) -> int:
+        """Delete ticks older than *keep_days* for markets that have ended.
+
+        Only prunes markets whose ``end_date_iso`` is in the past — active
+        markets keep all their ticks regardless of age. Deletes per-market
+        to tolerate minor index corruption (skip and continue).
+        Returns total rows deleted.
+        """
+        from datetime import datetime, timedelta, timezone
+        cutoff = (datetime.now(tz=timezone.utc) - timedelta(days=keep_days)).isoformat()
+        with self._lock:
+            ended = self._conn.execute(
+                "SELECT market_id FROM markets WHERE end_date_iso IS NOT NULL AND end_date_iso < ?",
+                (datetime.now(tz=timezone.utc).isoformat(),),
+            ).fetchall()
+            if not ended:
+                return 0
+            total_deleted = 0
+            for (mid,) in ended:
+                try:
+                    cur = self._conn.execute(
+                        "DELETE FROM ticks WHERE market_id = ? AND timestamp < ?",
+                        (mid, cutoff),
+                    )
+                    if cur.rowcount > 0:
+                        total_deleted += cur.rowcount
+                        self._conn.commit()
+                except Exception:
+                    try:
+                        self._conn.rollback()
+                    except Exception:
+                        pass
+            if total_deleted:
+                try:
+                    self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                except Exception:
+                    pass
+            return total_deleted
+
     def close(self) -> None:
         with self._lock:
             self._conn.close()

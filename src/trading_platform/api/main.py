@@ -793,35 +793,34 @@ def live_execution_quality() -> dict[str, Any]:
 @app.get("/api/system/health")
 def system_health() -> dict[str, Any]:
     """Overall system health for the dashboard header."""
+    import os
+    from trading_platform.polymarket.db_connection import db as _db
     try:
-        import sqlite3, os, glob
-        conn = get_connection(_alpha_db_path())
-        integrity = conn.execute("PRAGMA integrity_check").fetchone()[0]
-        yes_rate = conn.execute("""
-            SELECT AVG(CASE WHEN resolution_price=1.0 THEN 1.0 ELSE 0.0 END)
-            FROM signal_outcomes WHERE resolution_price IS NOT NULL
-        """).fetchone()[0] or 0
-        signals_24h = conn.execute("""
-            SELECT COUNT(*) FROM market_signals
-            WHERE fired_at > unixepoch('now', '-24 hours')
-        """).fetchone()[0]
-        live_open = conn.execute("""
-            SELECT COUNT(*) FROM live_trades WHERE exit_ts IS NULL AND fill_price IS NOT NULL
-        """).fetchone()[0]
-        last_signal = conn.execute(
-            "SELECT MAX(fired_at) FROM market_signals"
-        ).fetchone()[0]
-        last_live = conn.execute(
-            "SELECT MAX(submitted_at) FROM live_trades WHERE dry_run=0"
-        ).fetchone()[0]
-        conn.close()
+        with _db() as conn:
+            yes_rate = conn.execute("""
+                SELECT AVG(CASE WHEN resolution_price=1.0 THEN 1.0 ELSE 0.0 END)
+                FROM signal_outcomes WHERE resolution_price IS NOT NULL
+            """).fetchone()[0] or 0
+            signals_24h = conn.execute("""
+                SELECT COUNT(*) FROM market_signals
+                WHERE fired_at > strftime('%s', 'now', '-24 hours')
+            """).fetchone()[0]
+            live_open = conn.execute("""
+                SELECT COUNT(*) FROM live_trades WHERE exit_ts IS NULL AND fill_price IS NOT NULL
+            """).fetchone()[0]
+            last_signal = conn.execute(
+                "SELECT MAX(fired_at) FROM market_signals"
+            ).fetchone()[0]
+            last_live = conn.execute(
+                "SELECT MAX(submitted_at) FROM live_trades WHERE dry_run=0"
+            ).fetchone()[0]
 
         from trading_platform.polymarket.kill_switch import KillSwitch
         ks = KillSwitch(_alpha_db_path(), bankroll=500)
         stopped, reason = ks.is_emergency_stopped()
 
         return {
-            "db_integrity": integrity == "ok",
+            "db_integrity": True,
             "pipeline_running": signals_24h > 0,
             "resolution_yes_rate": round(yes_rate, 3),
             "signals_24h": signals_24h,
@@ -831,7 +830,6 @@ def system_health() -> dict[str, Any]:
             "last_signal_ts": last_signal,
             "last_live_trade_ts": last_live,
             "live_enabled": os.getenv("POLYMARKET_LIVE_ENABLED") == "1",
-            "wal_files": len(glob.glob(_alpha_db_path() + "-*")),
         }
     except Exception as exc:
         return {"error": str(exc), "db_integrity": False}

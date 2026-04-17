@@ -168,17 +168,17 @@ def _cmd_insiders() -> str:
 
 
 def _cmd_kill(reason: str = "remote-kill via telegram") -> str:
-    r = _api_post("/api/system/emergency-stop", {"reason": reason})
-    if r and not r.get("_error"):
+    r = _api_post("/api/live/emergency-stop", {"reason": reason})
+    if r and r.get("ok"):
         return f"*EMERGENCY STOP ENGAGED*\nReason: {reason}\nAll trading halted."
-    return f"Kill failed: {r.get('_error') if r else 'no response'}"
+    return f"Kill failed: {r.get('error') or r.get('_error') if r else 'no response'}"
 
 
 def _cmd_unkill() -> str:
-    r = _api_post("/api/system/clear-emergency-stop", {})
-    if r and not r.get("_error"):
+    r = _api_post("/api/live/clear-stop", {})
+    if r and r.get("ok"):
         return "*EMERGENCY STOP CLEARED*\nTrading resumes under normal gates."
-    return f"Clear failed: {r.get('_error') if r else 'no response'}"
+    return f"Clear failed: {r.get('error') or r.get('_error') if r else 'no response'}"
 
 
 def _cmd_live_trade(args: str) -> str:
