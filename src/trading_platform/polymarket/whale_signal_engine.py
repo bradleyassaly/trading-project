@@ -62,13 +62,13 @@ INFORMATIONAL_SIGNALS = {
     "position_reduction",  # partial exit, informational only
 }
 
-# Sports markets dominate the feed and resolve unpredictably (game outcomes).
-# Even with 86.6% copyable-wallet WR, they flood the funnel and slow time-to-50.
-# Exclude all sports to focus on politics/crypto/economics where thesis is strongest.
-EXCLUDED_CATEGORIES = {
-    "sports", "soccer", "basketball", "football", "baseball",
-    "hockey", "mma", "tennis", "esports", "motorsport",
-}
+# Sports category gate moved to the paper executor (TIER1_ONLY_CATEGORIES)
+# rather than hard-blocking at the signal engine level. This lets tier1
+# sports signals flow through to discovery mode ($1 stakes) so we can
+# validate the tier1-only thesis (+$55K/863 trades historical).
+# Signal-level data shows sports at -0.06 EV overall in the fillable
+# band, but sample is small (n=134) and tier1-only may be positive.
+EXCLUDED_CATEGORIES: set[str] = set()
 
 _SPORTS_PATTERNS = [
     "vs.", "vs ", "O/U ", "Spread:", "over/under",
