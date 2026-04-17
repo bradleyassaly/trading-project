@@ -67,6 +67,7 @@ SIGNAL_BANKROLL = {
     "price_velocity":          3_000,   # velocity noise; already excluded at gate
     "whale_exit":              3_000,   # informational — small alloc
     "position_reduction":      3_000,   # informational
+    "order_flow_imbalance":   10_000,   # order book bid/ask imbalance — new alpha source
 }
 
 MIN_CONFIDENCE = 0.35
@@ -633,36 +634,15 @@ class PolymarketPaperExecutor:
         except Exception as exc:
             logger.debug("execution gates failed (pass-through): %s", exc)
 
-        # ── Confluence scoring ────────────────────────────────────────
-        # Count how many distinct signal types fired on the same market
-        # within the last hour. Multiple independent signals agreeing on
-        # the same condition_id is a strong conviction multiplier.
-        confluence = self._count_confluence(condition_id, signal_type)
-        if confluence >= 3:
-            confidence = min(0.95, confidence * 1.30)
-            signal["confluence_boost"] = "3+"
-        elif confluence >= 2:
-            confidence = min(0.95, confidence * 1.15)
-            signal["confluence_boost"] = "2"
-        if confluence >= 1:
-            signal["confluence_count"] = confluence + 1  # +1 for current signal
+        # ── Ensemble scoring ──────────────────────────────────────────
+        # Combine all available features into a single conviction score
+        # (0-1) that drives sizing. Replaces the previous independent
+        # multiplier chain (confluence × band × time_mult × confidence).
+        ensemble = self._compute_ensemble(signal, condition_id, signal_type)
+        signal["ensemble_score"] = round(ensemble["score"], 4)
+        signal["ensemble_components"] = ensemble["components"]
+        confidence = ensemble["score"]
 
-        # ── Resolution timing ─────────────────────────────────────────
-        # Prefer markets that resolve sooner — capital tied up for 30
-        # days earns less annualized return than capital that turns over
-        # in 3 days. Score: 1/sqrt(days_to_close), capped at [0.5, 1.5].
-        # Markets closing within 1 day get a 1.5× boost; 7 days → 1.0×
-        # (neutral); 30 days → 0.55×; unknown → 1.0× (no penalty).
-        time_mult = 1.0
-        days_to_close = self._days_to_close(condition_id)
-        if days_to_close is not None and days_to_close > 0:
-            import math
-            time_mult = min(1.5, max(0.5, 1.0 / math.sqrt(max(days_to_close, 0.5))))
-            signal["days_to_close"] = round(days_to_close, 1)
-            signal["time_mult"] = round(time_mult, 2)
-
-        # Kelly-based position sizing — validated from win_rate_validation.md.
-        # PROBATION signals get minimum stake; others use half-Kelly.
         from trading_platform.polymarket.whale_signal_engine import PROBATION_SIGNAL_TYPES
         ep = float(signal.get("price") or 0.50)
 
@@ -676,21 +656,10 @@ class PolymarketPaperExecutor:
             size_reason = f"probation: ${MIN_STAKE_USD:.0f} (gathering data)"
         else:
             available = max(0, STARTING_BANKROLL - deployed)
-            base = available * HALF_KELLY * confidence
-            # Optimal band gets full size; edge band gets 70%
-            if OPTIMAL_BAND_LOW <= ep <= OPTIMAL_BAND_HIGH:
-                band_adj = 1.0
-            else:
-                band_adj = 0.7
-            stake = round(max(MIN_STAKE_USD, min(base * band_adj * time_mult, MAX_STAKE_USD)), 2)
-            # Check portfolio concentration
+            stake = round(max(MIN_STAKE_USD, min(available * HALF_KELLY * confidence, MAX_STAKE_USD)), 2)
             if deployed + stake > STARTING_BANKROLL * MAX_PORTFOLIO_PCT:
                 stake = max(0, round(STARTING_BANKROLL * MAX_PORTFOLIO_PCT - deployed, 2))
-            size_reason = (
-                f"half-Kelly={HALF_KELLY:.0%} conf={confidence:.2f} "
-                f"band={'optimal' if band_adj == 1.0 else 'edge'} "
-                f"time={time_mult:.2f} stake=${stake:.0f}"
-            )
+            size_reason = f"ensemble={confidence:.2f} stake=${stake:.0f}"
 
         if stake < MIN_STAKE_USD:
             return None
@@ -1701,6 +1670,88 @@ class PolymarketPaperExecutor:
             "realized_pnl": round(realized, 2),
             "unrealized_pnl": round(unrealized, 2),
         }
+
+    # ── Category EV priors from our signal-level analysis (fillable band) ──
+    _CATEGORY_EV = {
+        "geopolitics": 0.44, "entertainment": 0.32, "politics": 0.31,
+        "sports": -0.06, "crypto": -0.27, "other": -0.27,
+        "economics": 0.0, "science": 0.0, "tech": 0.0, "finance": 0.0,
+    }
+
+    def _compute_ensemble(
+        self, signal: dict, condition_id: str, signal_type: str,
+    ) -> dict:
+        """Combine all features into a single 0-1 conviction score.
+
+        Weighted sum of normalized components. Each component contributes
+        a 0-1 sub-score; weights reflect relative importance from our
+        historical EV analysis. The final score drives Kelly sizing
+        directly — higher score → bigger stake.
+
+        Returns {score: float, components: dict} for logging/analysis.
+        """
+        import math
+        components: dict[str, float] = {}
+
+        # 1. Raw signal confidence (0-1, already computed by signal engine)
+        raw_conf = float(signal.get("confidence") or 0.5)
+        components["confidence"] = raw_conf
+
+        # 2. Wallet tier (tier1h=1.0, tier1=0.8, tier2=0.5, unknown=0.3)
+        tier = signal.get("wallet_tier") or ""
+        tier_scores = {"tier1h": 1.0, "tier1": 0.8, "tier2": 0.5, "market": 0.3}
+        components["wallet_tier"] = tier_scores.get(tier, 0.3)
+
+        # 3. Alpha score (wallet's proven category-specific edge, 0-1)
+        components["alpha"] = min(1.0, float(signal.get("alpha_score") or 0))
+
+        # 4. Confluence (other signal types on same market in last 1h)
+        confluence = self._count_confluence(condition_id, signal_type)
+        signal["confluence_count"] = confluence + 1
+        components["confluence"] = min(1.0, confluence * 0.35)
+
+        # 5. Time efficiency (prefer faster-resolving markets)
+        days = self._days_to_close(condition_id)
+        if days is not None and days > 0:
+            time_score = min(1.0, 1.0 / math.sqrt(max(days, 0.5)))
+            signal["days_to_close"] = round(days, 1)
+        else:
+            time_score = 0.5
+        components["time_efficiency"] = time_score
+
+        # 6. Entry price band (sweet spot 0.10-0.50 from wallet_deep_dive)
+        ep = float(signal.get("price") or 0.5)
+        if OPTIMAL_BAND_LOW <= ep <= OPTIMAL_BAND_HIGH:
+            components["price_band"] = 1.0
+        elif MIN_ENTRY_PRICE <= ep <= MAX_ENTRY_PRICE:
+            components["price_band"] = 0.7
+        else:
+            components["price_band"] = 0.3
+
+        # 7. Category prior (historical EV by category)
+        cat = (signal.get("category") or "other").lower()
+        cat_ev = self._CATEGORY_EV.get(cat, 0.0)
+        components["category"] = max(0.0, min(1.0, 0.5 + cat_ev))
+
+        # 8. Directional win rate of firing wallet
+        wr = float(signal.get("directional_win_rate") or 0)
+        components["wallet_wr"] = min(1.0, wr)
+
+        # Weighted combination
+        weights = {
+            "confidence": 0.20,
+            "wallet_tier": 0.15,
+            "alpha": 0.15,
+            "confluence": 0.10,
+            "time_efficiency": 0.10,
+            "price_band": 0.10,
+            "category": 0.10,
+            "wallet_wr": 0.10,
+        }
+        score = sum(components[k] * weights[k] for k in weights)
+        score = max(0.05, min(0.95, score))
+
+        return {"score": score, "components": components}
 
     def _days_to_close(self, condition_id: str) -> float | None:
         """Return estimated days until market closes, or None if unknown."""

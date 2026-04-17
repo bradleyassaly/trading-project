@@ -1010,6 +1010,30 @@ def paper_pnl_history() -> dict[str, Any]:
     return reader.read_paper_pnl_history()
 
 
+@app.post("/api/backtest/strategy")
+def backtest_strategy(config: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Run the systematic backtest framework against resolved signal_outcomes."""
+    from trading_platform.polymarket.backtest_framework import run_backtest, BacktestConfig
+    cfg = BacktestConfig()
+    if config:
+        for k in ("signal_types", "categories", "wallet_tiers"):
+            if k in config:
+                setattr(cfg, k, config[k])
+        for k in ("min_confidence", "min_alpha_score", "flat_stake", "lookback_days", "train_pct"):
+            if k in config:
+                setattr(cfg, k, float(config[k]))
+        if "entry_price_range" in config:
+            cfg.entry_price_range = tuple(config["entry_price_range"])
+    return run_backtest(cfg)
+
+
+@app.get("/api/backtest/ensemble-validation")
+def backtest_ensemble_validation(lookback_days: int = 60) -> dict[str, Any]:
+    """Validate ensemble scorer: do higher scores predict better outcomes?"""
+    from trading_platform.polymarket.backtest_framework import run_ensemble_backtest
+    return run_ensemble_backtest(lookback_days=lookback_days)
+
+
 @app.get("/api/smart-money/leaderboard")
 def smart_money_leaderboard(sort_by: str = "equity_score") -> dict[str, Any]:
     return reader.read_smart_money_leaderboard(sort_by=sort_by)

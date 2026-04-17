@@ -138,6 +138,10 @@ services:
       - POSTGRES_PASSWORD=polymarket_dev
       - POSTGRES_DB=polymarket
       - DB_BACKEND=postgres
+      # Enable order book monitor — scans top 50 markets every 2 min
+      # for bid/ask imbalances. Feeds order_flow_imbalance signals
+      # into the signal engine alongside wallet-based signals.
+      - POLYMARKET_ENABLE_OB_MONITOR=1
       # Cap numerical-library thread pools. Root cause of the 2026-04
       # ~130MB/h RSS climb was pyarrow+OpenBLAS each auto-spawning a
       # thread pool sized to CPU count (32 on this host → 64 extra

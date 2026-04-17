@@ -964,16 +964,7 @@ class WhaleSignalEngine:
         if now_ts - last < ORDER_BOOK_DEBOUNCE_SECONDS:
             return None
 
-        type_map = {
-            "order_book_imbalance": "accumulation",
-            "sustained_imbalance":  "convergence",
-            "bid_wall":             "oversized_bet",
-            "ask_removal":          "market_maker_flip",
-            "spread_compression":   "cascade",
-        }
-        signal_type = type_map.get(anomaly.get("type", ""))
-        if not signal_type:
-            return None
+        signal_type = "order_flow_imbalance"
 
         severity = anomaly.get("severity", "medium")
         base_conf = {"critical": 0.70, "high": 0.55, "medium": 0.40}.get(severity, 0.40)

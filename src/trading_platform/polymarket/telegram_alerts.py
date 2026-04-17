@@ -198,6 +198,8 @@ class TelegramAlerter:
         "copyable_contrarian", "strategy_specialist",
         "consensus_follower", "network_leader_entry",
         "news_reactor",
+        "order_flow_imbalance",
+        "high_conviction_insider",
     }
 
     # Minimum trade size (USD) to alert on whale detection
