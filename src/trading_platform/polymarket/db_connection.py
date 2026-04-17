@@ -111,6 +111,8 @@ def _get_pool():
             max_size=POOL_MAX_SIZE,
             kwargs={"autocommit": True},
             open=True,
+            timeout=30.0,
+            max_idle=300.0,
         )
         logger.info(
             "[pg_pool] opened min=%d max=%d host=%s",

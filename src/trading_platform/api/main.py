@@ -31,7 +31,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from trading_platform.api import artifact_reader as reader
-from trading_platform.polymarket.db_connection import get_connection
+from trading_platform.polymarket.db_connection import db as _db
 
 # Prometheus metrics. Must be importable even if the lib is absent so a
 # fresh checkout without deps still boots — hence the try/except + noop
@@ -195,53 +195,49 @@ def bankroll_refresh() -> dict[str, Any]:
 def signals_backtest_results() -> dict[str, Any]:
     """Latest per-signal-type EV from signal_engine_backtest, blended with
     live paper-trade resolutions. Sorted by EV descending."""
-    from trading_platform.polymarket.db_connection import get_connection
     try:
-        c = get_connection(_alpha_db_path())
+        with _db() as c:
+            latest = c.execute("SELECT MAX(run_ts) FROM signal_backtest_results").fetchone()
+            if not latest or not latest[0]:
+                return {"rows": [], "run_ts": None, "note": "no backtest run yet"}
+            run_ts = int(latest[0])
+            bt_rows = c.execute(
+                "SELECT signal_type, fires, resolved, wr, ev, total_delta, pending, lookback_days "
+                "FROM signal_backtest_results WHERE run_ts = ?",
+                (run_ts,),
+            ).fetchall()
+            live_map: dict[str, dict] = {}
+            for st, n, ev, wins, pnl in c.execute(
+                "SELECT signal_type, COUNT(*), AVG(return_pct)/100.0, "
+                " SUM(CASE WHEN outcome='win' THEN 1 ELSE 0 END), "
+                " SUM(COALESCE(realized_pnl,0)) "
+                "FROM polymarket_paper_trades WHERE archived=0 AND exit_ts IS NOT NULL "
+                "GROUP BY signal_type"
+            ).fetchall():
+                live_map[st] = {
+                    "live_resolved": n or 0, "live_ev": ev,
+                    "live_wins": wins or 0, "live_pnl": pnl or 0,
+                }
+            rows = []
+            for st, fires, resolved, wr, ev, total_delta, pending, lookback in bt_rows:
+                row = {
+                    "signal_type": st,
+                    "backtest_fires": fires,
+                    "backtest_resolved": resolved,
+                    "backtest_wr": wr,
+                    "backtest_ev": ev,
+                    "backtest_total_delta": total_delta,
+                    "backtest_pending": pending,
+                    "lookback_days": lookback,
+                }
+                row.update(live_map.get(st, {
+                    "live_resolved": 0, "live_ev": None, "live_wins": 0, "live_pnl": 0,
+                }))
+                rows.append(row)
+            rows.sort(key=lambda x: -(x["backtest_ev"] if x["backtest_ev"] is not None else -999))
+            return {"run_ts": run_ts, "rows": rows, "n_signal_types": len(rows)}
     except Exception as exc:
         return {"error": str(exc), "rows": [], "run_ts": None}
-    try:
-        latest = c.execute("SELECT MAX(run_ts) FROM signal_backtest_results").fetchone()
-        if not latest or not latest[0]:
-            return {"rows": [], "run_ts": None, "note": "no backtest run yet"}
-        run_ts = int(latest[0])
-        bt_rows = c.execute(
-            "SELECT signal_type, fires, resolved, wr, ev, total_delta, pending, lookback_days "
-            "FROM signal_backtest_results WHERE run_ts = ?",
-            (run_ts,),
-        ).fetchall()
-        live_map: dict[str, dict] = {}
-        for st, n, ev, wins, pnl in c.execute(
-            "SELECT signal_type, COUNT(*), AVG(return_pct)/100.0, "
-            " SUM(CASE WHEN outcome='win' THEN 1 ELSE 0 END), "
-            " SUM(COALESCE(realized_pnl,0)) "
-            "FROM polymarket_paper_trades WHERE archived=0 AND exit_ts IS NOT NULL "
-            "GROUP BY signal_type"
-        ).fetchall():
-            live_map[st] = {
-                "live_resolved": n or 0, "live_ev": ev,
-                "live_wins": wins or 0, "live_pnl": pnl or 0,
-            }
-        rows = []
-        for st, fires, resolved, wr, ev, total_delta, pending, lookback in bt_rows:
-            row = {
-                "signal_type": st,
-                "backtest_fires": fires,
-                "backtest_resolved": resolved,
-                "backtest_wr": wr,
-                "backtest_ev": ev,
-                "backtest_total_delta": total_delta,
-                "backtest_pending": pending,
-                "lookback_days": lookback,
-            }
-            row.update(live_map.get(st, {
-                "live_resolved": 0, "live_ev": None, "live_wins": 0, "live_pnl": 0,
-            }))
-            rows.append(row)
-        rows.sort(key=lambda x: -(x["backtest_ev"] if x["backtest_ev"] is not None else -999))
-        return {"run_ts": run_ts, "rows": rows, "n_signal_types": len(rows)}
-    finally:
-        c.close()
 
 
 @app.get("/api/signals/sizing")
@@ -282,9 +278,7 @@ def insiders_list() -> dict[str, Any]:
 def wallets_archetypes() -> dict[str, Any]:
     """Wallet archetype distribution and per-archetype copy-trading stats."""
     try:
-        import sqlite3
-        conn = get_connection(_alpha_db_path())
-        try:
+        with _db() as conn:
             rows = conn.execute("""
                 SELECT archetype, copyable, COUNT(*) AS n
                 FROM wallet_archetypes
@@ -294,8 +288,6 @@ def wallets_archetypes() -> dict[str, Any]:
             return {"available": True, "data": [
                 {"archetype": r[0], "copyable": bool(r[1]), "count": r[2]} for r in rows
             ]}
-        finally:
-            conn.close()
     except Exception as exc:
         return {"available": False, "error": str(exc)}
 
@@ -325,9 +317,7 @@ def signals_live_readiness() -> dict[str, Any]:
 def wallets_political_leaders(limit: int = 25) -> dict[str, Any]:
     """Top tier S/A/B wallets in politics + geopolitics with current activity."""
     try:
-        import sqlite3
-        conn = get_connection(_alpha_db_path())
-        try:
+        with _db() as conn:
             rows = conn.execute(
                 """SELECT wcp.wallet, wcp.tier, wcp.tier_score, wcp.category,
                           wcp.win_rate, wcp.win_rate_30d, wcp.resolved_trades,
@@ -353,8 +343,6 @@ def wallets_political_leaders(limit: int = 25) -> dict[str, Any]:
                 "trades_7d", "open_markets",
             ]
             return {"available": True, "data": [dict(zip(cols, r)) for r in rows]}
-        finally:
-            conn.close()
     except Exception as exc:
         return {"available": False, "error": str(exc)}
 
@@ -395,9 +383,7 @@ def signals_political_performance() -> dict[str, Any]:
 def markets_political_activity(hours: int = 48, limit: int = 50) -> dict[str, Any]:
     """Recent whale trades in political / geopolitical markets (tracked tier S/A/B)."""
     try:
-        import sqlite3
-        conn = get_connection(_alpha_db_path())
-        try:
+        with _db() as conn:
             rows = conn.execute(
                 """SELECT wt.wallet, wt.side, wt.size, wt.price,
                           wt.title, wt.category,
@@ -419,8 +405,6 @@ def markets_political_activity(hours: int = 48, limit: int = 50) -> dict[str, An
                 "trade_time", "wallet_tier", "wallet_wr", "condition_id",
             ]
             return {"available": True, "data": [dict(zip(cols, r)) for r in rows]}
-        finally:
-            conn.close()
     except Exception as exc:
         return {"available": False, "error": str(exc)}
 
@@ -697,9 +681,7 @@ def live_trades(limit: int = 50) -> dict[str, Any]:
 def live_positions() -> dict[str, Any]:
     """Open live positions with current price and unrealized PnL."""
     try:
-        import sqlite3
-        conn = get_connection(_alpha_db_path())
-        try:
+        with _db() as conn:
             rows = conn.execute("""
                 SELECT id, condition_id, token_id, question, category, side,
                        signal_type, confidence, fill_price, size_usd, shares,
@@ -719,8 +701,6 @@ def live_positions() -> dict[str, Any]:
                 "total_exposure": round(total_exposure, 2),
                 "count": len(positions),
             }
-        finally:
-            conn.close()
     except Exception as exc:
         return {"positions": [], "total_exposure": 0, "count": 0, "error": str(exc)}
 
@@ -729,9 +709,7 @@ def live_positions() -> dict[str, Any]:
 def live_history(limit: int = 50) -> dict[str, Any]:
     """Closed live trades with realized PnL."""
     try:
-        import sqlite3
-        conn = get_connection(_alpha_db_path())
-        try:
+        with _db() as conn:
             rows = conn.execute("""
                 SELECT id, condition_id, question, category, side, signal_type,
                        fill_price, exit_price, size_usd, realized_pnl, outcome,
@@ -753,8 +731,6 @@ def live_history(limit: int = 50) -> dict[str, Any]:
                 "win_rate": round(wins / len(trades), 4) if trades else 0,
                 "count": len(trades),
             }
-        finally:
-            conn.close()
     except Exception as exc:
         return {"trades": [], "total_realized_pnl": 0, "win_rate": 0, "count": 0, "error": str(exc)}
 
@@ -763,9 +739,7 @@ def live_history(limit: int = 50) -> dict[str, Any]:
 def live_execution_quality() -> dict[str, Any]:
     """Fill rate, slippage, fill time stats."""
     try:
-        import sqlite3
-        conn = get_connection(_alpha_db_path())
-        try:
+        with _db() as conn:
             r = conn.execute("""
                 SELECT COUNT(*) AS total,
                        SUM(CASE WHEN fill_price IS NOT NULL THEN 1 ELSE 0 END) AS filled,
@@ -784,8 +758,6 @@ def live_execution_quality() -> dict[str, Any]:
                 "avg_fill_time_ms": round(r[3] or 0, 1),
                 "avg_price_deviation": round(r[4] or 0, 4),
             }
-        finally:
-            conn.close()
     except Exception as exc:
         return {"total_orders": 0, "filled": 0, "fill_rate": 0, "error": str(exc)}
 
@@ -794,7 +766,6 @@ def live_execution_quality() -> dict[str, Any]:
 def system_health() -> dict[str, Any]:
     """Overall system health for the dashboard header."""
     import os
-    from trading_platform.polymarket.db_connection import db as _db
     try:
         with _db() as conn:
             yes_rate = conn.execute("""
@@ -1346,11 +1317,8 @@ def thesis_snapshot() -> dict[str, Any]:
 def wallet_expected_returns(address: str) -> dict[str, Any]:
     """Full return distribution stats for a wallet across all categories."""
     try:
-        import sqlite3
-        conn = get_connection(_alpha_db_path())
-        conn.row_factory = sqlite3.Row
-        try:
-            # Case-insensitive match (addresses may be mixed-case)
+        with _db() as conn:
+            conn.row_factory = __import__("sqlite3").Row
             rows = conn.execute(
                 """SELECT category, win_rate, resolved_trades,
                           avg_win_pnl, avg_loss_pnl, profit_factor,
@@ -1361,14 +1329,12 @@ def wallet_expected_returns(address: str) -> dict[str, Any]:
                 (address,),
             ).fetchall()
 
-            # Build category dict from alpha scores
             categories = {}
             for r in rows:
                 d = dict(r)
                 cat = d.pop("category")
                 categories[cat] = d
 
-            # If no alpha scores, fall back to leaderboard profile
             if not categories:
                 lb = conn.execute(
                     """SELECT directional_win_rate, rolling_20_wr,
@@ -1391,8 +1357,6 @@ def wallet_expected_returns(address: str) -> dict[str, Any]:
                 }
 
             return {"available": True, "wallet": address, "source": "alpha_scores", "categories": categories}
-        finally:
-            conn.close()
     except Exception as exc:
         return {"available": False, "error": str(exc)}
 
@@ -1401,10 +1365,9 @@ def wallet_expected_returns(address: str) -> dict[str, Any]:
 def trade_analysis(trade_id: int) -> dict[str, Any]:
     """Full pre-trade hypothesis + post-trade analysis for a single trade."""
     try:
-        import sqlite3, json
-        conn = get_connection(_alpha_db_path())
-        conn.row_factory = sqlite3.Row
-        try:
+        import json
+        with _db() as conn:
+            conn.row_factory = __import__("sqlite3").Row
             hypo = conn.execute(
                 "SELECT * FROM trade_hypotheses WHERE trade_id = ?",
                 (trade_id,),
@@ -1420,8 +1383,6 @@ def trade_analysis(trade_id: int) -> dict[str, Any]:
                    ORDER BY snapshot_at""",
                 (trade_id,),
             ).fetchall()
-        finally:
-            conn.close()
 
         result: dict[str, Any] = {"available": True, "trade_id": trade_id}
         if hypo:
@@ -1476,17 +1437,14 @@ def positions_mtm() -> dict[str, Any]:
 def execution_gates_status() -> dict[str, Any]:
     """Current gate thresholds + recent gate results from hypotheses."""
     try:
-        import sqlite3, json
+        import json
         from trading_platform.polymarket.execution_gates import _PAPER_THRESHOLDS
-        conn = get_connection(_alpha_db_path())
-        try:
+        with _db() as conn:
             recent = conn.execute(
                 """SELECT trade_id, gate_results_json FROM trade_hypotheses
                    WHERE gate_results_json IS NOT NULL
                    ORDER BY created_at DESC LIMIT 10"""
             ).fetchall()
-        finally:
-            conn.close()
         results = []
         for tid, gj in recent:
             try:
@@ -1505,16 +1463,12 @@ def execution_gates_status() -> dict[str, Any]:
 def whale_exits() -> dict[str, Any]:
     """Recent whale exit signals."""
     try:
-        import sqlite3
-        conn = get_connection(_alpha_db_path())
-        conn.row_factory = sqlite3.Row
-        try:
+        with _db() as conn:
+            conn.row_factory = __import__("sqlite3").Row
             rows = conn.execute(
                 """SELECT * FROM whale_exit_signals ORDER BY detected_at DESC LIMIT 20"""
             ).fetchall()
             return {"available": True, "exits": [dict(r) for r in rows]}
-        finally:
-            conn.close()
     except Exception as exc:
         return {"available": False, "exits": [], "error": str(exc)}
 
@@ -1609,9 +1563,7 @@ def paper_analytics_summary() -> dict[str, Any]:
 @app.get("/api/paper/equity-curve")
 def paper_equity_curve() -> dict[str, Any]:
     try:
-        import sqlite3
-        conn = get_connection(_alpha_db_path())
-        try:
+        with _db() as conn:
             rows = conn.execute(
                 "SELECT ts, cash, positions_value, total_equity, open_count, realized_pnl_cumulative, unrealized_pnl FROM paper_equity_snapshots ORDER BY ts"
             ).fetchall()
@@ -1622,8 +1574,6 @@ def paper_equity_curve() -> dict[str, Any]:
                 for r in rows
             ]
             return {"available": True, "data": data}
-        finally:
-            conn.close()
     except Exception as exc:
         return {"available": False, "data": [], "error": str(exc)}
 
@@ -1632,11 +1582,10 @@ def paper_equity_curve() -> dict[str, Any]:
 def daily_report() -> dict[str, Any]:
     """Daily summary for digest and Command Center."""
     try:
-        import sqlite3, time
-        conn = get_connection(_alpha_db_path())
+        import time
         now = int(time.time())
         yesterday = now - 86400
-        try:
+        with _db() as conn:
             row = conn.execute("""
                 SELECT COUNT(*),
                        SUM(CASE WHEN exit_ts IS NULL AND archived=0 THEN 1 ELSE 0 END),
@@ -1659,8 +1608,6 @@ def daily_report() -> dict[str, Any]:
                 FROM polymarket_paper_trades WHERE archived=0 AND exit_ts IS NULL
                 GROUP BY category
             """).fetchall()
-        finally:
-            conn.close()
 
         return {
             "available": True,
@@ -1695,14 +1642,10 @@ def paper_sizing() -> dict[str, Any]:
             MIN_ENTRY_PRICE, MAX_ENTRY_PRICE, OPTIMAL_BAND_LOW, OPTIMAL_BAND_HIGH,
             STARTING_BANKROLL,
         )
-        import sqlite3
-        conn = get_connection(_alpha_db_path())
-        try:
+        with _db() as conn:
             deployed = conn.execute(
                 "SELECT COALESCE(SUM(size_usd),0) FROM polymarket_paper_trades WHERE exit_ts IS NULL AND archived=0"
             ).fetchone()[0]
-        finally:
-            conn.close()
         available = max(0, STARTING_BANKROLL - deployed)
         return {
             "available": True,
