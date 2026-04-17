@@ -182,6 +182,7 @@ class PolymarketLiveCollector:
             stats_task = asyncio.create_task(self._stats_loop())
             heartbeat_task = asyncio.create_task(self._heartbeat_loop())
             poll_task = asyncio.create_task(self._tier1_poll_loop())
+            self._fundamental_task = asyncio.create_task(self._fundamental_scan_loop())
             await self._ws_loop()
         except (KeyboardInterrupt, asyncio.CancelledError):
             logger.info("Collector stopping gracefully")
@@ -937,6 +938,35 @@ class PolymarketLiveCollector:
             except Exception as exc:
                 print(f"[tracemalloc] dump failed: {exc}", flush=True)
             await asyncio.sleep(15 * 60)
+
+    async def _fundamental_scan_loop(self) -> None:
+        """Scan for fundamental (non-wallet) signals every 15 min.
+
+        These signals are uncorrelated with the wallet cluster — they
+        derive from price patterns and market lifecycle, providing true
+        diversification in the ensemble scorer.
+        """
+        await asyncio.sleep(180)
+        while True:
+            try:
+                from trading_platform.polymarket.fundamental_signals import (
+                    scan_price_momentum, scan_resolution_proximity,
+                )
+                signals = scan_price_momentum() + scan_resolution_proximity()
+                placed = 0
+                for sig in signals:
+                    if self._paper_executor:
+                        try:
+                            result = self._paper_executor.execute_signal(sig)
+                            if result:
+                                placed += 1
+                        except Exception:
+                            pass
+                if placed:
+                    print(f"[FUNDAMENTAL] Placed {placed} trades from {len(signals)} signals", flush=True)
+            except Exception as exc:
+                logger.debug("fundamental scan failed: %s", exc)
+            await asyncio.sleep(900)
 
     async def _heartbeat_loop(self) -> None:
         while True:

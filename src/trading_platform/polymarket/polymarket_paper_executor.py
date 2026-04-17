@@ -68,6 +68,8 @@ SIGNAL_BANKROLL = {
     "whale_exit":              3_000,   # informational — small alloc
     "position_reduction":      3_000,   # informational
     "order_flow_imbalance":   10_000,   # order book bid/ask imbalance — new alpha source
+    "price_momentum":         10_000,   # 24h price trend continuation/reversal
+    "resolution_proximity":   10_000,   # high-confidence markets near resolution
 }
 
 MIN_CONFIDENCE = 0.35
@@ -139,6 +141,30 @@ LIVE_TRADE_CATEGORIES = {"politics", "geopolitics"}
 # Signal types to exclude from paper bankroll (fire+record only, no capital).
 EXCLUDE_SIGNAL_TYPES = {
     "price_velocity",   # 95% WR, EV +0.004 = noise — 1300/day, pure noise
+}
+
+# Signal clusters — correlated signals share a cluster. TRUE confluence
+# is cross-cluster (wallet + microstructure agreeing). Intra-cluster
+# signals (whale_entry + accumulation) are the same underlying event
+# seen through different lenses — counting them as independent is wrong.
+SIGNAL_CLUSTERS = {
+    # Wallet cluster — all derived from watching smart money trade
+    "whale_entry": "wallet", "whale_entry_filtered": "wallet",
+    "accumulation": "wallet", "cascade": "wallet",
+    "convergence": "wallet", "oversized_bet": "wallet",
+    "wallet_reversal": "wallet", "no_position_entry": "wallet",
+    "specialist_entry": "wallet", "network_leader_entry": "wallet",
+    "market_maker_flip": "wallet", "copyable_contrarian": "wallet",
+    "consensus_follower": "wallet", "strategy_specialist": "wallet",
+    "insider_entry": "wallet", "high_conviction_insider": "wallet",
+    "late_conviction": "wallet", "tier_entry": "wallet",
+    "whale_exit": "wallet", "news_reactor": "wallet",
+    # Microstructure cluster — order book / market mechanics
+    "order_flow_imbalance": "microstructure",
+    "price_velocity": "microstructure",
+    # Fundamental cluster — price/time patterns, no wallet dependency
+    "price_momentum": "fundamental",
+    "resolution_proximity": "fundamental",
 }
 
 # Discovery mode: signal types with fewer than this many resolved paper
@@ -1705,10 +1731,11 @@ class PolymarketPaperExecutor:
         # 3. Alpha score (wallet's proven category-specific edge, 0-1)
         components["alpha"] = min(1.0, float(signal.get("alpha_score") or 0))
 
-        # 4. Confluence (other signal types on same market in last 1h)
+        # 4. Cross-cluster confluence (different signal clusters on same market)
         confluence = self._count_confluence(condition_id, signal_type)
-        signal["confluence_count"] = confluence + 1
-        components["confluence"] = min(1.0, confluence * 0.35)
+        signal["confluence_count"] = confluence
+        signal["signal_cluster"] = SIGNAL_CLUSTERS.get(signal_type, "wallet")
+        components["confluence"] = min(1.0, confluence * 0.50)
 
         # 5. Time efficiency (prefer faster-resolving markets)
         days = self._days_to_close(condition_id)
@@ -1776,10 +1803,12 @@ class PolymarketPaperExecutor:
             return None
 
     def _count_confluence(self, condition_id: str, current_signal_type: str) -> int:
-        """Count distinct signal types that fired on the same market in the last hour.
+        """Count distinct signal CLUSTERS that fired on the same market in the last hour.
 
-        Excludes the current signal_type (we're counting OTHER signals that
-        agree). Returns 0 if no other signals, 1 if one other, etc.
+        Only cross-cluster signals count as true confluence. whale_entry +
+        accumulation are both 'wallet' cluster — that's one event, not two.
+        whale_entry + order_flow_imbalance are different clusters — that's
+        real independent confirmation.
         """
         try:
             from trading_platform.polymarket.db_connection import get_connection
@@ -1787,12 +1816,18 @@ class PolymarketPaperExecutor:
             cutoff = int(_t.time()) - 3600
             conn = get_connection()
             try:
-                row = conn.execute(
-                    "SELECT COUNT(DISTINCT signal_type) FROM signal_outcomes "
-                    "WHERE condition_id = ? AND signal_type != ? AND fired_at >= ?",
-                    (condition_id, current_signal_type, cutoff),
-                ).fetchone()
-                return row[0] if row else 0
+                rows = conn.execute(
+                    "SELECT DISTINCT signal_type FROM signal_outcomes "
+                    "WHERE condition_id = ? AND fired_at >= ?",
+                    (condition_id, cutoff),
+                ).fetchall()
+                current_cluster = SIGNAL_CLUSTERS.get(current_signal_type, "wallet")
+                other_clusters = set()
+                for (st,) in rows:
+                    cluster = SIGNAL_CLUSTERS.get(st, "wallet")
+                    if cluster != current_cluster:
+                        other_clusters.add(cluster)
+                return len(other_clusters)
             finally:
                 conn.close()
         except Exception:
