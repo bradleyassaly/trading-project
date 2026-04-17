@@ -1358,7 +1358,7 @@ class WhaleSignalEngine:
             # when the trade was rejected at downstream gates — generating
             # phone spam with no actionable trade behind it. Daily digest
             # still summarises everything; loud alerts gated on placement.
-            if paper_trade:
+            if paper_trade and not paper_trade.get("discovery"):
                 alerter.send_signal(signal, paper_result=paper_trade)
 
                 if trade.category in ("politics", "geopolitics") and trade.wallet:

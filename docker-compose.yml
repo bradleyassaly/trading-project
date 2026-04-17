@@ -157,9 +157,7 @@ services:
       - NUMEXPR_NUM_THREADS=2
       - VECLIB_MAXIMUM_THREADS=2
       - ARROW_IO_THREADS=2
-      # Keep tracemalloc on for one more full-day cycle to confirm the
-      # thread-pool fix holds. Flip to 0 once RSS is confirmed bounded.
-      - LIVE_COLLECT_TRACEMALLOC=1
+      - LIVE_COLLECT_TRACEMALLOC=0
     restart: unless-stopped
     mem_limit: 2g
     memswap_limit: 2g
