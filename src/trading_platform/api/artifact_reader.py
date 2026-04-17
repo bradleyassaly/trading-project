@@ -3171,46 +3171,45 @@ def read_paper_bankroll() -> dict[str, Any]:
 
 
 def read_paper_pnl_history() -> dict[str, Any]:
-    """Daily P&L snapshots for charting."""
-    db_path = DATA_ROOT / "kalshi" / "paper_trades.db"
+    """Daily P&L from Postgres polymarket_paper_trades."""
+    from trading_platform.polymarket.db_connection import db as _db
     by_day: list[dict] = []
     by_signal_total: dict[str, dict] = {}
 
-    if db_path.exists():
-        try:
-            import sqlite3
-            conn = _safe_connect(db_path, check_same_thread=False)
+    try:
+        with _db() as conn:
             rows = conn.execute("""
-                SELECT DATE(exit_ts) as d, COALESCE(signal_family, 'unknown'),
-                       SUM(return_pct), COUNT(*)
-                FROM trades WHERE outcome IS NOT NULL AND exit_ts IS NOT NULL
-                GROUP BY d, signal_family ORDER BY d
+                SELECT TO_CHAR(TO_TIMESTAMP(exit_ts), 'YYYY-MM-DD') AS d,
+                       signal_type, SUM(realized_pnl), COUNT(*),
+                       SUM(CASE WHEN outcome='win' THEN 1 ELSE 0 END)
+                FROM polymarket_paper_trades
+                WHERE archived = 0 AND exit_ts IS NOT NULL AND realized_pnl IS NOT NULL
+                GROUP BY d, signal_type ORDER BY d
             """).fetchall()
 
             day_totals: dict[str, float] = {}
-            for d, sig, pnl, count in rows:
+            for d, sig, pnl, count, wins in rows:
                 if d:
-                    day_totals[d] = day_totals.get(d, 0) + (pnl or 0)
+                    day_totals[d] = day_totals.get(d, 0) + float(pnl or 0)
+                sig = sig or "unknown"
                 if sig not in by_signal_total:
-                    by_signal_total[sig] = {"total_pnl": 0, "trades": 0, "wins": 0}
-                by_signal_total[sig]["total_pnl"] += (pnl or 0)
+                    by_signal_total[sig] = {"total_pnl": 0.0, "trades": 0, "wins": 0}
+                by_signal_total[sig]["total_pnl"] += float(pnl or 0)
                 by_signal_total[sig]["trades"] += count
+                by_signal_total[sig]["wins"] += (wins or 0)
 
             cumulative = 0.0
             for d in sorted(day_totals):
                 cumulative += day_totals[d]
-                by_day.append({"date": d, "pnl": round(day_totals[d], 4), "cumulative_pnl": round(cumulative, 4)})
-
-            conn.close()
-        except Exception:
-            pass
+                by_day.append({"date": d, "pnl": round(day_totals[d], 2), "cumulative_pnl": round(cumulative, 2)})
+    except Exception:
+        pass
 
     return {
         "available": True,
         "has_data": len(by_day) > 0,
         "by_day": by_day,
         "by_signal_total": {k: {kk: round(vv, 4) if isinstance(vv, float) else vv for kk, vv in v.items()} for k, v in by_signal_total.items()},
-        "next_resolution": "April 15, 2026 (KXCPI/KXFED markets)",
     }
 
 
@@ -4483,186 +4482,95 @@ _WHALE_SIGNAL_TYPES = [
 
 
 def read_paper_dashboard() -> dict[str, Any]:
-    """Comprehensive paper trading dashboard — non-archived only."""
-    db_path = DATA_ROOT / "kalshi" / "paper_trades.db"
-    if not db_path.exists():
-        return {"available": False, "reason": "No paper trading DB found"}
+    """Comprehensive paper trading dashboard from Postgres polymarket_paper_trades."""
+    from trading_platform.polymarket.db_connection import db as _db
     try:
-        import sqlite3
-        conn = _safe_connect(db_path, check_same_thread=False)
+        with _db() as conn:
+            starting_bankroll = 10_000
 
-        # Open positions — Polymarket whale signals only (non-archived)
-        open_trades = conn.execute("""
-            SELECT id, ticker, side, entry_price, size_usd, signal_family, confidence,
-                   entry_ts, COALESCE(platform, 'kalshi') as platform, full_token_id, signal_type
-            FROM trades
-            WHERE status = 'open' AND (archived = 0 OR archived IS NULL)
-            ORDER BY entry_ts DESC
-        """).fetchall()
-        positions = []
-        poly_deployed = 0.0
-        for t in open_trades:
-            positions.append({
-                "id": t[0], "ticker": t[1], "side": t[2],
-                "entry_price": t[3], "size_usd": t[4],
-                "signal_type": t[10] or t[5] or "unknown",
-                "confidence": t[6],
-                "entry_ts": t[7], "platform": t[8],
-                "full_token_id": t[9],
-            })
-            if t[8] == "polymarket":
-                poly_deployed += (t[4] or 0)
+            open_rows = conn.execute("""
+                SELECT id, condition_id, question, category, side, entry_price,
+                       size_usd, signal_type, confidence, wallet, entry_ts
+                FROM polymarket_paper_trades
+                WHERE exit_ts IS NULL AND archived = 0
+                ORDER BY entry_ts DESC
+            """).fetchall()
+            positions = []
+            deployed = 0.0
+            for r in open_rows:
+                positions.append({
+                    "id": r[0], "ticker": r[1], "side": r[4],
+                    "entry_price": r[5], "size_usd": r[6],
+                    "signal_type": r[7] or "unknown", "confidence": r[8],
+                    "entry_ts": r[10], "platform": "polymarket",
+                    "full_token_id": r[1], "question": r[2],
+                    "category": r[3], "wallet": r[9],
+                })
+                deployed += (r[6] or 0)
 
-        # Signal attribution — show all 9 whale signals (non-archived only)
-        attr_rows = conn.execute("""
-            SELECT COALESCE(signal_type, signal_family, 'unknown') as sig,
-                   COUNT(*) as total,
-                   SUM(CASE WHEN outcome='win' THEN 1 ELSE 0 END) as wins,
-                   SUM(CASE WHEN status='closed' THEN 1 ELSE 0 END) as closed,
-                   AVG(size_usd) as avg_stake
-            FROM trades
-            WHERE archived = 0 OR archived IS NULL
-            GROUP BY sig
-        """).fetchall()
-        by_sig = {r[0]: r for r in attr_rows}
-        attribution = []
-        for sig in _WHALE_SIGNAL_TYPES:
-            r = by_sig.get(sig)
-            if r:
-                closed = r[3]
+            attr_rows = conn.execute("""
+                SELECT signal_type,
+                       COUNT(*) AS total,
+                       SUM(CASE WHEN outcome='win' THEN 1 ELSE 0 END) AS wins,
+                       SUM(CASE WHEN exit_ts IS NOT NULL THEN 1 ELSE 0 END) AS closed,
+                       AVG(size_usd) AS avg_stake,
+                       SUM(COALESCE(realized_pnl, 0)) AS total_pnl
+                FROM polymarket_paper_trades WHERE archived = 0
+                GROUP BY signal_type ORDER BY total_pnl DESC
+            """).fetchall()
+            attribution = []
+            for r in attr_rows:
+                closed = r[3] or 0
                 attribution.append({
-                    "signal_type": sig,
-                    "total_trades": r[1], "wins": r[2], "closed": closed,
-                    "win_rate": round(r[2] / closed, 3) if closed > 0 else 0.0,
+                    "signal_type": r[0], "total_trades": r[1],
+                    "wins": r[2] or 0, "closed": closed,
+                    "win_rate": round((r[2] or 0) / closed, 3) if closed > 0 else 0.0,
                     "avg_stake": round(r[4], 2) if r[4] else 0.0,
-                })
-            else:
-                attribution.append({
-                    "signal_type": sig, "total_trades": 0, "wins": 0,
-                    "closed": 0, "win_rate": 0.0, "avg_stake": 0.0,
+                    "total_pnl": round(r[5], 2) if r[5] else 0.0,
                 })
 
-        # Recent closed trades — non-archived only
-        closed_trades = conn.execute("""
-            SELECT ticker, side, entry_price, exit_price, size_usd,
-                   signal_family, outcome, return_pct, exit_ts,
-                   COALESCE(platform, 'kalshi') as platform, signal_type
-            FROM trades
-            WHERE status = 'closed' AND (archived = 0 OR archived IS NULL)
-            ORDER BY exit_ts DESC LIMIT 20
-        """).fetchall()
-        recent = []
-        for t in closed_trades:
-            recent.append({
-                "ticker": t[0], "side": t[1],
-                "entry_price": t[2], "exit_price": t[3],
-                "size_usd": t[4],
-                "signal_type": t[10] or t[5],
-                "outcome": t[6], "return_pct": t[7],
-                "exit_ts": t[8], "platform": t[9],
-            })
+            recent_rows = conn.execute("""
+                SELECT condition_id, side, entry_price, exit_price, size_usd,
+                       signal_type, outcome, return_pct, exit_ts, question,
+                       realized_pnl, exit_reason
+                FROM polymarket_paper_trades
+                WHERE exit_ts IS NOT NULL AND archived = 0
+                ORDER BY exit_ts DESC LIMIT 20
+            """).fetchall()
+            recent = []
+            for r in recent_rows:
+                recent.append({
+                    "ticker": r[0], "side": r[1], "entry_price": r[2],
+                    "exit_price": r[3], "size_usd": r[4],
+                    "signal_type": r[5], "outcome": r[6],
+                    "return_pct": r[7], "exit_ts": r[8],
+                    "platform": "polymarket", "question": r[9],
+                    "realized_pnl": r[10], "exit_reason": r[11],
+                })
 
-        # Platform breakdown
-        platform_rows = conn.execute("""
-            SELECT COALESCE(platform, 'kalshi'),
-                   COUNT(*), SUM(CASE WHEN outcome='win' THEN 1 ELSE 0 END),
-                   SUM(CASE WHEN status='open' THEN 1 ELSE 0 END)
-            FROM trades
-            WHERE archived = 0 OR archived IS NULL
-            GROUP BY 1
-        """).fetchall()
-        platforms = {}
-        for r in platform_rows:
-            platforms[r[0]] = {"total": r[1], "wins": r[2] or 0, "open": r[3]}
+            total_realized = conn.execute(
+                "SELECT COALESCE(SUM(realized_pnl), 0) FROM polymarket_paper_trades WHERE archived=0 AND exit_ts IS NOT NULL"
+            ).fetchone()[0]
 
-        # NEW: Read from polymarket_paper_trades in wallet_intelligence.db
-        # This is the primary Polymarket paper trading source going forward
-        poly_db = DATA_ROOT / "polymarket" / "wallet_intelligence.db"
-        if poly_db.exists():
-            try:
-                pconn = _safe_connect(poly_db, check_same_thread=False)
-                ppt_rows = pconn.execute("""
-                    SELECT id, condition_id, question, category, side, entry_price,
-                           size_usd, signal_type, confidence, wallet, entry_ts
-                    FROM polymarket_paper_trades
-                    WHERE exit_ts IS NULL AND archived = 0
-                    ORDER BY entry_ts DESC
-                """).fetchall()
-                for r in ppt_rows:
-                    positions.append({
-                        "id": f"ppt-{r[0]}", "ticker": r[1], "side": r[4],
-                        "entry_price": r[5], "size_usd": r[6],
-                        "signal_type": r[7] or "unknown",
-                        "confidence": r[8],
-                        "entry_ts": r[10], "platform": "polymarket",
-                        "full_token_id": r[1], "question": r[2], "category": r[3],
-                        "wallet": r[9],
-                    })
-                    poly_deployed += (r[6] or 0)
-
-                # Add to attribution
-                attr_v2 = pconn.execute("""
-                    SELECT signal_type, COUNT(*), SUM(CASE WHEN outcome='win' THEN 1 ELSE 0 END),
-                           SUM(CASE WHEN outcome IS NOT NULL THEN 1 ELSE 0 END), AVG(size_usd)
-                    FROM polymarket_paper_trades WHERE archived = 0 GROUP BY signal_type
-                """).fetchall()
-                for sig_row in attr_v2:
-                    sig_name = sig_row[0]
-                    for entry in attribution:
-                        if entry["signal_type"] == sig_name:
-                            entry["total_trades"] = (entry["total_trades"] or 0) + (sig_row[1] or 0)
-                            entry["wins"] = (entry["wins"] or 0) + (sig_row[2] or 0)
-                            entry["closed"] = (entry["closed"] or 0) + (sig_row[3] or 0)
-                            if entry["closed"] > 0:
-                                entry["win_rate"] = round(entry["wins"] / entry["closed"], 3)
-                            if sig_row[4]:
-                                entry["avg_stake"] = round(sig_row[4], 2)
-                            break
-                pconn.close()
-            except Exception as exc:
-                pass
-
-        # Polymarket bankroll math
-        poly_open = sum(1 for p in positions if p["platform"] == "polymarket")
-        starting_bankroll = 100_000
-        polymarket_cash = round(starting_bankroll - poly_deployed, 2)
-
-        # Kalshi legacy (archived) for display
-        kalshi_archived_count = conn.execute(
-            "SELECT COUNT(*) FROM trades WHERE archived = 1 AND (platform IS NULL OR platform = 'kalshi')"
-        ).fetchone()[0]
-        port = conn.execute("SELECT cash_usd, realized_pnl FROM portfolio ORDER BY id DESC LIMIT 1").fetchone()
-        kalshi_cash = float(port[0]) if port else 0.0
-        realized = float(port[1]) if port else 0.0
-
-        # Total counts include both legacy Kalshi trades AND new Polymarket trades
-        total_open = len(positions)
-        total_trades_active = conn.execute(
-            "SELECT COUNT(*) FROM trades WHERE archived = 0 OR archived IS NULL"
-        ).fetchone()[0] + poly_open
-
-        conn.close()
-
+        cash = round(starting_bankroll - deployed, 2)
         return {
             "available": True,
             "starting_bankroll": starting_bankroll,
-            "polymarket_cash": polymarket_cash,
-            "polymarket_open_count": poly_open,
-            "polymarket_deployed": round(poly_deployed, 2),
-            "kalshi_cash": round(kalshi_cash, 2),
-            "kalshi_open_count": kalshi_archived_count,
-            "total_trades": total_trades_active,
-            "open_trades": total_open,
+            "polymarket_cash": cash,
+            "polymarket_open_count": len(positions),
+            "polymarket_deployed": round(deployed, 2),
+            "total_trades": len(positions) + len(recent),
+            "open_trades": len(positions),
             "portfolio": {
-                "cash": polymarket_cash,
-                "total_value": polymarket_cash + poly_deployed,
-                "realized_pnl": realized,
+                "cash": cash,
+                "total_value": cash + deployed,
+                "realized_pnl": round(float(total_realized), 2),
             },
             "positions": positions,
             "attribution": attribution,
             "signal_attribution": attribution,
             "recent_closed": recent,
-            "platforms": platforms,
+            "platforms": {"polymarket": {"total": len(positions) + len(recent), "wins": sum(1 for r in recent if r["outcome"] == "win"), "open": len(positions)}},
         }
     except Exception as exc:
         return {"available": False, "reason": str(exc)}
@@ -4677,15 +4585,24 @@ def read_paper_portfolio() -> dict[str, Any]:
 
 
 def read_paper_trades() -> dict[str, Any]:
-    db_path = DATA_ROOT / "kalshi" / "paper_trades.db"
-    if not db_path.exists():
-        return {"available": False, "reason": "No paper trading DB found", "data": []}
+    """Recent paper trades from Postgres polymarket_paper_trades."""
+    from trading_platform.polymarket.db_connection import db as _db
     try:
-        from trading_platform.kalshi.paper_executor import KalshiPaperExecutor
-        executor = KalshiPaperExecutor(db_path)
-        trades = executor.get_recent_trades(limit=50)
-        executor.close()
-        return {"available": True, "data": trades, "count": len(trades)}
+        with _db() as conn:
+            rows = conn.execute("""
+                SELECT id, condition_id, question, category, side, entry_price,
+                       exit_price, size_usd, signal_type, confidence, wallet,
+                       entry_ts, exit_ts, outcome, realized_pnl, exit_reason
+                FROM polymarket_paper_trades
+                WHERE archived = 0
+                ORDER BY entry_ts DESC LIMIT 50
+            """).fetchall()
+            cols = ["id", "condition_id", "question", "category", "side",
+                    "entry_price", "exit_price", "size_usd", "signal_type",
+                    "confidence", "wallet", "entry_ts", "exit_ts", "outcome",
+                    "realized_pnl", "exit_reason"]
+            trades = [dict(zip(cols, r)) for r in rows]
+            return {"available": True, "data": trades, "count": len(trades)}
     except Exception as exc:
         return {"available": False, "reason": str(exc), "data": []}
 
