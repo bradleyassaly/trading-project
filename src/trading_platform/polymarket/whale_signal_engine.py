@@ -39,20 +39,13 @@ VALID_SIGNAL_TYPES = [
     "high_conviction_insider",
 ]
 
-# Signals proven to have zero or negative edge in the validation data.
-# They still get LOGGED (for future analysis) but are blocked from
-# reaching the paper executor. See reports/signal_analysis_clean.md.
+# Signals that should never reach the paper executor. Kept very small —
+# most "low edge" signals are now handled by the paper executor's
+# discovery mode ($1 stakes, auto-graduate at 15 resolutions) instead
+# of being hard-blocked here. Only truly untradeable types remain.
 DISABLED_SIGNAL_TYPES = {
-    "price_velocity",      # not a wallet signal, fictional trades
-    "oversized_bet",       # negative edge on corrected data (WR 10.6%, EV -0.39)
-    "whale_entry",         # break-even raw; replaced by whale_entry_filtered
-    "insider_entry",       # DISABLED: sampling bias invalidates accuracy metric
-    "cascade",             # by the time 5 wallets are in, info is priced in
-    "convergence",         # 87.7% WR = no edge over whale_entry alone (87.5%)
-    "no_position_entry",   # redundant with whale_entry (same wallet, same gate)
-    "market_maker_flip",   # negative EV on corrected data (-0.057)
-    "wallet_reversal",     # negative EV on corrected data (-0.033)
-    "accumulation",        # 3W/11L, -$4.5k on live paper book — calibration.status='disabled'
+    "price_velocity",      # synthetic wallet, 1300/day — pure noise
+    "whale_entry",         # forks to whale_entry_filtered at line ~1282
 }
 
 # Signals active but unproven — place paper trades at minimum stake,
@@ -1341,7 +1334,8 @@ class WhaleSignalEngine:
                     signal_type, trade.side, trade.wallet[:14],
                 )
         except Exception as exc:
-            logger.warning("[SIGNAL\u2192TRADE] EXECUTOR_FAILED: %s", exc)
+            import traceback as _tb
+            print(f"[SIGNAL→TRADE] EXECUTOR_FAILED: {exc}\n{''.join(_tb.format_exc())}", flush=True)
 
         # Live executor — DRY_RUN by default. Will be blocked by KillSwitch
         # unless POLYMARKET_LIVE_ENABLED=1 in .env. Purely additive:

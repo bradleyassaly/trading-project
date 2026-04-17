@@ -137,9 +137,15 @@ EXCLUDE_CATEGORIES: set[str] = set()  # no hard exclusions; tier-gating handles 
 LIVE_TRADE_CATEGORIES = {"politics", "geopolitics"}
 # Signal types to exclude from paper bankroll (fire+record only, no capital).
 EXCLUDE_SIGNAL_TYPES = {
-    "price_velocity",   # 95% WR, EV +0.004 = noise
-    "accumulation",     # 0% WR across 6 resolved, EV -0.78, PnL -$892 — disabled 2026-04-17
+    "price_velocity",   # 95% WR, EV +0.004 = noise — 1300/day, pure noise
 }
+
+# Discovery mode: signal types with fewer than this many resolved paper
+# trades take a simplified $1-stake path that bypasses Kelly, fusion,
+# execution gates, and most category restrictions. This lets us collect
+# resolution data on untested signals without bankroll risk.
+DISCOVERY_THRESHOLD = 15       # need 15 resolved before graduating to full sizing
+DISCOVERY_STAKE_USD = 1.0      # $1 flat — purely informational
 
 # Kelly sizing — Half-Kelly from validated 0.10-0.80 data (WR=73%, odds=0.82)
 HALF_KELLY = 0.05  # 5% of available bankroll (quarter-Kelly, conservative for paper phase)
@@ -430,6 +436,15 @@ class PolymarketPaperExecutor:
             logger.debug("[CAT_GATE] SKIP excluded signal_type=%s", signal_type)
             return None
 
+        # ── Discovery mode ──────────────────────────────────────────────
+        # Signal types with < DISCOVERY_THRESHOLD resolved paper trades
+        # take a simplified $1-stake path. Bypasses Kelly, fusion, exec
+        # gates, and most category restrictions — keeps entry-price bounds
+        # and duplicate-position check for correctness.
+        n_resolved = self._count_resolved(signal_type)
+        if n_resolved < DISCOVERY_THRESHOLD:
+            return self._execute_discovery(signal, signal_type, n_resolved)
+
         # Category gate (global): proven positive-EV categories only.
         # Resolve unknown categories via the classifier BEFORE gating —
         # previously, a missing category bypassed the allowlist entirely
@@ -478,7 +493,6 @@ class PolymarketPaperExecutor:
         # negative. See reports/category_grouping_analysis_2026-04-12.md.
         _EXCLUDED_CATS = {
             "accumulation": {"crypto", "entertainment", "sports"},
-            "insider_entry": {"crypto", "entertainment", "sports"},
         }
         category = signal.get("category") or "other"
         excluded = _EXCLUDED_CATS.get(signal_type, set())
@@ -1626,6 +1640,132 @@ class PolymarketPaperExecutor:
             "open_positions": len(positions),
             "realized_pnl": round(realized, 2),
             "unrealized_pnl": round(unrealized, 2),
+        }
+
+    def _count_resolved(self, signal_type: str) -> int:
+        """Count resolved paper trades for a signal type (cached per cycle)."""
+        if not hasattr(self, "_resolved_cache"):
+            self._resolved_cache = {}
+            self._resolved_cache_ts = 0
+        import time as _t
+        now = _t.time()
+        if now - self._resolved_cache_ts > 300:
+            self._resolved_cache.clear()
+            self._resolved_cache_ts = now
+        if signal_type in self._resolved_cache:
+            return self._resolved_cache[signal_type]
+        try:
+            from trading_platform.polymarket.db_connection import get_connection
+            conn = get_connection()
+            try:
+                n = conn.execute(
+                    "SELECT COUNT(*) FROM polymarket_paper_trades "
+                    "WHERE signal_type = ? AND exit_ts IS NOT NULL AND archived = 0",
+                    (signal_type,),
+                ).fetchone()[0]
+            finally:
+                conn.close()
+        except Exception:
+            n = 0
+        self._resolved_cache[signal_type] = n
+        return n
+
+    def _execute_discovery(
+        self, signal: dict[str, Any], signal_type: str, n_resolved: int,
+    ) -> dict[str, Any] | None:
+        """Place a $1 discovery paper trade — simplified gate path.
+
+        Keeps entry-price bounds and duplicate-position checks (correctness),
+        but skips Kelly, fusion, execution gates, and most category
+        restrictions so we collect resolution data on untested signals.
+        """
+        direction = (signal.get("direction") or "").upper()
+        if direction not in ("BUY", "SELL"):
+            return None
+        condition_id = signal.get("condition_id") or signal.get("token_id", "")
+        if not condition_id:
+            return None
+
+        ep = None
+        try:
+            ep = float(signal.get("price") or 0)
+        except (TypeError, ValueError):
+            pass
+        if ep is None or ep < MIN_ENTRY_PRICE or ep > MAX_ENTRY_PRICE:
+            return None
+
+        with self._wallet_lock:
+            existing = self._wallet_conn.execute(
+                "SELECT id FROM polymarket_paper_trades "
+                "WHERE condition_id = ? AND exit_ts IS NULL AND archived = 0",
+                (condition_id,),
+            ).fetchone()
+        if existing:
+            return None
+
+        # Emergency stop still applies
+        try:
+            if hasattr(self, "_kill_switch"):
+                stopped, _ = self._kill_switch.is_emergency_stopped()
+                if stopped:
+                    return None
+        except Exception:
+            pass
+
+        side = "YES" if direction == "BUY" else "NO"
+        category = signal.get("category") or "other"
+        if not category or category in ("other", "wallet_derived"):
+            try:
+                from trading_platform.polymarket.market_categorizer import classify_keywords
+                resolved_cat, _ = classify_keywords(
+                    signal.get("slug") or "", signal.get("question") or "",
+                )
+                if resolved_cat and resolved_cat != "other":
+                    category = resolved_cat.lower()
+            except Exception:
+                pass
+
+        wallet = signal.get("wallet", "")
+        question = signal.get("question") or ""
+        confidence = signal.get("confidence") or 0
+        stake = DISCOVERY_STAKE_USD
+
+        now_ts = int(__import__("time").time())
+        with self._wallet_lock:
+            self._wallet_conn.execute(
+                """INSERT INTO polymarket_paper_trades
+                   (condition_id, question, category, side, entry_price,
+                    size_usd, signal_type, confidence, wallet, entry_ts,
+                    archived, wallet_tier_at_fire, source_wallet,
+                    detection_lag_seconds, whale_entry_price, alpha_score_at_fire)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)""",
+                (condition_id, question[:200], category, side, ep,
+                 stake, signal_type, confidence, wallet[:42], now_ts,
+                 signal.get("wallet_tier", ""), signal.get("wallet", ""),
+                 signal.get("detection_lag_seconds"), signal.get("price"),
+                 signal.get("alpha_score", 0)),
+            )
+            self._wallet_conn.commit()
+            row = self._wallet_conn.execute(
+                "SELECT MAX(id) FROM polymarket_paper_trades WHERE condition_id = ? AND signal_type = ? AND entry_ts = ?",
+                (condition_id, signal_type, now_ts),
+            ).fetchone()
+            trade_id = row[0] if row else 0
+
+        print(
+            f"[DISCOVERY] {signal_type} ${stake:.0f} {side} @ {ep:.2f} "
+            f"| {question[:50]} | n_resolved={n_resolved}",
+            flush=True,
+        )
+        return {
+            "id": trade_id,
+            "signal_type": signal_type,
+            "side": side,
+            "entry_price": ep,
+            "size_usd": stake,
+            "category": category,
+            "discovery": True,
+            "n_resolved": n_resolved,
         }
 
     def get_open_positions(self) -> list[dict[str, Any]]:
