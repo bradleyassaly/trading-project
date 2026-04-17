@@ -93,16 +93,19 @@ class LiveTickStore:
         trade_size: float | None = None,
     ) -> None:
         received_at = datetime.now(tz=timezone.utc).isoformat()
-        with self._lock:
-            self._conn.execute(
-                """INSERT INTO ticks
-                   (asset_id, market_id, price, side, size, timestamp, received_at, msg_type,
-                    best_bid, best_ask, spread, trade_size)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (asset_id, market_id, price, side, size, timestamp, received_at, msg_type,
-                 best_bid, best_ask, spread, trade_size),
-            )
-            self._conn.commit()
+        try:
+            with self._lock:
+                self._conn.execute(
+                    """INSERT INTO ticks
+                       (asset_id, market_id, price, side, size, timestamp, received_at, msg_type,
+                        best_bid, best_ask, spread, trade_size)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (asset_id, market_id, price, side, size, timestamp, received_at, msg_type,
+                     best_bid, best_ask, spread, trade_size),
+                )
+                self._conn.commit()
+        except sqlite3.DatabaseError:
+            pass
 
     def insert_ticks_batch(
         self,
@@ -125,15 +128,18 @@ class LiveTickStore:
                 a, m, p, sd, sz, ts, mt = row[:7]
                 bb, ba, sp, tsz = None, None, None, None
             expanded.append((a, m, p, sd, sz, ts, received_at, mt, bb, ba, sp, tsz))
-        with self._lock:
-            self._conn.executemany(
-                """INSERT INTO ticks
-                   (asset_id, market_id, price, side, size, timestamp, received_at, msg_type,
-                    best_bid, best_ask, spread, trade_size)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                expanded,
-            )
-            self._conn.commit()
+        try:
+            with self._lock:
+                self._conn.executemany(
+                    """INSERT INTO ticks
+                       (asset_id, market_id, price, side, size, timestamp, received_at, msg_type,
+                        best_bid, best_ask, spread, trade_size)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    expanded,
+                )
+                self._conn.commit()
+        except sqlite3.DatabaseError:
+            return 0
         return len(rows)
 
     def get_ticks_for_hour(
