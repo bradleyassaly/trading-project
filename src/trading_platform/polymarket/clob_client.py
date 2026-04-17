@@ -267,6 +267,150 @@ class ClobClient:
                 error_msg=str(exc), raw={},
             )
 
+    def place_limit_order(
+        self,
+        token_id: str,
+        side: str,
+        size_usdc: float,
+        timeout_sec: float = 30.0,
+        aggression: str = "passive",
+    ) -> OrderResult:
+        """Place a limit order with fill monitoring.
+
+        Aggression levels:
+        - "passive": at the bid (maker) — earns spread, may not fill
+        - "mid": at midpoint — balanced fill speed vs. price improvement
+        - "aggressive": at ask+tick — equivalent to market, guaranteed fill
+
+        Posts as GTC (good-till-cancel), polls for fill up to timeout_sec,
+        cancels if unfilled.
+        """
+        if not self._configured:
+            return OrderResult(
+                success=False, order_id=None, status="error",
+                filled_price=None, filled_size=None,
+                error_msg="CLOB not configured", raw={},
+            )
+
+        try:
+            from py_clob_client.client import ClobClient as PyClobClient
+            from py_clob_client.clob_types import ApiCreds, OrderArgs, OrderType
+            from py_clob_client.constants import POLYGON
+            import os as _os, time as _time
+
+            funder = _os.environ.get("POLYMARKET_FUNDER_ADDRESS") or ""
+            client_kwargs = dict(
+                host=CLOB_BASE, chain_id=POLYGON, key=self._private_key,
+                creds=ApiCreds(
+                    api_key=self._api_key, api_secret=self._api_secret,
+                    api_passphrase=self._passphrase,
+                ),
+            )
+            if funder:
+                client_kwargs["signature_type"] = int(
+                    _os.environ.get("POLYMARKET_SIGNATURE_TYPE", "1")
+                )
+                client_kwargs["funder"] = funder
+            client = PyClobClient(**client_kwargs)
+
+            book = self.get_order_book(token_id)
+            bids = book.get("bids") or []
+            asks = book.get("asks") or []
+            best_bid = float(bids[0]["price"]) if bids else 0.50
+            best_ask = float(asks[0]["price"]) if asks else 0.50
+            mid = (best_bid + best_ask) / 2 if best_bid and best_ask else 0.50
+            tick = 0.01
+
+            if side.upper() == "BUY":
+                if aggression == "passive":
+                    price = round(best_bid, 2)
+                elif aggression == "mid":
+                    price = round(mid, 2)
+                else:
+                    price = round(best_ask + tick, 2)
+            else:
+                if aggression == "passive":
+                    price = round(best_ask, 2)
+                elif aggression == "mid":
+                    price = round(mid, 2)
+                else:
+                    price = round(best_bid - tick, 2)
+            price = max(0.01, min(0.99, price))
+
+            shares_int = max(1, int(float(size_usdc) / price))
+            order_args = OrderArgs(
+                token_id=token_id, price=price,
+                size=float(shares_int), side=side.upper(),
+            )
+
+            order_type = OrderType.FOK if aggression == "aggressive" else OrderType.GTC
+            signed = client.create_order(order_args)
+            resp = client.post_order(signed, order_type)
+            order_id = resp.get("orderID") or resp.get("id")
+            status = resp.get("status", "unknown")
+
+            if order_type == OrderType.FOK or status == "matched":
+                filled = resp.get("avgFilledPrice")
+                return OrderResult(
+                    success=status in ("matched", "live", "delayed"),
+                    order_id=order_id, status=status,
+                    filled_price=float(filled) if filled else price,
+                    filled_size=float(size_usdc), error_msg=None, raw=resp,
+                )
+
+            # GTC: poll for fill
+            deadline = _time.time() + timeout_sec
+            while _time.time() < deadline:
+                _time.sleep(2.0)
+                try:
+                    check = client.get_order(order_id)
+                    st = check.get("status", "")
+                    if st == "matched":
+                        fp = check.get("avgFilledPrice") or check.get("associate_trades", [{}])[0].get("price")
+                        return OrderResult(
+                            success=True, order_id=order_id, status="matched",
+                            filled_price=float(fp) if fp else price,
+                            filled_size=float(size_usdc), error_msg=None,
+                            raw=check,
+                        )
+                    if st in ("cancelled", "expired"):
+                        break
+                except Exception:
+                    pass
+
+            # Unfilled — cancel and fall back to aggressive
+            try:
+                client.cancel(order_id)
+            except Exception:
+                pass
+
+            if aggression == "passive":
+                logger.info("[clob] passive order unfilled after %.0fs, escalating to mid", timeout_sec)
+                return self.place_limit_order(
+                    token_id, side, size_usdc,
+                    timeout_sec=timeout_sec, aggression="mid",
+                )
+            elif aggression == "mid":
+                logger.info("[clob] mid order unfilled, escalating to aggressive (FOK)")
+                return self.place_limit_order(
+                    token_id, side, size_usdc,
+                    timeout_sec=0, aggression="aggressive",
+                )
+
+            return OrderResult(
+                success=False, order_id=order_id, status="unfilled",
+                filled_price=None, filled_size=None,
+                error_msg="order timed out", raw={},
+            )
+
+        except Exception as exc:
+            logger.warning("place_limit_order failed: %s", exc)
+            return OrderResult(
+                success=False, order_id=None, status="error",
+                filled_price=None, filled_size=None,
+                error_msg=str(exc), raw={},
+            )
+
     # ── Diagnostics ────────────────────────────────────────────────────────
 
     def test_connection(self) -> dict[str, Any]:

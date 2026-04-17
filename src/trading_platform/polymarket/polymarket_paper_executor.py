@@ -647,6 +647,20 @@ class PolymarketPaperExecutor:
         if confluence >= 1:
             signal["confluence_count"] = confluence + 1  # +1 for current signal
 
+        # ── Resolution timing ─────────────────────────────────────────
+        # Prefer markets that resolve sooner — capital tied up for 30
+        # days earns less annualized return than capital that turns over
+        # in 3 days. Score: 1/sqrt(days_to_close), capped at [0.5, 1.5].
+        # Markets closing within 1 day get a 1.5× boost; 7 days → 1.0×
+        # (neutral); 30 days → 0.55×; unknown → 1.0× (no penalty).
+        time_mult = 1.0
+        days_to_close = self._days_to_close(condition_id)
+        if days_to_close is not None and days_to_close > 0:
+            import math
+            time_mult = min(1.5, max(0.5, 1.0 / math.sqrt(max(days_to_close, 0.5))))
+            signal["days_to_close"] = round(days_to_close, 1)
+            signal["time_mult"] = round(time_mult, 2)
+
         # Kelly-based position sizing — validated from win_rate_validation.md.
         # PROBATION signals get minimum stake; others use half-Kelly.
         from trading_platform.polymarket.whale_signal_engine import PROBATION_SIGNAL_TYPES
@@ -668,14 +682,14 @@ class PolymarketPaperExecutor:
                 band_adj = 1.0
             else:
                 band_adj = 0.7
-            stake = round(max(MIN_STAKE_USD, min(base * band_adj, MAX_STAKE_USD)), 2)
+            stake = round(max(MIN_STAKE_USD, min(base * band_adj * time_mult, MAX_STAKE_USD)), 2)
             # Check portfolio concentration
             if deployed + stake > STARTING_BANKROLL * MAX_PORTFOLIO_PCT:
                 stake = max(0, round(STARTING_BANKROLL * MAX_PORTFOLIO_PCT - deployed, 2))
             size_reason = (
                 f"half-Kelly={HALF_KELLY:.0%} conf={confidence:.2f} "
                 f"band={'optimal' if band_adj == 1.0 else 'edge'} "
-                f"stake=${stake:.0f}"
+                f"time={time_mult:.2f} stake=${stake:.0f}"
             )
 
         if stake < MIN_STAKE_USD:
@@ -1687,6 +1701,28 @@ class PolymarketPaperExecutor:
             "realized_pnl": round(realized, 2),
             "unrealized_pnl": round(unrealized, 2),
         }
+
+    def _days_to_close(self, condition_id: str) -> float | None:
+        """Return estimated days until market closes, or None if unknown."""
+        try:
+            from trading_platform.polymarket.db_connection import get_connection
+            conn = get_connection()
+            try:
+                row = conn.execute(
+                    "SELECT end_date_iso FROM markets WHERE condition_id = ?",
+                    (condition_id,),
+                ).fetchone()
+                if not row or not row[0]:
+                    return None
+                from datetime import datetime, timezone
+                end = datetime.fromisoformat(row[0].replace("Z", "+00:00"))
+                now = datetime.now(tz=timezone.utc)
+                delta = (end - now).total_seconds() / 86400.0
+                return max(0.0, delta)
+            finally:
+                conn.close()
+        except Exception:
+            return None
 
     def _count_confluence(self, condition_id: str, current_signal_type: str) -> int:
         """Count distinct signal types that fired on the same market in the last hour.

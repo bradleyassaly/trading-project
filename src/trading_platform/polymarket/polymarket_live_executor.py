@@ -247,9 +247,18 @@ class PolymarketLiveExecutor:
         if not self._clob.is_configured:
             return self._result(False, reason="CLOB not configured — set POLYMARKET_API_KEY etc.")
 
-        order_result: OrderResult = self._clob.place_market_order(
-            token_id=token_id, side="BUY", size_usdc=size_usd, max_slippage=0.02,
-        )
+        # Use optimized limit order: starts passive (at bid, earns spread),
+        # escalates to mid then aggressive if unfilled. Falls back to the
+        # old market-order path if place_limit_order isn't available.
+        if hasattr(self._clob, "place_limit_order"):
+            order_result: OrderResult = self._clob.place_limit_order(
+                token_id=token_id, side="BUY", size_usdc=size_usd,
+                timeout_sec=30.0, aggression="passive",
+            )
+        else:
+            order_result: OrderResult = self._clob.place_market_order(
+                token_id=token_id, side="BUY", size_usdc=size_usd, max_slippage=0.02,
+            )
         self._record_attempt(
             signal, size_usd, current_price, order_result,
             dry_run=False,
