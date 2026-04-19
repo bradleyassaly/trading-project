@@ -415,6 +415,105 @@ def get_wallet_alpha_status(
     return ("copyable" if is_copyable else "not_copyable", score)
 
 
+# Specialist detection — 2026-04-18. Backtest on 164 resolved paper trades
+# showed specialist-sourced trades at 52.6% WR / +$960 PnL vs generalist
+# 31.8% / -$1,026 on identical signal types. Criteria chosen to require
+# both concentration AND positive-edge evidence, not just concentration.
+SPECIALIST_MIN_CATEGORY_CONCENTRATION = 0.75  # ≥75% of wallet's resolved trades in one category
+SPECIALIST_MIN_CATEGORY_WR = 0.55             # ≥55% WR in that category
+SPECIALIST_MIN_CATEGORY_RESOLVED = 20         # ≥20 resolved trades in that category
+SPECIALIST_MIN_TOTAL_PNL = 0.0                # net positive lifetime in that category
+
+
+def is_specialist(
+    db_path: str | Path,
+    wallet: str,
+    category: str,
+) -> dict[str, Any]:
+    """Return {"is_specialist": bool, ...diagnostics} for a wallet × category.
+
+    A wallet is a "specialist" in a category when ALL of:
+      * Has ≥ SPECIALIST_MIN_CATEGORY_RESOLVED resolved trades in it
+      * ≥ SPECIALIST_MIN_CATEGORY_WR win rate in it
+      * ≥ SPECIALIST_MIN_CATEGORY_CONCENTRATION fraction of their lifetime
+        resolved trades live in this category (their primary focus)
+      * Net positive lifetime P&L in this category (edge is real)
+      * is_copyable = 1 (passes the baseline alpha filter)
+
+    Specialists earn a confidence/Kelly boost downstream because the
+    2026-04-18 backtest showed their signals land at 52.6% WR vs 31.8%
+    for generalists on the same signal types.
+
+    Returns a diagnostic dict even when False so callers can log why.
+    """
+    result: dict[str, Any] = {
+        "is_specialist": False,
+        "reason": None,
+        "concentration": None,
+        "win_rate": None,
+        "resolved_trades": None,
+        "total_pnl": None,
+        "is_copyable": None,
+    }
+    if not wallet or not category:
+        result["reason"] = "missing wallet/category"
+        return result
+    try:
+        conn = connect_wallet_db(db_path)
+        try:
+            # One query: wallet's category-specific row + their total resolved.
+            cat_row = conn.execute(
+                "SELECT resolved_trades, win_rate, total_pnl, is_copyable "
+                "FROM wallet_alpha_scores WHERE wallet = ? AND category = ?",
+                (wallet, category),
+            ).fetchone()
+            if not cat_row:
+                result["reason"] = "no row for (wallet, category)"
+                return result
+            total_row = conn.execute(
+                "SELECT SUM(resolved_trades) FROM wallet_alpha_scores WHERE wallet = ?",
+                (wallet,),
+            ).fetchone()
+        finally:
+            conn.close()
+    except Exception as exc:
+        logger.debug("is_specialist lookup failed: %s", exc)
+        result["reason"] = f"db error: {str(exc)[:60]}"
+        return result
+
+    cat_resolved = int(cat_row[0] or 0)
+    cat_wr = float(cat_row[1] or 0.0)
+    cat_pnl = float(cat_row[2] or 0.0)
+    cat_copyable = int(cat_row[3] or 0) == 1
+    total_resolved = int((total_row[0] if total_row else 0) or 0)
+    concentration = (cat_resolved / total_resolved) if total_resolved > 0 else 0.0
+
+    result["concentration"] = round(concentration, 3)
+    result["win_rate"] = round(cat_wr, 3)
+    result["resolved_trades"] = cat_resolved
+    result["total_pnl"] = round(cat_pnl, 2)
+    result["is_copyable"] = cat_copyable
+
+    if cat_resolved < SPECIALIST_MIN_CATEGORY_RESOLVED:
+        result["reason"] = f"n={cat_resolved} < {SPECIALIST_MIN_CATEGORY_RESOLVED}"
+        return result
+    if cat_wr < SPECIALIST_MIN_CATEGORY_WR:
+        result["reason"] = f"wr={cat_wr:.2f} < {SPECIALIST_MIN_CATEGORY_WR}"
+        return result
+    if concentration < SPECIALIST_MIN_CATEGORY_CONCENTRATION:
+        result["reason"] = f"concentration={concentration:.2f} < {SPECIALIST_MIN_CATEGORY_CONCENTRATION}"
+        return result
+    if cat_pnl <= SPECIALIST_MIN_TOTAL_PNL:
+        result["reason"] = f"pnl=${cat_pnl:.0f} not positive"
+        return result
+    if not cat_copyable:
+        result["reason"] = "is_copyable=0"
+        return result
+
+    result["is_specialist"] = True
+    return result
+
+
 def get_wallet_alpha_full(
     db_path: str | Path,
     wallet: str,

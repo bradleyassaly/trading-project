@@ -140,6 +140,31 @@ class PolymarketLiveExecutor:
         except Exception as exc:
             logger.debug("circuit breaker check failed (proceeding): %s", exc)
 
+        # 0c. Specialist boost (mirrors paper executor ~L628). Specialist
+        # wallets trading in their proven category earn 1.25x confidence
+        # and 2x alpha → roughly 2x stake. Applied pre-Kelly so the
+        # boost flows through to `size_usd` below. Backtest on 164
+        # resolved paper trades: specialists 52.6% WR / +$960 PnL vs
+        # generalists 31.8% / -$1,026 on identical signal types.
+        src_wallet = signal.get("wallet") or ""
+        if src_wallet and src_wallet not in ("velocity_detector", "order_book_monitor"):
+            try:
+                from trading_platform.polymarket.alpha_scores import is_specialist
+                spec = is_specialist(self._db_path, src_wallet, cat)
+                if spec["is_specialist"]:
+                    signal["is_specialist_source"] = True
+                    old_conf = confidence
+                    confidence = min(0.99, old_conf * 1.25)
+                    signal["confidence"] = confidence
+                    logger.info(
+                        "[LIVE][SPECIALIST_BOOST] %s in %s (conc=%.0f%% wr=%.0f%% n=%d); conf %.2f→%.2f",
+                        src_wallet[:14], cat,
+                        spec["concentration"] * 100, spec["win_rate"] * 100,
+                        spec["resolved_trades"], old_conf, confidence,
+                    )
+            except Exception as exc:
+                logger.debug("[LIVE] specialist boost lookup failed: %s", exc)
+
         # 1. Kelly size. Hard cap at 7% of current live bankroll so a
         # single bad trade can't blow out the account — derived from
         # live bankroll rather than hardcoded $25 so the cap tracks
@@ -152,6 +177,13 @@ class PolymarketLiveExecutor:
         size_usd = self._sizer.get_trade_size(sig_type, confidence)
         if size_usd > phase1_cap:
             size_usd = phase1_cap
+        # Specialist boost on size: if source wallet qualifies, 2x the
+        # Kelly-derived size (still capped by phase1_cap above).
+        if signal.get("is_specialist_source") and size_usd > 0:
+            boosted = min(phase1_cap, size_usd * 2.0)
+            if boosted > size_usd:
+                logger.info("[LIVE][SPECIALIST_BOOST] size $%.2f → $%.2f", size_usd, boosted)
+                size_usd = boosted
         if size_usd <= 0:
             return self._result(False, reason=f"Kelly says no edge for {sig_type}")
 

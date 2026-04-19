@@ -86,6 +86,56 @@ pg "SELECT signal_type, COUNT(*) n, SUM(hypothesis_correct) correct,
    GROUP BY signal_type ORDER BY n DESC;"
 
 echo
+echo "-- Specialist vs generalist paper trades ----------------------------"
+echo "   (Specialist = concentration >=75% + WR >=55% + n>=20 + copyable + positive PnL in that category)"
+pg "WITH specialists AS (
+      SELECT wc.wallet, wc.category
+        FROM wallet_alpha_scores wc
+        JOIN (SELECT wallet, SUM(resolved_trades) AS total FROM wallet_alpha_scores GROUP BY wallet) wt ON wt.wallet = wc.wallet
+       WHERE wc.resolved_trades >= 20 AND wt.total >= 20
+         AND (wc.resolved_trades::numeric/NULLIF(wt.total,0)) >= 0.75
+         AND wc.win_rate >= 0.55
+         AND wc.total_pnl > 0
+         AND wc.is_copyable = 1
+    ),
+    tagged AS (
+      SELECT pt.*, CASE WHEN s.wallet IS NOT NULL THEN 'specialist' ELSE 'generalist' END AS trader_type
+        FROM polymarket_paper_trades pt
+        LEFT JOIN specialists s ON s.wallet = pt.wallet AND s.category = pt.category
+       WHERE pt.archived=0 AND pt.exit_ts IS NOT NULL AND pt.wallet IS NOT NULL AND pt.wallet != ''
+    )
+    SELECT trader_type, COUNT(*) closed, SUM(CASE WHEN outcome='win' THEN 1 ELSE 0 END) wins,
+           ROUND((SUM(CASE WHEN outcome='win' THEN 1.0 ELSE 0 END)/NULLIF(COUNT(*),0))::numeric*100,1) wr_pct,
+           ROUND(SUM(COALESCE(realized_pnl,0))::numeric,2) pnl,
+           ROUND(AVG(realized_pnl/NULLIF(size_usd,0))::numeric*100,1) avg_ret_pct
+      FROM tagged GROUP BY trader_type ORDER BY trader_type;"
+
+echo
+echo "-- Specialist boost lift by signal type ------------------------------"
+pg "WITH specialists AS (
+      SELECT wc.wallet, wc.category FROM wallet_alpha_scores wc
+      JOIN (SELECT wallet, SUM(resolved_trades) AS total FROM wallet_alpha_scores GROUP BY wallet) wt ON wt.wallet = wc.wallet
+      WHERE wc.resolved_trades >= 20 AND wt.total >= 20
+        AND (wc.resolved_trades::numeric/NULLIF(wt.total,0)) >= 0.75
+        AND wc.win_rate >= 0.55 AND wc.total_pnl > 0 AND wc.is_copyable = 1
+    ),
+    tagged AS (
+      SELECT pt.signal_type, pt.outcome, pt.realized_pnl,
+             CASE WHEN s.wallet IS NOT NULL THEN 'spec' ELSE 'gen' END AS t
+        FROM polymarket_paper_trades pt
+        LEFT JOIN specialists s ON s.wallet = pt.wallet AND s.category = pt.category
+       WHERE pt.archived=0 AND pt.exit_ts IS NOT NULL
+    )
+    SELECT signal_type,
+           COUNT(*) FILTER (WHERE t='spec') spec_n,
+           ROUND((SUM(CASE WHEN t='spec' AND outcome='win' THEN 1.0 ELSE 0 END)/NULLIF(COUNT(*) FILTER (WHERE t='spec'),0))::numeric*100,1) spec_wr,
+           COUNT(*) FILTER (WHERE t='gen') gen_n,
+           ROUND((SUM(CASE WHEN t='gen' AND outcome='win' THEN 1.0 ELSE 0 END)/NULLIF(COUNT(*) FILTER (WHERE t='gen'),0))::numeric*100,1) gen_wr
+      FROM tagged GROUP BY signal_type
+      HAVING COUNT(*) >= 5
+      ORDER BY spec_n DESC NULLS LAST;"
+
+echo
 echo "-- Scheduler failures (7d) ------------------------------------------"
 docker compose logs --since 168h scheduler 2>&1 | grep -E '\[fail\]' | awk -F'"message": "' '{print $2}' | awk -F'"}' '{print $1}' | sort | uniq -c | sort -rn | head -10
 
