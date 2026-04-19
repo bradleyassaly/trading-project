@@ -137,10 +137,23 @@ PAPER_TRADE_CATEGORIES = {
 TIER1_ONLY_CATEGORIES = {"sports"}  # require wallet_tier='tier1' for these
 EXCLUDE_CATEGORIES: set[str] = set()  # no hard exclusions; tier-gating handles it
 # Live trading: strict allowlist (statistically significant positive EV only).
-LIVE_TRADE_CATEGORIES = {"politics", "geopolitics"}
+# 2026-04-18 expansion rationale (paper-trade data, archived=0, post-price_velocity cleanup):
+#   sports   : 75 closed, 46.7% WR, +49% avg return, +$965 PnL  ← added
+#   crypto   : 10 closed, 60.0% WR, +109% avg return, +$11 PnL   ← added
+#   politics : 3 closed, 0% WR, -$10 PnL (tiny sample, kept)
+#   geopolitics: 11 closed, 27.3% WR, -$124 PnL (tiny sample, kept — under review)
+# Excluded (negative or marginal): entertainment, science, other
+# Sports WR < 52% but positive skew (right-tail wins) gives positive EV;
+# Kelly sizing handles that correctly. Kill switch enforces per-trade cap.
+LIVE_TRADE_CATEGORIES = {"politics", "geopolitics", "sports", "crypto"}
 # Signal types to exclude from paper bankroll (fire+record only, no capital).
 EXCLUDE_SIGNAL_TYPES = {
     "price_velocity",   # 95% WR, EV +0.004 = noise — 1300/day, pure noise
+    # 2026-04-18: signals with ≥5 resolved at <30% WR or strongly negative
+    # PnL. Kept from firing at all until diagnosed and fixed.
+    "copyable_contrarian",  # 0/7 resolved, 0% WR
+    "no_position_entry",    # 1/5 resolved, 20% WR, EV -0.1
+    "news_reactor",         # 2/10 resolved, 20% WR
 }
 
 # Signal clusters — correlated signals share a cluster. TRUE confluence
@@ -575,18 +588,33 @@ class PolymarketPaperExecutor:
         gate_category = signal.get("category") or "other"
         if gate_wallet and gate_wallet not in ("velocity_detector", "order_book_monitor"):
             try:
-                from trading_platform.polymarket.alpha_scores import get_wallet_alpha
-                alpha = get_wallet_alpha(str(self._wallet_db_path), gate_wallet, gate_category)
+                from trading_platform.polymarket.alpha_scores import get_wallet_alpha_status
+                status, alpha = get_wallet_alpha_status(
+                    str(self._wallet_db_path), gate_wallet, gate_category,
+                )
                 gate_tier = signal.get("wallet_tier")
-                if alpha <= 0:
+                if status == "not_copyable":
+                    # 2026-04-18: wallet has scored data in this category
+                    # AND is explicitly not copyable — BLOCK the signal.
+                    # Root-cause of the accumulation 0/6: a -$70K lifetime
+                    # wallet (0x7ea571c4...) with is_copyable=0 in sports
+                    # fired 6 signals on Real Madrid YES that all lost,
+                    # because the old alpha gate collapsed not_copyable
+                    # into the same "bypass with alpha=0" path as unscored.
+                    logger.info(
+                        "[ALPHA_GATE] BLOCK wallet %s not copyable in %s (signal=%s)",
+                        gate_wallet[:14], gate_category, signal_type,
+                    )
+                    return None
+                if status == "unscored":
                     # Tier1/1h bypass: known-quality wallets pass even without
                     # per-category alpha scores. Tier2: previously hard-rejected,
                     # but that killed 90%+ of signal flow and blocked learning.
-                    # Now bypass with zero score (fusion learn-tier handles
+                    # Bypass with zero score (fusion learn-tier handles
                     # the sizing — 25% of already-small stakes).
                     signal["alpha_score"] = 0.0
                     logger.info(
-                        "[ALPHA_GATE] wallet %s %s bypass (alpha=0), signal=%s",
+                        "[ALPHA_GATE] wallet %s %s unscored-bypass, signal=%s",
                         gate_wallet[:14], gate_tier or "unknown", signal_type,
                     )
                 else:
@@ -610,6 +638,24 @@ class PolymarketPaperExecutor:
             logger.info(
                 "[SIGNAL\u2192TRADE] SKIP: %s entry_price=%s outside fillable band [%s, %s]",
                 signal_type, ep, MIN_ENTRY_PRICE, MAX_ENTRY_PRICE,
+            )
+            return None
+
+        # 2026-04-18: YES-favorite guard. Across all kept signal types,
+        # "BUY YES at entry_price >= 0.5" was a disaster:
+        #   YES favorite (>=0.7): 18 closed, 11% WR, -$335 PnL
+        #   YES mid (0.5-0.7):    29 closed, 35% WR, -$274 PnL
+        #   YES underdog (<0.5):  41 closed, 68% WR, +$34 PnL
+        # Economic intuition: copy-trade latency means whale's info edge
+        # is already priced in; buying a YES favorite is paying premium
+        # for a small upside while carrying large downside risk. Block
+        # the signal entirely when BUY at >= YES_FAVORITE_BLOCK_PRICE.
+        YES_FAVORITE_BLOCK_PRICE = 0.50
+        _dir_upper = (signal.get("direction") or "").upper()
+        if _dir_upper == "BUY" and ep is not None and ep >= YES_FAVORITE_BLOCK_PRICE:
+            logger.info(
+                "[YES_FAV_GATE] BLOCK %s BUY@%.3f (>= %.2f) — copy-trade tail risk",
+                signal_type, ep, YES_FAVORITE_BLOCK_PRICE,
             )
             return None
         if OPTIMAL_BAND_LOW <= ep <= OPTIMAL_BAND_HIGH:
@@ -1948,6 +1994,34 @@ class PolymarketPaperExecutor:
             f"| {question[:50]} | n_resolved={n_resolved}",
             flush=True,
         )
+
+        # 2026-04-18: discovery trades also generate a hypothesis so the
+        # thesis scorecard can measure their outcomes. Previously only
+        # full-path trades got hypotheses, which meant the scorecard
+        # saw 10 of 157 paper trades and was blind to the rest.
+        # Wallet-less scanner signals (velocity/order-book) have no
+        # meaningful wallet basis — skip hypothesis for those.
+        if wallet and wallet not in ("velocity_detector", "order_book_monitor"):
+            try:
+                from trading_platform.polymarket.trade_hypotheses import (
+                    build_hypothesis, persist_hypothesis,
+                )
+                hypo = build_hypothesis(
+                    str(self._wallet_db_path),
+                    wallet=wallet,
+                    category=category,
+                    signal_type=signal_type,
+                    market_slug=signal.get("slug") or "",
+                    market_question=question or "",
+                    direction=side,
+                    entry_price=float(ep or 0),
+                    convergence_count=int(signal.get("converging_wallets") or 0),
+                )
+                hypo.position_size_reason = "discovery_mode"
+                persist_hypothesis(str(self._wallet_db_path), hypo, trade_id=trade_id)
+            except Exception as exc:
+                logger.debug("discovery hypothesis generation failed: %s", exc)
+
         return {
             "id": trade_id,
             "signal_type": signal_type,
@@ -2186,5 +2260,29 @@ class PolymarketPaperExecutor:
         }
 
     def close(self) -> None:
+        # Release both the legacy SQLite conn AND the pooled Postgres
+        # wallet conn. Skipping the wallet conn was the root cause of
+        # pool exhaustion: every API handler that did
+        # `PolymarketPaperExecutor().foo()` without `with` leaked one
+        # pool slot permanently. See 2026-04-18 audit.
         with self._lock:
-            self._conn.close()
+            try:
+                self._conn.close()
+            except Exception:
+                pass
+            try:
+                self._wallet_conn.close()
+            except Exception:
+                pass
+
+    def __enter__(self) -> "PolymarketPaperExecutor":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self.close()
+
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except Exception:
+            pass

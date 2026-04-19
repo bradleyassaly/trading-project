@@ -43,8 +43,8 @@ def find_orphan_candidates(conn, *, min_signals: int = MIN_ORPHAN_SIGNALS) -> li
             SELECT 1 FROM wallet_trades wt WHERE wt.wallet = so.wallet
           )
         GROUP BY so.wallet
-        HAVING n >= ?
-        ORDER BY n DESC
+        HAVING COUNT(*) >= ?
+        ORDER BY COUNT(*) DESC
         """,
         (min_signals,),
     ).fetchall()

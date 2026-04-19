@@ -351,7 +351,7 @@ class MarketCategorizer:
         self._memo: dict[str, str] = {}
         if db_path is None:
             from trading_platform.polymarket.wallet_db import WalletDB
-            db_path = str(WalletDB()._path)
+            db_path = WalletDB.default_path()
         self._db_path = str(db_path)
         self._ensure_table()
 

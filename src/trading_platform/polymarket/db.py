@@ -70,7 +70,18 @@ def connect_wallet_db(
                 check_same_thread=check_same_thread,
             )
         except Exception as exc:
-            logger.warning("Postgres route failed, falling back to SQLite: %s", exc)
+            # SQLite fallback is stale (all writes go to Postgres post-cutover),
+            # so serving reads from it creates silent data divergence. Log at
+            # ERROR so it shows up in the watchdog and Telegram alerts instead
+            # of being swallowed as a routine warning.
+            # Opt-out: set DB_STRICT_POSTGRES=0 to restore legacy fallback.
+            logger.error(
+                "Postgres route failed: %s. SQLite is stale post-cutover; "
+                "either investigate pool/host or raise PG_POOL_MAX_SIZE.",
+                exc,
+            )
+            if _os.environ.get("DB_STRICT_POSTGRES", "1") != "0":
+                raise
 
     resolved = _resolve_path(path)
     if not resolved:

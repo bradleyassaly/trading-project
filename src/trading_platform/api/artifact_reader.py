@@ -5159,12 +5159,12 @@ def read_polymarket_signals_feed() -> dict[str, Any]:
         open_tickers = set()
         try:
             from trading_platform.polymarket.polymarket_paper_executor import PolymarketPaperExecutor
-            executor = PolymarketPaperExecutor()
-            with executor._lock:
-                rows = executor._conn.execute(
-                    "SELECT ticker FROM trades WHERE platform='polymarket' AND status='open'"
-                ).fetchall()
-            open_tickers = {r[0] for r in rows}
+            with PolymarketPaperExecutor() as executor:
+                with executor._lock:
+                    rows = executor._conn.execute(
+                        "SELECT ticker FROM trades WHERE platform='polymarket' AND status='open'"
+                    ).fetchall()
+                open_tickers = {r[0] for r in rows}
         except Exception:
             pass
 

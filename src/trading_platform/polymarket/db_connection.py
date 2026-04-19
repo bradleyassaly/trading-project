@@ -81,7 +81,8 @@ _pool_instance = None
 _pool_lock = __import__("threading").Lock()
 
 POOL_MIN_SIZE = int(os.environ.get("PG_POOL_MIN_SIZE", "2"))
-POOL_MAX_SIZE = int(os.environ.get("PG_POOL_MAX_SIZE", "10"))
+POOL_MAX_SIZE = int(os.environ.get("PG_POOL_MAX_SIZE", "20"))
+POOL_TIMEOUT = float(os.environ.get("PG_POOL_TIMEOUT", "60.0"))
 
 
 def _get_pool():
@@ -111,7 +112,7 @@ def _get_pool():
             max_size=POOL_MAX_SIZE,
             kwargs={"autocommit": True},
             open=True,
-            timeout=30.0,
+            timeout=POOL_TIMEOUT,
             max_idle=300.0,
         )
         logger.info(

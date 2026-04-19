@@ -350,6 +350,11 @@ def get_wallet_alpha(
 
     Returns 0.0 if no row exists or ``is_copyable = 0``. The signal
     engine uses 0.0 as a "skip this signal" sentinel.
+
+    NOTE: this function collapses "unscored" and "not copyable" into the
+    same 0.0 return. Callers that need to distinguish them (to bypass
+    unscored wallets while blocking known-bad ones) should use
+    ``get_wallet_alpha_status`` instead.
     """
     if not wallet or not category:
         return 0.0
@@ -368,6 +373,46 @@ def get_wallet_alpha(
     if not row or not row[1]:
         return 0.0
     return float(row[0])
+
+
+def get_wallet_alpha_status(
+    db_path: str | Path,
+    wallet: str,
+    category: str,
+) -> tuple[str, float]:
+    """Return (status, score) for a wallet × category.
+
+    status is one of:
+      * ``"copyable"``      — row exists and is_copyable=1 (use score)
+      * ``"not_copyable"``  — row exists and is_copyable=0 (BLOCK signal)
+      * ``"unscored"``      — no row (untested; caller may bypass at low size)
+
+    This three-way distinction was added 2026-04-18 after the
+    `accumulation` signal was found to be 0/6 correct on trades from a
+    -$70K lifetime wallet. The old two-way return caused the paper
+    executor to "bypass with 0 alpha" on both unscored AND explicitly
+    non-copyable wallets, silently copying losing wallets that had
+    real data saying "don't copy me".
+    """
+    if not wallet or not category:
+        return ("unscored", 0.0)
+    try:
+        conn = connect_wallet_db(db_path)
+        try:
+            row = conn.execute(
+                "SELECT copyability, is_copyable FROM wallet_alpha_scores WHERE wallet = ? AND category = ?",
+                (wallet, category),
+            ).fetchone()
+        finally:
+            conn.close()
+    except Exception as exc:
+        logger.debug("get_wallet_alpha_status lookup failed: %s", exc)
+        return ("unscored", 0.0)
+    if not row:
+        return ("unscored", 0.0)
+    is_copyable = int(row[1] or 0) == 1
+    score = float(row[0] or 0.0)
+    return ("copyable" if is_copyable else "not_copyable", score)
 
 
 def get_wallet_alpha_full(

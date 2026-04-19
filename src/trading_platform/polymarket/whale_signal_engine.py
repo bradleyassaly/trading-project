@@ -1331,7 +1331,10 @@ class WhaleSignalEngine:
         # unless POLYMARKET_LIVE_ENABLED=1 in .env. Purely additive:
         # failures here never affect paper trading.
         # LIVE_SIGNAL_TYPES is a code-level whitelist on top of KillSwitch.
-        LIVE_SIGNAL_TYPES = {"accumulation", "whale_entry_filtered"}
+        # 2026-04-18: `accumulation` removed after thesis scorecard showed
+        # 0/6 correct (0% accuracy). Signal keeps firing in paper for
+        # diagnosis. Re-add only when paper accuracy ≥55% on 20+ resolved.
+        LIVE_SIGNAL_TYPES = {"whale_entry_filtered"}
         if signal_type in LIVE_SIGNAL_TYPES:
             try:
                 from trading_platform.polymarket.polymarket_live_executor import PolymarketLiveExecutor

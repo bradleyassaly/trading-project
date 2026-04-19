@@ -228,15 +228,52 @@ React SPA (Vite) at `http://localhost:5173`, backed by FastAPI at port 8001.
 
 ---
 
-## Live Execution Gates
+## Live Execution Gates — Scaling Ladder
+
+The live path is not a single gate but a **ladder of bankroll levels (L0–L5)**,
+each with explicit promotion criteria. Target steady state is L5:
+**$10K–20K realized P&L per month on a $200–300K working bankroll**.
+
+See `THESIS.md` for the six sub-claims being tested at each level, and
+`LIVE_TRADING_CHECKLIST.md` for the operational checklist at each
+promotion.
+
+### Level summary
+
+| Level | Bankroll | Max/trade | Max open | Target P&L/mo |
+|---|---:|---:|---:|---:|
+| L0 Validate (paper) | $345 | $24 | 10 | n/a |
+| L1 Probate | $1,000 | $50 | 8 | $50–100 |
+| L2 Confirm | $5,000 | $150 | 10 | $250–500 |
+| L3 Growth | $25,000 | $500 | 15 | $1,250–2,500 |
+| L4 Scale | $100,000 | $1,500 | 20 | $5,000–10,000 |
+| **L5 Target** | **$200–300K** | **$3,000** | **25** | **$10,000–20,000** |
+
+### L0 → L1 promotion gates (paper → first real capital)
 
 | # | Gate | Requirement |
 |---|------|------------|
-| 1 | Resolved trades | 50+ paper trades resolved with > 55% win rate |
-| 2 | Category edge | At least 2 categories showing edge independently |
-| 3 | Drawdown | Max drawdown < 20% of bankroll over 30 days |
-| 4 | Human approval | Manual review and sign-off |
-| 5 | Capital | Start with $500 real capital, 1 category only |
+| 1 | Hypothesis accuracy | ≥70% on 50+ resolved hypotheses |
+| 2 | Signal diversity | ≥2 signal types at ≥60% accuracy on ≥20 resolved each |
+| 3 | Category edge | ≥2 categories with positive PnL on ≥20 resolved each |
+| 4 | Drawdown | Max drawdown <20% over 30 days |
+| 5 | Ops stability | 2+ weeks without silent failures |
+| 6 | Human approval | Manual review and sign-off |
+| 7 | Capital | $1,000 initial, $50 max/trade, 8 max open |
+
+### L1 → L5 promotion gates
+
+Each level has its own promotion criteria measured on live (not paper)
+data at that level. The common pattern: every level up requires
+≥30–100 live resolved trades at the prior level, slippage ≤2%, live WR
+within ±5pp of paper WR, and no circuit-breaker incidents. Full gate
+list per level in `LIVE_TRADING_CHECKLIST.md`.
+
+### Demotion (symmetric)
+
+Two consecutive months below the level's target P&L range, or any
+circuit-breaker trip, demotes one level. The ladder is bidirectional
+by design.
 
 ---
 

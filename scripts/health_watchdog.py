@@ -227,6 +227,45 @@ def check_disk() -> ComponentState:
         return ComponentState("disk", False, str(e)[:80])
 
 
+def check_hypothesis_drift() -> ComponentState:
+    """Alert if closed paper trades have matching hypothesis rows that
+    were never resolved. Before 2026-04-18 this drift went silent for
+    weeks — 17 resolved trades had zero updated hypotheses, and the
+    thesis scorecard was stuck reporting 0% accuracy despite real
+    outcomes being recorded in polymarket_paper_trades.
+    """
+    if os.environ.get("DB_BACKEND", "postgres").lower() != "postgres":
+        return ComponentState("hypothesis_drift", True, "skipped (sqlite)")
+    try:
+        import psycopg
+        conninfo = (
+            f"host={os.environ.get('POSTGRES_HOST','postgres')} "
+            f"port={os.environ.get('POSTGRES_PORT','5432')} "
+            f"user={os.environ.get('POSTGRES_USER','polymarket')} "
+            f"password={os.environ.get('POSTGRES_PASSWORD','polymarket_dev')} "
+            f"dbname={os.environ.get('POSTGRES_DB','polymarket')}"
+        )
+        with psycopg.connect(conninfo, connect_timeout=10) as conn:
+            row = conn.execute(
+                """SELECT COUNT(*) FROM trade_hypotheses h
+                     JOIN polymarket_paper_trades pt ON pt.id = h.trade_id
+                    WHERE h.actual_outcome IS NULL
+                      AND pt.exit_ts IS NOT NULL
+                      AND pt.outcome IS NOT NULL
+                      AND pt.exit_ts < extract(epoch FROM NOW()) - 3600"""
+            ).fetchone()
+            drift = int(row[0]) if row else 0
+        if drift > 0:
+            return ComponentState(
+                "hypothesis_drift", False,
+                f"{drift} closed trades >1h old with unresolved hypothesis "
+                "(run mark_resolved backfill)"
+            )
+        return ComponentState("hypothesis_drift", True, "scorecard fresh")
+    except Exception as e:
+        return ComponentState("hypothesis_drift", False, f"check err: {str(e)[:80]}")
+
+
 def _send_alert(message: str, *, loud: bool = False) -> None:
     try:
         from trading_platform.polymarket.telegram_alerts import get_alerter
@@ -256,7 +295,8 @@ def main() -> None:
     while True:
         now = time.time()
         states = [check_api(), check_db(), check_scheduler(),
-                  check_live_collect(), check_wallet_stream(), check_disk()]
+                  check_live_collect(), check_wallet_stream(), check_disk(),
+                  check_hypothesis_drift()]
         in_grace = (now - startup_ts) < STARTUP_GRACE_SECONDS
         if in_grace and any(not s.healthy for s in states):
             logger.info("[grace] suppressed alerts during startup window")

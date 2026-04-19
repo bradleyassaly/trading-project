@@ -1,54 +1,119 @@
 # Milestones
 
+Unit-of-work log. For **what** we are trying to prove and **how** we
+scale to $10–20K/month, see `THESIS.md` and `ROADMAP.md`.
+
+---
+
 ## Completed
 
-- **Signal Research Lab** — 8 signal families implemented. calibration_drift 56.2% WR, volume_spike 55.2% WR, time_decay 54.8% WR on 48,509 Manifold markets.
-- **Kalshi live candle collector** — Hourly OHLCV collection for 213 Economics markets.
-- **Polymarket WebSocket collector** — Live price tick collection via CLOB WebSocket. Expanded to 225 markets with whale detection.
-- **Paper trade executor** — Kalshi + Polymarket paper trading with Kelly sizing, portfolio tracking, resolution checking.
-- **Wallet intelligence DB** — 16,259 wallets, 108,845 trades, 31K resolved with PnL in wallet_intelligence.db.
-- **wallet-profiles --from-db** — Rebuilt 312 wallets with directional_win_rate directly from DB trades (bypasses broken CSV resolution path).
-- **Wallet bucket classification** — 11 behavioral buckets (directional, market_maker, arb_bot, concentrated_whale, etc).
-- **Market universe** — 226 markets across 9 categories (politics, economics, crypto, finance, sports, culture, tech, mentions, weather) from Gamma API.
-- **WhaleTripwire** — Loads 76 watched wallets (50 tier1, 26 tier2) from wallet_profiles.
-- **WhaleSignalEngine** — whale_entry + convergence signal generation with DB recording.
-- **Paper executor on_signal()** — Bankroll-allocated paper trades from whale signals (3% tier1, 1.5% tier2, 5% convergence).
-- **WebSocket whale integration** — Live collector passes events through WhaleTripwire → SignalEngine → PaperExecutor.
-- **Whale Monitor GUI** — Replaced MarketScanner with live whale feed, category performance table, signal feed.
-- **API endpoints** — whale-feed, subscription-status, signals-feed, category-performance.
-- **React GUI** — Dashboard, smart money wallets, signal monitor, paper trading, execution engine.
-- **Research replay framework** — Registry-backed evaluation, cross-provider comparison, promotion gating.
+### Phase 1 — Intelligence Foundation
+- **Wallet intelligence DB** — 16,259 wallets, 108,845 trades, 31K resolved.
+- **wallet-profiles --from-db** — directional WR over 312 wallets.
+- **Wallet bucket classification** — 11 behavioral buckets.
+- **Market universe** — 226 markets across 9 categories from Gamma API.
+- **WhaleTripwire** — 76 watched wallets loaded from wallet_profiles.
+
+### Phase 2 — Live Signal Generation
+- **Polymarket WebSocket collector** — 225 markets, live tick ingestion.
+- **Polygon wallet-stream** — chain-level Transfer event monitoring, ~2–5s latency.
+- **WhaleSignalEngine** — 20 signal types firing, ~8K/24h.
+- **Paper executor** — Kelly sizing, portfolio tracking, resolution checking.
+- **Whale Monitor GUI** + API endpoints — full dashboard coverage.
+- **Alpha scoring** — 1,686 wallet×category combos, 414 copyable (24.6% selectivity).
+
+### Research & Infrastructure
+- **Signal Research Lab** — 8 signal families validated on Manifold backtests.
+- **Kalshi live candle collector** — hourly OHLCV for 213 Economics markets.
+- **Research replay framework** — registry-backed evaluation, cross-provider compare.
 - **Test suite** — 1,817 passing tests.
+- **Postgres migration** — moved from SQLite; MVCC eliminates disk-image corruption.
 
-## Deprecated (preserved, not active)
+### 2026-04-18 Session (System Hardening + Scorecard Rescue)
+- **Postgres connection leak fix** — `PolymarketPaperExecutor` + `WalletDB`
+  now context-manager + GC safe; added `WalletDB.default_path()` static.
+  Pool was exhausting every ~20h; now stable under 90-req stress test.
+- **Scheduler mem bump** — 512m → 2g; `open_positions` task disabled
+  (legacy, 2.5GB goldsky dataset, 13 days stale).
+- **`orphan_wallet_onboarder` SQL fix** — `HAVING n` → `HAVING COUNT(*)`.
+- **Kelly sizer data-source bug** — fallback from `signal_outcomes` to
+  `polymarket_paper_trades` was dead code under Postgres; now active.
+  `whale_entry_filtered` went from Kelly=$0 to Kelly=$10.
+- **Live executor category reclassification** — mirrors paper path; sports
+  markets tagged "other" now correctly pass the allowlist.
+- **`LIVE_TRADE_CATEGORIES` expanded** — added `sports` (+$965 paper PnL)
+  and `crypto` on data-driven grounds.
+- **`accumulation` removed from `LIVE_SIGNAL_TYPES`** — 0/6 correct on the
+  thesis scorecard, would have fired real money on a broken signal.
+- **Thesis scorecard rescued** — 17 closed paper trades had orphan
+  hypothesis rows with `actual_outcome=NULL`. Backfilled; scorecard is
+  now live and reading 47.1% accuracy (PRELIMINARY, below 70% target).
+- **Hypothesis-resolution-drift watchdog** — alerts if closed paper
+  trades >1h old have unresolved matching hypotheses.
+- **Telegram 2-way** — commands `/status`, `/positions`, `/readiness`,
+  `/funnel`, `/insiders`, `/kill`, `/unkill` verified working.
 
-- **Manifold Markets parser** — 48K resolved markets used for backtesting only.
-- **Metaculus integration** — 2K markets, backtesting + divergence signal concept.
-- **PredictIt parser** — Historical data, not actively used.
-- **Wallet profiler CSV path** — `wallet_profiler.py` build_profiles() replaced by `wallet_profile_rebuild.py` rebuild_profiles() reading from DB.
-- **Cross-platform backtest** — Manifold+Metaculus backtest infrastructure, not used in active pipeline.
+---
 
-## In Progress
+## In Progress (Phase 3)
 
-- **KXCPI/KXFED paper trades** — Resolving through April 2026. First real signal validation.
-- **Polymarket trade accumulation** — Data API fetch running, accumulating new trades for watched wallets.
-- **Whale signal generation** — WebSocket running, waiting for tier1/tier2 wallet trades to hit monitored markets.
+- **Hypothesis accumulation** — 17 of 50 resolved. Need 33 more to reach
+  decision threshold. At current paper cadence (~25–50 closures/day),
+  ETA 2–4 days.
+- **Signal quality triage** — `whale_entry` validates at 70% on 10
+  resolved. `accumulation` at 0% on 6 — investigate why (wrong
+  direction? low-alpha wallets? wrong-side-of-whale?). Other signal
+  types awaiting sample size.
+- **Second category with edge** — currently sports-only by PnL.
+  Diversification is a Phase-3 exit criterion, not just a nice-to-have.
 
-## Next
+---
 
-- **Category performance tracking** — Track signal win rate per category from resolved paper trades.
-- **Rolling 20-trade wallet quality** — Demote wallets whose recent performance drops below 0.45 WR.
-- **Leaderboard with atomic versioning** — Version-stamped wallet rankings, safe against bad pipeline runs.
-- **Daily pipeline automation** — Scheduled every 4h: fetch → profile → classify → leaderboard → universe.
-- **Continuous monitor automation** — Auto-restart, health checks, dead man's switch.
-- **Paper trade resolution tracking by category** — Dashboard showing per-category win rates and P&L.
+## Next (gated on Phase 3 → 4 transition)
 
-## Go-Live Criteria
+### Phase 4 — Live Probate (L1, $1,000 bankroll)
+- First real auto-live fire via `whale_entry_filtered` in a whitelisted
+  category (expected any time now post-fixes).
+- Measure live slippage vs paper expectations.
+- Raise `POLYMARKET_LIVE_BANKROLL_USD` 345 → 1,000 after 10 clean live trades.
 
-| Gate | Requirement | Current Status |
-|------|------------|---------------|
-| 1 | 50+ paper trades resolved > 55% WR | 0 resolved (accumulating) |
-| 2 | 2+ categories showing edge independently | Not enough data yet |
-| 3 | Max drawdown < 20% of bankroll over 30 days | No drawdown data yet |
-| 4 | Human review and approval | Pending |
-| 5 | $500 real capital, 1 category only | Pending |
+### Phase 5 — Confirm + Growth (L2→L3, $5K → $25K)
+- 2-category diversification on live PnL.
+- Adjust max open positions upward with bankroll (10 → 15).
+- 30-day rolling Sharpe tracking on live fills only.
+
+### Phase 6 — Target Scale (L4→L5, $100K → $200–300K)
+- $10–20K/month realized P&L.
+- 3-category diversification minimum.
+- Replacement-signal pipeline (as older signals decay).
+
+---
+
+## Sunset / Deprecated
+
+- Manifold Markets parser — backtest only.
+- Metaculus integration — backtest + divergence concept only.
+- PredictIt parser — historical only.
+- `wallet_profiler.py` (CSV path) — replaced by `wallet_profile_rebuild.py`.
+- `open_positions` scheduler task — disabled 2026-04-18, needs a
+  Postgres-native rewrite before re-enabling.
+- `accumulation` signal on the live whitelist — paper-only pending
+  diagnosis; re-add only when paper accuracy ≥55% on 20+ resolved.
+
+---
+
+## Go-Live Criteria (L0 → L1 promotion)
+
+| Gate | Requirement | Current |
+|------|------------|---------|
+| 1 | ≥50 resolved hypotheses | **17** (34%) |
+| 2 | ≥70% hypothesis accuracy | **47.1%** |
+| 3 | ≥2 signal types at ≥60% on ≥20 resolved each | whale_entry 70%/10 only |
+| 4 | ≥2 categories positive PnL on ≥20 resolved each | sports only |
+| 5 | Max drawdown <20% over 30 days | 0.7% ✅ |
+| 6 | Ops stable 2+ weeks (no data-loss, no silent failures) | Post-fix monitoring |
+| 7 | Human review and approval | Pending gates 1–4 |
+
+All seven gates must pass before bankroll is raised from $345 to $1,000.
+Live execution with the current $345 bankroll continues on the narrow
+whitelist (`whale_entry_filtered` only, 4 categories) as data-gathering.

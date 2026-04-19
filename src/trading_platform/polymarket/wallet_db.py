@@ -267,6 +267,16 @@ class WalletDB:
     read it) but is only a display string under Postgres.
     """
 
+    @staticmethod
+    def default_path(db_path: str | Path | None = None) -> str:
+        """Resolve the wallet_intelligence.db path WITHOUT opening a connection.
+
+        Callers that only need the path string (e.g. ``KillSwitch(str(WalletDB()._path))``)
+        were leaking a pooled Postgres connection per call. Use this helper
+        instead.
+        """
+        return str(Path(db_path) if db_path else _DEFAULT_PATH)
+
     def __init__(self, db_path: str | Path = _DEFAULT_PATH) -> None:
         self._path = Path(db_path)
         self._path.parent.mkdir(parents=True, exist_ok=True)
@@ -1209,4 +1219,22 @@ class WalletDB:
 
     def close(self) -> None:
         with self._lock:
-            self._conn.close()
+            try:
+                self._conn.close()
+            except Exception:
+                pass
+
+    def __enter__(self) -> "WalletDB":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self.close()
+
+    def __del__(self) -> None:
+        # GC safety net so pooled Postgres conns get returned even when
+        # callers forget to close. Under CPython refcounting this runs
+        # promptly when the WalletDB goes out of scope.
+        try:
+            self.close()
+        except Exception:
+            pass

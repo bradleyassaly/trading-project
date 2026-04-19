@@ -102,6 +102,23 @@ class PolymarketLiveExecutor:
             return self._result(False, reason=f"signal_type {sig_type} excluded from live")
         raw_cat = signal.get("category") or ""
         cat = raw_cat.lower() if isinstance(raw_cat, str) else ""
+        # Re-classify when category is empty/other/wallet_derived — the
+        # paper executor already does this (polymarket_paper_executor.py
+        # around L495). Without it, sports markets tagged "other" by
+        # signal generation get blocked here while their paper twins
+        # correctly run as "sports". Mirrors the paper path exactly.
+        if not cat or cat in ("other", "wallet_derived"):
+            try:
+                from trading_platform.polymarket.market_categorizer import classify_keywords
+                resolved, _src = classify_keywords(
+                    signal.get("slug") or "",
+                    signal.get("question") or "",
+                )
+                if resolved and resolved != "other":
+                    cat = resolved.lower()
+                    signal["category"] = cat
+            except Exception as exc:
+                logger.debug("[LIVE] category classifier failed: %s", exc)
         if not cat or cat not in LIVE_TRADE_CATEGORIES:
             logger.debug("[LIVE] BLOCKED category=%s — not in live allowlist", cat)
             return self._result(False, reason=f"category '{cat}' not approved for live")
@@ -143,6 +160,22 @@ class PolymarketLiveExecutor:
         age_sec = time.time() - fired_at
         if age_sec > 900:
             return self._result(False, reason=f"Signal too old ({age_sec/60:.0f}m)")
+
+        # 1c. YES-favorite guard. Mirrors the same check in the paper
+        # executor (polymarket_paper_executor.py ~L645). Copy-trade
+        # tail risk is concentrated in BUY-YES trades at entry >= 0.5;
+        # block rather than let real capital into them.
+        raw_price = signal.get("entry_price") or signal.get("price")
+        try:
+            entry_px = float(raw_price) if raw_price is not None else None
+        except (TypeError, ValueError):
+            entry_px = None
+        if (signal.get("direction") or "").upper() == "BUY" and entry_px is not None and entry_px >= 0.50:
+            logger.info(
+                "[LIVE][YES_FAV_GATE] BLOCK %s BUY@%.3f — copy-trade tail risk",
+                sig_type, entry_px,
+            )
+            return self._result(False, reason=f"BUY YES at {entry_px:.2f} (>= 0.50): tail-risk blocked")
 
         # 2. Kill switch check. If the switch returns a probation_cap,
         # the signal passed probation gates (>=5 resolved, positive EV,

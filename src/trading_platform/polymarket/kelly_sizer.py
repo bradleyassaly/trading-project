@@ -75,19 +75,31 @@ class KellySizer:
                     (signal_type,),
                 ).fetchall()
         except sqlite3.OperationalError:
-            rows = conn.execute(
-                """SELECT return_pct/100.0,
-                          CASE WHEN outcome='win' THEN 1 ELSE 0 END
-                   FROM polymarket_paper_trades
-                   WHERE signal_type = ? AND archived = 0
-                     AND exit_ts IS NOT NULL AND return_pct IS NOT NULL""",
-                (signal_type,),
-            ).fetchall()
-        finally:
+            rows = []
+        # Fallback to polymarket_paper_trades when signal_outcomes has no
+        # resolutions for this signal_type. The live_readiness endpoint
+        # reads from paper_trades while Kelly historically read only from
+        # signal_outcomes — leading to the "ready but Kelly=$0" mismatch
+        # that blocked every whale_entry_filtered auto-live fire.
+        # (Prior to 2026-04-18 this fallback only triggered on SQLite
+        # OperationalError, which never fires under Postgres.)
+        if not rows:
             try:
-                conn.close()
+                rows = conn.execute(
+                    """SELECT realized_pnl / NULLIF(size_usd, 0),
+                              CASE WHEN outcome='win' THEN 1 ELSE 0 END
+                       FROM polymarket_paper_trades
+                       WHERE signal_type = ? AND archived = 0
+                         AND exit_ts IS NOT NULL
+                         AND realized_pnl IS NOT NULL AND size_usd > 0""",
+                    (signal_type,),
+                ).fetchall()
             except Exception:
-                pass
+                rows = []
+        try:
+            conn.close()
+        except Exception:
+            pass
         return [(float(r[0]), int(r[1] or 0)) for r in rows if r[0] is not None]
 
     def _fetch_backtest_stats(self, signal_type: str) -> dict[str, Any] | None:

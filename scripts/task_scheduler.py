@@ -109,6 +109,14 @@ SCHEDULE: list[Task] = [
         cmd="trading-cli data polymarket compute-open-positions",
         interval_seconds=2 * 3600,
         description="Compute open-position P&L snapshots",
+        # DISABLED 2026-04-18: reads goldsky_resolved_fills/ (2.5GB of 2028
+        # parquets, last updated 2026-04-05) and concats all files into
+        # memory before filtering. OOM-killed every 2h for 36+ hours;
+        # even 2GB mem_limit wasn't enough. The input data is 13 days
+        # stale (legacy Goldsky path) and the downstream consumer
+        # (/api/smart-money/open-positions) can serve the existing
+        # wallet_open_positions.parquet until a streaming rewrite lands.
+        enabled=False,
     ),
     Task(
         name="fetch_resolutions",
@@ -226,6 +234,17 @@ SCHEDULE: list[Task] = [
         cmd="python -m trading_platform.polymarket.weekly_digest",
         interval_seconds=7 * 24 * 3600,
         description="Weekly strategic digest: category EV, signal volume, wallet ranking",
+    ),
+    Task(
+        # 2026-04-18: self-heal hypothesis-resolution drift. Every 2h,
+        # scan for closed paper trades whose matching hypothesis row
+        # was never updated (actual_outcome IS NULL) and call
+        # mark_resolved on each. Covers the silent-scorecard-drift
+        # mode that went undetected for weeks before being found.
+        name="hypothesis_backfill",
+        cmd="python scripts/hypothesis_backfill.py",
+        interval_seconds=2 * 3600,
+        description="Backfill hypothesis resolutions for closed paper trades",
     ),
     Task(
         name="wallet_profiles_rebuild",

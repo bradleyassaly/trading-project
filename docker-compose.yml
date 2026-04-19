@@ -110,8 +110,12 @@ services:
       - DB_BACKEND=postgres
       - BACKUP_DIR=/backups
     restart: unless-stopped
-    mem_limit: 512m
-    memswap_limit: 512m
+    # 2026-04-18: bumped from 512m → 2g. compute-open-positions was
+    # OOM-killed (exit=137) every 2h for 36+ hours; loads pandas +
+    # parquet over the full open-position set. 1GB still OOMed at
+    # ~19s; 2GB matches live-collect and gives headroom.
+    mem_limit: 2g
+    memswap_limit: 2g
     depends_on:
       api:
         condition: service_healthy

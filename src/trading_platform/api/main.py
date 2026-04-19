@@ -478,7 +478,7 @@ def backtest_run(request: dict[str, Any]) -> dict[str, Any]:
             min_position_size=float(request.get("min_position_size", 25)),
             categories=request.get("categories"),
         )
-        return Backtester().run(config, str(WalletDB()._path))
+        return Backtester().run(config, WalletDB.default_path())
     except Exception as exc:
         return {"error": str(exc), "total_trades": 0, "trades": []}
 
@@ -813,7 +813,7 @@ def live_emergency_stop(request: dict[str, Any] | None = None) -> dict[str, Any]
         from trading_platform.polymarket.kill_switch import KillSwitch
         from trading_platform.polymarket.wallet_db import WalletDB
         reason = (request or {}).get("reason", "manual via API")
-        KillSwitch(str(WalletDB()._path)).emergency_stop(reason)
+        KillSwitch(WalletDB.default_path()).emergency_stop(reason)
         return {"ok": True, "reason": reason}
     except Exception as exc:
         return {"ok": False, "error": str(exc)}
@@ -825,7 +825,7 @@ def live_clear_stop() -> dict[str, Any]:
     try:
         from trading_platform.polymarket.kill_switch import KillSwitch
         from trading_platform.polymarket.wallet_db import WalletDB
-        KillSwitch(str(WalletDB()._path)).clear_emergency_stop()
+        KillSwitch(WalletDB.default_path()).clear_emergency_stop()
         return {"ok": True}
     except Exception as exc:
         return {"ok": False, "error": str(exc)}
@@ -847,7 +847,8 @@ def paper_check_resolutions() -> dict[str, Any]:
     """Walk open paper trades and resolve any whose underlying market settled."""
     try:
         from trading_platform.polymarket.polymarket_paper_executor import PolymarketPaperExecutor
-        return PolymarketPaperExecutor().check_and_resolve_open_trades()
+        with PolymarketPaperExecutor() as ex:
+            return ex.check_and_resolve_open_trades()
     except Exception as exc:
         return {"checked": 0, "resolved": 0, "error": str(exc)}
 
@@ -1232,7 +1233,7 @@ def _alpha_db_path() -> str:
     path = _resolve_path()
     if not path:
         from trading_platform.polymarket.wallet_db import WalletDB
-        return str(WalletDB()._path)
+        return WalletDB.default_path()
     # Always use /tmp copy for the API — queries are heavy and NTFS
     # bind mounts hang intermittently under concurrent access.
     tmp = _get_tmp_copy(path)
@@ -1692,7 +1693,8 @@ def paper_sizing() -> dict[str, Any]:
 def paper_check_exits() -> dict[str, Any]:
     try:
         from trading_platform.polymarket.polymarket_paper_executor import PolymarketPaperExecutor
-        return PolymarketPaperExecutor().check_exits()
+        with PolymarketPaperExecutor() as ex:
+            return ex.check_exits()
     except Exception as exc:
         return {"checked": 0, "exited": 0, "error": str(exc)}
 
@@ -1701,7 +1703,8 @@ def paper_check_exits() -> dict[str, Any]:
 def paper_snapshot_equity() -> dict[str, Any]:
     try:
         from trading_platform.polymarket.polymarket_paper_executor import PolymarketPaperExecutor
-        return PolymarketPaperExecutor().snapshot_equity()
+        with PolymarketPaperExecutor() as ex:
+            return ex.snapshot_equity()
     except Exception as exc:
         return {"error": str(exc)}
 
