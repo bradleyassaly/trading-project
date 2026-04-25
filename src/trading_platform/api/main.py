@@ -762,6 +762,20 @@ def live_execution_quality() -> dict[str, Any]:
         return {"total_orders": 0, "filled": 0, "fill_rate": 0, "error": str(exc)}
 
 
+@app.get("/api/funnel/decisions")
+def decision_funnel(hours: int = 24) -> dict[str, Any]:
+    """Aggregate decision_trace rows by gate. Closes the 'why didn't I
+    trade X yesterday' query gap. Reads from `decision_trace` written
+    at every gate evaluation in paper + live executors.
+    """
+    try:
+        from trading_platform.polymarket.decision_trace import funnel_summary
+        rows = funnel_summary(hours=hours)
+        return {"hours": hours, "by_gate": rows}
+    except Exception as exc:
+        return {"hours": hours, "by_gate": [], "error": str(exc)[:200]}
+
+
 @app.get("/api/live/funnel")
 def live_trade_funnel() -> dict[str, Any]:
     """Per-gate drop counts for the live executor over the past 24h.
@@ -928,6 +942,41 @@ def system_readiness() -> dict[str, Any]:
             add("scheduler_health", False, "state file missing")
     except Exception as exc:
         add("scheduler_health", False, f"error: {str(exc)[:60]}")
+
+    # 8. PM leaderboard sync staleness — closes the silent-staleness mode
+    # diagnosed 2026-04-25 where the daily sync hadn't run for >24h
+    # because container restarts kept resetting `last_run_at`. Threshold
+    # 36h gives one full daily-cycle slack.
+    try:
+        with _db() as conn:
+            row = conn.execute(
+                "SELECT MAX(pm_synced_at) FROM wallet_profiles WHERE pm_synced_at IS NOT NULL"
+            ).fetchone()
+        last_sync = float(row[0]) if row and row[0] else 0
+        age_h = (now - last_sync) / 3600 if last_sync else 99999
+        add(
+            "pm_leaderboard_fresh", age_h < 36,
+            f"last sync {age_h:.1f}h ago",
+            blocking=False,
+        )
+    except Exception as exc:
+        add("pm_leaderboard_fresh", False, f"error: {str(exc)[:60]}", blocking=False)
+
+    # 9. Wallet behavior metrics freshness — same logic, daily cadence
+    try:
+        with _db() as conn:
+            row = conn.execute(
+                "SELECT MAX(last_updated) FROM wallet_behavior_metrics"
+            ).fetchone()
+        last_bm = float(row[0]) if row and row[0] else 0
+        age_h = (now - last_bm) / 3600 if last_bm else 99999
+        add(
+            "behavior_metrics_fresh", age_h < 36,
+            f"last run {age_h:.1f}h ago" if last_bm else "never run",
+            blocking=False,
+        )
+    except Exception as exc:
+        add("behavior_metrics_fresh", False, f"error: {str(exc)[:60]}", blocking=False)
 
     blockers = [c for c in components if not c["ok"] and c["blocking"]]
     warnings = [c for c in components if not c["ok"] and not c["blocking"]]

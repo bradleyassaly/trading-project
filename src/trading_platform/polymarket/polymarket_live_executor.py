@@ -134,6 +134,13 @@ class PolymarketLiveExecutor:
                     logger.debug("[LIVE] sports fallback failed: %s", exc)
         if not cat or cat not in LIVE_TRADE_CATEGORIES:
             logger.debug("[LIVE] BLOCKED category=%s — not in live allowlist", cat)
+            try:
+                from trading_platform.polymarket.decision_trace import trace as _dt
+                _dt(signal=signal, gate="LIVE_CAT_GATE", passed=False,
+                    detail=cat or "<empty>", surface="live",
+                    db_path=self._db_path)
+            except Exception:
+                pass
             return self._result(False, reason=f"category '{cat}' not approved for live")
 
         # 0. Emergency stop check
@@ -177,6 +184,72 @@ class PolymarketLiveExecutor:
                     )
             except Exception as exc:
                 logger.debug("[LIVE] specialist boost lookup failed: %s", exc)
+
+        # 0d. Behavioral-metrics gates (mirrors paper executor; see
+        # wallet_behavior_metrics.py). Three signals:
+        #   - is_likely_farmer = 1 → BLOCK live entirely (defends real $)
+        #   - z-score specialist in category → up to 1.4× confidence
+        #   - sizing_p90 ≥ 10% (conviction whale) → 1.15×; <2% (mechanical) → 0.85×
+        # Fail-open on lookup error (table missing on first deployment).
+        if src_wallet and src_wallet not in ("velocity_detector", "order_book_monitor"):
+            try:
+                from trading_platform.polymarket.db_connection import get_connection
+                _bc = get_connection(self._db_path)
+                try:
+                    bm_row = _bc.execute(
+                        "SELECT is_likely_farmer, sizing_p90_pct FROM wallet_behavior_metrics WHERE wallet = ?",
+                        (src_wallet.lower(),),
+                    ).fetchone()
+                    z_row = _bc.execute(
+                        "SELECT z_score FROM wallet_category_zscore WHERE wallet = ? AND category = ?",
+                        (src_wallet.lower(), cat),
+                    ).fetchone()
+                finally:
+                    try: _bc.close()
+                    except Exception: pass
+                if bm_row and bm_row[0]:
+                    logger.warning(
+                        "[LIVE][FARMER_GATE] BLOCK %s wallet=%s — flagged farmer/wash",
+                        sig_type, src_wallet[:14],
+                    )
+                    try:
+                        from trading_platform.polymarket.decision_trace import trace as _dt
+                        _dt(signal=signal, gate="LIVE_FARMER_GATE", passed=False,
+                            detail=f"wallet={src_wallet[:14]}", surface="live",
+                            db_path=self._db_path)
+                    except Exception:
+                        pass
+                    return self._result(False, reason=f"farmer/wash wallet {src_wallet[:14]} blocked")
+                if z_row and z_row[0] is not None and float(z_row[0]) >= 1.0:
+                    z_boost = min(1.4, 1.0 + 0.15 * (float(z_row[0]) - 1.0))
+                    if z_boost > 1.0:
+                        old_conf = confidence
+                        confidence = min(0.99, confidence * z_boost)
+                        signal["confidence"] = confidence
+                        logger.info(
+                            "[LIVE][Z_SPECIALIST] %s in %s z=%.2f conf %.2f→%.2f",
+                            src_wallet[:14], cat, float(z_row[0]), old_conf, confidence,
+                        )
+                if bm_row and bm_row[1] is not None:
+                    p90 = float(bm_row[1])
+                    if p90 >= 0.10:
+                        old_conf = confidence
+                        confidence = min(0.99, confidence * 1.15)
+                        signal["confidence"] = confidence
+                        logger.info(
+                            "[LIVE][CONVICTION] %s p90=%.1f%% conf %.2f→%.2f",
+                            src_wallet[:14], p90 * 100, old_conf, confidence,
+                        )
+                    elif p90 < 0.02:
+                        old_conf = confidence
+                        confidence = max(0.05, confidence * 0.85)
+                        signal["confidence"] = confidence
+                        logger.info(
+                            "[LIVE][MECHANICAL] %s p90=%.1f%% conf %.2f→%.2f",
+                            src_wallet[:14], p90 * 100, old_conf, confidence,
+                        )
+            except Exception as exc:
+                logger.debug("[LIVE] behavioral metrics lookup failed: %s", exc)
 
         # 1. Kelly size. Hard cap at 7% of current live bankroll so a
         # single bad trade can't blow out the account — derived from
@@ -228,6 +301,14 @@ class PolymarketLiveExecutor:
                 "[LIVE][FAV_GATE] BLOCK %s BUY@%.3f (>= %.2f) — copy-trade tail risk",
                 sig_type, entry_px, FAVORITE_BLOCK_PRICE,
             )
+            try:
+                from trading_platform.polymarket.decision_trace import trace as _dt
+                _dt(signal=signal, gate="LIVE_FAV_GATE", passed=False,
+                    value=entry_px, threshold=FAVORITE_BLOCK_PRICE,
+                    detail=f"BUY@{entry_px:.3f}", surface="live",
+                    db_path=self._db_path)
+            except Exception:
+                pass
             return self._result(False, reason=f"BUY at {entry_px:.2f} (>= {FAVORITE_BLOCK_PRICE:.2f}): tail-risk blocked")
 
         # 2. Kill switch check. If the switch returns a probation_cap,

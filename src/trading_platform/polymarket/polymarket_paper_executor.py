@@ -555,9 +555,23 @@ class PolymarketPaperExecutor:
                     logger.debug("sports fallback failed: %s", exc)
         if sig_cat in EXCLUDE_CATEGORIES:
             logger.info("[CAT_GATE] SKIP %s in excluded category %s", signal_type, sig_cat)
+            try:
+                from trading_platform.polymarket.decision_trace import trace as _dt
+                _dt(signal=signal, gate="CAT_GATE_EXCLUDED", passed=False,
+                    detail=sig_cat, surface="paper",
+                    db_path=str(self._wallet_db_path))
+            except Exception:
+                pass
             return None
         if sig_cat not in PAPER_TRADE_CATEGORIES:
             logger.info("[CAT_GATE] SKIP %s in unproven category %s", signal_type, sig_cat or "<empty>")
+            try:
+                from trading_platform.polymarket.decision_trace import trace as _dt
+                _dt(signal=signal, gate="CAT_GATE_UNPROVEN", passed=False,
+                    detail=sig_cat or "<empty>", surface="paper",
+                    db_path=str(self._wallet_db_path))
+            except Exception:
+                pass
             return None
 
         # Tier gate for TIER1_ONLY_CATEGORIES (e.g. sports): the full
@@ -739,6 +753,14 @@ class PolymarketPaperExecutor:
                 "[YES_FAV_GATE] BLOCK %s BUY@%.3f (>= %.2f) — copy-trade tail risk",
                 signal_type, ep, YES_FAVORITE_BLOCK_PRICE,
             )
+            try:
+                from trading_platform.polymarket.decision_trace import trace as _dt
+                _dt(signal=signal, gate="FAV_GATE", passed=False,
+                    value=ep, threshold=YES_FAVORITE_BLOCK_PRICE,
+                    detail=f"BUY@{ep:.3f}", surface="paper",
+                    db_path=str(self._wallet_db_path))
+            except Exception:
+                pass
             return None
         if OPTIMAL_BAND_LOW <= ep <= OPTIMAL_BAND_HIGH:
             confidence = min(0.95, confidence * OPTIMAL_BAND_BOOST)
@@ -884,6 +906,13 @@ class PolymarketPaperExecutor:
                         "[FARMER_GATE] BLOCK %s wallet=%s — flagged farmer/wash",
                         signal_type, src_wallet[:14],
                     )
+                    try:
+                        from trading_platform.polymarket.decision_trace import trace as _dt
+                        _dt(signal=signal, gate="FARMER_GATE", passed=False,
+                            detail=f"wallet={src_wallet[:14]}", surface="paper",
+                            db_path=str(self._wallet_db_path))
+                    except Exception:
+                        pass
                     return None
                 if z_row and z_row[0] is not None and float(z_row[0]) >= 1.0:
                     z_boost = min(1.4, 1.0 + 0.15 * (float(z_row[0]) - 1.0))
