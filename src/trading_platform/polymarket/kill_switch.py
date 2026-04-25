@@ -80,6 +80,14 @@ class KillSwitch:
     # requires non-negative EV and `LIVE_DISCOVERY_ENABLED=1` env opt-in.
     DISCOVERY_MIN_RESOLVED = 1
     DISCOVERY_MAX_STAKE_USD = 1.0
+    # 2026-04-25: insider-tier sample threshold. Insider signals fire
+    # ~5/day vs 480/day for smart-money. Standard MIN_RESOLVED_HARD=15
+    # = 6 weeks before first live insider trade. With MIN=3 we trade
+    # earlier on smaller stakes; the higher quality of insider signals
+    # (avg_entry 12h+ before close) gives this a strong prior of edge.
+    INSIDER_SIGNAL_TYPES = {"insider_entry", "high_conviction_insider"}
+    INSIDER_MIN_RESOLVED = 3
+    INSIDER_MAX_STAKE_USD = 5.0
 
     def __init__(self, db_path: str, bankroll: float | None = None) -> None:
         self._db_path = str(db_path)
@@ -171,8 +179,17 @@ class KillSwitch:
             # doesn't pay real-world costs.
             effective_n = n_live + int(bt_n * 0.5)
 
+            # Insider tier: dedicated lower MIN_RESOLVED. Insider signals
+            # have strong structural priors (timing-based edge). If we
+            # waited for n>=15 the first live insider trade would land
+            # in late summer.
+            min_resolved_hard = (
+                self.INSIDER_MIN_RESOLVED
+                if signal_type in self.INSIDER_SIGNAL_TYPES
+                else self.MIN_RESOLVED_HARD
+            )
             probation = False
-            if effective_n < self.MIN_RESOLVED_HARD:
+            if effective_n < min_resolved_hard:
                 # Check probation path: enough samples to see the signal's
                 # direction, not enough to trust it at full size. Requires
                 # positive EV + acceptable WR. Evaluated later in this
@@ -181,7 +198,7 @@ class KillSwitch:
                 if effective_n >= self.PROBATION_MIN_RESOLVED:
                     probation = True
                     warnings.append(
-                        f"PROBATION (effective n={effective_n}/{self.MIN_RESOLVED_HARD}) — "
+                        f"PROBATION (effective n={effective_n}/{min_resolved_hard}) — "
                         f"capped at ${self.PROBATION_MAX_STAKE_USD:.0f}"
                     )
                 elif (

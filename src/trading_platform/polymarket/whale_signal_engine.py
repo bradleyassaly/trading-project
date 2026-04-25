@@ -43,9 +43,15 @@ VALID_SIGNAL_TYPES = [
 # most "low edge" signals are now handled by the paper executor's
 # discovery mode ($1 stakes, auto-graduate at 15 resolutions) instead
 # of being hard-blocked here. Only truly untradeable types remain.
+# 2026-04-25: `whale_entry` lifted from DISABLED. The original disable
+# (mid-2025) was driven by noise from synthetic-monitor "wallets" that
+# are now blocked upstream via `_NON_TRADEABLE`. The 30-day stats show
+# `whale_entry` raw at 70% accuracy + $863 PnL on 10 resolved trades —
+# the highest-EV signal in the system. The `whale_entry_filtered` fork
+# remains in place; both fire and we A/B which wins on a 30-day
+# rolling window via the new signal_health IC measurement.
 DISABLED_SIGNAL_TYPES = {
     "price_velocity",      # synthetic wallet, 1300/day — pure noise
-    "whale_entry",         # forks to whale_entry_filtered at line ~1282
 }
 
 # Signals active but unproven — place paper trades at minimum stake,
@@ -1258,13 +1264,14 @@ class WhaleSignalEngine:
         _NON_TRADEABLE = ("velocity_detector", "order_book_monitor")
         if trade.wallet in _NON_TRADEABLE:
             return signal  # log but don't trade
+        # 2026-04-25: whale_entry now trades directly AND forks to the
+        # filtered + insider variants (was DISABLED-only). Both compete
+        # for resolved-hypothesis volume; signal_health IC measures
+        # which lane is actually carrying alpha after a 30-day window.
+        if signal_type == "whale_entry":
+            self._maybe_fire_filtered_whale_entry(signal, trade, now_ts)
+            self._maybe_fire_insider_entry(signal, trade, now_ts)
         if signal_type in DISABLED_SIGNAL_TYPES:
-            # whale_entry is disabled from direct execution, but if the
-            # firing wallet is a copyable archetype (not a bot), fork a
-            # whale_entry_filtered signal that IS eligible for execution.
-            if signal_type == "whale_entry":
-                self._maybe_fire_filtered_whale_entry(signal, trade, now_ts)
-                self._maybe_fire_insider_entry(signal, trade, now_ts)
             print(f"[DISABLED] {signal_type} signal blocked from trading", flush=True)
             return signal  # log but don't trade
         if signal_type in INFORMATIONAL_SIGNALS:

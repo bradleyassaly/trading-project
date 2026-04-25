@@ -843,6 +843,26 @@ class PolymarketPaperExecutor:
         signal["ensemble_components"] = ensemble["components"]
         confidence = ensemble["score"]
 
+        # 2026-04-25: isotonic calibration on raw confidence. The first
+        # calibration run measured Brier=0.35 / miscal=0.31 — alpha_score
+        # is systematically overconfident. Without correction, every
+        # downstream multiplier (Kelly, STAKE_MULTIPLIERS, behavioral
+        # boosts) compounds the bias. apply_calibration() falls back to
+        # identity until the curve has been fit at least once.
+        try:
+            from trading_platform.polymarket.isotonic_calibration import apply_calibration
+            raw_conf = confidence
+            confidence = apply_calibration(confidence, db_path=str(self._wallet_db_path))
+            if abs(confidence - raw_conf) > 0.02:
+                logger.info(
+                    "[CALIB] %s raw=%.3f → calibrated=%.3f",
+                    signal_type, raw_conf, confidence,
+                )
+            signal["confidence_raw"] = round(raw_conf, 4)
+            signal["confidence_calibrated"] = round(confidence, 4)
+        except Exception as exc:
+            logger.debug("[CALIB] apply failed: %s", exc)
+
         # 2026-04-24: stake concentration on proven (signal, side) winners.
         # Eight-day post-Apr-18 cohort showed three combos earning their
         # capital and one structural price band carrying the entire PnL.
@@ -855,8 +875,15 @@ class PolymarketPaperExecutor:
         STAKE_MULTIPLIERS = {
             ("wallet_reversal",      "YES"): 1.5,  # 11 trades, 72.7% WR, +$19.74
             ("cascade",              "YES"): 1.3,  # 18 trades, 55.6% WR, +$12.96
-            ("whale_entry_filtered", "NO"):  1.3,  # 6 trades, 66.7% WR, +$3.63
-            ("whale_entry_filtered", "YES"): 1.2,  # 14 trades, 42.9% WR, +$8.61
+            # 2026-04-25: whale_entry_filtered drop from 1.2/1.3× → 0.7×
+            # for both sides. 30d data shows 58% WR but -$113 PnL: the
+            # SL trades had avg stake $31 vs TP avg $7 — high-confidence
+            # trades with biggest stakes are the losers. Calibration is
+            # the actual fix (Brier 0.35 = overconfident); until isotonic
+            # correction lands, downweight the multiplier so the over-
+            # confidence doesn't double-up via STAKE_MULTIPLIERS.
+            ("whale_entry_filtered", "NO"):  0.7,
+            ("whale_entry_filtered", "YES"): 0.7,
         }
         # Long-shot YES (entry < 0.30) carried 50% WR / +$67 over the week —
         # structurally positive EV at those prices. Layer a 1.25x boost on

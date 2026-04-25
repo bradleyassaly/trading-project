@@ -397,6 +397,29 @@ SCHEDULE: list[Task] = [
         description="Daily signal IC + pairwise correlation; decay + redundancy flags",
     ),
     Task(
+        # 2026-04-25: auto-promote insider wallets. Inserts into
+        # insider_wallets any wallet with early_win_rate>=0.65 over n>=10
+        # and avg_entry_hours_before_close>=12, excluding flagged farmers.
+        # Closes the 82-wallet insider-pool gap that limited insider
+        # signal volume to ~5/day vs 480/day for smart-money.
+        name="insider_promote",
+        cmd="python -m trading_platform.polymarket.insider_promote",
+        interval_seconds=24 * 3600,
+        description="Daily auto-promote of qualifying wallets into insider_wallets",
+    ),
+    Task(
+        # 2026-04-25: isotonic calibration of alpha_score. First Brier
+        # measurement showed 0.35 / miscal 0.31 (POOR_CALIBRATION) —
+        # alpha_score predicts ~0.43 where reality is ~0.20 in the
+        # 0.4-0.5 band. PAV regression refits a non-decreasing curve
+        # daily; apply_calibration() lookup runs at signal time. Fits
+        # require n>=20 resolved hypotheses; until then identity.
+        name="isotonic_calibration",
+        cmd="python -m trading_platform.polymarket.isotonic_calibration",
+        interval_seconds=24 * 3600,
+        description="Daily isotonic-regression refit of alpha_score → P(win)",
+    ),
+    Task(
         name="pnl_reconstruction",
         # FIFO lot-matching across wallet_trades to compute realized PnL
         # from pre-resolution sells (not just resolved markets). Writes
