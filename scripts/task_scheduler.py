@@ -387,6 +387,16 @@ SCHEDULE: list[Task] = [
         description="Daily behavioral metrics: bootstrap-CI, z-score, sizing, sybil, clusters",
     ),
     Task(
+        # 2026-04-25: signal health pipeline. Per-signal IC over 30d/14d
+        # rolling windows + pairwise correlation across signal types.
+        # Flags decaying (ic_14d < 0 on n>=10) and correlation-redundant
+        # (>=0.7 with another type) signals. Daily.
+        name="signal_health",
+        cmd="python -m trading_platform.polymarket.signal_health",
+        interval_seconds=24 * 3600,
+        description="Daily signal IC + pairwise correlation; decay + redundancy flags",
+    ),
+    Task(
         name="pnl_reconstruction",
         # FIFO lot-matching across wallet_trades to compute realized PnL
         # from pre-resolution sells (not just resolved markets). Writes

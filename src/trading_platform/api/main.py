@@ -762,6 +762,47 @@ def live_execution_quality() -> dict[str, Any]:
         return {"total_orders": 0, "filled": 0, "fill_rate": 0, "error": str(exc)}
 
 
+@app.get("/api/signal-health")
+def signal_health() -> dict[str, Any]:
+    """Latest IC + correlation snapshot per signal type. Reads
+    `signal_health` table populated daily by signal_health.py.
+    """
+    try:
+        with _db() as conn:
+            rows = conn.execute(
+                "SELECT signal_type, n_resolved_30d, ic_30d, ic_14d, ic_trend, "
+                "       correlated_with, correlation_max, decay_flag, last_updated "
+                "  FROM signal_health "
+                " ORDER BY ic_14d DESC NULLS LAST"
+            ).fetchall()
+    except Exception as exc:
+        return {"error": str(exc)[:200], "signals": []}
+    out = []
+    for r in rows:
+        out.append({
+            "signal_type": r[0], "n_resolved_30d": r[1],
+            "ic_30d": r[2], "ic_14d": r[3], "ic_trend": r[4],
+            "correlated_with": r[5], "correlation_max": r[6],
+            "decay_flag": int(r[7] or 0),
+            "last_updated": r[8],
+        })
+    return {"signals": out}
+
+
+@app.get("/api/calibration")
+def calibration_report(window_days: int = 30) -> dict[str, Any]:
+    """Brier score + reliability diagram + per-signal calibration over
+    the last `window_days` of resolved hypotheses. Verdict is one of
+    {well_calibrated, mild_miscalibration, poor_calibration} keyed off
+    mean abs miscalibration thresholds.
+    """
+    try:
+        from trading_platform.polymarket.calibration_metrics import compute_calibration
+        return compute_calibration(window_days=window_days)
+    except Exception as exc:
+        return {"error": str(exc)[:200], "n": 0, "window_days": window_days}
+
+
 @app.get("/api/funnel/decisions")
 def decision_funnel(hours: int = 24) -> dict[str, Any]:
     """Aggregate decision_trace rows by gate. Closes the 'why didn't I

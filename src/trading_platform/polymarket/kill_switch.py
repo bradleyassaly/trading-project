@@ -72,6 +72,14 @@ class KillSwitch:
     # sample. Probation requires positive EV and WR>=MIN_WIN_RATE.
     PROBATION_MIN_RESOLVED = 5
     PROBATION_MAX_STAKE_USD = 5.0
+    # 2026-04-25: discovery-stake tier. Below PROBATION_MIN_RESOLVED but
+    # above DISCOVERY_MIN_RESOLVED, allow $1 fires so we collect live
+    # resolution data on the bottom-of-funnel signal types. Without this,
+    # the gate stack starves signals into a "we need data to graduate
+    # but we can't trade without graduating" loop. Discovery tier still
+    # requires non-negative EV and `LIVE_DISCOVERY_ENABLED=1` env opt-in.
+    DISCOVERY_MIN_RESOLVED = 1
+    DISCOVERY_MAX_STAKE_USD = 1.0
 
     def __init__(self, db_path: str, bankroll: float | None = None) -> None:
         self._db_path = str(db_path)
@@ -176,6 +184,16 @@ class KillSwitch:
                         f"PROBATION (effective n={effective_n}/{self.MIN_RESOLVED_HARD}) — "
                         f"capped at ${self.PROBATION_MAX_STAKE_USD:.0f}"
                     )
+                elif (
+                    os.getenv("LIVE_DISCOVERY_ENABLED", "").lower() in ("1", "true", "yes")
+                    and effective_n >= self.DISCOVERY_MIN_RESOLVED
+                ):
+                    # Discovery tier: $1 stakes, real-money calibration.
+                    probation = True  # reuse probation path, just smaller cap
+                    warnings.append(
+                        f"DISCOVERY (effective n={effective_n}) — capped at "
+                        f"${self.DISCOVERY_MAX_STAKE_USD:.0f}"
+                    )
                 else:
                     return KillSwitchResult(
                         False,
@@ -251,10 +269,14 @@ class KillSwitch:
                     warnings,
                 )
 
-            return KillSwitchResult(
-                True, None, warnings,
-                probation_cap=self.PROBATION_MAX_STAKE_USD if probation else None,
-            )
+            # Discovery cap is tighter than probation; pick the right one.
+            cap = None
+            if probation:
+                if any("DISCOVERY" in w for w in warnings):
+                    cap = self.DISCOVERY_MAX_STAKE_USD
+                else:
+                    cap = self.PROBATION_MAX_STAKE_USD
+            return KillSwitchResult(True, None, warnings, probation_cap=cap)
         finally:
             conn.close()
 
