@@ -762,6 +762,124 @@ def live_execution_quality() -> dict[str, Any]:
         return {"total_orders": 0, "filled": 0, "fill_rate": 0, "error": str(exc)}
 
 
+@app.get("/api/wallet/{address}/profile")
+def wallet_profile(address: str) -> dict[str, Any]:
+    """Unified wallet view across all the intelligence layers.
+
+    Joins wallet_profiles, wallet_alpha_scores, wallet_behavior_metrics,
+    wallet_category_zscore, insider_wallets, and earliness lookup. Single
+    query for the dashboard / Telegram /wallet command.
+    """
+    addr = (address or "").lower()
+    if not addr.startswith("0x") or len(addr) != 42:
+        return {"error": "invalid address format"}
+    out: dict[str, Any] = {"wallet": addr}
+    try:
+        with _db() as conn:
+            row = conn.execute(
+                """SELECT pm_pnl_usdc, pm_volume_usdc, net_pnl_usdc,
+                          directional_win_rate, early_win_rate,
+                          resolved_trades, total_trades, total_volume_usdc,
+                          wallet_type, pseudonym, is_early_informed,
+                          first_seen_ts, last_trade_ts, pm_synced_at
+                     FROM wallet_profiles WHERE wallet = ?""",
+                (addr,),
+            ).fetchone()
+            if row:
+                out["profile"] = {
+                    "pm_pnl_usdc": row[0], "pm_volume_usdc": row[1],
+                    "net_pnl_usdc": row[2], "directional_win_rate": row[3],
+                    "early_win_rate": row[4], "resolved_trades": row[5],
+                    "total_trades": row[6], "total_volume_usdc": row[7],
+                    "wallet_type": row[8], "pseudonym": row[9],
+                    "is_early_informed": row[10],
+                    "first_seen_ts": row[11], "last_trade_ts": row[12],
+                    "pm_synced_at": row[13],
+                }
+            else:
+                out["profile"] = None
+
+            try:
+                bm = conn.execute(
+                    """SELECT n_resolved, roi_mean, roi_lower_95, roi_upper_95,
+                              is_copyable_ci, sizing_median_pct, sizing_p90_pct,
+                              estimated_bankroll, sybil_score, is_likely_farmer,
+                              category_hhi, primary_category, cluster_id
+                         FROM wallet_behavior_metrics WHERE wallet = ?""",
+                    (addr,),
+                ).fetchone()
+                if bm:
+                    out["behavior"] = {
+                        "n_resolved": bm[0], "roi_mean": bm[1],
+                        "roi_lower_95": bm[2], "roi_upper_95": bm[3],
+                        "is_copyable_ci": int(bm[4] or 0),
+                        "sizing_median_pct": bm[5], "sizing_p90_pct": bm[6],
+                        "estimated_bankroll": bm[7], "sybil_score": bm[8],
+                        "is_likely_farmer": int(bm[9] or 0),
+                        "category_hhi": bm[10], "primary_category": bm[11],
+                        "cluster_id": bm[12],
+                    }
+                else:
+                    out["behavior"] = None
+            except Exception:
+                out["behavior"] = None
+
+            try:
+                alpha_rows = conn.execute(
+                    """SELECT category, win_rate, win_rate_30d, avg_pnl,
+                              total_pnl, resolved_trades, copyability, is_copyable
+                         FROM wallet_alpha_scores
+                        WHERE wallet = ?
+                        ORDER BY total_pnl DESC LIMIT 20""",
+                    (addr,),
+                ).fetchall()
+                out["alpha_by_category"] = [
+                    {"category": r[0], "win_rate": r[1], "win_rate_30d": r[2],
+                     "avg_pnl": r[3], "total_pnl": r[4], "resolved_trades": r[5],
+                     "copyability": r[6], "is_copyable": int(r[7] or 0)}
+                    for r in alpha_rows
+                ]
+            except Exception:
+                out["alpha_by_category"] = []
+
+            try:
+                z_rows = conn.execute(
+                    """SELECT category, n_in_cat, cat_wr, lifetime_wr,
+                              z_score, is_specialist_z
+                         FROM wallet_category_zscore
+                        WHERE wallet = ?
+                        ORDER BY z_score DESC NULLS LAST""",
+                    (addr,),
+                ).fetchall()
+                out["zscore_by_category"] = [
+                    {"category": r[0], "n_in_cat": r[1], "cat_wr": r[2],
+                     "lifetime_wr": r[3], "z_score": r[4],
+                     "is_specialist_z": int(r[5] or 0)}
+                    for r in z_rows
+                ]
+            except Exception:
+                out["zscore_by_category"] = []
+
+            try:
+                ins = conn.execute(
+                    """SELECT insider_score, total_trades, total_pnl,
+                              detection_method, classified_at
+                         FROM insider_wallets WHERE wallet = ?""",
+                    (addr,),
+                ).fetchone()
+                out["insider"] = (
+                    {"insider_score": ins[0], "total_trades": ins[1],
+                     "total_pnl": ins[2], "detection_method": ins[3],
+                     "classified_at": ins[4]}
+                    if ins else None
+                )
+            except Exception:
+                out["insider"] = None
+        return out
+    except Exception as exc:
+        return {"wallet": addr, "error": str(exc)[:200]}
+
+
 @app.get("/api/signal-health")
 def signal_health() -> dict[str, Any]:
     """Latest IC + correlation snapshot per signal type. Reads

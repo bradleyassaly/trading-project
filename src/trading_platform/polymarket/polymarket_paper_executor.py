@@ -504,6 +504,13 @@ class PolymarketPaperExecutor:
                 "[SIDE_GATE] SKIP %s side=%s — not profitable on this side",
                 signal_type, _signal_side,
             )
+            try:
+                from trading_platform.polymarket.decision_trace import trace as _dt
+                _dt(signal=signal, gate="SIDE_GATE", passed=False,
+                    detail=f"{signal_type}/{_signal_side}",
+                    surface="paper", db_path=str(self._wallet_db_path))
+            except Exception:
+                pass
             return None
 
         # ── Discovery mode ──────────────────────────────────────────────
@@ -663,6 +670,13 @@ class PolymarketPaperExecutor:
                         "[ALPHA_GATE] BLOCK wallet %s not copyable in %s (signal=%s)",
                         gate_wallet[:14], gate_category, signal_type,
                     )
+                    try:
+                        from trading_platform.polymarket.decision_trace import trace as _dt
+                        _dt(signal=signal, gate="ALPHA_GATE", passed=False,
+                            detail=f"not_copyable in {gate_category}",
+                            surface="paper", db_path=str(self._wallet_db_path))
+                    except Exception:
+                        pass
                     return None
                 if status == "unscored":
                     # Tier1/1h bypass: known-quality wallets pass even without

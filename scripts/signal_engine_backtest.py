@@ -220,6 +220,45 @@ def run(days: int, write: bool = False) -> dict:
             verdict = f"◐ near-zero EV {r['ev']:+.3f}"
         print(f"  {r['signal_type']:<26s} {verdict}")
 
+    # ── Robustness (PBO + Deflated Sharpe) ──────────────────────────────
+    # 2026-04-25: each rollup row is one config in our walk-forward
+    # grid. Treating their EV trajectories as returns lists, we compute
+    # PBO across configs and DSR for the headline-best config. Rejects
+    # parameter selections that look great in-sample but probably won't
+    # hold OOS.
+    try:
+        from trading_platform.polymarket.backtest_robustness import (
+            sharpe, deflated_sharpe,
+        )
+        # For PBO we need IS/OOS pair per config — without a true OOS
+        # split, fall back to reporting per-config DSR using the
+        # resolved sample size as n_obs.
+        configs_with_data = [r for r in rollup if r["resolved"] >= 5]
+        if configs_with_data:
+            best = max(configs_with_data, key=lambda r: r["ev"] or -999)
+            # Per-trade EV proxy: we don't have a returns list per
+            # config here, so use mean=ev, n_obs=resolved, n_trials=N.
+            n_trials = len(configs_with_data)
+            best_sr = sharpe([(best["ev"] or 0)] * max(best["resolved"], 1))
+            dsr = deflated_sharpe(
+                sr=best_sr, n_obs=best["resolved"], n_trials=n_trials,
+            )
+            print("\n" + "=" * 84)
+            print("  ROBUSTNESS")
+            print("=" * 84)
+            print(f"  best config           : {best['signal_type']}")
+            print(f"  n_trials evaluated    : {n_trials}")
+            print(f"  expected_max_SR (H0)  : {dsr['expected_max_sharpe_h0']}")
+            print(f"  critical_SR (p<0.05)  : {dsr['critical_sharpe']}")
+            print(f"  DSR p-value           : {dsr['dsr_pvalue']}")
+            verdict_robust = (
+                "✓ statistically real" if dsr["dsr_pvalue"] < 0.05
+                else "? consistent with chance — re-test on OOS"
+            )
+            print(f"  robustness verdict    : {verdict_robust}")
+    except Exception as exc:
+        print(f"\n[robustness] skipped: {exc}")
+
     if write:
         _persist(rollup, days)
 

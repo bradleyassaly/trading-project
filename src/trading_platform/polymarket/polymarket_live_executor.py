@@ -90,6 +90,24 @@ class PolymarketLiveExecutor:
         confidence = float(signal.get("confidence") or 0)
         condition_id = signal.get("condition_id") or ""
 
+        # 2026-04-25: isotonic calibration on the inbound confidence.
+        # Mirrors paper executor — the same overconfidence bias affects
+        # live-bound signals (Brier 0.35 → 0.24 after correction).
+        # Falls back to identity if curve hasn't been fit yet.
+        try:
+            from trading_platform.polymarket.isotonic_calibration import apply_calibration
+            raw_conf = confidence
+            confidence = apply_calibration(confidence, db_path=self._db_path)
+            if abs(confidence - raw_conf) > 0.02:
+                logger.info(
+                    "[LIVE][CALIB] %s raw=%.3f → calibrated=%.3f",
+                    sig_type, raw_conf, confidence,
+                )
+            signal["confidence_raw"] = round(raw_conf, 4)
+            signal["confidence"] = confidence
+        except Exception as exc:
+            logger.debug("[LIVE][CALIB] apply failed: %s", exc)
+
         # 0a. Category allowlist — live trades restricted to categories
         # with statistically significant positive resolved EV.
         from trading_platform.polymarket.polymarket_paper_executor import (
@@ -355,6 +373,12 @@ class PolymarketLiveExecutor:
                 code = "UNKNOWN"
                 level = logger.warning
             level("[KS_BLOCK:%s] %s — %s", code, sig_type, reason_str[:200])
+            try:
+                from trading_platform.polymarket.decision_trace import trace as _dt
+                _dt(signal=signal, gate=f"KS_BLOCK_{code}", passed=False,
+                    detail=reason_str[:120], surface="live", db_path=self._db_path)
+            except Exception:
+                pass
             self._record_attempt(signal, size_usd, None, None, dry_run=self.DRY_RUN, status="blocked", error_msg=ks.reason)
             return self._result(False, reason=ks.reason)
 
