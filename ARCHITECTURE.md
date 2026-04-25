@@ -36,6 +36,26 @@ All 9 categories generate signals during testing. Category promotion/demotion is
 
 ---
 
+## The Nine Layers (2026-04-25)
+
+The platform is mentally decomposable into 9 layers, each with a status and a known top-1 gap. See `reports/alpha_pipeline_evaluation_2026-04-25.md` for the full elite-comparison table.
+
+| # | Layer | Key files | State |
+|---|---|---|---|
+| 1 | Ingestion | `wallet_stream.py`, `live_collector.py`, `wallet_trade_poller.py` | ✅ healthy; tier-1 poll 5min, hot-reload watched list |
+| 2 | Wallet intelligence | `wallet_profile_rebuild.py`, `alpha_scores.py`, `pm_leaderboard_sync.py`, **`wallet_behavior_metrics.py`**, **`wallet_earliness.py`** | ✅ bootstrap-CI + z-score + sybil + clusters live |
+| 3 | Signal generation | `whale_signal_engine.py` (13 types) | 🟡 needs IC decay + correlation pruning |
+| 4 | Calibration & sizing | `kelly_sizer.py`, `signal_evaluator.py`, `STAKE_MULTIPLIERS` | ✅ KellySizer reads `signal_calibration` |
+| 5 | Risk / gates | 14-gate stack in `polymarket_live_executor.py`; FAV_GATE 0.65, side-gate, structured `[KS_BLOCK:*]` | 🟡 needs single-budget reformulation |
+| 6 | Exit management | `polymarket_paper_executor.py` (SL/TP/trail/`whale_mirror_exit`/`pre_resolve_decay`) | 🟡 static rules; needs continuous EV recompute |
+| 7 | Observability | `/api/system/readiness`, `/api/live/funnel`, `health_watchdog.py` | ✅ readiness + funnel + sched-failure alerts |
+| 8 | Research / backtest | `signal_engine_backtest.py`, `replay_*` | 🟡 needs PBO + deflated Sharpe |
+| 9 | Discovery / hypothesis pipeline | **`hypothesis_tracker.py`**, `reports/alpha_discovery_onramp_2026-04-24.md` | ✅ table live; needs MHT correction on promotion |
+
+Bold = added or substantially upgraded 2026-04-24/25.
+
+---
+
 ## Repository Layout
 
 ```
@@ -47,13 +67,19 @@ trading-project/
 │   │   ├── wallet_db.py        # SQLite central store (wallet_intelligence.db)
 │   │   ├── wallet_profile_rebuild.py  # Directional WR computation
 │   │   ├── wallet_buckets.py   # Behavioral classification
+│   │   ├── wallet_behavior_metrics.py # Bootstrap-CI, z-score, sybil, clusters (NEW 2026-04-25)
+│   │   ├── wallet_earliness.py # Recent-vs-lifetime trend boost (NEW 2026-04-24)
+│   │   ├── alpha_scores.py     # Per-(wallet, category) copyability scores
+│   │   ├── pm_leaderboard_sync.py  # Authoritative PnL sync + auto-backfill chain
+│   │   ├── hypothesis_tracker.py # Alpha-discovery hypothesis pipeline (NEW 2026-04-24)
 │   │   ├── market_universe.py  # 225-market category-organized universe
 │   │   ├── whale_tripwire.py   # Real-time wallet detection
-│   │   ├── whale_signal_engine.py  # Signal generation (whale_entry + convergence)
-│   │   ├── polymarket_paper_executor.py  # Paper trade execution
+│   │   ├── whale_signal_engine.py  # Signal generation (13 types + clusters)
+│   │   ├── polymarket_paper_executor.py  # Paper trade execution + behavioral gates
+│   │   ├── polymarket_live_executor.py   # 14-gate live execution stack
 │   │   ├── live_collector.py   # WebSocket price + whale detection
-│   │   ├── smart_money_signal.py  # Legacy Goldsky-based signals
-│   │   ├── realtime_monitor.py # Legacy Goldsky polling monitor
+│   │   ├── kelly_sizer.py      # Kelly + signal_calibration integration
+│   │   ├── signal_evaluator.py # Per-signal EV + kelly_fraction calibration
 │   │   └── ...                 # Data fetchers, clients, models
 │   ├── kalshi/                 # Kalshi Economics trading subsystem
 │   │   ├── market_scanner.py   # Signal computation

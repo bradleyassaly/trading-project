@@ -21,6 +21,12 @@ Thumbs.db
 logs/
 *.log
 
+# Local-state / scratch
+replay_out.txt
+nul
+.claude/settings.local.json
+.claude/scheduled_tasks.lock
+
 # Env / secrets
 .env
 .env.*
@@ -50,7 +56,10 @@ artifacts_medium/
 artifacts/dashboard_data/
 artifacts/system_check/
 artifacts/system_check_ci/
-reports/
+reports/*.json
+reports/*.csv
+reports/*.parquet
+reports/*.html
 results/
 backtests/
 checkpoints/

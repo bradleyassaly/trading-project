@@ -38,6 +38,21 @@ def _project_relative(path_str: str) -> Path:
 def cmd_polymarket_live_collect(args: argparse.Namespace) -> None:
     from datetime import timedelta
 
+    # 2026-04-25: configure logging at the live-collect entry point.
+    # Without this every `logger.info(...)` call inside the signal
+    # engine + paper executor was being silently dropped (Python's
+    # default root logger handles only WARNING+), so [DISPATCH],
+    # [CAT_GATE], [EXEC_GATE], [SIDE_GATE], [STAKE_BOOST] and every
+    # other diagnostic marker was invisible. Cause of the long-running
+    # 0.4% signal→paper conversion blackout was a mix of (a) hard
+    # sports block + (b) silent gates we couldn't see.
+    try:
+        from trading_platform.polymarket.logging_config import setup_logging
+        setup_logging(service="live_collect")
+    except Exception:
+        import logging
+        logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+
     from trading_platform.polymarket.client import PolymarketClient, PolymarketConfig
     from trading_platform.polymarket.models import PolymarketMarket
     from trading_platform.polymarket.live_collector import (

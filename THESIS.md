@@ -231,11 +231,21 @@ because the market's capacity for our edge isn't tested above that.
 | Phase | Tests | Scaling level |
 |---|---|---|
 | **1 — Data foundation** | Claim 1 (persistent edge exists) | ✅ confirmed: 77.9% WR on 61k clean trades |
-| **2 — Alpha scoring** | Claims 2, 3 | ✅ confirmed: 414 copyable combos, 24.6% selectivity |
-| **3 — Real-time hypothesis testing** | Claim 4 | 🔄 **CURRENT** — 47.1% on 17 of 50 needed |
+| **2 — Alpha scoring** | Claims 2, 3, 7 | ✅ bootstrap-CI shipped: 148 wallets pass 95%-LB-on-ROI > 0; 101 farmers gated |
+| **3 — Real-time hypothesis testing** | Claim 4 | 🔄 **CURRENT** — gates rationalized 2026-04-25; flow restoration in progress |
 | **4 — Live probate (L1)** | Claim 5 | ⏳ gated on Phase 3 ≥70% on 50+ |
 | **5 — Confirm (L2)** | Claim 2 at scale | ⏳ gated on L1 passing |
 | **6 — Scale (L3→L5)** | Claim 6 (scalability) | ⏳ gated on L2 passing |
+
+### Claim 7 — Smart vs active money is distinguishable (NEW 2026-04-25)
+
+**Statement.** Lifetime PnL alone misidentifies wash-traders, sybils, and one-shot lucky strikes as "smart money." A behavioral-metrics layer (bootstrap-CI on per-trade ROI, sybil/wash heuristics, sizing-distribution shape, per-(wallet, category) z-score) materially separates wallets we should copy from those we should not.
+
+**How we test it.** Compute the metrics in `wallet_behavior_metrics`. The cohort `is_copyable_ci=1 AND is_likely_farmer=0` should outperform the naive `lifetime_pnl > $X` cohort on forward 30d resolved trades.
+
+**Current evidence (2026-04-25, first run).** 1,151 wallets profiled; 148 pass bootstrap-CI; 101 flagged farmers. Forward measurement begins now.
+
+**What would reject this.** The CI-passing cohort's forward WR not exceeding the naive lifetime-PnL cohort's by ≥3pp on n≥100 resolved trades over 30d.
 
 ---
 

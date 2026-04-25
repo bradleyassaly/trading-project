@@ -1265,13 +1265,39 @@ class WhaleSignalEngine:
             if signal_type == "whale_entry":
                 self._maybe_fire_filtered_whale_entry(signal, trade, now_ts)
                 self._maybe_fire_insider_entry(signal, trade, now_ts)
-            logger.info("[DISABLED] %s signal blocked from trading", signal_type)
+            print(f"[DISABLED] {signal_type} signal blocked from trading", flush=True)
             return signal  # log but don't trade
         if signal_type in INFORMATIONAL_SIGNALS:
-            logger.info("[INFO_ONLY] %s logged as informational, not trading", signal_type)
+            print(f"[INFO_ONLY] {signal_type} logged as informational, not trading", flush=True)
             return signal  # log but don't trade
+        # 2026-04-25: hard sports block removed. The block was killing
+        # ~80% of whale signals (cascade/network_leader_entry/market_
+        # maker_flip on NBA/MLB spreads, all tagged `wallet_derived`
+        # with "Spread:" in the question matched the regex). Sports is
+        # actually +$7.82 over 8d at 35.8% WR with a long-shot bias —
+        # net positive EV. The downstream `LIVE_TRADE_CATEGORIES` gate
+        # in the paper executor already handles category filtering for
+        # capital deployment, and `_execute_discovery` runs $1 stakes
+        # for unproven slices. Logging the sport-classified signals so
+        # we can audit, but not blocking.
         if _is_sports_market(trade.category, trade.question):
-            return signal  # log but don't trade
+            print(
+                f"[SPORTS_TAG] {signal_type} wallet={trade.wallet[:14]} "
+                f"cat={trade.category} — flowing to paper executor",
+                flush=True,
+            )
+            # fall through
+
+        # 2026-04-24: paper-trade freeze diagnostic — log every dispatch
+        # so we can see whether execute_signal reaches the paper executor.
+        # Use print() not logger.info — live-collect doesn't run
+        # setup_logging() so logger.info gets dropped at INFO level.
+        print(
+            f"[DISPATCH] {signal_type} wallet={trade.wallet[:14]} "
+            f"cat={trade.category} side={trade.side} conf={confidence:.2f} "
+            f"→ paper_executor",
+            flush=True,
+        )
 
         try:
             from trading_platform.polymarket.polymarket_paper_executor import PolymarketPaperExecutor
@@ -1331,23 +1357,37 @@ class WhaleSignalEngine:
         # unless POLYMARKET_LIVE_ENABLED=1 in .env. Purely additive:
         # failures here never affect paper trading.
         # LIVE_SIGNAL_TYPES is a code-level whitelist on top of KillSwitch.
-        # 2026-04-18: `accumulation` removed after thesis scorecard showed
-        # 0/6 correct (0% accuracy). Signal keeps firing in paper for
-        # diagnosis. Re-add only when paper accuracy ≥55% on 20+ resolved.
-        LIVE_SIGNAL_TYPES = {"whale_entry_filtered"}
+        # 2026-04-24: expanded from {whale_entry_filtered} to include
+        # the post-Apr-18 proven winners — wallet_reversal (72.7% WR YES)
+        # and cascade (55.6% WR YES). Both are NO-side-gated already via
+        # EXCLUDE_SIGNAL_SIDE. The previous singleton whitelist combined
+        # with a too-tight YES_FAV_GATE produced 0 live trades for 7
+        # days despite 1192 whale_entry_filtered signals firing.
+        LIVE_SIGNAL_TYPES = {"whale_entry_filtered", "wallet_reversal", "cascade"}
         if signal_type in LIVE_SIGNAL_TYPES:
             try:
                 from trading_platform.polymarket.polymarket_live_executor import PolymarketLiveExecutor
                 if not hasattr(self, "_live"):
                     self._live = PolymarketLiveExecutor()
                 live_result = self._live.execute(signal)
+                # Always log the live decision so we have an audit trail.
+                # Previously success=False was silent — for 7 days we had
+                # zero live activity AND zero diagnostic logs.
                 if live_result.get("success"):
                     if live_result.get("mode") == "dry_run":
                         logger.info("[LIVE_DRY] would trade: %s", live_result)
                     elif live_result.get("mode") == "live":
                         logger.warning("[LIVE_TRADE] EXECUTED: %s", live_result)
+                else:
+                    logger.info(
+                        "[LIVE_BLOCKED] %s side=%s ep=%.3f reason=%s",
+                        signal_type, signal.get("side", "?"),
+                        float(signal.get("entry_price") or signal.get("price") or 0),
+                        live_result.get("reason", "unknown")[:120],
+                    )
             except Exception as exc:
-                logger.debug("[LIVE] Executor error: %s", exc)
+                # Promote from debug → warning so silent failures surface.
+                logger.warning("[LIVE] Executor error: %s", exc)
 
         # Telegram alerts — ONLY on paper/live trade placement, not raw
         # signal fires. Previously every signal fire sent a notification

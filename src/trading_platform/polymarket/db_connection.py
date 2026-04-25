@@ -83,6 +83,8 @@ _pool_lock = __import__("threading").Lock()
 POOL_MIN_SIZE = int(os.environ.get("PG_POOL_MIN_SIZE", "2"))
 POOL_MAX_SIZE = int(os.environ.get("PG_POOL_MAX_SIZE", "20"))
 POOL_TIMEOUT = float(os.environ.get("PG_POOL_TIMEOUT", "60.0"))
+POOL_MAX_IDLE = float(os.environ.get("PG_POOL_MAX_IDLE", "60.0"))
+POOL_MAX_LIFETIME = float(os.environ.get("PG_POOL_MAX_LIFETIME", "1800.0"))
 
 
 def _get_pool():
@@ -91,6 +93,15 @@ def _get_pool():
     A single pool per process replaces per-call psycopg.connect() which
     was adding 10-50ms of TCP + auth + role-setup overhead to every API
     request. Connections are returned via wrapper.close() → pool.putconn.
+
+    2026-04-24: hardened against silent idle-disconnects after the
+    week-long unattended run died at +6h with `terminating connection
+    due to idle-session timeout`. Three layers of defense now:
+      1. TCP keepalives so a dropped backend surfaces fast.
+      2. `check=check_connection` so the pool runs SELECT 1 on each
+         getconn() and recycles a dead connection transparently.
+      3. `max_idle` + `max_lifetime` so the pool retires conns before
+         server-side timeouts fire.
     """
     global _pool_instance
     if _pool_instance is not None:
@@ -104,7 +115,9 @@ def _get_pool():
             )
         conninfo = (
             f"host={PG_HOST} port={PG_PORT} user={PG_USER} "
-            f"password={PG_PASSWORD} dbname={PG_DB}"
+            f"password={PG_PASSWORD} dbname={PG_DB} "
+            "keepalives=1 keepalives_idle=30 "
+            "keepalives_interval=10 keepalives_count=5"
         )
         _pool_instance = ConnectionPool(
             conninfo=conninfo,
@@ -113,11 +126,13 @@ def _get_pool():
             kwargs={"autocommit": True},
             open=True,
             timeout=POOL_TIMEOUT,
-            max_idle=300.0,
+            max_idle=POOL_MAX_IDLE,
+            max_lifetime=POOL_MAX_LIFETIME,
+            check=ConnectionPool.check_connection,
         )
         logger.info(
-            "[pg_pool] opened min=%d max=%d host=%s",
-            POOL_MIN_SIZE, POOL_MAX_SIZE, PG_HOST,
+            "[pg_pool] opened min=%d max=%d max_idle=%.0fs max_lifetime=%.0fs host=%s",
+            POOL_MIN_SIZE, POOL_MAX_SIZE, POOL_MAX_IDLE, POOL_MAX_LIFETIME, PG_HOST,
         )
         return _pool_instance
 

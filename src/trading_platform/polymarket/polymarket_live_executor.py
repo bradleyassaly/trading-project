@@ -93,13 +93,17 @@ class PolymarketLiveExecutor:
         # 0a. Category allowlist — live trades restricted to categories
         # with statistically significant positive resolved EV.
         from trading_platform.polymarket.polymarket_paper_executor import (
-            LIVE_TRADE_CATEGORIES, EXCLUDE_SIGNAL_TYPES,
+            LIVE_TRADE_CATEGORIES, EXCLUDE_SIGNAL_TYPES, EXCLUDE_SIGNAL_SIDE,
         )
         if sig_type in EXCLUDE_SIGNAL_TYPES:
             # Routine config-level rejection — not a warning. DEBUG it so
             # operators only see exceptional blocks at WARNING level.
             logger.debug("[LIVE] BLOCKED signal_type=%s (excluded)", sig_type)
             return self._result(False, reason=f"signal_type {sig_type} excluded from live")
+        _sig_side = (signal.get("side") or "").upper()
+        if _sig_side and (sig_type, _sig_side) in EXCLUDE_SIGNAL_SIDE:
+            logger.info("[LIVE][SIDE_GATE] BLOCKED %s side=%s", sig_type, _sig_side)
+            return self._result(False, reason=f"{sig_type} {_sig_side} excluded from live")
         raw_cat = signal.get("category") or ""
         cat = raw_cat.lower() if isinstance(raw_cat, str) else ""
         # Re-classify when category is empty/other/wallet_derived — the
@@ -119,6 +123,15 @@ class PolymarketLiveExecutor:
                     signal["category"] = cat
             except Exception as exc:
                 logger.debug("[LIVE] category classifier failed: %s", exc)
+            # Sports fallback — see paper executor for rationale.
+            if cat in ("", "other", "wallet_derived"):
+                try:
+                    from trading_platform.polymarket.whale_signal_engine import _is_sports_market
+                    if _is_sports_market(cat, signal.get("question") or ""):
+                        cat = "sports"
+                        signal["category"] = "sports"
+                except Exception as exc:
+                    logger.debug("[LIVE] sports fallback failed: %s", exc)
         if not cat or cat not in LIVE_TRADE_CATEGORIES:
             logger.debug("[LIVE] BLOCKED category=%s — not in live allowlist", cat)
             return self._result(False, reason=f"category '{cat}' not approved for live")
@@ -193,21 +206,29 @@ class PolymarketLiveExecutor:
         if age_sec > 900:
             return self._result(False, reason=f"Signal too old ({age_sec/60:.0f}m)")
 
-        # 1c. YES-favorite guard. Mirrors the same check in the paper
-        # executor (polymarket_paper_executor.py ~L645). Copy-trade
-        # tail risk is concentrated in BUY-YES trades at entry >= 0.5;
-        # block rather than let real capital into them.
+        # 1c. Favorite guard. The data backing this changed.
+        # Pre-Apr-18 (when set at >=0.50): only YES side with ep≥0.7 was the
+        # kill zone (15% WR), not the 0.5-0.7 mid band (35% WR ≈ break-even).
+        # Post-Apr-24: tightened analysis on 8d cohort showed:
+        #   long_shot   <0.30:  74 trades, 50% WR, +$67  ← amplify
+        #   underdog 0.30-0.50: 41 trades, 39% WR, +$5   ← keep
+        #   mid       0.50-0.70: 53 trades, 36% WR, +$2  ← keep, tight
+        #   favorite  0.70-0.85: 39 trades, 15% WR, -$6  ← block
+        # Lifting the live cap from 0.50 → 0.65 expands the live-eligible
+        # entry band from ~50% of signals to ~85%. NO-side blocking is
+        # handled separately via EXCLUDE_SIGNAL_SIDE.
+        FAVORITE_BLOCK_PRICE = 0.65
         raw_price = signal.get("entry_price") or signal.get("price")
         try:
             entry_px = float(raw_price) if raw_price is not None else None
         except (TypeError, ValueError):
             entry_px = None
-        if (signal.get("direction") or "").upper() == "BUY" and entry_px is not None and entry_px >= 0.50:
+        if (signal.get("direction") or "").upper() == "BUY" and entry_px is not None and entry_px >= FAVORITE_BLOCK_PRICE:
             logger.info(
-                "[LIVE][YES_FAV_GATE] BLOCK %s BUY@%.3f — copy-trade tail risk",
-                sig_type, entry_px,
+                "[LIVE][FAV_GATE] BLOCK %s BUY@%.3f (>= %.2f) — copy-trade tail risk",
+                sig_type, entry_px, FAVORITE_BLOCK_PRICE,
             )
-            return self._result(False, reason=f"BUY YES at {entry_px:.2f} (>= 0.50): tail-risk blocked")
+            return self._result(False, reason=f"BUY at {entry_px:.2f} (>= {FAVORITE_BLOCK_PRICE:.2f}): tail-risk blocked")
 
         # 2. Kill switch check. If the switch returns a probation_cap,
         # the signal passed probation gates (>=5 resolved, positive EV,
@@ -223,14 +244,36 @@ class PolymarketLiveExecutor:
             )
             size_usd = float(ks.probation_cap)
         if not ks.allowed:
-            # "POLYMARKET_LIVE_ENABLED not set" is the expected state
-            # when running paper-only. Don't spam warnings for that.
-            # Any other kill-switch reason stays at WARNING.
+            # 2026-04-24: structured drop-reason categorization. Previously
+            # every kill-switch block logged the same WARNING/DEBUG, making
+            # `grep` impossible to aggregate by cause. Now emits a fixed
+            # KS_BLOCK code ({DISABLED|MIN_RESOLVED|EV|WR|ENV|EMERGENCY|UNKNOWN})
+            # so we can `grep "[KS_BLOCK:" | sort | uniq -c` to see the
+            # systemic vs one-off blockers at a glance.
             reason_str = str(ks.reason or "")
-            if "POLYMARKET_LIVE_ENABLED" in reason_str:
-                logger.debug("[LIVE] KillSwitch blocked: %s", reason_str)
+            r = reason_str.lower()
+            if "polymarket_live_enabled" in r:
+                code = "ENV"
+                level = logger.debug
+            elif "emergency" in r or "stop" in r:
+                code = "EMERGENCY"
+                level = logger.warning
+            elif "min_resolved" in r or "minimum resolved" in r or "n=" in r and "<" in r:
+                code = "MIN_RESOLVED"
+                level = logger.warning
+            elif "ev" in r and ("negative" in r or "<" in r or "below" in r):
+                code = "EV"
+                level = logger.warning
+            elif "wr" in r and ("low" in r or "<" in r or "below" in r):
+                code = "WR"
+                level = logger.warning
+            elif "disabled" in r or "not enabled" in r or "excluded" in r:
+                code = "DISABLED"
+                level = logger.warning
             else:
-                logger.warning("[LIVE] KillSwitch blocked: %s", reason_str)
+                code = "UNKNOWN"
+                level = logger.warning
+            level("[KS_BLOCK:%s] %s — %s", code, sig_type, reason_str[:200])
             self._record_attempt(signal, size_usd, None, None, dry_run=self.DRY_RUN, status="blocked", error_msg=ks.reason)
             return self._result(False, reason=ks.reason)
 

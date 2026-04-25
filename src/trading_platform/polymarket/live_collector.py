@@ -583,12 +583,18 @@ class PolymarketLiveCollector:
     # ── Tier-1 wallet polling ──────────────────────────────────────────────
 
     async def _tier1_poll_loop(self) -> None:
-        """Poll Data API every 15 min for tier-1 wallet trades.
+        """Poll Data API every TIER1_POLL_INTERVAL_SEC seconds for tier-1
+        wallet trades on markets outside the WebSocket universe.
 
-        Catches trades on markets outside the WebSocket universe.
-        First poll happens 60s after startup, then every 15 min.
+        2026-04-24: dropped from 900s → 300s. The 15min cadence was
+        leaving up to 14m59s of alpha window unmonitored on each tier-1
+        wallet's off-WS markets. 300s is still well below any tier-1
+        Data API rate limits (~6 calls/min/wallet * 343 wallets =
+        ~2k/min — Polymarket's Data API absorbs this trivially).
+        Override via TIER1_POLL_INTERVAL_SEC env if needed.
         """
-        _POLL_INTERVAL = 900  # 15 minutes
+        import os
+        _POLL_INTERVAL = int(os.environ.get("TIER1_POLL_INTERVAL_SEC", "300"))
         _last_seen: dict[str, int] = {}
 
         # Initial delay (let WebSocket settle), then run immediately

@@ -284,6 +284,33 @@ def format_status(states: list[ComponentState]) -> str:
     return "\n".join(lines)
 
 
+def check_scheduler_consecutive_failures() -> ComponentState:
+    """Read state.json and alert when any enabled task has 5+ consecutive
+    failures. Wired 2026-04-24 — was the missing tripwire during the
+    week-long unattended run when 6 paper-side tasks failed every 15min
+    for 5 days without surfacing as a single component-level alert.
+    """
+    if not SCHEDULER_STATE.exists():
+        return ComponentState("scheduler_failures", True, "no state file (skipped)")
+    try:
+        data = json.loads(SCHEDULER_STATE.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return ComponentState("scheduler_failures", False, f"bad state: {exc}")
+    bad = []
+    for t in data.get("tasks", []):
+        if not t.get("enabled", True):
+            continue
+        cf = int(t.get("consecutive_failures", 0) or 0)
+        if cf >= 5:
+            bad.append(f"{t['name']}={cf}x")
+    if bad:
+        return ComponentState(
+            "scheduler_failures", False,
+            f"{len(bad)} task(s) failing 5+x: {', '.join(bad[:5])}",
+        )
+    return ComponentState("scheduler_failures", True, "no sustained failures")
+
+
 def main() -> None:
     startup_ts = time.time()
     logger.info(
@@ -296,7 +323,8 @@ def main() -> None:
         now = time.time()
         states = [check_api(), check_db(), check_scheduler(),
                   check_live_collect(), check_wallet_stream(), check_disk(),
-                  check_hypothesis_drift()]
+                  check_hypothesis_drift(),
+                  check_scheduler_consecutive_failures()]
         in_grace = (now - startup_ts) < STARTUP_GRACE_SECONDS
         if in_grace and any(not s.healthy for s in states):
             logger.info("[grace] suppressed alerts during startup window")

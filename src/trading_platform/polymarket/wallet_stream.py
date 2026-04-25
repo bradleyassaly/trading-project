@@ -93,6 +93,7 @@ class WalletStream:
         self.dedup_window = int(os.environ.get("WS_DEDUP_WINDOW_SEC", "10"))
         self._last_poll: dict[str, float] = {}  # wallet → last-trigger ts
         self._fetcher = None
+        self._reconnect_requested = False
         self._stats = {
             "events_seen": 0,
             "events_matched": 0,
@@ -327,6 +328,13 @@ class WalletStream:
         except Exception as exc:
             logger.warning("poll_wallet(%s) failed: %s", wallet[:10], exc)
 
+    def request_reconnect(self) -> None:
+        """Signal `run()` to drop the current WS and re-subscribe.
+        Used by the watched-list reloader after new wallets are added —
+        the topic filter has to be re-issued to cover them.
+        """
+        self._reconnect_requested = True
+
     async def run(self) -> None:
         """Main reconnect loop."""
         reconnect_delay = int(os.environ.get("WS_RECONNECT_DELAY", "5"))
@@ -345,8 +353,13 @@ class WalletStream:
                     self.ws_url, ping_interval=20, ping_timeout=10,
                 ) as ws:
                     await self._subscribe(ws)
+                    self._reconnect_requested = False
                     logger.info("[wallet-stream] subscribed — listening")
                     async for raw in ws:
+                        if self._reconnect_requested:
+                            logger.info("[wallet-stream] reconnect requested — closing")
+                            await ws.close()
+                            break
                         msg = json.loads(raw)
                         if msg.get("method") == "eth_subscription":
                             await self._handle_log(msg.get("params") or {})
@@ -357,6 +370,49 @@ class WalletStream:
                     exc, reconnect_delay,
                 )
                 await asyncio.sleep(reconnect_delay)
+
+
+async def _watched_reloader(stream: "WalletStream") -> None:
+    """Hot-reload the watched-wallet set every WS_RELOAD_SEC.
+
+    Wired 2026-04-24 — closes the gap where new tier1h wallets discovered
+    by `pm_leaderboard_sync` (daily) and `orphan_wallet_onboarder` (12h)
+    weren't picked up until the next process restart, sometimes 12-24h
+    after they qualified.
+
+    Strategy:
+      * Re-read the union (alpha_copyable + insiders) every interval.
+      * Update `stream.watched` in-place so the routing logic sees the
+        new set immediately for any matching event already covered by
+        the broad CTFExchange topic filter.
+      * If new wallets were added, raise a connection-reset to force
+        the WS reconnect loop in `run()` to re-subscribe with the
+        expanded topic-filter (only newly-included wallets need that).
+    """
+    interval = int(os.environ.get("WS_RELOAD_SEC", "300"))
+    while True:
+        try:
+            await asyncio.sleep(interval)
+            new = _load_watched_wallets()
+            if not new:
+                continue
+            new_lower = {w.lower() for w in new}
+            added = new_lower - stream.watched
+            removed = stream.watched - new_lower
+            if not added and not removed:
+                continue
+            stream.watched = new_lower
+            logger.info(
+                "[wallet-stream] watched-list reload: +%d -%d (now %d)",
+                len(added), len(removed), len(new_lower),
+            )
+            if added:
+                # Force reconnect so the topic filter expands to cover
+                # the newly added wallets. Existing connection won't
+                # see their events otherwise.
+                stream.request_reconnect()
+        except Exception as exc:
+            logger.debug("[wallet-stream] reloader error: %s", exc)
 
 
 async def _heartbeat(stream: WalletStream) -> None:
@@ -415,7 +471,11 @@ def main() -> int:
     stream = WalletStream(ws_url=ws_url, watched=watched)
 
     async def _run():
-        await asyncio.gather(stream.run(), _heartbeat(stream))
+        await asyncio.gather(
+            stream.run(),
+            _heartbeat(stream),
+            _watched_reloader(stream),
+        )
 
     asyncio.run(_run())
     return 0

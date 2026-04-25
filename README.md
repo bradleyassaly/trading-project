@@ -19,15 +19,29 @@ evidence, and the decision framework.
 4. **We can copy in real-time** — live-collect WebSocket + alpha gate detect and act on whale trades fast enough that the edge isn't already priced in
 5. **Edge survives transaction costs** — only verifiable in live trading
 
-## Current Status
+## Current Status (2026-04-25)
 
 | Claim | Status | Evidence |
 |---|---|---|
-| 1. Persistent edge | ✅ confirmed | 77.9% WR on 61,122 clean reliable trades |
-| 2. Category-specific | ✅ confirmed | 7 categories with copyable wallets |
-| 3. Identification | ✅ confirmed | 130 copyable / 387 scored = 34% selectivity, 56 distinct wallets |
-| 4. Real-time copy | 🔄 testing | Alpha gate live, accumulating hypothesis-bearing trades |
-| 5. Transaction costs | ⏳ not started | Gated on Phase 4 (paper accuracy ≥70% on 50+ trades) |
+| 1. Persistent edge | ✅ confirmed | 77.9% WR on 61,122 clean reliable trades; bootstrap-CI now gates copyability |
+| 2. Category-specific | ✅ confirmed | 7 categories with copyable wallets; per-(wallet, cat) z-score live |
+| 3. Identification | ✅ confirmed | 148 wallets pass 95%-LB-on-ROI > 0; 101 farmers detected and gated |
+| 4. Real-time copy | 🔄 testing | Pipeline restored, gate stack rationalized (sports block dropped, FAV_GATE 0.65, sports-fallback in classifier, behavioral gates wired) |
+| 5. Transaction costs | ⏳ blocked on flow | First live trade pending whale signal cycle |
+| 6. Scalability (L0→L5 ladder) | 🟡 paper L0 | $356 live bankroll, target $200-300K @ L5 = $10-20K/mo |
+| 7. Detect smart vs active money | ✅ shipped today | `wallet_behavior_metrics` table — bootstrap-CI, sybil score, sizing distribution, k=5 strategy clusters |
+
+## What landed 2026-04-25
+
+- **Reliability:** Postgres pool keepalives + max_lifetime, escalation alerts (1/5/25), scheduler state-restore (timers persist across restart)
+- **Throughput unblocked:** removed hard sports block, sports fallback in classifier, FAV_GATE 0.50→0.65, LIVE_SIGNAL_TYPES expanded {wef, wallet_reversal, cascade}, structured `[KS_BLOCK:*]` logging, `setup_logging` wired into live-collect (was dropping every gate marker)
+- **Sizing:** KellySizer reads `signal_calibration.kelly_fraction` (was hardcoded 0.25); `STAKE_MULTIPLIERS` for proven (signal, side) winners; long-shot YES boost
+- **Wallet detection layer:** bootstrap-CI, per-(wallet,category) z-score, bankroll-relative sizing, sybil/wash detection, strategy clustering — all live in `wallet_behavior_metrics.py`
+- **Observability:** `/api/system/readiness` (READY/DEGRADED/NOT_READY), `/api/live/funnel` aggregate counts, watchdog reads `consecutive_failures`, daily synthetic test trade
+- **Discovery:** `hypothesis_tracker` table + 6-stage discovery on-ramp doc
+- **Auto-recovery:** PM leaderboard sync now auto-backfills top-10 newly-seeded whales (closes the trade-history blind spot)
+
+See `reports/wallet_detection_audit_2026-04-25.md`, `reports/alpha_pipeline_evaluation_2026-04-25.md`, `reports/path_to_consistent_live_2026-04-24.md`, `ROADMAP_2026-04-24.md` for details.
 
 ## Daily Validation
 

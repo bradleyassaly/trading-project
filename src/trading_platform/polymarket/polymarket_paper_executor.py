@@ -153,7 +153,25 @@ EXCLUDE_SIGNAL_TYPES = {
     # PnL. Kept from firing at all until diagnosed and fixed.
     "copyable_contrarian",  # 0/7 resolved, 0% WR
     "no_position_entry",    # 1/5 resolved, 20% WR, EV -0.1
-    "news_reactor",         # 2/10 resolved, 20% WR
+    "news_reactor",         # 10 resolved, 20% WR, EV -0.236
+    # 2026-04-24: 30d audit (reports/signal_audit_2026-04-24.md) added.
+    "consensus_follower",   # 3 resolved, 33% WR, EV -0.40 — too small + negative
+}
+
+# 2026-04-24: per-(signal_type, side) block list. The 8d post-Apr-18 cohort
+# revealed clean signal types whose NO-side inversions don't preserve alpha.
+# Side semantics on Polymarket: (a) "BUY YES" = long the YES contract at the
+# YES price, (b) "BUY NO" = long the NO contract at the NO price. A whale-
+# wallet signal that's profitable when we mirror its YES buy may be net-
+# negative when we infer the contrarian NO from the same wallet's behavior,
+# because the inferred-direction edge is weaker than the directly-observed
+# one. Filter these tuples until each combo earns ≥45% WR on n≥30.
+EXCLUDE_SIGNAL_SIDE = {
+    # (signal_type, side): reason — n=, WR=
+    ("cascade",          "NO"),  # 1/5 win, 20% WR, -$1.92 PnL
+    ("wallet_reversal",  "NO"),  # 7/20 win, 35% WR, -$2.87 PnL
+    ("accumulation",     "NO"),  # 0/5 win, 0% WR
+    # NOTE: whale_entry_filtered NO is 67% WR (n=6) — explicitly NOT excluded.
 }
 
 # Signal clusters — correlated signals share a cluster. TRUE confluence
@@ -476,6 +494,18 @@ class PolymarketPaperExecutor:
             logger.debug("[CAT_GATE] SKIP excluded signal_type=%s", signal_type)
             return None
 
+        # Per-(signal_type, side) gate: a few signal types preserve alpha
+        # only on one side. See EXCLUDE_SIGNAL_SIDE for the rationale per
+        # tuple. Block here so the trade is never opened, but signals still
+        # log for accuracy tracking.
+        _signal_side = (signal.get("side") or "").upper()
+        if _signal_side and (signal_type, _signal_side) in EXCLUDE_SIGNAL_SIDE:
+            logger.info(
+                "[SIDE_GATE] SKIP %s side=%s — not profitable on this side",
+                signal_type, _signal_side,
+            )
+            return None
+
         # ── Discovery mode ──────────────────────────────────────────────
         # Signal types with < DISCOVERY_THRESHOLD resolved paper trades
         # take a simplified $1-stake path. Bypasses Kelly, fusion, exec
@@ -509,6 +539,20 @@ class PolymarketPaperExecutor:
                     signal["category"] = sig_cat
             except Exception as exc:
                 logger.debug("category classifier failed: %s", exc)
+            # 2026-04-25: fallback. classify_keywords misses sports
+            # markets that `_is_sports_market` catches via "Spread:",
+            # "vs.", "NBA" etc. — different keyword sets. Without
+            # this fallback every wallet_derived sports signal hit
+            # CAT_GATE despite sports being in PAPER_TRADE_CATEGORIES.
+            # Cause of the persistent 0.4% conversion ratio.
+            if sig_cat in ("", "other", "wallet_derived"):
+                try:
+                    from trading_platform.polymarket.whale_signal_engine import _is_sports_market
+                    if _is_sports_market(sig_cat, signal.get("question") or ""):
+                        sig_cat = "sports"
+                        signal["category"] = "sports"
+                except Exception as exc:
+                    logger.debug("sports fallback failed: %s", exc)
         if sig_cat in EXCLUDE_CATEGORIES:
             logger.info("[CAT_GATE] SKIP %s in excluded category %s", signal_type, sig_cat)
             return None
@@ -679,16 +723,16 @@ class PolymarketPaperExecutor:
             )
             return None
 
-        # 2026-04-18: YES-favorite guard. Across all kept signal types,
-        # "BUY YES at entry_price >= 0.5" was a disaster:
-        #   YES favorite (>=0.7): 18 closed, 11% WR, -$335 PnL
-        #   YES mid (0.5-0.7):    29 closed, 35% WR, -$274 PnL
-        #   YES underdog (<0.5):  41 closed, 68% WR, +$34 PnL
-        # Economic intuition: copy-trade latency means whale's info edge
-        # is already priced in; buying a YES favorite is paying premium
-        # for a small upside while carrying large downside risk. Block
-        # the signal entirely when BUY at >= YES_FAVORITE_BLOCK_PRICE.
-        YES_FAVORITE_BLOCK_PRICE = 0.50
+        # 2026-04-18: YES-favorite guard. Original analysis ("18 trades
+        # at >=0.7 was -$335") motivated a 0.50 threshold, but the
+        # 8d post-Apr-18 cohort showed mid-band 0.50-0.70 is essentially
+        # break-even (+$2 / 53 trades / 36% WR), only the >=0.65 favorite
+        # band tanks (-$6 / 39 trades / 15% WR). Lifting paper threshold
+        # 0.50 → 0.65 to match the live-executor change made earlier;
+        # without this match every mid-band BUY signal that reaches the
+        # paper executor still hits the 0.50 wall. Cause of the residual
+        # high SKIP rate after the sports/category fixes shipped today.
+        YES_FAVORITE_BLOCK_PRICE = 0.65
         _dir_upper = (signal.get("direction") or "").upper()
         if _dir_upper == "BUY" and ep is not None and ep >= YES_FAVORITE_BLOCK_PRICE:
             logger.info(
@@ -708,6 +752,30 @@ class PolymarketPaperExecutor:
             ).fetchone()
         if existing:
             return None
+
+        # 2026-04-24: re-entry cap. Allow reopening the same market after
+        # an exit, but only twice per (market, source-wallet, side) within
+        # the market's lifetime. Without this cap, a fluttering whale
+        # can drag us in and out repeatedly. With it, we still benefit
+        # from the "whale came back" pattern that motivated lifting the
+        # blanket dup check, but we don't pay 5× the spread for 1× edge.
+        MAX_REENTRIES = 2
+        wallet_for_cap = (signal.get("wallet") or "").lower()
+        side_for_cap = (signal.get("side") or "").upper()
+        if wallet_for_cap and side_for_cap:
+            with self._wallet_lock:
+                prior_n = self._wallet_conn.execute(
+                    """SELECT COUNT(*) FROM polymarket_paper_trades
+                       WHERE condition_id = ? AND wallet = ? AND side = ?
+                         AND archived = 0""",
+                    (condition_id, wallet_for_cap, side_for_cap),
+                ).fetchone()
+            if prior_n and int(prior_n[0]) >= MAX_REENTRIES:
+                logger.info(
+                    "[REENTRY_CAP] %s %s/%s already opened %d×, skipping",
+                    signal_type, wallet_for_cap[:14], side_for_cap, int(prior_n[0]),
+                )
+                return None
 
         wallet = signal.get("wallet", "")
 
@@ -753,8 +821,105 @@ class PolymarketPaperExecutor:
         signal["ensemble_components"] = ensemble["components"]
         confidence = ensemble["score"]
 
-        from trading_platform.polymarket.whale_signal_engine import PROBATION_SIGNAL_TYPES
+        # 2026-04-24: stake concentration on proven (signal, side) winners.
+        # Eight-day post-Apr-18 cohort showed three combos earning their
+        # capital and one structural price band carrying the entire PnL.
+        # Scale confidence by a 1.0-1.5x multiplier so the Kelly-derived
+        # stake follows. Cap at 0.95 to stay inside the SignalEvaluator's
+        # confidence band; reject anything that would amplify a low-conf
+        # signal past its calibration.
         ep = float(signal.get("price") or 0.50)
+        _side = (signal.get("side") or "").upper()
+        STAKE_MULTIPLIERS = {
+            ("wallet_reversal",      "YES"): 1.5,  # 11 trades, 72.7% WR, +$19.74
+            ("cascade",              "YES"): 1.3,  # 18 trades, 55.6% WR, +$12.96
+            ("whale_entry_filtered", "NO"):  1.3,  # 6 trades, 66.7% WR, +$3.63
+            ("whale_entry_filtered", "YES"): 1.2,  # 14 trades, 42.9% WR, +$8.61
+        }
+        # Long-shot YES (entry < 0.30) carried 50% WR / +$67 over the week —
+        # structurally positive EV at those prices. Layer a 1.25x boost on
+        # top of any signal-type multiplier when entry is in this band.
+        mult = STAKE_MULTIPLIERS.get((signal_type, _side), 1.0)
+        if _side == "YES" and ep > 0 and ep < 0.30:
+            mult *= 1.25
+        # 2026-04-24: wallet earliness boost. Wallets whose 7d WR exceeds
+        # their lifetime WR in this category get up to 1.3× extra; the
+        # reverse direction down to 0.7×. Captures "currently smart" vs
+        # "was smart" without rewriting the alpha-score table.
+        src_wallet = signal.get("wallet") or ""
+        try:
+            from trading_platform.polymarket.wallet_earliness import get_earliness_boost
+            if src_wallet and src_wallet not in ("velocity_detector", "order_book_monitor"):
+                eboost = get_earliness_boost(src_wallet, category, db_path=str(self._wallet_db_path))
+                if eboost != 1.0:
+                    mult *= eboost
+                    logger.info(
+                        "[EARLINESS] %s in %s ×%.2f",
+                        src_wallet[:14], category, eboost,
+                    )
+        except Exception as exc:
+            logger.debug("[EARLINESS] lookup failed: %s", exc)
+
+        # 2026-04-25: behavioral-metrics gates. Three new signals from
+        # wallet_behavior_metrics (run daily, see wallet_behavior_metrics.py):
+        #   (a) is_likely_farmer = 1 → BLOCK entirely (sybil/wash defense)
+        #   (b) z-score specialist in this category → up to 1.4× boost
+        #   (c) sizing_p90_pct >= 0.10 (conviction whale) → 1.15× boost,
+        #       sizing_p90_pct < 0.02 (mechanical farmer) → 0.85× cut
+        # Fail-open on lookup errors so a missing table never starves
+        # signal flow.
+        if src_wallet and src_wallet not in ("velocity_detector", "order_book_monitor"):
+            try:
+                with self._wallet_lock:
+                    bm_row = self._wallet_conn.execute(
+                        "SELECT is_likely_farmer, sizing_p90_pct FROM wallet_behavior_metrics WHERE wallet = ?",
+                        (src_wallet.lower(),),
+                    ).fetchone()
+                    z_row = self._wallet_conn.execute(
+                        "SELECT z_score FROM wallet_category_zscore WHERE wallet = ? AND category = ?",
+                        (src_wallet.lower(), category),
+                    ).fetchone()
+                if bm_row and bm_row[0]:
+                    logger.info(
+                        "[FARMER_GATE] BLOCK %s wallet=%s — flagged farmer/wash",
+                        signal_type, src_wallet[:14],
+                    )
+                    return None
+                if z_row and z_row[0] is not None and float(z_row[0]) >= 1.0:
+                    z_boost = min(1.4, 1.0 + 0.15 * (float(z_row[0]) - 1.0))
+                    if z_boost > 1.0:
+                        mult *= z_boost
+                        logger.info(
+                            "[Z_SPECIALIST] %s in %s z=%.2f ×%.2f",
+                            src_wallet[:14], category, float(z_row[0]), z_boost,
+                        )
+                if bm_row and bm_row[1] is not None:
+                    p90 = float(bm_row[1])
+                    if p90 >= 0.10:
+                        mult *= 1.15
+                        logger.info(
+                            "[CONVICTION] %s p90_size=%.1f%% ×1.15",
+                            src_wallet[:14], p90 * 100,
+                        )
+                    elif p90 < 0.02:
+                        mult *= 0.85
+                        logger.info(
+                            "[MECHANICAL] %s p90_size=%.1f%% ×0.85",
+                            src_wallet[:14], p90 * 100,
+                        )
+            except Exception as exc:
+                logger.debug("[BEHAVIOR_METRICS] lookup failed: %s", exc)
+
+        if mult != 1.0:
+            old_conf = confidence
+            confidence = min(0.95, max(0.10, confidence * mult))
+            if abs(confidence - old_conf) > 0.01:
+                logger.info(
+                    "[STAKE_BOOST] %s/%s ep=%.3f conf %.2f→%.2f (×%.2f)",
+                    signal_type, _side, ep, old_conf, confidence, mult,
+                )
+
+        from trading_platform.polymarket.whale_signal_engine import PROBATION_SIGNAL_TYPES
 
         with self._wallet_lock:
             deployed = self._wallet_conn.execute(
@@ -1524,6 +1689,29 @@ class PolymarketPaperExecutor:
                 age_days = (time.time() - (pos.get("entry_ts") or time.time())) / 86400
                 if age_days > time_days and abs(unrealized) < self.TIME_DECAY_MIN_MOVE:
                     exit_reason = "time_decay"
+                # 2026-04-24: tighter pre-resolution time-decay exit. The
+                # 8d cohort showed `market_life_expired` at 24/212 (~11%
+                # of closes) hitting near-zero PnL — we were renting the
+                # resolution lottery. New rule: if market resolves within
+                # 8h AND position PnL is in the "stuck" band [-10%, +5%],
+                # close at mark rather than wait for the binary outcome.
+                if not exit_reason:
+                    try:
+                        end_iso = self._lookup_market_end_date(cid)
+                        if end_iso:
+                            from datetime import datetime, timezone
+                            clean = end_iso.replace("Z", "+00:00") if end_iso.endswith("Z") else end_iso
+                            end_dt = datetime.fromisoformat(clean)
+                            if end_dt.tzinfo is None:
+                                end_dt = end_dt.replace(tzinfo=timezone.utc)
+                            now_dt = datetime.fromtimestamp(time.time(), tz=timezone.utc)
+                            hours_to_resolve = (end_dt - now_dt).total_seconds() / 3600
+                            stake = float(pos.get("size_usd") or 1.0)
+                            unreal_pct = (float(unrealized) / max(stake, 1)) if stake else 0
+                            if 0 < hours_to_resolve <= 8 and -0.10 <= unreal_pct <= 0.05:
+                                exit_reason = "pre_resolve_decay"
+                    except Exception as exc:
+                        logger.debug("pre_resolve_decay check failed for %s: %s", cid[:14], exc)
 
                 # Implied-probability shift: YES-token price moved 30pp+ since
                 # entry — likely directionally resolved even if UMA hasn't

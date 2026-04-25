@@ -65,11 +65,26 @@ class Task:
     last_duration_s: float | None = None
     last_error: str | None = None
     enabled: bool = True
+    consecutive_failures: int = 0
+    first_failure_at: float | None = None
 
     def next_run_at(self, now: float) -> float:
         if self.last_run_at is None:
             return now  # run immediately on startup
         return self.last_run_at + self.interval_seconds
+
+
+# 2026-04-24: alert escalation ladder. The Apr-19 → Apr-24 idle-session
+# bug failed the same six tasks every 15-30 minutes for 5 days; the
+# per-failure alert path generated ~480 messages and was effectively
+# noise. This ladder fires Telegram on:
+#   - 1st failure  → immediate ("a thing broke")
+#   - 5th in-a-row → "this is sustained, look at it"
+#   - 25th in-a-row → "this is now a multi-hour incident"
+#   - then every 100th → tail-spam suppression
+# Recoveries always fire once.
+ALERT_ON_FAILURE_COUNT = (1, 5, 25)
+ALERT_TAIL_SPAM_EVERY = 100
 
 
 # ── Schedule definitions ────────────────────────────────────────────────────
@@ -361,6 +376,17 @@ SCHEDULE: list[Task] = [
         description="Daily PM authoritative leaderboard sync + tier1h promotion",
     ),
     Task(
+        # 2026-04-25: behavioral metrics pipeline. Bootstrap-CI on per-
+        # wallet ROI, per-(wallet,category) z-score, sizing distribution,
+        # sybil/farmer detection, k-means strategy clusters. Replaces
+        # the hand-coded `wallet_type` enum with data-driven flags. Runs
+        # daily after pnl_reconstruction; idempotent upserts.
+        name="wallet_behavior_metrics",
+        cmd="python -m trading_platform.polymarket.wallet_behavior_metrics",
+        interval_seconds=24 * 3600,
+        description="Daily behavioral metrics: bootstrap-CI, z-score, sizing, sybil, clusters",
+    ),
+    Task(
         name="pnl_reconstruction",
         # FIFO lot-matching across wallet_trades to compute realized PnL
         # from pre-resolution sells (not just resolved markets). Writes
@@ -436,6 +462,18 @@ SCHEDULE: list[Task] = [
         description="Weekly Postgres pruning + VACUUM ANALYZE",
     ),
     Task(
+        # 2026-04-24: daily smoke test — fires a $0.50 synthetic paper
+        # trade through the full pipeline and verifies yesterday's
+        # synthetic actually resolved. Catches silent pipeline gaps
+        # (signals fire but no trades open, or trades open but never
+        # resolve) within 24h instead of the weeks-long blind window
+        # we used to have.
+        name="synthetic_test_trade",
+        cmd="python scripts/synthetic_test_trade.py",
+        interval_seconds=24 * 3600,
+        description="Daily synthetic test trade + yesterday's-resolution check",
+    ),
+    Task(
         name="pg_backup",
         # Nightly dump of the Postgres DB to /backups (bind-mounted).
         # Keeps 7 daily snapshots. pg_backup.sh handles retention pruning.
@@ -479,20 +517,70 @@ def _persist_state(tasks: list[Task]) -> None:
         logger.warning("scheduler state write failed: %s", exc)
 
 
+def _should_alert_on_failure(consecutive_failures: int) -> bool:
+    """Return True if the failure count crosses an escalation step."""
+    if consecutive_failures in ALERT_ON_FAILURE_COUNT:
+        return True
+    if (
+        consecutive_failures > max(ALERT_ON_FAILURE_COUNT)
+        and consecutive_failures % ALERT_TAIL_SPAM_EVERY == 0
+    ):
+        return True
+    return False
+
+
 def _send_failure_alert(task: Task, error: str) -> None:
+    if not _should_alert_on_failure(task.consecutive_failures):
+        return
+    try:
+        from trading_platform.polymarket.telegram_alerts import get_alerter
+        alerter = get_alerter()
+        if not alerter.enabled:
+            return
+        if task.consecutive_failures == 1:
+            severity = "\u26a0\ufe0f <b>SCHEDULER TASK FAILED</b>"
+        elif task.consecutive_failures < 25:
+            severity = (
+                f"\U0001f7e0 <b>SUSTAINED FAILURE — {task.consecutive_failures}× in a row</b>"
+            )
+        else:
+            duration_h = (
+                (time.time() - (task.first_failure_at or time.time())) / 3600
+            )
+            severity = (
+                f"\U0001f534 <b>INCIDENT — {task.consecutive_failures}× failures over {duration_h:.1f}h</b>"
+            )
+        msg = (
+            f"{severity}\n"
+            f"Task: <code>{task.name}</code>\n"
+            f"Cmd: <code>{task.cmd[:80]}</code>\n"
+            f"Error: {error[:300]}\n"
+            f"────────\n\U0001f5a5 localhost:5173"
+        )
+        alerter._send(msg, disable_notification=(task.consecutive_failures < 5))
+    except Exception:
+        pass
+
+
+def _send_recovery_alert(task: Task, prior_failures: int) -> None:
+    """Single recovery alert when a task transitions failed → ok after >=5
+    consecutive failures. Below 5 we don't bother — too quiet to be a real
+    incident.
+    """
+    if prior_failures < 5:
+        return
     try:
         from trading_platform.polymarket.telegram_alerts import get_alerter
         alerter = get_alerter()
         if not alerter.enabled:
             return
         msg = (
-            f"\u26a0\ufe0f <b>SCHEDULER TASK FAILED</b>\n"
+            f"\U0001f7e2 <b>SCHEDULER TASK RECOVERED</b>\n"
             f"Task: <code>{task.name}</code>\n"
-            f"Cmd: <code>{task.cmd[:80]}</code>\n"
-            f"Error: {error[:300]}\n"
+            f"Was failing {prior_failures} cycles in a row.\n"
             f"────────\n\U0001f5a5 localhost:5173"
         )
-        alerter._send(msg, disable_notification=True)
+        alerter._send(msg, disable_notification=False)
     except Exception:
         pass
 
@@ -552,33 +640,91 @@ def _run_task(task: Task) -> None:
         task.last_run_at = started
         task.last_duration_s = round(elapsed, 1)
         if result.returncode == 0:
+            prior_failures = task.consecutive_failures
             task.last_status = "ok"
             task.last_error = None
+            task.consecutive_failures = 0
+            task.first_failure_at = None
             logger.info("[ok ] %s in %.1fs%s", task.name, elapsed,
                         f" ({attempts} attempts)" if attempts > 1 else "")
+            if prior_failures > 0:
+                _send_recovery_alert(task, prior_failures)
         else:
             task.last_status = "failed"
             task.last_error = (result.stdout or "")[-500:]
-            logger.warning("[fail] %s exit=%d (after %d attempts)", task.name, result.returncode, attempts)
+            task.consecutive_failures += 1
+            if task.first_failure_at is None:
+                task.first_failure_at = started
+            logger.warning(
+                "[fail] %s exit=%d (after %d attempts, %d consecutive)",
+                task.name, result.returncode, attempts, task.consecutive_failures,
+            )
             _send_failure_alert(task, task.last_error or f"exit {result.returncode}")
     except subprocess.TimeoutExpired:
         task.last_run_at = started
         task.last_status = "failed"
         task.last_error = "timeout"
         task.last_duration_s = time.time() - started
-        logger.warning("[timeout] %s", task.name)
+        task.consecutive_failures += 1
+        if task.first_failure_at is None:
+            task.first_failure_at = started
+        logger.warning("[timeout] %s (%d consecutive)", task.name, task.consecutive_failures)
         _send_failure_alert(task, "timeout")
     except Exception as exc:
         task.last_run_at = started
         task.last_status = "failed"
         task.last_error = str(exc)[:500]
         task.last_duration_s = time.time() - started
-        logger.exception("[error] %s", task.name)
+        task.consecutive_failures += 1
+        if task.first_failure_at is None:
+            task.first_failure_at = started
+        logger.exception("[error] %s (%d consecutive)", task.name, task.consecutive_failures)
         _send_failure_alert(task, str(exc))
+
+
+def _load_state(tasks: list[Task]) -> None:
+    """Restore last_run_at and friends from the persisted state file.
+
+    Wired 2026-04-25 after diagnosing a silent class of failure: a
+    scheduler restart was wiping every task's `last_run_at`, which pushed
+    each daily task's next run ~24h into the future. Multiple restarts
+    in a session = perpetual postponement. `pm_leaderboard_sync` not
+    running today (despite running yesterday) traced back to exactly
+    this — the boundary kept sliding forward each time the container
+    cycled.
+
+    Now: on startup, hydrate timers from `state.json` (only fields that
+    matter for cadence + alerting). Unknown tasks in state.json are
+    ignored; tasks new to SCHEDULE start clean.
+    """
+    if not STATE_PATH.exists():
+        return
+    try:
+        data = json.loads(STATE_PATH.read_text(encoding="utf-8"))
+    except Exception as exc:
+        logger.warning("scheduler state load failed: %s", exc)
+        return
+    by_name = {t.name: t for t in tasks}
+    restored = 0
+    for row in data.get("tasks", []):
+        name = row.get("name")
+        t = by_name.get(name)
+        if not t:
+            continue
+        t.last_run_at = row.get("last_run_at")
+        t.last_status = row.get("last_status")
+        t.last_duration_s = row.get("last_duration_s")
+        t.last_error = row.get("last_error")
+        t.consecutive_failures = int(row.get("consecutive_failures") or 0)
+        t.first_failure_at = row.get("first_failure_at")
+        if t.last_run_at is not None:
+            restored += 1
+    logger.info("scheduler restored %d task timers from state", restored)
 
 
 def main() -> None:
     logger.info("scheduler starting with %d tasks", len([t for t in SCHEDULE if t.enabled]))
+    _load_state(SCHEDULE)
     _persist_state(SCHEDULE)
     while True:
         now = time.time()

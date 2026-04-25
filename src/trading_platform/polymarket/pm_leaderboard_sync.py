@@ -116,6 +116,7 @@ def sync(limit: int = 500) -> dict[str, Any]:
     # become known to the rest of the pipeline).
     written = 0
     new_profiles = 0
+    new_profile_addresses: list[str] = []
     conn = get_connection()
     try:
         for w, data in merged.items():
@@ -130,6 +131,7 @@ def sync(limit: int = 500) -> dict[str, Any]:
                      f"auto-seeded from PM leaderboard {time.strftime('%Y-%m-%d')}"),
                 )
                 new_profiles += 1
+                new_profile_addresses.append(w)
             conn.execute(
                 "UPDATE wallet_profiles SET pm_pnl_usdc = ?, pm_volume_usdc = ?, "
                 "pm_synced_at = ?, pseudonym = COALESCE(pseudonym, ?) "
@@ -153,6 +155,33 @@ def sync(limit: int = 500) -> dict[str, Any]:
     # wallet with pm_pnl_usdc ≥ $100K earns tier1h treatment in signals.
     promoted = _promote_pm_whales(min_pnl=100_000)
 
+    # 2026-04-25: auto-chain trade-history backfill for newly-seeded
+    # whales. Without this, PM leaderboard sync seeds the *profile*
+    # but the wallet has zero rows in wallet_trades — surfaced today
+    # via 15 PM whales (≥$100K) with 0 resolved trades. Limit to top-N
+    # by PM PnL to bound runtime; remaining wallets get picked up by
+    # the daily `backfill-top-wallets` task.
+    seeded_addresses = sorted(
+        new_profile_addresses,
+        key=lambda w: -float(merged.get(w, {}).get("pm_pnl_usdc") or 0),
+    )[:10]
+    backfilled = 0
+    if seeded_addresses:
+        try:
+            from trading_platform.polymarket.wallet_trade_poller import (
+                WalletTradePoller,
+            )
+            poller = WalletTradePoller()
+            for w in seeded_addresses:
+                try:
+                    n = poller.process_wallet(w, [])
+                    if n:
+                        backfilled += 1
+                except Exception as exc:
+                    logger.debug("auto-backfill failed for %s: %s", w[:12], exc)
+        except Exception as exc:
+            logger.debug("auto-backfill skipped: %s", exc)
+
     return {
         "profits_fetched": len(profits),
         "volumes_fetched": len(volumes),
@@ -160,6 +189,7 @@ def sync(limit: int = 500) -> dict[str, Any]:
         "new_profiles_seeded": new_profiles,
         "upserts": written,
         "tier1h_promoted": promoted,
+        "auto_backfilled": backfilled,
         "elapsed_seconds": round(time.time() - t0, 1),
     }
 

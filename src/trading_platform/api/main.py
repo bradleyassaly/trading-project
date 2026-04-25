@@ -762,6 +762,191 @@ def live_execution_quality() -> dict[str, Any]:
         return {"total_orders": 0, "filled": 0, "fill_rate": 0, "error": str(exc)}
 
 
+@app.get("/api/live/funnel")
+def live_trade_funnel() -> dict[str, Any]:
+    """Per-gate drop counts for the live executor over the past 24h.
+
+    Built 2026-04-24 to answer the standing question: 'why does the live
+    executor produce zero trades?' Reads `live_trades` for kill-switch
+    rejections (which are auditable rows) and parses the structured
+    `[KS_BLOCK:CODE]` log markers from the live-collect container.
+    Pre-kill-switch gates (category, signal-side, FAV_GATE, etc.) only
+    surface in logs, so the breakdown there is grep-of-logs not query.
+    """
+    import time as _t
+    cutoff = int(_t.time()) - 24 * 3600
+    funnel = {
+        "kill_switch_blocks": {},
+        "live_attempts": 0,
+        "live_succeeded": 0,
+        "live_failed": 0,
+        "log_markers_note": (
+            "Pre-kill-switch gates ([SIDE_GATE], [LIVE][FAV_GATE], "
+            "[LIVE_BLOCKED]) only emit log lines; not aggregated here. "
+            "Run: docker compose logs --since 24h live-collect "
+            "| grep -E '\\[(SIDE_GATE|LIVE\\]\\[FAV_GATE|LIVE_BLOCKED|KS_BLOCK)\\]' "
+            "| sort | uniq -c | sort -rn"
+        ),
+    }
+    try:
+        with _db() as conn:
+            rows = conn.execute(
+                """SELECT status, error_msg, COUNT(*) n
+                     FROM live_trades
+                    WHERE submitted_at > %s
+                    GROUP BY status, error_msg""",
+                (cutoff,),
+            ).fetchall()
+    except Exception as exc:
+        return {"error": f"funnel query failed: {str(exc)[:120]}"}
+    for row in rows:
+        status, err, n = row[0], row[1] or "", int(row[2])
+        if status == "submitted":
+            funnel["live_succeeded"] += n
+        elif status == "blocked":
+            err_lower = err.lower()
+            if "polymarket_live_enabled" in err_lower:
+                code = "ENV"
+            elif "emergency" in err_lower or "stop" in err_lower:
+                code = "EMERGENCY"
+            elif "min_resolved" in err_lower or "minimum" in err_lower:
+                code = "MIN_RESOLVED"
+            elif "ev" in err_lower:
+                code = "EV"
+            elif "wr" in err_lower:
+                code = "WR"
+            elif "disabled" in err_lower or "excluded" in err_lower:
+                code = "DISABLED"
+            else:
+                code = "OTHER"
+            funnel["kill_switch_blocks"][code] = funnel["kill_switch_blocks"].get(code, 0) + n
+            funnel["live_failed"] += n
+        funnel["live_attempts"] += n
+    return funnel
+
+
+@app.get("/api/system/readiness")
+def system_readiness() -> dict[str, Any]:
+    """Single-shot answer to the question 'is live trading active and healthy
+    right now?'. Wired 2026-04-24 after the week-long unattended run failed
+    silently — there was no single endpoint to confirm liveness.
+
+    Returns status in {READY, DEGRADED, NOT_READY} with per-component details.
+    Each component is a hard yes/no; DEGRADED means one or more checks failed
+    but the system is partially operable; NOT_READY means live trading is
+    blocked.
+    """
+    import os
+    import time as _t
+    components: list[dict[str, Any]] = []
+    now = _t.time()
+
+    def add(name: str, ok: bool, detail: str, blocking: bool = True) -> None:
+        components.append(
+            {"name": name, "ok": ok, "detail": detail, "blocking": blocking}
+        )
+
+    # 1. POLYMARKET_LIVE_ENABLED env var
+    live_env = os.environ.get("POLYMARKET_LIVE_ENABLED", "").lower() in ("1", "true", "yes")
+    add("env_live_enabled", live_env, "POLYMARKET_LIVE_ENABLED=1" if live_env else "not set")
+
+    # 2. Bankroll > 0
+    try:
+        from trading_platform.polymarket.bankroll import get_bankroll
+        bk = get_bankroll() or 0
+        add("bankroll", bk > 0, f"${bk:.2f}")
+    except Exception as exc:
+        add("bankroll", False, f"error: {str(exc)[:60]}")
+
+    # 3. Kill switch / emergency stop
+    try:
+        from trading_platform.polymarket.kill_switch import KillSwitch
+        ks_inst = KillSwitch(_alpha_db_path(), bankroll=500)
+        stopped, reason = ks_inst.is_emergency_stopped()
+        add("kill_switch", not stopped, reason if stopped else "active")
+    except Exception as exc:
+        add("kill_switch", False, f"error: {str(exc)[:60]}")
+
+    # 4. Circuit breaker
+    try:
+        from trading_platform.polymarket.circuit_breaker import CircuitBreaker
+        cb = CircuitBreaker(_alpha_db_path())
+        allowed, cb_reason = cb.can_trade()
+        add("circuit_breaker", allowed, "ok" if allowed else cb_reason or "halted")
+    except Exception as exc:
+        add("circuit_breaker", False, f"error: {str(exc)[:60]}")
+
+    # 5. Recent signal activity (any signal in last 60 min)
+    try:
+        with _db() as conn:
+            last_sig = conn.execute(
+                "SELECT MAX(fired_at) FROM market_signals"
+            ).fetchone()[0]
+        last_sig = float(last_sig) if last_sig else 0
+        age_min = (now - last_sig) / 60 if last_sig else 99999
+        add("signals_fresh", age_min < 60, f"last signal {age_min:.1f}min ago", blocking=False)
+    except Exception as exc:
+        add("signals_fresh", False, f"error: {str(exc)[:60]}", blocking=False)
+
+    # 6. Wallet trade ingestion freshness. 60-min threshold accommodates
+    # natural quiet periods + the wallet-poller's 10-min cadence + WS
+    # reconnect windows. Below this we flag DEGRADED, not NOT_READY.
+    try:
+        with _db() as conn:
+            last_wt = conn.execute(
+                "SELECT MAX(timestamp) FROM wallet_trades"
+            ).fetchone()[0]
+        last_wt = float(last_wt) if last_wt else 0
+        age_min = (now - last_wt) / 60 if last_wt else 99999
+        add(
+            "wallet_trades_fresh", age_min < 60,
+            f"last trade {age_min:.1f}min ago",
+            blocking=False,  # warn, don't fail readiness on bursty ingestion
+        )
+    except Exception as exc:
+        add("wallet_trades_fresh", False, f"error: {str(exc)[:60]}", blocking=False)
+
+    # 7. Scheduler tasks not in sustained failure
+    try:
+        from pathlib import Path
+        import json as _j
+        state_file = Path("/app/data/scheduler/state.json")
+        if state_file.exists():
+            data = _j.loads(state_file.read_text(encoding="utf-8"))
+            failing = [
+                t for t in data.get("tasks", [])
+                if t.get("enabled", True) and int(t.get("consecutive_failures", 0)) >= 5
+            ]
+            if failing:
+                add(
+                    "scheduler_health", False,
+                    f"{len(failing)} tasks failing 5+x: {', '.join(t['name'] for t in failing[:3])}",
+                )
+            else:
+                add("scheduler_health", True, "no sustained failures")
+        else:
+            add("scheduler_health", False, "state file missing")
+    except Exception as exc:
+        add("scheduler_health", False, f"error: {str(exc)[:60]}")
+
+    blockers = [c for c in components if not c["ok"] and c["blocking"]]
+    warnings = [c for c in components if not c["ok"] and not c["blocking"]]
+    if not blockers and not warnings:
+        status = "READY"
+    elif blockers:
+        status = "NOT_READY"
+    else:
+        status = "DEGRADED"
+
+    return {
+        "status": status,
+        "blockers": [c["name"] for c in blockers],
+        "warnings": [c["name"] for c in warnings],
+        "components": components,
+        "checked_at": int(now),
+    }
+
+
 @app.get("/api/system/health")
 def system_health() -> dict[str, Any]:
     """Overall system health for the dashboard header."""

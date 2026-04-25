@@ -39,6 +39,43 @@ class KellySizer:
             from trading_platform.polymarket.bankroll import get_bankroll
             self.BANKROLL = get_bankroll()
 
+    def _calibrated_kelly_fraction(self, signal_type: str) -> float | None:
+        """Return SignalEvaluator-calibrated kelly_fraction if it exists.
+
+        Wired 2026-04-24: previously KellySizer used a static 0.25 for every
+        signal type, ignoring the SignalEvaluator's per-signal calibration
+        already living in `signal_calibration`. This made graduated signals
+        size identically to brand-new ones. Returns None when no row is
+        present, in which case the caller falls back to KELLY_FRACTION.
+        """
+        try:
+            conn = get_connection(self._db_path)
+        except Exception:
+            return None
+        try:
+            row = conn.execute(
+                "SELECT kelly_fraction FROM signal_calibration "
+                "WHERE signal_type = ? AND kelly_fraction IS NOT NULL",
+                (signal_type,),
+            ).fetchone()
+        except sqlite3.OperationalError:
+            row = None
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+        if not row or row[0] is None:
+            return None
+        try:
+            f = float(row[0])
+        except (TypeError, ValueError):
+            return None
+        # Sanity-clamp: anything outside [0.05, 1.0] is calibration noise.
+        if 0.05 <= f <= 1.0:
+            return f
+        return None
+
     def _fetch_outcomes(
         self,
         signal_type: str,
@@ -191,7 +228,13 @@ class KellySizer:
             full_kelly = 0.0
         full_kelly = max(0.0, full_kelly)
 
-        fractional_kelly = full_kelly * self.KELLY_FRACTION
+        # Use SignalEvaluator's calibrated kelly_fraction when present.
+        # Falls back to the static 0.25 for any signal type the evaluator
+        # hasn't yet measured. This unblocks graduated signal types that
+        # were sizing as if brand-new.
+        calibrated_frac = self._calibrated_kelly_fraction(signal_type)
+        kelly_frac_used = calibrated_frac if calibrated_frac is not None else self.KELLY_FRACTION
+        fractional_kelly = full_kelly * kelly_frac_used
         # Cap by absolute MAX_PCT_OF_BANKROLL
         capped = min(fractional_kelly, self.MAX_PCT_OF_BANKROLL)
 
@@ -204,7 +247,8 @@ class KellySizer:
 
         return {
             "kelly_full": round(full_kelly, 4),
-            "kelly_fraction": self.KELLY_FRACTION,
+            "kelly_fraction": round(kelly_frac_used, 4),
+            "kelly_fraction_source": "calibration" if calibrated_frac is not None else "default",
             "kelly_fractional": round(fractional_kelly, 4),
             "kelly_capped": round(capped, 4),
             "recommended_usd": round(recommended, 2),
