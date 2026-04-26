@@ -681,6 +681,33 @@ class PolymarketPaperExecutor:
         # See reports/signal_analysis_clean.md and alpha_scores.py.
         gate_wallet = signal.get("wallet") or ""
         gate_category = signal.get("category") or "other"
+        # 2026-04-26: manual blocklist override. Wallets blocked via
+        # Telegram inline button or /api/wallet/block are rejected
+        # here regardless of alpha_score state. Highest-priority
+        # gate; runs before alpha gate. Fail-open if table missing.
+        if gate_wallet and gate_wallet not in ("velocity_detector", "order_book_monitor"):
+            try:
+                with self._wallet_lock:
+                    _bl = self._wallet_conn.execute(
+                        "SELECT reason FROM wallet_blocklist WHERE wallet = ?",
+                        (gate_wallet.lower(),),
+                    ).fetchone()
+                if _bl:
+                    logger.info(
+                        "[BLOCKLIST] BLOCK wallet %s (reason=%s, signal=%s)",
+                        gate_wallet[:14], (_bl[0] or "")[:60], signal_type,
+                    )
+                    try:
+                        from trading_platform.polymarket.decision_trace import trace as _dt
+                        _dt(signal=signal, gate="BLOCKLIST", passed=False,
+                            detail=f"manual block: {(_bl[0] or '')[:60]}",
+                            surface="paper", db_path=str(self._wallet_db_path))
+                    except Exception:
+                        pass
+                    return None
+            except Exception as exc:
+                logger.debug("[BLOCKLIST] check failed: %s", exc)
+
         if gate_wallet and gate_wallet not in ("velocity_detector", "order_book_monitor"):
             try:
                 from trading_platform.polymarket.alpha_scores import get_wallet_alpha_status

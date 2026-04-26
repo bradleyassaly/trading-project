@@ -900,6 +900,42 @@ def ladder_status() -> dict[str, Any]:
     }
 
 
+@app.post("/api/wallet/block")
+def wallet_block(payload: dict[str, Any] = Body(default_factory=dict)) -> dict[str, Any]:
+    """Manual override: add a wallet to wallet_blocklist so the
+    paper executor's ALPHA_GATE rejects future signals from it.
+    Used by Telegram inline-button "Block (advisory)" + manual ops.
+    """
+    import time as _t
+    addr = (payload.get("wallet") or "").strip().lower()
+    reason = (payload.get("reason") or "manual_block")[:120]
+    if not addr.startswith("0x") or len(addr) != 42:
+        return {"ok": False, "error": "invalid wallet address"}
+    try:
+        with _db() as conn:
+            conn.execute(
+                """CREATE TABLE IF NOT EXISTS wallet_blocklist (
+                    wallet      TEXT PRIMARY KEY,
+                    blocked_at  BIGINT NOT NULL,
+                    reason      TEXT,
+                    blocked_by  TEXT
+                )"""
+            )
+            conn.execute(
+                """INSERT INTO wallet_blocklist (wallet, blocked_at, reason, blocked_by)
+                   VALUES (?, ?, ?, ?)
+                   ON CONFLICT (wallet) DO UPDATE SET
+                     blocked_at = EXCLUDED.blocked_at,
+                     reason = EXCLUDED.reason,
+                     blocked_by = EXCLUDED.blocked_by""",
+                (addr, int(_t.time()), reason, "telegram_or_api"),
+            )
+            conn.commit()
+        return {"ok": True, "wallet": addr}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)[:200]}
+
+
 @app.post("/api/ladder/promote")
 def ladder_promote(payload: dict[str, Any] = Body(default_factory=dict)) -> dict[str, Any]:
     """Record a ladder promotion to the audit table. Does NOT change

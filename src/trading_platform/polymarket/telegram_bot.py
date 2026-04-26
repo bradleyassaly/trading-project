@@ -700,8 +700,65 @@ def _parse_id_list(raw: str) -> set[str]:
     return {p.strip() for p in raw.split(",") if p.strip()}
 
 
+def _handle_callback(cb: dict, bot_token: str,
+                     allowed_full: set[str]) -> None:
+    """Handle inline-keyboard callback_query. Currently supports:
+       block_wallet:<addr> — record manual override into wallet_blocklist
+       so the ALPHA_GATE rejects future signals from this wallet.
+    Read-only users are blocked.
+    """
+    cb_id = cb.get("id") or ""
+    chat_id = str((cb.get("message") or {}).get("chat", {}).get("id") or "")
+    user_id = str((cb.get("from") or {}).get("id") or "")
+    data = (cb.get("data") or "").strip()
+
+    full_ok = (not allowed_full) or (chat_id in allowed_full) or (user_id in allowed_full)
+    if not full_ok:
+        _tg_request("answerCallbackQuery",
+                    {"callback_query_id": cb_id,
+                     "text": "Control role required.", "show_alert": True},
+                    bot_token=bot_token)
+        return
+
+    if data.startswith("block_wallet:"):
+        addr = data.split(":", 1)[1].strip().lower()
+        if not addr.startswith("0x") or len(addr) != 42:
+            _tg_request("answerCallbackQuery",
+                        {"callback_query_id": cb_id,
+                         "text": "Bad address format.", "show_alert": True},
+                        bot_token=bot_token)
+            return
+        r = _api_post("/api/wallet/block", {"wallet": addr,
+                                            "reason": "telegram_inline_block"}) or {}
+        ok = r.get("ok")
+        _tg_request("answerCallbackQuery",
+                    {"callback_query_id": cb_id,
+                     "text": (f"Blocked {addr[:14]}…" if ok else
+                              f"Block failed: {r.get('error', 'n/a')}"),
+                     "show_alert": True},
+                    bot_token=bot_token)
+        if ok and chat_id:
+            _tg_request("sendMessage",
+                        {"chat_id": chat_id,
+                         "text": f"⚠ Wallet `{addr[:14]}…` blocked manually. "
+                                 f"Future signals from this wallet will be "
+                                 f"rejected at ALPHA_GATE."},
+                        bot_token=bot_token)
+        return
+
+    # Unknown callback — acknowledge so Telegram clears the spinner
+    _tg_request("answerCallbackQuery",
+                {"callback_query_id": cb_id, "text": "no handler"},
+                bot_token=bot_token)
+
+
 def _handle_update(update: dict, bot_token: str,
                    allowed_full: set[str], allowed_readonly: set[str]) -> None:
+    # Inline-keyboard callback queries (from button taps)
+    if update.get("callback_query"):
+        _handle_callback(update["callback_query"], bot_token, allowed_full)
+        return
+
     msg = update.get("message") or update.get("edited_message") or {}
     chat_id = str(msg.get("chat", {}).get("id") or "")
     text = (msg.get("text") or "").strip()
