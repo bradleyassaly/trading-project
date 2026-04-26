@@ -494,6 +494,29 @@ class PolymarketPaperExecutor:
             logger.debug("[CAT_GATE] SKIP excluded signal_type=%s", signal_type)
             return None
 
+        # 2026-04-25: dynamic decay-flag gate. signal_health.decay_flag is
+        # set when 14d IC < 0 on n>=10 resolved hypotheses. Auto-block
+        # without code change so we don't keep paying for a decayed signal
+        # while waiting for someone to update EXCLUDE_SIGNAL_TYPES.
+        try:
+            with self._wallet_lock:
+                _decay = self._wallet_conn.execute(
+                    "SELECT decay_flag FROM signal_health WHERE signal_type = ?",
+                    (signal_type,),
+                ).fetchone()
+            if _decay and int(_decay[0] or 0) == 1:
+                logger.info("[DECAY_GATE] SKIP %s — IC<0 on n>=10", signal_type)
+                try:
+                    from trading_platform.polymarket.decision_trace import trace as _dt
+                    _dt(signal=signal, gate="DECAY_GATE", passed=False,
+                        detail=f"{signal_type} IC<0", surface="paper",
+                        db_path=str(self._wallet_db_path))
+                except Exception:
+                    pass
+                return None
+        except Exception:
+            pass
+
         # Per-(signal_type, side) gate: a few signal types preserve alpha
         # only on one side. See EXCLUDE_SIGNAL_SIDE for the rationale per
         # tuple. Block here so the trade is never opened, but signals still

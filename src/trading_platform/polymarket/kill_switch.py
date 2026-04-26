@@ -62,6 +62,11 @@ class KillSwitch:
     MAX_TRADE_USD_PCT = 0.07
     MAX_TRADE_USD_ABS_CAP = 25.0
     MIN_WIN_RATE = 0.52
+    # 2026-04-25: probation/discovery tier WR floor. Standard 0.52 blocked
+    # 45 live attempts in 24h. Drop to 0.45 for stakes <= probation cap so
+    # real-money calibration data starts flowing — risk is bounded by the
+    # cap, not the WR threshold. Full-stake live still requires 0.52.
+    MIN_WIN_RATE_PROBATION = 0.45
     MIN_RESOLVED_HARD = 15
     PREFERRED_MIN_RESOLVED = 30
     # Probation tier: signals below MIN_RESOLVED_HARD but above
@@ -249,10 +254,11 @@ class KillSwitch:
                 wr = (2 * wr_live * n_live + bt_wr * bt_n) / (2 * n_live + bt_n)
             else:
                 wr = wr_live if wr_live is not None else (bt_wr or 0)
-            if effective_n >= 20 and wr < self.MIN_WIN_RATE:
+            wr_floor = self.MIN_WIN_RATE_PROBATION if probation else self.MIN_WIN_RATE
+            if effective_n >= 20 and wr < wr_floor:
                 return KillSwitchResult(
                     False,
-                    f"{signal_type}: blended WR {wr:.0%} below minimum {self.MIN_WIN_RATE:.0%}",
+                    f"{signal_type}: blended WR {wr:.0%} below minimum {wr_floor:.0%}",
                     warnings,
                 )
 
