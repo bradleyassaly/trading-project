@@ -84,6 +84,13 @@ export default function WalletDetail() {
     [address],
   )
   const { data: alphaData } = useApi(alphaFetcher, 0)
+  // 2026-04-25: unified profile (PM PnL + behavior + insider + z-score
+  // + alpha by category) from the new /api/wallet/{addr}/profile.
+  const profileFetcher = useCallback(
+    () => fetch(`/api/wallet/${encodeURIComponent(address)}/profile`).then(r => r.ok ? r.json() : null),
+    [address],
+  )
+  const { data: profile } = useApi(profileFetcher, 0)
 
   if (loading && !data) return <div className="p-6"><LoadingSkeleton rows={10} /></div>
   if (!data?.available) {
@@ -155,6 +162,85 @@ export default function WalletDetail() {
         <div className="bg-amber-500/10 border border-amber-500/30 rounded p-2 text-[10px] text-amber-300">
           <strong>HIGH-CONVICTION TIER</strong> — Qualified by ${(data.net_pnl_usdc / 1000).toFixed(0)}K+ PnL on large position sizes,
           not by trade count. Treated as tier-1 with 1.1× signal confidence multiplier.
+        </div>
+      )}
+
+      {/* 2026-04-25: Behavioral metrics + insider + z-score panel.
+          Sourced from /api/wallet/{addr}/profile which joins
+          wallet_behavior_metrics + insider_wallets + wallet_category_zscore.
+          Renders only when at least one of the new layers has data. */}
+      {profile && (profile.behavior || profile.insider || (profile.zscore_by_category || []).length > 0) && (
+        <div className="bg-surface-card rounded-lg p-3 border border-surface-border">
+          <p className="text-[10px] text-gray-500 mb-2">INTELLIGENCE LAYERS</p>
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 text-[10px]">
+            {profile.behavior && (
+              <>
+                <div>
+                  <span className="text-gray-500">copyable-CI: </span>
+                  <span className={profile.behavior.is_copyable_ci ? 'text-green-400' : 'text-gray-400'}>
+                    {profile.behavior.is_copyable_ci ? '✓ yes (95% LB > 0)' : '— no'}
+                  </span>
+                </div>
+                <div>
+                  <span className="text-gray-500">farmer flag: </span>
+                  <span className={profile.behavior.is_likely_farmer ? 'text-red-400' : 'text-gray-400'}>
+                    {profile.behavior.is_likely_farmer ? '⚠ flagged' : '— clean'}
+                  </span>
+                </div>
+                <div>
+                  <span className="text-gray-500">ROI mean: </span>
+                  <span className="text-gray-200 font-mono">
+                    {profile.behavior.roi_mean != null ? `${(profile.behavior.roi_mean * 100).toFixed(1)}%` : '—'}
+                  </span>
+                </div>
+                <div>
+                  <span className="text-gray-500">ROI 95% LB: </span>
+                  <span className={(profile.behavior.roi_lower_95 || 0) > 0 ? 'text-green-400 font-mono' : 'text-gray-400 font-mono'}>
+                    {profile.behavior.roi_lower_95 != null ? `${(profile.behavior.roi_lower_95 * 100).toFixed(1)}%` : '—'}
+                  </span>
+                </div>
+                <div>
+                  <span className="text-gray-500">sizing p90: </span>
+                  <span className="text-gray-200 font-mono">
+                    {profile.behavior.sizing_p90_pct != null ? `${(profile.behavior.sizing_p90_pct * 100).toFixed(1)}%` : '—'}
+                  </span>
+                </div>
+                <div>
+                  <span className="text-gray-500">cluster: </span>
+                  <span className="text-gray-200">#{profile.behavior.cluster_id ?? '—'}</span>
+                </div>
+                <div>
+                  <span className="text-gray-500">cat HHI: </span>
+                  <span className="text-gray-200 font-mono">
+                    {profile.behavior.category_hhi != null ? profile.behavior.category_hhi.toFixed(2) : '—'}
+                  </span>
+                </div>
+                <div>
+                  <span className="text-gray-500">primary: </span>
+                  <span className="text-gray-200 capitalize">{profile.behavior.primary_category || '—'}</span>
+                </div>
+              </>
+            )}
+            {profile.insider && (
+              <div className="col-span-2 lg:col-span-4 bg-purple-500/10 border border-purple-500/30 rounded p-2">
+                <span className="text-purple-300 font-semibold">INSIDER</span>
+                <span className="text-gray-400 ml-3">score {profile.insider.insider_score?.toFixed(2)}</span>
+                <span className="text-gray-400 ml-3">via {profile.insider.detection_method}</span>
+              </div>
+            )}
+            {(profile.zscore_by_category || []).filter(z => z.is_specialist_z).length > 0 && (
+              <div className="col-span-2 lg:col-span-4">
+                <p className="text-gray-500 mb-1">CATEGORY SPECIALTIES (z ≥ 1.0)</p>
+                <div className="flex flex-wrap gap-1">
+                  {profile.zscore_by_category.filter(z => z.is_specialist_z).slice(0, 8).map((z, i) => (
+                    <span key={i} className="px-1.5 py-0.5 rounded text-[9px] bg-blue-500/20 text-blue-300 capitalize">
+                      {z.category} z={z.z_score?.toFixed(1)} ({(z.cat_wr * 100).toFixed(0)}% WR / n={z.n_in_cat})
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
         </div>
       )}
 

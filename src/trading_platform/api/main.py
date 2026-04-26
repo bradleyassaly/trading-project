@@ -779,7 +779,7 @@ def wallet_profile(address: str) -> dict[str, Any]:
             row = conn.execute(
                 """SELECT pm_pnl_usdc, pm_volume_usdc, net_pnl_usdc,
                           directional_win_rate, early_win_rate,
-                          resolved_trades, total_trades, total_volume_usdc,
+                          resolved_trades, total_volume_usdc,
                           wallet_type, pseudonym, is_early_informed,
                           first_seen_ts, last_trade_ts, pm_synced_at
                      FROM wallet_profiles WHERE wallet = ?""",
@@ -790,11 +790,11 @@ def wallet_profile(address: str) -> dict[str, Any]:
                     "pm_pnl_usdc": row[0], "pm_volume_usdc": row[1],
                     "net_pnl_usdc": row[2], "directional_win_rate": row[3],
                     "early_win_rate": row[4], "resolved_trades": row[5],
-                    "total_trades": row[6], "total_volume_usdc": row[7],
-                    "wallet_type": row[8], "pseudonym": row[9],
-                    "is_early_informed": row[10],
-                    "first_seen_ts": row[11], "last_trade_ts": row[12],
-                    "pm_synced_at": row[13],
+                    "total_volume_usdc": row[6],
+                    "wallet_type": row[7], "pseudonym": row[8],
+                    "is_early_informed": row[9],
+                    "first_seen_ts": row[10], "last_trade_ts": row[11],
+                    "pm_synced_at": row[12],
                 }
             else:
                 out["profile"] = None

@@ -420,6 +420,17 @@ SCHEDULE: list[Task] = [
         description="Daily isotonic-regression refit of alpha_score → P(win)",
     ),
     Task(
+        # 2026-04-25: Phase B independent signal. Resolution-time decay
+        # — markets within 24h of resolve at $0.10-$0.30 with positive
+        # liquidity. Decoupled from whale-flow alpha source. Behind
+        # PHASE_B_RESOLUTION_DECAY_ENABLED feature flag. Disabled by
+        # default until manually enabled in env.
+        name="resolution_decay_signal",
+        cmd="python -m trading_platform.polymarket.resolution_decay_signal",
+        interval_seconds=15 * 60,
+        description="Phase B: resolution-time decay independent signal",
+    ),
+    Task(
         name="pnl_reconstruction",
         # FIFO lot-matching across wallet_trades to compute realized PnL
         # from pre-resolution sells (not just resolved markets). Writes

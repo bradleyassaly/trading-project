@@ -30,6 +30,10 @@ _STARTING_CASH = 500.0
 _PROJECT_ROOT = Path(__file__).resolve().parents[3]
 _WALLET_DB_PATH = _PROJECT_ROOT / "data" / "polymarket" / "wallet_intelligence.db"
 
+# 2026-04-25: register Phase B independent signal so it passes the
+# `signal_type not in SIGNAL_BANKROLL` reject at the top of
+# execute_signal. Bankroll allocation modest until validation.
+# (Constant defined alongside the others below.)
 SIGNAL_BANKROLL = {
     # ─── Backtest-validated (EV > 0 on n ≥ 20 over 60d) ───
     # Values set from 2026-04-14 signal_engine_backtest results:
@@ -70,6 +74,9 @@ SIGNAL_BANKROLL = {
     "order_flow_imbalance":   10_000,   # order book bid/ask imbalance — new alpha source
     "price_momentum":         10_000,   # 24h price trend continuation/reversal
     "resolution_proximity":   10_000,   # high-confidence markets near resolution
+    # 2026-04-25: Phase B independent signal. Decoupled from whale flow.
+    # Modest 5K bankroll until validated.
+    "resolution_decay":        5_000,
 }
 
 MIN_CONFIDENCE = 0.35

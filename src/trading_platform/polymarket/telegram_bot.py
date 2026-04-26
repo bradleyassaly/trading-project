@@ -167,6 +167,69 @@ def _cmd_insiders() -> str:
     return "\n".join(lines)
 
 
+def _cmd_wallet(args: str) -> str:
+    """Unified wallet profile via /api/wallet/{addr}/profile.
+    Surfaces: PM PnL + lifetime + behavior metrics + insider tag +
+    z-specialty + top alpha categories. Single screen."""
+    addr = (args or "").strip().lower()
+    if not addr.startswith("0x") or len(addr) != 42:
+        return "Usage: /wallet 0xWALLETADDRESS (42 chars, 0x-prefixed)"
+    r = _api_get(f"/api/wallet/{addr}/profile") or {}
+    if r.get("error") or not r:
+        return f"*WALLET {addr[:12]}…*\nlookup failed: {r.get('error', 'n/a')}"
+    p = r.get("profile") or {}
+    b = r.get("behavior") or {}
+    ins = r.get("insider") or {}
+    alpha = r.get("alpha_by_category") or []
+    z = r.get("zscore_by_category") or []
+
+    lines = [f"*WALLET {addr[:12]}…*"]
+    if p.get("pseudonym"):
+        lines.append(f"  alias: {p['pseudonym']}")
+    pm = p.get("pm_pnl_usdc")
+    if pm:
+        lines.append(f"  PM PnL: ${float(pm):,.0f} | vol ${float(p.get('pm_volume_usdc') or 0):,.0f}")
+    if p.get("net_pnl_usdc") is not None:
+        lines.append(
+            f"  resolved: {p.get('resolved_trades') or 0} trades, "
+            f"WR {float(p.get('directional_win_rate') or 0) * 100:.0f}%, "
+            f"PnL ${float(p.get('net_pnl_usdc') or 0):,.0f}"
+        )
+
+    if b:
+        ci = "✓ copyable-CI" if b.get("is_copyable_ci") else "—"
+        farmer = " ⚠ FARMER" if b.get("is_likely_farmer") else ""
+        lines.append(
+            f"  behavior: {ci}{farmer} | "
+            f"ROI {float(b.get('roi_mean') or 0):+.3f} "
+            f"[LB {float(b.get('roi_lower_95') or 0):+.3f}] | "
+            f"sizing p90 {float(b.get('sizing_p90_pct') or 0) * 100:.1f}%"
+        )
+
+    if ins:
+        lines.append(f"  insider: score {float(ins.get('insider_score') or 0):.2f}")
+
+    specialists = [s for s in z if s.get("is_specialist_z")]
+    if specialists:
+        top_z = max(specialists, key=lambda s: s.get("z_score") or 0)
+        lines.append(
+            f"  top z-cat: {top_z['category']} z={float(top_z.get('z_score') or 0):.2f} "
+            f"({float(top_z.get('cat_wr') or 0) * 100:.0f}% WR on n={top_z.get('n_in_cat')})"
+        )
+
+    if alpha:
+        lines.append("  top alpha categories:")
+        for a in alpha[:3]:
+            cop = "✓" if a.get("is_copyable") else "—"
+            lines.append(
+                f"    {cop} {a['category']:<14s} "
+                f"WR {float(a.get('win_rate') or 0) * 100:.0f}% "
+                f"PnL ${float(a.get('total_pnl') or 0):,.0f} "
+                f"n={a.get('resolved_trades')}"
+            )
+    return "\n".join(lines)
+
+
 def _cmd_kill(reason: str = "remote-kill via telegram") -> str:
     r = _api_post("/api/live/emergency-stop", {"reason": reason})
     if r and r.get("ok"):
@@ -239,6 +302,7 @@ def _cmd_help() -> str:
         "/readiness — live-trade gate detail\n"
         "/funnel — 24h signal → trade funnel\n"
         "/insiders — detected insider wallets\n"
+        "/wallet 0x... — full wallet profile\n"
         "/live-trade <cid> <YES|NO> [$stake] — place live trade ($5 cap)\n"
         "/kill [reason] — emergency stop\n"
         "/unkill — clear emergency stop\n"
@@ -252,6 +316,7 @@ _HANDLERS = {
     "/readiness": lambda args: _cmd_readiness(),
     "/funnel": lambda args: _cmd_funnel(),
     "/insiders": lambda args: _cmd_insiders(),
+    "/wallet": _cmd_wallet,
     "/live-trade": lambda args: _cmd_live_trade(args),
     "/kill": lambda args: _cmd_kill(args or "remote-kill via telegram"),
     "/unkill": lambda args: _cmd_unkill(),
