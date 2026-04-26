@@ -221,6 +221,15 @@ class TelegramAlerter:
         self._noncrit_send_log: list[float] = []
         # Per-market cooldown to prevent alert spam
         self._market_alert_times: dict[str, float] = {}
+        # 2026-04-25: per-message-fingerprint dedup. Same payload within
+        # 1h is dropped (silent + non-critical only). Critical alerts
+        # always go through. Closes the "I got 50 identical farmer-block
+        # alerts in 5 minutes" failure mode.
+        self._fingerprint_log: dict[str, float] = {}
+        # Quiet hours (local UTC). 23:00-07:00 by default. Critical
+        # alerts always bypass; non-critical messages are dropped.
+        self._quiet_hours_start_utc = int(os.getenv("TELEGRAM_QUIET_START_UTC", "3") or 3)  # 11pm ET
+        self._quiet_hours_end_utc   = int(os.getenv("TELEGRAM_QUIET_END_UTC",   "11") or 11)  # 7am ET
 
     def _check_market_cooldown(self, condition_id: str | None) -> bool:
         """True if we should send, False if this market is in cooldown."""
@@ -240,6 +249,32 @@ class TelegramAlerter:
         self._noncrit_send_log = [t for t in self._noncrit_send_log if t >= cutoff]
         return len(self._noncrit_send_log) < self.MAX_NONCRITICAL_PER_HOUR
 
+    def _is_quiet_hours(self) -> bool:
+        """True if current UTC hour falls in the configured quiet window."""
+        from datetime import datetime, timezone
+        h = datetime.now(timezone.utc).hour
+        s, e = self._quiet_hours_start_utc, self._quiet_hours_end_utc
+        if s == e:
+            return False
+        if s < e:
+            return s <= h < e
+        # Wraps midnight (e.g. 23 → 7)
+        return h >= s or h < e
+
+    def _is_dup_within_1h(self, message: str) -> bool:
+        """Fingerprint-based dedup. Same first-150-chars within 1h = drop."""
+        import hashlib
+        now = time.time()
+        # Garbage-collect old entries
+        self._fingerprint_log = {
+            k: v for k, v in self._fingerprint_log.items() if now - v < 3600
+        }
+        fp = hashlib.md5(message[:150].encode("utf-8")).hexdigest()
+        if fp in self._fingerprint_log:
+            return True
+        self._fingerprint_log[fp] = now
+        return False
+
     def _send(self, message: str, disable_notification: bool = False) -> bool:
         """Send a message to Telegram.
 
@@ -249,13 +284,22 @@ class TelegramAlerter:
             HTML-formatted message text.
         disable_notification:
             When True the message arrives silently and is subject to the
-            non-critical rate limit. When False (default behaviour for
-            backwards compatibility) the message bypasses the rate limit
-            and triggers a sound/vibration notification.
+            non-critical rate limit, fingerprint dedup, and quiet hours.
+            When False (default behaviour for backwards compatibility)
+            the message bypasses all of those and triggers a
+            sound/vibration notification.
         """
         if not self.enabled:
             return False
         if disable_notification:
+            # Quiet hours drop non-critical messages entirely
+            if self._is_quiet_hours():
+                logger.debug("Telegram quiet hours; dropping non-critical message")
+                return False
+            # Fingerprint dedup
+            if self._is_dup_within_1h(message):
+                logger.debug("Telegram dup within 1h; dropping non-critical message")
+                return False
             if not self._within_noncrit_budget():
                 logger.debug("Telegram non-critical rate limit hit; dropping message")
                 return False
@@ -886,6 +930,58 @@ class TelegramAlerter:
         open_count = int(equity_row[2]) if equity_row else 0
         conv = total_placed / total_fired * 100 if total_fired else 0
 
+        # 2026-04-25: pull ladder + calibration + binding-gate context
+        # so the morning digest answers "where are we vs the L5 goal"
+        # not just "what fired in the last 24h".
+        ladder_block = ""
+        try:
+            import urllib.request as _ur, json as _j
+            with _ur.urlopen("http://localhost:8001/api/ladder/status", timeout=5) as r:
+                _l = _j.loads(r.read())
+            level = _l.get("level", "?")
+            level_name = _l.get("level_name", "")
+            bk = _l.get("bankroll_usd", 0)
+            target = _l.get("target_bankroll_l5", 200000)
+            pct = _l.get("progress_pct", 0)
+            gates = _l.get("gates_to_next") or []
+            gates_pass = sum(1 for g in gates if g.get("passed"))
+            ladder_block = (
+                f"\n<b>Ladder:</b> {level} {level_name} "
+                f"(${bk:,.0f} / ${target:,.0f}, {pct:.1f}%)\n"
+                f"  Gates to next: {gates_pass}/{len(gates)} passed"
+            )
+        except Exception:
+            pass
+
+        calib_block = ""
+        try:
+            with _ur.urlopen("http://localhost:8001/api/calibration", timeout=5) as r:
+                _c = _j.loads(r.read())
+            if _c.get("n"):
+                v = (_c.get("verdict") or "?").replace("_", " ")
+                calib_block = (
+                    f"\n<b>Calibration:</b> Brier {_c.get('brier'):.3f}, "
+                    f"miscal {(_c.get('mean_abs_miscalibration') or 0)*100:.1f}% — {v}"
+                )
+        except Exception:
+            pass
+
+        funnel_block = ""
+        try:
+            with _ur.urlopen(
+                "http://localhost:8001/api/funnel/decisions?hours=24", timeout=5,
+            ) as r:
+                _f = _j.loads(r.read())
+            top = (_f.get("by_gate") or [])[:1]
+            if top:
+                t = top[0]
+                funnel_block = (
+                    f"\n<b>Top binding gate:</b> {t.get('gate')} "
+                    f"({t.get('rejected')} rejected on {t.get('surface')})"
+                )
+        except Exception:
+            pass
+
         lines = [
             "\U0001f4ca <b>DAILY DIGEST</b>\n",
             f"<b>Pipeline (24h):</b>",
@@ -897,6 +993,9 @@ class TelegramAlerter:
             f"  Equity: {_fmt_usd(equity)}",
             f"  Cum PnL: {'+' if cum_pnl >= 0 else ''}{_fmt_usd(cum_pnl)}",
             f"  Open positions: {open_count}",
+            ladder_block,
+            calib_block,
+            funnel_block,
         ]
 
         if placed:

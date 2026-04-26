@@ -230,6 +230,144 @@ def _cmd_wallet(args: str) -> str:
     return "\n".join(lines)
 
 
+def _cmd_ladder(args: str = "") -> str:
+    """L0→L5 ladder progress + gates remaining + lane state."""
+    r = _api_get("/api/ladder/status") or {}
+    if r.get("error"):
+        return f"*LADDER*\nlookup failed: {r.get('error', 'n/a')}"
+    level = r.get("level", "?")
+    name = r.get("level_name", "?")
+    bk = r.get("bankroll_usd", 0)
+    target = r.get("target_bankroll_l5", 200000)
+    pct = r.get("progress_pct", 0)
+    paper = r.get("paper") or {}
+    live = r.get("live") or {}
+    hyp_acc = r.get("hypothesis_accuracy_30d")
+    lanes = r.get("lanes") or {}
+
+    lines = [f"*LADDER* — {level} {name}"]
+    lines.append(f"  bankroll ${bk:,.0f} → target ${target:,.0f} ({pct:.1f}%)")
+    lines.append(
+        f"  paper 30d: n={paper.get('closed_30d', 0)} "
+        f"WR {(paper.get('wr_30d') or 0) * 100:.0f}% "
+        f"PnL ${paper.get('pnl_30d', 0):.0f}"
+    )
+    lines.append(
+        f"  live  30d: {live.get('submitted_30d', 0)} submitted, "
+        f"{live.get('closed_30d', 0)} closed"
+    )
+    if hyp_acc is not None:
+        lines.append(f"  hypothesis acc 30d: {hyp_acc * 100:.1f}%")
+
+    nx = r.get("next_level") or "—"
+    if nx and nx != "—":
+        lines.append(f"\n*GATES TO {nx.upper()}*")
+        for g in r.get("gates_to_next") or []:
+            mark = "✓" if g.get("passed") else "○"
+            lines.append(f"  {mark} {g.get('name')} → {g.get('value')}")
+
+    lane_bits = []
+    if lanes.get("live_discovery_enabled"): lane_bits.append("DISCOVERY")
+    if lanes.get("phase_b_enabled"): lane_bits.append("PHASE_B")
+    if lanes.get("phase_d_enabled"): lane_bits.append("PHASE_D")
+    lines.append(f"\n*LANES*: {', '.join(lane_bits) if lane_bits else 'baseline only'}")
+    return "\n".join(lines)
+
+
+def _cmd_lanes(args: str = "") -> str:
+    """Just the lane state — quick check before enabling/disabling."""
+    r = _api_get("/api/ladder/status") or {}
+    lanes = r.get("lanes") or {}
+    rows = [
+        ("LIVE_DISCOVERY",  "live_discovery_enabled",  "$1 live trades enabled"),
+        ("PHASE_B",         "phase_b_enabled",          "resolution_decay independent signal"),
+        ("PHASE_D",         "phase_d_enabled",          "cross-platform divergence (Kalshi)"),
+    ]
+    out = ["*LANES*"]
+    for label, key, desc in rows:
+        on = lanes.get(key)
+        out.append(f"  {'✓' if on else '○'} {label}: {desc}")
+    return "\n".join(out)
+
+
+def _cmd_calibration(args: str = "") -> str:
+    """Brier score + verdict + top miscalibrated signals."""
+    r = _api_get("/api/calibration") or {}
+    if r.get("error") or not r.get("n"):
+        return f"*CALIBRATION*\n{r.get('error', 'no resolved hypotheses yet')}"
+    brier = r.get("brier")
+    miscal = r.get("mean_abs_miscalibration")
+    verdict = r.get("verdict") or "—"
+    n = r.get("n", 0)
+    lines = [
+        f"*CALIBRATION* — {verdict.replace('_', ' ').upper()}",
+        f"  Brier: {brier:.3f} | mean abs miscal: {(miscal or 0) * 100:.1f}%",
+        f"  n resolved: {n} (last 30d)",
+    ]
+    by_sig = r.get("by_signal") or []
+    if by_sig:
+        lines.append("\n*PER SIGNAL (top 6 by n)*")
+        for s in by_sig[:6]:
+            mp = s.get("mean_pred") or 0
+            ma = s.get("mean_actual") or 0
+            gap = abs(mp - ma)
+            arrow = "→" if abs(mp - ma) < 0.05 else ("↓" if mp > ma else "↑")
+            lines.append(
+                f"  {s.get('signal_type'):<22s} n={s.get('n'):<3d} "
+                f"pred={mp:.2f} {arrow} act={ma:.2f}"
+            )
+    return "\n".join(lines)
+
+
+def _cmd_signal_health(args: str = "") -> str:
+    """Per-signal IC + decay flags."""
+    r = _api_get("/api/signal-health") or {}
+    sigs = r.get("signals") or []
+    if not sigs:
+        return "*SIGNAL HEALTH*\nNo data yet (signal_health task hasn't run)."
+    decayed = [s for s in sigs if s.get("decay_flag")]
+    lines = [f"*SIGNAL HEALTH* — {len(sigs)} tracked, {len(decayed)} decay-flagged"]
+    lines.append("\n*TOP IC (14d)*")
+    for s in sigs[:6]:
+        ic = s.get("ic_14d") or 0
+        flag = " ⚠ DECAY" if s.get("decay_flag") else ""
+        corr = s.get("correlation_max") or 0
+        corr_note = f" ⚠ corr {corr:.2f}" if corr >= 0.7 else ""
+        lines.append(
+            f"  {s.get('signal_type'):<22s} IC={ic:+.2f} n={s.get('n_resolved_30d')}{flag}{corr_note}"
+        )
+    if decayed:
+        lines.append(f"\n*DECAY-FLAGGED* (auto-blocked at signal time)")
+        for s in decayed[:5]:
+            lines.append(f"  {s.get('signal_type')} (IC {s.get('ic_14d') or 0:+.2f})")
+    return "\n".join(lines)
+
+
+def _cmd_pnl(args: str = "") -> str:
+    """Today's paper PnL + WR + open positions + last trade."""
+    r = _api_get("/api/ladder/status") or {}
+    paper = r.get("paper") or {}
+    live = r.get("live") or {}
+    bk = r.get("bankroll_usd", 0)
+    pos = _api_get("/api/live/positions") or {}
+    open_paper = (pos.get("paper") or {}).get("open_count", 0) if pos else 0
+
+    lines = ["*PnL — 30d snapshot*"]
+    lines.append(f"  bankroll: ${bk:,.0f}")
+    lines.append(
+        f"  paper: n={paper.get('closed_30d', 0)} "
+        f"WR {(paper.get('wr_30d') or 0) * 100:.0f}% "
+        f"PnL ${paper.get('pnl_30d', 0):+,.2f}"
+    )
+    lines.append(
+        f"  live:  {live.get('submitted_30d', 0)} submitted, "
+        f"{live.get('closed_30d', 0)} closed, "
+        f"WR {(live.get('wr_30d') or 0) * 100:.0f}%"
+    )
+    lines.append(f"  open paper positions: {open_paper}")
+    return "\n".join(lines)
+
+
 def _cmd_kill(reason: str = "remote-kill via telegram") -> str:
     r = _api_post("/api/live/emergency-stop", {"reason": reason})
     if r and r.get("ok"):
@@ -298,6 +436,11 @@ def _cmd_help() -> str:
     return (
         "*COMMANDS*\n"
         "/status — system health + gates\n"
+        "/ladder — L0→L5 progress + gates to next\n"
+        "/lanes — feature-flag state (DISCOVERY / PHASE_B / PHASE_D)\n"
+        "/pnl — 30d paper + live PnL summary\n"
+        "/calibration — Brier score + miscalibration\n"
+        "/signal-health — per-signal IC + decay flags\n"
         "/positions — paper + live positions\n"
         "/readiness — live-trade gate detail\n"
         "/funnel — 24h signal → trade funnel\n"
@@ -312,6 +455,12 @@ def _cmd_help() -> str:
 
 _HANDLERS = {
     "/status": lambda args: _cmd_status(),
+    "/ladder": _cmd_ladder,
+    "/lanes": _cmd_lanes,
+    "/pnl": _cmd_pnl,
+    "/calibration": _cmd_calibration,
+    "/signal-health": _cmd_signal_health,
+    "/signals": _cmd_signal_health,
     "/positions": lambda args: _cmd_positions(),
     "/readiness": lambda args: _cmd_readiness(),
     "/funnel": lambda args: _cmd_funnel(),
