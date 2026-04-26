@@ -26,7 +26,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import FastAPI, Query, Request, Response
+from fastapi import Body, FastAPI, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -898,6 +898,162 @@ def ladder_status() -> dict[str, Any]:
             "phase_d_enabled": _os.environ.get("PHASE_D_DIVERGENCE_ENABLED", "").lower() in ("1", "true"),
         },
     }
+
+
+@app.post("/api/ladder/promote")
+def ladder_promote(payload: dict[str, Any] = Body(default_factory=dict)) -> dict[str, Any]:
+    """Record a ladder promotion to the audit table. Does NOT change
+    bankroll — that step is manual. Confirms gates were passed at the
+    time of promotion."""
+    import time as _t
+    try:
+        with _db() as conn:
+            conn.execute(
+                """CREATE TABLE IF NOT EXISTS ladder_promotions (
+                    id BIGSERIAL PRIMARY KEY,
+                    promoted_at BIGINT NOT NULL,
+                    from_level TEXT, to_level TEXT,
+                    passed_gates BIGINT, total_gates BIGINT,
+                    notes TEXT
+                )"""
+            )
+            conn.execute(
+                """INSERT INTO ladder_promotions
+                     (promoted_at, from_level, to_level,
+                      passed_gates, total_gates, notes)
+                   VALUES (?,?,?,?,?,?)""",
+                (
+                    int(_t.time()),
+                    str(payload.get("from_level") or ""),
+                    str(payload.get("to_level") or ""),
+                    int(payload.get("passed_gates") or 0),
+                    int(payload.get("total_gates") or 0),
+                    "via Telegram /promote confirm",
+                ),
+            )
+            conn.commit()
+        try:
+            from trading_platform.polymarket.telegram_alerts import get_alerter
+            a = get_alerter()
+            if a.enabled:
+                a._send(
+                    f"\U0001f680 <b>LADDER PROMOTION RECORDED</b>\n"
+                    f"{payload.get('from_level')} → {payload.get('to_level')}\n"
+                    f"Gates: {payload.get('passed_gates')}/{payload.get('total_gates')}\n"
+                    f"Capital deposit + POLYMARKET_LIVE_BANKROLL_USD update is manual.",
+                    disable_notification=False,
+                )
+        except Exception:
+            pass
+        return {"ok": True}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)[:200]}
+
+
+@app.get("/api/diff/24h")
+def diff_24h() -> dict[str, Any]:
+    """What changed in the last 24h vs the prior 24h. Pulls counts
+    from the same canonical sources used by the daily digest so
+    operators can answer 'is the system improving?' at a glance.
+    """
+    import time as _t
+    out: dict[str, Any] = {}
+    try:
+        with _db() as conn:
+            for label, sql in (
+                ("paper_trades", """
+                    SELECT
+                      COUNT(*) FILTER (WHERE entry_ts > extract(epoch FROM NOW()-interval '24 hours')) AS today,
+                      COUNT(*) FILTER (WHERE entry_ts > extract(epoch FROM NOW()-interval '48 hours')
+                                         AND entry_ts <= extract(epoch FROM NOW()-interval '24 hours')) AS yest
+                      FROM polymarket_paper_trades WHERE archived=0
+                """),
+                ("pnl", """
+                    SELECT
+                      ROUND(SUM(realized_pnl) FILTER (WHERE exit_ts > extract(epoch FROM NOW()-interval '24 hours'))::numeric,2) AS today,
+                      ROUND(SUM(realized_pnl) FILTER (WHERE exit_ts > extract(epoch FROM NOW()-interval '48 hours')
+                                                       AND exit_ts <= extract(epoch FROM NOW()-interval '24 hours'))::numeric,2) AS yest
+                      FROM polymarket_paper_trades WHERE archived=0 AND realized_pnl IS NOT NULL
+                """),
+                ("hypotheses_resolved", """
+                    SELECT
+                      COUNT(*) FILTER (WHERE resolved_at > extract(epoch FROM NOW()-interval '24 hours')) AS today,
+                      COUNT(*) FILTER (WHERE resolved_at > extract(epoch FROM NOW()-interval '48 hours')
+                                         AND resolved_at <= extract(epoch FROM NOW()-interval '24 hours')) AS yest
+                      FROM trade_hypotheses WHERE resolved_at IS NOT NULL
+                """),
+                ("hypothesis_accuracy_pct", """
+                    SELECT
+                      ROUND(AVG(hypothesis_correct::numeric*100) FILTER (WHERE resolved_at > extract(epoch FROM NOW()-interval '24 hours'))::numeric,1) AS today,
+                      ROUND(AVG(hypothesis_correct::numeric*100) FILTER (WHERE resolved_at > extract(epoch FROM NOW()-interval '48 hours')
+                                                                          AND resolved_at <= extract(epoch FROM NOW()-interval '24 hours'))::numeric,1) AS yest
+                      FROM trade_hypotheses
+                     WHERE resolved_at IS NOT NULL AND hypothesis_correct IN (0,1)
+                """),
+                ("insider_pool", """
+                    SELECT
+                      (SELECT COUNT(*) FROM insider_wallets) AS today,
+                      (SELECT COUNT(*) FROM insider_wallets
+                        WHERE classified_at <= extract(epoch FROM NOW()-interval '24 hours')) AS yest
+                """),
+                ("alpha_gate_rejections", """
+                    SELECT
+                      COUNT(*) FILTER (WHERE gate='ALPHA_GATE' AND decision_ts > extract(epoch FROM NOW()-interval '24 hours')) AS today,
+                      COUNT(*) FILTER (WHERE gate='ALPHA_GATE' AND decision_ts > extract(epoch FROM NOW()-interval '48 hours')
+                                         AND decision_ts <= extract(epoch FROM NOW()-interval '24 hours')) AS yest
+                      FROM decision_trace
+                """),
+            ):
+                try:
+                    row = conn.execute(sql).fetchone()
+                    out[f"{label}_today"] = row[0] if row else None
+                    out[f"{label}_yesterday"] = row[1] if row else None
+                except Exception as exc:
+                    out[f"{label}_error"] = str(exc)[:80]
+        return out
+    except Exception as exc:
+        return {"error": str(exc)[:200]}
+
+
+@app.get("/api/explain/{decision_id}")
+def explain_decision(decision_id: str) -> dict[str, Any]:
+    """Plain-language reason for why a signal fired or was rejected.
+
+    Looks up `decision_trace` by id (or by signal_outcomes.id if no
+    direct trace match). Returns the gate that fired, value vs threshold,
+    and a humanized sentence.
+    """
+    try:
+        sid = int(decision_id)
+    except (TypeError, ValueError):
+        return {"error": "decision_id must be an integer"}
+    try:
+        with _db() as conn:
+            row = conn.execute(
+                """SELECT decision_ts, condition_id, signal_type, side,
+                          wallet, category, gate, passed, value, threshold,
+                          detail, surface
+                     FROM decision_trace WHERE id = ?""",
+                (sid,),
+            ).fetchone()
+    except Exception as exc:
+        return {"error": str(exc)[:200]}
+    if not row:
+        return {"error": f"no decision_trace row with id={sid}"}
+    ts, cid, sig, side, wallet, cat, gate, passed, val, thr, detail, surface = row
+    verdict = "PASSED" if passed else "BLOCKED"
+    bits = [
+        f"<b>{verdict}</b> {sig or '?'} {side or ''} on {surface or 'paper'}",
+        f"  market: {(cid or '?')[:14]}…",
+        f"  category: {cat or '?'}",
+        f"  wallet: {(wallet or '?')[:14]}…",
+        f"  gate: <code>{gate}</code>",
+    ]
+    if val is not None and thr is not None:
+        bits.append(f"  value {val:.3f} vs threshold {thr:.3f}")
+    if detail:
+        bits.append(f"  detail: {detail[:200]}")
+    return {"explanation": "\n".join(bits)}
 
 
 @app.get("/api/insiders/growth")

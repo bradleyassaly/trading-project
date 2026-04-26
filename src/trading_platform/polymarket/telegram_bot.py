@@ -368,6 +368,95 @@ def _cmd_pnl(args: str = "") -> str:
     return "\n".join(lines)
 
 
+def _cmd_promote(args: str = "") -> str:
+    """Guard-railed ladder promotion. Two-phase:
+       /promote          — show what would happen, no action
+       /promote confirm  — record promotion to ladder_promotions table,
+                           raise loud alert. CAPITAL deposit is manual.
+    """
+    r = _api_get("/api/ladder/status") or {}
+    if r.get("error") or not r.get("level"):
+        return f"*PROMOTE*\nladder lookup failed: {r.get('error', 'n/a')}"
+    level = r.get("level")
+    next_level = r.get("next_level") or "—"
+    gates = r.get("gates_to_next") or []
+    passed = sum(1 for g in gates if g.get("passed"))
+    total = len(gates)
+    confirm = (args or "").strip().lower() == "confirm"
+
+    if total == 0 or next_level == "—":
+        return f"*PROMOTE*\nno next level above {level} (already at top)"
+    if passed < total:
+        unmet = [g for g in gates if not g.get("passed")]
+        lines = [
+            f"*PROMOTE BLOCKED* — {passed}/{total} gates passed",
+            f"  current: {level}, target: {next_level}",
+            "  unmet gates:",
+        ]
+        for g in unmet:
+            lines.append(f"    ○ {g.get('name')} → {g.get('value')}")
+        lines.append("\nPromotion will unlock once all gates pass.")
+        return "\n".join(lines)
+
+    if not confirm:
+        bk = r.get("bankroll_usd", 0)
+        return (
+            f"*PROMOTE READY* — {passed}/{total} gates ✓\n"
+            f"  current: {level} (${bk:,.0f}) → target: {next_level}\n"
+            f"  Required deposit (manual): see LIVE_TRADING_CHECKLIST.md\n\n"
+            f"Type `/promote confirm` to record the promotion to the audit log + raise alert.\n"
+            f"This does NOT deposit capital — that step is manual."
+        )
+
+    # Confirm path: record promotion + alert
+    payload = {"from_level": level, "to_level": next_level,
+               "passed_gates": passed, "total_gates": total}
+    res = _api_post("/api/ladder/promote", payload) or {}
+    if res.get("ok"):
+        return (
+            f"*PROMOTION RECORDED* {level} → {next_level}\n"
+            f"  Audit row written. Deposit capital + update "
+            f"POLYMARKET_LIVE_BANKROLL_USD when funded."
+        )
+    return f"*PROMOTE CONFIRM FAILED*\n{res.get('error') or res.get('_error') or 'no response'}"
+
+
+def _cmd_diff(args: str = "") -> str:
+    """What changed since 24h ago: paper trades, PnL, insider pool, ALPHA gate."""
+    r = _api_get("/api/diff/24h") or {}
+    if r.get("error"):
+        return f"*DIFF*\n{r.get('error')}"
+    bits = ["*DIFF — last 24h vs prior 24h*"]
+    for k, label in (
+        ("paper_trades", "paper trades"),
+        ("pnl", "paper PnL"),
+        ("hypotheses_resolved", "hypotheses resolved"),
+        ("hypothesis_accuracy_pct", "hypothesis acc %"),
+        ("insider_pool", "insider pool"),
+        ("alpha_gate_rejections", "ALPHA_GATE rejections"),
+    ):
+        cur = r.get(f"{k}_today")
+        prev = r.get(f"{k}_yesterday")
+        if cur is None and prev is None:
+            continue
+        delta = (cur or 0) - (prev or 0)
+        arrow = "↑" if delta > 0 else "↓" if delta < 0 else "→"
+        bits.append(f"  {label}: {prev} {arrow} {cur} ({'+' if delta >= 0 else ''}{delta})")
+    return "\n".join(bits)
+
+
+def _cmd_explain(args: str = "") -> str:
+    """Plain-language explanation of why a signal fired or was rejected."""
+    sid = (args or "").strip()
+    if not sid:
+        return ("Usage: /explain <signal_outcome_id> | <decision_trace_id>\n"
+                "Pulls the most recent gate decision for that id.")
+    r = _api_get(f"/api/explain/{sid}") or {}
+    if r.get("error"):
+        return f"*EXPLAIN {sid}*\n{r.get('error')}"
+    return r.get("explanation") or "no explanation available"
+
+
 def _cmd_kill(reason: str = "remote-kill via telegram") -> str:
     r = _api_post("/api/live/emergency-stop", {"reason": reason})
     if r and r.get("ok"):
@@ -446,6 +535,9 @@ def _cmd_help() -> str:
         "/funnel — 24h signal → trade funnel\n"
         "/insiders — detected insider wallets\n"
         "/wallet 0x... — full wallet profile\n"
+        "/promote [confirm] — guard-railed L0→L1 promotion\n"
+        "/diff — what changed since yesterday\n"
+        "/explain <id> — why a signal fired / was rejected\n"
         "/live-trade <cid> <YES|NO> [$stake] — place live trade ($5 cap)\n"
         "/kill [reason] — emergency stop\n"
         "/unkill — clear emergency stop\n"
@@ -466,6 +558,9 @@ _HANDLERS = {
     "/funnel": lambda args: _cmd_funnel(),
     "/insiders": lambda args: _cmd_insiders(),
     "/wallet": _cmd_wallet,
+    "/promote": _cmd_promote,
+    "/diff": _cmd_diff,
+    "/explain": _cmd_explain,
     "/live-trade": lambda args: _cmd_live_trade(args),
     "/kill": lambda args: _cmd_kill(args or "remote-kill via telegram"),
     "/unkill": lambda args: _cmd_unkill(),
@@ -476,18 +571,48 @@ _HANDLERS = {
 
 # ── Main loop ─────────────────────────────────────────────────────────────
 
-def _handle_update(update: dict, bot_token: str, allowed_chat: str) -> None:
+# 2026-04-25: multi-user auth + role split. TELEGRAM_CHAT_ID accepts a
+# comma-separated list of chat ids. TELEGRAM_CHAT_ID_READONLY is a
+# separate optional list whose users CAN run read commands but are
+# blocked from /promote, /kill, /unkill, /live-trade. Backwards-compat:
+# single chat id still works as before (full control).
+_CONTROL_COMMANDS = {"/promote", "/kill", "/unkill", "/live-trade"}
+
+
+def _parse_id_list(raw: str) -> set[str]:
+    if not raw:
+        return set()
+    return {p.strip() for p in raw.split(",") if p.strip()}
+
+
+def _handle_update(update: dict, bot_token: str,
+                   allowed_full: set[str], allowed_readonly: set[str]) -> None:
     msg = update.get("message") or update.get("edited_message") or {}
     chat_id = str(msg.get("chat", {}).get("id") or "")
-    if allowed_chat and chat_id != str(allowed_chat):
-        logger.info("ignoring msg from chat %s (not allowed)", chat_id)
-        return
     text = (msg.get("text") or "").strip()
     if not text.startswith("/"):
         return
     parts = text.split(" ", 1)
-    cmd = parts[0].split("@")[0].lower()  # strip @botname mention
+    cmd = parts[0].split("@")[0].lower()
     args = parts[1] if len(parts) > 1 else ""
+
+    is_control = cmd in _CONTROL_COMMANDS
+    full_ok = (not allowed_full) or (chat_id in allowed_full)
+    readonly_ok = chat_id in allowed_readonly
+
+    if not (full_ok or readonly_ok):
+        logger.info("ignoring msg from chat %s (not allowed)", chat_id)
+        return
+    if is_control and not full_ok:
+        # Read-only user attempting control command
+        _tg_request(
+            "sendMessage",
+            {"chat_id": chat_id,
+             "text": f"`{cmd}` requires control role. You have read-only access.",
+             "parse_mode": "Markdown"},
+            bot_token=bot_token,
+        )
+        return
 
     handler = _HANDLERS.get(cmd)
     if not handler:
@@ -517,11 +642,15 @@ def main() -> int:
     load_dotenv(_PROJECT_ROOT / ".env")
 
     bot_token = os.environ.get("TELEGRAM_BOT_TOKEN") or ""
-    allowed_chat = os.environ.get("TELEGRAM_CHAT_ID") or ""
+    allowed_full = _parse_id_list(os.environ.get("TELEGRAM_CHAT_ID") or "")
+    allowed_readonly = _parse_id_list(os.environ.get("TELEGRAM_CHAT_ID_READONLY") or "")
     if not bot_token:
         logger.error("TELEGRAM_BOT_TOKEN not set")
         return 2
-    logger.info("[telegram-bot] starting long-poll (allowed chat: %s)", allowed_chat or "ANY")
+    logger.info(
+        "[telegram-bot] starting long-poll (control: %s, readonly: %s)",
+        sorted(allowed_full) or "ANY", sorted(allowed_readonly) or "—",
+    )
 
     offset = 0
     while True:
@@ -536,7 +665,7 @@ def main() -> int:
                 continue
             for update in r.get("result") or []:
                 offset = max(offset, update.get("update_id", 0) + 1)
-                _handle_update(update, bot_token, allowed_chat)
+                _handle_update(update, bot_token, allowed_full, allowed_readonly)
         except KeyboardInterrupt:
             return 0
         except Exception as exc:
