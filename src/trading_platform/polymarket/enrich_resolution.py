@@ -158,18 +158,48 @@ def _enrich_from_positions(db: WalletDB) -> int:
 
     For each wallet with unresolved trades, fetch positions and look for
     resolved markets (curPrice == 0 or 1).
+
+    2026-04-26: hardened against ``psycopg.errors.IdleSessionTimeout``.
+    Original failure mode (state.json ``enrich_trade_resolution.last_error``
+    at 1,669s): held ``db._conn`` open for the full minutes-long Data API
+    fetch loop; Postgres reaped the idle backend; the final UPDATE
+    executemany failed. Now: re-fetch the WalletDB connection right
+    before each DB-touching block, and wrap the writes with a single
+    reconnect-and-retry. Long-running HTTP work no longer holds a
+    Postgres handle.
     """
     import requests
     from trading_platform.polymarket.address_map import AddressMap
 
     addr_map = AddressMap()
-    conn = db._conn
+
+    def _fresh_conn():
+        # Re-acquire from pool — the pool's check_connection invariant
+        # ensures stale backends are recycled transparently.
+        return db._conn
+
+    def _exec_with_retry(fn, *args, **kw):
+        try:
+            return fn(*args, **kw)
+        except Exception as exc:
+            etype = type(exc).__name__
+            if "IdleSessionTimeout" in etype or "OperationalError" in etype \
+               or "InterfaceError" in etype:
+                logger.warning("[enrich] reconnecting after %s", etype)
+                try:
+                    db._reconnect()  # best-effort if WalletDB exposes it
+                except Exception:
+                    pass
+                return fn(*args, **kw)
+            raise
 
     # Get wallets that still have unresolved trades
     with db._lock:
-        wallet_rows = conn.execute(
-            "SELECT DISTINCT wallet FROM wallet_trades WHERE market_resolved = 0"
-        ).fetchall()
+        wallet_rows = _exec_with_retry(
+            lambda: _fresh_conn().execute(
+                "SELECT DISTINCT wallet FROM wallet_trades WHERE market_resolved = 0"
+            ).fetchall(),
+        )
     wallets = [r[0] for r in wallet_rows]
     logger.info("Pass 2: checking positions for %d wallets with unresolved trades", len(wallets))
 
@@ -225,11 +255,15 @@ def _enrich_from_positions(db: WalletDB) -> int:
     if not resolved_assets:
         return 0
 
-    # Now match against unresolved trades
+    # Now match against unresolved trades. Re-fetch the connection —
+    # the prior `conn` reference may be stale after the Data API loop.
     with db._lock:
-        unresolved = conn.execute(
-            "SELECT id, asset, side, size, price FROM wallet_trades WHERE market_resolved = 0 AND asset IS NOT NULL"
-        ).fetchall()
+        unresolved = _exec_with_retry(
+            lambda: _fresh_conn().execute(
+                "SELECT id, asset, side, size, price FROM wallet_trades "
+                "WHERE market_resolved = 0 AND asset IS NOT NULL"
+            ).fetchall(),
+        )
 
     batch: list[tuple] = []
     for trade_id, asset, side, size, price in unresolved:
@@ -252,11 +286,19 @@ def _enrich_from_positions(db: WalletDB) -> int:
         batch.append((1, market_outcome, round(pnl, 4), trade_id))
 
     if batch:
-        with db._lock:
-            conn.executemany(
-                "UPDATE wallet_trades SET market_resolved = ?, market_outcome = ?, pnl = ? WHERE id = ?",
-                batch,
-            )
-            conn.commit()
+        # Chunk into 500-row batches; commit each chunk separately so a
+        # transient disconnect doesn't lose the whole pass.
+        CHUNK = 500
+        for i in range(0, len(batch), CHUNK):
+            sub = batch[i:i + CHUNK]
+            with db._lock:
+                _exec_with_retry(
+                    lambda s=sub: _fresh_conn().executemany(
+                        "UPDATE wallet_trades SET market_resolved = ?, "
+                        "market_outcome = ?, pnl = ? WHERE id = ?",
+                        s,
+                    ),
+                )
+                _exec_with_retry(lambda: _fresh_conn().commit())
 
     return len(batch)

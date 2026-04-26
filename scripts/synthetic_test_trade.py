@@ -95,8 +95,9 @@ def _fire_synthetic() -> tuple[bool, str]:
             """SELECT condition_id, slug, question, end_date_iso, yes_token_id, no_token_id
                  FROM markets
                 WHERE end_date_iso IS NOT NULL
-                  AND end_date_iso > datetime('now')
-                  AND end_date_iso < datetime('now', '+24 hours')
+                  AND end_date_iso > to_char(NOW(), 'YYYY-MM-DD"T"HH24:MI:SS')
+                  AND end_date_iso < to_char(NOW() + interval '24 hours',
+                                             'YYYY-MM-DD"T"HH24:MI:SS')
                   AND yes_token_id IS NOT NULL
                   AND no_token_id IS NOT NULL
                 ORDER BY end_date_iso ASC LIMIT 1"""
@@ -112,14 +113,14 @@ def _fire_synthetic() -> tuple[bool, str]:
     try:
         cur = conn.execute(
             """INSERT INTO polymarket_paper_trades
-                 (wallet, signal_type, condition_id, token_id, side, direction,
+                 (wallet, signal_type, condition_id, side,
                   entry_price, size_usd, confidence, entry_ts,
-                  category, slug, question, archived)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,0)""",
+                  category, question, archived)
+               VALUES (?,?,?,?,?,?,?,?,?,?,0)""",
             (
-                "synthetic_test", "synthetic", cond_id, yes_tid, "YES", "BUY",
+                "synthetic_test", "synthetic", cond_id, "YES",
                 0.50, 0.50, 0.50, now,
-                "synthetic", slug, question[:200],
+                "synthetic", question[:200],
             ),
         )
         conn.commit()
