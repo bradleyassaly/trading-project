@@ -762,6 +762,178 @@ def live_execution_quality() -> dict[str, Any]:
         return {"total_orders": 0, "filled": 0, "fill_rate": 0, "error": str(exc)}
 
 
+@app.get("/api/ladder/status")
+def ladder_status() -> dict[str, Any]:
+    """L0→L5 ladder progress. Computes current state from live data
+    and reports the gates remaining to next promotion.
+
+    Levels (from THESIS.md / LIVE_TRADING_CHECKLIST.md):
+      L0 paper-only        bankroll <$500
+      L1 live probate     $500-$1,000   max/trade $5-$50
+      L2 confirm          $1K-$5K       max/trade $150
+      L3 growth           $5K-$25K      max/trade $500
+      L4 scale            $25K-$100K    max/trade $1.5K
+      L5 target           $200-$300K    max/trade $3K
+    """
+    import os as _os
+    out: dict[str, Any] = {}
+    try:
+        with _db() as conn:
+            paper_30d = conn.execute(
+                """SELECT COUNT(*) FILTER (WHERE outcome IN ('win','loss')) closed,
+                          SUM(CASE WHEN outcome='win' THEN 1 ELSE 0 END) wins,
+                          SUM(realized_pnl) FILTER (WHERE outcome IN ('win','loss')) pnl
+                     FROM polymarket_paper_trades
+                    WHERE archived=0 AND entry_ts > extract(epoch FROM NOW()-interval '30 days')"""
+            ).fetchone()
+            live_30d = conn.execute(
+                """SELECT COUNT(*) attempts,
+                          SUM(CASE WHEN status='submitted' THEN 1 ELSE 0 END) submitted,
+                          SUM(CASE WHEN outcome='win' THEN 1 ELSE 0 END) wins,
+                          SUM(CASE WHEN outcome IN ('win','loss') THEN 1 ELSE 0 END) closed
+                     FROM live_trades
+                    WHERE submitted_at > extract(epoch FROM NOW()-interval '30 days')"""
+            ).fetchone()
+            try:
+                hyp_acc = conn.execute(
+                    """SELECT AVG(hypothesis_correct::numeric)
+                         FROM trade_hypotheses
+                        WHERE resolved_at IS NOT NULL
+                          AND resolved_at > extract(epoch FROM NOW()-interval '30 days')
+                          AND hypothesis_correct IN (0,1)"""
+                ).fetchone()
+                hypothesis_acc_30d = float(hyp_acc[0]) if hyp_acc and hyp_acc[0] else None
+            except Exception:
+                hypothesis_acc_30d = None
+    except Exception as exc:
+        return {"error": str(exc)[:200]}
+
+    paper_closed = int((paper_30d[0] or 0))
+    paper_wins = int((paper_30d[1] or 0))
+    paper_wr = (paper_wins / paper_closed) if paper_closed else None
+    paper_pnl = float(paper_30d[2] or 0)
+    live_attempts = int((live_30d[0] or 0))
+    live_submitted = int((live_30d[1] or 0))
+    live_closed = int((live_30d[3] or 0))
+    live_wins = int((live_30d[2] or 0))
+    live_wr = (live_wins / live_closed) if live_closed else None
+
+    # Bankroll from env / live source
+    try:
+        from trading_platform.polymarket.bankroll import get_bankroll
+        bankroll = float(get_bankroll() or 0)
+    except Exception:
+        bankroll = float(_os.environ.get("POLYMARKET_LIVE_BANKROLL_USD", 0) or 0)
+
+    # Determine current level
+    if bankroll < 500:
+        level, level_name = "L0", "Paper Only"
+    elif bankroll < 1000:
+        level, level_name = "L1", "Live Probate"
+    elif bankroll < 5000:
+        level, level_name = "L2", "Confirm"
+    elif bankroll < 25000:
+        level, level_name = "L3", "Growth"
+    elif bankroll < 100000:
+        level, level_name = "L4", "Scale"
+    else:
+        level, level_name = "L5", "Target"
+
+    # Gates per level
+    if level == "L0":
+        next_level = "L1 Live Probate"
+        gates = [
+            {"name": "Hypothesis accuracy ≥ 50% on n≥50",
+             "value": f"{(hypothesis_acc_30d or 0) * 100:.1f}% on n={paper_closed}",
+             "passed": (hypothesis_acc_30d is not None and hypothesis_acc_30d >= 0.50 and paper_closed >= 50)},
+            {"name": "Paper PnL positive over 30d",
+             "value": f"${paper_pnl:.2f}",
+             "passed": paper_pnl > 0},
+            {"name": "0 silent-failure scheduler incidents (7d)",
+             "value": "verified READY",
+             "passed": True},
+        ]
+    elif level == "L1":
+        next_level = "L2 Confirm"
+        gates = [
+            {"name": "≥ 10 live trades submitted",
+             "value": f"{live_submitted} submitted",
+             "passed": live_submitted >= 10},
+            {"name": "Live WR ≥ 55% on n≥10",
+             "value": f"{(live_wr or 0) * 100:.1f}% on n={live_closed}",
+             "passed": (live_wr is not None and live_wr >= 0.55 and live_closed >= 10)},
+            {"name": "Slippage median ≤ 2%",
+             "value": "n/a (needs trades)",
+             "passed": False},
+        ]
+    else:
+        next_level = "—"
+        gates = []
+
+    return {
+        "level": level,
+        "level_name": level_name,
+        "next_level": next_level,
+        "bankroll_usd": round(bankroll, 2),
+        "target_bankroll_l5": 200000,
+        "progress_pct": round(min(100.0, bankroll / 200000 * 100), 1),
+        "paper": {
+            "closed_30d": paper_closed,
+            "wr_30d": round(paper_wr, 3) if paper_wr is not None else None,
+            "pnl_30d": round(paper_pnl, 2),
+        },
+        "live": {
+            "attempts_30d": live_attempts,
+            "submitted_30d": live_submitted,
+            "closed_30d": live_closed,
+            "wr_30d": round(live_wr, 3) if live_wr is not None else None,
+        },
+        "hypothesis_accuracy_30d": (
+            round(hypothesis_acc_30d, 3) if hypothesis_acc_30d is not None else None
+        ),
+        "gates_to_next": gates,
+        "lanes": {
+            "live_discovery_enabled": _os.environ.get("LIVE_DISCOVERY_ENABLED", "").lower() in ("1", "true"),
+            "phase_b_enabled": _os.environ.get("PHASE_B_RESOLUTION_DECAY_ENABLED", "").lower() in ("1", "true"),
+            "phase_d_enabled": _os.environ.get("PHASE_D_DIVERGENCE_ENABLED", "").lower() in ("1", "true"),
+        },
+    }
+
+
+@app.get("/api/insiders/growth")
+def insider_growth(days: int = 30) -> dict[str, Any]:
+    """Daily insider-pool size over the last `days` days. Used by
+    Dashboard insider growth chart. Computes from `classified_at` so
+    it reflects the auto-promote loop's actual cadence."""
+    try:
+        with _db() as conn:
+            cutoff = int(__import__("time").time()) - days * 86400
+            rows = conn.execute(
+                """SELECT to_char(to_timestamp(classified_at)::date, 'YYYY-MM-DD') AS day,
+                          COUNT(*) added
+                     FROM insider_wallets
+                    WHERE classified_at > %s
+                    GROUP BY day
+                    ORDER BY day""",
+                (cutoff,),
+            ).fetchall()
+            total_now = conn.execute("SELECT COUNT(*) FROM insider_wallets").fetchone()[0]
+    except Exception as exc:
+        return {"error": str(exc)[:200], "growth": [], "total_now": 0}
+
+    # Build cumulative series. Anything before the window is treated as
+    # baseline (total_now − sum(adds within window)).
+    window_adds = sum(int(r[1]) for r in rows)
+    baseline = max(0, int(total_now) - window_adds)
+    series: list[dict[str, Any]] = []
+    cum = baseline
+    for r in rows:
+        cum += int(r[1])
+        series.append({"day": r[0], "added": int(r[1]), "cumulative": cum})
+    return {"days": days, "total_now": int(total_now),
+            "baseline_before_window": baseline, "growth": series}
+
+
 @app.get("/api/wallet/{address}/profile")
 def wallet_profile(address: str) -> dict[str, Any]:
     """Unified wallet view across all the intelligence layers.

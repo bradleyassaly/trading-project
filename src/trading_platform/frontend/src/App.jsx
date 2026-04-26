@@ -12,6 +12,8 @@ import SignalLab from './pages/SignalLab'
 import LiveReadiness from './pages/LiveReadiness'
 import LiveTrading from './pages/LiveTrading'
 import WalletDetail from './pages/WalletDetail'
+import SignalHealth from './pages/SignalHealth'
+import DecisionFunnel from './pages/DecisionFunnel'
 
 export default function App() {
   return (
@@ -38,6 +40,8 @@ export default function App() {
             <Route path="/live-readiness" element={<LiveReadiness />} />
             <Route path="/engine" element={<Navigate to="/live" replace />} />
             <Route path="/signals" element={<SignalLab />} />
+            <Route path="/signals/health" element={<SignalHealth />} />
+            <Route path="/funnel" element={<DecisionFunnel />} />
             <Route path="/control" element={<Navigate to="/live" replace />} />
             <Route path="/loop" element={<Navigate to="/live" replace />} />
             <Route path="/research" element={<Navigate to="/dashboard" replace />} />

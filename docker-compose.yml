@@ -55,6 +55,9 @@ services:
       - POSTGRES_PASSWORD=polymarket_dev
       - POSTGRES_DB=polymarket
       - DB_BACKEND=postgres
+      # Mirror lane flags so /api/ladder/status reports them correctly.
+      - LIVE_DISCOVERY_ENABLED=1
+      - PHASE_B_RESOLUTION_DECAY_ENABLED=1
     depends_on:
       postgres:
         condition: service_healthy

@@ -811,6 +811,175 @@ function LiveReadinessTile({ data }) {
   )
 }
 
+function LadderProgressTile({ data }) {
+  // L0 → L5 ladder. Goal-visible at a glance.
+  if (!data || data.error) return (
+    <div>
+      <h2 className="text-sm font-medium text-gray-300">Ladder Progress</h2>
+      <p className="text-[10px] text-gray-600">{data?.error || 'loading…'}</p>
+    </div>
+  )
+  const levels = ['L0', 'L1', 'L2', 'L3', 'L4', 'L5']
+  const cur = data.level
+  const curIdx = levels.indexOf(cur)
+  return (
+    <div>
+      <div className="flex items-baseline justify-between mb-2">
+        <h2 className="text-sm font-medium text-gray-300">Ladder Progress</h2>
+        <span className="text-[9px] text-gray-600">
+          target: ${(data.target_bankroll_l5 / 1000).toFixed(0)}K → $10-20K/mo
+        </span>
+      </div>
+
+      {/* Ladder visualization */}
+      <div className="flex items-center gap-1 mb-3">
+        {levels.map((lv, i) => (
+          <div key={lv} className="flex-1 flex items-center">
+            <div className={
+              `flex-1 text-center py-1.5 rounded text-[10px] font-bold border ${
+                i === curIdx
+                  ? 'bg-accent-blue/20 border-accent-blue text-accent-blue'
+                  : i < curIdx
+                  ? 'bg-green-500/20 border-green-500/40 text-green-400'
+                  : 'bg-surface-hover border-surface-border text-gray-600'
+              }`}>
+              {lv}
+            </div>
+            {i < levels.length - 1 && (
+              <div className={`w-2 h-px ${i < curIdx ? 'bg-green-500/50' : 'bg-surface-border'}`} />
+            )}
+          </div>
+        ))}
+      </div>
+
+      {/* Current state */}
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-2 mb-2 text-[10px]">
+        <div className="bg-surface-hover rounded p-2">
+          <p className="text-[9px] text-gray-500">CURRENT</p>
+          <p className="text-sm text-accent-blue font-bold">{cur} {data.level_name}</p>
+        </div>
+        <div className="bg-surface-hover rounded p-2">
+          <p className="text-[9px] text-gray-500">BANKROLL</p>
+          <p className="text-sm font-mono text-gray-200">${data.bankroll_usd?.toLocaleString()}</p>
+        </div>
+        <div className="bg-surface-hover rounded p-2">
+          <p className="text-[9px] text-gray-500">PAPER 30d</p>
+          <p className="text-sm font-mono text-gray-200">
+            n={data.paper?.closed_30d}{' '}
+            <span className={(data.paper?.pnl_30d || 0) >= 0 ? 'text-green-400' : 'text-red-400'}>
+              ${data.paper?.pnl_30d?.toFixed(0)}
+            </span>
+          </p>
+        </div>
+        <div className="bg-surface-hover rounded p-2">
+          <p className="text-[9px] text-gray-500">LIVE 30d</p>
+          <p className="text-sm font-mono text-gray-200">
+            {data.live?.submitted_30d || 0} submitted
+          </p>
+        </div>
+      </div>
+
+      {/* Lane badges */}
+      <div className="flex gap-2 mb-2 flex-wrap">
+        <span className={`px-1.5 py-0.5 rounded text-[9px] font-bold ${
+          data.lanes?.live_discovery_enabled
+            ? 'bg-green-500/20 text-green-400'
+            : 'bg-surface-hover text-gray-500'
+        }`}>
+          LIVE_DISCOVERY {data.lanes?.live_discovery_enabled ? '✓ on' : 'off'}
+        </span>
+        <span className={`px-1.5 py-0.5 rounded text-[9px] font-bold ${
+          data.lanes?.phase_b_enabled
+            ? 'bg-blue-500/20 text-blue-400'
+            : 'bg-surface-hover text-gray-500'
+        }`}>
+          PHASE_B (resolution_decay) {data.lanes?.phase_b_enabled ? '✓ on' : 'off'}
+        </span>
+        <span className={`px-1.5 py-0.5 rounded text-[9px] font-bold ${
+          data.lanes?.phase_d_enabled
+            ? 'bg-purple-500/20 text-purple-400'
+            : 'bg-surface-hover text-gray-500'
+        }`}>
+          PHASE_D (cross-platform) {data.lanes?.phase_d_enabled ? '✓ on' : 'off'}
+        </span>
+      </div>
+
+      {/* Gates to next level */}
+      {data.next_level && data.next_level !== '—' && (
+        <div className="bg-surface-hover rounded p-2">
+          <p className="text-[9px] text-gray-500 mb-1">
+            GATES TO {data.next_level.toUpperCase()}
+          </p>
+          <div className="space-y-1">
+            {(data.gates_to_next || []).map((g, i) => (
+              <div key={i} className="flex items-center gap-2 text-[10px]">
+                <span className={g.passed ? 'text-green-400' : 'text-amber-400'}>
+                  {g.passed ? '✓' : '○'}
+                </span>
+                <span className="text-gray-400">{g.name}</span>
+                <span className="ml-auto font-mono text-gray-500">{g.value}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function InsiderGrowthTile({ data }) {
+  if (!data || data.error) return (
+    <div>
+      <h2 className="text-sm font-medium text-gray-300">Insider Pool Growth</h2>
+      <p className="text-[10px] text-gray-600">{data?.error || 'loading…'}</p>
+    </div>
+  )
+  const series = data.growth || []
+  if (!series.length) return (
+    <div>
+      <h2 className="text-sm font-medium text-gray-300">Insider Pool Growth</h2>
+      <p className="text-[10px] text-gray-600">
+        {data.total_now} insider wallets total · no new additions in last {data.days}d
+      </p>
+    </div>
+  )
+  const W = 280, H = 100, P = 16
+  const maxY = Math.max(...series.map(s => s.cumulative))
+  const minY = data.baseline_before_window || 0
+  const span = Math.max(1, maxY - minY)
+  const xStep = (W - 2 * P) / Math.max(1, series.length - 1)
+  const points = series.map((s, i) =>
+    `${P + i * xStep},${H - P - ((s.cumulative - minY) / span) * (H - 2 * P)}`
+  ).join(' ')
+  return (
+    <div>
+      <div className="flex items-baseline justify-between mb-2">
+        <h2 className="text-sm font-medium text-gray-300">Insider Pool Growth</h2>
+        <span className="text-[9px] text-gray-600">
+          {data.total_now} total · last {data.days}d
+        </span>
+      </div>
+      <svg viewBox={`0 0 ${W} ${H}`} className="w-full h-auto">
+        <line x1={P} y1={H - P} x2={W - P} y2={H - P} stroke="#374151" strokeWidth="1" />
+        <polyline points={points} fill="none" stroke="#a78bfa" strokeWidth="1.5" />
+        {series.map((s, i) => (
+          <circle
+            key={i}
+            cx={P + i * xStep}
+            cy={H - P - ((s.cumulative - minY) / span) * (H - 2 * P)}
+            r="2" fill="#a78bfa"
+          />
+        ))}
+      </svg>
+      <div className="flex justify-between text-[9px] text-gray-600 mt-1">
+        <span>baseline: {minY}</span>
+        <span>now: {maxY}</span>
+        <span>+{maxY - minY} in window</span>
+      </div>
+    </div>
+  )
+}
+
 function IntelligenceHealthTile({ readiness, calibration, signalHealth, funnel }) {
   // Composite tile surfacing the four daily feedback loops in one card:
   // (1) /api/system/readiness — 9-component health
@@ -1056,6 +1225,14 @@ export default function Dashboard() {
     () => fetch('/api/funnel/decisions?hours=24').then(r => r.ok ? r.json() : null),
     60_000,
   )
+  const { data: ladder } = useApi(
+    () => fetch('/api/ladder/status').then(r => r.ok ? r.json() : null),
+    60_000,
+  )
+  const { data: insiderGrowth } = useApi(
+    () => fetch('/api/insiders/growth?days=30').then(r => r.ok ? r.json() : null),
+    300_000,
+  )
 
   return (
     <div className="p-3 md:p-6 space-y-3 md:space-y-4">
@@ -1065,6 +1242,11 @@ export default function Dashboard() {
       </div>
 
       <ThesisScorecard data={thesis} history={thesisHistory} />
+
+      {/* 2026-04-25: Ladder progress card. Goal-visible at the top. */}
+      <div className="card">
+        <LadderProgressTile data={ladder} />
+      </div>
 
       <StatusBar status={status} />
       <StatCards whaleFeed={whaleFeed} health={health} status={status} bankroll={bankroll} cb={cb} universe={universe} leaderboard={leaderboard} />
@@ -1085,6 +1267,11 @@ export default function Dashboard() {
         <div className="lg:col-span-2 card">
           <CalibrationCurveTile data={calibration} />
         </div>
+      </div>
+
+      {/* 2026-04-25: Insider pool growth — visualize the auto-promote loop. */}
+      <div className="card">
+        <InsiderGrowthTile data={insiderGrowth} />
       </div>
 
       {/* P&L curve + Recent Hypotheses — answers "are hypothesis trades

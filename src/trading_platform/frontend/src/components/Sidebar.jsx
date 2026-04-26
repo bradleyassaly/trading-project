@@ -15,6 +15,8 @@ const NAV = [
   { to: '/wallets',   label: 'Wallet Intelligence', Icon: Eye         },
   { to: '/scanner',   label: 'Market Scanner',     Icon: Search       },
   { to: '/signals',   label: 'Signal Lab',         Icon: FlaskConical },
+  { to: '/signals/health', label: 'Signal Health', Icon: FlaskConical },
+  { to: '/funnel',    label: 'Decision Funnel',    Icon: Search       },
   { to: '/live-readiness', label: 'Live Readiness', Icon: Shield      },
 ]
 
