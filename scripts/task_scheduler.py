@@ -425,9 +425,15 @@ SCHEDULE: list[Task] = [
         # from pre-resolution sells (not just resolved markets). Writes
         # realized_pnl_closed per fill and realized_pnl_total on
         # wallet_profiles. Must run after wallet_trade_sync.
-        cmd="python -m trading_platform.polymarket.wallet_pnl_reconstruction",
+        # 2026-04-25: chained → wallet_behavior_metrics so bootstrap-CI
+        # + sizing distribution + farmer detection refresh in the same
+        # cycle as the underlying trade data, instead of lagging a day.
+        cmd=(
+            "python -m trading_platform.polymarket.wallet_pnl_reconstruction "
+            "&& python -m trading_platform.polymarket.wallet_behavior_metrics"
+        ),
         interval_seconds=24 * 3600,
-        description="Daily FIFO PnL reconstruction (captures sells-before-resolution)",
+        description="Daily FIFO PnL reconstruction → behavior metrics chain",
     ),
     # `daily_digest` above (Python module) supersedes the earlier
     # curl-based API digest task — removed 2026-04-14 to eliminate the

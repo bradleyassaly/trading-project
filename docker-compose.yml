@@ -162,6 +162,13 @@ services:
       - VECLIB_MAXIMUM_THREADS=2
       - ARROW_IO_THREADS=2
       - LIVE_COLLECT_TRACEMALLOC=0
+      # 2026-04-25: enable discovery-tier live trading. With this set,
+      # the kill_switch allows $1 live fires for signals at n>=1
+      # resolved (vs n>=15 standard, n>=5 probation). Real-money
+      # calibration data starts flowing into signal_calibration +
+      # alpha_calibration_curve. Hard-capped at $1/trade so a bad
+      # discovery signal can't blow up. To disable: set =0 or remove.
+      - LIVE_DISCOVERY_ENABLED=1
     restart: unless-stopped
     mem_limit: 2g
     memswap_limit: 2g

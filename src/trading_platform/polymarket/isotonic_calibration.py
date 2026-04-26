@@ -38,9 +38,11 @@ CREATE TABLE IF NOT EXISTS alpha_calibration_curve (
     breakpoints_json TEXT NOT NULL,
     brier_before    DOUBLE PRECISION,
     brier_after     DOUBLE PRECISION,
-    window_days     BIGINT
+    window_days     BIGINT,
+    category        TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_acc_fitted_at ON alpha_calibration_curve(fitted_at DESC);
+CREATE INDEX IF NOT EXISTS idx_acc_category ON alpha_calibration_curve(category, fitted_at DESC);
 """
 
 
@@ -52,6 +54,15 @@ def _ensure_schema(conn) -> None:
                 conn.execute(s)
             except Exception:
                 pass
+    # 2026-04-25: idempotent ALTER for the per-category column added to
+    # an already-existing table. Postgres ADD COLUMN IF NOT EXISTS is
+    # safe in concurrent workloads.
+    try:
+        conn.execute(
+            "ALTER TABLE alpha_calibration_curve ADD COLUMN IF NOT EXISTS category TEXT"
+        )
+    except Exception:
+        pass
 
 
 def isotonic_regression(
@@ -86,24 +97,44 @@ def isotonic_regression(
 
 
 def fit_calibration(
-    window_days: int = 30, db_path: str | None = None,
+    window_days: int = 30,
+    category: str | None = None,
+    db_path: str | None = None,
 ) -> dict[str, Any]:
-    """Fit isotonic curve on resolved hypotheses; persist + return summary."""
+    """Fit isotonic curve on resolved hypotheses; persist + return summary.
+
+    If `category` is None, fits the GLOBAL curve. If category is set,
+    fits a per-category curve (`category` column on the row). The
+    apply_calibration() lookup falls back to the global curve when no
+    per-category fit exists.
+    """
     t0 = time.time()
     cutoff = int(time.time()) - window_days * 86400
     conn = get_connection(db_path) if db_path else get_connection()
     try:
         _ensure_schema(conn)
         try:
-            rows = conn.execute(
-                """SELECT alpha_score, hypothesis_correct
-                     FROM trade_hypotheses
-                    WHERE resolved_at IS NOT NULL
-                      AND resolved_at > ?
-                      AND hypothesis_correct IN (0, 1)
-                      AND alpha_score IS NOT NULL""",
-                (cutoff,),
-            ).fetchall()
+            if category:
+                rows = conn.execute(
+                    """SELECT alpha_score, hypothesis_correct
+                         FROM trade_hypotheses
+                        WHERE resolved_at IS NOT NULL
+                          AND resolved_at > ?
+                          AND hypothesis_correct IN (0, 1)
+                          AND alpha_score IS NOT NULL
+                          AND category = ?""",
+                    (cutoff, category),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """SELECT alpha_score, hypothesis_correct
+                         FROM trade_hypotheses
+                        WHERE resolved_at IS NOT NULL
+                          AND resolved_at > ?
+                          AND hypothesis_correct IN (0, 1)
+                          AND alpha_score IS NOT NULL""",
+                    (cutoff,),
+                ).fetchall()
         except Exception as exc:
             return {"error": f"query: {exc}"}
 
@@ -142,18 +173,28 @@ def fit_calibration(
         breakpoints_json = json.dumps(
             [{"x": round(x, 4), "y": round(y, 4)} for x, y in breakpoints]
         )
-        try:
-            conn.execute(
-                """INSERT INTO alpha_calibration_curve
-                     (fitted_at, n_samples, breakpoints_json,
-                      brier_before, brier_after, window_days)
-                   VALUES (?,?,?,?,?,?)""",
-                (now, len(rows), breakpoints_json,
-                 round(brier_before, 6), round(brier_after, 6), window_days),
+        # Only persist curves that actually improve Brier — prevents
+        # over-fit per-category curves (e.g. entertainment at n=40)
+        # from overriding the better global fallback at lookup time.
+        if brier_after >= brier_before * 0.99:
+            logger.info(
+                "[CALIB] %s curve not persisted (Brier %.4f → %.4f, no improvement)",
+                category or "GLOBAL", brier_before, brier_after,
             )
-            conn.commit()
-        except Exception as exc:
-            logger.warning("calibration curve persist failed: %s", exc)
+        else:
+            try:
+                conn.execute(
+                    """INSERT INTO alpha_calibration_curve
+                         (fitted_at, n_samples, breakpoints_json,
+                          brier_before, brier_after, window_days, category)
+                       VALUES (?,?,?,?,?,?,?)""",
+                    (now, len(rows), breakpoints_json,
+                     round(brier_before, 6), round(brier_after, 6),
+                     window_days, category),
+                )
+                conn.commit()
+            except Exception as exc:
+                logger.warning("calibration curve persist failed: %s", exc)
 
         return {
             "elapsed_seconds": round(time.time() - t0, 1),
@@ -173,43 +214,60 @@ def fit_calibration(
 
 # ── Lookup API ──────────────────────────────────────────────────────────────
 
-_curve_cache: dict[str, Any] = {"fitted_at": 0, "bp_x": [], "bp_y": []}
+# Cache: keyed by category string ("" = global). Each entry is the
+# bisect-ready (bp_x, bp_y) pair plus a fitted_at timestamp for TTL.
+_curve_cache: dict[str, dict[str, Any]] = {}
 _curve_ttl_seconds = 300
 
 
-def _load_latest_curve(db_path: str | None = None) -> None:
+def _load_curve(category: str | None, db_path: str | None = None) -> None:
     global _curve_cache
+    cache_key = category or ""
     now = time.time()
-    if now - _curve_cache.get("fitted_at", 0) < _curve_ttl_seconds and _curve_cache["bp_x"]:
+    cached = _curve_cache.get(cache_key)
+    if cached and now - cached.get("fitted_at", 0) < _curve_ttl_seconds and cached.get("bp_x"):
         return
     conn = get_connection(db_path) if db_path else get_connection()
     try:
         try:
-            row = conn.execute(
-                "SELECT breakpoints_json, fitted_at FROM alpha_calibration_curve "
-                "ORDER BY fitted_at DESC LIMIT 1"
-            ).fetchone()
+            if category:
+                row = conn.execute(
+                    "SELECT breakpoints_json, fitted_at FROM alpha_calibration_curve "
+                    "WHERE category = ? ORDER BY fitted_at DESC LIMIT 1",
+                    (category,),
+                ).fetchone()
+            else:
+                row = conn.execute(
+                    "SELECT breakpoints_json, fitted_at FROM alpha_calibration_curve "
+                    "WHERE category IS NULL ORDER BY fitted_at DESC LIMIT 1"
+                ).fetchone()
         except Exception:
             row = None
         if not row:
-            _curve_cache = {"fitted_at": now, "bp_x": [], "bp_y": []}
+            _curve_cache[cache_key] = {"fitted_at": now, "bp_x": [], "bp_y": []}
             return
         try:
             bps = json.loads(row[0])
             bp_x = [float(b["x"]) for b in bps]
             bp_y = [float(b["y"]) for b in bps]
-            _curve_cache = {"fitted_at": now, "bp_x": bp_x, "bp_y": bp_y}
+            _curve_cache[cache_key] = {"fitted_at": now, "bp_x": bp_x, "bp_y": bp_y}
         except Exception as exc:
             logger.debug("curve parse failed: %s", exc)
-            _curve_cache = {"fitted_at": now, "bp_x": [], "bp_y": []}
+            _curve_cache[cache_key] = {"fitted_at": now, "bp_x": [], "bp_y": []}
     finally:
         try: conn.close()
         except Exception: pass
 
 
-def apply_calibration(alpha_score: float, db_path: str | None = None) -> float:
-    """Map raw alpha_score through the latest isotonic curve. Returns
-    the calibrated probability. Falls back to identity on cold start.
+def apply_calibration(
+    alpha_score: float,
+    category: str | None = None,
+    db_path: str | None = None,
+) -> float:
+    """Map raw alpha_score through the latest isotonic curve.
+
+    Prefers per-category curve when available; falls back to global.
+    Identity fallback on cold start.
     """
     if alpha_score is None:
         return 0.0
@@ -217,20 +275,67 @@ def apply_calibration(alpha_score: float, db_path: str | None = None) -> float:
         x = max(0.0, min(1.0, float(alpha_score)))
     except (TypeError, ValueError):
         return 0.0
-    _load_latest_curve(db_path)
-    bp_x = _curve_cache.get("bp_x") or []
-    bp_y = _curve_cache.get("bp_y") or []
+    # Try per-category first
+    if category:
+        _load_curve(category, db_path)
+        cached = _curve_cache.get(category) or {}
+        bp_x = cached.get("bp_x") or []
+        bp_y = cached.get("bp_y") or []
+        if bp_x:
+            i = bisect.bisect_right(bp_x, x) - 1
+            return bp_y[0] if i < 0 else bp_y[i]
+    # Fall back to global
+    _load_curve(None, db_path)
+    cached = _curve_cache.get("") or {}
+    bp_x = cached.get("bp_x") or []
+    bp_y = cached.get("bp_y") or []
     if not bp_x:
         return x
     i = bisect.bisect_right(bp_x, x) - 1
-    if i < 0:
-        return bp_y[0]
-    return bp_y[i]
+    return bp_y[0] if i < 0 else bp_y[i]
 
 
 def main() -> int:
+    """Fit global curve + per-category curves for any category with
+    enough resolved data. Per-category curves take precedence at
+    apply_calibration() lookup; categories without enough data fall
+    back to the global curve."""
     logging.basicConfig(level=logging.INFO, format="%(message)s")
-    print(fit_calibration())
+
+    # 1. Global fit
+    global_result = fit_calibration()
+    print({"scope": "global", **global_result})
+
+    # 2. Per-category fits — only categories with enough resolved data
+    #    will produce a curve; others get skipped. Reads the category
+    #    list from trade_hypotheses.
+    conn = get_connection()
+    try:
+        try:
+            cat_rows = conn.execute(
+                """SELECT category, COUNT(*) n
+                     FROM trade_hypotheses
+                    WHERE resolved_at IS NOT NULL
+                      AND resolved_at > ?
+                      AND hypothesis_correct IN (0, 1)
+                      AND alpha_score IS NOT NULL
+                      AND category IS NOT NULL
+                    GROUP BY category
+                   HAVING COUNT(*) >= 20""",
+                (int(time.time()) - 30 * 86400,),
+            ).fetchall()
+        except Exception as exc:
+            cat_rows = []
+            print({"scope": "per_category", "error": str(exc)[:120]})
+    finally:
+        try: conn.close()
+        except Exception: pass
+
+    for cat, n in cat_rows:
+        if not cat:
+            continue
+        result = fit_calibration(category=cat)
+        print({"scope": "category", "category": cat, **result})
     return 0
 
 

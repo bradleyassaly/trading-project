@@ -889,7 +889,12 @@ class PolymarketPaperExecutor:
         try:
             from trading_platform.polymarket.isotonic_calibration import apply_calibration
             raw_conf = confidence
-            confidence = apply_calibration(confidence, db_path=str(self._wallet_db_path))
+            # Pass category so per-category curve takes precedence;
+            # falls back to global curve if no per-category fit exists.
+            confidence = apply_calibration(
+                confidence, category=category,
+                db_path=str(self._wallet_db_path),
+            )
             if abs(confidence - raw_conf) > 0.02:
                 logger.info(
                     "[CALIB] %s raw=%.3f → calibrated=%.3f",

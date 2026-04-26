@@ -97,7 +97,11 @@ class PolymarketLiveExecutor:
         try:
             from trading_platform.polymarket.isotonic_calibration import apply_calibration
             raw_conf = confidence
-            confidence = apply_calibration(confidence, db_path=self._db_path)
+            confidence = apply_calibration(
+                confidence,
+                category=(signal.get("category") or "").lower() or None,
+                db_path=self._db_path,
+            )
             if abs(confidence - raw_conf) > 0.02:
                 logger.info(
                     "[LIVE][CALIB] %s raw=%.3f → calibrated=%.3f",
