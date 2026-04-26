@@ -811,6 +811,159 @@ function LiveReadinessTile({ data }) {
   )
 }
 
+function IntelligenceHealthTile({ readiness, calibration, signalHealth, funnel }) {
+  // Composite tile surfacing the four daily feedback loops in one card:
+  // (1) /api/system/readiness — 9-component health
+  // (2) /api/calibration — Brier + verdict
+  // (3) /api/signal-health — top IC + decay flags
+  // (4) /api/funnel/decisions — top binding gate
+  const components = readiness?.components || []
+  const blockers = readiness?.blockers || []
+  const status = readiness?.status || '—'
+  const brier = calibration?.brier
+  const miscal = calibration?.mean_abs_miscalibration
+  const verdict = calibration?.verdict
+  const signals = signalHealth?.signals || []
+  const topIC = signals.slice(0, 3)
+  const decayed = signals.filter(s => s.decay_flag)
+  const gates = funnel?.by_gate || []
+  const topGate = gates[0]
+
+  const statusColor = status === 'READY' ? 'text-green-400'
+    : status === 'DEGRADED' ? 'text-amber-400' : 'text-red-400'
+  const verdictColor = verdict === 'well_calibrated' ? 'text-green-400'
+    : verdict === 'mild_miscalibration' ? 'text-amber-400'
+    : verdict === 'poor_calibration' ? 'text-red-400' : 'text-gray-400'
+
+  return (
+    <div>
+      <div className="flex items-baseline justify-between mb-2">
+        <h2 className="text-sm font-medium text-gray-300">Intelligence Layer Health</h2>
+        <span className="text-[9px] text-gray-600">readiness · calibration · signal-health · funnel</span>
+      </div>
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+
+        {/* Readiness */}
+        <div className="bg-surface-hover rounded p-2">
+          <p className="text-[9px] text-gray-500 mb-1">SYSTEM READINESS</p>
+          <p className={`text-sm font-bold ${statusColor}`}>{status}</p>
+          <p className="text-[9px] text-gray-600 mt-1">
+            {components.filter(c => c.ok).length}/{components.length} green
+            {blockers.length > 0 && (
+              <span className="text-red-400"> · {blockers.length} blocking</span>
+            )}
+          </p>
+        </div>
+
+        {/* Calibration */}
+        <div className="bg-surface-hover rounded p-2">
+          <p className="text-[9px] text-gray-500 mb-1">CALIBRATION</p>
+          <p className="text-sm font-mono">
+            Brier <span className={verdictColor}>{brier?.toFixed(3) ?? '—'}</span>
+          </p>
+          <p className="text-[9px] text-gray-600 mt-1">
+            miscal {(miscal != null ? (miscal * 100).toFixed(1) : '—')}% · {(verdict || '').replace('_', ' ')}
+          </p>
+        </div>
+
+        {/* Top signal by IC */}
+        <div className="bg-surface-hover rounded p-2">
+          <p className="text-[9px] text-gray-500 mb-1">TOP SIGNAL (IC 14d)</p>
+          {topIC.length > 0 ? (
+            <>
+              <p className="text-[10px] font-mono text-gray-200">{topIC[0].signal_type}</p>
+              <p className="text-[9px] text-gray-600">
+                IC {topIC[0].ic_14d?.toFixed(2)} · n={topIC[0].n_resolved_30d}
+              </p>
+              {decayed.length > 0 && (
+                <p className="text-[9px] text-amber-400 mt-1">
+                  {decayed.length} decay-flagged
+                </p>
+              )}
+            </>
+          ) : (
+            <p className="text-[9px] text-gray-600">no data yet</p>
+          )}
+        </div>
+
+        {/* Top binding gate */}
+        <div className="bg-surface-hover rounded p-2">
+          <p className="text-[9px] text-gray-500 mb-1">TOP BINDING GATE</p>
+          {topGate ? (
+            <>
+              <p className="text-[10px] font-mono text-gray-200">{topGate.gate}</p>
+              <p className="text-[9px] text-gray-600">
+                {topGate.rejected} rejected · {topGate.surface}
+              </p>
+              {gates.length > 1 && (
+                <p className="text-[9px] text-gray-500 mt-1">
+                  +{gates.length - 1} other gates
+                </p>
+              )}
+            </>
+          ) : (
+            <p className="text-[9px] text-gray-600">no rejections logged</p>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function CalibrationCurveTile({ data }) {
+  // Mini reliability diagram from /api/calibration bins.
+  // Each bin: midpoint as x, mean_actual as y, dot size = n.
+  const bins = (data?.bins || []).filter(b => b.n > 0)
+  if (!bins.length) return (
+    <div>
+      <h2 className="text-sm font-medium text-gray-300 mb-2">Calibration Curve</h2>
+      <p className="text-[10px] text-gray-600">No resolved hypotheses yet — curve renders after first daily fit.</p>
+    </div>
+  )
+  const W = 280, H = 140, P = 24
+  const xScale = (x) => P + x * (W - 2 * P)
+  const yScale = (y) => H - P - y * (H - 2 * P)
+  const maxN = Math.max(...bins.map(b => b.n))
+  return (
+    <div>
+      <div className="flex items-baseline justify-between mb-2">
+        <h2 className="text-sm font-medium text-gray-300">Calibration Curve</h2>
+        <span className="text-[9px] text-gray-600">predicted vs realized · diagonal = perfect</span>
+      </div>
+      <svg viewBox={`0 0 ${W} ${H}`} className="w-full h-auto">
+        {/* Axes */}
+        <line x1={P} y1={H - P} x2={W - P} y2={H - P} stroke="#374151" strokeWidth="1" />
+        <line x1={P} y1={P} x2={P} y2={H - P} stroke="#374151" strokeWidth="1" />
+        {/* Diagonal (perfect calibration) */}
+        <line x1={P} y1={H - P} x2={W - P} y2={P} stroke="#4b5563" strokeDasharray="2 2" />
+        {/* Bin dots */}
+        {bins.map((b, i) => {
+          const mid = (b.bin_lo + b.bin_hi) / 2
+          const r = 2 + 6 * (b.n / maxN)
+          const above = b.mean_actual > mid
+          return (
+            <g key={i}>
+              <circle
+                cx={xScale(b.mean_pred ?? mid)} cy={yScale(b.mean_actual ?? 0)}
+                r={r}
+                fill={above ? '#10b981' : '#ef4444'}
+                opacity="0.85"
+              />
+            </g>
+          )
+        })}
+        <text x={W / 2} y={H - 4} textAnchor="middle" fontSize="8" fill="#6b7280">predicted</text>
+        <text x={4} y={H / 2} fontSize="8" fill="#6b7280" transform={`rotate(-90 4 ${H / 2})`}>realized</text>
+      </svg>
+      <div className="flex gap-3 text-[9px] text-gray-500 mt-1">
+        <span><span className="inline-block w-2 h-2 rounded-full bg-green-500 mr-1" />under-confident</span>
+        <span><span className="inline-block w-2 h-2 rounded-full bg-red-500 mr-1" />over-confident</span>
+        <span className="ml-auto">n = {data?.n}</span>
+      </div>
+    </div>
+  )
+}
+
 function RecentHypotheses({ data }) {
   const rows = data?.hypotheses ?? []
   if (!data?.available) {
@@ -884,6 +1037,25 @@ export default function Dashboard() {
   const { data: tradeJournalData } = useApi(() => api.tradeJournal(15), 60_000)
   const { data: exitAnalysis } = useApi(() => api.exitAnalyzer(5), 120_000)
   const { data: attribution } = useApi(() => api.signalAttribution(168), 60_000)
+  // 2026-04-25: today's intelligence-layer endpoints — surface the four
+  // feedback loops in a single card so the operator can glance health,
+  // calibration, signal IC, and the binding gate all at once.
+  const { data: sysReadiness } = useApi(
+    () => fetch('/api/system/readiness').then(r => r.ok ? r.json() : null),
+    30_000,
+  )
+  const { data: calibration } = useApi(
+    () => fetch('/api/calibration').then(r => r.ok ? r.json() : null),
+    300_000,
+  )
+  const { data: signalHealth } = useApi(
+    () => fetch('/api/signal-health').then(r => r.ok ? r.json() : null),
+    300_000,
+  )
+  const { data: decisionFunnel } = useApi(
+    () => fetch('/api/funnel/decisions?hours=24').then(r => r.ok ? r.json() : null),
+    60_000,
+  )
 
   return (
     <div className="p-3 md:p-6 space-y-3 md:space-y-4">
@@ -896,6 +1068,24 @@ export default function Dashboard() {
 
       <StatusBar status={status} />
       <StatCards whaleFeed={whaleFeed} health={health} status={status} bankroll={bankroll} cb={cb} universe={universe} leaderboard={leaderboard} />
+
+      {/* 2026-04-25: Intelligence Layer Health — composite tile showing
+          today's four feedback loops at a glance. Replaces the need to
+          hit /api/system/readiness + /api/calibration + /api/signal-health
+          + /api/funnel/decisions individually. */}
+      <div className="grid grid-cols-1 lg:grid-cols-5 gap-4">
+        <div className="lg:col-span-3 card">
+          <IntelligenceHealthTile
+            readiness={sysReadiness}
+            calibration={calibration}
+            signalHealth={signalHealth}
+            funnel={decisionFunnel}
+          />
+        </div>
+        <div className="lg:col-span-2 card">
+          <CalibrationCurveTile data={calibration} />
+        </div>
+      </div>
 
       {/* P&L curve + Recent Hypotheses — answers "are hypothesis trades
           actually compounding?" alongside "what did we just bet on?". */}

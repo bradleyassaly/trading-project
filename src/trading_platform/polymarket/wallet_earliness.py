@@ -36,48 +36,68 @@ MIN_BOOST = 0.7
 def compute_earliness(
     wallet: str, category: str, db_path: str | None = None,
 ) -> dict[str, Any] | None:
-    """Return {"recent_wr", "lifetime_wr", "delta", "n_recent", "n_lifetime"}
-    for the wallet/category, or None when insufficient data."""
+    """Return EWMA-weighted {recent_wr, lifetime_wr, delta, n_recent, n_lifetime}
+    for the wallet/category, or None when insufficient data.
+
+    2026-04-25: switched from a hard 7d-window snapshot to an EWMA over
+    the full trade history. The 7d cliff was producing noisy/None for
+    wallets that traded 8d ago vs 6d ago — same wallet, same skill,
+    very different gate decision. EWMA with half-life of 7d makes the
+    estimate continuous and robust to bursty traders.
+    """
+    EWMA_HALF_LIFE_DAYS = 7.0
+    decay_per_day = 0.5 ** (1.0 / EWMA_HALF_LIFE_DAYS)
     conn = get_connection(db_path) if db_path else get_connection()
     try:
-        cutoff = int(time.time()) - LOOKBACK_RECENT_DAYS * 86400
         try:
-            row = conn.execute(
-                """SELECT
-                     SUM(CASE WHEN ts >= %s THEN 1 ELSE 0 END) AS n_recent,
-                     SUM(CASE WHEN ts >= %s AND won = 1 THEN 1 ELSE 0 END) AS w_recent,
-                     COUNT(*) AS n_total,
-                     SUM(CASE WHEN won = 1 THEN 1 ELSE 0 END) AS w_total
-                   FROM (
-                     SELECT timestamp AS ts,
-                            CASE WHEN COALESCE(pnl, 0) > 0 THEN 1 ELSE 0 END AS won
-                       FROM wallet_trades
-                      WHERE wallet = %s AND category = %s
-                        AND pnl IS NOT NULL AND pnl_reliable = 1
-                   ) t""",
-                (cutoff, cutoff, wallet.lower(), category.lower()),
-            ).fetchone()
+            rows = conn.execute(
+                """SELECT timestamp AS ts,
+                          CASE WHEN COALESCE(pnl, 0) > 0 THEN 1 ELSE 0 END AS won
+                     FROM wallet_trades
+                    WHERE wallet = %s AND category = %s
+                      AND pnl IS NOT NULL AND pnl_reliable = 1
+                    ORDER BY timestamp DESC""",
+                (wallet.lower(), category.lower()),
+            ).fetchall()
         except Exception:
-            row = None
+            rows = []
     finally:
         try: conn.close()
         except Exception: pass
-    if not row or row[2] is None or int(row[2]) == 0:
+    if not rows:
         return None
-    n_recent = int(row[0] or 0)
-    w_recent = int(row[1] or 0)
-    n_total = int(row[2])
-    w_total = int(row[3] or 0)
-    if n_recent < MIN_RECENT_TRADES:
+    n_total = len(rows)
+    if n_total < MIN_RECENT_TRADES:
         return None
-    recent_wr = w_recent / n_recent
-    lifetime_wr = w_total / n_total
+    now = int(time.time())
+    sum_w = 0.0
+    sum_w_won = 0.0
+    n_lifetime = 0
+    n_lifetime_won = 0
+    for ts, won in rows:
+        try:
+            ts_int = int(ts)
+        except (TypeError, ValueError):
+            continue
+        days_ago = max(0.0, (now - ts_int) / 86400.0)
+        weight = decay_per_day ** days_ago
+        sum_w += weight
+        if won:
+            sum_w_won += weight
+        n_lifetime += 1
+        if won:
+            n_lifetime_won += 1
+    if sum_w <= 0:
+        return None
+    recent_wr = sum_w_won / sum_w  # EWMA-weighted recent WR
+    lifetime_wr = n_lifetime_won / n_lifetime if n_lifetime else 0.0
     return {
         "recent_wr": round(recent_wr, 3),
         "lifetime_wr": round(lifetime_wr, 3),
         "delta": round(recent_wr - lifetime_wr, 3),
-        "n_recent": n_recent,
-        "n_lifetime": n_total,
+        "n_recent": n_lifetime,  # all trades contribute, just weighted
+        "n_lifetime": n_lifetime,
+        "ewma_half_life_days": EWMA_HALF_LIFE_DAYS,
     }
 
 

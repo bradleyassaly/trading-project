@@ -109,6 +109,9 @@ services:
       - POSTGRES_DB=polymarket
       - DB_BACKEND=postgres
       - BACKUP_DIR=/backups
+      # Phase B independent signal feature flag (see live-collect block).
+      # Enabled here so the scheduler task can read it.
+      - PHASE_B_RESOLUTION_DECAY_ENABLED=1
     restart: unless-stopped
     # 2026-04-18: bumped from 512m → 2g. compute-open-positions was
     # OOM-killed (exit=137) every 2h for 36+ hours; loads pandas +
@@ -169,6 +172,12 @@ services:
       # alpha_calibration_curve. Hard-capped at $1/trade so a bad
       # discovery signal can't blow up. To disable: set =0 or remove.
       - LIVE_DISCOVERY_ENABLED=1
+      # 2026-04-25: Phase B independent signal. Paper-only at first;
+      # decoupled from whale-flow alpha source. 15min cadence via
+      # scheduler. Disable: set =0 or remove. The signal still goes
+      # through the same FAV_GATE / SIDE_GATE / calibration / Kelly
+      # stack, so a bad signal can't escape the existing guards.
+      - PHASE_B_RESOLUTION_DECAY_ENABLED=1
     restart: unless-stopped
     mem_limit: 2g
     memswap_limit: 2g
