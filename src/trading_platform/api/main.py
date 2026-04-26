@@ -950,6 +950,140 @@ def ladder_promote(payload: dict[str, Any] = Body(default_factory=dict)) -> dict
         return {"ok": False, "error": str(exc)[:200]}
 
 
+@app.get("/api/portfolio/by-category")
+def portfolio_by_category() -> dict[str, Any]:
+    """Open paper + live positions grouped by category. Powers /portfolio.
+    Returns deployed USD and unrealized PnL per category."""
+    out: dict[str, Any] = {"paper": [], "live": [], "totals": {}}
+    try:
+        with _db() as conn:
+            paper_rows = conn.execute(
+                """SELECT category,
+                          COUNT(*) n_open,
+                          ROUND(SUM(size_usd)::numeric, 2) deployed,
+                          ROUND(SUM(COALESCE(unrealized_pnl, 0))::numeric, 2) unreal
+                     FROM polymarket_paper_trades
+                    WHERE archived = 0 AND exit_ts IS NULL
+                    GROUP BY category
+                    ORDER BY deployed DESC NULLS LAST"""
+            ).fetchall()
+            try:
+                live_rows = conn.execute(
+                    """SELECT 'live' AS category, COUNT(*) n_open,
+                              ROUND(SUM(size_usd)::numeric, 2) deployed
+                         FROM live_trades
+                        WHERE dry_run = 0 AND exit_ts IS NULL
+                          AND fill_price IS NOT NULL"""
+                ).fetchall()
+            except Exception:
+                live_rows = []
+        out["paper"] = [
+            {"category": r[0], "n_open": int(r[1] or 0),
+             "deployed": float(r[2] or 0), "unrealized": float(r[3] or 0)}
+            for r in paper_rows
+        ]
+        out["live"] = [
+            {"category": r[0], "n_open": int(r[1] or 0),
+             "deployed": float(r[2] or 0)}
+            for r in live_rows
+        ]
+        total_paper_deployed = sum(p["deployed"] for p in out["paper"])
+        total_paper_unreal = sum(p["unrealized"] for p in out["paper"])
+        out["totals"] = {
+            "paper_n": sum(p["n_open"] for p in out["paper"]),
+            "paper_deployed": round(total_paper_deployed, 2),
+            "paper_unrealized": round(total_paper_unreal, 2),
+        }
+        return out
+    except Exception as exc:
+        return {"error": str(exc)[:200]}
+
+
+@app.get("/api/leaderboard/recent")
+def leaderboard_recent(days: int = 7, limit: int = 15) -> dict[str, Any]:
+    """Top wallets by realized PnL on resolved paper trades in window.
+    Joins to wallet_profiles + wallet_behavior_metrics for context."""
+    try:
+        with _db() as conn:
+            cutoff = int(__import__("time").time()) - days * 86400
+            rows = conn.execute(
+                """SELECT pt.wallet,
+                          COUNT(*) n,
+                          SUM(CASE WHEN pt.outcome='win' THEN 1 ELSE 0 END) wins,
+                          ROUND(SUM(pt.realized_pnl)::numeric, 2) pnl,
+                          (SELECT pseudonym FROM wallet_profiles wp
+                            WHERE wp.wallet = pt.wallet) AS pseudo,
+                          (SELECT pm_pnl_usdc FROM wallet_profiles wp
+                            WHERE wp.wallet = pt.wallet) AS pm_pnl,
+                          (SELECT is_copyable_ci FROM wallet_behavior_metrics wbm
+                            WHERE wbm.wallet = pt.wallet) AS copyable_ci,
+                          (SELECT is_likely_farmer FROM wallet_behavior_metrics wbm
+                            WHERE wbm.wallet = pt.wallet) AS farmer
+                     FROM polymarket_paper_trades pt
+                    WHERE pt.archived = 0 AND pt.exit_ts IS NOT NULL
+                      AND pt.entry_ts > ?
+                      AND pt.wallet IS NOT NULL AND pt.wallet != ''
+                    GROUP BY pt.wallet
+                   HAVING COUNT(*) >= 2
+                    ORDER BY pnl DESC NULLS LAST
+                    LIMIT ?""",
+                (cutoff, limit),
+            ).fetchall()
+        return {
+            "days": days,
+            "leaderboard": [
+                {
+                    "wallet": r[0], "n": int(r[1]), "wins": int(r[2] or 0),
+                    "wr": round((r[2] or 0) / r[1], 3) if r[1] else 0,
+                    "pnl": float(r[3] or 0),
+                    "pseudonym": r[4],
+                    "pm_pnl_usdc": float(r[5]) if r[5] is not None else None,
+                    "is_copyable_ci": int(r[6] or 0),
+                    "is_likely_farmer": int(r[7] or 0),
+                }
+                for r in rows
+            ],
+        }
+    except Exception as exc:
+        return {"error": str(exc)[:200], "leaderboard": []}
+
+
+@app.get("/api/heatmap/signal-category")
+def heatmap_signal_category(days: int = 30) -> dict[str, Any]:
+    """Per (signal_type, category) WR + PnL matrix from resolved paper
+    trades. Surfaces best/worst tuples for stake-multiplier decisions."""
+    try:
+        with _db() as conn:
+            cutoff = int(__import__("time").time()) - days * 86400
+            rows = conn.execute(
+                """SELECT signal_type, category,
+                          COUNT(*) n,
+                          SUM(CASE WHEN outcome='win' THEN 1 ELSE 0 END) wins,
+                          ROUND(SUM(realized_pnl)::numeric, 2) pnl
+                     FROM polymarket_paper_trades
+                    WHERE archived = 0 AND exit_ts IS NOT NULL
+                      AND entry_ts > ?
+                    GROUP BY signal_type, category
+                   HAVING COUNT(*) >= 2
+                    ORDER BY pnl DESC NULLS LAST""",
+                (cutoff,),
+            ).fetchall()
+        return {
+            "days": days,
+            "cells": [
+                {
+                    "signal_type": r[0], "category": r[1],
+                    "n": int(r[2]), "wins": int(r[3] or 0),
+                    "wr": round((r[3] or 0) / r[2], 3) if r[2] else 0,
+                    "pnl": float(r[4] or 0),
+                }
+                for r in rows
+            ],
+        }
+    except Exception as exc:
+        return {"error": str(exc)[:200], "cells": []}
+
+
 @app.get("/api/diff/24h")
 def diff_24h() -> dict[str, Any]:
     """What changed in the last 24h vs the prior 24h. Pulls counts

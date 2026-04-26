@@ -275,7 +275,12 @@ class TelegramAlerter:
         self._fingerprint_log[fp] = now
         return False
 
-    def _send(self, message: str, disable_notification: bool = False) -> bool:
+    def _send(
+        self,
+        message: str,
+        disable_notification: bool = False,
+        reply_markup: dict | None = None,
+    ) -> bool:
         """Send a message to Telegram.
 
         Parameters
@@ -306,13 +311,16 @@ class TelegramAlerter:
             self._noncrit_send_log.append(time.time())
         try:
             url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
-            payload = json.dumps({
+            body: dict[str, Any] = {
                 "chat_id": self.chat_id,
                 "text": message,
                 "parse_mode": "HTML",
                 "disable_web_page_preview": True,
                 "disable_notification": bool(disable_notification),
-            }).encode()
+            }
+            if reply_markup is not None:
+                body["reply_markup"] = reply_markup
+            payload = json.dumps(body).encode()
             req = urllib.request.Request(
                 url, data=payload,
                 headers={"Content-Type": "application/json"},
@@ -453,7 +461,28 @@ class TelegramAlerter:
         )
         msg += self._paper_trade_block(signal, paper_result)
         msg += _FOOTER
-        return self._send(msg)
+        # 2026-04-25: inline-keyboard buttons. "View market" opens the
+        # PM page, "Wallet" opens our profile page, "Block farmer"
+        # records a manual override (advisory; the auto-detector
+        # decides ground truth). Buttons add zero-cost ops affordances
+        # without leaving Telegram. Skipped on paper-trade-only signals.
+        slug = signal.get("slug") or ""
+        wallet = signal.get("wallet") or ""
+        kb_rows: list[list[dict]] = []
+        if cid and slug:
+            kb_rows.append([{
+                "text": "🔗 Market",
+                "url": f"https://polymarket.com/event/{slug}",
+            }])
+        if wallet and len(wallet) == 42:
+            kb_rows.append([
+                {"text": "👤 Wallet",
+                 "url": f"http://localhost:5173/wallets/{wallet}"},
+                {"text": "⚠ Block (advisory)",
+                 "callback_data": f"block_wallet:{wallet[:42]}"},
+            ])
+        reply_markup = {"inline_keyboard": kb_rows} if kb_rows else None
+        return self._send(msg, reply_markup=reply_markup)
 
     # ── Signal-type-specific templates ──────────────────────────────────
 

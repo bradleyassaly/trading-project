@@ -368,6 +368,115 @@ def _cmd_pnl(args: str = "") -> str:
     return "\n".join(lines)
 
 
+def _cmd_portfolio(args: str = "") -> str:
+    """Open positions grouped by category — paper + live."""
+    r = _api_get("/api/portfolio/by-category") or {}
+    if r.get("error"):
+        return f"*PORTFOLIO*\n{r.get('error')}"
+    paper = r.get("paper") or []
+    live = r.get("live") or []
+    totals = r.get("totals") or {}
+
+    lines = ["*PORTFOLIO* — open positions"]
+    if paper:
+        lines.append("\n*PAPER (by category)*")
+        for p in paper[:10]:
+            unreal_str = (
+                f" {'+' if p['unrealized'] >= 0 else ''}{p['unrealized']:.2f}"
+                if p['unrealized'] else ''
+            )
+            lines.append(
+                f"  {(p['category'] or '?'):<14s} "
+                f"{p['n_open']:>3d} open  ${p['deployed']:.0f}{unreal_str}"
+            )
+        lines.append(
+            f"  ─── totals: {totals.get('paper_n', 0)} open, "
+            f"${totals.get('paper_deployed', 0):.0f} deployed, "
+            f"unrealized {'+' if totals.get('paper_unrealized', 0) >= 0 else ''}"
+            f"{totals.get('paper_unrealized', 0):.2f}"
+        )
+    else:
+        lines.append("\n*PAPER*: no open positions")
+
+    if live:
+        lines.append("\n*LIVE*")
+        for l in live:
+            lines.append(f"  {l.get('n_open')} open, ${l.get('deployed', 0):.2f} deployed")
+    else:
+        lines.append("\n*LIVE*: no open positions")
+    return "\n".join(lines)
+
+
+def _cmd_leaderboard(args: str = "") -> str:
+    """Top wallets by recent paper PnL. Args: optional <days> (default 7)."""
+    try:
+        days = int(args.strip()) if args and args.strip().isdigit() else 7
+    except Exception:
+        days = 7
+    days = max(1, min(days, 30))
+    r = _api_get(f"/api/leaderboard/recent?days={days}&limit=10") or {}
+    if r.get("error"):
+        return f"*LEADERBOARD*\n{r.get('error')}"
+    rows = r.get("leaderboard") or []
+    if not rows:
+        return f"*LEADERBOARD ({days}d)*\nno qualifying wallets (need n≥2 resolved)"
+
+    lines = [f"*LEADERBOARD — top by {days}d realized PnL*"]
+    for i, row in enumerate(rows, 1):
+        flags = []
+        if row.get("is_copyable_ci"): flags.append("✓CI")
+        if row.get("is_likely_farmer"): flags.append("⚠farmer")
+        flag_str = f" [{','.join(flags)}]" if flags else ""
+        pseudo = row.get("pseudonym")
+        name_str = f" {pseudo}" if pseudo else ""
+        pm_str = (
+            f" PM ${row['pm_pnl_usdc'] / 1000:.0f}K" if row.get("pm_pnl_usdc")
+            else ""
+        )
+        lines.append(
+            f"  {i:>2d}. {row['wallet'][:12]}…{name_str}{flag_str}\n"
+            f"      n={row['n']} WR={row['wr'] * 100:.0f}% "
+            f"PnL ${row['pnl']:+.2f}{pm_str}"
+        )
+    return "\n".join(lines)
+
+
+def _cmd_heatmap(args: str = "") -> str:
+    """Per (signal, category) WR + PnL — surfaces best slices."""
+    try:
+        days = int(args.strip()) if args and args.strip().isdigit() else 30
+    except Exception:
+        days = 30
+    days = max(7, min(days, 90))
+    r = _api_get(f"/api/heatmap/signal-category?days={days}") or {}
+    if r.get("error"):
+        return f"*HEATMAP*\n{r.get('error')}"
+    cells = r.get("cells") or []
+    if not cells:
+        return f"*HEATMAP ({days}d)*\nno resolved data"
+
+    lines = [f"*HEATMAP — top (signal × category) tuples by PnL ({days}d)*"]
+    pos = [c for c in cells if c["pnl"] > 0][:8]
+    neg = [c for c in cells if c["pnl"] < 0][-5:]
+    if pos:
+        lines.append("\n*WINNERS*")
+        for c in pos:
+            lines.append(
+                f"  {c['signal_type']:<22s} × {c['category']:<10s} "
+                f"n={c['n']:<3d} WR={c['wr'] * 100:.0f}% "
+                f"PnL ${c['pnl']:+.2f}"
+            )
+    if neg:
+        lines.append("\n*LOSERS*")
+        for c in neg:
+            lines.append(
+                f"  {c['signal_type']:<22s} × {c['category']:<10s} "
+                f"n={c['n']:<3d} WR={c['wr'] * 100:.0f}% "
+                f"PnL ${c['pnl']:+.2f}"
+            )
+    return "\n".join(lines)
+
+
 def _cmd_promote(args: str = "") -> str:
     """Guard-railed ladder promotion. Two-phase:
        /promote          — show what would happen, no action
@@ -535,6 +644,9 @@ def _cmd_help() -> str:
         "/funnel — 24h signal → trade funnel\n"
         "/insiders — detected insider wallets\n"
         "/wallet 0x... — full wallet profile\n"
+        "/portfolio — open positions by category\n"
+        "/leaderboard [days] — top wallets by recent PnL\n"
+        "/heatmap [days] — (signal × category) WR + PnL matrix\n"
         "/promote [confirm] — guard-railed L0→L1 promotion\n"
         "/diff — what changed since yesterday\n"
         "/explain <id> — why a signal fired / was rejected\n"
@@ -558,6 +670,9 @@ _HANDLERS = {
     "/funnel": lambda args: _cmd_funnel(),
     "/insiders": lambda args: _cmd_insiders(),
     "/wallet": _cmd_wallet,
+    "/portfolio": _cmd_portfolio,
+    "/leaderboard": _cmd_leaderboard,
+    "/heatmap": _cmd_heatmap,
     "/promote": _cmd_promote,
     "/diff": _cmd_diff,
     "/explain": _cmd_explain,
