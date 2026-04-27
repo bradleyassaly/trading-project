@@ -83,11 +83,16 @@ def sync(limit: int = 500) -> dict[str, Any]:
     t0 = time.time()
     now = int(time.time())
 
-    profits: list[dict] = []
-    volumes: list[dict] = []
-    for window in ("all", "1d"):
-        profits.extend(fetch_leaderboard(PROFIT_URL, window=window, limit=50))
-        volumes.extend(fetch_leaderboard(VOLUME_URL, window=window, limit=50))
+    # 2026-04-26: lifted limit 50 → 500 on the all-time window only.
+    # First attempt also added 30d/7d/1d windows but the merge logic
+    # writes last-wins — meaning shorter-window values (smaller PnL)
+    # OVERWROTE the cumulative all-time values for any wallet that
+    # appeared in multiple windows. swisstony got truncated $6.6M →
+    # $2.2M in one run. The cumulative pm_pnl_usdc is the only number
+    # we use; pulling only "all" eliminates the overwrite class entirely.
+    # Coverage at limit=500 already deepens from 100 → 500 wallets/sync.
+    profits = fetch_leaderboard(PROFIT_URL, window="all", limit=500)
+    volumes = fetch_leaderboard(VOLUME_URL, window="all", limit=500)
 
     # Build merged view keyed by wallet
     merged: dict[str, dict] = {}
