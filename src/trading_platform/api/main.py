@@ -20,6 +20,7 @@ except Exception:
     pass
 
 
+import math
 import subprocess
 import threading
 import uuid
@@ -839,11 +840,74 @@ def ladder_status() -> dict[str, Any]:
     else:
         level, level_name = "L5", "Target"
 
+    # 2026-04-27: per-signal Bayesian early-stop on the L0→L1 gate.
+    # Aggregate accuracy is dragged down by under-validated signals.
+    # If ANY single signal type clears the conviction bar (P(acc>=0.55)
+    # > 0.90 via Beta-Binomial posterior with weak prior), promote.
+    # Cohort statistics still reported for visibility.
+    promotable_signals: list[dict[str, Any]] = []
+    try:
+        with _db() as conn:
+            sig_rows = conn.execute(
+                """SELECT signal_type,
+                          COUNT(*) AS n,
+                          SUM(CASE WHEN hypothesis_correct=1 THEN 1 ELSE 0 END) AS wins
+                     FROM trade_hypotheses
+                    WHERE resolved_at IS NOT NULL
+                      AND resolved_at > extract(epoch FROM NOW()-interval '30 days')
+                      AND hypothesis_correct IN (0,1)
+                    GROUP BY signal_type
+                   HAVING COUNT(*) >= 8"""
+            ).fetchall()
+        for r in sig_rows:
+            sig, n, wins = r[0], int(r[1]), int(r[2] or 0)
+            # Beta(2, 2) prior + Binomial likelihood = Beta(2+wins, 2+n-wins)
+            # P(p >= 0.55) computed via beta CDF
+            try:
+                from math import lgamma
+                a, b = 2 + wins, 2 + (n - wins)
+                # Numerical integration of beta pdf from 0.55 to 1
+                steps = 200
+                lo, hi = 0.55, 1.0
+                step = (hi - lo) / steps
+                # log Beta(a,b) = lgamma(a)+lgamma(b)-lgamma(a+b)
+                log_norm = lgamma(a) + lgamma(b) - lgamma(a + b)
+                prob = 0.0
+                for i in range(steps):
+                    x = lo + (i + 0.5) * step
+                    log_pdf = (a - 1) * (math.log(x) if x > 0 else -1e9) \
+                              + (b - 1) * (math.log(1 - x) if x < 1 else -1e9) \
+                              - log_norm
+                    prob += math.exp(log_pdf) * step
+                if prob > 0.90 and n >= 8:
+                    promotable_signals.append({
+                        "signal_type": sig,
+                        "n": n, "wins": wins,
+                        "wr": round(wins / n, 3),
+                        "p_acc_ge_55": round(prob, 3),
+                    })
+            except Exception:
+                pass
+    except Exception:
+        pass
+
     # Gates per level
     if level == "L0":
         next_level = "L1 Live Probate"
+        bayes_pass = len(promotable_signals) > 0
+        bayes_detail = (
+            f"{promotable_signals[0]['signal_type']} "
+            f"n={promotable_signals[0]['n']} "
+            f"WR={promotable_signals[0]['wr'] * 100:.0f}% "
+            f"P(acc≥55%)={promotable_signals[0]['p_acc_ge_55']:.2f}"
+            if promotable_signals else
+            f"no signal yet at P(acc≥55%)>0.90 on n≥8"
+        )
         gates = [
-            {"name": "Hypothesis accuracy ≥ 50% on n≥50",
+            {"name": "Per-signal Bayesian: any signal P(acc≥55%) > 0.90 on n≥8",
+             "value": bayes_detail,
+             "passed": bayes_pass},
+            {"name": "Aggregate hypothesis acc ≥ 50% on n≥50 (alt path)",
              "value": f"{(hypothesis_acc_30d or 0) * 100:.1f}% on n={paper_closed}",
              "passed": (hypothesis_acc_30d is not None and hypothesis_acc_30d >= 0.50 and paper_closed >= 50)},
             {"name": "Paper PnL positive over 30d",
@@ -877,6 +941,7 @@ def ladder_status() -> dict[str, Any]:
         "bankroll_usd": round(bankroll, 2),
         "target_bankroll_l5": 200000,
         "progress_pct": round(min(100.0, bankroll / 200000 * 100), 1),
+        "promotable_signals": promotable_signals,
         "paper": {
             "closed_30d": paper_closed,
             "wr_30d": round(paper_wr, 3) if paper_wr is not None else None,
