@@ -501,22 +501,37 @@ class PolymarketPaperExecutor:
             logger.debug("[CAT_GATE] SKIP excluded signal_type=%s", signal_type)
             return None
 
-        # 2026-04-25: dynamic decay-flag gate. signal_health.decay_flag is
-        # set when 14d IC < 0 on n>=10 resolved hypotheses. Auto-block
-        # without code change so we don't keep paying for a decayed signal
-        # while waiting for someone to update EXCLUDE_SIGNAL_TYPES.
+        # 2026-04-25: dynamic decay-flag gate. Originally blocked on
+        # decay_flag=1 alone (IC<0 on n>=10). 2026-04-27 retuned: also
+        # require lifetime PnL <= 0 in the same signal type. Reason —
+        # whale_entry was decay-flagged today (IC=-0.15) but still has
+        # +$889 lifetime PnL on n=6 sports trades. IC measures rank
+        # correlation between alpha_score and outcome; a profitable
+        # signal can have negative IC if the alpha_score isn't well-
+        # calibrated yet. Killing it based on IC alone destroys real
+        # alpha. Both conditions = real decay; one alone = noise.
         try:
             with self._wallet_lock:
-                _decay = self._wallet_conn.execute(
-                    "SELECT decay_flag FROM signal_health WHERE signal_type = ?",
+                _row = self._wallet_conn.execute(
+                    """SELECT sh.decay_flag,
+                              COALESCE((SELECT SUM(pt.realized_pnl)
+                                          FROM polymarket_paper_trades pt
+                                         WHERE pt.signal_type = sh.signal_type
+                                           AND pt.archived = 0
+                                           AND pt.realized_pnl IS NOT NULL), 0) AS lifetime_pnl
+                         FROM signal_health sh
+                        WHERE sh.signal_type = ?""",
                     (signal_type,),
                 ).fetchone()
-            if _decay and int(_decay[0] or 0) == 1:
-                logger.info("[DECAY_GATE] SKIP %s — IC<0 on n>=10", signal_type)
+            if _row and int(_row[0] or 0) == 1 and float(_row[1] or 0) <= 0:
+                logger.info(
+                    "[DECAY_GATE] SKIP %s — IC<0 AND lifetime PnL=%.2f<=0",
+                    signal_type, float(_row[1] or 0),
+                )
                 try:
                     from trading_platform.polymarket.decision_trace import trace as _dt
                     _dt(signal=signal, gate="DECAY_GATE", passed=False,
-                        detail=f"{signal_type} IC<0", surface="paper",
+                        detail=f"{signal_type} IC<0 + PnL<=0", surface="paper",
                         db_path=str(self._wallet_db_path))
                 except Exception:
                     pass
