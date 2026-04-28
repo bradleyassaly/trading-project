@@ -393,8 +393,10 @@ SCHEDULE: list[Task] = [
         # (>=0.7 with another type) signals. Daily.
         name="signal_health",
         cmd="python -m trading_platform.polymarket.signal_health",
-        interval_seconds=24 * 3600,
-        description="Daily signal IC + pairwise correlation; decay + redundancy flags",
+        # 2026-04-27: 24h → 6h (Day-5 scale-up). Decay-flag latency
+        # drops 24h → 6h; less time spent firing decayed signals.
+        interval_seconds=6 * 3600,
+        description="Signal IC + correlation; decay + redundancy (every 6h)",
     ),
     Task(
         # 2026-04-25: auto-promote insider wallets. Inserts into
@@ -406,6 +408,18 @@ SCHEDULE: list[Task] = [
         cmd="python -m trading_platform.polymarket.insider_promote",
         interval_seconds=24 * 3600,
         description="Daily auto-promote of qualifying wallets into insider_wallets",
+    ),
+    Task(
+        # 2026-04-27: signal-outcome wallet discovery. Mines
+        # signal_outcomes for wallets whose fired-and-resolved signals
+        # ended profitably 3+ times in 30d. Auto-promotes qualifying
+        # wallets into insider_wallets — a 5-10× faster discovery
+        # channel than the lifetime-PnL-based pm_leaderboard_sync.
+        # From scale_up_roadmap_2026-04-27.md, Day 4.
+        name="signal_outcome_discovery",
+        cmd="python -m trading_platform.polymarket.signal_outcome_discovery",
+        interval_seconds=24 * 3600,
+        description="Daily wallet discovery from resolved signal_outcomes",
     ),
     Task(
         # 2026-04-27: auto-promote slice STAKE_MULTIPLIERS. Daily scan
@@ -446,8 +460,11 @@ SCHEDULE: list[Task] = [
         # require n>=20 resolved hypotheses; until then identity.
         name="isotonic_calibration",
         cmd="python -m trading_platform.polymarket.isotonic_calibration",
-        interval_seconds=24 * 3600,
-        description="Daily isotonic-regression refit of alpha_score → P(win)",
+        # 2026-04-27: 24h → 6h (Day-5 scale-up). More frequent refits =
+        # faster Brier convergence to ground truth as new resolved
+        # hypotheses land.
+        interval_seconds=6 * 3600,
+        description="Isotonic-regression refit of alpha_score → P(win) (6h)",
     ),
     Task(
         # 2026-04-25: Phase B independent signal. Resolution-time decay
