@@ -408,6 +408,19 @@ SCHEDULE: list[Task] = [
         description="Daily auto-promote of qualifying wallets into insider_wallets",
     ),
     Task(
+        # 2026-04-27: sub-domain classifier. Polymarket markets aren't
+        # "sports" — they're "UFC vs Y" or "Iran-US peace deal". Smart
+        # money operates at event level. Classifier writes
+        # markets.subcategory (sports/ufc, politics/iran, etc.) so
+        # alpha-scoring + leaderboards + alerts can run at sport
+        # granularity. Daily; idempotent (only re-classifies NULL rows
+        # unless --force).
+        name="subcategory_classifier",
+        cmd="python -m trading_platform.polymarket.subcategory_classifier",
+        interval_seconds=24 * 3600,
+        description="Daily sub-domain classification (sports/ufc, politics/iran, etc.)",
+    ),
+    Task(
         # 2026-04-25: isotonic calibration of alpha_score. First Brier
         # measurement showed 0.35 / miscal 0.31 (POOR_CALIBRATION) —
         # alpha_score predicts ~0.43 where reality is ~0.20 in the

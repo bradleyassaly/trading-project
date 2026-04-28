@@ -1084,6 +1084,93 @@ def leaderboard_recent(days: int = 7, limit: int = 15) -> dict[str, Any]:
         return {"error": str(exc)[:200], "leaderboard": []}
 
 
+@app.get("/api/leaderboard/by-subdomain")
+def leaderboard_by_subdomain(
+    subdomain: str, days: int = 90, limit: int = 15,
+) -> dict[str, Any]:
+    """Top wallets by activity in a sub-domain (e.g. sports/ufc,
+    politics/iran, crypto/bitcoin). Reads markets.subcategory from
+    the classifier output. Ranks by trade count + lifetime PnL +
+    realized PnL on the sub-domain (when available)."""
+    sub = (subdomain or "").strip().lower()
+    if not sub:
+        return {"error": "subdomain required"}
+    try:
+        with _db() as conn:
+            cutoff = int(__import__("time").time()) - days * 86400
+            rows = conn.execute(
+                """SELECT wt.wallet,
+                          wp.pseudonym,
+                          COUNT(*) trades,
+                          ROUND(SUM(wt.size * wt.price)::numeric, 0) volume,
+                          SUM(CASE WHEN wt.pnl > 0 THEN 1 ELSE 0 END) wins,
+                          SUM(CASE WHEN wt.pnl IS NOT NULL THEN 1 ELSE 0 END) resolved,
+                          ROUND(SUM(wt.pnl)::numeric, 2) realized_pnl,
+                          wp.pm_pnl_usdc,
+                          COALESCE(wbm.is_copyable_ci, 0) AS copyable_ci,
+                          COALESCE(wbm.is_likely_farmer, 0) AS farmer
+                     FROM wallet_trades wt
+                     JOIN markets m ON m.condition_id = wt.condition_id
+                     LEFT JOIN wallet_profiles wp ON wp.wallet = wt.wallet
+                     LEFT JOIN wallet_behavior_metrics wbm ON wbm.wallet = wt.wallet
+                    WHERE m.subcategory = ?
+                      AND wt.timestamp > ?
+                    GROUP BY wt.wallet, wp.pseudonym, wp.pm_pnl_usdc, wbm.is_copyable_ci, wbm.is_likely_farmer
+                   HAVING COUNT(*) >= 2
+                    ORDER BY trades DESC, volume DESC
+                    LIMIT ?""",
+                (sub, cutoff, limit),
+            ).fetchall()
+        return {
+            "subdomain": sub,
+            "days": days,
+            "leaderboard": [
+                {
+                    "wallet": r[0], "pseudonym": r[1],
+                    "trades": int(r[2]), "volume_usdc": float(r[3] or 0),
+                    "wins": int(r[4] or 0), "resolved": int(r[5] or 0),
+                    "wr": (
+                        round(float(r[4] or 0) / float(r[5]), 3)
+                        if r[5] else None
+                    ),
+                    "realized_pnl": float(r[6] or 0),
+                    "pm_pnl_usdc": float(r[7]) if r[7] is not None else None,
+                    "is_copyable_ci": int(r[8] or 0),
+                    "is_likely_farmer": int(r[9] or 0),
+                }
+                for r in rows
+            ],
+        }
+    except Exception as exc:
+        return {"error": str(exc)[:200], "leaderboard": []}
+
+
+@app.get("/api/subdomains")
+def list_subdomains() -> dict[str, Any]:
+    """Distinct subdomains with market + trade counts. Used by the
+    frontend filter dropdown + Telegram /sport autocomplete."""
+    try:
+        with _db() as conn:
+            rows = conn.execute(
+                """SELECT subcategory, COUNT(*) markets,
+                          (SELECT COUNT(*) FROM wallet_trades wt
+                            JOIN markets m2 ON m2.condition_id = wt.condition_id
+                           WHERE m2.subcategory = m.subcategory) trades
+                     FROM markets m
+                    WHERE subcategory IS NOT NULL
+                    GROUP BY subcategory
+                    ORDER BY trades DESC NULLS LAST"""
+            ).fetchall()
+        return {
+            "subdomains": [
+                {"subdomain": r[0], "markets": int(r[1]), "trades": int(r[2] or 0)}
+                for r in rows
+            ],
+        }
+    except Exception as exc:
+        return {"error": str(exc)[:200], "subdomains": []}
+
+
 @app.get("/api/heatmap/signal-category")
 def heatmap_signal_category(days: int = 30) -> dict[str, Any]:
     """Per (signal_type, category) WR + PnL matrix from resolved paper

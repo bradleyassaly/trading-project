@@ -368,6 +368,57 @@ def _cmd_pnl(args: str = "") -> str:
     return "\n".join(lines)
 
 
+def _cmd_sport(args: str = "") -> str:
+    """Top wallets in a sub-domain. Args: <subdomain> [days]
+    Examples: /sport ufc, /sport tennis 30, /sport politics/iran"""
+    parts = (args or "").strip().split()
+    if not parts:
+        # No arg → list available subdomains
+        r = _api_get("/api/subdomains") or {}
+        subs = r.get("subdomains") or []
+        if not subs:
+            return "*SUBDOMAINS*\nClassifier hasn't run yet."
+        lines = ["*SUBDOMAINS* (sorted by trade volume)"]
+        for s in subs[:20]:
+            lines.append(f"  {s['subdomain']:<28s} {s['markets']:>3d} markets · {s['trades']:>5d} trades")
+        lines.append("\nUsage: /sport <name> [days]")
+        return "\n".join(lines)
+    sub = parts[0].lower()
+    if "/" not in sub:
+        # User typed /sport ufc instead of /sport sports/ufc — try
+        # both common parents
+        for parent in ("sports", "politics", "crypto", "geopolitics", "entertainment"):
+            r = _api_get(f"/api/leaderboard/by-subdomain?subdomain={parent}/{sub}&limit=10") or {}
+            if (r.get("leaderboard") or []):
+                sub = f"{parent}/{sub}"
+                break
+    days = 90
+    if len(parts) > 1:
+        try:
+            days = max(1, min(int(parts[1]), 365))
+        except ValueError:
+            pass
+    r = _api_get(f"/api/leaderboard/by-subdomain?subdomain={sub}&days={days}&limit=10") or {}
+    rows = r.get("leaderboard") or []
+    if not rows:
+        return f"*SUBDOMAIN {sub}*\nNo wallets found (need n≥2 trades in last {days}d)."
+    lines = [f"*TOP {sub.upper()} WALLETS* (last {days}d, n≥2)"]
+    for i, w in enumerate(rows, 1):
+        flags = []
+        if w.get("is_copyable_ci"): flags.append("✓CI")
+        if w.get("is_likely_farmer"): flags.append("⚠farmer")
+        flag_str = f" [{','.join(flags)}]" if flags else ""
+        wr_str = f"WR {w['wr'] * 100:.0f}% on {w['resolved']}" if w.get("wr") is not None else "no resolved"
+        pm_str = f" PM ${w['pm_pnl_usdc'] / 1000:.0f}K" if w.get("pm_pnl_usdc") else ""
+        pseudo = w.get("pseudonym")
+        name_str = f" {pseudo}" if pseudo else ""
+        lines.append(
+            f"  {i:>2d}. {w['wallet'][:12]}…{name_str}{flag_str}\n"
+            f"      {w['trades']} trades · ${w['volume_usdc']:,.0f} vol · {wr_str}{pm_str}"
+        )
+    return "\n".join(lines)
+
+
 def _cmd_portfolio(args: str = "") -> str:
     """Open positions grouped by category — paper + live."""
     r = _api_get("/api/portfolio/by-category") or {}
@@ -644,6 +695,7 @@ def _cmd_help() -> str:
         "/funnel — 24h signal → trade funnel\n"
         "/insiders — detected insider wallets\n"
         "/wallet 0x... — full wallet profile\n"
+        "/sport [name] [days] — top wallets in subdomain (ufc, tennis, iran, ...)\n"
         "/portfolio — open positions by category\n"
         "/leaderboard [days] — top wallets by recent PnL\n"
         "/heatmap [days] — (signal × category) WR + PnL matrix\n"
@@ -670,6 +722,8 @@ _HANDLERS = {
     "/funnel": lambda args: _cmd_funnel(),
     "/insiders": lambda args: _cmd_insiders(),
     "/wallet": _cmd_wallet,
+    "/sport": _cmd_sport,
+    "/subdomain": _cmd_sport,
     "/portfolio": _cmd_portfolio,
     "/leaderboard": _cmd_leaderboard,
     "/heatmap": _cmd_heatmap,
