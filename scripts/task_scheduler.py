@@ -408,6 +408,19 @@ SCHEDULE: list[Task] = [
         description="Daily auto-promote of qualifying wallets into insider_wallets",
     ),
     Task(
+        # 2026-04-27: auto-promote slice STAKE_MULTIPLIERS. Daily scan
+        # of resolved paper trades for (signal_type, subdomain) tuples
+        # at n>=10 / WR>=60% / +PnL. Writes to stake_multiplier_
+        # overrides table; paper executor reads at signal time and
+        # applies on top of static STAKE_MULTIPLIERS dict. Highest
+        # validated slices auto-amplify; under-performers auto-demote.
+        # Highest-EV scale move from scale_up_roadmap_2026-04-27.md.
+        name="slice_multiplier_promoter",
+        cmd="python -m trading_platform.polymarket.slice_multiplier_promoter",
+        interval_seconds=24 * 3600,
+        description="Daily auto-promote of validated (signal × subdomain) tuples",
+    ),
+    Task(
         # 2026-04-27: sub-domain classifier. Polymarket markets aren't
         # "sports" — they're "UFC vs Y" or "Iran-US peace deal". Smart
         # money operates at event level. Classifier writes

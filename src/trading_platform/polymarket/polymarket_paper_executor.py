@@ -1047,6 +1047,33 @@ class PolymarketPaperExecutor:
         mult = STAKE_MULTIPLIERS.get((signal_type, _side), 1.0)
         if _side == "YES" and ep > 0 and ep < 0.30:
             mult *= 1.25
+        # 2026-04-27: runtime slice override from
+        # stake_multiplier_overrides — auto-promoted by the daily
+        # slice_multiplier_promoter when (signal_type, subdomain) hits
+        # n>=10 / WR>=60% / +PnL. Stacks multiplicatively over the
+        # static dict, capped at 1.6x total. Closes the loop between
+        # heatmap evidence → automatic stake amplification.
+        sig_subdomain_for_mult = signal.get("subcategory") or category
+        if sig_subdomain_for_mult:
+            try:
+                with self._wallet_lock:
+                    _ovr = self._wallet_conn.execute(
+                        "SELECT multiplier FROM stake_multiplier_overrides "
+                        "WHERE signal_type = ? AND subdomain = ?",
+                        (signal_type, sig_subdomain_for_mult),
+                    ).fetchone()
+                if _ovr and _ovr[0]:
+                    slice_mult = float(_ovr[0])
+                    if slice_mult > 1.0:
+                        mult *= slice_mult
+                        logger.info(
+                            "[SLICE_OVERRIDE] %s × %s ×%.2f",
+                            signal_type, sig_subdomain_for_mult, slice_mult,
+                        )
+            except Exception:
+                pass
+        # Hard cap on combined multiplier
+        mult = min(1.6, mult)
         # 2026-04-24: wallet earliness boost. Wallets whose 7d WR exceeds
         # their lifetime WR in this category get up to 1.3× extra; the
         # reverse direction down to 0.7×. Captures "currently smart" vs
