@@ -448,9 +448,13 @@ class TelegramAlerter:
         )
 
         badge = _resolution_badge(cid)
+        # 2026-04-27: surface subcategory when available — so an alert
+        # for sports/tennis doesn't read as just "sports."
+        sub = signal.get("subcategory")
+        cat_label = (sub if sub else cat) if (sub or cat) else "?"
         msg = (
             f"{emoji} <b>SIGNAL: {sig_type.upper().replace('_', ' ')}</b>{badge}\n"
-            f"<b>{yn} \u2014 {cat}</b>\n\n"
+            f"<b>{yn} \u2014 {cat_label.upper()}</b>\n\n"
             f"\U0001f4ca <b>Market:</b> {question}\n"
             f"{link_line}\n"
             f"Entry: {_price_implied(price)}  |  Size: {_fmt_usd(size)}\n"

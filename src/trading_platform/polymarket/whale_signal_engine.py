@@ -1117,6 +1117,20 @@ class WhaleSignalEngine:
         want_yes = (trade.side or "").upper() == "BUY"
         trade_token_id = yes_tid if want_yes else no_tid
 
+        # 2026-04-27: enrich with subdomain from markets table so the
+        # paper executor's z-subdomain lookup + alert badges have it.
+        # Cheap single-row lookup; falls back to None on miss.
+        _subcat = None
+        try:
+            with self.db._lock:
+                _r = self.db._conn.execute(
+                    "SELECT subcategory FROM markets WHERE condition_id = ?",
+                    (trade.condition_id,),
+                ).fetchone()
+            _subcat = _r[0] if _r else None
+        except Exception:
+            pass
+
         signal = {
             "signal_type": signal_type,
             "condition_id": trade.condition_id,
@@ -1126,6 +1140,7 @@ class WhaleSignalEngine:
             "price": trade.price,
             "size": trade.size,
             "category": trade.category,
+            "subcategory": _subcat,
             "question": trade.question,
             "wallet_tier": trade.wallet_tier,
             "directional_win_rate": trade.directional_win_rate,

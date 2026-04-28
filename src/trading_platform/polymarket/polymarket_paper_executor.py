@@ -1040,6 +1040,34 @@ class PolymarketPaperExecutor:
                             "[Z_SPECIALIST] %s in %s z=%.2f ×%.2f",
                             src_wallet[:14], category, float(z_row[0]), z_boost,
                         )
+
+                # 2026-04-27: per-subdomain z-score boost (more granular).
+                # Looks up wallet_subdomain_zscore for the SPECIFIC sport
+                # / region of this market (sports/tennis vs sports/nba).
+                # Stacks multiplicatively on top of the category z-boost
+                # but capped — together they can reach max 1.6×.
+                signal_subdomain = signal.get("subcategory")
+                if signal_subdomain:
+                    try:
+                        with self._wallet_lock:
+                            sz_row = self._wallet_conn.execute(
+                                "SELECT z_score, sub_pnl, n_in_subdomain "
+                                "FROM wallet_subdomain_zscore "
+                                "WHERE wallet = ? AND subdomain = ?",
+                                (src_wallet.lower(), signal_subdomain),
+                            ).fetchone()
+                        if (sz_row and sz_row[0] is not None
+                                and float(sz_row[0]) >= 1.0
+                                and float(sz_row[1] or 0) > 0):
+                            sub_boost = min(1.3, 1.0 + 0.10 * (float(sz_row[0]) - 1.0))
+                            mult *= sub_boost
+                            logger.info(
+                                "[Z_SUBDOMAIN] %s in %s z=%.2f pnl=%.0f ×%.2f",
+                                src_wallet[:14], signal_subdomain,
+                                float(sz_row[0]), float(sz_row[1] or 0), sub_boost,
+                            )
+                    except Exception:
+                        pass
                 if bm_row and bm_row[1] is not None:
                     p90 = float(bm_row[1])
                     if p90 >= 0.10:

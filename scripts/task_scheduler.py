@@ -414,11 +414,15 @@ SCHEDULE: list[Task] = [
         # markets.subcategory (sports/ufc, politics/iran, etc.) so
         # alpha-scoring + leaderboards + alerts can run at sport
         # granularity. Daily; idempotent (only re-classifies NULL rows
-        # unless --force).
+        # unless --force). Chained → wallet_subdomain_metrics so the
+        # z-score table refreshes immediately after new sub-domain tags.
         name="subcategory_classifier",
-        cmd="python -m trading_platform.polymarket.subcategory_classifier",
+        cmd=(
+            "python -m trading_platform.polymarket.subcategory_classifier "
+            "&& python -m trading_platform.polymarket.wallet_subdomain_metrics"
+        ),
         interval_seconds=24 * 3600,
-        description="Daily sub-domain classification (sports/ufc, politics/iran, etc.)",
+        description="Daily sub-domain classifier → subdomain z-score chain",
     ),
     Task(
         # 2026-04-25: isotonic calibration of alpha_score. First Brier
