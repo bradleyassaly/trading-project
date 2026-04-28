@@ -44,9 +44,17 @@ logger = logging.getLogger(__name__)
 SIGNAL_TYPE = "resolution_decay"
 ENV_FLAG = "PHASE_B_RESOLUTION_DECAY_ENABLED"
 MIN_HOURS_TO_RESOLVE = 1.0
-MAX_HOURS_TO_RESOLVE = 24.0
-ENTRY_PRICE_LOW = 0.10
-ENTRY_PRICE_HIGH = 0.30
+# 2026-04-27: widened 24h → 48h. Resolved-trade throughput is the
+# binding constraint on L0→L1 promotion (per scale_up_roadmap).
+# Markets resolving in 24-48h still produce a single-day-cycle
+# resolution-data point with the corrected calibration.
+MAX_HOURS_TO_RESOLVE = 48.0
+# 2026-04-27: widened price band 0.10-0.30 → 0.05-0.40. Original
+# was conservative; 0.05-0.10 long-shots have asymmetric upside +
+# 0.30-0.40 mid-band has the same time-decay structure. Expected
+# ~5-10× candidate volume.
+ENTRY_PRICE_LOW = 0.05
+ENTRY_PRICE_HIGH = 0.40
 MIN_VOLUME_24H = 1000.0  # market must have any liquidity at all
 
 
@@ -98,6 +106,10 @@ def _candidate_markets(conn) -> list[dict[str, Any]]:
             continue
         if vol is not None and float(vol) < MIN_VOLUME_24H:
             continue
+        # Pull market subcategory so the signal payload + executor
+        # z-subdomain lookup have it
+        # (set later in _emit_signal)
+        pass
 
         # outcome_prices is JSON like '["0.18", "0.82"]' — yes price first
         yes_price = None

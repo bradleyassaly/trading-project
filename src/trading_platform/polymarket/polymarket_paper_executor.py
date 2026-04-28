@@ -154,6 +154,17 @@ EXCLUDE_CATEGORIES: set[str] = set()  # no hard exclusions; tier-gating handles 
 # Kelly sizing handles that correctly. Kill switch enforces per-trade cap.
 LIVE_TRADE_CATEGORIES = {"politics", "geopolitics", "sports", "crypto"}
 # Signal types to exclude from paper bankroll (fire+record only, no capital).
+# 2026-04-27: max-hours-to-resolve preference. Resolved-hypothesis
+# throughput is the binding constraint on ladder progression. Markets
+# resolving within MAX_HOURS_TO_RESOLVE_PREF give same-day calibration
+# data; longer-horizon markets are accepted but only when the
+# wallet/signal slice is high-conviction (passes the strict filter
+# below). Effect: bias toward fast-resolving markets without dropping
+# real conviction signals on long-horizon markets.
+MAX_HOURS_TO_RESOLVE_PREF = 168  # 7 days
+MAX_HOURS_TO_RESOLVE_HARD = 720  # 30 days (above this = always reject)
+
+
 EXCLUDE_SIGNAL_TYPES = {
     "price_velocity",   # 95% WR, EV +0.004 = noise — 1300/day, pure noise
     # 2026-04-18: signals with ≥5 resolved at <30% WR or strongly negative
@@ -500,6 +511,60 @@ class PolymarketPaperExecutor:
         if signal_type in EXCLUDE_SIGNAL_TYPES:
             logger.debug("[CAT_GATE] SKIP excluded signal_type=%s", signal_type)
             return None
+
+        # 2026-04-27: HORIZON gate. Hard-rejects markets resolving
+        # >30d out (signal data lands too slow to inform calibration).
+        # Soft-rejects (downweight confidence) markets resolving in
+        # 7-30d unless signal is high-conviction (raw confidence
+        # already >= 0.70). Markets <7d to resolve preferred and
+        # passed unchanged.
+        try:
+            with self._wallet_lock:
+                _h_row = self._wallet_conn.execute(
+                    "SELECT end_date_iso FROM markets WHERE condition_id = ?",
+                    (condition_id,),
+                ).fetchone()
+            if _h_row and _h_row[0]:
+                from datetime import datetime, timezone as _tz
+                _iso = _h_row[0].replace("Z", "+00:00") if _h_row[0].endswith("Z") else _h_row[0]
+                _end = datetime.fromisoformat(_iso)
+                if _end.tzinfo is None:
+                    _end = _end.replace(tzinfo=_tz.utc)
+                _hours = (_end.timestamp() - time.time()) / 3600
+                if _hours > MAX_HOURS_TO_RESOLVE_HARD:
+                    logger.info(
+                        "[HORIZON_GATE] SKIP %s — resolves in %.0fh (>%dh hard cap)",
+                        signal_type, _hours, MAX_HOURS_TO_RESOLVE_HARD,
+                    )
+                    try:
+                        from trading_platform.polymarket.decision_trace import trace as _dt
+                        _dt(signal=signal, gate="HORIZON_GATE", passed=False,
+                            value=_hours, threshold=MAX_HOURS_TO_RESOLVE_HARD,
+                            detail=f"horizon {_hours:.0f}h", surface="paper",
+                            db_path=str(self._wallet_db_path))
+                    except Exception:
+                        pass
+                    return None
+                if _hours > MAX_HOURS_TO_RESOLVE_PREF:
+                    # Soft-rejection only when conviction is low
+                    if confidence < 0.70:
+                        logger.info(
+                            "[HORIZON_GATE] SKIP %s — %.0fh out + conf %.2f<0.70",
+                            signal_type, _hours, confidence,
+                        )
+                        try:
+                            from trading_platform.polymarket.decision_trace import trace as _dt
+                            _dt(signal=signal, gate="HORIZON_GATE_SOFT",
+                                passed=False, value=_hours,
+                                threshold=MAX_HOURS_TO_RESOLVE_PREF,
+                                detail=f"low-conf {confidence:.2f}",
+                                surface="paper",
+                                db_path=str(self._wallet_db_path))
+                        except Exception:
+                            pass
+                        return None
+        except Exception:
+            pass
 
         # 2026-04-25: dynamic decay-flag gate. Originally blocked on
         # decay_flag=1 alone (IC<0 on n>=10). 2026-04-27 retuned: also
