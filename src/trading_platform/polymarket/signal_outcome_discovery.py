@@ -168,12 +168,52 @@ def run_discovery(db_path: str | None = None) -> dict[str, Any]:
                 except Exception as exc:
                     logger.debug("insider promote failed %s: %s", wallet[:12], exc)
 
+        # 2026-04-30: demote previously-promoted wallets that no longer
+        # qualify under the current (tightened) thresholds. Closes the
+        # discovery loop self-correctingly: yesterday's 459-spike rows
+        # get demoted on the next run when they fail the new bar.
+        # Only operates on rows we created — never touches insiders
+        # detected by other methods (accuracy_60pct etc.).
+        n_demoted = 0
+        try:
+            promoted_rows = conn.execute(
+                "SELECT wallet FROM insider_wallets "
+                "WHERE detection_method = 'signal_outcome_discovery'",
+            ).fetchall()
+            qualifying_set = {
+                r[0] for r in rows
+                if (
+                    int(r[2] or 0) >= DISCOVERY_MIN_WINS
+                    and (int(r[2] or 0) / int(r[1])) >= DISCOVERY_MIN_WR
+                    and float(r[3] or 0) >= DISCOVERY_MIN_PNL
+                )
+            }
+            for (w,) in promoted_rows:
+                if w not in qualifying_set:
+                    try:
+                        conn.execute(
+                            "DELETE FROM insider_wallets "
+                            "WHERE wallet = ? AND detection_method = 'signal_outcome_discovery'",
+                            (w,),
+                        )
+                        conn.execute(
+                            "UPDATE wallet_discovery_candidates "
+                            "SET promoted_to_insider = 0 WHERE wallet = ?",
+                            (w,),
+                        )
+                        n_demoted += 1
+                    except Exception:
+                        pass
+        except Exception as exc:
+            logger.debug("demotion sweep failed: %s", exc)
+
         conn.commit()
         return {
             "elapsed_seconds": round(time.time() - t0, 1),
             "wallets_evaluated": n_evaluated,
             "qualifying": n_qualifying,
             "newly_promoted_to_insider": n_promoted,
+            "demoted_no_longer_qualifying": n_demoted,
         }
     finally:
         try: conn.close()

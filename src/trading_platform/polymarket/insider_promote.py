@@ -35,6 +35,12 @@ def run_promotion(db_path: str | None = None) -> dict[str, Any]:
         # Pull candidate wallets meeting the early/skill thresholds.
         # Left join to wallet_behavior_metrics so we can exclude farmers
         # — fail-open if the table doesn't exist yet.
+        # 2026-04-30: tightened to address the +459-wallets-in-one-day
+        # spike. The prior bar (early_wr≥0.65, n≥10) admitted ~475 wallets
+        # which inflates the insider_entry signal count and dilutes
+        # specialist-boost confidence. New bar: early_wr≥0.70 AND
+        # lifetime_wr≥0.55 AND n≥20 AND net_pnl≥$50 (or pm_pnl≥$50K).
+        # Conservative; the right wallets will still qualify.
         try:
             rows = conn.execute(
                 """SELECT wp.wallet, wp.early_win_rate, wp.resolved_trades,
@@ -46,15 +52,13 @@ def run_promotion(db_path: str | None = None) -> dict[str, Any]:
                      FROM wallet_profiles wp
                      LEFT JOIN wallet_behavior_metrics wbm ON wbm.wallet = wp.wallet
                     WHERE wp.early_win_rate IS NOT NULL
-                      AND wp.early_win_rate >= 0.65
-                      AND wp.resolved_trades >= 10
-                      -- avg_entry_hours_before_close is NULL on most rows;
-                      -- skip the gate when the data isn't populated. Use
-                      -- the value when present.
+                      AND wp.early_win_rate >= 0.70
+                      AND wp.resolved_trades >= 20
+                      AND (wp.win_rate IS NULL OR wp.win_rate >= 0.55)
                       AND (wp.avg_entry_hours_before_close >= 12
                            OR wp.avg_entry_hours_before_close IS NULL)
                       AND COALESCE(wbm.is_likely_farmer, 0) = 0
-                      AND (wp.net_pnl_usdc > 0 OR wp.pm_pnl_usdc >= 50000)"""
+                      AND (wp.net_pnl_usdc >= 50 OR wp.pm_pnl_usdc >= 50000)"""
             ).fetchall()
         except Exception as exc:
             logger.warning("insider candidate query failed: %s", exc)
@@ -114,12 +118,37 @@ def run_promotion(db_path: str | None = None) -> dict[str, Any]:
                     n_new += 1
             except Exception as exc:
                 logger.debug("insider upsert failed %s: %s", wallet[:12], exc)
+        # 2026-04-30: demote previously auto_promote'd wallets that no
+        # longer meet the (newly tightened) bar. Only operates on rows
+        # we created — never touches manual or accuracy_60pct insiders.
+        n_demoted = 0
+        try:
+            qualifying_set = {r[0] for r in rows}
+            existing = conn.execute(
+                "SELECT wallet FROM insider_wallets "
+                "WHERE detection_method = 'auto_promote'",
+            ).fetchall()
+            for (w,) in existing:
+                if w not in qualifying_set:
+                    try:
+                        conn.execute(
+                            "DELETE FROM insider_wallets "
+                            "WHERE wallet = ? AND detection_method = 'auto_promote'",
+                            (w,),
+                        )
+                        n_demoted += 1
+                    except Exception:
+                        pass
+        except Exception as exc:
+            logger.debug("auto_promote demotion sweep failed: %s", exc)
+
         conn.commit()
         return {
             "elapsed_seconds": round(time.time() - t0, 1),
             "candidates_evaluated": len(rows),
             "new_insider_wallets": n_new,
             "updated_insider_wallets": n_upsert,
+            "demoted_no_longer_qualifying": n_demoted,
         }
     finally:
         try: conn.close()
