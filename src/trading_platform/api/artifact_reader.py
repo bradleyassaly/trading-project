@@ -5267,25 +5267,32 @@ def read_intelligence_health() -> dict[str, Any]:
         "signals_today": ws_data.get("signals_today", 0),
     }
 
-    # Paper trading health
+    # Paper trading health. 2026-04-30: was reading the legacy
+    # data/kalshi/paper_trades.db (a stale SQLite) and falling back to
+    # a hard-coded $500 — producing a ladder/intelligence bankroll
+    # disagreement ($356 vs $500) for any caller. Now reads the same
+    # canonical source as /api/ladder/status (bankroll module +
+    # polymarket_paper_trades open positions).
     try:
-        import sqlite3
-        paper_db = DATA_ROOT.parent / "kalshi" / "paper_trades.db"
-        if paper_db.exists():
-            conn = _safe_connect(paper_db)
+        from trading_platform.polymarket.bankroll import get_bankroll
+        from trading_platform.polymarket.db_connection import get_connection
+        bankroll = float(get_bankroll() or 0.0)
+        try:
+            conn = get_connection()
             open_count = conn.execute(
-                "SELECT COUNT(*) FROM trades WHERE platform='polymarket' AND status='open'"
+                """SELECT COUNT(*) FROM polymarket_paper_trades
+                    WHERE archived = 0 AND exit_ts IS NULL"""
             ).fetchone()[0]
-            cash_row = conn.execute("SELECT cash_usd FROM portfolio ORDER BY id DESC LIMIT 1").fetchone()
-            conn.close()
-            result["paper_trading"] = {
-                "open_positions": open_count,
-                "bankroll_current": round(cash_row[0], 2) if cash_row else 500.0,
-            }
-        else:
-            result["paper_trading"] = {"open_positions": 0, "bankroll_current": 500.0}
+            try: conn.close()
+            except Exception: pass
+        except Exception:
+            open_count = 0
+        result["paper_trading"] = {
+            "open_positions": int(open_count or 0),
+            "bankroll_current": round(bankroll, 2),
+        }
     except Exception:
-        result["paper_trading"] = {"open_positions": 0, "bankroll_current": 500.0}
+        result["paper_trading"] = {"open_positions": 0, "bankroll_current": None}
 
     # Category status
     try:

@@ -43,8 +43,25 @@ logger = logging.getLogger(__name__)
 class PolymarketLiveExecutor:
     """Live trading executor with multi-layer safety gating."""
 
+    # 2026-04-28: per-signal-type live execution allowlist.
+    # Signals in this set bypass DRY_RUN — they fire REAL orders
+    # subject to all the standard 14-gate safety stack PLUS the
+    # discovery-tier $1 hard cap. Default policy: keep this set
+    # narrow (only Bayesian-validated signals).
+    #
+    # Current allowlist:
+    #   whale_entry — Bayesian validated 2026-04-27:
+    #     n=13 resolved, WR=77%, P(acc≥55%)=0.915
+    #     /api/ladder/status promotable_signals confirms
+    LIVE_REAL_SIGNAL_TYPES: set[str] = {"whale_entry"}
+
     # ALWAYS True in source. Flip in your local instance only.
+    # Class default applies to non-allowlisted signal types.
     DRY_RUN: bool = True
+
+    # Hard cap on a real (non-DRY) trade size — defense-in-depth on
+    # top of LIVE_DISCOVERY_MAX_STAKE_USD in kill_switch.
+    LIVE_REAL_MAX_STAKE_USD: float = 1.0
 
     def __init__(self) -> None:
         self._db = WalletDB()
@@ -53,6 +70,37 @@ class PolymarketLiveExecutor:
         self._kill = KillSwitch(self._db_path)
         self._sizer = KellySizer(self._db_path)
         self._ensure_live_trades_table()
+
+    def _is_dry_run_for(self, signal_type: str) -> bool:
+        """Per-signal DRY_RUN check. Allowlisted types fire real
+        orders; everything else stays dry. Auto-demotes to dry-run
+        when the signal hits 3 consecutive real-money losses (defense
+        against early variance in the first live cohort)."""
+        if signal_type not in self.LIVE_REAL_SIGNAL_TYPES:
+            return self.DRY_RUN
+        # Check last 3 closed real-money trades on this signal type
+        try:
+            import sqlite3 as _sq
+            _conn = _sq.connect(self._db_path, timeout=2.0)
+            try:
+                _row = _conn.execute(
+                    """SELECT outcome FROM live_trades
+                        WHERE signal_type = ? AND dry_run = 0
+                          AND outcome IN ('win','loss')
+                        ORDER BY exit_ts DESC LIMIT 3""",
+                    (signal_type,),
+                ).fetchall()
+            finally:
+                _conn.close()
+            if len(_row) >= 3 and all((r[0] or "") == "loss" for r in _row):
+                logger.warning(
+                    "[LIVE][AUTO_DEMOTE] %s — 3 consecutive real losses, "
+                    "back to dry-run", signal_type,
+                )
+                return True
+        except Exception:
+            pass
+        return False
 
     def _ensure_live_trades_table(self) -> None:
         try:
@@ -440,15 +488,24 @@ class PolymarketLiveExecutor:
                 reason=f"Thin liquidity on {outcome_label} (ask depth ${ask_depth:.0f} < 2x trade ${size_usd:.0f})",
             )
 
+        # 2026-04-28: per-signal DRY_RUN check + real-trade hard cap.
+        is_dry = self._is_dry_run_for(sig_type)
+        if not is_dry and size_usd > self.LIVE_REAL_MAX_STAKE_USD:
+            logger.warning(
+                "[LIVE][REAL_CAP] %s clamping size $%.2f → $%.2f (allowlisted real)",
+                sig_type, size_usd, self.LIVE_REAL_MAX_STAKE_USD,
+            )
+            size_usd = self.LIVE_REAL_MAX_STAKE_USD
+
         logger.info(
-            "[LIVE%s] %s %s $%.0f @ %.3f | conf=%.0f%% | %s",
-            "(DRY)" if self.DRY_RUN else "",
+            "[LIVE%s] %s %s $%.2f @ %.3f | conf=%.0f%% | %s",
+            "(DRY)" if is_dry else "(REAL)",
             sig_type, outcome_label, size_usd, current_price,
             confidence * 100, (signal.get("question") or "")[:40],
         )
 
         # 5. DRY RUN: log + record + return
-        if self.DRY_RUN:
+        if is_dry:
             self._record_attempt(
                 signal, size_usd, current_price, None,
                 dry_run=True, status="dry_run", error_msg=None,

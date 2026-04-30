@@ -7,6 +7,7 @@ import EmptyState from '../components/EmptyState'
 import { SignalBadge, TierBadge } from '../components/Badges'
 import AccuracySparkline from '../components/charts/AccuracySparkline'
 import CumulativePnLChart from '../components/charts/CumulativePnLChart'
+import AutonomousLiveTile from '../components/AutonomousLiveTile'
 import { fmtUsd, fmtPct, fmtRelTime } from '../lib/format'
 
 function relTime(ts) {
@@ -1240,6 +1241,10 @@ export default function Dashboard() {
         <p className="text-xs text-gray-600 mb-1">Trading Platform &gt; <span className="text-gray-400">Command Center</span></p>
         <h1 className="text-lg font-semibold text-gray-200">Command Center</h1>
       </div>
+
+      {/* Autonomous live trading status — answers "are we trading
+          live yet, and if not, what's the binding gate?" at a glance. */}
+      <AutonomousLiveTile />
 
       <ThesisScorecard data={thesis} history={thesisHistory} />
 

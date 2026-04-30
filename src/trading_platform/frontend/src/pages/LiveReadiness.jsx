@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react'
 import { api } from '../api/client'
 import { useApi } from '../hooks/useApi'
 import LoadingSkeleton from '../components/LoadingSkeleton'
+import AutonomousLiveTile from '../components/AutonomousLiveTile'
 
 function fmtUsd(n) {
   if (n == null) return '—'
@@ -114,6 +115,9 @@ export default function LiveReadiness() {
         <h1 className="text-lg font-semibold text-gray-200">Live Readiness</h1>
         <p className="text-xs text-gray-500 mt-0.5">Are we ready for real money? — Operational gates, thesis validation, and risk controls</p>
       </div>
+
+      {/* Hero: autonomous-trading status with binding-gate drill-down */}
+      <AutonomousLiveTile />
 
       {/* Thesis Gate — must pass before any live trading */}
       <div className={`card border ${thesisReady ? 'border-accent-green/40 bg-accent-green/5' : 'border-accent-yellow/40 bg-accent-yellow/5'}`}>

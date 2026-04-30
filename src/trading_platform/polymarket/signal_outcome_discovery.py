@@ -45,10 +45,18 @@ CREATE INDEX IF NOT EXISTS idx_wdc_promoted ON wallet_discovery_candidates(promo
 """
 
 LOOKBACK_DAYS = 30
-DISCOVERY_MIN_WINS = 3              # at least 3 winning signals
-DISCOVERY_MIN_RESOLVED = 5          # over at least 5 resolved
-DISCOVERY_MIN_WR = 0.55             # WR ≥ 55%
-DISCOVERY_MIN_PNL = 0.0             # net positive paper PnL
+# 2026-04-30: tightened thresholds. Prior settings (3W/5R/55%) caused
+# +459 wallets to be promoted to insider_wallets in a single run on
+# 2026-04-29 (16 → 475). At n=5, a 60% WR is one heads-flip away from
+# 50% — pure noise gets through. Raising the bar both stops noise and
+# preserves the goal (find genuinely-profitable wallets that lifetime-
+# PnL leaderboard scan misses).
+DISCOVERY_MIN_WINS = 6              # at least 6 winning signals
+DISCOVERY_MIN_RESOLVED = 10         # over at least 10 resolved
+DISCOVERY_MIN_WR = 0.60             # WR ≥ 60% (Wilson-95 lower bound on
+                                    # 6/10 ≈ 30%, so this still allows
+                                    # noise; future: switch to Wilson)
+DISCOVERY_MIN_PNL = 5.0             # net +$5 paper PnL minimum
 
 
 def _ensure_schema(conn) -> None:

@@ -238,4 +238,13 @@ export const api = {
   killSwitchReset: () => post('/system/kill-switch/reset'),
   signalLiveReadiness: () => get('/signals/live-readiness'),
   insidersList: () => get('/insiders/list'),
+  decisionFunnel: (hours = 24) => get(`/funnel/decisions?hours=${hours}`),
+  decisionFunnelBreakdown: (gate, opts = {}) => {
+    const q = new URLSearchParams({ gate, hours: opts.hours ?? 24, group_by: opts.groupBy ?? 'category' })
+    if (opts.surface) q.append('surface', opts.surface)
+    if (opts.limit) q.append('limit', opts.limit)
+    return get(`/funnel/decisions/breakdown?${q.toString()}`)
+  },
+  ladderStatus: () => get('/ladder/status'),
+  systemReadiness: () => get('/system/readiness'),
 }

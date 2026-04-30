@@ -169,3 +169,53 @@ def funnel_summary(
     finally:
         try: conn.close()
         except Exception: pass
+
+
+def gate_breakdown(
+    gate: str,
+    hours: int = 24,
+    surface: str | None = None,
+    group_by: str = "category",
+    limit: int = 20,
+    db_path: str | None = None,
+) -> list[dict[str, Any]]:
+    """Drill into a single gate's rejections, grouped by `category`,
+    `signal_type`, `wallet`, or `detail`. Answers questions like
+    'which categories are killing LIVE_CAT_GATE?'.
+    """
+    if group_by not in {"category", "signal_type", "wallet", "detail"}:
+        group_by = "category"
+    try:
+        conn = get_connection(db_path) if db_path else get_connection()
+    except Exception:
+        return []
+    try:
+        _ensure_schema(conn)
+        cutoff = int(time.time()) - hours * 3600
+        params: list[Any] = [cutoff, gate]
+        sql = (
+            f"""SELECT COALESCE({group_by}, '<null>') AS bucket,
+                       SUM(CASE WHEN passed=1 THEN 1 ELSE 0 END) AS passed,
+                       SUM(CASE WHEN passed=0 THEN 1 ELSE 0 END) AS rejected,
+                       COUNT(*) AS total
+                  FROM decision_trace
+                 WHERE decision_ts > ?
+                   AND gate = ?"""
+        )
+        if surface:
+            sql += " AND surface = ?"
+            params.append(surface)
+        sql += f" GROUP BY {group_by} ORDER BY rejected DESC LIMIT {int(limit)}"
+        rows = conn.execute(sql, tuple(params)).fetchall()
+        return [
+            {
+                "bucket": r[0],
+                "passed": int(r[1] or 0),
+                "rejected": int(r[2] or 0),
+                "total": int(r[3] or 0),
+            }
+            for r in rows
+        ]
+    finally:
+        try: conn.close()
+        except Exception: pass

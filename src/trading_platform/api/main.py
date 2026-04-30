@@ -1585,6 +1585,79 @@ def decision_funnel(hours: int = 24) -> dict[str, Any]:
         return {"hours": hours, "by_gate": [], "error": str(exc)[:200]}
 
 
+@app.get("/api/calibration/debug")
+def calibration_debug(category: str | None = None) -> dict[str, Any]:
+    """Inspect the live isotonic curve. Verifies whether
+    apply_calibration() actually moves a 0.99 input — if it returns
+    ~0.99, the curve isn't loaded and trade-time calibration is
+    silently a no-op (the explanation for Brier 0.347 not improving
+    despite the daily fit job running 'ok').
+    """
+    try:
+        from trading_platform.polymarket.isotonic_calibration import (
+            apply_calibration, _curve_cache, _load_curve,
+        )
+        from trading_platform.polymarket.wallet_db import WalletDB
+        db_path = str(WalletDB()._path)
+        _load_curve(category, db_path)
+        key = category or ""
+        curve = _curve_cache.get(key) or {}
+        # Sample probe values to show curve effect
+        probes = [0.10, 0.30, 0.50, 0.70, 0.85, 0.95, 0.99]
+        mapped = {f"{p:.2f}": round(apply_calibration(p, category=category, db_path=db_path), 4) for p in probes}
+        return {
+            "category": category,
+            "curve_loaded": bool(curve.get("bp_x")),
+            "n_breakpoints": len(curve.get("bp_x") or []),
+            "bp_x": curve.get("bp_x") or [],
+            "bp_y": curve.get("bp_y") or [],
+            "fitted_at": curve.get("fitted_at"),
+            "probe_mappings": mapped,
+        }
+    except Exception as exc:
+        return {"error": str(exc)[:240]}
+
+
+@app.get("/api/kelly/debug")
+def kelly_debug(signal_type: str) -> dict[str, Any]:
+    """Expose the full KellySizer.compute_kelly() response for debugging
+    why a signal returns Kelly=0 despite passing visible gates.
+    """
+    try:
+        from trading_platform.polymarket.kelly_sizer import KellySizer
+        from trading_platform.polymarket.wallet_db import WalletDB
+        sizer = KellySizer(str(WalletDB()._path))
+        return sizer.compute_kelly(signal_type)
+    except Exception as exc:
+        return {"error": str(exc)[:240]}
+
+
+@app.get("/api/funnel/decisions/breakdown")
+def decision_funnel_breakdown(
+    gate: str,
+    hours: int = 24,
+    surface: str | None = None,
+    group_by: str = "category",
+    limit: int = 20,
+) -> dict[str, Any]:
+    """Drill into a single gate's rejections, grouped by category/
+    signal_type/wallet/detail. Answers 'which categories are killing
+    LIVE_CAT_GATE?'.
+    """
+    try:
+        from trading_platform.polymarket.decision_trace import gate_breakdown
+        rows = gate_breakdown(
+            gate=gate, hours=hours, surface=surface,
+            group_by=group_by, limit=limit,
+        )
+        return {
+            "gate": gate, "hours": hours, "surface": surface,
+            "group_by": group_by, "buckets": rows,
+        }
+    except Exception as exc:
+        return {"gate": gate, "buckets": [], "error": str(exc)[:200]}
+
+
 @app.get("/api/live/funnel")
 def live_trade_funnel() -> dict[str, Any]:
     """Per-gate drop counts for the live executor over the past 24h.

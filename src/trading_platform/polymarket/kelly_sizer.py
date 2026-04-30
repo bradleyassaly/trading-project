@@ -83,45 +83,36 @@ class KellySizer:
     ) -> list[tuple[float, int]]:
         """Return [(outcome_delta, is_win), ...].
 
-        Primary source: signal_outcomes (live-fired signals with resolutions).
-        Fallback: signal_backtest_results — if a signal type has <5 live
-        resolved outcomes but has backtest evidence, use the backtest's
-        (ev, wr, resolved) to synthesise pseudo-rows so Kelly has something
-        to size against. Backtest rows are under-weighted by using only
-        50% of their count — same approach as the kill switch blend.
+        Primary source: polymarket_paper_trades (placed-trade EV — the
+        distribution we actually traded).
+        Fallback: signal_outcomes (every fire including rejected ones).
+
+        2026-04-29: priority flipped. Previously signal_outcomes was
+        primary, but it records every signal *fire* (rejected + placed)
+        — its EV embeds the gates' selection bias and is systematically
+        worse than the placed-trade EV. For whale_entry: signal_outcomes
+        n=155, EV=-0.099 vs paper_trades n=15, EV=+1.30. Sizing live
+        capital from placed-trade history matches the distribution we'd
+        actually trade.
         """
         try:
             conn = get_connection(self._db_path)
         except Exception:
             return []
+        rows: list = []
+        # Primary: placed paper trades (the population that would actually go live)
         try:
             if category:
                 rows = conn.execute(
-                    """SELECT outcome_delta, is_win FROM signal_outcomes
+                    """SELECT realized_pnl / NULLIF(size_usd, 0),
+                              CASE WHEN outcome='win' THEN 1 ELSE 0 END
+                       FROM polymarket_paper_trades
                        WHERE signal_type = ? AND category = ?
-                         AND resolution_price IS NOT NULL
-                         AND outcome_delta IS NOT NULL""",
+                         AND archived = 0 AND exit_ts IS NOT NULL
+                         AND realized_pnl IS NOT NULL AND size_usd > 0""",
                     (signal_type, category),
                 ).fetchall()
             else:
-                rows = conn.execute(
-                    """SELECT outcome_delta, is_win FROM signal_outcomes
-                       WHERE signal_type = ?
-                         AND resolution_price IS NOT NULL
-                         AND outcome_delta IS NOT NULL""",
-                    (signal_type,),
-                ).fetchall()
-        except sqlite3.OperationalError:
-            rows = []
-        # Fallback to polymarket_paper_trades when signal_outcomes has no
-        # resolutions for this signal_type. The live_readiness endpoint
-        # reads from paper_trades while Kelly historically read only from
-        # signal_outcomes — leading to the "ready but Kelly=$0" mismatch
-        # that blocked every whale_entry_filtered auto-live fire.
-        # (Prior to 2026-04-18 this fallback only triggered on SQLite
-        # OperationalError, which never fires under Postgres.)
-        if not rows:
-            try:
                 rows = conn.execute(
                     """SELECT realized_pnl / NULLIF(size_usd, 0),
                               CASE WHEN outcome='win' THEN 1 ELSE 0 END
@@ -131,7 +122,29 @@ class KellySizer:
                          AND realized_pnl IS NOT NULL AND size_usd > 0""",
                     (signal_type,),
                 ).fetchall()
-            except Exception:
+        except Exception:
+            rows = []
+        # Fallback: signal_outcomes (signal fires; broader sample but
+        # selection-biased). Only used when no placed trades exist.
+        if not rows:
+            try:
+                if category:
+                    rows = conn.execute(
+                        """SELECT outcome_delta, is_win FROM signal_outcomes
+                           WHERE signal_type = ? AND category = ?
+                             AND resolution_price IS NOT NULL
+                             AND outcome_delta IS NOT NULL""",
+                        (signal_type, category),
+                    ).fetchall()
+                else:
+                    rows = conn.execute(
+                        """SELECT outcome_delta, is_win FROM signal_outcomes
+                           WHERE signal_type = ?
+                             AND resolution_price IS NOT NULL
+                             AND outcome_delta IS NOT NULL""",
+                        (signal_type,),
+                    ).fetchall()
+            except sqlite3.OperationalError:
                 rows = []
         try:
             conn.close()
@@ -221,6 +234,20 @@ class KellySizer:
         n = n_effective
 
         # Kelly fraction f* = (p*b - q) / b where b = avg_win/avg_loss
+        # 2026-04-29: signal_outcomes records is_win but often leaves
+        # outcome_delta NULL or 0 for both wins and losses (schema gap).
+        # That made avg_win and avg_loss both 0 for whale_entry, which
+        # left full_kelly=0 despite WR=80% — blocking every real-money
+        # trade. When deltas are missing/zero but we have a clean wr>0.5
+        # signal, impute symmetric default magnitudes (10% per leg, the
+        # mode of Polymarket entry-exit deltas) so Kelly resolves to
+        # ``(2*wr - 1)`` — a conservative, magnitude-free Kelly.
+        DEFAULT_DELTA = 0.10
+        if wr > 0.5 and (avg_win <= 0 or avg_loss <= 0):
+            if avg_win <= 0:
+                avg_win = DEFAULT_DELTA
+            if avg_loss <= 0:
+                avg_loss = DEFAULT_DELTA
         if avg_win > 0 and avg_loss > 0:
             b = avg_win / avg_loss
             full_kelly = (wr * b - (1 - wr)) / b

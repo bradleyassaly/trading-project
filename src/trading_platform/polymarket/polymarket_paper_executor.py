@@ -85,13 +85,56 @@ MIN_CONFIDENCE = 0.35
 # edge get a lower floor so we collect more resolution data — otherwise
 # whale_entry_filtered at 0.29 confidence is silently dropped. Learned
 # from the 1929-fires/1-placed ratio over a 24h window.
+# 2026-04-29: lowered whale_entry to 0.25. Bayesian gate (n=15, WR=80%,
+# Brier 0.18, P(acc≥55%)=0.96) makes it the best-calibrated signal in
+# the system, yet 140/day fire and 0/day place. Mostly killed by
+# CAT_GATE_UNPROVEN + CONF_FLOOR. Bypass below + this lower floor to
+# unblock paper placements.
 MIN_CONFIDENCE_BY_TYPE = {
     "price_velocity": 0.25,
+    "whale_entry": 0.25,
     "whale_entry_filtered": 0.25,
     "high_conviction_insider": 0.30,
     "insider_entry": 0.30,
     "specialist_entry": 0.30,
 }
+
+# Signals that have cleared the per-signal Bayesian L0→L1 gate
+# (P(acc≥55%) > 0.90 on n≥8). These bypass CAT_GATE_UNPROVEN since
+# their EV is proven across categories, and skip the unproven-category
+# block. They still respect EXCLUDE_CATEGORIES + tier gating.
+PROMOTABLE_SIGNALS = {"whale_entry", "resolution_decay"}
+
+# Brier-tier sizing. Signals are bucketed by their 30d Brier score
+# (lower = better calibrated). Untiered signals get 1.0×. Calibration
+# tier overrides any other multiplier (specialist boost, slice promo)
+# multiplicatively.
+#   Tier A (Brier ≤ 0.25):   1.0×  (well calibrated — full size)
+#   Tier B (Brier 0.25-0.40): 0.5× (partial size — collect data)
+#   Tier C (Brier > 0.40):    0.0× (paper-only via flag — no live capital)
+# Source: /api/calibration by_signal as of 2026-04-29.
+SIGNAL_CALIBRATION_TIER = {
+    # Tier A — well calibrated
+    "whale_entry":           "A",  # Brier 0.176
+    "whale_entry_filtered":  "A",  # Brier 0.250
+    # Tier B — moderate
+    "wallet_reversal":       "B",  # Brier 0.286
+    "specialist_entry":      "B",  # Brier 0.299
+    "market_maker_flip":     "B",  # Brier 0.313
+    "oversized_bet":         "B",  # Brier 0.323
+    "cascade":               "B",  # Brier 0.333
+    "consensus_follower":    "B",  # Brier 0.231 but n=3
+    "strategy_specialist":   "B",  # Brier 0.357
+    # Tier C — chronically miscalibrated (no live capital)
+    "network_leader_entry":  "C",  # Brier 0.426
+    "convergence":           "C",  # Brier 0.442
+    "no_position_entry":     "C",  # Brier 0.454
+    "copyable_contrarian":   "C",  # Brier 0.479
+    "news_reactor":          "C",  # Brier 0.502
+    "accumulation":          "C",  # Brier 0.517
+    "insider_entry":         "C",  # Brier 0.410 on n=3
+}
+CALIBRATION_TIER_MULTIPLIER = {"A": 1.0, "B": 0.5, "C": 0.25}
 MAX_POSITION_PCT = 0.15
 MIN_STAKE = 25.0
 STARTING_BANKROLL = 10_000  # Paper validation phase — not production size
@@ -652,15 +695,34 @@ class PolymarketPaperExecutor:
                 pass
             return None
         if sig_cat not in PAPER_TRADE_CATEGORIES:
-            logger.info("[CAT_GATE] SKIP %s in unproven category %s", signal_type, sig_cat or "<empty>")
-            try:
-                from trading_platform.polymarket.decision_trace import trace as _dt
-                _dt(signal=signal, gate="CAT_GATE_UNPROVEN", passed=False,
-                    detail=sig_cat or "<empty>", surface="paper",
-                    db_path=str(self._wallet_db_path))
-            except Exception:
-                pass
-            return None
+            # 2026-04-29: PROMOTABLE_SIGNALS bypass. whale_entry has
+            # P(acc≥55%)=0.96 on n=15 — its EV is proven independent of
+            # category. Without this bypass, 140/day fires get
+            # zero placements because most categories are still
+            # "unproven" by the population-wide gate.
+            if signal_type in PROMOTABLE_SIGNALS:
+                logger.info(
+                    "[CAT_GATE] BYPASS %s (promotable) in unproven cat %s",
+                    signal_type, sig_cat or "<empty>",
+                )
+                try:
+                    from trading_platform.polymarket.decision_trace import trace as _dt
+                    _dt(signal=signal, gate="CAT_GATE_UNPROVEN", passed=True,
+                        detail=f"bypass:{signal_type}:{sig_cat or '<empty>'}",
+                        surface="paper",
+                        db_path=str(self._wallet_db_path))
+                except Exception:
+                    pass
+            else:
+                logger.info("[CAT_GATE] SKIP %s in unproven category %s", signal_type, sig_cat or "<empty>")
+                try:
+                    from trading_platform.polymarket.decision_trace import trace as _dt
+                    _dt(signal=signal, gate="CAT_GATE_UNPROVEN", passed=False,
+                        detail=sig_cat or "<empty>", surface="paper",
+                        db_path=str(self._wallet_db_path))
+                except Exception:
+                    pass
+                return None
 
         # Tier gate for TIER1_ONLY_CATEGORIES (e.g. sports): the full
         # sports population is -$44K over 4,707 trades, but tier1-only
@@ -1091,6 +1153,17 @@ class PolymarketPaperExecutor:
                         )
             except Exception:
                 pass
+        # 2026-04-29: Brier-tier sizing. Apply BEFORE the hard cap so
+        # tier-C signals can't be amplified above 0.25× by other boosts.
+        # Source: /api/calibration by_signal — see SIGNAL_CALIBRATION_TIER.
+        cal_tier = SIGNAL_CALIBRATION_TIER.get(signal_type)
+        if cal_tier:
+            cal_mult = CALIBRATION_TIER_MULTIPLIER[cal_tier]
+            if cal_mult != 1.0:
+                mult *= cal_mult
+                logger.info(
+                    "[CAL_TIER] %s tier=%s ×%.2f", signal_type, cal_tier, cal_mult,
+                )
         # Hard cap on combined multiplier
         mult = min(1.6, mult)
         # 2026-04-24: wallet earliness boost. Wallets whose 7d WR exceeds

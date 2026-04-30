@@ -1385,7 +1385,16 @@ class WhaleSignalEngine:
         # EXCLUDE_SIGNAL_SIDE. The previous singleton whitelist combined
         # with a too-tight YES_FAV_GATE produced 0 live trades for 7
         # days despite 1192 whale_entry_filtered signals firing.
-        LIVE_SIGNAL_TYPES = {"whale_entry_filtered", "wallet_reversal", "cascade"}
+        # 2026-04-29: added `whale_entry`. The live executor's
+        # LIVE_REAL_SIGNAL_TYPES allowlist only fires real money on
+        # whale_entry, but the engine here was filtering it out before
+        # it ever reached the executor — guaranteeing zero real trades.
+        # whale_entry has the strongest Bayesian gate verdict
+        # (n=15 / WR=80% / P(acc≥55%)=0.96 per /api/ladder/status).
+        LIVE_SIGNAL_TYPES = {
+            "whale_entry", "whale_entry_filtered",
+            "wallet_reversal", "cascade",
+        }
         if signal_type in LIVE_SIGNAL_TYPES:
             try:
                 from trading_platform.polymarket.polymarket_live_executor import PolymarketLiveExecutor
