@@ -643,6 +643,35 @@ class PolymarketLiveExecutor:
         except Exception as exc:
             logger.debug("live_trades record failed: %s", exc)
 
+        # 2026-04-30: Telegram alert on the FIRST real trade. Loud + idempotent
+        # — fires only if this row is dry_run=0 AND no prior real trades exist.
+        # Goal: operator gets paged the moment autonomous live trading starts.
+        if not dry_run:
+            try:
+                conn2 = sqlite3.connect(self._db_path, timeout=2.0)
+                prior = conn2.execute(
+                    """SELECT COUNT(*) FROM live_trades
+                        WHERE dry_run = 0 AND status IN ('submitted','live','matched')""",
+                ).fetchone()
+                conn2.close()
+                is_first = (prior and int(prior[0]) <= 1)  # <=1 because we just inserted
+                from trading_platform.polymarket.telegram_alerts import get_alerter
+                alerter = get_alerter()
+                tag = "🚨 FIRST REAL TRADE" if is_first else "💰 LIVE TRADE"
+                ep_disp = f"{entry_price:.3f}" if entry_price is not None else "n/a"
+                size_disp = f"${size_usd:.2f}" if size_usd is not None else "?"
+                msg = (
+                    f"<b>{tag}</b>\n"
+                    f"signal=<code>{signal.get('signal_type')}</code> "
+                    f"side={signal.get('direction','BUY')}\n"
+                    f"size={size_disp} @ {ep_disp}\n"
+                    f"market={(signal.get('question') or '')[:80]}\n"
+                    f"status={status}"
+                )
+                alerter._send(msg, disable_notification=False)
+            except Exception as exc:
+                logger.debug("first-trade alert failed: %s", exc)
+
     def _result(
         self,
         success: bool,

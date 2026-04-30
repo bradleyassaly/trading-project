@@ -1057,7 +1057,12 @@ class TelegramAlerter:
                 lines.append(f"\u26a0\ufe0f {st}: silent for {hours_ago:.0f}h")
 
         msg = "\n".join(lines) + _FOOTER
-        return self._send(msg, disable_notification=True)
+        # 2026-04-30: was disable_notification=True, which subjected the
+        # digest to quiet-hours dropping (3-11 UTC). Daily digest is
+        # operator-requested + scheduled — should fire regardless of
+        # local time. Caused 4 consecutive 'digest sent: False' fails
+        # because the cron lands in the 3-11 UTC quiet window.
+        return self._send(msg, disable_notification=False)
 
     # ── Order book anomaly ──────────────────────────────────────────────────
 
