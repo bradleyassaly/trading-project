@@ -497,6 +497,25 @@ SCHEDULE: list[Task] = [
         description="Phase D: cross-platform arb (PM vs Kalshi)",
     ),
     Task(
+        # 2026-04-30: Kalshi market ingestion — populates kalshi_markets
+        # table that cross_platform_arb_strategy reads. Public Kalshi
+        # API; no creds needed for top-of-book.
+        name="kalshi_ingest",
+        cmd="python -m trading_platform.polymarket.kalshi_ingest",
+        interval_seconds=15 * 60,
+        description="Pull active Kalshi markets for cross-platform arb",
+    ),
+    Task(
+        # 2026-04-30: PM↔Kalshi auto-mapper. Scores PM/Kalshi pairs by
+        # token Jaccard + close-time proximity. Auto-promotes pairs at
+        # score>=0.70 to cross_platform_market_map (used by arb scanner).
+        # Daily cadence; chained after kalshi_ingest.
+        name="cross_platform_mapper",
+        cmd="python -m trading_platform.polymarket.cross_platform_mapper",
+        interval_seconds=24 * 3600,
+        description="Auto-map PM↔Kalshi pairs by similarity",
+    ),
+    Task(
         # 2026-04-30: Phase E — sport pre-game CLV (line-move follow).
         # Behind PHASE_E_SPORT_CLV_ENABLED. 15-min cadence covers
         # pre-game windows.

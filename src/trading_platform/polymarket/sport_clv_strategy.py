@@ -128,7 +128,13 @@ def _candidate_markets(conn) -> list[dict[str, Any]]:
 
 def _line_move(conn, condition_id: str) -> float | None:
     """Return signed YES-price delta over LOOKBACK_HOURS. None if no
-    history."""
+    history.
+
+    2026-04-30: market_ticks is sparse for sport markets (most have
+    <10 ticks per 6h window). Fall back to fetching the market's
+    oneDayPriceChange / oneHourPriceChange directly from the Gamma
+    API when ticks are insufficient. Coarse but unblocks the strategy.
+    """
     cutoff = int(time.time()) - int(LOOKBACK_HOURS * 3600)
     try:
         rows = conn.execute(
@@ -138,10 +144,31 @@ def _line_move(conn, condition_id: str) -> float | None:
             (condition_id, cutoff),
         ).fetchall()
     except Exception:
-        return None
-    if len(rows) < 2:
-        return None
-    return float(rows[-1][1] or 0.0) - float(rows[0][1] or 0.0)
+        rows = []
+    if len(rows) >= 2:
+        return float(rows[-1][1] or 0.0) - float(rows[0][1] or 0.0)
+    # Fallback: hit Gamma API for fresh price-change fields. Slow but
+    # only triggered when ticks are sparse — typically <10 candidates
+    # per run, so an acceptable cost.
+    try:
+        import json as _json
+        import urllib.request as _ur
+        url = f"https://gamma-api.polymarket.com/markets?condition_ids={condition_id}"
+        req = _ur.Request(url, headers={"User-Agent": "trading-platform"})
+        with _ur.urlopen(req, timeout=5) as resp:
+            data = _json.loads(resp.read().decode("utf-8"))
+        if not isinstance(data, list) or not data:
+            return None
+        m = data[0]
+        one_day = m.get("oneDayPriceChange")
+        one_hour = m.get("oneHourPriceChange")
+        if one_day is not None:
+            return float(one_day) * (LOOKBACK_HOURS / 24.0)
+        if one_hour is not None:
+            return float(one_hour) * LOOKBACK_HOURS
+    except Exception as exc:
+        logger.debug("[SPORT_CLV] gamma fallback failed: %s", exc)
+    return None
 
 
 def _confidence(line_move: float, hours_to_resolve: float) -> float:

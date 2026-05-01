@@ -45,9 +45,14 @@ logger = logging.getLogger(__name__)
 SIGNAL_TYPE = "btc_5min_imbalance"
 ENV_FLAG = "PHASE_C_BTC_5MIN_ENABLED"
 
-# Window: only fire when resolution is between MIN and MAX seconds away
+# Window: only fire when resolution is between MIN and MAX seconds away.
+# 2026-04-30: widened from [30s, 90s] → [30s, 240s]. With 60s scheduler
+# cadence and 60s catch window, ~80% of markets were missed because the
+# scheduler ran out of phase with the resolution clock. 240s window
+# guarantees every market gets ≥3 fire opportunities. Earliness lift
+# captured in confidence (closer-to-resolve = higher conviction).
 MIN_SECONDS_TO_RESOLVE = 30
-MAX_SECONDS_TO_RESOLVE = 90
+MAX_SECONDS_TO_RESOLVE = 240
 
 # Imbalance threshold (when OB data available)
 MIN_DEPTH_IMBALANCE = 0.30  # 30% skew
@@ -270,7 +275,7 @@ def run_pipeline() -> dict[str, Any]:
         return {
             "elapsed_seconds": round(time.time() - t0, 2),
             "candidates": 0, "fired": 0,
-            "note": "no active 5-min markets in [30s, 90s] window",
+            "note": f"no active 5-min markets in [{MIN_SECONDS_TO_RESOLVE}s, {MAX_SECONDS_TO_RESOLVE}s] window",
         }
     conn = get_connection()
     try:
