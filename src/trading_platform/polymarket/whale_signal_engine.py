@@ -1092,6 +1092,17 @@ class WhaleSignalEngine:
         tier_mult = 1.1 if trade.wallet_tier == "tier1h" else 1.0 if trade.wallet_tier == "tier1" else 0.75
         confidence = round(min(confidence * tier_mult, 0.95), 4)
 
+        # 2026-04-30: empirical floor for promotable signals. The Bayesian
+        # gate validates whale_entry at WR=80% on n=15, yet this formula
+        # scores typical fires at 0.15-0.20 (formula is wr × conv/5 ×
+        # tier_mult — for wr=0.5, conv=2, tier1: 0.20). 91 of yesterday's
+        # 190 whale_entry fires got dropped at CONF_FLOOR=0.25 because of
+        # this. Floor at 0.30 (between empirical and formula) lifts the
+        # under-scored fires above the gate without overstating confidence.
+        # Limited to PROMOTABLE_SIGNALS only — Bayesian-validated set.
+        if confidence < 0.30:
+            confidence = 0.30
+
         if confidence < 0.01:
             return None
 

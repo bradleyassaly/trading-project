@@ -412,7 +412,7 @@ class PolymarketLiveExecutor:
             elif "min_resolved" in r or "minimum resolved" in r or "n=" in r and "<" in r:
                 code = "MIN_RESOLVED"
                 level = logger.warning
-            elif "ev" in r and ("negative" in r or "<" in r or "below" in r):
+            elif "ev" in r and ("negative" in r or "<" in r or "below" in r or "not positive" in r or "no measured edge" in r):
                 code = "EV"
                 level = logger.warning
             elif "wr" in r and ("low" in r or "<" in r or "below" in r):

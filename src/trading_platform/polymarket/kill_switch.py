@@ -148,17 +148,25 @@ class KillSwitch:
             return KillSwitchResult(False, f"DB unavailable: {exc}", warnings)
 
         try:
+            # 2026-04-30: was reading AVG(return_pct) but that column has
+            # historical mixed units (some rows ratio, some rows
+            # percentage-number) — same pollution that skewed
+            # live_readiness EV by 100×. For whale_entry, return_pct path
+            # gave avg=-13.4 (interpreted as -0.134 EV — blocked); the
+            # canonical realized_pnl/size_usd path gives +1.30. Now reads
+            # the same source as KellySizer + readiness endpoint.
             row = conn.execute(
                 """SELECT COUNT(*) AS n,
-                          AVG(return_pct) AS avg_return_pct,
+                          AVG(realized_pnl / NULLIF(size_usd, 0)) AS avg_ev,
                           SUM(CASE WHEN outcome='win' THEN 1 ELSE 0 END) AS wins
                    FROM polymarket_paper_trades
                    WHERE signal_type = ? AND archived = 0
-                     AND exit_ts IS NOT NULL""",
+                     AND exit_ts IS NOT NULL
+                     AND realized_pnl IS NOT NULL AND size_usd > 0""",
                 (signal_type,),
             ).fetchone()
             n_live = (row[0] or 0) if row else 0
-            avg_return_pct = (row[1] or 0.0) if row else 0.0
+            avg_ev_live = (row[1] or 0.0) if row else 0.0
             wins = (row[2] or 0) if row else 0
 
             # Pull most-recent backtest evidence for this signal type.
@@ -231,7 +239,10 @@ class KillSwitch:
                 )
 
             # Blended EV — live data gets 2x weight when both exist.
-            ev_live = avg_return_pct / 100.0 if n_live else None
+            # 2026-04-30: avg_ev_live is now realized_pnl/size_usd ratio
+            # (already a fractional EV), no /100 needed. Was dividing
+            # the bad return_pct value by 100 before.
+            ev_live = avg_ev_live if n_live else None
             if ev_live is not None and bt_ev is not None:
                 ev = (2 * ev_live * n_live + bt_ev * bt_n) / (2 * n_live + bt_n)
             elif ev_live is not None:
