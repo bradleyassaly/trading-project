@@ -122,25 +122,36 @@ PROMOTABLE_SIGNALS = {"whale_entry", "resolution_decay"}
 #   Tier C (Brier > 0.40):    0.0× (paper-only via flag — no live capital)
 # Source: /api/calibration by_signal as of 2026-04-29.
 SIGNAL_CALIBRATION_TIER = {
-    # Tier A — well calibrated
-    "whale_entry":           "A",  # Brier 0.176
-    "whale_entry_filtered":  "A",  # Brier 0.250
-    # Tier B — moderate
-    "wallet_reversal":       "B",  # Brier 0.286
-    "specialist_entry":      "B",  # Brier 0.299
-    "market_maker_flip":     "B",  # Brier 0.313
-    "oversized_bet":         "B",  # Brier 0.323
-    "cascade":               "B",  # Brier 0.333
-    "consensus_follower":    "B",  # Brier 0.231 but n=3
-    "strategy_specialist":   "B",  # Brier 0.357
-    # Tier C — chronically miscalibrated (no live capital)
-    "network_leader_entry":  "C",  # Brier 0.426
-    "convergence":           "C",  # Brier 0.442
-    "no_position_entry":     "C",  # Brier 0.454
-    "copyable_contrarian":   "C",  # Brier 0.479
-    "news_reactor":          "C",  # Brier 0.502
-    "accumulation":          "C",  # Brier 0.517
-    "insider_entry":         "C",  # Brier 0.410 on n=3
+    # 2026-05-01: re-tiered against fresh 60-day backtest (n>=100).
+    # Tiering now reflects backtest EV, not Brier alone — Brier
+    # measures calibration quality but doesn't capture signal direction.
+    # whale_entry has decent Brier (0.18) but EV=-30.9% on n=1,892:
+    # well-calibrated DOES NOT mean profitable. Re-tier accordingly.
+
+    # Tier A — proven backtest EV ≥ +10% on n ≥ 50
+    "wallet_reversal":       "A",  # n=192, WR=72%, EV=+10.1%
+    "specialist_entry":      "A",  # n=60,  WR=80%, EV=+12.7%
+    # Tier B — small-n positive EV (need more samples to graduate)
+    "tier_entry":            "B",  # n=16, EV=+26% but small sample
+    "whale_exit":            "B",  # n=17, EV=+3.5% but small sample
+    "position_reduction":    "B",  # n=4 — pin until 50+
+    "strategy_specialist":   "B",  # n=177, EV=-2.8% (close to break-even)
+    # Tier C — chronically negative EV in fresh backtest. Paper-only,
+    # 0.25× stake, never live.
+    "whale_entry":           "C",  # n=1892, EV=-30.9% (was Tier A — fresh
+                                   # backtest reveals the truth)
+    "whale_entry_filtered":  "C",  # not in fresh BT but correlated
+    "network_leader_entry":  "C",  # n=607, EV=-26.5%
+    "oversized_bet":         "C",  # n=289, EV=-31.2%
+    "market_maker_flip":     "C",  # n=883, EV=-58.4%
+    "copyable_contrarian":   "C",  # n=913, EV=-57.9%
+    "no_position_entry":     "C",  # n=600, EV=-93.1% catastrophic
+    "cascade":               "C",  # not in fresh BT
+    "convergence":           "C",  # not in fresh BT
+    "consensus_follower":    "C",
+    "news_reactor":          "C",
+    "accumulation":          "C",
+    "insider_entry":         "C",
     # 2026-04-30: new parallel-alpha strategies. All start tier-C
     # (paper-only stake 0.25×) until n>=20 resolutions accumulate
     # and Bayesian/Brier promote them.

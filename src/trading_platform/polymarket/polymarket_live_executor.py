@@ -53,7 +53,18 @@ class PolymarketLiveExecutor:
     #   whale_entry — Bayesian validated 2026-04-27:
     #     n=13 resolved, WR=77%, P(acc≥55%)=0.915
     #     /api/ladder/status promotable_signals confirms
-    LIVE_REAL_SIGNAL_TYPES: set[str] = {"whale_entry"}
+    # 2026-05-01: pivoted from {whale_entry} after fresh backtest.
+    # whale_entry on n=1,892 historical replays: WR 47%, EV -30.9%.
+    # The Bayesian gate's positive verdict was reading a small (n=15)
+    # gate-filtered sample, not the real signal distribution. The
+    # kill_switch's blended-EV block was correct.
+    #
+    # New allowlist points at the two signals with proven backtest edge:
+    #   wallet_reversal:    n=192, WR=72%, EV=+10.1%
+    #   specialist_entry:   n=60,  WR=80%, EV=+12.7%
+    # Both are tier-B per Brier ranking; tier-C overall sizing
+    # multiplier remains, plus LIVE_REAL_MAX_STAKE_USD=$1 hard cap.
+    LIVE_REAL_SIGNAL_TYPES: set[str] = {"wallet_reversal", "specialist_entry"}
 
     # ALWAYS True in source. Flip in your local instance only.
     # Class default applies to non-allowlisted signal types.
