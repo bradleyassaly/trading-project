@@ -173,13 +173,35 @@ def fit_calibration(
         breakpoints_json = json.dumps(
             [{"x": round(x, 4), "y": round(y, 4)} for x, y in breakpoints]
         )
-        # Only persist curves that actually improve Brier — prevents
-        # over-fit per-category curves (e.g. entertainment at n=40)
-        # from overriding the better global fallback at lookup time.
+        # 2026-05-01: previously the only persistence guard was Brier
+        # improvement >1%. Discovered today the live curve had collapsed
+        # to a degenerate near-flat line (bp_y.max ≈ 0.50, all inputs
+        # mapped into [0, 0.50]). That technically improves Brier on
+        # balanced samples but destroys ALL signal — every gate that
+        # needs confidence > 0.5 now rejects every trade. Add two
+        # additional guards:
+        #   1. n_samples >= 50 (prevents fitting on tiny noise samples)
+        #   2. bp_y range >= 0.30 (prevents collapse to flat line)
+        bp_y_vals = [b[1] for b in breakpoints]
+        bp_range = max(bp_y_vals) - min(bp_y_vals) if bp_y_vals else 0
+        too_flat = bp_range < 0.30
+        too_small = len(rows) < 50
         if brier_after >= brier_before * 0.99:
             logger.info(
                 "[CALIB] %s curve not persisted (Brier %.4f → %.4f, no improvement)",
                 category or "GLOBAL", brier_before, brier_after,
+            )
+        elif too_flat:
+            logger.warning(
+                "[CALIB] %s curve REJECTED — degenerate flat line "
+                "(bp_y range=%.2f < 0.30, max=%.2f). "
+                "Low Brier from collapse, not calibration.",
+                category or "GLOBAL", bp_range, max(bp_y_vals),
+            )
+        elif too_small:
+            logger.info(
+                "[CALIB] %s curve not persisted (n=%d < 50)",
+                category or "GLOBAL", len(rows),
             )
         else:
             try:

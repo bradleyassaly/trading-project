@@ -57,10 +57,59 @@ def _tokenize(s: str) -> set[str]:
     if not s:
         return set()
     s = s.lower()
-    # Strip non-alphanumeric except spaces
+    # Strip non-alphanumeric except spaces (preserves digits for $150K etc)
     s = re.sub(r"[^a-z0-9\s]", " ", s)
     toks = {t for t in s.split() if t and t not in _STOPWORDS and len(t) > 1}
     return toks
+
+
+def _bigrams(toks: list[str]) -> set[str]:
+    """Token bigrams capture 'New York' / 'Hong Kong' / etc."""
+    if len(toks) < 2:
+        return set()
+    return {f"{toks[i]}_{toks[i+1]}" for i in range(len(toks) - 1)}
+
+
+def _numeric_tokens(s: str) -> set[str]:
+    """Extract numeric tokens (dates, dollar amounts, percentages).
+
+    These are highly discriminating — '150k', '2026', '70%' rarely
+    co-occur unless markets are about the same outcome.
+    """
+    if not s:
+        return set()
+    out = set()
+    # Dollar amounts: $150k, $1m, $50,000
+    for m in re.finditer(r"\$?(\d+(?:,\d{3})*(?:\.\d+)?)\s*([kmb]?)", s.lower()):
+        num = m.group(1).replace(",", "")
+        unit = m.group(2)
+        out.add(f"num_{num}{unit}")
+    # Year tokens (2025, 2026, 2027)
+    for m in re.finditer(r"\b(202[3-9])\b", s):
+        out.add(f"yr_{m.group(1)}")
+    # Percentage thresholds
+    for m in re.finditer(r"(\d+)\s*%", s):
+        out.add(f"pct_{m.group(1)}")
+    return out
+
+
+# Generic political / geo / economic entities — bonus for shared mention
+_ENTITY_PATTERNS = re.compile(
+    r"\b(trump|biden|harris|putin|xi|netanyahu|powell|fed|fomc|"
+    r"iran|china|russia|ukraine|israel|gaza|north korea|saudi|"
+    r"taiwan|taiwan|venezuela|nato|congress|senate|"
+    r"bitcoin|ethereum|btc|eth|sol|solana|"
+    r"recession|inflation|cpi|gdp|yield|treasury|"
+    r"openai|google|microsoft|apple|tesla|meta|amazon|nvidia|"
+    r"musk|altman|gates|zuckerberg)\b",
+    re.IGNORECASE,
+)
+
+
+def _entities(s: str) -> set[str]:
+    if not s:
+        return set()
+    return {m.group(1).lower() for m in _ENTITY_PATTERNS.finditer(s)}
 
 
 def _jaccard(a: set[str], b: set[str]) -> float:
@@ -71,22 +120,51 @@ def _jaccard(a: set[str], b: set[str]) -> float:
     return inter / union if union else 0.0
 
 
+def _weighted_similarity(pm_q: str, kalshi_title: str) -> float:
+    """Weighted combo: 0.4 unigram Jaccard + 0.3 bigram + 0.2 numeric +
+    0.1 entity overlap. Heavily penalizes superficial-only matches.
+    """
+    pm_uni = _tokenize(pm_q)
+    k_uni = _tokenize(kalshi_title)
+    pm_bi = _bigrams(sorted(pm_uni))
+    k_bi = _bigrams(sorted(k_uni))
+    pm_num = _numeric_tokens(pm_q)
+    k_num = _numeric_tokens(kalshi_title)
+    pm_ent = _entities(pm_q)
+    k_ent = _entities(kalshi_title)
+    score = (
+        0.40 * _jaccard(pm_uni, k_uni)
+        + 0.30 * _jaccard(pm_bi, k_bi)
+        + 0.20 * _jaccard(pm_num, k_num)
+        + 0.10 * _jaccard(pm_ent, k_ent)
+    )
+    # Hard requirement: must share at least one entity OR one numeric
+    # token. Pure-text overlap (e.g. "Trump-North-Korea" vs "Trump-North-
+    # Carolina") otherwise scores too high.
+    if not (pm_ent & k_ent) and not (pm_num & k_num):
+        score *= 0.40  # heavy penalty
+    return score
+
+
 def _score(pm_q: str, kalshi_title: str,
            pm_close: int | None, kalshi_close: int | None) -> float:
-    j = _jaccard(_tokenize(pm_q), _tokenize(kalshi_title))
-    if j < 0.30:
-        return 0.0  # token overlap too weak
-    # Close-time proximity bonus: 1.0 if within 1 day, decays linearly
+    """2026-05-01: replaced single-Jaccard with weighted combo
+    (unigram + bigram + numeric tokens + entity overlap). Hard
+    requirement that shared entity OR shared numeric token must
+    exist eliminates the 'Trump-North-Korea vs Trump-North-Carolina'
+    false positives that plagued v1.
+    """
+    base = _weighted_similarity(pm_q, kalshi_title)
+    if base < 0.20:
+        return 0.0
     time_factor = 1.0
     if pm_close and kalshi_close:
         gap = abs(pm_close - kalshi_close)
         if gap > MAX_CLOSE_TIME_GAP_SECONDS:
             return 0.0
         time_factor = max(0.5, 1.0 - gap / MAX_CLOSE_TIME_GAP_SECONDS)
-    # Length similarity (markets phrased similarly tend to have
-    # similar question lengths)
     len_factor = 1.0 - min(0.3, abs(len(pm_q) - len(kalshi_title)) / 200.0)
-    return round(j * time_factor * len_factor, 4)
+    return round(base * time_factor * len_factor, 4)
 
 
 def _ensure_schemas(conn) -> None:
@@ -106,7 +184,7 @@ def _ensure_schemas(conn) -> None:
         logger.debug("schema ensure failed: %s", exc)
 
 
-def run_mapper(max_pm: int = 500, max_kalshi: int = 500) -> dict[str, Any]:
+def run_mapper(max_pm: int = 500, max_kalshi: int = 5000) -> dict[str, Any]:
     """Find candidate PM↔Kalshi pairs.
 
     Restrict to politics/geopolitics for the first pass — those are the

@@ -1865,10 +1865,15 @@ def system_readiness() -> dict[str, Any]:
             ).fetchone()[0]
         last_wt = float(last_wt) if last_wt else 0
         age_min = (now - last_wt) / 60 if last_wt else 99999
+        # 2026-05-01: widened 60min → 240min. Watched-wallet activity is
+        # genuinely bursty — 24h baseline is ~10K trades but multi-hour
+        # gaps during off-peak are normal (US overnight, weekends).
+        # Keeping a tight 60min threshold made DEGRADED status persist
+        # through every routine quiet period.
         add(
-            "wallet_trades_fresh", age_min < 60,
+            "wallet_trades_fresh", age_min < 240,
             f"last trade {age_min:.1f}min ago",
-            blocking=False,  # warn, don't fail readiness on bursty ingestion
+            blocking=False,
         )
     except Exception as exc:
         add("wallet_trades_fresh", False, f"error: {str(exc)[:60]}", blocking=False)
