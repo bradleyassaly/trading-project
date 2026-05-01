@@ -478,6 +478,43 @@ SCHEDULE: list[Task] = [
         description="Phase B: resolution-time decay independent signal",
     ),
     Task(
+        # 2026-04-30: Phase C — BTC 5-minute order-book imbalance +
+        # velocity strategy. Highest sample-rate alpha (~288 markets/day
+        # on BTC alone). Behind PHASE_C_BTC_5MIN_ENABLED. 60s cadence
+        # because 5-min markets cycle that fast.
+        name="btc_5min_strategy",
+        cmd="python -m trading_platform.polymarket.btc_5min_strategy",
+        interval_seconds=60,
+        description="Phase C: BTC 5-min OB imbalance + velocity",
+    ),
+    Task(
+        # 2026-04-30: Phase D — cross-platform arb scanner (PM vs
+        # Kalshi). Behind PHASE_D_ARB_ENABLED. Empty until pairs are
+        # mapped via cross_platform_market_map.
+        name="cross_platform_arb",
+        cmd="python -m trading_platform.polymarket.cross_platform_arb_strategy",
+        interval_seconds=60,
+        description="Phase D: cross-platform arb (PM vs Kalshi)",
+    ),
+    Task(
+        # 2026-04-30: Phase E — sport pre-game CLV (line-move follow).
+        # Behind PHASE_E_SPORT_CLV_ENABLED. 15-min cadence covers
+        # pre-game windows.
+        name="sport_clv_strategy",
+        cmd="python -m trading_platform.polymarket.sport_clv_strategy",
+        interval_seconds=15 * 60,
+        description="Phase E: sport pre-game closing-line value",
+    ),
+    Task(
+        # 2026-04-30: Phase F — election-eve momentum (politics late
+        # move follow-through). Behind PHASE_F_ELECTION_EVE_ENABLED.
+        # 30-min cadence.
+        name="election_eve_strategy",
+        cmd="python -m trading_platform.polymarket.election_eve_strategy",
+        interval_seconds=30 * 60,
+        description="Phase F: election-eve momentum (politics)",
+    ),
+    Task(
         name="pnl_reconstruction",
         # FIFO lot-matching across wallet_trades to compute realized PnL
         # from pre-resolution sells (not just resolved markets). Writes

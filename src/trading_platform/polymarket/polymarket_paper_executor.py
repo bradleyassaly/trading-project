@@ -133,6 +133,13 @@ SIGNAL_CALIBRATION_TIER = {
     "news_reactor":          "C",  # Brier 0.502
     "accumulation":          "C",  # Brier 0.517
     "insider_entry":         "C",  # Brier 0.410 on n=3
+    # 2026-04-30: new parallel-alpha strategies. All start tier-C
+    # (paper-only stake 0.25×) until n>=20 resolutions accumulate
+    # and Bayesian/Brier promote them.
+    "btc_5min_imbalance":    "C",
+    "cross_platform_arb":    "C",
+    "sport_pregame_clv":     "C",
+    "election_eve_momentum": "C",
 }
 CALIBRATION_TIER_MULTIPLIER = {"A": 1.0, "B": 0.5, "C": 0.25}
 MAX_POSITION_PCT = 0.15
