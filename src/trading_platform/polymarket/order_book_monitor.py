@@ -76,6 +76,67 @@ class OrderBookMonitor:
         self._db_path = db_path
         # cid -> [(ts, imbalance, bid_usd, ask_usd)]
         self._history: dict[str, list[tuple[int, float, float, float]]] = {}
+        self._snapshot_schema_ready = False
+
+    def _ensure_snapshot_schema(self, conn) -> None:
+        """Lazy-create order_book_snapshots table.
+
+        Wired 2026-04-30 to support strategies (e.g. btc_5min_strategy)
+        that read OB depth at trade-time. Previously the monitor kept
+        history only in process memory — strategies couldn't query it.
+        """
+        if self._snapshot_schema_ready:
+            return
+        try:
+            conn.execute(
+                """CREATE TABLE IF NOT EXISTS order_book_snapshots (
+                    id BIGSERIAL PRIMARY KEY,
+                    condition_id TEXT NOT NULL,
+                    token_id TEXT,
+                    ts BIGINT NOT NULL,
+                    yes_bid_depth_usd DOUBLE PRECISION,
+                    yes_ask_depth_usd DOUBLE PRECISION,
+                    mid_price DOUBLE PRECISION,
+                    imbalance_ratio DOUBLE PRECISION
+                )"""
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_obs_cid_ts "
+                "ON order_book_snapshots(condition_id, ts DESC)"
+            )
+            conn.commit()
+            self._snapshot_schema_ready = True
+        except Exception as exc:
+            logger.debug("OB snapshot schema ensure failed: %s", exc)
+
+    def _persist_snapshot(self, snap: "OrderBookSnapshot") -> None:
+        """Write one snapshot row. Best-effort; never raises."""
+        if not self._db_path:
+            return
+        try:
+            from trading_platform.polymarket.db_connection import get_connection
+            conn = get_connection(self._db_path)
+            try:
+                self._ensure_snapshot_schema(conn)
+                conn.execute(
+                    """INSERT INTO order_book_snapshots
+                       (condition_id, token_id, ts, yes_bid_depth_usd,
+                        yes_ask_depth_usd, mid_price, imbalance_ratio)
+                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        snap.condition_id, snap.token_id, snap.timestamp,
+                        float(snap.bid_depth_usd or 0),
+                        float(snap.ask_depth_usd or 0),
+                        float(snap.mid_price or 0),
+                        float(snap.imbalance_ratio or 0),
+                    ),
+                )
+                conn.commit()
+            finally:
+                try: conn.close()
+                except Exception: pass
+        except Exception as exc:
+            logger.debug("OB snapshot persist failed: %s", exc)
 
     # ── Snapshot fetch ───────────────────────────────────────────────────────
 
@@ -248,6 +309,11 @@ class OrderBookMonitor:
         current = self.fetch_snapshot(condition_id, token_id)
         if not current:
             return []
+
+        # 2026-04-30: persist snapshot so trade-time strategies (e.g.
+        # btc_5min) can read recent depth without keeping the monitor
+        # process-shared. Best-effort; failure never blocks anomaly path.
+        self._persist_snapshot(current)
 
         history = self._history.setdefault(condition_id, [])
         previous = history[-1] if history else None
