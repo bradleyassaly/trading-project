@@ -137,9 +137,9 @@ def _price_velocity(conn, condition_id: str, lookback_s: int) -> float:
     cutoff = int(time.time()) - lookback_s
     try:
         rows = conn.execute(
-            """SELECT ts, yes_price FROM market_ticks
-                WHERE condition_id = ? AND ts > ?
-                ORDER BY ts ASC""",
+            """SELECT timestamp, price FROM market_ticks
+                WHERE condition_id = ? AND timestamp > ?
+                ORDER BY timestamp ASC""",
             (condition_id, cutoff),
         ).fetchall()
     except Exception:

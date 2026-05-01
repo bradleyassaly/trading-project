@@ -112,21 +112,12 @@ def _fetch_price(token_id: str, side: str = "buy") -> float | None:
 
 
 def _ensure_market_ticks_schema(conn) -> None:
-    """market_ticks already exists in the canonical schema, but lazy-
-    create it here too in case this is the first writer in a fresh DB."""
+    """market_ticks canonical schema is (id, condition_id, token_id,
+    timestamp, price). Don't recreate — just ensure index exists."""
     try:
         conn.execute(
-            """CREATE TABLE IF NOT EXISTS market_ticks (
-                id BIGSERIAL PRIMARY KEY,
-                condition_id TEXT NOT NULL,
-                token_id TEXT,
-                ts BIGINT NOT NULL,
-                yes_price DOUBLE PRECISION,
-                no_price DOUBLE PRECISION
-            )"""
-        )
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_market_ticks_cid_ts ON market_ticks(condition_id, ts DESC)"
+            "CREATE INDEX IF NOT EXISTS idx_market_ticks_cid_ts "
+            "ON market_ticks(condition_id, timestamp DESC)"
         )
         conn.commit()
     except Exception:
@@ -155,10 +146,9 @@ def run_collector() -> dict[str, Any]:
             try:
                 conn.execute(
                     """INSERT INTO market_ticks
-                         (condition_id, token_id, ts, yes_price, no_price)
-                       VALUES (?,?,?,?,?)""",
-                    (m["condition_id"], m["yes_token_id"], now_ts,
-                     yes_buy, round(1.0 - yes_buy, 4)),
+                         (condition_id, token_id, timestamp, price)
+                       VALUES (?,?,?,?)""",
+                    (m["condition_id"], m["yes_token_id"], now_ts, yes_buy),
                 )
                 ticks_written += 1
             except Exception as exc:

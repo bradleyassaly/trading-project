@@ -138,9 +138,9 @@ def _line_move(conn, condition_id: str) -> float | None:
     cutoff = int(time.time()) - int(LOOKBACK_HOURS * 3600)
     try:
         rows = conn.execute(
-            """SELECT ts, yes_price FROM market_ticks
-                WHERE condition_id = ? AND ts > ?
-                ORDER BY ts ASC""",
+            """SELECT timestamp, price FROM market_ticks
+                WHERE condition_id = ? AND timestamp > ?
+                ORDER BY timestamp ASC""",
             (condition_id, cutoff),
         ).fetchall()
     except Exception:

@@ -97,6 +97,14 @@ MIN_CONFIDENCE_BY_TYPE = {
     "high_conviction_insider": 0.30,
     "insider_entry": 0.30,
     "specialist_entry": 0.30,
+    # 2026-05-01: tier-A/B signals were silently dropping below the 0.35
+    # default floor. CONF_FLOOR funnel showed oversized_bet=59 and
+    # wallet_reversal=38 rejected in 12h despite both being Brier-tier B.
+    # Lowering to 0.20 lets the calibration tier multiplier (0.5×) handle
+    # sizing instead of binary block.
+    "oversized_bet":   0.20,
+    "wallet_reversal": 0.20,
+    "cascade":         0.20,
 }
 
 # Signals that have cleared the per-signal Bayesian L0→L1 gate
