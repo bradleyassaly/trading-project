@@ -64,13 +64,17 @@ H4_WINDOW = (15, 90)
 H5_WINDOW = (30, 90)
 H6_WINDOW = (30, 240)
 
-# Thresholds
-H1_MIN_IMB = 0.30
-H1_MIN_VEL = 0.03
-H2_MIN_VEL = 0.05
-H3_PRICE_THRESH_HIGH = 0.70  # yes > 0.70 → bet NO
-H3_PRICE_THRESH_LOW = 0.30   # yes < 0.30 → bet YES
-H4_MIN_VEL_60S = 0.05
+# Thresholds — 2026-05-01: relaxed after observing 5-min markets are
+# typically calmer than expected. With 24h of tick data and 0 fires,
+# original thresholds (3-5% velocity) catch almost nothing. Lower
+# thresholds will fire more, making the race actually testable. The
+# random_baseline hypothesis controls for over-trading.
+H1_MIN_IMB = 0.20
+H1_MIN_VEL = 0.015
+H2_MIN_VEL = 0.025
+H3_PRICE_THRESH_HIGH = 0.65  # yes > 0.65 → bet NO
+H3_PRICE_THRESH_LOW = 0.35   # yes < 0.35 → bet YES
+H4_MIN_VEL_60S = 0.025
 H5_PRICE_HIGH = 0.55
 H5_PRICE_LOW = 0.45
 

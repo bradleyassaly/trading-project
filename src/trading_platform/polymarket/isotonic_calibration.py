@@ -184,7 +184,12 @@ def fit_calibration(
         #   2. bp_y range >= 0.30 (prevents collapse to flat line)
         bp_y_vals = [b[1] for b in breakpoints]
         bp_range = max(bp_y_vals) - min(bp_y_vals) if bp_y_vals else 0
+        bp_max = max(bp_y_vals) if bp_y_vals else 0
         too_flat = bp_range < 0.30
+        # 2026-05-01: also reject curves where bp_max < 0.65. The first
+        # calibration curve had bp_max=0.495 — high-conf signals could
+        # never map above 50%, breaking every conf>0.5 gate downstream.
+        too_compressed = bp_max < 0.65
         too_small = len(rows) < 50
         if brier_after >= brier_before * 0.99:
             logger.info(
@@ -196,7 +201,13 @@ def fit_calibration(
                 "[CALIB] %s curve REJECTED — degenerate flat line "
                 "(bp_y range=%.2f < 0.30, max=%.2f). "
                 "Low Brier from collapse, not calibration.",
-                category or "GLOBAL", bp_range, max(bp_y_vals),
+                category or "GLOBAL", bp_range, bp_max,
+            )
+        elif too_compressed:
+            logger.warning(
+                "[CALIB] %s curve REJECTED — compressed top "
+                "(bp_y max=%.2f < 0.65). Would kill every high-conf signal.",
+                category or "GLOBAL", bp_max,
             )
         elif too_small:
             logger.info(

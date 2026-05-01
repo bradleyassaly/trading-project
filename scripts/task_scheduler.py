@@ -521,10 +521,33 @@ SCHEDULE: list[Task] = [
         # 2026-04-30: Kalshi market ingestion — populates kalshi_markets
         # table that cross_platform_arb_strategy reads. Public Kalshi
         # API; no creds needed for top-of-book.
+        # 2026-05-01: scope reduced to flat 10-page sweep (~25s).
+        # Heavy event-targeted scan moved to kalshi_ingest_deep below.
         name="kalshi_ingest",
         cmd="python -m trading_platform.polymarket.kalshi_ingest",
         interval_seconds=15 * 60,
-        description="Pull active Kalshi markets for cross-platform arb",
+        description="Pull active Kalshi top-2K markets for cross-platform arb",
+    ),
+    Task(
+        # 2026-05-01: hourly smoke tests catching cross-cutting issues
+        # that pre-deploy checks would have. Schema mismatches, scope
+        # bugs, degenerate calibration curves — each lesson learned the
+        # hard way → translated to a check here.
+        name="smoke_tests",
+        cmd="python -m trading_platform.polymarket.smoke_tests",
+        interval_seconds=3600,
+        description="Hourly invariant checks — catch silent breakages",
+    ),
+    Task(
+        # 2026-05-01: heavy daily scan — pulls events by category
+        # (Elections, Politics, World, Economics, Crypto, Companies,
+        # Climate, Science) and drills into each event for markets.
+        # ~5-10 min runtime. Was bundled into kalshi_ingest before but
+        # caused 40 consecutive 450s timeouts.
+        name="kalshi_ingest_deep",
+        cmd="python -m trading_platform.polymarket.kalshi_ingest --deep",
+        interval_seconds=24 * 3600,
+        description="Daily deep Kalshi scan (politics/world/macro markets)",
     ),
     Task(
         # 2026-04-30: PM↔Kalshi auto-mapper. Scores PM/Kalshi pairs by

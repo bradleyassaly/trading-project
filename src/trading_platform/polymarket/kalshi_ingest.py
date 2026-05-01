@@ -27,11 +27,15 @@ logger = logging.getLogger(__name__)
 
 KALSHI_BASE = "https://api.elections.kalshi.com/trade-api/v2"
 PAGE_LIMIT = 200  # Kalshi max per page
-# 2026-04-30: increased 20 → 50 (4K → 10K markets/run). Top 4K are
-# dominated by sports parlay multi-event tickers (KXMVE*). Real
-# political/news markets live deeper in pagination. 10K total is still
-# tractable in ~45s and covers the categories we actually want to arb.
-MAX_PAGES = 50
+# 2026-05-01: dropped 50 → 10. The 50-page sweep + targeted events scan
+# combined to >450s, exceeding the 15-min task timeout (max=interval/2).
+# 40 consecutive failures overnight took the whole system to NOT_READY.
+# Now: flat sweep is 2K markets in <30s. The heavy /events targeted
+# scan moved to a separate kalshi_ingest_deep task running daily.
+MAX_PAGES = 10
+# Skip the per-event drill-down on the regular cadence — it's the slow
+# part. Set to True only when running the daily deep ingest.
+DEEP_EVENTS_SCAN = False
 
 
 _SCHEMA = """
@@ -254,9 +258,11 @@ def run_ingest() -> dict[str, Any]:
             if not cursor:
                 break
             n_pages += 1
-        # Then targeted-categories pass — captures politics/world/etc.
-        # markets that sit deep behind sports parlays in flat sweep.
-        n_event_pages, n_event_markets = _ingest_events(conn, now)
+        # 2026-05-01: deep events scan only on opt-in. The fast path
+        # is the flat sweep above; deep scan is now its own daily task.
+        n_event_pages, n_event_markets = (0, 0)
+        if DEEP_EVENTS_SCAN:
+            n_event_pages, n_event_markets = _ingest_events(conn, now)
         conn.commit()
         return {
             "elapsed_seconds": round(time.time() - t0, 1),
@@ -269,9 +275,34 @@ def run_ingest() -> dict[str, Any]:
         except Exception: pass
 
 
+def run_deep_ingest() -> dict[str, Any]:
+    """Heavy daily scan — pulls events targeted by category and drills
+    into each event for individual markets. Slow (~5-10 min) but
+    required for political/news arb pairs that don't surface in the
+    flat sweep.
+    """
+    t0 = time.time()
+    conn = get_connection()
+    try:
+        _ensure_schema(conn)
+        n_event_pages, n_event_markets = _ingest_events(conn, int(time.time()))
+        conn.commit()
+        return {
+            "elapsed_seconds": round(time.time() - t0, 1),
+            "event_pages": n_event_pages, "event_market_upserts": n_event_markets,
+        }
+    finally:
+        try: conn.close()
+        except Exception: pass
+
+
 def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(message)s")
-    print(run_ingest())
+    import sys
+    if "--deep" in sys.argv:
+        print(run_deep_ingest())
+    else:
+        print(run_ingest())
     return 0
 
 
