@@ -8,6 +8,7 @@ import { SignalBadge, TierBadge } from '../components/Badges'
 import AccuracySparkline from '../components/charts/AccuracySparkline'
 import CumulativePnLChart from '../components/charts/CumulativePnLChart'
 import AutonomousLiveTile from '../components/AutonomousLiveTile'
+import HypothesisRaceTile from '../components/HypothesisRaceTile'
 import { fmtUsd, fmtPct, fmtRelTime } from '../lib/format'
 
 function relTime(ts) {
@@ -1245,6 +1246,12 @@ export default function Dashboard() {
       {/* Autonomous live trading status — answers "are we trading
           live yet, and if not, what's the binding gate?" at a glance. */}
       <AutonomousLiveTile />
+
+      {/* 6-hypothesis race on crypto 5-min markets. Direct view into
+          which alpha is actually working. Loud when n_resolved hits 20. */}
+      <div className="card">
+        <HypothesisRaceTile />
+      </div>
 
       <ThesisScorecard data={thesis} history={thesisHistory} />
 

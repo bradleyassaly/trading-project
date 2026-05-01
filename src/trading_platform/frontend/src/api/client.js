@@ -247,4 +247,5 @@ export const api = {
   },
   ladderStatus: () => get('/ladder/status'),
   systemReadiness: () => get('/system/readiness'),
+  hypothesisRace: (hours = 168) => get(`/hypothesis/race?window_hours=${hours}`),
 }
