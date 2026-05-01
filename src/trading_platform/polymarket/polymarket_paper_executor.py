@@ -140,6 +140,15 @@ SIGNAL_CALIBRATION_TIER = {
     "cross_platform_arb":    "C",
     "sport_pregame_clv":     "C",
     "election_eve_momentum": "C",
+    # 2026-04-30: 6 racing hypotheses on crypto 5-min markets. All tier-C
+    # initially. The calibration loop ranks them after n>=20; winners
+    # graduate to tier-B/A.
+    "h1_ob_velocity":        "C",
+    "h2_pure_velocity":      "C",
+    "h3_mean_reversion":     "C",
+    "h4_late_momentum":      "C",
+    "h5_close_position":     "C",
+    "h6_random_baseline":    "C",
 }
 CALIBRATION_TIER_MULTIPLIER = {"A": 1.0, "B": 0.5, "C": 0.25}
 MAX_POSITION_PCT = 0.15

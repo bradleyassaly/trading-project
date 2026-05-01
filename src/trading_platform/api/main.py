@@ -1585,6 +1585,77 @@ def decision_funnel(hours: int = 24) -> dict[str, Any]:
         return {"hours": hours, "by_gate": [], "error": str(exc)[:200]}
 
 
+@app.get("/api/hypothesis/race")
+def hypothesis_race(window_hours: int = 168) -> dict[str, Any]:
+    """Compare 6 racing hypotheses on crypto 5-min markets.
+
+    Reads polymarket_paper_trades for {h1_ob_velocity, h2_pure_velocity,
+    h3_mean_reversion, h4_late_momentum, h5_close_position,
+    h6_random_baseline} over the last `window_hours`. Returns each
+    hypothesis's WR, EV, Brier, n_resolved, and rank. h6_random_baseline
+    is the null hypothesis — anything that doesn't beat it is no
+    better than chance.
+    """
+    from trading_platform.polymarket.db_connection import get_connection
+    HYPOTHESES = ("h1_ob_velocity", "h2_pure_velocity", "h3_mean_reversion",
+                  "h4_late_momentum", "h5_close_position", "h6_random_baseline")
+    try:
+        conn = get_connection()
+        out: list[dict[str, Any]] = []
+        cutoff = f"extract(epoch FROM NOW() - interval '{int(window_hours)} hours')::bigint"
+        for h in HYPOTHESES:
+            row = conn.execute(
+                f"""SELECT COUNT(*) AS n_placed,
+                          COALESCE(SUM(CASE WHEN exit_ts IS NOT NULL THEN 1 ELSE 0 END),0) AS n_resolved,
+                          COALESCE(SUM(CASE WHEN outcome='win' THEN 1 ELSE 0 END),0) AS wins,
+                          COALESCE(AVG(CASE WHEN exit_ts IS NOT NULL AND size_usd > 0
+                                           THEN realized_pnl/size_usd END),0) AS avg_ev,
+                          COALESCE(SUM(realized_pnl),0) AS net_pnl,
+                          COALESCE(AVG((confidence - CASE WHEN outcome='win' THEN 1.0 ELSE 0.0 END)
+                                       * (confidence - CASE WHEN outcome='win' THEN 1.0 ELSE 0.0 END)),0) AS brier
+                     FROM polymarket_paper_trades
+                    WHERE signal_type = ? AND archived = 0
+                      AND entry_ts > {cutoff}""",
+                (h,),
+            ).fetchone()
+            n_placed = int(row[0] or 0)
+            n_resolved = int(row[1] or 0)
+            wins = int(row[2] or 0)
+            wr = wins / n_resolved if n_resolved > 0 else None
+            out.append({
+                "hypothesis": h,
+                "n_placed": n_placed,
+                "n_resolved": n_resolved,
+                "wins": wins,
+                "win_rate": round(wr, 3) if wr is not None else None,
+                "avg_ev": round(float(row[3] or 0), 4),
+                "net_pnl": round(float(row[4] or 0), 2),
+                "brier": round(float(row[5] or 0), 4) if n_resolved > 0 else None,
+            })
+        try: conn.close()
+        except Exception: pass
+        # Rank by avg_ev desc among hypotheses with n_resolved >= 5
+        ranked = sorted(
+            [h for h in out if h["n_resolved"] >= 5],
+            key=lambda h: -h["avg_ev"],
+        )
+        for i, h in enumerate(ranked):
+            h["rank"] = i + 1
+        baseline = next((h for h in out if h["hypothesis"] == "h6_random_baseline"), None)
+        return {
+            "window_hours": window_hours,
+            "hypotheses": out,
+            "ranked": ranked,
+            "baseline_random_brier": baseline["brier"] if baseline else None,
+            "interpretation": (
+                "Hypotheses with WR > baseline_random WR + Brier < 0.25 + n_resolved ≥ 20"
+                " are candidate alpha sources. Below baseline = no edge."
+            ),
+        }
+    except Exception as exc:
+        return {"error": str(exc)[:240]}
+
+
 @app.get("/api/calibration/debug")
 def calibration_debug(category: str | None = None) -> dict[str, Any]:
     """Inspect the live isotonic curve. Verifies whether

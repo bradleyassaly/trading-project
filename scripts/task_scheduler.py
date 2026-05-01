@@ -488,6 +488,27 @@ SCHEDULE: list[Task] = [
         description="Phase C: BTC 5-min OB imbalance + velocity",
     ),
     Task(
+        # 2026-04-30: Tick collector for crypto 5-min markets — fills
+        # the data gap that historical backtest can't (PM doesn't
+        # backfill OHLC for 5-min markets). 30s cadence × 7 tickers ×
+        # 10min window. Required dependency for the hypothesis race.
+        name="crypto_5min_tick_collector",
+        cmd="python -m trading_platform.polymarket.crypto_5min_tick_collector",
+        interval_seconds=30,
+        description="Phase C: poll-based tick collection for 5-min markets",
+    ),
+    Task(
+        # 2026-04-30: 6-hypothesis race on crypto 5-min markets. Each
+        # hypothesis fires its own signal_type so the calibration loop
+        # ranks them. Behind PHASE_C_BTC_5MIN_RACE_ENABLED — turn on
+        # only after the tick collector has been writing for ~1h
+        # (otherwise velocity/imbalance signals are noise).
+        name="crypto_5min_hypothesis_race",
+        cmd="python -m trading_platform.polymarket.crypto_5min_hypothesis_race",
+        interval_seconds=60,
+        description="Phase C: 6-hypothesis race for systematic comparison",
+    ),
+    Task(
         # 2026-04-30: Phase D — cross-platform arb scanner (PM vs
         # Kalshi). Behind PHASE_D_ARB_ENABLED. Empty until pairs are
         # mapped via cross_platform_market_map.
