@@ -28,15 +28,13 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[3]
 _DEFAULT_DB = str(_PROJECT_ROOT / "data" / "polymarket" / "wallet_intelligence.db")
 
 # Thresholds — paper uses relaxed values; live overrides in constructor.
-# 2026-05-01: bumped paper max_positions 10 → 60. Open count was 30
-# (oldest entry 22d ago). With 6+ alpha lanes firing daily, the 10-cap
-# blocked EVERY new signal silently. Paper has no real-money risk; the
-# cap should accommodate sample accumulation across all strategies.
-# Live cap stays at 5.
+# 2026-05-02: 60-cap filled overnight (97 trades/24h after gate
+# unblocking). Bumping to 150. Real fix is auto-closing stale
+# positions, but cap raise is the immediate unblock. Live cap = 5.
 _PAPER_THRESHOLDS = {
     "max_price_move_pct": 0.05,
     "max_category_pct": 0.30,
-    "max_positions": 60,
+    "max_positions": 150,
     "depth_multiple": 2.0,
     "spread_safety_factor": 1.5,
 }
