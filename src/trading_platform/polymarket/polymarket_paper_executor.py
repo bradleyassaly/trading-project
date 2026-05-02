@@ -103,15 +103,25 @@ MIN_CONFIDENCE_BY_TYPE = {
     # Lowering to 0.20 lets the calibration tier multiplier (0.5×) handle
     # sizing instead of binary block.
     "oversized_bet":   0.20,
-    "wallet_reversal": 0.20,
+    "wallet_reversal": 0.10,  # Tier-A backtest; need to fire to validate live
+    "specialist_entry": 0.10,  # Tier-A backtest; same reason
     "cascade":         0.20,
 }
 
 # Signals that have cleared the per-signal Bayesian L0→L1 gate
-# (P(acc≥55%) > 0.90 on n≥8). These bypass CAT_GATE_UNPROVEN since
-# their EV is proven across categories, and skip the unproven-category
-# block. They still respect EXCLUDE_CATEGORIES + tier gating.
-PROMOTABLE_SIGNALS = {"whale_entry", "resolution_decay"}
+# (P(acc≥55%) > 0.90 on n≥8) OR have validated backtest edge >= 10%
+# on n>=50. These bypass CAT_GATE_UNPROVEN, and their per-fire
+# confidence gets floored at 0.30 in whale_signal_engine because the
+# raw formula systematically under-scores them.
+# 2026-05-01: added wallet_reversal + specialist_entry. These were
+# pivoted to LIVE_REAL_SIGNAL_TYPES yesterday but still firing 0
+# trades because CONF_FLOOR was rejecting 82 + 13 in 24h.
+PROMOTABLE_SIGNALS = {
+    "whale_entry",         # n=15 paper / Bayesian (still tier-C in backtest)
+    "resolution_decay",    # n=22 paper / Bayesian
+    "wallet_reversal",     # backtest n=192, EV +10.1%, WR 72%
+    "specialist_entry",    # backtest n=60, EV +12.7%, WR 80%
+}
 
 # Brier-tier sizing. Signals are bucketed by their 30d Brier score
 # (lower = better calibrated). Untiered signals get 1.0×. Calibration

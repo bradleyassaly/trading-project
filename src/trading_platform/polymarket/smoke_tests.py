@@ -138,12 +138,55 @@ def _check_strategies_have_data(conn) -> tuple[bool, str]:
         return False, str(exc)[:120]
 
 
+def _check_wallet_stream_health(conn) -> tuple[bool, str]:
+    """Verify watched-wallet trades flowing.
+    2026-05-01: WebSocket dropped for 1+ hour while smoke didn't catch.
+    """
+    try:
+        n_1h = conn.execute(
+            "SELECT COUNT(*) FROM wallet_trades "
+            "WHERE timestamp > extract(epoch FROM NOW() - interval '1 hour')::bigint"
+        ).fetchone()[0]
+        n_8h = conn.execute(
+            "SELECT COUNT(*) FROM wallet_trades "
+            "WHERE timestamp > extract(epoch FROM NOW() - interval '8 hours')::bigint"
+        ).fetchone()[0]
+        # Use 8h baseline to detect regression — if 1h is < 5% of expected
+        expected = max(10, n_8h // 16)  # half the per-hour rate of 8h baseline
+        if n_1h < expected:
+            return False, (f"wallet stream may be stalled — only {n_1h} "
+                           f"trades in last hour (expected ≥{expected})")
+        return True, f"wallet stream healthy ({n_1h} 1h, {n_8h} 8h)"
+    except Exception as exc:
+        return False, str(exc)[:120]
+
+
+def _check_paper_position_cap(conn) -> tuple[bool, str]:
+    """Verify open-position count isn't blocking new placements.
+    2026-05-01: 30 open vs cap=10 silently blocked every signal.
+    """
+    try:
+        from trading_platform.polymarket.execution_gates import _PAPER_THRESHOLDS
+        cap = _PAPER_THRESHOLDS.get("max_positions", 10)
+        n_open = conn.execute(
+            "SELECT COUNT(*) FROM polymarket_paper_trades "
+            "WHERE archived = 0 AND exit_ts IS NULL"
+        ).fetchone()[0]
+        if n_open >= cap * 0.9:
+            return False, f"open positions {n_open}/{cap} — near cap, will block new signals"
+        return True, f"open positions {n_open}/{cap} (room to spare)"
+    except Exception as exc:
+        return False, str(exc)[:120]
+
+
 CHECKS = [
     ("market_ticks_schema", _check_market_ticks_schema),
     ("kalshi_ingest_pace", _check_kalshi_ingest_pace),
     ("calibration_curve_health", _check_calibration_curve_health),
     ("signal_tier_vs_backtest", _check_signal_tier_vs_backtest),
     ("strategies_have_data", _check_strategies_have_data),
+    ("wallet_stream_health", _check_wallet_stream_health),
+    ("paper_position_cap", _check_paper_position_cap),
 ]
 
 
