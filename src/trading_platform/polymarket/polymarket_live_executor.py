@@ -72,7 +72,20 @@ class PolymarketLiveExecutor:
 
     # Hard cap on a real (non-DRY) trade size — defense-in-depth on
     # top of LIVE_DISCOVERY_MAX_STAKE_USD in kill_switch.
+    # 2026-05-02: this is now a FALLBACK. The runtime cap is read from
+    # stake_ladder.get_current_cap() which auto-promotes through tiers
+    # ($1→$5→$25→$100→$500→$2500) based on real-money trade history.
     LIVE_REAL_MAX_STAKE_USD: float = 1.0
+
+    def _live_real_cap(self) -> float:
+        """Read the runtime stake cap from stake_ladder. Falls back to
+        the class default if the ladder hasn't initialized yet."""
+        try:
+            from trading_platform.polymarket.stake_ladder import get_current_cap
+            cap = get_current_cap(db_path=self._db_path)
+            return float(cap) if cap else self.LIVE_REAL_MAX_STAKE_USD
+        except Exception:
+            return self.LIVE_REAL_MAX_STAKE_USD
 
     def __init__(self) -> None:
         self._db = WalletDB()
@@ -500,13 +513,16 @@ class PolymarketLiveExecutor:
             )
 
         # 2026-04-28: per-signal DRY_RUN check + real-trade hard cap.
+        # 2026-05-02: cap is now ladder-driven — auto-promotes
+        # $1→$5→$25→$100→$500→$2500 based on real-money trade history.
         is_dry = self._is_dry_run_for(sig_type)
-        if not is_dry and size_usd > self.LIVE_REAL_MAX_STAKE_USD:
+        runtime_cap = self._live_real_cap()
+        if not is_dry and size_usd > runtime_cap:
             logger.warning(
-                "[LIVE][REAL_CAP] %s clamping size $%.2f → $%.2f (allowlisted real)",
-                sig_type, size_usd, self.LIVE_REAL_MAX_STAKE_USD,
+                "[LIVE][REAL_CAP] %s clamping size $%.2f → $%.2f (ladder cap)",
+                sig_type, size_usd, runtime_cap,
             )
-            size_usd = self.LIVE_REAL_MAX_STAKE_USD
+            size_usd = runtime_cap
 
         logger.info(
             "[LIVE%s] %s %s $%.2f @ %.3f | conf=%.0f%% | %s",

@@ -1201,7 +1201,18 @@ class PolymarketPaperExecutor:
         # 2026-04-29: Brier-tier sizing. Apply BEFORE the hard cap so
         # tier-C signals can't be amplified above 0.25× by other boosts.
         # Source: /api/calibration by_signal — see SIGNAL_CALIBRATION_TIER.
-        cal_tier = SIGNAL_CALIBRATION_TIER.get(signal_type)
+        # 2026-05-02: prefer runtime override from signal_tier_overrides
+        # (auto_tier_promoter writes daily). Falls back to static dict.
+        cal_tier = None
+        try:
+            from trading_platform.polymarket.auto_tier_promoter import get_tier_override
+            override = get_tier_override(signal_type, db_path=str(self._wallet_db_path))
+            if override and override in ("A", "B", "C"):
+                cal_tier = override
+        except Exception:
+            pass
+        if not cal_tier:
+            cal_tier = SIGNAL_CALIBRATION_TIER.get(signal_type)
         if cal_tier:
             cal_mult = CALIBRATION_TIER_MULTIPLIER[cal_tier]
             if cal_mult != 1.0:

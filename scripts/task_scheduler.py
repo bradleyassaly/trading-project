@@ -529,6 +529,41 @@ SCHEDULE: list[Task] = [
         description="Pull active Kalshi top-2K markets for cross-platform arb",
     ),
     Task(
+        # 2026-05-02: per-(signal × category) EV slicer. Enables sharper
+        # tier promotion + per-category live allowlists. 6h cadence.
+        name="signal_category_ev",
+        cmd="python -m trading_platform.polymarket.signal_category_ev",
+        interval_seconds=6 * 3600,
+        description="Compute per-(signal × category) EV slices",
+    ),
+    Task(
+        # 2026-05-02: auto-tier promoter. Reads paper + backtest evidence,
+        # writes signal_tier_overrides. Daily cadence — quick to react,
+        # not so fast we overfit on noise.
+        name="auto_tier_promoter",
+        cmd="python -m trading_platform.polymarket.auto_tier_promoter",
+        interval_seconds=24 * 3600,
+        description="Auto-promote/demote signal tiers from evidence",
+    ),
+    Task(
+        # 2026-05-02: stake ladder — auto-promotes LIVE_REAL_MAX_STAKE
+        # $1 → $5 → $25 → $100 → $500 → $2500 based on real-money
+        # trade history. The actual mechanism toward L5.
+        name="stake_ladder",
+        cmd="python -m trading_platform.polymarket.stake_ladder",
+        interval_seconds=24 * 3600,
+        description="Auto-promote real-money stake cap based on history",
+    ),
+    Task(
+        # 2026-05-02: LLM disambiguator for cross_platform_market_map.
+        # Skips silently if ANTHROPIC_API_KEY unset. Cost-capped at
+        # ~$0.10/run worst case.
+        name="llm_market_matcher",
+        cmd="python -m trading_platform.polymarket.llm_market_matcher",
+        interval_seconds=24 * 3600,
+        description="LLM-confirm PM↔Kalshi candidate pairs",
+    ),
+    Task(
         # 2026-05-01: hourly smoke tests catching cross-cutting issues
         # that pre-deploy checks would have. Schema mismatches, scope
         # bugs, degenerate calibration curves — each lesson learned the

@@ -1585,6 +1585,58 @@ def decision_funnel(hours: int = 24) -> dict[str, Any]:
         return {"hours": hours, "by_gate": [], "error": str(exc)[:200]}
 
 
+@app.get("/api/signal-category-ev")
+def signal_category_ev_view(top_n: int = 20, min_n: int = 10) -> dict[str, Any]:
+    """Top per-(signal × category) slices by EV. Paper-trade-derived."""
+    try:
+        from trading_platform.polymarket.db_connection import get_connection
+        with get_connection() as conn:
+            rows = conn.execute(
+                f"""SELECT signal_type, category, n_resolved, win_rate, avg_ev, sum_pnl, computed_at
+                      FROM signal_category_ev
+                     WHERE n_resolved >= {int(min_n)}
+                     ORDER BY avg_ev DESC LIMIT {int(top_n)}"""
+            ).fetchall()
+        return {
+            "min_n": min_n, "top_n": top_n,
+            "slices": [
+                {"signal_type": r[0], "category": r[1], "n": int(r[2] or 0),
+                 "win_rate": float(r[3] or 0), "avg_ev": float(r[4] or 0),
+                 "sum_pnl": float(r[5] or 0), "computed_at": int(r[6] or 0)}
+                for r in rows
+            ],
+        }
+    except Exception as exc:
+        return {"error": str(exc)[:240]}
+
+
+@app.get("/api/stake-ladder")
+def stake_ladder_view() -> dict[str, Any]:
+    """Current ladder tier + cap, with last evaluation reason."""
+    try:
+        from trading_platform.polymarket.db_connection import get_connection
+        with get_connection() as conn:
+            r = conn.execute(
+                """SELECT tier_index, cap_usd, promoted_at, last_evaluated,
+                          real_n, real_wr, real_pnl, reason
+                     FROM stake_ladder_state ORDER BY promoted_at DESC LIMIT 1"""
+            ).fetchone()
+        if not r:
+            return {"tier_index": 0, "cap_usd": 1.0, "reason": "no state yet"}
+        return {
+            "tier_index": int(r[0]),
+            "cap_usd": float(r[1]),
+            "promoted_at": int(r[2]),
+            "last_evaluated": int(r[3]),
+            "real_n": int(r[4] or 0),
+            "real_wr": float(r[5] or 0),
+            "real_pnl": float(r[6] or 0),
+            "reason": r[7] or "",
+        }
+    except Exception as exc:
+        return {"error": str(exc)[:240]}
+
+
 @app.get("/api/hypothesis/race")
 def hypothesis_race(window_hours: int = 168) -> dict[str, Any]:
     """Compare 6 racing hypotheses on crypto 5-min markets.
