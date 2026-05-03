@@ -169,6 +169,11 @@ SIGNAL_CALIBRATION_TIER = {
     "cross_platform_arb":    "C",
     "sport_pregame_clv":     "C",
     "election_eve_momentum": "C",
+    # 2026-05-02: confluence + whale_exit + order_flow_imbalance
+    # all start tier-C until paper data + backtest validate them.
+    "confluence_2plus":      "C",
+    "whale_exit_cluster":    "C",
+    "order_flow_imbalance":  "C",
     # 2026-04-30: 6 racing hypotheses on crypto 5-min markets. All tier-C
     # initially. The calibration loop ranks them after n>=20; winners
     # graduate to tier-B/A.
@@ -327,6 +332,33 @@ def _is_proven_slice(signal_type: str, category: str, db_path: str) -> bool:
         return bool(row)
     except Exception:
         return False
+
+
+# 2026-05-02: per-slice concurrent-position cap. Proven slices
+# (Tier-A) get up to 20 concurrent paper positions; everyone else
+# uses the global max_positions cap. This lets us load up on the
+# proven edges without letting marginal signals fill the cap.
+PROVEN_SLICE_PER_CAP = 20
+
+
+def _slice_position_count(signal_type: str, category: str, db_path: str) -> int:
+    """Count open paper positions for this (signal, category)."""
+    try:
+        from trading_platform.polymarket.db_connection import get_connection
+        conn = get_connection(db_path)
+        try:
+            row = conn.execute(
+                """SELECT COUNT(*) FROM polymarket_paper_trades
+                    WHERE signal_type = ? AND category = ?
+                      AND archived = 0 AND exit_ts IS NULL""",
+                (signal_type, category),
+            ).fetchone()
+        finally:
+            try: conn.close()
+            except Exception: pass
+        return int(row[0]) if row else 0
+    except Exception:
+        return 0
 
 # 2026-04-24: per-(signal_type, side) block list. The 8d post-Apr-18 cohort
 # revealed clean signal types whose NO-side inversions don't preserve alpha.

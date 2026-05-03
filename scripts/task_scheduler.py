@@ -538,6 +538,33 @@ SCHEDULE: list[Task] = [
         description="Auto-archive stale paper positions (>14d unresolved)",
     ),
     Task(
+        # 2026-05-02: time-of-day + resolution-window EV slicers.
+        # 4 time buckets (UTC) × 3 horizon buckets reveal temporal
+        # alpha patterns hidden in per-signal aggregates.
+        name="signal_temporal_ev",
+        cmd="python -m trading_platform.polymarket.signal_temporal_ev",
+        interval_seconds=24 * 3600,
+        description="Time-of-day + resolution-horizon EV slicers",
+    ),
+    Task(
+        # 2026-05-02: cross-signal confluence detector.
+        # Fires confluence_2plus when 2+ distinct signals fire on
+        # same market within 5min. Behind PHASE_G_CONFLUENCE_ENABLED.
+        name="confluence_detector",
+        cmd="python -m trading_platform.polymarket.confluence_detector",
+        interval_seconds=60,
+        description="Detect cross-signal confluence (2+ signals/5min)",
+    ),
+    Task(
+        # 2026-05-02: whale exit cluster detector.
+        # When 2+ tier-1 whales sell same market within 1h, fire
+        # contrarian signal. Behind PHASE_G_WHALE_EXIT_ENABLED.
+        name="whale_exit_detector",
+        cmd="python -m trading_platform.polymarket.whale_exit_detector",
+        interval_seconds=300,
+        description="Detect coordinated whale exits as contrarian signal",
+    ),
+    Task(
         # 2026-05-02: 3-dim slicer adds wallet_tier dimension.
         # Reveals tier1h vs tier2 EV dispersion within proven slices.
         name="signal_category_wallet_ev",
