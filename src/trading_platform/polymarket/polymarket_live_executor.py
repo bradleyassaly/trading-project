@@ -226,7 +226,35 @@ class PolymarketLiveExecutor:
                         signal["category"] = "sports"
                 except Exception as exc:
                     logger.debug("[LIVE] sports fallback failed: %s", exc)
-        if not cat or cat not in LIVE_TRADE_CATEGORIES:
+        # 2026-05-02: per-(signal, category) bypass. signal_category_ev
+        # exposes proven slices (n>=10, EV>=10%) — let those through
+        # even if the global LIVE_TRADE_CATEGORIES blocks them. The
+        # signal-level allowlist + this slice-level bypass together
+        # form the actual live-eligibility decision.
+        slice_proven = False
+        try:
+            from trading_platform.polymarket.db_connection import get_connection
+            _conn = get_connection(self._db_path)
+            try:
+                _row = _conn.execute(
+                    """SELECT n_resolved, avg_ev FROM signal_category_ev
+                        WHERE signal_type = ? AND category = ?
+                          AND n_resolved >= 10 AND avg_ev >= 0.10""",
+                    (sig_type, cat),
+                ).fetchone()
+            finally:
+                try: _conn.close()
+                except Exception: pass
+            if _row:
+                slice_proven = True
+                logger.info(
+                    "[LIVE][SLICE_BYPASS] %s × %s n=%d EV=%+.0f%% — bypassing LIVE_CAT_GATE",
+                    sig_type, cat, int(_row[0]), float(_row[1]) * 100,
+                )
+        except Exception:
+            pass
+
+        if not slice_proven and (not cat or cat not in LIVE_TRADE_CATEGORIES):
             logger.debug("[LIVE] BLOCKED category=%s — not in live allowlist", cat)
             try:
                 from trading_platform.polymarket.decision_trace import trace as _dt

@@ -245,9 +245,16 @@ EXCLUDE_CATEGORIES: set[str] = set()  # no hard exclusions; tier-gating handles 
 # rejections). Paper data: wallet_reversal × entertainment = 26
 # trades / 50% WR / +$17.40 PnL. Worth letting through to live at
 # discovery-tier $1 stakes.
+# 2026-05-02: added 'science' + 'mentions' based on signal_category_ev.
+# Per-slice evidence:
+#   wallet_reversal × entertainment: n=27 EV +74% (Elon-tweet markets)
+#   network_leader_entry × science: n=17 EV +15%
+#   Top wins yesterday were all 'mentions' subcategory (Elon tweets)
+# These ARE proven slices; widening here lets them through to live
+# instead of dying at LIVE_CAT_GATE while we wait for real samples.
 LIVE_TRADE_CATEGORIES = {
     "politics", "geopolitics", "sports", "crypto",
-    "entertainment", "economics",
+    "entertainment", "economics", "science", "mentions",
 }
 # Signal types to exclude from paper bankroll (fire+record only, no capital).
 # 2026-04-27: max-hours-to-resolve preference. Resolved-hypothesis

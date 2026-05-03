@@ -529,6 +529,15 @@ SCHEDULE: list[Task] = [
         description="Pull active Kalshi top-2K markets for cross-platform arb",
     ),
     Task(
+        # 2026-05-02: paper position archiver. Stale positions (>14d
+        # without exit) eat the max_positions cap and corrupt PnL stats.
+        # 6h cadence is plenty since stale-cutoff is 14d.
+        name="paper_position_archiver",
+        cmd="python -m trading_platform.polymarket.paper_position_archiver",
+        interval_seconds=6 * 3600,
+        description="Auto-archive stale paper positions (>14d unresolved)",
+    ),
+    Task(
         # 2026-05-02: per-(signal × category) EV slicer. Enables sharper
         # tier promotion + per-category live allowlists. 6h cadence.
         name="signal_category_ev",

@@ -1590,13 +1590,17 @@ def signal_category_ev_view(top_n: int = 20, min_n: int = 10) -> dict[str, Any]:
     """Top per-(signal × category) slices by EV. Paper-trade-derived."""
     try:
         from trading_platform.polymarket.db_connection import get_connection
-        with get_connection() as conn:
+        conn = get_connection()
+        try:
             rows = conn.execute(
                 f"""SELECT signal_type, category, n_resolved, win_rate, avg_ev, sum_pnl, computed_at
                       FROM signal_category_ev
                      WHERE n_resolved >= {int(min_n)}
                      ORDER BY avg_ev DESC LIMIT {int(top_n)}"""
             ).fetchall()
+        finally:
+            try: conn.close()
+            except Exception: pass
         return {
             "min_n": min_n, "top_n": top_n,
             "slices": [
@@ -1615,12 +1619,16 @@ def stake_ladder_view() -> dict[str, Any]:
     """Current ladder tier + cap, with last evaluation reason."""
     try:
         from trading_platform.polymarket.db_connection import get_connection
-        with get_connection() as conn:
+        conn = get_connection()
+        try:
             r = conn.execute(
                 """SELECT tier_index, cap_usd, promoted_at, last_evaluated,
                           real_n, real_wr, real_pnl, reason
                      FROM stake_ladder_state ORDER BY promoted_at DESC LIMIT 1"""
             ).fetchone()
+        finally:
+            try: conn.close()
+            except Exception: pass
         if not r:
             return {"tier_index": 0, "cap_usd": 1.0, "reason": "no state yet"}
         return {
