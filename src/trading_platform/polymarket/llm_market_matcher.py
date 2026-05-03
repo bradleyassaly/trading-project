@@ -13,25 +13,27 @@ Why an LLM here:
 - "Will the Fed cut rates by July 2026?" vs "Will the Fed cut by 25bps
   in July?" need rate-magnitude understanding.
 
-LLM call shape:
-  prompt: structured JSON-output asking for {same_outcome: bool,
-          same_date: bool, confidence: 0-1, reason: str}
-  cost: ~$0.001-0.003 per Haiku call
+2026-05-02: refactored to shell out to the `claude` CLI (`-p` print
+mode) instead of calling the Anthropic API directly. This lets the
+container use the host's Claude Max subscription auth (mounted at
+/root/.claude), avoiding the need for ANTHROPIC_API_KEY billing.
 
-Run after cross_platform_mapper writes candidates with score 0.5-0.7
+Tradeoffs vs API:
+  - 5-15s per call (vs ~500ms API) — acceptable for daily-cadence
+  - Serial (no parallelism) — Max session is single-user
+  - Free at our volume — Max already paid
+
+Run after cross_platform_mapper writes candidates with score 0.5-0.85
 (the ambiguous middle band). High-confidence Jaccard matches (>=0.85)
 get promoted directly; low (<0.5) get dropped; middle goes through LLM.
-
-Requires ANTHROPIC_API_KEY in env. Skips silently if unset (returns
-0 calls, no false positives).
 """
 from __future__ import annotations
 
 import json
 import logging
 import os
+import subprocess
 import time
-import urllib.request
 from typing import Any
 
 from trading_platform.polymarket.db_connection import get_connection
@@ -39,9 +41,19 @@ from trading_platform.polymarket.db_connection import get_connection
 logger = logging.getLogger(__name__)
 
 
+# 2026-05-02: tried to ship CLI-subprocess so the container could use
+# the host Max subscription. Discovered Claude CLI's OAuth flow is
+# unhappy inside Docker (needs keychain that the container can't read);
+# `--bare` works but explicitly requires ANTHROPIC_API_KEY (defeating
+# the point). Default reverted to API mode. The CLI scaffolding stays
+# in case Anthropic ships headless OAuth later — opt in via:
+#   LLM_MATCHER_USE_CLI=1
+USE_CLI = os.environ.get("LLM_MATCHER_USE_CLI", "0") in ("1", "true", "yes")
+CLAUDE_CLI = "claude"
+CLI_TIMEOUT_SECONDS = 30
 ANTHROPIC_BASE = "https://api.anthropic.com/v1"
 MODEL = "claude-haiku-4-5-20251001"
-MAX_CALLS_PER_RUN = 50    # cost cap: ~$0.10/run worst case
+MAX_CALLS_PER_RUN = 30    # serial CLI calls — keep total runtime bounded
 SCORE_BAND_LOW = 0.50      # below this: drop
 SCORE_BAND_HIGH = 0.85     # above this: auto-promote without LLM
 
@@ -62,17 +74,63 @@ def _have_api_key() -> bool:
     return bool(os.environ.get("ANTHROPIC_API_KEY", "").strip())
 
 
-def _call_haiku(pm_q: str, kalshi_title: str) -> dict[str, Any] | None:
+def _have_cli() -> bool:
+    """Check claude CLI is installed + auth works."""
+    try:
+        r = subprocess.run([CLAUDE_CLI, "--version"], capture_output=True,
+                           text=True, timeout=5)
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
+def _extract_json(text: str) -> dict[str, Any] | None:
+    """Extract first {...} block from arbitrary LLM output text."""
+    if "{" not in text:
+        return None
+    start = text.index("{")
+    end = text.rindex("}") + 1 if "}" in text else len(text)
+    try:
+        return json.loads(text[start:end])
+    except Exception:
+        return None
+
+
+def _call_via_cli(pm_q: str, kalshi_title: str) -> dict[str, Any] | None:
+    """Headless `claude -p` call. Uses host's Max subscription auth
+    mounted at /root/.claude. Returns None on any failure."""
+    try:
+        prompt = _PROMPT.format(pm_q=pm_q[:240], kalshi_title=kalshi_title[:240])
+        r = subprocess.run(
+            [CLAUDE_CLI, "-p", prompt],
+            capture_output=True, text=True, timeout=CLI_TIMEOUT_SECONDS,
+        )
+        if r.returncode != 0:
+            logger.debug("[LLM_MATCHER] cli exit=%d stderr=%s",
+                         r.returncode, (r.stderr or "")[:200])
+            return None
+        return _extract_json(r.stdout or "")
+    except subprocess.TimeoutExpired:
+        logger.debug("[LLM_MATCHER] cli timeout after %ds", CLI_TIMEOUT_SECONDS)
+        return None
+    except Exception as exc:
+        logger.debug("[LLM_MATCHER] cli error: %s", exc)
+        return None
+
+
+def _call_via_api(pm_q: str, kalshi_title: str) -> dict[str, Any] | None:
+    """API fallback. Requires ANTHROPIC_API_KEY."""
     if not _have_api_key():
         return None
     try:
+        import urllib.request as _ur
         prompt = _PROMPT.format(pm_q=pm_q[:240], kalshi_title=kalshi_title[:240])
         body = json.dumps({
             "model": MODEL,
             "max_tokens": 200,
             "messages": [{"role": "user", "content": prompt}],
         }).encode("utf-8")
-        req = urllib.request.Request(
+        req = _ur.Request(
             f"{ANTHROPIC_BASE}/messages",
             data=body,
             headers={
@@ -82,24 +140,32 @@ def _call_haiku(pm_q: str, kalshi_title: str) -> dict[str, Any] | None:
             },
             method="POST",
         )
-        with urllib.request.urlopen(req, timeout=15) as resp:
+        with _ur.urlopen(req, timeout=15) as resp:
             data = json.loads(resp.read().decode("utf-8"))
         text = (data.get("content") or [{}])[0].get("text", "").strip()
-        # Strip code-fences / extract first { ... } block
-        if "{" in text:
-            text = text[text.index("{"):]
-            if "}" in text:
-                text = text[:text.rindex("}") + 1]
-        return json.loads(text)
+        return _extract_json(text)
     except Exception as exc:
-        logger.debug("[LLM_MATCHER] call failed: %s", exc)
+        logger.debug("[LLM_MATCHER] api call failed: %s", exc)
         return None
 
 
+def _call_haiku(pm_q: str, kalshi_title: str) -> dict[str, Any] | None:
+    """Dispatch to CLI or API based on USE_CLI."""
+    if USE_CLI:
+        return _call_via_cli(pm_q, kalshi_title)
+    return _call_via_api(pm_q, kalshi_title)
+
+
 def run_matcher() -> dict[str, Any]:
-    if not _have_api_key():
+    if USE_CLI:
+        if not _have_cli():
+            return {
+                "skipped": "claude CLI not installed (or not in PATH)",
+                "calls": 0, "promoted": 0,
+            }
+    elif not _have_api_key():
         return {
-            "skipped": "ANTHROPIC_API_KEY not set",
+            "skipped": "ANTHROPIC_API_KEY not set (and CLI mode disabled)",
             "calls": 0, "promoted": 0,
         }
     t0 = time.time()

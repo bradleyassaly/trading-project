@@ -102,6 +102,12 @@ services:
       # Postgres backup volume — scripts/pg_backup.sh writes compressed
       # dumps here nightly. 7-day retention managed by the script.
       - ./backups:/backups
+      # 2026-05-02: mount host's ~/.claude AND ~/.claude.json so the
+      # `claude` CLI inside the container can use the host's Max
+      # subscription auth headlessly. Both are needed (the CLI reads
+      # config from .claude.json, plugins/cache from .claude/).
+      - ${USERPROFILE:-${HOME}}/.claude:/root/.claude:ro
+      - ${USERPROFILE:-${HOME}}/.claude.json:/root/.claude.json:ro
     env_file: .env
     environment:
       - WALLET_DB_PATH=/app/data/polymarket/wallet_intelligence.db

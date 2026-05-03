@@ -6,6 +6,14 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends curl sqlite3 ca-certificates postgresql-client \
  && rm -rf /var/lib/apt/lists/*
 
+# 2026-05-02: install Node.js 20 + Claude Code CLI for headless LLM
+# subprocess calls. Lets the scheduler use the host's Max subscription
+# (mounted at /root/.claude) instead of the Anthropic API directly.
+RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+ && apt-get install -y --no-install-recommends nodejs \
+ && npm install -g @anthropic-ai/claude-code \
+ && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 
 # Install Python deps first to leverage layer cache
