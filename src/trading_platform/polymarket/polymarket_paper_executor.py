@@ -266,8 +266,27 @@ LIVE_TRADE_CATEGORIES = {
 # real conviction signals on long-horizon markets.
 MAX_HOURS_TO_RESOLVE_PREF = 168  # 7 days
 MAX_HOURS_TO_RESOLVE_HARD = 720  # 30 days (above this = always reject)
+# 2026-05-02: fast-resolution preference for ladder progression.
+# Markets resolving within FAST_RESOLUTION_HOURS get a confidence
+# boost (1.15×) since they compound much faster — same EV per trade,
+# 7× the resolutions/week vs 7-day markets. Bias signal eligibility
+# toward these.
+FAST_RESOLUTION_HOURS = 72
+FAST_RESOLUTION_BOOST = 1.15
 
 
+# 2026-05-02: tier-C chronically -EV signals expanded to EXCLUDE.
+# Backtest evidence (n>=300):
+#   whale_entry         n=1892, EV -30.9%
+#   market_maker_flip   n=883,  EV -58.4%
+#   network_leader_entry n=607, EV -26.5%
+#   copyable_contrarian n=913,  EV -57.9%
+#   no_position_entry   n=600,  EV -93.1%
+#   oversized_bet       n=289,  EV -31.2%
+# These fire ~1500-2000/day combined. Even at tier-C 0.25× sizing,
+# they fill the position cap with -EV trades and corrupt PnL stats.
+# Block at the executor entry. Slice-level whitelist below preserves
+# proven slices (e.g. network_leader_entry × sports +31%).
 EXCLUDE_SIGNAL_TYPES = {
     "price_velocity",   # 95% WR, EV +0.004 = noise — 1300/day, pure noise
     # 2026-04-18: signals with ≥5 resolved at <30% WR or strongly negative
@@ -277,7 +296,37 @@ EXCLUDE_SIGNAL_TYPES = {
     "news_reactor",         # 10 resolved, 20% WR, EV -0.236
     # 2026-04-24: 30d audit (reports/signal_audit_2026-04-24.md) added.
     "consensus_follower",   # 3 resolved, 33% WR, EV -0.40 — too small + negative
+    # 2026-05-02: tier-C aggregate. Slice-level whitelist below
+    # preserves proven slices.
+    "whale_entry",          # backtest n=1892 EV -30.9%
+    "market_maker_flip",    # backtest n=883 EV -58.4%
+    "network_leader_entry", # backtest n=607 EV -26.5%
+    "oversized_bet",        # backtest n=289 EV -31.2%
 }
+
+# 2026-05-02: signal-type EXCLUDE doesn't apply when (signal_type,
+# category) is in a Tier-A proven slice. Allows e.g. network_leader_
+# entry × sports (+31% EV n=14) to keep firing while blocking the
+# 587 other -EV network_leader_entry fires.
+def _is_proven_slice(signal_type: str, category: str, db_path: str) -> bool:
+    if not signal_type or not category:
+        return False
+    try:
+        from trading_platform.polymarket.db_connection import get_connection
+        conn = get_connection(db_path)
+        try:
+            row = conn.execute(
+                """SELECT 1 FROM signal_category_ev
+                    WHERE signal_type = ? AND category = ?
+                      AND n_resolved >= 10 AND avg_ev >= 0.10""",
+                (signal_type, category),
+            ).fetchone()
+        finally:
+            try: conn.close()
+            except Exception: pass
+        return bool(row)
+    except Exception:
+        return False
 
 # 2026-04-24: per-(signal_type, side) block list. The 8d post-Apr-18 cohort
 # revealed clean signal types whose NO-side inversions don't preserve alpha.
@@ -628,9 +677,16 @@ class PolymarketPaperExecutor:
 
         # Signal-type gate (global): exclude low-edge / high-volume types
         # from bankroll deployment. They still fire and record for analysis.
+        # 2026-05-02: bypass when (signal, category) is in a proven slice.
         if signal_type in EXCLUDE_SIGNAL_TYPES:
-            logger.debug("[CAT_GATE] SKIP excluded signal_type=%s", signal_type)
-            return None
+            if _is_proven_slice(signal_type, sig_cat or "", str(self._wallet_db_path)):
+                logger.info(
+                    "[EXCLUDE_BYPASS] %s × %s — proven slice, allowing through",
+                    signal_type, sig_cat,
+                )
+            else:
+                logger.debug("[CAT_GATE] SKIP excluded signal_type=%s", signal_type)
+                return None
 
         # 2026-04-25: dynamic decay-flag gate. Originally blocked on
         # decay_flag=1 alone (IC<0 on n>=10). 2026-04-27 retuned: also
@@ -1205,6 +1261,23 @@ class PolymarketPaperExecutor:
                         )
             except Exception:
                 pass
+        # 2026-05-02: fast-resolution boost. Markets resolving within
+        # FAST_RESOLUTION_HOURS (72h) get a 1.15× multiplier — same EV
+        # per trade but 7× the resolutions/week vs weekly markets.
+        try:
+            sig_end_iso = signal.get("end_date_iso") or signal.get("end_iso")
+            if sig_end_iso:
+                from datetime import datetime, timezone
+                clean = sig_end_iso.replace("Z", "+00:00") if sig_end_iso.endswith("Z") else sig_end_iso
+                end_dt = datetime.fromisoformat(clean)
+                if end_dt.tzinfo is None:
+                    end_dt = end_dt.replace(tzinfo=timezone.utc)
+                hours_to_resolve = (end_dt.timestamp() - time.time()) / 3600
+                if 0 < hours_to_resolve <= FAST_RESOLUTION_HOURS:
+                    mult *= FAST_RESOLUTION_BOOST
+        except Exception:
+            pass
+
         # 2026-04-29: Brier-tier sizing. Apply BEFORE the hard cap so
         # tier-C signals can't be amplified above 0.25× by other boosts.
         # Source: /api/calibration by_signal — see SIGNAL_CALIBRATION_TIER.

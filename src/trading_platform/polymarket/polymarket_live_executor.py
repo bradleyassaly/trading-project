@@ -77,15 +77,56 @@ class PolymarketLiveExecutor:
     # ($1→$5→$25→$100→$500→$2500) based on real-money trade history.
     LIVE_REAL_MAX_STAKE_USD: float = 1.0
 
-    def _live_real_cap(self) -> float:
-        """Read the runtime stake cap from stake_ladder. Falls back to
-        the class default if the ladder hasn't initialized yet."""
+    def _live_real_cap(self, signal_type: str | None = None,
+                       category: str | None = None) -> float:
+        """Read the runtime stake cap. Per-slice scaling on top of the
+        global ladder cap.
+
+        Logic:
+          base = ladder cap (current tier)
+          if (signal, category) is a Tier-A proven slice with EV ≥ 30%
+            → 1.0 × base
+          elif EV ≥ 15%
+            → 0.75 × base
+          elif EV ≥ 5% (proven but marginal)
+            → 0.5 × base
+          else (no slice data, or weak EV)
+            → 0.25 × base (conservative)
+        """
         try:
             from trading_platform.polymarket.stake_ladder import get_current_cap
-            cap = get_current_cap(db_path=self._db_path)
-            return float(cap) if cap else self.LIVE_REAL_MAX_STAKE_USD
+            base = float(get_current_cap(db_path=self._db_path) or self.LIVE_REAL_MAX_STAKE_USD)
         except Exception:
-            return self.LIVE_REAL_MAX_STAKE_USD
+            base = self.LIVE_REAL_MAX_STAKE_USD
+        if not signal_type or not category:
+            return base * 0.25  # no slice info → conservative
+        try:
+            from trading_platform.polymarket.db_connection import get_connection
+            conn = get_connection(self._db_path)
+            try:
+                row = conn.execute(
+                    """SELECT n_resolved, avg_ev FROM signal_category_ev
+                        WHERE signal_type = ? AND category = ?""",
+                    (signal_type, category),
+                ).fetchone()
+            finally:
+                try: conn.close()
+                except Exception: pass
+        except Exception:
+            return base * 0.25
+        if not row:
+            return base * 0.25
+        n = int(row[0] or 0)
+        ev = float(row[1] or 0)
+        if n < 8:
+            return base * 0.25
+        if ev >= 0.30:
+            return base * 1.0
+        if ev >= 0.15:
+            return base * 0.75
+        if ev >= 0.05:
+            return base * 0.50
+        return base * 0.25
 
     def __init__(self) -> None:
         self._db = WalletDB()
@@ -226,31 +267,51 @@ class PolymarketLiveExecutor:
                         signal["category"] = "sports"
                 except Exception as exc:
                     logger.debug("[LIVE] sports fallback failed: %s", exc)
-        # 2026-05-02: per-(signal, category) bypass. signal_category_ev
-        # exposes proven slices (n>=10, EV>=10%) — let those through
-        # even if the global LIVE_TRADE_CATEGORIES blocks them. The
-        # signal-level allowlist + this slice-level bypass together
-        # form the actual live-eligibility decision.
+        # 2026-05-02: per-(signal, category) bypass with Wilson-95
+        # lower bound. Raw EV check (n>=10, EV>=10%) admits noisy
+        # slices (n=10 EV+12% has Wilson lower of -8% — pure luck).
+        # Wilson approach: require lower bound >= 0% for any n>=8.
+        # Looser n requirement, safer EV requirement.
         slice_proven = False
+        slice_n = 0
+        slice_ev = 0.0
         try:
             from trading_platform.polymarket.db_connection import get_connection
             _conn = get_connection(self._db_path)
             try:
                 _row = _conn.execute(
-                    """SELECT n_resolved, avg_ev FROM signal_category_ev
+                    """SELECT n_resolved, win_rate, avg_ev FROM signal_category_ev
                         WHERE signal_type = ? AND category = ?
-                          AND n_resolved >= 10 AND avg_ev >= 0.10""",
+                          AND n_resolved >= 8""",
                     (sig_type, cat),
                 ).fetchone()
             finally:
                 try: _conn.close()
                 except Exception: pass
             if _row:
-                slice_proven = True
-                logger.info(
-                    "[LIVE][SLICE_BYPASS] %s × %s n=%d EV=%+.0f%% — bypassing LIVE_CAT_GATE",
-                    sig_type, cat, int(_row[0]), float(_row[1]) * 100,
-                )
+                slice_n = int(_row[0])
+                wr = float(_row[1])
+                slice_ev = float(_row[2])
+                # Wilson 95% lower bound for binary outcome (WR proxy
+                # for EV direction). Then scale by slice EV to get a
+                # rough EV lower bound. Conservative.
+                import math
+                if slice_n > 0:
+                    z = 1.96
+                    denom = 1 + z * z / slice_n
+                    centre = (wr + z * z / (2 * slice_n)) / denom
+                    spread = (z / denom) * math.sqrt(wr * (1 - wr) / slice_n + z * z / (4 * slice_n * slice_n))
+                    wr_lower = max(0.0, centre - spread)
+                    # Slice approved when (a) WR lower bound > 0.5 OR
+                    # (b) WR lower bound > 0.4 AND raw EV >= 5%.
+                    # Either tells us the edge is unlikely from noise.
+                    if wr_lower > 0.50 or (wr_lower > 0.40 and slice_ev >= 0.05):
+                        slice_proven = True
+                        logger.info(
+                            "[LIVE][SLICE_BYPASS] %s × %s n=%d WR=%.0f%% (Wilson-lower=%.0f%%) "
+                            "EV=%+.0f%% — bypassing LIVE_CAT_GATE",
+                            sig_type, cat, slice_n, wr * 100, wr_lower * 100, slice_ev * 100,
+                        )
         except Exception:
             pass
 
@@ -541,10 +602,11 @@ class PolymarketLiveExecutor:
             )
 
         # 2026-04-28: per-signal DRY_RUN check + real-trade hard cap.
-        # 2026-05-02: cap is now ladder-driven — auto-promotes
-        # $1→$5→$25→$100→$500→$2500 based on real-money trade history.
+        # 2026-05-02: cap is now ladder-driven AND slice-scaled.
+        # Higher-EV (signal × category) slices get full ladder cap;
+        # marginal slices get conservative fraction.
         is_dry = self._is_dry_run_for(sig_type)
-        runtime_cap = self._live_real_cap()
+        runtime_cap = self._live_real_cap(signal_type=sig_type, category=cat)
         if not is_dry and size_usd > runtime_cap:
             logger.warning(
                 "[LIVE][REAL_CAP] %s clamping size $%.2f → $%.2f (ladder cap)",
