@@ -538,6 +538,14 @@ SCHEDULE: list[Task] = [
         description="Auto-archive stale paper positions (>14d unresolved)",
     ),
     Task(
+        # 2026-05-02: 3-dim slicer adds wallet_tier dimension.
+        # Reveals tier1h vs tier2 EV dispersion within proven slices.
+        name="signal_category_wallet_ev",
+        cmd="python -m trading_platform.polymarket.signal_category_wallet_ev",
+        interval_seconds=24 * 3600,
+        description="3-dim per-(signal × category × wallet-tier) EV slicer",
+    ),
+    Task(
         # 2026-05-02: per-(signal × category) EV slicer. Enables sharper
         # tier promotion + per-category live allowlists. 6h cadence.
         name="signal_category_ev",
