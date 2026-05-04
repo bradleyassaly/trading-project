@@ -164,11 +164,9 @@ def refresh_bankroll() -> dict[str, Any]:
 def _fetch_clob_cash() -> float | None:
     """USDC balance from CLOB's funding proxy. Returns USD float or None."""
     try:
-        from py_clob_client.client import ClobClient
-        from py_clob_client.constants import POLYGON
-        from py_clob_client.clob_types import (
-            ApiCreds, BalanceAllowanceParams, AssetType,
-        )
+        from py_clob_client_v2 import ClobClient, ApiCreds
+        from py_clob_client_v2.constants import POLYGON
+        from py_clob_client_v2.clob_types import BalanceAllowanceParams, AssetType
     except ImportError:
         return None
     api_key = os.environ.get("POLYMARKET_API_KEY", "").strip()
@@ -178,6 +176,8 @@ def _fetch_clob_cash() -> float | None:
         or os.environ.get("POLYMARKET_PASSPHRASE") or ""
     ).strip()
     pk = os.environ.get("POLYMARKET_PRIVATE_KEY", "").strip()
+    funder = os.environ.get("POLYMARKET_FUNDER_ADDRESS", "").strip()
+    sig_type = int(os.environ.get("POLYMARKET_SIGNATURE_TYPE", "1"))
     if not (api_key and api_secret and api_pass and pk):
         return None
     try:
@@ -187,6 +187,7 @@ def _fetch_clob_cash() -> float | None:
             creds=ApiCreds(
                 api_key=api_key, api_secret=api_secret, api_passphrase=api_pass,
             ),
+            signature_type=sig_type, funder=funder or None,
         )
         b = client.get_balance_allowance(
             BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
@@ -194,7 +195,6 @@ def _fetch_clob_cash() -> float | None:
         raw = b.get("balance") if isinstance(b, dict) else None
         if raw is None:
             return None
-        # USDC has 6 decimals on Polygon; convert raw → USD
         return float(raw) / 1_000_000.0
     except Exception as exc:
         logger.debug("CLOB balance fetch failed: %s", exc)
