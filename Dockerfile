@@ -26,6 +26,10 @@ RUN pip install --no-cache-dir -e .
 # `trading-cli polymarket *` commands can load without ImportError.
 RUN pip install --no-cache-dir scikit-learn
 
+# Polymarket migrated to CLOB V2 (EIP-712 domain version change ~2026-04-27).
+# py-clob-client (v1) produces order_version_mismatch on every order.
+RUN pip install --no-cache-dir py-clob-client-v2>=1.0
+
 # Scripts + configs (data is mounted at runtime)
 COPY scripts/ scripts/
 COPY configs/ configs/

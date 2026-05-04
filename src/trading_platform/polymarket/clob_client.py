@@ -22,9 +22,9 @@ Setup
        POLYMARKET_PRIVATE_KEY=0x...
        POLYMARKET_WALLET_ADDRESS=0x...
 
-3. Optionally install py-clob-client::
+3. Optionally install py-clob-client-v2::
 
-       pip install py-clob-client
+       pip install py-clob-client-v2
 """
 from __future__ import annotations
 
@@ -141,16 +141,16 @@ class ClobClient:
             )
 
         try:
-            from py_clob_client.client import ClobClient as PyClobClient
-            from py_clob_client.clob_types import ApiCreds, MarketOrderArgs
-            from py_clob_client.constants import POLYGON
+            from py_clob_client_v2 import ClobClient as PyClobClient
+            from py_clob_client_v2 import ApiCreds, OrderArgs, OrderType, PartialCreateOrderOptions
+            from py_clob_client_v2.constants import POLYGON
         except ImportError:
             return OrderResult(
                 success=False, order_id=None, status="error",
                 filled_price=None, filled_size=None,
                 error_msg=(
-                    "py-clob-client not installed. "
-                    "Run: pip install py-clob-client"
+                    "py-clob-client-v2 not installed. "
+                    "Run: pip install py-clob-client-v2"
                 ),
                 raw={},
             )
@@ -191,60 +191,37 @@ class ClobClient:
 
             current_price = self.get_mid_price(token_id) or 0.5
 
-            # Polymarket enforces a 0.01 minimum tick. py_clob_client's
-            # create_market_order computes a slippage-adjusted price that
-            # often lands at e.g. 0.310000062 — server returns "breaks
-            # minimum tick size rule". Pass an explicit slippage-rounded
-            # price ceiling so the resulting order respects the tick grid.
             tick = 0.01
+            book = self.get_order_book(token_id)
+            if side.upper() == "BUY":
+                asks = book.get("asks") or []
+                best_ask = float(asks[0]["price"]) if asks else current_price
+                target = round(best_ask + tick, 2)
+            else:
+                bids = book.get("bids") or []
+                best_bid = float(bids[0]["price"]) if bids else current_price
+                target = round(best_bid - tick, 2)
+            target = max(0.01, min(0.99, target))
+            shares_int = max(1, int(float(size_usdc) / target))
+            actual_usdc = round(shares_int * target, 2)
+            order_args = OrderArgs(
+                token_id=token_id,
+                price=target,
+                size=float(shares_int),
+                side=side.upper(),
+            )
+            neg_risk_flag = False
             try:
-                # Build a LIMIT order at worst-acceptable-price (one tick
-                # above ask for BUYs, below bid for SELLs) — fills like a
-                # market order but always tick-aligned.
-                from py_clob_client.clob_types import OrderArgs, OrderType
-                book = self.get_order_book(token_id)
-                if side.upper() == "BUY":
-                    asks = book.get("asks") or []
-                    best_ask = float(asks[0]["price"]) if asks else current_price
-                    target = round(best_ask + tick, 2)
-                else:
-                    bids = book.get("bids") or []
-                    best_bid = float(bids[0]["price"]) if bids else current_price
-                    target = round(best_bid - tick, 2)
-                target = max(0.01, min(0.99, target))
-                # Polymarket on-chain maker_amount precision is 6 decimals
-                # (USDC.e wei). Pick a SHARE quantity rounded to whole units
-                # so maker_amount = shares*price has at most 2 decimals
-                # (price has 2, shares integer = 2 total). This avoids the
-                # "max accuracy 2 decimals" rejection.
-                shares_int = max(1, int(float(size_usdc) / target))
-                actual_usdc = round(shares_int * target, 2)
-                order_args = OrderArgs(
-                    token_id=token_id,
-                    price=target,
-                    size=float(shares_int),
-                    side=side.upper(),
-                )
-                signed = client.create_order(order_args)
-                resp = client.post_order(signed, OrderType.FOK)  # fill-or-kill
-                logger.info(
-                    "[clob] order: %s %d shares @ %.2f = $%.2f",
-                    side.upper(), shares_int, target, actual_usdc,
-                )
-                logger.info(
-                    "[clob] limit-as-market %s %.2f @ %.2f (size=%.2f)",
-                    side.upper(), float(size_usdc), target, shares,
-                )
-            except Exception as exc_inner:
-                # Fallback to original MarketOrderArgs path if anything fails
-                logger.warning("limit-as-market path failed (%s); trying MarketOrderArgs", exc_inner)
-                order_args = MarketOrderArgs(
-                    token_id=token_id,
-                    amount=float(size_usdc),
-                    side=side.upper(),
-                )
-                signed = client.create_market_order(order_args)
-                resp = client.post_order(signed)
+                neg_risk_flag = bool(client.get_neg_risk(token_id))
+                logger.info("[clob] neg_risk=%s for %s...", neg_risk_flag, token_id[:12])
+            except Exception as _nr_exc:
+                logger.warning("[clob] get_neg_risk lookup failed (%s), defaulting to False", _nr_exc)
+            opts = PartialCreateOrderOptions(tick_size="0.01", neg_risk=neg_risk_flag)
+            resp = client.create_and_post_order(order_args, options=opts, order_type=OrderType.FOK)
+            logger.info(
+                "[clob] market-as-FOK %s %d shares @ %.2f = $%.2f neg_risk=%s",
+                side.upper(), shares_int, target, actual_usdc, neg_risk_flag,
+            )
 
             order_id = resp.get("orderID") or resp.get("id")
             status = resp.get("status", "unknown")
@@ -293,9 +270,9 @@ class ClobClient:
             )
 
         try:
-            from py_clob_client.client import ClobClient as PyClobClient
-            from py_clob_client.clob_types import ApiCreds, OrderArgs, OrderType
-            from py_clob_client.constants import POLYGON
+            from py_clob_client_v2 import ClobClient as PyClobClient
+            from py_clob_client_v2 import ApiCreds, OrderArgs, OrderType, PartialCreateOrderOptions
+            from py_clob_client_v2.constants import POLYGON
             import os as _os, time as _time
 
             funder = _os.environ.get("POLYMARKET_FUNDER_ADDRESS") or ""
@@ -342,10 +319,16 @@ class ClobClient:
                 token_id=token_id, price=price,
                 size=float(shares_int), side=side.upper(),
             )
+            neg_risk_flag = False
+            try:
+                neg_risk_flag = bool(client.get_neg_risk(token_id))
+                logger.info("[clob] neg_risk=%s for %s...", neg_risk_flag, token_id[:12])
+            except Exception as _nr_exc:
+                logger.warning("[clob] get_neg_risk lookup failed (%s), defaulting to False", _nr_exc)
+            _opts = PartialCreateOrderOptions(tick_size="0.01", neg_risk=neg_risk_flag)
 
             order_type = OrderType.FOK if aggression == "aggressive" else OrderType.GTC
-            signed = client.create_order(order_args)
-            resp = client.post_order(signed, order_type)
+            resp = client.create_and_post_order(order_args, options=_opts, order_type=order_type)
             order_id = resp.get("orderID") or resp.get("id")
             status = resp.get("status", "unknown")
 
@@ -380,7 +363,7 @@ class ClobClient:
 
             # Unfilled — cancel and fall back to aggressive
             try:
-                client.cancel(order_id)
+                client.cancel_order(order_id)
             except Exception:
                 pass
 
@@ -426,7 +409,7 @@ class ClobClient:
         results["wallet_set"] = bool(self._wallet)
         results["private_key_set"] = bool(self._private_key)
         try:
-            import py_clob_client  # noqa: F401
+            import py_clob_client_v2  # noqa: F401
             results["py_clob_client"] = True
         except ImportError:
             results["py_clob_client"] = False

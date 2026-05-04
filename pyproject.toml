@@ -48,7 +48,7 @@ dependencies = [
   "uvicorn[standard]>=0.28",
   "python-multipart>=0.0.9",
   "httpx>=0.27",
-  "py-clob-client>=0.20"
+  "py-clob-client-v2>=1.0"
 ]
 
 [project.urls]
