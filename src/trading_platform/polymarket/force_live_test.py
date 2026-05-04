@@ -37,7 +37,38 @@ HARD_STAKE_CAP_USD = 5.0  # safety: $5 max regardless of CLI input
 
 
 def _check_usdc_balance(wallet: str) -> float | None:
-    """Query USDC.e balance on-chain via free public RPCs (multi-fallback)."""
+    """Query USDC balance via CLOB API (authoritative for V2 proxy wallets).
+
+    Polymarket V2 holds funds in their exchange contracts — raw on-chain
+    USDC.e at the proxy wallet address is always 0. The CLOB's own
+    balance-allowance endpoint is the correct source of truth.
+    Falls back to on-chain USDC.e check for EOA-mode accounts.
+    """
+    # Primary: CLOB V2 balance endpoint — works for proxy wallet accounts
+    try:
+        from py_clob_client_v2 import ClobClient as _ClobClient, ApiCreds as _ApiCreds
+        from py_clob_client_v2.constants import POLYGON as _POLYGON
+        from py_clob_client_v2.clob_types import BalanceAllowanceParams as _BAP, AssetType as _AT
+        _key = os.environ.get("POLYMARKET_PRIVATE_KEY", "")
+        _api_key = os.environ.get("POLYMARKET_API_KEY", "")
+        _api_sec = os.environ.get("POLYMARKET_API_SECRET", "")
+        _api_pass = os.environ.get("POLYMARKET_API_PASSPHRASE") or os.environ.get("POLYMARKET_PASSPHRASE", "")
+        _funder = os.environ.get("POLYMARKET_FUNDER_ADDRESS", "")
+        _sig_type = int(os.environ.get("POLYMARKET_SIGNATURE_TYPE", "1"))
+        if _key and _api_key and _api_sec and _api_pass:
+            _client = _ClobClient(
+                host="https://clob.polymarket.com", chain_id=_POLYGON, key=_key,
+                creds=_ApiCreds(api_key=_api_key, api_secret=_api_sec, api_passphrase=_api_pass),
+                signature_type=_sig_type, funder=_funder or None,
+            )
+            bal = _client.get_balance_allowance(_BAP(asset_type=_AT.COLLATERAL))
+            clob_bal = int(bal.get("balance", 0)) / 1e6
+            if clob_bal > 0:
+                return clob_bal
+    except Exception as exc:
+        logger.debug("CLOB balance check failed: %s", exc)
+
+    # Fallback: on-chain USDC.e (works for EOA-mode accounts)
     import urllib.request
     import json
     USDC_E = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
@@ -61,10 +92,11 @@ def _check_usdc_balance(wallet: str) -> float | None:
             with urllib.request.urlopen(req, timeout=10) as r:
                 data = json.loads(r.read())
             if "result" in data and data["result"]:
-                return int(data["result"], 16) / 1e6
+                on_chain = int(data["result"], 16) / 1e6
+                if on_chain > 0:
+                    return on_chain
         except Exception as exc:
             logger.debug("RPC %s failed: %s", rpc, exc)
-    logger.warning("All RPC balance checks failed; falling back to env override")
     env_bal = os.environ.get("POLYMARKET_LIVE_BANKROLL_USD")
     if env_bal:
         try: return float(env_bal)
