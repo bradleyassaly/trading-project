@@ -217,9 +217,16 @@ def check_live_exits() -> dict[str, int]:
         if not exit_reason:
             continue
 
-        # Place SELL order on the token we HOLD
+        # Place SELL order on the token we HOLD.
+        # Pass exact_shares (floored) so we never try to sell more tokens
+        # than our balance.  Derive from the shares column when present;
+        # fall back to size_usd / entry (original fill calculation).
+        shares_held = float(shares or 0) or (float(size_usd or 0) / max(entry, 0.01))
+        exact_sell_shares = max(1, int(shares_held))
         order_result = clob.place_market_order(
-            token_id=token_id, side="SELL", size_usdc=float(size_usd or 0),
+            token_id=token_id, side="SELL",
+            size_usdc=float(size_usd or 0),
+            exact_shares=exact_sell_shares,
             max_slippage=0.05,
         )
         if not order_result.success:
