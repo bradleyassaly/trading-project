@@ -28,7 +28,6 @@ from __future__ import annotations
 
 import json
 import logging
-import sqlite3
 import time
 from typing import Any
 
@@ -62,9 +61,26 @@ class PolymarketLiveExecutor:
     # New allowlist points at the two signals with proven backtest edge:
     #   wallet_reversal:    n=192, WR=72%, EV=+10.1%
     #   specialist_entry:   n=60,  WR=80%, EV=+12.7%
-    # Both are tier-B per Brier ranking; tier-C overall sizing
-    # multiplier remains, plus LIVE_REAL_MAX_STAKE_USD=$1 hard cap.
-    LIVE_REAL_SIGNAL_TYPES: set[str] = {"wallet_reversal", "specialist_entry"}
+    # 2026-05-03: added probation-tier signals (probation = $5 cap until n≥15):
+    #   tier_entry:  n=15, WR=100%, EV=+32% (small sample, probation)
+    #   whale_exit:  n=16, WR=100%, EV=+3.7%  (small sample, probation)
+    LIVE_REAL_SIGNAL_TYPES: set[str] = {
+        "wallet_reversal", "specialist_entry",
+        "tier_entry", "whale_exit",
+        # 2026-05-03: paper-proven signals promoted to live.
+        # whale_entry: P(acc≥55%)=0.92 (ladder), +$885 paper PnL n=28.
+        # whale_entry_filtered: +$401 paper PnL n=96 (sports blocked below).
+        # cascade: +$114 paper PnL n=39 (sports blocked below).
+        "whale_entry", "whale_entry_filtered", "cascade",
+        # 2026-05-03: new signals — paper trading to validate before raising stakes.
+        # reversal_confluence: 3+ tier-1 wallets reversing same market (high conviction).
+        # pre_resolution_entry: tier-1 buying within 72h of resolution (fast feedback).
+        "reversal_confluence", "pre_resolution_entry",
+        # 2026-05-04: Phase B signal promoted to live. 95% hypothesis accuracy
+        # on n=22, 100% WR in politics/israel (n=6) and economics (n=8) slices.
+        # Decoupled from whale flow — fires on time-to-resolve + price band.
+        "resolution_decay",
+    }
 
     # ALWAYS True in source. Flip in your local instance only.
     # Class default applies to non-allowlisted signal types.
@@ -136,17 +152,55 @@ class PolymarketLiveExecutor:
         self._sizer = KellySizer(self._db_path)
         self._ensure_live_trades_table()
 
-    def _is_dry_run_for(self, signal_type: str) -> bool:
-        """Per-signal DRY_RUN check. Allowlisted types fire real
-        orders; everything else stays dry. Auto-demotes to dry-run
-        when the signal hits 3 consecutive real-money losses (defense
-        against early variance in the first live cohort)."""
+    def _is_dry_run_for(
+        self,
+        signal_type: str,
+        category: str | None = None,
+        wallet_tier: str | None = None,
+    ) -> bool:
+        """Per-signal DRY_RUN check.
+
+        Allowlisted types (LIVE_REAL_SIGNAL_TYPES) fire real orders.
+        Non-allowlisted types are also promoted to live when their
+        (signal, category, wallet_tier) 3-dim slice is proven
+        (n>=5, EV>=15%) — this is the mechanism that lets slices
+        discovered by the 3-dim slicer (e.g. whale_entry × sports ×
+        tier1 +256% EV) reach live trading without requiring a code
+        change to LIVE_REAL_SIGNAL_TYPES.
+
+        In both paths, 3 consecutive real-money losses auto-demote
+        the signal back to dry-run.
+        """
+        from trading_platform.polymarket.db_connection import get_connection as _gc
+        promoted_via_3dim = False
         if signal_type not in self.LIVE_REAL_SIGNAL_TYPES:
-            return self.DRY_RUN
+            if category and wallet_tier:
+                try:
+                    _conn = _gc(self._db_path)
+                    try:
+                        _r = _conn.execute(
+                            """SELECT avg_ev FROM signal_category_wallet_ev
+                                WHERE signal_type = ? AND category = ?
+                                  AND wallet_tier = ?
+                                  AND n_resolved >= 5 AND avg_ev >= 0.15""",
+                            (signal_type, category, wallet_tier),
+                        ).fetchone()
+                    finally:
+                        try: _conn.close()
+                        except Exception: pass
+                    if _r:
+                        promoted_via_3dim = True
+                        logger.info(
+                            "[LIVE][3DIM_PROMOTE] %s × %s × %s EV=%+.0f%% — 3-dim proven, entering live path",
+                            signal_type, category, wallet_tier, float(_r[0]) * 100,
+                        )
+                except Exception:
+                    pass
+            if not promoted_via_3dim:
+                return self.DRY_RUN
         # Check last 3 closed real-money trades on this signal type
         try:
-            import sqlite3 as _sq
-            _conn = _sq.connect(self._db_path, timeout=2.0)
+            _conn = _gc(self._db_path)
             try:
                 _row = _conn.execute(
                     """SELECT outcome FROM live_trades
@@ -156,7 +210,8 @@ class PolymarketLiveExecutor:
                     (signal_type,),
                 ).fetchall()
             finally:
-                _conn.close()
+                try: _conn.close()
+                except Exception: pass
             if len(_row) >= 3 and all((r[0] or "") == "loss" for r in _row):
                 logger.warning(
                     "[LIVE][AUTO_DEMOTE] %s — 3 consecutive real losses, "
@@ -169,7 +224,8 @@ class PolymarketLiveExecutor:
 
     def _ensure_live_trades_table(self) -> None:
         try:
-            conn = sqlite3.connect(self._db_path)
+            from trading_platform.polymarket.db_connection import get_connection
+            conn = get_connection(self._db_path)
             try:
                 conn.execute("""
                     CREATE TABLE IF NOT EXISTS live_trades (
@@ -185,15 +241,24 @@ class PolymarketLiveExecutor:
                         order_id TEXT,
                         status TEXT,
                         dry_run INTEGER DEFAULT 1,
-                        error_msg TEXT
+                        error_msg TEXT,
+                        outcome TEXT,
+                        exit_ts INTEGER
                     )
                 """)
                 conn.execute(
                     "CREATE INDEX IF NOT EXISTS idx_live_trades_ts ON live_trades(attempted_at DESC)"
                 )
+                # Lazy-add columns that pre-date this schema — idempotent.
+                for col_ddl in ("outcome TEXT", "exit_ts INTEGER"):
+                    try:
+                        conn.execute(f"ALTER TABLE live_trades ADD COLUMN {col_ddl}")
+                    except Exception:
+                        pass
                 conn.commit()
             finally:
-                conn.close()
+                try: conn.close()
+                except Exception: pass
         except Exception as exc:
             logger.debug("live_trades table ensure failed: %s", exc)
 
@@ -230,9 +295,10 @@ class PolymarketLiveExecutor:
         from trading_platform.polymarket.polymarket_paper_executor import (
             LIVE_TRADE_CATEGORIES, EXCLUDE_SIGNAL_TYPES, EXCLUDE_SIGNAL_SIDE,
         )
-        if sig_type in EXCLUDE_SIGNAL_TYPES:
-            # Routine config-level rejection — not a warning. DEBUG it so
-            # operators only see exceptional blocks at WARNING level.
+        # LIVE_REAL_SIGNAL_TYPES is an explicit allowlist that overrides paper-level
+        # exclusions. whale_entry is in paper EXCLUDE (backtest -EV aggregate) but
+        # has proven live edge by slice — allowlist takes precedence.
+        if sig_type in EXCLUDE_SIGNAL_TYPES and sig_type not in self.LIVE_REAL_SIGNAL_TYPES:
             logger.debug("[LIVE] BLOCKED signal_type=%s (excluded)", sig_type)
             return self._result(False, reason=f"signal_type {sig_type} excluded from live")
         _sig_side = (signal.get("side") or "").upper()
@@ -267,6 +333,19 @@ class PolymarketLiveExecutor:
                         signal["category"] = "sports"
                 except Exception as exc:
                     logger.debug("[LIVE] sports fallback failed: %s", exc)
+        # Per-signal category exclusions. signal_category_ev shows these as
+        # positive (stale resolution data), but paper trades are consistently
+        # negative — trust the more recent execution evidence.
+        # 2026-05-03: whale_entry_filtered×sports (-$0.72/trade, 30% WR n=60)
+        #             cascade×sports (-$2.27/trade, 27.8% WR n=18)
+        _CAT_BLOCKS: dict[str, set[str]] = {
+            "whale_entry_filtered": {"sports"},
+            "cascade": {"sports"},
+        }
+        if cat in _CAT_BLOCKS.get(sig_type, set()):
+            logger.info("[LIVE] BLOCKED %s × %s — per-signal category block", sig_type, cat)
+            return self._result(False, reason=f"{sig_type} blocked in category {cat}")
+
         # 2026-05-02: per-(signal, category) bypass with Wilson-95
         # lower bound. Raw EV check (n>=10, EV>=10%) admits noisy
         # slices (n=10 EV+12% has Wilson lower of -8% — pure luck).
@@ -605,7 +684,10 @@ class PolymarketLiveExecutor:
         # 2026-05-02: cap is now ladder-driven AND slice-scaled.
         # Higher-EV (signal × category) slices get full ladder cap;
         # marginal slices get conservative fraction.
-        is_dry = self._is_dry_run_for(sig_type)
+        # 2026-05-03: pass category + wallet_tier so _is_dry_run_for can
+        # promote signals proven in the 3-dim table to live execution.
+        _sig_wallet_tier = signal.get("wallet_tier") or signal.get("wallet_tier_at_fire")
+        is_dry = self._is_dry_run_for(sig_type, category=cat, wallet_tier=_sig_wallet_tier)
         runtime_cap = self._live_real_cap(signal_type=sig_type, category=cat)
         if not is_dry and size_usd > runtime_cap:
             logger.warning(
@@ -655,6 +737,7 @@ class PolymarketLiveExecutor:
             dry_run=False,
             status=order_result.status if order_result.success else "error",
             error_msg=order_result.error_msg,
+            token_id=token_id,
         )
         if order_result.success:
             fill = order_result.filled_price or current_price
@@ -729,18 +812,29 @@ class PolymarketLiveExecutor:
         dry_run: bool,
         status: str,
         error_msg: str | None,
+        token_id: str | None = None,
     ) -> None:
         try:
-            conn = sqlite3.connect(self._db_path)
+            from trading_platform.polymarket.db_connection import get_connection
+            conn = get_connection(self._db_path)
+            now_ts = int(time.time())
+            fill_price = None
+            shares = None
+            if order_result and order_result.filled_price:
+                fill_price = float(order_result.filled_price)
+                effective_price = fill_price or entry_price
+                if effective_price and size_usd:
+                    shares = float(size_usd) / max(float(effective_price), 0.01)
             try:
                 conn.execute(
                     """INSERT INTO live_trades
                        (attempted_at, signal_type, condition_id, question, direction,
                         confidence, size_usd, entry_price, order_id, status,
-                        dry_run, error_msg)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        dry_run, error_msg, token_id, side, fill_price, shares,
+                        category, signal_wallet, submitted_at, filled_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
-                        int(time.time()),
+                        now_ts,
                         signal.get("signal_type"),
                         signal.get("condition_id", ""),
                         (signal.get("question") or "")[:200],
@@ -752,11 +846,19 @@ class PolymarketLiveExecutor:
                         status,
                         1 if dry_run else 0,
                         error_msg,
+                        token_id or signal.get("yes_token_id") or signal.get("no_token_id"),
+                        signal.get("direction", "BUY"),
+                        fill_price,
+                        shares,
+                        signal.get("category"),
+                        signal.get("source_wallet") or signal.get("signal_wallet"),
+                        now_ts,
+                        now_ts if status in ("matched", "live") else None,
                     ),
                 )
-                conn.commit()
             finally:
-                conn.close()
+                try: conn.close()
+                except Exception: pass
         except Exception as exc:
             logger.debug("live_trades record failed: %s", exc)
 
@@ -765,12 +867,14 @@ class PolymarketLiveExecutor:
         # Goal: operator gets paged the moment autonomous live trading starts.
         if not dry_run:
             try:
-                conn2 = sqlite3.connect(self._db_path, timeout=2.0)
+                from trading_platform.polymarket.db_connection import get_connection as _gc2
+                conn2 = _gc2(self._db_path)
                 prior = conn2.execute(
                     """SELECT COUNT(*) FROM live_trades
                         WHERE dry_run = 0 AND status IN ('submitted','live','matched')""",
                 ).fetchone()
-                conn2.close()
+                try: conn2.close()
+                except Exception: pass
                 is_first = (prior and int(prior[0]) <= 1)  # <=1 because we just inserted
                 from trading_platform.polymarket.telegram_alerts import get_alerter
                 alerter = get_alerter()
