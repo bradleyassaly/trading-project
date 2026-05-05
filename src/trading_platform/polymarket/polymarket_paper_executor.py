@@ -307,29 +307,53 @@ EXCLUDE_SIGNAL_TYPES = {
     "market_maker_flip",    # backtest n=883 EV -58.4%
     "network_leader_entry", # backtest n=607 EV -26.5%
     "oversized_bet",        # backtest n=289 EV -31.2%
+    "accumulation",         # 2026-05-03: 40 paper trades 25% WR -$4,493 total; drags hypothesis accuracy
+    "order_flow_imbalance", # 2026-05-04: n=31 resolved 35.5% WR -14.5% avg EV; no positive category slice
+    "convergence",          # 2026-05-04: n=14 trade_hypotheses 29% acc; sports slice -36.8% EV
+    "insider_entry",        # 2026-05-04: n=7 trade_hypotheses 29% acc; no positive EV slice
 }
 
 # 2026-05-02: signal-type EXCLUDE doesn't apply when (signal_type,
 # category) is in a Tier-A proven slice. Allows e.g. network_leader_
 # entry × sports (+31% EV n=14) to keep firing while blocking the
 # 587 other -EV network_leader_entry fires.
-def _is_proven_slice(signal_type: str, category: str, db_path: str) -> bool:
+def _is_proven_slice(
+    signal_type: str,
+    category: str,
+    db_path: str,
+    wallet_tier: str | None = None,
+) -> bool:
     if not signal_type or not category:
         return False
     try:
         from trading_platform.polymarket.db_connection import get_connection
         conn = get_connection(db_path)
         try:
+            # 2-dim check (signal × category)
             row = conn.execute(
                 """SELECT 1 FROM signal_category_ev
                     WHERE signal_type = ? AND category = ?
                       AND n_resolved >= 10 AND avg_ev >= 0.10""",
                 (signal_type, category),
             ).fetchone()
+            if row:
+                return True
+            # 3-dim check (signal × category × wallet_tier) — lower n
+            # threshold (5 vs 10) because the finer slice accumulates
+            # samples more slowly
+            if wallet_tier:
+                row3 = conn.execute(
+                    """SELECT 1 FROM signal_category_wallet_ev
+                        WHERE signal_type = ? AND category = ?
+                          AND wallet_tier = ?
+                          AND n_resolved >= 5 AND avg_ev >= 0.10""",
+                    (signal_type, category, wallet_tier),
+                ).fetchone()
+                return bool(row3)
         finally:
             try: conn.close()
             except Exception: pass
-        return bool(row)
+        return False
     except Exception:
         return False
 
@@ -493,7 +517,10 @@ class PolymarketPaperExecutor:
             cb = CircuitBreaker(str(self._wallet_db_path))
             state = cb.initialize(starting_capital=STARTING_BANKROLL)
             sc = float(state.get("starting_capital") or 0)
-            if sc > 0 and abs(sc - STARTING_BANKROLL) / sc > 0.05:
+            # Only rebase DOWN from a stale large placeholder (e.g. $100k init).
+            # Never rebase UP: a smaller starting_capital means the live system
+            # has been calibrated to actual bankroll — don't overwrite it.
+            if sc > 0 and sc > STARTING_BANKROLL * 1.5 and abs(sc - STARTING_BANKROLL) / sc > 0.05:
                 logger.info(
                     "[CB] rebasing starting_capital %.0f → %.0f", sc, STARTING_BANKROLL,
                 )
@@ -681,6 +708,10 @@ class PolymarketPaperExecutor:
         """
         confidence = signal.get("confidence", 0) or 0
         signal_type = signal.get("signal_type", "")
+        # Early assignment so EXCLUDE_SIGNAL_TYPES bypass (line ~735) can reference
+        # sig_cat before the full category-resolution block runs later.
+        sig_cat_raw = signal.get("category") or ""
+        sig_cat = sig_cat_raw.lower() if isinstance(sig_cat_raw, str) else ""
         # Allow per-signal floors so velocity-style signals (which top out
         # at 0.85 by formula) aren't filtered out by the global threshold.
         floor = MIN_CONFIDENCE_BY_TYPE.get(signal_type, MIN_CONFIDENCE)
@@ -711,10 +742,12 @@ class PolymarketPaperExecutor:
         # from bankroll deployment. They still fire and record for analysis.
         # 2026-05-02: bypass when (signal, category) is in a proven slice.
         if signal_type in EXCLUDE_SIGNAL_TYPES:
-            if _is_proven_slice(signal_type, sig_cat or "", str(self._wallet_db_path)):
+            _wt = signal.get("wallet_tier") or signal.get("wallet_tier_at_fire")
+            if _is_proven_slice(signal_type, sig_cat or "", str(self._wallet_db_path),
+                                wallet_tier=_wt):
                 logger.info(
-                    "[EXCLUDE_BYPASS] %s × %s — proven slice, allowing through",
-                    signal_type, sig_cat,
+                    "[EXCLUDE_BYPASS] %s × %s × %s — proven slice, allowing through",
+                    signal_type, sig_cat, _wt or "n/a",
                 )
             else:
                 logger.debug("[CAT_GATE] SKIP excluded signal_type=%s", signal_type)
