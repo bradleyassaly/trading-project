@@ -111,6 +111,13 @@ CONVERGENCE_MIN_WALLETS = 2
 ACCUMULATION_WINDOW_HOURS = 24.0
 ACCUMULATION_MIN_GAP_SECONDS = 3600
 
+# Reversal confluence: 3+ tier-1 wallets all flipping side on same market
+REVERSAL_CONFLUENCE_MIN = 3
+REVERSAL_CONFLUENCE_WINDOW_H = 4.0
+# Resolution proximity: tier-1 wallet trades within N hours of market end
+RESOLUTION_PROXIMITY_HOURS = 72
+RESOLUTION_MIN_SIZE_USD = 75.0
+
 
 class WhaleSignalEngine:
     """Generates signals from detected whale trades across 9 signal types."""
@@ -134,6 +141,10 @@ class WhaleSignalEngine:
         # Check signals in conviction order
         # Tier 1
         sig = self._check_wallet_reversal(trade, now_ts)
+        if sig:
+            signals_fired.append(sig)
+
+        sig = self._check_reversal_confluence(trade, now_ts)
         if sig:
             signals_fired.append(sig)
 
@@ -193,6 +204,10 @@ class WhaleSignalEngine:
         if sig:
             signals_fired.append(sig)
 
+        sig = self._check_resolution_proximity(trade, now_ts)
+        if sig:
+            signals_fired.append(sig)
+
         # Strategy-specific alpha signals (wallet_strategy_profiles-driven)
         sig = self._check_copyable_contrarian(trade, now_ts)
         if sig:
@@ -245,6 +260,77 @@ class WhaleSignalEngine:
         confidence = round(min(confidence * tier_mult, 0.95), 4)
 
         return self._fire_signal("wallet_reversal", trade, confidence, now_ts)
+
+    def _check_reversal_confluence(self, trade: WhaleTrade, now_ts: int) -> dict | None:
+        """3+ tier-1 wallets all flipping side on same market within 4h.
+
+        A single reversal is informative; coordinated multi-wallet reversals
+        indicate a consensus shift in informed money — strong contrarian signal.
+        """
+        prior = self.db.get_prior_position(trade.wallet, trade.condition_id)
+        if not prior or (prior.get("side") or "").upper() == trade.side:
+            return None
+        cutoff = now_ts - int(REVERSAL_CONFLUENCE_WINDOW_H * 3600)
+        try:
+            with self.db._lock:
+                rows = self.db._conn.execute(
+                    """SELECT DISTINCT wallet FROM market_signals
+                       WHERE condition_id = ? AND signal_type = 'wallet_reversal'
+                         AND direction = ? AND fired_at >= ?""",
+                    (trade.condition_id, trade.side, cutoff),
+                ).fetchall()
+            other_reversers = {r[0] for r in rows if r[0] != trade.wallet}
+        except Exception:
+            return None
+        total = len(other_reversers) + 1
+        if total < REVERSAL_CONFLUENCE_MIN:
+            return None
+        extra_wallets = max(0, total - REVERSAL_CONFLUENCE_MIN)
+        confidence = round(min(0.85 + 0.05 * extra_wallets, 0.95), 4)
+        return self._fire_signal("reversal_confluence", trade, confidence, now_ts,
+                                 extra={"confluence_wallets": total})
+
+    def _check_resolution_proximity(self, trade: WhaleTrade, now_ts: int) -> dict | None:
+        """Tier-1 wallet makes a significant trade within 72h of market resolution.
+
+        Informed money moving near resolution = late-breaking edge. Also fast
+        resolution = rapid hypothesis feedback for ladder progression.
+        """
+        if trade.wallet_tier not in ("tier1h", "tier1"):
+            return None
+        if trade.size < RESOLUTION_MIN_SIZE_USD:
+            return None
+        end_str: str | None = None
+        if self.universe:
+            try:
+                entry = self.universe._by_condition.get(trade.condition_id)
+                if entry:
+                    end_str = entry.get("end_date_iso", "")
+            except Exception:
+                pass
+        if not end_str:
+            try:
+                with self.db._lock:
+                    row = self.db._conn.execute(
+                        "SELECT end_date_iso FROM markets WHERE condition_id = ?",
+                        (trade.condition_id,),
+                    ).fetchone()
+                end_str = row[0] if row else None
+            except Exception:
+                pass
+        if not end_str:
+            return None
+        try:
+            end_dt = datetime.fromisoformat(end_str.replace("Z", "+00:00"))
+            hours_to_end = (end_dt - datetime.now(tz=timezone.utc)).total_seconds() / 3600
+        except Exception:
+            return None
+        if hours_to_end <= 0 or hours_to_end > RESOLUTION_PROXIMITY_HOURS:
+            return None
+        prox_mult = 1.30 if hours_to_end < 24 else 1.15 if hours_to_end < 48 else 1.05
+        confidence = round(min(trade.directional_win_rate * prox_mult, 0.95), 4)
+        return self._fire_signal("pre_resolution_entry", trade, confidence, now_ts,
+                                 extra={"hours_to_resolution": round(hours_to_end, 1)})
 
     def _check_oversized_bet(self, trade: WhaleTrade, now_ts: int) -> dict | None:
         """Trade significantly above wallet's historical large_bet_threshold."""
@@ -1178,22 +1264,21 @@ class WhaleSignalEngine:
                 alpha = get_wallet_alpha(
                     str(self.db._path), trade.wallet, trade.category or "other",
                 )
-                # Tiered bypass: tier1h always fires; tier1 allows cold-start
-                # (no alpha row yet) so coverage gaps don't zero out signals
-                # from known-good wallets. tier2 still requires a positive score.
+                # Alpha as confidence multiplier for tier1/tier1h (not a hard gate).
+                # Proven wallets in the category get a boost; unproven get a small
+                # dampen. tier2 still requires a positive score to fire at all.
+                # Rationale: tier1h are vetted by polymarket leaderboard; blocking
+                # them on no-data is worse than dampening. But we should still
+                # use their category track record to calibrate confidence.
                 tier = trade.wallet_tier
                 if alpha <= 0:
-                    if tier == "tier1h":
+                    if tier in ("tier1h", "tier1"):
+                        # No data yet — apply mild confidence dampen (0.90×)
                         signal["alpha_score"] = 0.0
+                        signal["confidence"] = round(signal["confidence"] * 0.90, 4)
                         logger.info(
-                            "[ALPHA_GATE] wallet %s tier1h BYPASS, signal=%s",
-                            trade.wallet[:14], signal_type,
-                        )
-                    elif tier == "tier1":
-                        signal["alpha_score"] = 0.0
-                        logger.info(
-                            "[ALPHA_GATE] wallet %s tier1 COLD-START allow, signal=%s cat=%s",
-                            trade.wallet[:14], signal_type, trade.category,
+                            "[ALPHA_GATE] wallet %s %s no-data dampen 0.90×, signal=%s cat=%s",
+                            trade.wallet[:14], tier, signal_type, trade.category,
                         )
                     else:
                         logger.info(
@@ -1203,9 +1288,12 @@ class WhaleSignalEngine:
                         return None
                 else:
                     signal["alpha_score"] = alpha
+                    # Boost confidence proportional to alpha score (up to 1.15×).
+                    boost = 1.0 + min(alpha, 0.5) * 0.30
+                    signal["confidence"] = round(min(signal["confidence"] * boost, 0.95), 4)
                     logger.info(
-                        "[ALPHA_GATE] wallet %s copyable in %s, score=%.3f, signal=%s",
-                        trade.wallet[:14], trade.category, alpha, signal_type,
+                        "[ALPHA_GATE] wallet %s copyable in %s, score=%.3f boost=%.2f× signal=%s",
+                        trade.wallet[:14], trade.category, alpha, boost, signal_type,
                     )
             except Exception as exc:
                 logger.debug("alpha gate (engine) lookup failed: %s", exc)
@@ -1402,9 +1490,21 @@ class WhaleSignalEngine:
         # it ever reached the executor — guaranteeing zero real trades.
         # whale_entry has the strongest Bayesian gate verdict
         # (n=15 / WR=80% / P(acc≥55%)=0.96 per /api/ladder/status).
+        # specialist_entry 2026-05-03: 84% WR / +10.9% EV (n=74).
+        # tier_entry 2026-05-03: 100% WR / +32% EV (n=15, probation).
+        # whale_exit 2026-05-03: 100% WR / +3.7% EV (n=16, probation).
         LIVE_SIGNAL_TYPES = {
             "whale_entry", "whale_entry_filtered",
             "wallet_reversal", "cascade",
+            "specialist_entry",
+            "tier_entry", "whale_exit",
+            # 2026-05-03: new signals
+            "reversal_confluence",    # 3+ wallets flipping same market — high conviction
+            "pre_resolution_entry",   # tier-1 buying within 72h of resolution
+            # 2026-05-05: oversized_bet — IC30=+0.121, +$107 paper PnL n=34.
+            # Was in LIVE_REAL_SIGNAL_TYPES but missing here → 1,044 signals/week
+            # fired through paper only, 0 live_trades entries. Fixed.
+            "oversized_bet",
         }
         if signal_type in LIVE_SIGNAL_TYPES:
             try:

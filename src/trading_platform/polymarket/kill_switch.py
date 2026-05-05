@@ -98,9 +98,12 @@ class KillSwitch:
     # still applies; only the WR floor is relaxed to the value below.
     # whale_entry_filtered: IC30=0.313, paper PnL +$687 14d at 37% WR — valid.
     # oversized_bet: IC30=0.121, paper PnL +$107, 29% WR but +33% avg EV — valid.
+    # cascade: IC14=+0.032, paper PnL +$74 n=45 at 38% WR — structural low WR,
+    #   edge comes from catching 2+ wallets piling in at low probability.
     WR_FLOOR_OVERRIDES: dict[str, float] = {
         "whale_entry_filtered": 0.30,
         "oversized_bet": 0.25,
+        "cascade": 0.30,
     }
     # When IC14 < this threshold AND decay_flag is set, halve the live stake.
     IC14_DECAY_THRESHOLD = 0.05
@@ -254,8 +257,15 @@ class KillSwitch:
             # 2026-04-30: avg_ev_live is now realized_pnl/size_usd ratio
             # (already a fractional EV), no /100 needed. Was dividing
             # the bad return_pct value by 100 before.
+            # 2026-05-05: once n_live >= MIN_RESOLVED_HARD, trust live paper
+            # exclusively — backtest replay has high false-positive rate on some
+            # signals (e.g. oversized_bet: bt_ev=-0.35 from historical bulk
+            # labeling vs live paper ev=+0.33 from filtered real-time detection).
+            # Backtest serves as cold-start prior only.
             ev_live = avg_ev_live if n_live else None
-            if ev_live is not None and bt_ev is not None:
+            if ev_live is not None and n_live >= min_resolved_hard:
+                ev = ev_live
+            elif ev_live is not None and bt_ev is not None:
                 ev = (2 * ev_live * n_live + bt_ev * bt_n) / (2 * n_live + bt_n)
             elif ev_live is not None:
                 ev = ev_live
