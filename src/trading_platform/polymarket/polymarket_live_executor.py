@@ -152,6 +152,9 @@ class PolymarketLiveExecutor:
         self._kill = KillSwitch(self._db_path)
         self._sizer = KellySizer(self._db_path)
         self._ensure_live_trades_table()
+        # Cache of condition_ids that returned 403 "Trading restricted".
+        # Loaded from live_trades on startup so restarts don't re-attempt.
+        self._restricted_conditions: set[str] = self._load_restricted_conditions()
 
     def _is_dry_run_for(
         self,
@@ -268,6 +271,12 @@ class PolymarketLiveExecutor:
         sig_type = signal.get("signal_type", "")
         confidence = float(signal.get("confidence") or 0)
         condition_id = signal.get("condition_id") or ""
+
+        # Restricted-market fast-exit: skip condition_ids that previously
+        # returned 403 "Trading restricted" to avoid burning error records.
+        if condition_id and condition_id in self._restricted_conditions:
+            logger.debug("[LIVE] SKIP restricted condition %s", condition_id[:16])
+            return self._result(False, reason="condition_id in restricted cache")
 
         # 2026-04-25: isotonic calibration on the inbound confidence.
         # Mirrors paper executor — the same overconfidence bias affects
@@ -704,7 +713,20 @@ class PolymarketLiveExecutor:
             confidence * 100, (signal.get("question") or "")[:40],
         )
 
-        # 5. DRY RUN: log + record + return
+        # 5a. CLOB minimum size check: Polymarket requires at least 5 shares.
+        # At price P, cost = 5 × P. Bump up to the minimum if we're below it;
+        # the CLOB would reject and waste the attempt recording an error row.
+        if not is_dry:
+            clob_min_usd = max(5.0 * current_price, 1.0)
+            if size_usd < clob_min_usd:
+                bumped = min(clob_min_usd, ks.probation_cap or clob_min_usd)
+                logger.info(
+                    "[LIVE] stake $%.2f below CLOB min $%.2f (5 shares @ %.3f) → bumped to $%.2f",
+                    size_usd, clob_min_usd, current_price, bumped,
+                )
+                size_usd = bumped
+
+        # 5b. DRY RUN: log + record + return
         if is_dry:
             self._record_attempt(
                 signal, size_usd, current_price, None,
@@ -767,8 +789,13 @@ class PolymarketLiveExecutor:
                 size_usd=size_usd, filled_price=order_result.filled_price,
             )
         else:
-            logger.error("[LIVE] order failed: %s", order_result.error_msg)
-            return self._result(False, reason=order_result.error_msg)
+            err = order_result.error_msg or ""
+            logger.error("[LIVE] order failed: %s", err)
+            # Cache geo-restricted markets so we don't retry them.
+            if "Trading restricted" in err and condition_id:
+                self._restricted_conditions.add(condition_id)
+                logger.info("[LIVE] cached restricted condition %s", condition_id[:16])
+            return self._result(False, reason=err)
 
     # ── Helpers ────────────────────────────────────────────────────────────
 
@@ -797,6 +824,24 @@ class PolymarketLiveExecutor:
         except Exception as exc:
             logger.debug("token id resolve failed: %s", exc)
         return []
+
+    def _load_restricted_conditions(self) -> set[str]:
+        """Load condition_ids that returned 403 Trading restricted from history."""
+        try:
+            from trading_platform.polymarket.db_connection import get_connection
+            conn = get_connection(self._db_path)
+            try:
+                rows = conn.execute(
+                    "SELECT DISTINCT condition_id FROM live_trades"
+                    " WHERE error_msg LIKE '%Trading restricted%'"
+                    "   AND condition_id IS NOT NULL AND condition_id != ''",
+                ).fetchall()
+                return {r[0] for r in rows}
+            finally:
+                try: conn.close()
+                except Exception: pass
+        except Exception:
+            return set()
 
     # Backwards-compatible shim — returns the YES token id only.
     def _resolve_token_id(self, condition_id: str) -> str | None:
