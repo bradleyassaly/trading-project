@@ -84,9 +84,10 @@ def check_live_exits() -> dict[str, int]:
         rows = conn.execute("""
             SELECT id, condition_id, token_id, side, fill_price, size_usd,
                    shares, signal_type, signal_wallet, submitted_at,
-                   COALESCE(mfe, 0) AS mfe, last_mark_price
+                   COALESCE(mfe, 0) AS mfe, last_mark_price,
+                   entry_price
             FROM live_trades
-            WHERE dry_run = 0 AND fill_price IS NOT NULL
+            WHERE dry_run = 0
               AND exit_ts IS NULL AND status NOT IN ('error', 'blocked')
         """).fetchall()
     finally:
@@ -102,8 +103,14 @@ def check_live_exits() -> dict[str, int]:
 
     for row in rows:
         (lid, cid, token_id, side, fill_price, size_usd, shares,
-         sig_type, src_wallet, submitted_at, mfe_dollars, last_mark) = row
-        if not (cid and token_id and fill_price):
+         sig_type, src_wallet, submitted_at, mfe_dollars, last_mark,
+         entry_price) = row
+        if not cid or not token_id:
+            continue
+        # Use fill_price when available; fall back to entry_price for orders
+        # where avgFilledPrice was 0 (FOK match without price echo).
+        effective_fill = fill_price if fill_price else entry_price
+        if not effective_fill:
             continue
 
         # Fetch current mid price for the token we HOLD
@@ -112,7 +119,7 @@ def check_live_exits() -> dict[str, int]:
             continue
 
         # Compute unrealized pct on stake
-        entry = float(fill_price)
+        entry = float(effective_fill)
         if side in ("YES", "BUY"):
             unrealized_pct = (current - entry) / max(entry, 0.01)
         else:

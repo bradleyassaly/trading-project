@@ -202,8 +202,19 @@ class ClobClient:
                 best_bid = float(bids[0]["price"]) if bids else current_price
                 target = round(best_bid - tick, 2)
             target = max(0.01, min(0.99, target))
-            shares_int = max(1, int(float(size_usdc) / target))
+            _CLOB_MIN_SHARES = 5
+            shares_int = max(_CLOB_MIN_SHARES, int(float(size_usdc) / target))
             actual_usdc = round(shares_int * target, 2)
+            if actual_usdc > float(size_usdc) * 3.0:
+                return OrderResult(
+                    success=False, order_id=None, status="error",
+                    filled_price=None, filled_size=None,
+                    error_msg=(
+                        f"stake ${size_usdc:.2f} too small: CLOB min {_CLOB_MIN_SHARES} shares "
+                        f"@ {target:.3f} = ${actual_usdc:.2f} ({actual_usdc / size_usdc:.1f}x)"
+                    ),
+                    raw={},
+                )
             order_args = OrderArgs(
                 token_id=token_id,
                 price=target,
@@ -225,14 +236,15 @@ class ClobClient:
 
             order_id = resp.get("orderID") or resp.get("id")
             status = resp.get("status", "unknown")
-            filled = resp.get("avgFilledPrice")
+            filled_raw = resp.get("avgFilledPrice")
+            filled_price = float(filled_raw) if filled_raw else current_price
 
             return OrderResult(
                 success=status in ("matched", "live", "delayed"),
                 order_id=order_id,
                 status=status,
-                filled_price=float(filled) if filled is not None else current_price,
-                filled_size=float(size_usdc),
+                filled_price=filled_price,
+                filled_size=float(actual_usdc),
                 error_msg=None if status != "error" else str(resp),
                 raw=resp,
             )
@@ -314,7 +326,19 @@ class ClobClient:
                     price = round(best_bid - tick, 2)
             price = max(0.01, min(0.99, price))
 
-            shares_int = max(1, int(float(size_usdc) / price))
+            _CLOB_MIN_SHARES = 5
+            shares_int = max(_CLOB_MIN_SHARES, int(float(size_usdc) / price))
+            _limit_usdc = round(shares_int * price, 2)
+            if _limit_usdc > float(size_usdc) * 3.0:
+                return OrderResult(
+                    success=False, order_id=None, status="error",
+                    filled_price=None, filled_size=None,
+                    error_msg=(
+                        f"stake ${size_usdc:.2f} too small: CLOB min {_CLOB_MIN_SHARES} shares "
+                        f"@ {price:.3f} = ${_limit_usdc:.2f} ({_limit_usdc / size_usdc:.1f}x)"
+                    ),
+                    raw={},
+                )
             order_args = OrderArgs(
                 token_id=token_id, price=price,
                 size=float(shares_int), side=side.upper(),
