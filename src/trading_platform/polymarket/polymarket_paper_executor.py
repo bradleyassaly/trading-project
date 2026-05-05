@@ -63,7 +63,7 @@ SIGNAL_BANKROLL = {
     "convergence":             10_000,  # no backtest data
 
     # ─── Backtest-negative or demoted ───
-    "oversized_bet":           3_000,   # 60d-backtest EV=-0.127 — capped
+    "oversized_bet":             200,   # 60d-backtest EV=-0.127; live paper EV=+0.33 n=34 — modest cap
     "market_maker_flip":          25,   # 60d-backtest EV=-0.268 — probation sizing ($25/trade)
     "whale_entry":             1_000,   # 60d-backtest EV=-0.047 — baseline, demoted
     "no_position_entry":       3_000,   # small sample, unproven
@@ -912,8 +912,12 @@ class PolymarketPaperExecutor:
         # Category exclusions per signal type. Crypto accumulation: 7 signals,
         # 0 wins, EV=-0.50 on corrected data. Sports/entertainment are also
         # negative. See reports/category_grouping_analysis_2026-04-12.md.
+        # 2026-05-05: whale_entry_filtered×geopolitics: n=12, WR=50%, avg_stake=$32.69
+        # on losses vs $2.25 on wins → -$94 net. Kelly over-sizes on high-confidence
+        # geo trades that consistently lose; wins are small/underdog bets.
         _EXCLUDED_CATS = {
             "accumulation": {"crypto", "entertainment", "sports"},
+            "whale_entry_filtered": {"geopolitics"},
         }
         category = signal.get("category") or "other"
         excluded = _EXCLUDED_CATS.get(signal_type, set())

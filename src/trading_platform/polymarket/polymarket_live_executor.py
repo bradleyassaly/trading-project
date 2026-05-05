@@ -278,6 +278,39 @@ class PolymarketLiveExecutor:
             logger.debug("[LIVE] SKIP restricted condition %s", condition_id[:16])
             return self._result(False, reason="condition_id in restricted cache")
 
+        # 2026-05-05: market horizon gate. Live trades on markets resolving
+        # more than 30 days out take too long to resolve, stalling the
+        # kill switch's sample accumulation (need 15 resolved to reach full
+        # Kelly). Skip live; paper still tracks them for signal validation.
+        LIVE_MAX_HORIZON_DAYS = 30
+        if condition_id:
+            try:
+                from trading_platform.polymarket.db_connection import get_connection as _gc
+                _hconn = _gc(self._db_path)
+                try:
+                    _hrow = _hconn.execute(
+                        "SELECT end_date_iso FROM markets WHERE condition_id = ?",
+                        (condition_id,),
+                    ).fetchone()
+                finally:
+                    try: _hconn.close()
+                    except Exception: pass
+                if _hrow and _hrow[0]:
+                    from datetime import datetime, timezone as _tz
+                    _end = datetime.fromisoformat(str(_hrow[0]).replace("Z", "+00:00"))
+                    _days_out = (_end - datetime.now(tz=_tz.utc)).total_seconds() / 86400
+                    if _days_out > LIVE_MAX_HORIZON_DAYS:
+                        logger.debug(
+                            "[LIVE] SKIP %s — market resolves in %.0f days (> %d day limit)",
+                            condition_id[:16], _days_out, LIVE_MAX_HORIZON_DAYS,
+                        )
+                        return self._result(
+                            False,
+                            reason=f"market resolves in {_days_out:.0f}d (limit {LIVE_MAX_HORIZON_DAYS}d)",
+                        )
+            except Exception as _hex:
+                logger.debug("[LIVE] horizon check failed (proceeding): %s", _hex)
+
         # 2026-04-25: isotonic calibration on the inbound confidence.
         # Mirrors paper executor — the same overconfidence bias affects
         # live-bound signals (Brier 0.35 → 0.24 after correction).
@@ -348,8 +381,11 @@ class PolymarketLiveExecutor:
         # negative — trust the more recent execution evidence.
         # 2026-05-03: whale_entry_filtered×sports (-$0.72/trade, 30% WR n=60)
         #             cascade×sports (-$2.27/trade, 27.8% WR n=18)
+        # 2026-05-05: whale_entry_filtered×geopolitics: n=12, WR=50%, avg_stake
+        #             $32.69 on losses vs $2.25 on wins → -$94 net paper. Kelly
+        #             over-sizes high-confidence geo trades that consistently lose.
         _CAT_BLOCKS: dict[str, set[str]] = {
-            "whale_entry_filtered": {"sports"},
+            "whale_entry_filtered": {"sports", "geopolitics"},
             "cascade": {"sports"},
         }
         if cat in _CAT_BLOCKS.get(sig_type, set()):
