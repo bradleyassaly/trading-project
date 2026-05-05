@@ -78,8 +78,13 @@ class CircuitBreaker:
         now = int(time.time())
         conn = connect_wallet_db(self._db_path)
         try:
+            # INSERT OR IGNORE — never overwrite a calibrated row.
+            # The db_connection rewriter maps INSERT OR REPLACE to
+            # ON CONFLICT DO UPDATE which would stomp a live-calibrated
+            # starting_capital. Use INSERT OR IGNORE (→ ON CONFLICT DO
+            # NOTHING) so a pre-existing row with the real bankroll wins.
             conn.execute(
-                """INSERT OR REPLACE INTO circuit_breaker_state
+                """INSERT OR IGNORE INTO circuit_breaker_state
                     (id, starting_capital, peak_equity, current_equity,
                      max_drawdown_pct, current_drawdown_pct, is_halted,
                      daily_pnl, daily_loss_limit, daily_halted, last_updated)

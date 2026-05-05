@@ -323,11 +323,15 @@ class KillSwitch:
                     warnings,
                 )
 
-            # 7. Open live position count (live_trades table — created lazily)
+            # 7. Open live position count — exit_ts IS NULL guards against
+            # closed trades with status='matched' being counted as open.
+            # The exit path updates exit_ts but not status, so status alone
+            # is not a reliable open-position signal.
             try:
                 live_open = conn.execute(
                     """SELECT COUNT(*) FROM live_trades
-                       WHERE dry_run = 0 AND status IN ('submitted','live','matched')"""
+                       WHERE dry_run = 0 AND exit_ts IS NULL
+                         AND status IN ('submitted','live','matched')"""
                 ).fetchone()[0]
             except sqlite3.OperationalError:
                 live_open = 0
