@@ -239,6 +239,19 @@ SCHEDULE: list[Task] = [
         description="Ingest top-50 wallets over last 7 days (weekly discovery)",
     ),
     Task(
+        name="backfill_alltime_top_wallets",
+        # Fetches trade history for leaderboard wallets we know about (by
+        # all-time net_pnl_usdc) but haven't tracked yet. Closes the gap
+        # between leaderboard discovery (515 wallets) and actual polling
+        # coverage (48 wallets tracked as of 2026-05-04). Wallets already
+        # in wallet_trades are skipped automatically. After backfill, the
+        # daily compute-alpha-scores + tiers_rebuild tasks pick them up and
+        # they start generating signals within 24h.
+        cmd="trading-cli data polymarket backfill-top-wallets --limit 200",
+        interval_seconds=7 * 24 * 3600,
+        description="Weekly: backfill trade history for top-200 untracked leaderboard wallets",
+    ),
+    Task(
         name="daily_digest",
         cmd="python -m trading_platform.polymarket.daily_digest",
         interval_seconds=24 * 3600,
@@ -312,10 +325,11 @@ SCHEDULE: list[Task] = [
     ),
     Task(
         name="db_backup",
-        # Daily SQLite backup using sqlite3's native .backup() API,
-        # which is safe to run while the DB is open and being written
-        # to (unlike a file copy which can race the WAL checkpoint).
-        # Keeps the last 7 daily backups; older ones are pruned.
+        # DISABLED 2026-05-03: DB migrated from SQLite to PostgreSQL on
+        # 2026-04-14. This task backed up the old SQLite file at
+        # /app/data/polymarket/wallet_intelligence.db which no longer
+        # holds production data. The pg_backup task below is the correct
+        # backup mechanism for the Postgres DB.
         cmd=(
             "python -c \""
             "import sqlite3, os, glob, time; "
@@ -329,7 +343,8 @@ SCHEDULE: list[Task] = [
             "print(f'backup ok: {dst}')\""
         ),
         interval_seconds=24 * 3600,
-        description="Daily SQLite backup (rotates last 7 days)",
+        description="Daily SQLite backup (DISABLED — production DB is now Postgres; see pg_backup)",
+        enabled=False,
     ),
     Task(
         name="thesis_daily_snapshot",
@@ -374,6 +389,17 @@ SCHEDULE: list[Task] = [
         cmd="python -m trading_platform.polymarket.pm_leaderboard_sync",
         interval_seconds=24 * 3600,
         description="Daily PM authoritative leaderboard sync + tier1h promotion",
+    ),
+    Task(
+        name="wallet_auto_discovery",
+        # 2026-05-04: mines wallet_trades for high-performing wallets not
+        # yet in the leaderboard (WR>=55%, n>=30, PnL>=$50k). Adds them
+        # to leaderboard + wallet_poll_state automatically so signal engine
+        # can copy them. Runs after pm_leaderboard_sync so PM wallets are
+        # already present and won't be double-added.
+        cmd="python -m trading_platform.polymarket.wallet_auto_discovery",
+        interval_seconds=24 * 3600,
+        description="Daily auto-discovery of high-performing wallets from wallet_trades",
     ),
     Task(
         # 2026-04-25: behavioral metrics pipeline. Bootstrap-CI on per-

@@ -73,30 +73,52 @@ def cmd_polymarket_discover_market_wallets(args: argparse.Namespace) -> None:
 
 
 def cmd_polymarket_backfill_top_wallets(args: argparse.Namespace) -> None:
-    """Backfill top 50 wallets from leaderboard table by net_pnl_usdc."""
+    """Backfill top N wallets from leaderboard table by net_pnl_usdc.
+
+    Skips wallets already tracked in wallet_trades unless --all is passed.
+    Default: top 200 untracked wallets ordered by all-time PnL.
+    """
     from trading_platform.polymarket.wallet_db import WalletDB
     from trading_platform.polymarket.leaderboard_ingest import PolymarketLeaderboardIngestor
 
-    limit = getattr(args, "limit", 50)
+    limit = getattr(args, "limit", 200)
+    skip_tracked = not getattr(args, "all", False)
     db = WalletDB()
     with db._lock:
-        rows = db._conn.execute(
-            "SELECT wallet, net_pnl_usdc FROM leaderboard ORDER BY net_pnl_usdc DESC LIMIT ?",
-            (limit,),
-        ).fetchall()
+        if skip_tracked:
+            rows = db._conn.execute(
+                """SELECT l.wallet, l.net_pnl_usdc
+                   FROM leaderboard l
+                   WHERE NOT EXISTS (
+                       SELECT 1 FROM wallet_trades wt WHERE wt.wallet = l.wallet
+                   )
+                   ORDER BY l.net_pnl_usdc DESC
+                   LIMIT ?""",
+                (limit,),
+            ).fetchall()
+        else:
+            rows = db._conn.execute(
+                "SELECT wallet, net_pnl_usdc FROM leaderboard ORDER BY net_pnl_usdc DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
 
     if not rows:
-        print("[ERROR] No wallets in leaderboard. Run build-leaderboard first.")
+        if skip_tracked:
+            print("[INFO] All leaderboard wallets are already tracked. Use --all to re-sync.")
+        else:
+            print("[ERROR] No wallets in leaderboard. Run build-leaderboard first.")
         return
 
+    mode = "untracked" if skip_tracked else "top"
     ing = PolymarketLeaderboardIngestor(db=db)
-    print(f"Backfilling {len(rows)} top wallets...")
+    print(f"Backfilling {len(rows)} {mode} leaderboard wallets by all-time PnL...")
     total = 0
     for i, (wallet, pnl) in enumerate(rows, 1):
-        print(f"  [{i}/{len(rows)}] {wallet[:16]}... (PnL: ${(pnl or 0):,.0f})", end=" ")
+        print(f"  [{i}/{len(rows)}] {wallet[:16]}... (PnL: ${(pnl or 0):,.0f})", end=" ", flush=True)
         result = ing.backfill_wallet(wallet)
         total += result["trades_fetched"]
         print(f"{result['trades_fetched']} trades")
 
     print()
     print(f"[DONE] Total trades fetched: {total}")
+    print(f"  Next: run compute-alpha-scores to update copyability scores")

@@ -3123,10 +3123,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     data_polymarket_backfill_top = data_polymarket_subparsers.add_parser(
         "backfill-top-wallets",
-        help="Backfill top N wallets from leaderboard by net_pnl_usdc.",
+        help="Backfill untracked leaderboard wallets by all-time net_pnl_usdc.",
     )
-    data_polymarket_backfill_top.add_argument("--limit", type=int, default=50,
-        help="Number of top wallets to backfill (default: 50).")
+    data_polymarket_backfill_top.add_argument("--limit", type=int, default=200,
+        help="Max untracked wallets to backfill (default: 200).")
+    data_polymarket_backfill_top.add_argument("--all", action="store_true",
+        help="Re-sync already-tracked wallets too (slower).")
     data_polymarket_backfill_top.set_defaults(func=cmd_polymarket_backfill_top_wallets)
 
     data_polymarket_discover = data_polymarket_subparsers.add_parser(

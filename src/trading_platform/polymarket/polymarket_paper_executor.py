@@ -64,7 +64,7 @@ SIGNAL_BANKROLL = {
 
     # ─── Backtest-negative or demoted ───
     "oversized_bet":           3_000,   # 60d-backtest EV=-0.127 — capped
-    "market_maker_flip":       2_000,   # 60d-backtest EV=-0.268 — near-disabled
+    "market_maker_flip":          25,   # 60d-backtest EV=-0.268 — probation sizing ($25/trade)
     "whale_entry":             1_000,   # 60d-backtest EV=-0.047 — baseline, demoted
     "no_position_entry":       3_000,   # small sample, unproven
     "pre_deadline_surge":      5_000,
