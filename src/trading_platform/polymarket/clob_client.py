@@ -211,6 +211,13 @@ class ClobClient:
                 shares_int = max(1, int(exact_shares))
                 actual_usdc = round(shares_int * target, 2)
             elif side.upper() == "BUY":
+                if float(size_usdc) < 1.0:
+                    return OrderResult(
+                        success=False, order_id=None, status="error",
+                        filled_price=None, filled_size=None,
+                        error_msg=f"CLOB minimum BUY is $1.00; requested ${size_usdc:.2f}",
+                        raw={},
+                    )
                 _CLOB_MIN_SHARES = 5
                 shares_int = max(_CLOB_MIN_SHARES, int(float(size_usdc) / target))
                 actual_usdc = round(shares_int * target, 2)

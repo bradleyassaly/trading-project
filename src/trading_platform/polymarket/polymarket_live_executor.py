@@ -65,7 +65,10 @@ class PolymarketLiveExecutor:
     #   tier_entry:  n=15, WR=100%, EV=+32% (small sample, probation)
     #   whale_exit:  n=16, WR=100%, EV=+3.7%  (small sample, probation)
     LIVE_REAL_SIGNAL_TYPES: set[str] = {
-        "wallet_reversal", "specialist_entry",
+        "wallet_reversal",
+        # specialist_entry removed 2026-05-05: IC30=-0.202, IC14=-0.135, decay_flag=True.
+        # Negative information coefficient means live orders lose money. Re-add when
+        # IC30 recovers above 0.05 and decay_flag clears.
         "tier_entry", "whale_exit",
         # 2026-05-03: paper-proven signals promoted to live.
         # whale_entry: P(acc≥55%)=0.92 (ladder), +$885 paper PnL n=28.

@@ -93,6 +93,16 @@ class KillSwitch:
     INSIDER_SIGNAL_TYPES = {"insider_entry", "high_conviction_insider"}
     INSIDER_MIN_RESOLVED = 3
     INSIDER_MAX_STAKE_USD = 5.0
+    # Signals where WR < 50% is structural: edge comes from asymmetric payoffs
+    # (betting low-probability outcomes at better-than-fair odds). The EV gate
+    # still applies; only the WR floor is relaxed to the value below.
+    # whale_entry_filtered: IC30=0.313, paper PnL +$687 14d at 37% WR — valid.
+    WR_FLOOR_OVERRIDES: dict[str, float] = {
+        "whale_entry_filtered": 0.30,
+    }
+    # When IC14 < this threshold AND decay_flag is set, halve the live stake.
+    IC14_DECAY_THRESHOLD = 0.05
+    IC14_STAKE_HALF_FACTOR = 0.5
 
     def __init__(self, db_path: str, bankroll: float | None = None) -> None:
         self._db_path = str(db_path)
@@ -265,13 +275,36 @@ class KillSwitch:
                 wr = (2 * wr_live * n_live + bt_wr * bt_n) / (2 * n_live + bt_n)
             else:
                 wr = wr_live if wr_live is not None else (bt_wr or 0)
-            wr_floor = self.MIN_WIN_RATE_PROBATION if probation else self.MIN_WIN_RATE
+            default_wr_floor = self.MIN_WIN_RATE_PROBATION if probation else self.MIN_WIN_RATE
+            wr_floor = self.WR_FLOOR_OVERRIDES.get(signal_type, default_wr_floor)
             if effective_n >= 20 and wr < wr_floor:
                 return KillSwitchResult(
                     False,
                     f"{signal_type}: blended WR {wr:.0%} below minimum {wr_floor:.0%}",
                     warnings,
                 )
+
+            # IC14 decay penalty: if recent IC has collapsed, halve the stake cap.
+            # This doesn't block the trade — it forces smaller size until the
+            # signal proves it still has edge in the current market regime.
+            try:
+                ic_row = conn.execute(
+                    "SELECT ic_14d, decay_flag FROM signal_health WHERE signal_type = %s",
+                    (signal_type,),
+                ).fetchone()
+                if ic_row:
+                    ic14, decay = float(ic_row[0] or 0), bool(ic_row[1])
+                    if decay and ic14 < self.IC14_DECAY_THRESHOLD:
+                        warnings.append(
+                            f"IC14={ic14:.3f} below {self.IC14_DECAY_THRESHOLD} with decay_flag — "
+                            f"stake halved"
+                        )
+                        if cap is None:
+                            cap = self.PROBATION_MAX_STAKE_USD * self.IC14_STAKE_HALF_FACTOR
+                        else:
+                            cap = cap * self.IC14_STAKE_HALF_FACTOR
+            except Exception:
+                pass
 
             # 6. Daily loss limit
             today_start = int(time.time()) - 86400
