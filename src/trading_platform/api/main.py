@@ -685,10 +685,13 @@ def live_positions() -> dict[str, Any]:
         with _db() as conn:
             rows = conn.execute("""
                 SELECT id, condition_id, token_id, question, category, side,
-                       signal_type, confidence, fill_price, size_usd, shares,
+                       signal_type, confidence,
+                       COALESCE(fill_price, entry_price) AS fill_price,
+                       size_usd, shares,
                        submitted_at, wallet_archetype, signal_wallet
                 FROM live_trades
-                WHERE exit_ts IS NULL AND fill_price IS NOT NULL
+                WHERE exit_ts IS NULL AND status NOT IN ('blocked', 'error')
+                  AND dry_run = 0
                 ORDER BY submitted_at DESC
             """).fetchall()
             cols = ["id", "condition_id", "token_id", "question", "category",

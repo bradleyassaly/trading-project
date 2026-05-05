@@ -67,22 +67,20 @@ class PolymarketLiveExecutor:
     LIVE_REAL_SIGNAL_TYPES: set[str] = {
         "wallet_reversal",
         # specialist_entry removed 2026-05-05: IC30=-0.202, IC14=-0.135, decay_flag=True.
-        # Negative information coefficient means live orders lose money. Re-add when
-        # IC30 recovers above 0.05 and decay_flag clears.
+        # Re-add when IC30 recovers above 0.05 and decay_flag clears.
         "tier_entry", "whale_exit",
-        # 2026-05-03: paper-proven signals promoted to live.
-        # whale_entry: P(acc≥55%)=0.92 (ladder), +$885 paper PnL n=28.
-        # whale_entry_filtered: +$401 paper PnL n=96 (sports blocked below).
-        # cascade: +$114 paper PnL n=39 (sports blocked below).
-        "whale_entry", "whale_entry_filtered", "cascade",
-        # 2026-05-03: new signals — paper trading to validate before raising stakes.
-        # reversal_confluence: 3+ tier-1 wallets reversing same market (high conviction).
-        # pre_resolution_entry: tier-1 buying within 72h of resolution (fast feedback).
+        # whale_entry_filtered: IC30=+0.313, +$574 paper PnL n=148 (sports blocked).
+        # cascade: IC14=+0.032 (recovering), +$76 paper PnL n=43.
+        "whale_entry_filtered", "cascade",
+        # whale_entry removed 2026-05-05: IC30=-0.383, IC14=-0.674, decay_flag=True.
+        # Fires 5k+/week, 100% blocked by kill switch (EV=-0.291). Pure noise.
+        # Re-add if IC30 recovers above 0.0 for 7+ consecutive days.
         "reversal_confluence", "pre_resolution_entry",
-        # 2026-05-04: Phase B signal promoted to live. 95% hypothesis accuracy
-        # on n=22, 100% WR in politics/israel (n=6) and economics (n=8) slices.
-        # Decoupled from whale flow — fires on time-to-resolve + price band.
+        # resolution_decay: 85% WR, +185% EV, n=27 — best WR of any signal.
         "resolution_decay",
+        # oversized_bet: IC30=+0.121, +$107 paper PnL n=34, +33% avg EV.
+        # Asymmetric payoffs (low WR structural), WR floor overridden to 0.25.
+        "oversized_bet",
     }
 
     # ALWAYS True in source. Flip in your local instance only.

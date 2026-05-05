@@ -21,7 +21,7 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-_FOOTER = "\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\U0001f5a5 View: localhost:5173"
+_FOOTER = "\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500"
 
 _SIGNAL_EMOJIS = {
     "wallet_reversal": "\U0001f504", "cascade": "\U0001f4c8",
@@ -184,24 +184,19 @@ class TelegramAlerter:
 
     MAX_NONCRITICAL_PER_HOUR = 20
 
-    # Only alert on wallet-based signals — NOT technical scanners.
-    # velocity_detector and order_book_monitor are noise.
+    # Alert on live-traded signals + high-IC monitors. Excluded from list:
+    # signals with negative IC, in paper EXCLUDE, or firing 1k+/day all-blocked.
     SIGNAL_WHITELIST = {
-        "whale_entry", "whale_exit",
-        "convergence", "cascade",
-        "specialist_entry", "accumulation",
-        "oversized_bet", "wallet_reversal",
-        "market_maker_flip", "no_position_entry",
-        "position_reduction", "pre_deadline_surge",
-        "late_conviction", "tier_entry",
-        "whale_entry_filtered", "insider_entry",
-        "copyable_contrarian", "strategy_specialist",
-        "consensus_follower", "network_leader_entry",
-        "news_reactor",
-        "order_flow_imbalance",
-        "high_conviction_insider",
-        "price_momentum",
-        "resolution_proximity",
+        # Live-traded
+        "whale_entry_filtered", "whale_exit", "wallet_reversal",
+        "cascade", "tier_entry", "resolution_decay", "oversized_bet",
+        "reversal_confluence", "pre_resolution_entry",
+        # Monitoring (positive IC, not yet live)
+        "whale_entry",           # high volume; watch for regime recovery
+        "insider_entry", "high_conviction_insider",
+        # Time-sensitive alerts
+        "pre_deadline_surge", "late_conviction", "position_reduction",
+        "price_momentum", "resolution_proximity",
     }
 
     # Minimum trade size (USD) to alert on whale detection
@@ -1015,6 +1010,34 @@ class TelegramAlerter:
         except Exception:
             pass
 
+        # Live account block — bankroll, open positions, all-time realized PnL
+        live_block = ""
+        try:
+            from trading_platform.polymarket.bankroll import get_bankroll
+            live_bankroll = get_bankroll()
+            live_rows = conn.execute("""
+                SELECT
+                    COUNT(*) FILTER (WHERE exit_ts IS NULL AND status NOT IN ('blocked','error') AND dry_run=0) AS open_n,
+                    SUM(CASE WHEN exit_ts IS NOT NULL AND dry_run=0 THEN COALESCE(realized_pnl,0) ELSE 0 END) AS realized,
+                    COUNT(*) FILTER (WHERE exit_ts IS NOT NULL AND outcome='win' AND dry_run=0) AS wins,
+                    COUNT(*) FILTER (WHERE exit_ts IS NOT NULL AND outcome IS NOT NULL AND dry_run=0) AS settled
+                FROM live_trades
+            """).fetchone()
+            open_n = int(live_rows[0] or 0)
+            live_realized = float(live_rows[1] or 0)
+            live_wins = int(live_rows[2] or 0)
+            live_settled = int(live_rows[3] or 0)
+            live_wr = f"{live_wins/live_settled*100:.0f}%" if live_settled else "n/a"
+            live_sign = "+" if live_realized >= 0 else ""
+            live_block = (
+                f"\n<b>Live Account:</b>\n"
+                f"  Bankroll: {_fmt_usd(live_bankroll)}\n"
+                f"  Open positions: {open_n}\n"
+                f"  Settled: {live_settled} trades | WR: {live_wr} | PnL: {live_sign}{_fmt_usd(live_realized)}"
+            )
+        except Exception as exc:
+            logger.debug("live block failed: %s", exc)
+
         lines = [
             "\U0001f4ca <b>DAILY DIGEST</b>\n",
             f"<b>Pipeline (24h):</b>",
@@ -1022,10 +1045,11 @@ class TelegramAlerter:
             f"  Paper trades placed: {total_placed} ({conv:.1f}%)",
             f"  Trades resolved: {total_exited}",
             f"  Day PnL: {'+' if total_pnl >= 0 else ''}{_fmt_usd(total_pnl)}",
-            f"\n<b>Portfolio:</b>",
+            f"\n<b>Paper Portfolio:</b>",
             f"  Equity: {_fmt_usd(equity)}",
             f"  Cum PnL: {'+' if cum_pnl >= 0 else ''}{_fmt_usd(cum_pnl)}",
             f"  Open positions: {open_count}",
+            live_block,
             ladder_block,
             calib_block,
             funnel_block,

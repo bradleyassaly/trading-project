@@ -97,8 +97,10 @@ class KillSwitch:
     # (betting low-probability outcomes at better-than-fair odds). The EV gate
     # still applies; only the WR floor is relaxed to the value below.
     # whale_entry_filtered: IC30=0.313, paper PnL +$687 14d at 37% WR — valid.
+    # oversized_bet: IC30=0.121, paper PnL +$107, 29% WR but +33% avg EV — valid.
     WR_FLOOR_OVERRIDES: dict[str, float] = {
         "whale_entry_filtered": 0.30,
+        "oversized_bet": 0.25,
     }
     # When IC14 < this threshold AND decay_flag is set, halve the live stake.
     IC14_DECAY_THRESHOLD = 0.05
