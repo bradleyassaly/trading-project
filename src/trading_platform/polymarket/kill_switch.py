@@ -55,7 +55,11 @@ class KillSwitch:
     """Multi-layer pre-trade safety check."""
 
     MAX_DAILY_LOSS_PCT = 0.10
-    MAX_OPEN_POSITIONS = 10
+    # 2026-05-06: raised 10→20. 30-day horizon gate means positions resolve
+    # faster; resolution_decay was repeatedly blocked at 10 despite only 4
+    # genuinely open trades. With short-horizon markets, turnover is high
+    # enough that 20 simultaneous positions carries acceptable risk.
+    MAX_OPEN_POSITIONS = 20
     # Per-trade cap derived dynamically from live bankroll (7% of account
     # as phase-1 safety ramp; capped at $25 hard ceiling). Scales with
     # account growth without code changes.

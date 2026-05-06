@@ -202,7 +202,12 @@ class PolymarketLiveExecutor:
                     pass
             if not promoted_via_3dim:
                 return self.DRY_RUN
-        # Check last 3 closed real-money trades on this signal type
+        # Check last 3 closed real-money trades on this signal type.
+        # Exclude discovery-tier ($1) stakes: those are probe trades on any
+        # available market (including long-dated markets now gated by the
+        # 30-day horizon filter). Three $1 stop-losses on wrong markets
+        # should not demote a signal that has strong paper evidence.
+        # Only trades with size_usd > $1.50 count toward the demote gate.
         try:
             _conn = _gc(self._db_path)
             try:
@@ -210,6 +215,7 @@ class PolymarketLiveExecutor:
                     """SELECT outcome FROM live_trades
                         WHERE signal_type = ? AND dry_run = 0
                           AND outcome IN ('win','loss')
+                          AND size_usd > 1.50
                         ORDER BY exit_ts DESC LIMIT 3""",
                     (signal_type,),
                 ).fetchall()
@@ -218,7 +224,7 @@ class PolymarketLiveExecutor:
                 except Exception: pass
             if len(_row) >= 3 and all((r[0] or "") == "loss" for r in _row):
                 logger.warning(
-                    "[LIVE][AUTO_DEMOTE] %s — 3 consecutive real losses, "
+                    "[LIVE][AUTO_DEMOTE] %s — 3 consecutive real losses (size>$1.50), "
                     "back to dry-run", signal_type,
                 )
                 return True
