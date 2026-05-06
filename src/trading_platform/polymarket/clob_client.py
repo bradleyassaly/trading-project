@@ -370,15 +370,19 @@ class ClobClient:
                 logger.warning("[clob] get_neg_risk lookup failed (%s), defaulting to False", _nr_exc)
             _opts = PartialCreateOrderOptions(tick_size="0.01", neg_risk=neg_risk_flag)
 
-            order_type = OrderType.FOK if aggression == "aggressive" else OrderType.GTC
+            # Always GTC — FOK was causing "order couldn't be fully filled"
+            # on thin books (46 errors/12h) because the entire order had to
+            # fill atomically. GTC at aggressive price fills what's available
+            # immediately then picks up the rest within timeout_sec.
+            order_type = OrderType.GTC
             resp = client.create_and_post_order(order_args, options=_opts, order_type=order_type)
             order_id = resp.get("orderID") or resp.get("id")
             status = resp.get("status", "unknown")
 
-            if order_type == OrderType.FOK or status == "matched":
+            if status == "matched":
                 filled = resp.get("avgFilledPrice")
                 return OrderResult(
-                    success=status in ("matched", "live", "delayed"),
+                    success=True,
                     order_id=order_id, status=status,
                     filled_price=float(filled) if filled else price,
                     filled_size=float(size_usdc), error_msg=None, raw=resp,
@@ -417,10 +421,10 @@ class ClobClient:
                     timeout_sec=timeout_sec, aggression="mid",
                 )
             elif aggression == "mid":
-                logger.info("[clob] mid order unfilled, escalating to aggressive (FOK)")
+                logger.info("[clob] mid order unfilled, escalating to aggressive (GTC, 15s)")
                 return self.place_limit_order(
                     token_id, side, size_usdc,
-                    timeout_sec=0, aggression="aggressive",
+                    timeout_sec=15.0, aggression="aggressive",
                 )
 
             return OrderResult(

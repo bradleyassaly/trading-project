@@ -918,6 +918,7 @@ class PolymarketPaperExecutor:
         _EXCLUDED_CATS = {
             "accumulation": {"crypto", "entertainment", "sports"},
             "whale_entry_filtered": {"geopolitics"},
+            "cascade": {"geopolitics", "science"},
         }
         category = signal.get("category") or "other"
         excluded = _EXCLUDED_CATS.get(signal_type, set())

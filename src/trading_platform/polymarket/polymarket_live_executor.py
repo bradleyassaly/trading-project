@@ -390,9 +390,12 @@ class PolymarketLiveExecutor:
         # 2026-05-05: whale_entry_filtered×geopolitics: n=12, WR=50%, avg_stake
         #             $32.69 on losses vs $2.25 on wins → -$94 net paper. Kelly
         #             over-sizes high-confidence geo trades that consistently lose.
+        # 2026-05-06: cascade×geopolitics: 3 losses overnight (US-Iran peace deal).
+        #             cascade×sports: PSG misclassified as 'science' — also block
+        #             'science' for cascade since FC matches landing there.
         _CAT_BLOCKS: dict[str, set[str]] = {
             "whale_entry_filtered": {"sports", "geopolitics"},
-            "cascade": {"sports"},
+            "cascade": {"sports", "geopolitics", "science"},
         }
         if cat in _CAT_BLOCKS.get(sig_type, set()):
             logger.info("[LIVE] BLOCKED %s × %s — per-signal category block", sig_type, cat)
