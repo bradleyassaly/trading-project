@@ -331,9 +331,7 @@ class TelegramAlerter:
 
     def send_whale_detection(self, trade: Any, profile: dict | None = None) -> bool:
         """Rich alert on tier-1 (or tier1h) whale detection."""
-        tier = getattr(trade, "wallet_tier", "tier2")
-        if tier not in ("tier1", "tier1h"):
-            return False
+        return False  # suppressed — live entry/exit alerts are the signal of record
 
         # Filter: minimum trade size
         size = getattr(trade, "size", 0) or 0
@@ -392,11 +390,7 @@ class TelegramAlerter:
 
     def send_signal(self, signal: dict, paper_result: dict | None = None) -> bool:
         """Rich alert when a signal fires, with paper trade details if placed."""
-        sig_type = signal.get("signal_type", "")
-
-        # Only wallet-based signals — silently drop velocity/order_book noise
-        if sig_type not in self.SIGNAL_WHITELIST:
-            return False
+        return False  # suppressed — live entry/exit alerts cover execution; daily digest covers signals
 
         # Per-market cooldown
         cid = signal.get("condition_id")
@@ -617,9 +611,7 @@ class TelegramAlerter:
 
     def send_insider_entry(self, signal: dict) -> bool:
         """Alert when an insider-flagged wallet enters a market."""
-        cid = signal.get("condition_id")
-        if not self._check_market_cooldown(cid):
-            return False
+        return False  # suppressed — not yet live; covered by send_signal when re-enabled
 
         wallet = (signal.get("wallet") or "")[:12]
         question = (signal.get("question") or "")[:90]
@@ -653,13 +645,8 @@ class TelegramAlerter:
         win_rate: float | None = None,
         pnl_30d: float | None = None,
     ) -> bool:
-        """Loud alert: S/A tier political / geopolitical wallet just moved.
-
-        B tier uses silent notification; C and below don't alert here.
-        """
-        tier_u = (tier or "").upper()
-        if tier_u not in ("S", "A", "B"):
-            return False
+        """Loud alert: S/A tier political / geopolitical wallet just moved."""
+        return False  # suppressed — not actionable while trading restricted; re-enable when live
 
         sig_type = signal.get("signal_type", "")
         cid = signal.get("condition_id")
@@ -695,7 +682,7 @@ class TelegramAlerter:
 
     def send_paper_trade(self, trade: dict) -> bool:
         """Alert when a paper trade is placed (standalone, without signal context)."""
-        question = (trade.get("question") or trade.get("condition_id", ""))[:70]
+        return False  # suppressed — paper placement noise; trade_resolved covers outcomes
         stake = trade.get("stake", 0) or 0
         conf = trade.get("confidence", 0) or 0
         sig = trade.get("signal_type", "")
@@ -778,7 +765,7 @@ class TelegramAlerter:
                 )
 
         msg += _FOOTER
-        return self._send(msg)
+        return self._send(msg, disable_notification=True)
 
     # ── Daily position update ────────────────────────────────────────────────
 
@@ -882,7 +869,7 @@ class TelegramAlerter:
 
     def send_paper_trade_confirmation(self, signal: dict, trade: dict) -> bool:
         """Brief confirmation when the paper executor places a trade."""
-        sig_type = signal.get("signal_type", "")
+        return False  # suppressed — too granular; trade_resolved covers outcomes
         q = (signal.get("question") or "")[:60]
         price = trade.get("entry_price") or signal.get("price") or 0
         size = trade.get("size_usd") or 0
