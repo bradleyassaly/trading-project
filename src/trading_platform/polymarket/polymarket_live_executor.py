@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import time
 from typing import Any
 
@@ -37,6 +38,11 @@ from trading_platform.polymarket.kill_switch import KillSwitch
 from trading_platform.polymarket.wallet_db import WalletDB
 
 logger = logging.getLogger(__name__)
+
+# In-process dedup: prevents concurrent signals for the same (condition_id, direction)
+# from racing past the DB check before either INSERT completes.
+_DEDUP_LOCKS: dict = {}
+_DEDUP_LOCKS_META = threading.Lock()
 
 
 class PolymarketLiveExecutor:
@@ -713,17 +719,6 @@ class PolymarketLiveExecutor:
             return self._result(False, reason="Could not fetch current price from CLOB")
         current_price = _yes_mid if want_yes else max(0.01, 1.0 - _yes_mid)
 
-        # Near-resolution gate for SELL: NO token below 5 cents means the
-        # market is 95%+ resolved YES. The NO book has essentially zero
-        # liquidity and CLOB rejects any bid (YES+NO > 1.0 constraint).
-        # Root cause of every entry_price≈0.999 timeout error.
-        if not want_yes and current_price < 0.05:
-            return self._result(
-                False,
-                reason=(f"NO token at {current_price:.3f} — market {_yes_mid:.3f}+ resolved, "
-                        f"no liquidity"),
-            )
-
         # Stale-price guard: compare signal's predicted price against the live
         # CLOB mid. Use an absolute 0.10 drift threshold rather than relative
         # so the gate is meaningful on both cheap (0.05) and expensive (0.90)
@@ -806,102 +801,125 @@ class PolymarketLiveExecutor:
             )
 
         # 5c. Dedup gate: one live position per (condition_id, direction).
-        # Prevents stacking 5-18 positions on the same market when multiple
-        # signals fire for the same condition_id within a short window.
-        if condition_id:
-            try:
-                from trading_platform.polymarket.db_connection import get_connection as _gc
-                _dconn = _gc(self._db_path)
-                try:
-                    _dup = _dconn.execute(
-                        """SELECT 1 FROM live_trades
-                           WHERE condition_id = ? AND direction = ? AND dry_run = 0
-                             AND exit_ts IS NULL AND status NOT IN ('error','blocked')
-                           LIMIT 1""",
-                        (condition_id, signal.get("direction", "BUY")),
-                    ).fetchone()
-                finally:
-                    try: _dconn.close()
-                    except Exception: pass
-                if _dup:
-                    return self._result(
-                        False,
-                        reason=f"duplicate: open {signal.get('direction','BUY')} on {condition_id[:20]}",
-                    )
-            except Exception as _derr:
-                logger.debug("[LIVE] dedup check failed (proceeding): %s", _derr)
-
-        # 6. LIVE — submit. Polymarket CLOB side is always BUY; YES vs NO
-        # is determined by token_id.
-        if not self._clob.is_configured:
-            return self._result(False, reason="CLOB not configured — set POLYMARKET_API_KEY etc.")
-
-        # Aggression routing: SELL direction (buying NO token) and wallet_reversal
-        # use aggressive pricing for guaranteed fills. Passive bidding on thin NO
-        # books almost never fills within the 75s escalation window — wallet_reversal
-        # had 86 errors vs 21 fills on SELL. Time-sensitive signals can't afford
-        # the passive→mid→aggressive escalation delay.
-        _aggression = (
-            "aggressive"
-            if (not want_yes or sig_type == "wallet_reversal")
-            else "passive"
-        )
-
-        # Use optimized limit order. Pass current_price (already direction-
-        # corrected) as price_hint so place_limit_order uses the right fallback
-        # when one side of the book is empty rather than re-fetching mid (which
-        # would return the YES price even for NO token queries).
-        if hasattr(self._clob, "place_limit_order"):
-            order_result: OrderResult = self._clob.place_limit_order(
-                token_id=token_id, side="BUY", size_usdc=size_usd,
-                timeout_sec=30.0, aggression=_aggression,
-                price_hint=current_price,
-            )
-        else:
-            order_result: OrderResult = self._clob.place_market_order(
-                token_id=token_id, side="BUY", size_usdc=size_usd, max_slippage=0.02,
-            )
-        self._record_attempt(
-            signal, size_usd, current_price, order_result,
-            dry_run=False,
-            status=order_result.status if order_result.success else "error",
-            error_msg=order_result.error_msg,
-            token_id=token_id,
-        )
-        if order_result.success:
-            fill = order_result.filled_price or current_price
-            logger.info("[LIVE] order placed: %s @ %.3f", order_result.order_id, fill)
-            # LOUD Telegram alert — live fills get their own format so they
-            # stand out from paper trade notifications.
-            try:
-                from trading_platform.polymarket.telegram_alerts import get_alerter
-                alerter = get_alerter()
-                question = (signal.get("question") or "")[:60]
-                alerter._send(
-                    f"\U0001f6a8 <b>LIVE TRADE EXECUTED</b> \U0001f6a8\n\n"
-                    f"<b>{sig_type.upper()}</b> | {outcome_label} @ {fill:.3f}\n"
-                    f"Stake: <b>${size_usd:.2f}</b>\n"
-                    f"Market: {question}\n"
-                    f"Order: <code>{order_result.order_id or 'n/a'}</code>\n"
-                    f"Confidence: {confidence:.0%} | "
-                    f"{'PROBATION $5 cap' if ks.probation_cap is not None else 'FULL KELLY'}\n"
-                    f"\n\U0001f4b0 Bankroll: ${live_bankroll:.0f}",
-                    disable_notification=False,  # LOUD — sound + vibration
+        # Two-layer protection:
+        #   (a) Module-level per-market lock closes the race window where
+        #       concurrent signals both read "no open position" before either
+        #       INSERT lands — was the primary cause of PSG (×15) / US-Iran (×6).
+        #   (b) DB query covers ALL non-exited rows including error/blocked, so a
+        #       failed first order still blocks the next signal on the same market.
+        #       Previously the `status NOT IN ('error','blocked')` exclusion was
+        #       letting every failed retry sail through the gate.
+        _dedup_direction = signal.get("direction", "BUY")
+        _dedup_key = f"{condition_id}:{_dedup_direction}" if condition_id else None
+        _dedup_lock_obj = None
+        if _dedup_key:
+            with _DEDUP_LOCKS_META:
+                _dedup_lock_obj = _DEDUP_LOCKS.setdefault(_dedup_key, threading.Lock())
+            if not _dedup_lock_obj.acquire(blocking=False):
+                return self._result(
+                    False,
+                    reason=f"concurrent entry in-flight: {_dedup_key[:30]}",
                 )
-            except Exception:
-                pass
-            return self._result(
-                True, mode="live", order_id=order_result.order_id,
-                size_usd=size_usd, filled_price=order_result.filled_price,
+        try:
+            if condition_id:
+                try:
+                    from trading_platform.polymarket.db_connection import get_connection as _gc
+                    _dconn = _gc(self._db_path)
+                    try:
+                        _dup = _dconn.execute(
+                            """SELECT 1 FROM live_trades
+                               WHERE condition_id = ? AND direction = ? AND dry_run = 0
+                                 AND exit_ts IS NULL
+                               LIMIT 1""",
+                            (condition_id, _dedup_direction),
+                        ).fetchone()
+                    finally:
+                        try: _dconn.close()
+                        except Exception: pass
+                    if _dup:
+                        return self._result(
+                            False,
+                            reason=f"duplicate: open {_dedup_direction} on {condition_id[:20]}",
+                        )
+                except Exception as _derr:
+                    logger.warning("[LIVE] dedup check failed — blocking: %s", _derr)
+                    return self._result(False, reason="dedup check error — blocked")
+
+            # 6. LIVE — submit. Polymarket CLOB side is always BUY; YES vs NO
+            # is determined by token_id.
+            if not self._clob.is_configured:
+                return self._result(False, reason="CLOB not configured — set POLYMARKET_API_KEY etc.")
+
+            # Aggression routing: SELL direction (buying NO token) and wallet_reversal
+            # use aggressive pricing for guaranteed fills. Passive bidding on thin NO
+            # books almost never fills within the 75s escalation window — wallet_reversal
+            # had 86 errors vs 21 fills on SELL. Time-sensitive signals can't afford
+            # the passive→mid→aggressive escalation delay.
+            _aggression = (
+                "aggressive"
+                if (not want_yes or sig_type == "wallet_reversal")
+                else "passive"
             )
-        else:
-            err = order_result.error_msg or ""
-            logger.error("[LIVE] order failed: %s", err)
-            # Cache geo-restricted markets so we don't retry them.
-            if "Trading restricted" in err and condition_id:
-                self._restricted_conditions.add(condition_id)
-                logger.info("[LIVE] cached restricted condition %s", condition_id[:16])
-            return self._result(False, reason=err)
+
+            # Use optimized limit order. Pass current_price (already direction-
+            # corrected) as price_hint so place_limit_order uses the right fallback
+            # when one side of the book is empty rather than re-fetching mid (which
+            # would return the YES price even for NO token queries).
+            if hasattr(self._clob, "place_limit_order"):
+                order_result: OrderResult = self._clob.place_limit_order(
+                    token_id=token_id, side="BUY", size_usdc=size_usd,
+                    timeout_sec=30.0, aggression=_aggression,
+                    price_hint=current_price,
+                )
+            else:
+                order_result: OrderResult = self._clob.place_market_order(
+                    token_id=token_id, side="BUY", size_usdc=size_usd, max_slippage=0.02,
+                )
+            self._record_attempt(
+                signal, size_usd, current_price, order_result,
+                dry_run=False,
+                status=order_result.status if order_result.success else "error",
+                error_msg=order_result.error_msg,
+                token_id=token_id,
+            )
+            if order_result.success:
+                fill = order_result.filled_price or current_price
+                logger.info("[LIVE] order placed: %s @ %.3f", order_result.order_id, fill)
+                # LOUD Telegram alert — live fills get their own format so they
+                # stand out from paper trade notifications.
+                try:
+                    from trading_platform.polymarket.telegram_alerts import get_alerter
+                    alerter = get_alerter()
+                    question = (signal.get("question") or "")[:60]
+                    alerter._send(
+                        f"\U0001f6a8 <b>LIVE TRADE EXECUTED</b> \U0001f6a8\n\n"
+                        f"<b>{sig_type.upper()}</b> | {outcome_label} @ {fill:.3f}\n"
+                        f"Stake: <b>${size_usd:.2f}</b>\n"
+                        f"Market: {question}\n"
+                        f"Order: <code>{order_result.order_id or 'n/a'}</code>\n"
+                        f"Confidence: {confidence:.0%} | "
+                        f"{'PROBATION $5 cap' if ks.probation_cap is not None else 'FULL KELLY'}\n"
+                        f"\n\U0001f4b0 Bankroll: ${live_bankroll:.0f}",
+                        disable_notification=False,  # LOUD — sound + vibration
+                    )
+                except Exception:
+                    pass
+                return self._result(
+                    True, mode="live", order_id=order_result.order_id,
+                    size_usd=size_usd, filled_price=order_result.filled_price,
+                )
+            else:
+                err = order_result.error_msg or ""
+                logger.error("[LIVE] order failed: %s", err)
+                # Cache geo-restricted markets so we don't retry them.
+                if "Trading restricted" in err and condition_id:
+                    self._restricted_conditions.add(condition_id)
+                    logger.info("[LIVE] cached restricted condition %s", condition_id[:16])
+                return self._result(False, reason=err)
+        finally:
+            if _dedup_lock_obj is not None:
+                try: _dedup_lock_obj.release()
+                except RuntimeError: pass
 
     # ── Helpers ────────────────────────────────────────────────────────────
 
