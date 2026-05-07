@@ -260,7 +260,7 @@ class PolymarketLiveExecutor:
                     "CREATE INDEX IF NOT EXISTS idx_live_trades_ts ON live_trades(attempted_at DESC)"
                 )
                 # Lazy-add columns that pre-date this schema — idempotent.
-                for col_ddl in ("outcome TEXT", "exit_ts INTEGER"):
+                for col_ddl in ("outcome TEXT", "exit_ts INTEGER", "signal_price REAL"):
                     try:
                         conn.execute(f"ALTER TABLE live_trades ADD COLUMN {col_ddl}")
                     except Exception:
@@ -709,20 +709,20 @@ class PolymarketLiveExecutor:
         if current_price is None:
             return self._result(False, reason="Could not fetch current price from CLOB")
 
-        # Stale-price guard: compare against entry price in the same frame.
-        # Signal.price is in the YES-token reference frame; current_price is
-        # the token we'd actually buy. For NO trades, flip entry_price into
-        # NO-frame before comparing.
+        # Stale-price guard: compare signal's predicted price against the live
+        # CLOB mid. Use an absolute 0.10 drift threshold rather than relative
+        # so the gate is meaningful on both cheap (0.05) and expensive (0.90)
+        # tokens — 5% relative was ±0.0025 at 0.05, useless for drift detection.
         entry_price = float(signal.get("entry_price") or signal.get("price") or 0)
         if entry_price > 0:
             entry_in_token_frame = entry_price if want_yes else (1.0 - entry_price)
             if entry_in_token_frame > 0:
-                slippage = abs(current_price - entry_in_token_frame) / entry_in_token_frame
-                if slippage > 0.05:
+                drift = abs(current_price - entry_in_token_frame)
+                if drift > 0.10:
                     return self._result(
                         False,
-                        reason=(f"Price moved {slippage:.1%} since signal "
-                                f"(entry={entry_in_token_frame:.3f} now={current_price:.3f})"),
+                        reason=(f"Price drifted {drift:.2f} since signal fired "
+                                f"(signal={entry_in_token_frame:.3f} now={current_price:.3f})"),
                     )
 
         # Liquidity guard: check orderbook depth on THE token we're buying
@@ -759,17 +759,24 @@ class PolymarketLiveExecutor:
         )
 
         # 5a. CLOB minimum size check: Polymarket requires at least 5 shares.
-        # At price P, cost = 5 × P. Bump up to the minimum if we're below it;
-        # the CLOB would reject and waste the attempt recording an error row.
+        # At price P, cost = 5 × P. If stake is below minimum, bump to minimum
+        # UNLESS the probation cap is lower — in that case skip entirely rather
+        # than submitting a guaranteed-fail order (was generating ~17 error rows/day).
         if not is_dry:
             clob_min_usd = max(5.0 * current_price, 1.0)
             if size_usd < clob_min_usd:
-                bumped = min(clob_min_usd, ks.probation_cap or clob_min_usd)
+                cap = ks.probation_cap or clob_min_usd
+                if clob_min_usd > cap:
+                    return self._result(
+                        False,
+                        reason=(f"CLOB min ${clob_min_usd:.2f} (5 shares @ {current_price:.3f}) "
+                                f"exceeds probation cap ${cap:.2f} — skipping"),
+                    )
                 logger.info(
-                    "[LIVE] stake $%.2f below CLOB min $%.2f (5 shares @ %.3f) → bumped to $%.2f",
-                    size_usd, clob_min_usd, current_price, bumped,
+                    "[LIVE] stake $%.2f bumped to CLOB min $%.2f (5 shares @ %.3f)",
+                    size_usd, clob_min_usd, current_price,
                 )
-                size_usd = bumped
+                size_usd = clob_min_usd
 
         # 5b. DRY RUN: log + record + return
         if is_dry:
@@ -952,13 +959,15 @@ class PolymarketLiveExecutor:
                     else:
                         shares = float(size_usd) / max(float(effective_price), 0.01)
             try:
+                _sig_price_raw = signal.get("entry_price") or signal.get("price")
+                _sig_price = float(_sig_price_raw) if _sig_price_raw is not None else None
                 conn.execute(
                     """INSERT INTO live_trades
                        (attempted_at, signal_type, condition_id, question, direction,
                         confidence, size_usd, entry_price, order_id, status,
                         dry_run, error_msg, token_id, side, fill_price, shares,
-                        category, signal_wallet, submitted_at, filled_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        category, signal_wallet, submitted_at, filled_at, signal_price)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         now_ts,
                         signal.get("signal_type"),
@@ -980,6 +989,7 @@ class PolymarketLiveExecutor:
                         signal.get("source_wallet") or signal.get("signal_wallet"),
                         now_ts,
                         now_ts if status in ("matched", "live") else None,
+                        _sig_price,
                     ),
                 )
             finally:

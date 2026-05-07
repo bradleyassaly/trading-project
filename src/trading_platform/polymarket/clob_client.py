@@ -249,7 +249,17 @@ class ClobClient:
             opts = PartialCreateOrderOptions(tick_size="0.01", neg_risk=neg_risk_flag)
             # GTC so partial fills are collected rather than the entire order
             # being killed if the book can't absorb it atomically (FOK).
-            resp = client.create_and_post_order(order_args, options=opts, order_type=OrderType.GTC)
+            resp = None
+            for _nonce_try in range(3):
+                try:
+                    resp = client.create_and_post_order(order_args, options=opts, order_type=OrderType.GTC)
+                    break
+                except Exception as _ne:
+                    if "order_version_mismatch" in str(_ne) and _nonce_try < 2:
+                        logger.warning("[clob] nonce mismatch (attempt %d), retrying", _nonce_try + 1)
+                        time.sleep(0.4 * (_nonce_try + 1))
+                        continue
+                    raise
             logger.info(
                 "[clob] market-as-GTC %s %d shares @ %.2f = $%.2f neg_risk=%s",
                 side.upper(), shares_int, target, actual_usdc, neg_risk_flag,
@@ -323,12 +333,16 @@ class ClobClient:
                 client_kwargs["funder"] = funder
             client = PyClobClient(**client_kwargs)
 
+            # Use live midpoint as fallback when one side of the book is empty.
+            # Previously defaulted to 0.50, which caused orders to be placed at
+            # 0.50 on thin markets where the real mid was 0.10–0.20.
+            mid_fallback = self.get_mid_price(token_id) or 0.5
             book = self.get_order_book(token_id)
             bids = book.get("bids") or []
             asks = book.get("asks") or []
-            best_bid = float(bids[0]["price"]) if bids else 0.50
-            best_ask = float(asks[0]["price"]) if asks else 0.50
-            mid = (best_bid + best_ask) / 2 if best_bid and best_ask else 0.50
+            best_bid = float(bids[0]["price"]) if bids else mid_fallback
+            best_ask = float(asks[0]["price"]) if asks else mid_fallback
+            mid = (best_bid + best_ask) / 2
             tick = 0.01
 
             if side.upper() == "BUY":
@@ -377,7 +391,21 @@ class ClobClient:
             # fill atomically. GTC at aggressive price fills what's available
             # immediately then picks up the rest within timeout_sec.
             order_type = OrderType.GTC
-            resp = client.create_and_post_order(order_args, options=_opts, order_type=order_type)
+            # Retry on EIP-712 nonce collision (order_version_mismatch) which
+            # happens when concurrent submissions share the same timestamp salt.
+            # py_clob_client_v2 generates a fresh nonce on each create call so
+            # retrying the full create_and_post is sufficient.
+            resp = None
+            for _nonce_try in range(3):
+                try:
+                    resp = client.create_and_post_order(order_args, options=_opts, order_type=order_type)
+                    break
+                except Exception as _ne:
+                    if "order_version_mismatch" in str(_ne) and _nonce_try < 2:
+                        logger.warning("[clob] nonce mismatch (attempt %d), retrying", _nonce_try + 1)
+                        _time.sleep(0.4 * (_nonce_try + 1))
+                        continue
+                    raise
             order_id = resp.get("orderID") or resp.get("id")
             status = resp.get("status", "unknown")
 
