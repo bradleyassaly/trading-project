@@ -211,6 +211,15 @@ class ClobClient:
                 best_bid = max((float(b["price"]) for b in bids), default=current_price)
                 target = round(best_bid - tick, 2)
             target = max(0.01, min(0.99, target))
+            # Guard: Polymarket's order book API returns YES-space prices for
+            # ALL token queries, including NO tokens. For a NO token at 0.01,
+            # the book's asks come back at ~0.99 (YES space), making target=0.99
+            # instead of 0.02. Detected when target deviates >0.30 from the
+            # caller's direction-corrected price_hint; fall back to hint±tick.
+            if current_price != 0.5 and abs(target - current_price) > 0.30:
+                target = round(current_price + tick, 2) if side.upper() == "BUY" \
+                    else round(current_price - tick, 2)
+                target = max(0.01, min(0.99, target))
             if exact_shares is not None:
                 # Caller-supplied exact count (exit sells use this to avoid
                 # exceeding the token balance we actually hold).
@@ -368,6 +377,12 @@ class ClobClient:
                 else:
                     price = round(best_bid - tick, 2)
             price = max(0.01, min(0.99, price))
+            # Guard: order book returns YES-space prices for NO token queries;
+            # fall back to price_hint ± tick when computed price is far off.
+            if mid_fallback != 0.5 and abs(price - mid_fallback) > 0.30:
+                price = round(mid_fallback + tick, 2) if side.upper() == "BUY" \
+                    else round(mid_fallback - tick, 2)
+                price = max(0.01, min(0.99, price))
 
             _CLOB_MIN_SHARES = 5
             shares_int = max(_CLOB_MIN_SHARES, int(float(size_usdc) / price))

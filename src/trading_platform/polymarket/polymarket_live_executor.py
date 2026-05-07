@@ -719,6 +719,15 @@ class PolymarketLiveExecutor:
             return self._result(False, reason="Could not fetch current price from CLOB")
         current_price = _yes_mid if want_yes else max(0.01, 1.0 - _yes_mid)
 
+        # Live-price BUY gate: catches signals where entry_price was None/0 so
+        # the FAVORITE_BLOCK check above didn't fire, but the live market is already
+        # expensive (e.g. Bitcoin-5min buying YES at 0.99 — any tiny reversal = loss).
+        if want_yes and current_price >= FAVORITE_BLOCK_PRICE:
+            return self._result(
+                False,
+                reason=f"BUY at live price {current_price:.2f} (>= {FAVORITE_BLOCK_PRICE:.2f}): tail-risk blocked",
+            )
+
         # Stale-price guard: compare signal's predicted price against the live
         # CLOB mid. Use an absolute 0.10 drift threshold rather than relative
         # so the gate is meaningful on both cheap (0.05) and expensive (0.90)
