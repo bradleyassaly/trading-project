@@ -50,6 +50,7 @@ class OrderResult:
     filled_size: float | None
     error_msg: str | None
     raw: dict
+    fill_time_ms: int | None = None
 
 
 class ClobClient:
@@ -294,6 +295,7 @@ class ClobClient:
         size_usdc: float,
         timeout_sec: float = 30.0,
         aggression: str = "passive",
+        price_hint: float | None = None,
     ) -> OrderResult:
         """Place a limit order with fill monitoring.
 
@@ -333,10 +335,10 @@ class ClobClient:
                 client_kwargs["funder"] = funder
             client = PyClobClient(**client_kwargs)
 
-            # Use live midpoint as fallback when one side of the book is empty.
-            # Previously defaulted to 0.50, which caused orders to be placed at
-            # 0.50 on thin markets where the real mid was 0.10–0.20.
-            mid_fallback = self.get_mid_price(token_id) or 0.5
+            # price_hint is the caller's already-fetched, direction-corrected
+            # token price. Prefer it over re-fetching mid (which always returns
+            # the YES price even for NO token queries).
+            mid_fallback = price_hint if price_hint is not None else (self.get_mid_price(token_id) or 0.5)
             book = self.get_order_book(token_id)
             bids = book.get("bids") or []
             asks = book.get("asks") or []
@@ -344,6 +346,7 @@ class ClobClient:
             best_ask = float(asks[0]["price"]) if asks else mid_fallback
             mid = (best_bid + best_ask) / 2
             tick = 0.01
+            _order_submit_ts = _time.time()
 
             if side.upper() == "BUY":
                 if aggression == "passive":
@@ -416,6 +419,7 @@ class ClobClient:
                     order_id=order_id, status=status,
                     filled_price=float(filled) if filled else price,
                     filled_size=float(size_usdc), error_msg=None, raw=resp,
+                    fill_time_ms=int((_time.time() - _order_submit_ts) * 1000),
                 )
 
             # GTC: poll for fill
@@ -432,13 +436,14 @@ class ClobClient:
                             filled_price=float(fp) if fp else price,
                             filled_size=float(size_usdc), error_msg=None,
                             raw=check,
+                            fill_time_ms=int((_time.time() - _order_submit_ts) * 1000),
                         )
                     if st in ("cancelled", "expired"):
                         break
                 except Exception:
                     pass
 
-            # Unfilled — cancel and fall back to aggressive
+            # Unfilled — cancel and fall back to next aggression level
             try:
                 client.cancel_order(order_id)
             except Exception:
@@ -449,12 +454,14 @@ class ClobClient:
                 return self.place_limit_order(
                     token_id, side, size_usdc,
                     timeout_sec=timeout_sec, aggression="mid",
+                    price_hint=price_hint,
                 )
             elif aggression == "mid":
                 logger.info("[clob] mid order unfilled, escalating to aggressive (GTC, 15s)")
                 return self.place_limit_order(
                     token_id, side, size_usdc,
                     timeout_sec=15.0, aggression="aggressive",
+                    price_hint=price_hint,
                 )
 
             return OrderResult(

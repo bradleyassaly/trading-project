@@ -705,9 +705,24 @@ class PolymarketLiveExecutor:
             return self._result(False, reason=f"No {outcome_label} token_id for {condition_id[:20]}")
 
         # 4. Current price + liquidity check (ON THE TOKEN WE'RE BUYING)
-        current_price = self._clob.get_mid_price(token_id)
-        if current_price is None:
+        # Polymarket's /midpoint endpoint always returns the YES-token market
+        # probability regardless of which token_id is queried. For SELL signals
+        # (buying NO token), flip to get the actual NO-token price.
+        _yes_mid = self._clob.get_mid_price(token_id)
+        if _yes_mid is None:
             return self._result(False, reason="Could not fetch current price from CLOB")
+        current_price = _yes_mid if want_yes else max(0.01, 1.0 - _yes_mid)
+
+        # Near-resolution gate for SELL: NO token below 5 cents means the
+        # market is 95%+ resolved YES. The NO book has essentially zero
+        # liquidity and CLOB rejects any bid (YES+NO > 1.0 constraint).
+        # Root cause of every entry_price≈0.999 timeout error.
+        if not want_yes and current_price < 0.05:
+            return self._result(
+                False,
+                reason=(f"NO token at {current_price:.3f} — market {_yes_mid:.3f}+ resolved, "
+                        f"no liquidity"),
+            )
 
         # Stale-price guard: compare signal's predicted price against the live
         # CLOB mid. Use an absolute 0.10 drift threshold rather than relative
@@ -821,13 +836,26 @@ class PolymarketLiveExecutor:
         if not self._clob.is_configured:
             return self._result(False, reason="CLOB not configured — set POLYMARKET_API_KEY etc.")
 
-        # Use optimized limit order: starts passive (at bid, earns spread),
-        # escalates to mid then aggressive if unfilled. Falls back to the
-        # old market-order path if place_limit_order isn't available.
+        # Aggression routing: SELL direction (buying NO token) and wallet_reversal
+        # use aggressive pricing for guaranteed fills. Passive bidding on thin NO
+        # books almost never fills within the 75s escalation window — wallet_reversal
+        # had 86 errors vs 21 fills on SELL. Time-sensitive signals can't afford
+        # the passive→mid→aggressive escalation delay.
+        _aggression = (
+            "aggressive"
+            if (not want_yes or sig_type == "wallet_reversal")
+            else "passive"
+        )
+
+        # Use optimized limit order. Pass current_price (already direction-
+        # corrected) as price_hint so place_limit_order uses the right fallback
+        # when one side of the book is empty rather than re-fetching mid (which
+        # would return the YES price even for NO token queries).
         if hasattr(self._clob, "place_limit_order"):
             order_result: OrderResult = self._clob.place_limit_order(
                 token_id=token_id, side="BUY", size_usdc=size_usd,
-                timeout_sec=30.0, aggression="passive",
+                timeout_sec=30.0, aggression=_aggression,
+                price_hint=current_price,
             )
         else:
             order_result: OrderResult = self._clob.place_market_order(
@@ -961,13 +989,26 @@ class PolymarketLiveExecutor:
             try:
                 _sig_price_raw = signal.get("entry_price") or signal.get("price")
                 _sig_price = float(_sig_price_raw) if _sig_price_raw is not None else None
+                # expected_price = CLOB mid at submission; slippage = fill - expected.
+                _expected = float(entry_price) if entry_price is not None else None
+                _slippage = (
+                    round(fill_price - _expected, 4)
+                    if fill_price is not None and _expected is not None
+                    else None
+                )
+                _fill_time_ms = (
+                    order_result.fill_time_ms
+                    if order_result and order_result.fill_time_ms is not None
+                    else None
+                )
                 conn.execute(
                     """INSERT INTO live_trades
                        (attempted_at, signal_type, condition_id, question, direction,
                         confidence, size_usd, entry_price, order_id, status,
                         dry_run, error_msg, token_id, side, fill_price, shares,
-                        category, signal_wallet, submitted_at, filled_at, signal_price)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        category, signal_wallet, submitted_at, filled_at, signal_price,
+                        expected_price, slippage, fill_time_ms)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         now_ts,
                         signal.get("signal_type"),
@@ -976,7 +1017,7 @@ class PolymarketLiveExecutor:
                         signal.get("direction", "BUY"),
                         signal.get("confidence"),
                         float(size_usd) if size_usd is not None else None,
-                        float(entry_price) if entry_price is not None else None,
+                        _expected,
                         order_result.order_id if order_result else None,
                         status,
                         1 if dry_run else 0,
@@ -990,6 +1031,9 @@ class PolymarketLiveExecutor:
                         now_ts,
                         now_ts if status in ("matched", "live") else None,
                         _sig_price,
+                        _expected,
+                        _slippage,
+                        _fill_time_ms,
                     ),
                 )
             finally:

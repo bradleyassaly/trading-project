@@ -747,6 +747,19 @@ SCHEDULE: list[Task] = [
         description="Live position auto-exit monitor (every 5min)",
     ),
     Task(
+        name="order_reconciler",
+        # Poll CLOB for any GTC orders stuck in 'live'/'submitted' status
+        # (e.g., process restarted mid-poll). Marks them filled/cancelled
+        # and cancels stale open orders older than 10 min.
+        cmd=(
+            "python -c \""
+            "from trading_platform.polymarket.order_reconciler import reconcile_open_orders; "
+            "r = reconcile_open_orders(); print(f'[reconciler] {r}')\""
+        ),
+        interval_seconds=10 * 60,
+        description="Reconcile open GTC orders against CLOB (every 10min)",
+    ),
+    Task(
         name="signal_anomaly_detector",
         # Detect silent or spiking signal types every 30 min. Compares
         # last-hour fires vs 7-day per-hour baseline; alerts via Telegram
