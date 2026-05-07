@@ -132,6 +132,7 @@ class ClobClient:
         size_usdc: float,
         max_slippage: float = 0.02,
         exact_shares: int | None = None,
+        price_hint: float | None = None,
     ) -> OrderResult:
         """Submit a market order to the CLOB. Requires py-clob-client."""
         if not self._configured:
@@ -191,7 +192,11 @@ class ClobClient:
                 )
             client = PyClobClient(**client_kwargs)
 
-            current_price = self.get_mid_price(token_id) or 0.5
+            # price_hint is the caller's direction-corrected token price.
+            # get_mid_price always returns the YES-space price regardless of
+            # token queried, so for NO token exits the fallback must come from
+            # the caller (1 - yes_mid), not a fresh fetch.
+            current_price = price_hint if price_hint is not None else (self.get_mid_price(token_id) or 0.5)
 
             tick = 0.01
             book = self.get_order_book(token_id)

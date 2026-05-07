@@ -225,14 +225,21 @@ def check_live_exits() -> dict[str, int]:
         if side not in ("YES", "BUY"):
             no_entry = max(1.0 - entry, 0.01)
             shares_held = float(size_usd or 0) / no_entry
+            # current is the YES-space price (get_mid_price returns YES
+            # regardless of token). Flip to get the actual NO token price
+            # for the exit order fallback — otherwise an empty NO book uses
+            # YES price as the sell target and the order never fills.
+            exit_price_hint = max(0.01, 1.0 - current)
         else:
             shares_held = float(shares or 0) or (float(size_usd or 0) / max(entry, 0.01))
+            exit_price_hint = current
         exact_sell_shares = max(1, int(shares_held))
         order_result = clob.place_market_order(
             token_id=token_id, side="SELL",
             size_usdc=float(size_usd or 0),
             exact_shares=exact_sell_shares,
             max_slippage=0.05,
+            price_hint=exit_price_hint,
         )
         if not order_result.success:
             logger.warning(
