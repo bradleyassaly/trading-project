@@ -917,7 +917,7 @@ class PolymarketPaperExecutor:
         # geo trades that consistently lose; wins are small/underdog bets.
         _EXCLUDED_CATS = {
             "accumulation": {"crypto", "entertainment", "sports"},
-            "whale_entry_filtered": {"geopolitics"},
+            "whale_entry_filtered": {"geopolitics", "crypto"},
             "cascade": {"geopolitics", "science"},
         }
         category = signal.get("category") or "other"

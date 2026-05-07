@@ -218,10 +218,15 @@ def check_live_exits() -> dict[str, int]:
             continue
 
         # Place SELL order on the token we HOLD.
-        # Pass exact_shares (floored) so we never try to sell more tokens
-        # than our balance.  Derive from the shares column when present;
-        # fall back to size_usd / entry (original fill calculation).
-        shares_held = float(shares or 0) or (float(size_usd or 0) / max(entry, 0.01))
+        # For SELL direction (long NO): shares = size_usd / NO_price = size_usd / (1-entry)
+        # because entry = fill_price is stored in YES-space (Polymarket avgFilledPrice
+        # for NO token BUYs returns the complementary YES price).
+        # Using entry directly (YES-space) gave ~100x under-count: int(2.7) instead of 267.
+        if side not in ("YES", "BUY"):
+            no_entry = max(1.0 - entry, 0.01)
+            shares_held = float(size_usd or 0) / no_entry
+        else:
+            shares_held = float(shares or 0) or (float(size_usd or 0) / max(entry, 0.01))
         exact_sell_shares = max(1, int(shares_held))
         order_result = clob.place_market_order(
             token_id=token_id, side="SELL",

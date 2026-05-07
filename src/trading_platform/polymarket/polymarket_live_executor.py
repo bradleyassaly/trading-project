@@ -394,7 +394,7 @@ class PolymarketLiveExecutor:
         #             cascade×sports: PSG misclassified as 'science' — also block
         #             'science' for cascade since FC matches landing there.
         _CAT_BLOCKS: dict[str, set[str]] = {
-            "whale_entry_filtered": {"sports", "geopolitics"},
+            "whale_entry_filtered": {"sports", "geopolitics", "crypto"},
             "cascade": {"sports", "geopolitics", "science"},
         }
         if cat in _CAT_BLOCKS.get(sig_type, set()):
@@ -783,6 +783,32 @@ class PolymarketLiveExecutor:
                 reason=f"DRY RUN — would BUY {outcome_label} token (no order submitted)",
             )
 
+        # 5c. Dedup gate: one live position per (condition_id, direction).
+        # Prevents stacking 5-18 positions on the same market when multiple
+        # signals fire for the same condition_id within a short window.
+        if condition_id:
+            try:
+                from trading_platform.polymarket.db_connection import get_connection as _gc
+                _dconn = _gc(self._db_path)
+                try:
+                    _dup = _dconn.execute(
+                        """SELECT 1 FROM live_trades
+                           WHERE condition_id = ? AND direction = ? AND dry_run = 0
+                             AND exit_ts IS NULL AND status NOT IN ('error','blocked')
+                           LIMIT 1""",
+                        (condition_id, signal.get("direction", "BUY")),
+                    ).fetchone()
+                finally:
+                    try: _dconn.close()
+                    except Exception: pass
+                if _dup:
+                    return self._result(
+                        False,
+                        reason=f"duplicate: open {signal.get('direction','BUY')} on {condition_id[:20]}",
+                    )
+            except Exception as _derr:
+                logger.debug("[LIVE] dedup check failed (proceeding): %s", _derr)
+
         # 6. LIVE — submit. Polymarket CLOB side is always BUY; YES vs NO
         # is determined by token_id.
         if not self._clob.is_configured:
@@ -915,7 +941,16 @@ class PolymarketLiveExecutor:
                 fill_price = float(order_result.filled_price)
                 effective_price = fill_price or entry_price
                 if effective_price and size_usd:
-                    shares = float(size_usd) / max(float(effective_price), 0.01)
+                    direction = signal.get("direction", "BUY").upper()
+                    if direction == "SELL":
+                        # fill_price is the YES-space price; NO token price = 1 - fill_price.
+                        # Shares = USDC spent / NO token price so the exit sell targets
+                        # the correct quantity (was using fill_price as denominator →
+                        # ~100x under-count on near-resolution SELL entries).
+                        no_price = max(1.0 - float(effective_price), 0.01)
+                        shares = float(size_usd) / no_price
+                    else:
+                        shares = float(size_usd) / max(float(effective_price), 0.01)
             try:
                 conn.execute(
                     """INSERT INTO live_trades

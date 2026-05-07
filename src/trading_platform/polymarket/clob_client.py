@@ -247,9 +247,11 @@ class ClobClient:
             except Exception as _nr_exc:
                 logger.warning("[clob] get_neg_risk lookup failed (%s), defaulting to False", _nr_exc)
             opts = PartialCreateOrderOptions(tick_size="0.01", neg_risk=neg_risk_flag)
-            resp = client.create_and_post_order(order_args, options=opts, order_type=OrderType.FOK)
+            # GTC so partial fills are collected rather than the entire order
+            # being killed if the book can't absorb it atomically (FOK).
+            resp = client.create_and_post_order(order_args, options=opts, order_type=OrderType.GTC)
             logger.info(
-                "[clob] market-as-FOK %s %d shares @ %.2f = $%.2f neg_risk=%s",
+                "[clob] market-as-GTC %s %d shares @ %.2f = $%.2f neg_risk=%s",
                 side.upper(), shares_int, target, actual_usdc, neg_risk_flag,
             )
 
