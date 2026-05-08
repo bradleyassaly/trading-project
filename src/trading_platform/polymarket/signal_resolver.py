@@ -33,8 +33,11 @@ _GAMMA_CSV = _PROJECT_ROOT / "data" / "polymarket" / "gamma_resolution.csv"
 _GAMMA_URL = "https://gamma-api.polymarket.com/markets"
 
 # Per-run ceiling on Gamma API calls — protects against runaway and rate limit.
-# At ~3 req/s this is ~100s of API work per resolver run.
-_MAX_GAMMA_CALLS_PER_RUN = 300
+# 2026-05-03: raised 300→1000. At 0.35s/call that's ~350s (6 min) per run,
+# well within the 4h interval. Old 300-call ceiling created a permanent
+# equilibrium with ~8K backlogged markets — we added ~300 new markets per
+# run while resolving only 300, so the queue never drained.
+_MAX_GAMMA_CALLS_PER_RUN = 1000
 # Sleep between Gamma calls; public API tolerates ~3 req/s comfortably.
 _GAMMA_SLEEP_SEC = 0.35
 

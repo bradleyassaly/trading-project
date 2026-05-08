@@ -54,11 +54,11 @@ def run_detector() -> dict[str, Any]:
                       COUNT(DISTINCT wt.wallet) AS n_distinct,
                       AVG(wt.price) AS avg_exit_price
                  FROM wallet_trades wt
-                 JOIN wallet_alpha_scores was ON LOWER(was.wallet) = LOWER(wt.wallet)
+                 JOIN leaderboard lb ON LOWER(lb.wallet) = LOWER(wt.wallet)
                 WHERE wt.timestamp > ?
                   AND wt.side IN ('SELL', 'sell', 'CLOSE', 'close')
                   AND (wt.size * wt.price) >= ?
-                  AND was.is_copyable = 1
+                  AND lb.tier IN ('tier1h', 'tier1')
                 GROUP BY wt.condition_id
                HAVING COUNT(DISTINCT wt.wallet) >= ?""",
             (cutoff, EXIT_AMOUNT_USD, MIN_DISTINCT_EXITS),

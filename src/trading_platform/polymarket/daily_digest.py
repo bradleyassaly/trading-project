@@ -72,6 +72,28 @@ def build_digest() -> str:
         "GROUP BY side"
     ).fetchall()
 
+    # Live money section — real trades + stake ladder + funnel
+    live_real = conn.execute(
+        "SELECT COUNT(*), "
+        "  SUM(CASE WHEN outcome='win' THEN 1 ELSE 0 END), "
+        "  SUM(COALESCE(realized_pnl,0)) "
+        "FROM live_trades WHERE dry_run=0 AND outcome IN ('win','loss')"
+    ).fetchone() or (0, 0, 0)
+    live_attempted_24h = q_one(
+        "SELECT COUNT(*) FROM live_trades "
+        "WHERE attempted_at > extract(epoch FROM NOW() - interval '24 hours')::bigint "
+        "  AND dry_run=0"
+    ) or 0
+    live_blocked_24h = conn.execute(
+        "SELECT status, COUNT(*) FROM live_trades "
+        "WHERE attempted_at > extract(epoch FROM NOW() - interval '24 hours')::bigint "
+        "GROUP BY status ORDER BY 2 DESC LIMIT 6"
+    ).fetchall()
+    ladder_row = conn.execute(
+        "SELECT tier_index, cap_usd, real_n, real_wr FROM stake_ladder_state "
+        "ORDER BY promoted_at DESC LIMIT 1"
+    ).fetchone()
+
     conn.close()
 
     wr_s = f"{wins/resolved*100:.0f}%" if resolved else "n/a"
@@ -117,6 +139,16 @@ def build_digest() -> str:
     else:
         footer = f"Need {max(0, 20 - resolved)} more resolutions"
 
+    # Live money block
+    real_n, real_wins, real_pnl = int(live_real[0] or 0), int(live_real[1] or 0), float(live_real[2] or 0)
+    real_wr_s = f"{real_wins/real_n*100:.0f}%" if real_n else "n/a"
+    if ladder_row:
+        tier_idx, cap_usd, ladder_n, ladder_wr = ladder_row
+        ladder_s = f"Tier {tier_idx} (${cap_usd:.0f} cap) — {ladder_n} real trades, WR={ladder_wr*100:.0f}%"
+    else:
+        ladder_s = "no ladder state"
+    blocked_lines = "\n".join(f"  {st}: {cnt}" for st, cnt in live_blocked_24h) or "  none"
+
     return (
         f"Daily Trading Digest - {datetime.now().strftime('%b %d')}\n\n"
         f"Live Gate (politics+geo wallet signals): {resolved}/20 resolved\n"
@@ -128,6 +160,11 @@ def build_digest() -> str:
         f"Direction split 24h:\n{yn_block}\n\n"
         f"Open paper positions:\n{pos_block}\n"
         f"  total deployed: ${total_deployed:,.0f} | unrealized: {total_unreal:+.2f}\n\n"
+        f"Live money:\n"
+        f"  {ladder_s}\n"
+        f"  All-time: {real_n} settled trades, WR={real_wr_s}, PnL={real_pnl:+.2f}\n"
+        f"  24h attempts: {live_attempted_24h}\n"
+        f"  24h status breakdown:\n{blocked_lines}\n\n"
         f"{footer}"
     )
 

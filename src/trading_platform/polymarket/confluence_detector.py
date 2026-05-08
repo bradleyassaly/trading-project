@@ -66,10 +66,15 @@ def run_detector() -> dict[str, Any]:
             # Span of fires must be within WINDOW_SECONDS
             if (last_ts - first_ts) > WINDOW_SECONDS:
                 continue
-            # Pull the constituent signals + market info
+            # Pull the constituent signals + market info.
+            # market_signals uses `direction` (BUY/SELL) rather than a
+            # separate `side` column; `price` is the entry price; there
+            # is no `wallet_tier` column — NULL fills that slot so all
+            # downstream index positions stay the same.
             constituents = conn.execute(
-                """SELECT signal_type, side, direction, confidence,
-                          entry_price, wallet, wallet_tier, slug, question, category
+                """SELECT signal_type, direction AS side, direction, confidence,
+                          price AS entry_price, wallet, NULL AS wallet_tier,
+                          slug, question, category
                      FROM market_signals
                     WHERE condition_id = ? AND fired_at > ?
                       AND signal_type NOT IN ('price_velocity', 'order_flow_imbalance')
@@ -88,8 +93,11 @@ def run_detector() -> dict[str, Any]:
             side = "YES" if yes_conf > no_conf else "NO"
             # Average entry price across constituents (most-recent)
             avg_entry = sum(float(c[4] or 0.5) for c in constituents) / len(constituents)
-            # Combined confidence — capped at 0.85
-            combined_conf = min(0.85, max(yes_conf, no_conf) * 1.2)
+            # Average confidence on the winning side, boosted 20% for confluence
+            # (divide sum by total constituents, not just winning-side count, to
+            # penalise mixed signals; still cap at 0.85 for safety)
+            avg_conf = max(yes_conf, no_conf) / max(len(constituents), 1)
+            combined_conf = min(0.85, avg_conf * 1.2)
             # Use most recent fire's wallet info for tier
             top = constituents[0]
             payload = {

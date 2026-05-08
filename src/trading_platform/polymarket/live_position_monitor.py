@@ -114,13 +114,22 @@ def check_live_exits() -> dict[str, int]:
         if current is None:
             continue
 
-        # Compute unrealized pct on stake
+        # Compute unrealized pct on stake.
+        # For SELL (long NO) positions, use actual CONDITIONAL token balance to
+        # compute dollar PnL — DB size_usd reflects intended allocation while
+        # GTC partial fills may leave only 1–N tokens in the wallet.
         entry = float(effective_fill)
         if side in ("YES", "BUY"):
             unrealized_pct = (current - entry) / max(entry, 0.01)
+            unrealized_dollars = unrealized_pct * float(size_usd or 0)
         else:
             unrealized_pct = (entry - current) / max(1 - entry, 0.01)
-        unrealized_dollars = unrealized_pct * float(size_usd or 0)
+            actual_tok = clob.get_conditional_balance(token_id) if token_id else None
+            if actual_tok is not None:
+                no_price_change = max(0.01, 1.0 - current) - max(0.01, 1.0 - entry)
+                unrealized_dollars = actual_tok * no_price_change
+            else:
+                unrealized_dollars = unrealized_pct * float(size_usd or 0)
 
         prof = _exit_profile(sig_type or "")
 
@@ -176,13 +185,45 @@ def check_live_exits() -> dict[str, int]:
             continue
 
         # Place SELL order on the token we HOLD.
-        # For SELL direction (long NO): shares = size_usd / NO_price = size_usd / (1-entry)
-        # because entry = fill_price is stored in YES-space (Polymarket avgFilledPrice
-        # for NO token BUYs returns the complementary YES price).
-        # Using entry directly (YES-space) gave ~100x under-count: int(2.7) instead of 267.
+        # For SELL direction (long NO): use actual CONDITIONAL token balance — DB
+        # size_usd records the intended USDC allocation, but GTC orders on thin
+        # near-resolution NO books often partially fill (e.g. 1 token vs. 467
+        # intended). Selling the computed size_usd/no_price quantity then hits
+        # "not enough balance/allowance". Fall back to size_usd/no_price only if
+        # the balance query fails.
         if side not in ("YES", "BUY"):
-            no_entry = max(1.0 - entry, 0.01)
-            shares_held = float(size_usd or 0) / no_entry
+            actual_tokens = clob.get_conditional_balance(token_id) if token_id else None
+            if actual_tokens is not None and actual_tokens < 0.001:
+                # Zero balance — market likely resolved; tokens already redeemed.
+                # Mark position closed at $0 rather than attempting a doomed sell.
+                logger.warning(
+                    "[live-exit] #%d %s has 0 CONDITIONAL balance — marking resolved_zero_balance",
+                    lid, sig_type,
+                )
+                try:
+                    conn = get_connection()
+                    try:
+                        conn.execute(
+                            """UPDATE live_trades
+                               SET exit_ts=?, exit_reason='resolved_zero_balance',
+                                   outcome='loss', realized_pnl=0
+                               WHERE id=?""",
+                            (int(time.time()), lid),
+                        )
+                        conn.commit()
+                    finally:
+                        try: conn.close()
+                        except Exception: pass
+                except Exception as exc:
+                    logger.error("zero-balance close failed for #%d: %s", lid, exc)
+                exited += 1
+                reasons["resolved_zero_balance"] = reasons.get("resolved_zero_balance", 0) + 1
+                continue
+            if actual_tokens is not None and actual_tokens > 0:
+                shares_held = actual_tokens
+            else:
+                no_entry = max(1.0 - entry, 0.01)
+                shares_held = float(size_usd or 0) / no_entry
             # current is the YES-space price (get_mid_price returns YES
             # regardless of token). Flip to get the actual NO token price
             # for the exit order fallback — otherwise an empty NO book uses

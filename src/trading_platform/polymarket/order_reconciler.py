@@ -121,7 +121,8 @@ def reconcile_open_orders() -> dict[str, int]:
                 age_min = (now_ts - int(submitted_at or now_ts)) / 60
                 if age_min > MAX_OPEN_MINUTES:
                     try:
-                        py_client.cancel_order(order_id)
+                        from py_clob_client_v2.clob_types import OrderPayload as _OP
+                        py_client.cancel_order(_OP(orderID=order_id))
                         conn = get_connection()
                         try:
                             conn.execute(

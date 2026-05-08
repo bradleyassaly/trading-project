@@ -140,23 +140,30 @@ def _check_strategies_have_data(conn) -> tuple[bool, str]:
 
 def _check_wallet_stream_health(conn) -> tuple[bool, str]:
     """Verify watched-wallet trades flowing.
+
     2026-05-01: WebSocket dropped for 1+ hour while smoke didn't catch.
+    2026-05-03: sync_wallet_trades runs every 2h in batches, so the 1h
+    window legitimately shows 0 trades in the hour before each sync fires.
+    Widened to a 3h window to avoid false positives from the batch cadence
+    while still catching genuine stalls (a full 3h gap = missed at least
+    one sync cycle).
     """
     try:
-        n_1h = conn.execute(
+        n_3h = conn.execute(
             "SELECT COUNT(*) FROM wallet_trades "
-            "WHERE timestamp > extract(epoch FROM NOW() - interval '1 hour')::bigint"
+            "WHERE timestamp > extract(epoch FROM NOW() - interval '3 hours')::bigint"
         ).fetchone()[0]
         n_8h = conn.execute(
             "SELECT COUNT(*) FROM wallet_trades "
             "WHERE timestamp > extract(epoch FROM NOW() - interval '8 hours')::bigint"
         ).fetchone()[0]
-        # Use 8h baseline to detect regression — if 1h is < 5% of expected
-        expected = max(10, n_8h // 16)  # half the per-hour rate of 8h baseline
-        if n_1h < expected:
-            return False, (f"wallet stream may be stalled — only {n_1h} "
-                           f"trades in last hour (expected ≥{expected})")
-        return True, f"wallet stream healthy ({n_1h} 1h, {n_8h} 8h)"
+        # Expected = at least 30% of the per-3h rate implied by the 8h window.
+        # A genuine stall (sync container down) shows up as n_3h ≈ 0 for 3+ hours.
+        expected = max(10, (n_8h * 3) // (8 * 3))  # 1/3 of 8h total, conservative
+        if n_3h < expected:
+            return False, (f"wallet stream may be stalled — only {n_3h} "
+                           f"trades in last 3h (expected ≥{expected})")
+        return True, f"wallet stream healthy ({n_3h} 3h, {n_8h} 8h)"
     except Exception as exc:
         return False, str(exc)[:120]
 

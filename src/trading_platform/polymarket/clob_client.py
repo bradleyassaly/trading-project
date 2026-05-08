@@ -145,7 +145,8 @@ class ClobClient:
 
         try:
             from py_clob_client_v2 import ClobClient as PyClobClient
-            from py_clob_client_v2 import ApiCreds, OrderArgs, OrderType, PartialCreateOrderOptions
+            from py_clob_client_v2 import ApiCreds, OrderType, PartialCreateOrderOptions
+            from py_clob_client_v2.clob_types import OrderArgsV2 as OrderArgs
             from py_clob_client_v2.constants import POLYGON
         except ImportError:
             return OrderResult(
@@ -262,19 +263,8 @@ class ClobClient:
             except Exception as _nr_exc:
                 logger.warning("[clob] get_neg_risk lookup failed (%s), defaulting to False", _nr_exc)
             opts = PartialCreateOrderOptions(tick_size="0.01", neg_risk=neg_risk_flag)
-            # GTC so partial fills are collected rather than the entire order
-            # being killed if the book can't absorb it atomically (FOK).
-            resp = None
-            for _nonce_try in range(3):
-                try:
-                    resp = client.create_and_post_order(order_args, options=opts, order_type=OrderType.GTC)
-                    break
-                except Exception as _ne:
-                    if "order_version_mismatch" in str(_ne) and _nonce_try < 2:
-                        logger.warning("[clob] nonce mismatch (attempt %d), retrying", _nonce_try + 1)
-                        time.sleep(0.4 * (_nonce_try + 1))
-                        continue
-                    raise
+            _order = client.create_order(order_args, opts)
+            resp = client.post_order(_order, order_type=OrderType.GTC)
             logger.info(
                 "[clob] market-as-GTC %s %d shares @ %.2f = $%.2f neg_risk=%s",
                 side.upper(), shares_int, target, actual_usdc, neg_risk_flag,
@@ -330,7 +320,8 @@ class ClobClient:
 
         try:
             from py_clob_client_v2 import ClobClient as PyClobClient
-            from py_clob_client_v2 import ApiCreds, OrderArgs, OrderType, PartialCreateOrderOptions
+            from py_clob_client_v2 import ApiCreds, OrderType, PartialCreateOrderOptions
+            from py_clob_client_v2.clob_types import OrderArgsV2 as OrderArgs, OrderPayload
             from py_clob_client_v2.constants import POLYGON
             import os as _os, time as _time
 
@@ -408,27 +399,8 @@ class ClobClient:
             except Exception as _nr_exc:
                 logger.warning("[clob] get_neg_risk lookup failed (%s), defaulting to False", _nr_exc)
             _opts = PartialCreateOrderOptions(tick_size="0.01", neg_risk=neg_risk_flag)
-
-            # Always GTC — FOK was causing "order couldn't be fully filled"
-            # on thin books (46 errors/12h) because the entire order had to
-            # fill atomically. GTC at aggressive price fills what's available
-            # immediately then picks up the rest within timeout_sec.
-            order_type = OrderType.GTC
-            # Retry on EIP-712 nonce collision (order_version_mismatch) which
-            # happens when concurrent submissions share the same timestamp salt.
-            # py_clob_client_v2 generates a fresh nonce on each create call so
-            # retrying the full create_and_post is sufficient.
-            resp = None
-            for _nonce_try in range(3):
-                try:
-                    resp = client.create_and_post_order(order_args, options=_opts, order_type=order_type)
-                    break
-                except Exception as _ne:
-                    if "order_version_mismatch" in str(_ne) and _nonce_try < 2:
-                        logger.warning("[clob] nonce mismatch (attempt %d), retrying", _nonce_try + 1)
-                        _time.sleep(0.4 * (_nonce_try + 1))
-                        continue
-                    raise
+            _order = client.create_order(order_args, _opts)
+            resp = client.post_order(_order, order_type=OrderType.GTC)
             order_id = resp.get("orderID") or resp.get("id")
             status = resp.get("status", "unknown")
 
@@ -465,7 +437,7 @@ class ClobClient:
 
             # Unfilled — cancel and fall back to next aggression level
             try:
-                client.cancel_order(order_id)
+                client.cancel_order(OrderPayload(orderID=order_id))
             except Exception:
                 pass
 
@@ -498,6 +470,44 @@ class ClobClient:
                 error_msg=str(exc), raw={},
             )
 
+    # ── Balance queries ────────────────────────────────────────────────────
+
+    def get_conditional_balance(self, token_id: str) -> float | None:
+        """Return actual CONDITIONAL token balance in full tokens (1 = 1_000_000 units).
+
+        GTC partial fills on thin near-resolution books result in only 1–N tokens
+        being filled even when the intended order size implied hundreds. Using
+        size_usd / no_price for the sell quantity then hits "not enough balance".
+        This method returns the ground-truth share count to use for exit orders.
+        """
+        if not self._configured or not token_id:
+            return None
+        try:
+            from py_clob_client_v2 import ClobClient as PyClobClient, ApiCreds
+            from py_clob_client_v2.constants import POLYGON
+            from py_clob_client_v2.clob_types import BalanceAllowanceParams, AssetType
+            import os as _os
+            funder = _os.environ.get("POLYMARKET_FUNDER_ADDRESS") or ""
+            kwargs: dict = dict(
+                host=CLOB_BASE, chain_id=POLYGON, key=self._private_key,
+                creds=ApiCreds(
+                    api_key=self._api_key,
+                    api_secret=self._api_secret,
+                    api_passphrase=self._passphrase,
+                ),
+            )
+            if funder:
+                kwargs["signature_type"] = int(_os.environ.get("POLYMARKET_SIGNATURE_TYPE", "1"))
+                kwargs["funder"] = funder
+            client = PyClobClient(**kwargs)
+            result = client.get_balance_allowance(
+                BalanceAllowanceParams(asset_type=AssetType.CONDITIONAL, token_id=token_id)
+            )
+            return int(result.get("balance", 0)) / 1_000_000
+        except Exception as exc:
+            logger.debug("[clob] conditional balance check failed for %s: %s", token_id[:16], exc)
+            return None
+
     # ── Diagnostics ────────────────────────────────────────────────────────
 
     def test_connection(self) -> dict[str, Any]:
@@ -514,7 +524,7 @@ class ClobClient:
         results["private_key_set"] = bool(self._private_key)
         try:
             import py_clob_client_v2  # noqa: F401
-            results["py_clob_client"] = True
+            results["py_clob_client_v2"] = True
         except ImportError:
-            results["py_clob_client"] = False
+            results["py_clob_client_v2"] = False
         return results

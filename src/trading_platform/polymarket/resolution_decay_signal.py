@@ -185,7 +185,7 @@ def _emit_signal(market: dict, api_url: str) -> None:
             "no_token_id": market["no_token_id"],
             "fired_at": now_ts,
         }
-        # Direct paper executor invocation — same path the whale engine uses
+        # Paper executor invocation
         try:
             from trading_platform.polymarket.polymarket_paper_executor import (
                 PolymarketPaperExecutor,
@@ -205,6 +205,26 @@ def _emit_signal(market: dict, api_url: str) -> None:
                 )
         except Exception as exc:
             logger.debug("paper executor invocation failed: %s", exc)
+
+        # Live executor invocation — mirrors whale_signal_engine routing
+        try:
+            from trading_platform.polymarket.polymarket_live_executor import (
+                PolymarketLiveExecutor,
+            )
+            live_ex = PolymarketLiveExecutor()
+            live_result = live_ex.execute(payload)
+            if live_result and live_result.get("success"):
+                logger.info(
+                    "[RESOLUTION_DECAY][LIVE] submitted %s @ %.3f",
+                    market["slug"][:30], market["yes_price"],
+                )
+            elif live_result:
+                logger.debug(
+                    "[RESOLUTION_DECAY][LIVE] gated: %s",
+                    live_result.get("reason", ""),
+                )
+        except Exception as exc:
+            logger.debug("live executor invocation failed: %s", exc)
     finally:
         try: conn.close()
         except Exception: pass

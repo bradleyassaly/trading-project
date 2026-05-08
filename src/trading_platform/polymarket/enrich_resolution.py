@@ -17,6 +17,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from trading_platform.polymarket.db_connection import get_connection
 from trading_platform.polymarket.wallet_db import WalletDB
 
 logger = logging.getLogger(__name__)
@@ -58,12 +59,17 @@ def enrich_trades(*, db: WalletDB | None = None) -> dict[str, Any]:
 
     logger.info("Loaded %d resolved tokens from gamma", len(rp_map))
 
-    # Get all unresolved trades from DB
-    conn = db._conn
-    with db._lock:
+    # Fetch unresolved trades — acquire a fresh connection, release
+    # immediately so no handle is held during the in-memory processing.
+    conn = get_connection()
+    try:
         rows = conn.execute(
-            "SELECT id, asset, side, size, price, outcome FROM wallet_trades WHERE market_resolved = 0 AND asset IS NOT NULL"
+            "SELECT id, asset, side, size, price, outcome FROM wallet_trades "
+            "WHERE market_resolved = 0 AND asset IS NOT NULL"
         ).fetchall()
+    finally:
+        try: conn.close()
+        except Exception: pass
 
     logger.info("Unresolved trades to check: %d", len(rows))
 
@@ -96,7 +102,6 @@ def enrich_trades(*, db: WalletDB | None = None) -> dict[str, Any]:
             market_outcome = "NO" if token_won else "YES"
         else:
             # Non-binary market (sports team, Up/Down, Over/Under, etc.)
-            # We don't know what "YES" means here — label by the token name
             market_outcome = outcome_name if token_won else f"NOT_{outcome_name}"
 
         # PnL calculation:
@@ -111,29 +116,27 @@ def enrich_trades(*, db: WalletDB | None = None) -> dict[str, Any]:
 
         side_upper = (side or "").upper()
         if side_upper == "BUY":
-            if token_won:
-                pnl = size * (1.0 - price)
-            else:
-                pnl = -(size * price)
+            pnl = size * (1.0 - price) if token_won else -(size * price)
         elif side_upper == "SELL":
-            if token_won:
-                pnl = -(size * (1.0 - price))
-            else:
-                pnl = size * price
+            pnl = -(size * (1.0 - price)) if token_won else size * price
         else:
             pnl = 0
 
         batch.append((1, market_outcome, round(pnl, 4), trade_id))
         enriched += 1
 
-    # Batch update
+    # Batch update — fresh connection, released immediately after commit.
     if batch:
-        with db._lock:
+        conn = get_connection()
+        try:
             conn.executemany(
                 "UPDATE wallet_trades SET market_resolved = ?, market_outcome = ?, pnl = ? WHERE id = ?",
                 batch,
             )
             conn.commit()
+        finally:
+            try: conn.close()
+            except Exception: pass
 
     # ── Pass 2: Enrich from Data API positions (curPrice=0/1 = resolved) ────
     pos_enriched = _enrich_from_positions(db)
@@ -156,54 +159,29 @@ def enrich_trades(*, db: WalletDB | None = None) -> dict[str, Any]:
 def _enrich_from_positions(db: WalletDB) -> int:
     """Enrich trades using resolved positions from the Data API.
 
-    For each wallet with unresolved trades, fetch positions and look for
-    resolved markets (curPrice == 0 or 1).
-
-    2026-04-26: hardened against ``psycopg.errors.IdleSessionTimeout``.
-    Original failure mode (state.json ``enrich_trade_resolution.last_error``
-    at 1,669s): held ``db._conn`` open for the full minutes-long Data API
-    fetch loop; Postgres reaped the idle backend; the final UPDATE
-    executemany failed. Now: re-fetch the WalletDB connection right
-    before each DB-touching block, and wrap the writes with a single
-    reconnect-and-retry. Long-running HTTP work no longer holds a
-    Postgres handle.
+    Acquire/release connections only at DB-touch points so no Postgres
+    handle is held during the minutes-long HTTP position-fetch loop.
     """
     import requests
     from trading_platform.polymarket.address_map import AddressMap
 
     addr_map = AddressMap()
 
-    def _fresh_conn():
-        # Re-acquire from pool — the pool's check_connection invariant
-        # ensures stale backends are recycled transparently.
-        return db._conn
+    # Fetch wallet list — acquire, fetchall, release immediately.
+    conn = get_connection()
+    try:
+        wallet_rows = conn.execute(
+            "SELECT DISTINCT wallet FROM wallet_trades WHERE market_resolved = 0"
+        ).fetchall()
+    finally:
+        try: conn.close()
+        except Exception: pass
 
-    def _exec_with_retry(fn, *args, **kw):
-        try:
-            return fn(*args, **kw)
-        except Exception as exc:
-            etype = type(exc).__name__
-            if "IdleSessionTimeout" in etype or "OperationalError" in etype \
-               or "InterfaceError" in etype:
-                logger.warning("[enrich] reconnecting after %s", etype)
-                try:
-                    db._reconnect()  # best-effort if WalletDB exposes it
-                except Exception:
-                    pass
-                return fn(*args, **kw)
-            raise
-
-    # Get wallets that still have unresolved trades
-    with db._lock:
-        wallet_rows = _exec_with_retry(
-            lambda: _fresh_conn().execute(
-                "SELECT DISTINCT wallet FROM wallet_trades WHERE market_resolved = 0"
-            ).fetchall(),
-        )
     wallets = [r[0] for r in wallet_rows]
     logger.info("Pass 2: checking positions for %d wallets with unresolved trades", len(wallets))
 
-    # Build a map of asset -> resolved outcome from positions
+    # Build a map of asset -> resolved outcome from positions.
+    # No DB connection held during this HTTP loop.
     resolved_assets: dict[str, str] = {}  # asset -> "YES" or "NO"
     fetched = 0
 
@@ -243,7 +221,6 @@ def _enrich_from_positions(db: WalletDB) -> int:
 
             # curPrice == 1.0 means this token's outcome won
             # curPrice == 0.0 means this token's outcome lost
-            # redeemable also indicates resolution
             if cp >= 0.99 or cp <= 0.01 or redeemable:
                 token_won = cp >= 0.99
                 resolved_assets[asset] = "YES" if token_won else "NO"
@@ -255,15 +232,16 @@ def _enrich_from_positions(db: WalletDB) -> int:
     if not resolved_assets:
         return 0
 
-    # Now match against unresolved trades. Re-fetch the connection —
-    # the prior `conn` reference may be stale after the Data API loop.
-    with db._lock:
-        unresolved = _exec_with_retry(
-            lambda: _fresh_conn().execute(
-                "SELECT id, asset, side, size, price FROM wallet_trades "
-                "WHERE market_resolved = 0 AND asset IS NOT NULL"
-            ).fetchall(),
-        )
+    # Fetch current unresolved trades — acquire, fetchall, release immediately.
+    conn = get_connection()
+    try:
+        unresolved = conn.execute(
+            "SELECT id, asset, side, size, price FROM wallet_trades "
+            "WHERE market_resolved = 0 AND asset IS NOT NULL"
+        ).fetchall()
+    finally:
+        try: conn.close()
+        except Exception: pass
 
     batch: list[tuple] = []
     for trade_id, asset, side, size, price in unresolved:
@@ -285,20 +263,24 @@ def _enrich_from_positions(db: WalletDB) -> int:
 
         batch.append((1, market_outcome, round(pnl, 4), trade_id))
 
-    if batch:
-        # Chunk into 500-row batches; commit each chunk separately so a
-        # transient disconnect doesn't lose the whole pass.
-        CHUNK = 500
-        for i in range(0, len(batch), CHUNK):
-            sub = batch[i:i + CHUNK]
-            with db._lock:
-                _exec_with_retry(
-                    lambda s=sub: _fresh_conn().executemany(
-                        "UPDATE wallet_trades SET market_resolved = ?, "
-                        "market_outcome = ?, pnl = ? WHERE id = ?",
-                        s,
-                    ),
-                )
-                _exec_with_retry(lambda: _fresh_conn().commit())
+    if not batch:
+        return 0
+
+    # Write in 500-row chunks; each chunk gets its own connection so a
+    # transient disconnect doesn't lose the whole pass.
+    CHUNK = 500
+    for i in range(0, len(batch), CHUNK):
+        sub = batch[i:i + CHUNK]
+        conn = get_connection()
+        try:
+            conn.executemany(
+                "UPDATE wallet_trades SET market_resolved = ?, "
+                "market_outcome = ?, pnl = ? WHERE id = ?",
+                sub,
+            )
+            conn.commit()
+        finally:
+            try: conn.close()
+            except Exception: pass
 
     return len(batch)
