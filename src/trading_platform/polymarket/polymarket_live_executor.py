@@ -660,6 +660,21 @@ class PolymarketLiveExecutor:
                 pass
             return self._result(False, reason=f"BUY at {entry_px:.2f} (>= {FAVORITE_BLOCK_PRICE:.2f}): tail-risk blocked")
 
+        # Per-signal BUY entry ceiling (tighter than FAVORITE_BLOCK_PRICE for
+        # specific signals). Live data for whale_entry_filtered BUY 0.50-0.65:
+        # 5W/26L, -$18 PnL vs SELL entries at YES≥0.85: 23W/19L, +$44 PnL.
+        # Mid-market BUY copies are noise; near-resolution SELL (buy NO) is edge.
+        _BUY_ENTRY_CEILINGS: dict[str, float] = {
+            "whale_entry_filtered": 0.50,
+        }
+        _sig_buy_ceil = _BUY_ENTRY_CEILINGS.get(sig_type)
+        if want_yes and _sig_buy_ceil is not None:
+            if entry_px is not None and entry_px >= _sig_buy_ceil:
+                return self._result(
+                    False,
+                    reason=f"BUY@{entry_px:.3f} >= {sig_type} mid-market ceiling {_sig_buy_ceil:.2f}",
+                )
+
         # 2. Kill switch check. If the switch returns a probation_cap,
         # the signal passed probation gates (>=5 resolved, positive EV,
         # acceptable WR) but hasn't hit MIN_RESOLVED_HARD — clamp size
@@ -752,6 +767,12 @@ class PolymarketLiveExecutor:
             return self._result(
                 False,
                 reason=f"BUY at live price {current_price:.2f} (>= {FAVORITE_BLOCK_PRICE:.2f}): tail-risk blocked",
+            )
+        # Live-price check for per-signal ceiling (mirrors the signal-price check above).
+        if want_yes and _sig_buy_ceil is not None and current_price >= _sig_buy_ceil:
+            return self._result(
+                False,
+                reason=f"BUY at live price {current_price:.3f} >= {sig_type} mid-market ceiling {_sig_buy_ceil:.2f}",
             )
 
         # Stale-price guard: compare signal's predicted price against the live

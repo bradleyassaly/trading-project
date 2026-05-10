@@ -100,15 +100,24 @@ class KillSwitch:
     # Signals where WR < 50% is structural: edge comes from asymmetric payoffs
     # (betting low-probability outcomes at better-than-fair odds). The EV gate
     # still applies; only the WR floor is relaxed to the value below.
-    # whale_entry_filtered: IC30=0.313, paper PnL +$687 14d at 37% WR — valid.
-    # oversized_bet: IC30=0.121, paper PnL +$107, 29% WR but +33% avg EV — valid.
-    # cascade: IC14=+0.032, paper PnL +$74 n=45 at 38% WR — structural low WR,
-    #   edge comes from catching 2+ wallets piling in at low probability.
+    # whale_entry_filtered: IC30=0.313, live 38% WR, 3.4× win:loss = +EV.
+    # oversized_bet: IC30=0.121, 29% WR but +33% avg EV — valid.
+    # wallet_reversal: IC30=0.160, 56% live WR but structural low WR on paper.
+    # specialist_entry: IC30=0.050, 89% backtest WR but small live sample.
     WR_FLOOR_OVERRIDES: dict[str, float] = {
         "whale_entry_filtered": 0.30,
         "oversized_bet": 0.25,
         "cascade": 0.30,
+        "wallet_reversal": 0.35,
+        "specialist_entry": 0.35,
+        "resolution_decay": 0.35,
     }
+    # EV threshold above which the WR gate is bypassed entirely. Signals
+    # with confirmed positive EV (>= 5%) are profitable regardless of WR
+    # when payoffs are asymmetric (e.g. 38% WR × 3.4× ratio >> breakeven).
+    # The WR gate remains for borderline-EV signals where a low WR could
+    # indicate noise rather than genuine asymmetric edge.
+    EV_BYPASS_WR_THRESHOLD = 0.05
     # When IC14 < this threshold AND decay_flag is set, halve the live stake.
     IC14_DECAY_THRESHOLD = 0.05
     IC14_STAKE_HALF_FACTOR = 0.5
@@ -293,7 +302,11 @@ class KillSwitch:
                 wr = wr_live if wr_live is not None else (bt_wr or 0)
             default_wr_floor = self.MIN_WIN_RATE_PROBATION if probation else self.MIN_WIN_RATE
             wr_floor = self.WR_FLOOR_OVERRIDES.get(signal_type, default_wr_floor)
-            if effective_n >= 20 and wr < wr_floor:
+            # Skip WR gate when EV is meaningfully positive: asymmetric-payoff
+            # signals (e.g. whale_entry_filtered 38% WR, 3.4× win:loss) are
+            # profitable even at low WR. WR gate only applies when EV is near
+            # zero, where low WR could signal noise rather than real asymmetry.
+            if ev < self.EV_BYPASS_WR_THRESHOLD and effective_n >= 20 and wr < wr_floor:
                 return KillSwitchResult(
                     False,
                     f"{signal_type}: blended WR {wr:.0%} below minimum {wr_floor:.0%}",

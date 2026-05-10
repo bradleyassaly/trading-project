@@ -336,6 +336,195 @@ def check_live_exits() -> dict[str, int]:
     return {"checked": len(rows), "exited": exited, "reasons": reasons}
 
 
+def _resolve_token_id_for_paper(condition_id: str, want_yes: bool) -> str | None:
+    """Resolve YES/NO token_id from condition_id via DB markets table then Gamma API."""
+    if not condition_id:
+        return None
+    # 1. Try the local markets table first (fastest path, no network).
+    try:
+        from trading_platform.polymarket.db_connection import get_connection
+        conn = get_connection()
+        try:
+            row = conn.execute(
+                "SELECT yes_token_id, no_token_id FROM markets WHERE condition_id = %s",
+                (condition_id,),
+            ).fetchone()
+        finally:
+            try: conn.close()
+            except Exception: pass
+        if row:
+            tid = row[0] if want_yes else row[1]
+            return str(tid) if tid else None
+    except Exception:
+        pass
+    # 2. Fall back to Gamma API.
+    try:
+        import requests as _req
+        import json as _json
+        r = _req.get(
+            "https://gamma-api.polymarket.com/markets",
+            params={"condition_ids": condition_id},
+            timeout=6,
+        )
+        data = r.json()
+        m = data[0] if isinstance(data, list) and data else None
+        if m:
+            tids_raw = m.get("clobTokenIds") or "[]"
+            tids = _json.loads(tids_raw) if isinstance(tids_raw, str) else tids_raw
+            if isinstance(tids, list) and len(tids) >= 2:
+                return str(tids[0]) if want_yes else str(tids[1])
+    except Exception:
+        pass
+    return None
+
+
+def check_paper_exits() -> dict[str, int]:
+    """Simulate exits for open paper positions (dry_run=1, status='dry_run').
+
+    Applies the same exit profiles as check_live_exits() but without
+    placing any SELL order — just marks exit_ts/exit_price/realized_pnl
+    in live_trades so paper performance is trackable.
+
+    Resolves token_id from condition_id to get current market prices.
+    Positions with unresolvable token_ids are skipped (not failed).
+    """
+    from trading_platform.polymarket.db_connection import get_connection
+    from trading_platform.polymarket.clob_client import ClobClient
+
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            """SELECT id, condition_id, token_id, side, fill_price, size_usd,
+                      shares, signal_type, signal_wallet, submitted_at,
+                      COALESCE(mfe, 0) AS mfe, last_mark_price,
+                      entry_price, direction
+               FROM live_trades
+               WHERE dry_run = 1 AND status = %s
+                 AND exit_ts IS NULL
+                 AND (fill_price IS NOT NULL OR entry_price IS NOT NULL)""",
+            ("dry_run",),
+        ).fetchall()
+    finally:
+        try: conn.close()
+        except Exception: pass
+
+    if not rows:
+        return {"checked": 0, "exited": 0, "reasons": {}}
+
+    clob = ClobClient()
+    exited = 0
+    reasons: dict[str, int] = {}
+    # Cache token_id resolutions within this pass to avoid duplicate API calls.
+    _tok_cache: dict[tuple[str, bool], str | None] = {}
+
+    for row in rows:
+        (lid, cid, token_id, side, fill_price, size_usd, shares,
+         sig_type, src_wallet, submitted_at, mfe_dollars, last_mark,
+         entry_price, direction) = row
+
+        # Use fill_price if set, else entry_price (paper trades are logged
+        # with fill_price=None and entry_price=current_price_at_signal_time).
+        effective_fill = fill_price if fill_price else entry_price
+        if not effective_fill:
+            continue
+        entry = float(effective_fill)
+
+        # Resolve token_id if not stored.
+        want_yes = (direction or side or "BUY").upper() in ("BUY", "YES")
+        if not token_id:
+            if cid:
+                cache_key = (cid, want_yes)
+                if cache_key not in _tok_cache:
+                    _tok_cache[cache_key] = _resolve_token_id_for_paper(cid, want_yes)
+                token_id = _tok_cache[cache_key]
+        if not token_id:
+            continue
+
+        current = clob.get_mid_price(token_id)
+        if current is None:
+            continue
+        # get_mid_price always returns YES-space price. Flip for NO side.
+        if not want_yes:
+            current = max(0.01, 1.0 - current)
+
+        # Compute unrealized PnL.
+        if want_yes:
+            unrealized_pct = (current - entry) / max(entry, 0.01)
+            paper_shares = float(shares or 0) or (float(size_usd or 0) / max(entry, 0.01))
+            unrealized_dollars = unrealized_pct * float(size_usd or 0)
+        else:
+            unrealized_pct = (entry - current) / max(1 - entry, 0.01)
+            paper_shares = float(shares or 0) or (float(size_usd or 0) / max(1.0 - entry, 0.01))
+            unrealized_dollars = unrealized_pct * float(size_usd or 0)
+
+        prof = _exit_profile(sig_type or "")
+
+        # Update mark in DB.
+        try:
+            conn = get_connection()
+            try:
+                conn.execute(
+                    """UPDATE live_trades
+                       SET last_mark_price = %s, last_mark_ts = %s, unrealized_pnl = %s,
+                           mae = CASE WHEN mae IS NULL OR %s < mae THEN %s ELSE mae END,
+                           mfe = CASE WHEN mfe IS NULL OR %s > mfe THEN %s ELSE mfe END
+                       WHERE id = %s""",
+                    (current, int(time.time()), unrealized_dollars,
+                     unrealized_dollars, unrealized_dollars,
+                     unrealized_dollars, unrealized_dollars, lid),
+                )
+                conn.commit()
+            finally:
+                try: conn.close()
+                except Exception: pass
+        except Exception as exc:
+            logger.debug("paper mark update failed for #%d: %s", lid, exc)
+
+        age_days = (time.time() - float(submitted_at or time.time())) / 86400
+        mfe_pct = float(mfe_dollars or 0) / max(float(size_usd or 1), 1)
+        side_key = "YES" if want_yes else "NO"
+        exit_reason = _decide_exit(
+            side=side_key, entry=entry, current=current,
+            mfe_pct=mfe_pct, age_days=age_days, profile=prof,
+        )
+
+        if not exit_reason:
+            continue
+
+        # Simulated fill at current price (no actual order placed).
+        fill = current
+        realized_pnl = paper_shares * (fill - entry) if want_yes else paper_shares * (entry - fill)
+        outcome = "win" if realized_pnl > 0 else "loss"
+
+        try:
+            conn = get_connection()
+            try:
+                conn.execute(
+                    """UPDATE live_trades
+                       SET exit_price = %s, exit_ts = %s, outcome = %s,
+                           realized_pnl = %s, exit_reason = %s
+                       WHERE id = %s""",
+                    (fill, int(time.time()), outcome,
+                     round(realized_pnl, 2), exit_reason, lid),
+                )
+                conn.commit()
+            finally:
+                try: conn.close()
+                except Exception: pass
+        except Exception as exc:
+            logger.error("paper-exit DB update failed for #%d: %s", lid, exc)
+            continue
+
+        exited += 1
+        reasons[exit_reason] = reasons.get(exit_reason, 0) + 1
+        logger.info(
+            "[paper-exit] #%d %s @ %.3f → %s | pnl=%+.2f",
+            lid, sig_type, fill, exit_reason, realized_pnl,
+        )
+
+    return {"checked": len(rows), "exited": exited, "reasons": reasons}
+
+
 def main() -> int:
     try:
         from trading_platform.polymarket.logging_config import setup_logging
@@ -346,6 +535,11 @@ def main() -> int:
     logger.info(
         "[live-monitor] checked=%d exited=%d reasons=%s",
         result["checked"], result["exited"], result["reasons"],
+    )
+    paper = check_paper_exits()
+    logger.info(
+        "[paper-monitor] checked=%d exited=%d reasons=%s",
+        paper["checked"], paper["exited"], paper["reasons"],
     )
     return 0
 
