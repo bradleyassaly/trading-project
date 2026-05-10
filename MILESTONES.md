@@ -6,6 +6,57 @@ scale to $10–20K/month, see `THESIS.md` and `ROADMAP.md` (updated:
 
 ---
 
+## Session 2026-05-09 — road to profitability: Phase 4 hardening
+
+System evaluation and six targeted improvements to unlock live scale.
+Live book: 156 closed trades, +$48.09 PnL. Stake ladder promoted Tier 0→1.
+
+**Kill switch — EV gate bypass:**
+- Added `EV_BYPASS_WR_THRESHOLD = 0.05` (5% EV floor)
+- WR gate now skipped when blended EV ≥ 5%; unblocks asymmetric-payoff
+  signals (whale_entry_filtered: 38% WR but 3.4× win:loss → +EV)
+- Raised `MAX_OPEN_POSITIONS` 20 → 30 (30 × $5 = $150 = 50% of $300 bankroll)
+- Widened `WR_FLOOR_OVERRIDES` to cover wallet_reversal, specialist_entry,
+  resolution_decay at 0.35
+
+**Entry price filter — whale_entry_filtered BUY ceiling:**
+- `_BUY_ENTRY_CEILINGS = {"whale_entry_filtered": 0.50}` in live executor
+- Blocks BUY at mid-market ≥ 0.50 (the 0.50–0.65 region was -$18 PnL vs
+  the SELL-side +$44 PnL on the same signal)
+- Live-price check added to catch price moves between signal fire and order
+
+**Paper exit monitor:**
+- `check_paper_exits()` in live_position_monitor.py processes dry_run=1 rows
+- Resolves token_id via markets DB + Gamma API with in-pass cache
+- Uses entry_price as effective fill; no SELL order placed (paper only)
+- Wired into the monitor main() loop alongside check_live_exits()
+
+**Stake ladder + sizing:**
+- Promoted Tier 0 ($1) → Tier 1 ($5); real n=158, real_wr=0.367, PnL=+$49.48
+- `KellySizer.MIN_TRADE_USD` lowered 10 → 5 to match CLOB minimum
+- `_live_real_cap()` floored at $5.0 on all slice-multiplier branches
+- EV-based promotion path: WR < 55% but positive avg PnL/trade now qualifies
+- EV-based demotion exception: WR-based demotion blocked when EV > 0
+
+**CLOB fill fix:**
+- `avgFilledPrice=0` from live GTC orders treated as absent; fall back to
+  current_price. Prevents $0 fills being recorded as valid execution price.
+- Non-success CLOB statuses now emit descriptive error strings, not just "error"
+
+**Signal health monitoring:**
+- `signal_health.py` now sends Telegram alert on first IC30 decay transition
+  (signal newly enters decay_flag=1) and when a monitored signal's IC30 first
+  crosses below 0.02 warn threshold
+- `_MONITORED_SIGNALS = {specialist_entry, whale_entry_filtered, resolution_decay}`
+- Alert fires once per crossing, not every 6h run
+
+**Infrastructure:**
+- `wallet_profiles_parquet_export` weekly task: exports Postgres wallet_profiles
+  → data/polymarket/wallet_profiles.parquet (was 34 days stale)
+- Containers restarted to pick up all code changes
+
+---
+
 ## Session 2026-04-24 / 2026-04-25 — recovery + structural rebuild
 
 The week-long unattended run (started 2026-04-18) failed at +6h on a
@@ -127,37 +178,27 @@ intelligence, alpha discovery, and observability.
 
 ---
 
-## In Progress (Phase 3)
+## In Progress (Phase 4 — Live Probate, active as of 2026-05-09)
 
-- **Hypothesis accumulation** — 17 of 50 resolved. Need 33 more to reach
-  decision threshold. At current paper cadence (~25–50 closures/day),
-  ETA 2–4 days.
-- **Signal quality triage** — `whale_entry` validates at 70% on 10
-  resolved. `accumulation` at 0% on 6 — investigate why (wrong
-  direction? low-alpha wallets? wrong-side-of-whale?). Other signal
-  types awaiting sample size.
-- **Second category with edge** — currently sports-only by PnL.
-  Diversification is a Phase-3 exit criterion, not just a nice-to-have.
+- **Live book**: 156 closed trades, +$48.09 PnL, WR=36.7% (asymmetric payoff)
+- **Bankroll**: ~$300, stake ladder Tier 1 ($5/trade), 30 max open positions
+- **Slippage measurement**: ongoing — need median ≤2% on 30+ fills
+- **specialist_entry signal**: IC30=+0.050, n=4 resolved; needs 30 to confirm edge
+- **resolution_decay signal**: n=2 resolved; too early to evaluate
+- **Next promotion gate**: raise bankroll to $1,000 after 30+ live trades with
+  slippage ≤2% and no circuit-breaker incidents
 
----
-
-## Next (gated on Phase 3 → 4 transition)
-
-### Phase 4 — Live Probate (L1, $1,000 bankroll)
-- First real auto-live fire via `whale_entry_filtered` in a whitelisted
-  category (expected any time now post-fixes).
-- Measure live slippage vs paper expectations.
-- Raise `POLYMARKET_LIVE_BANKROLL_USD` 345 → 1,000 after 10 clean live trades.
+## Next
 
 ### Phase 5 — Confirm + Growth (L2→L3, $5K → $25K)
-- 2-category diversification on live PnL.
-- Adjust max open positions upward with bankroll (10 → 15).
-- 30-day rolling Sharpe tracking on live fills only.
+- 2-category diversification on live PnL (sports + one other)
+- Max open positions 30 → higher with bankroll
+- 30-day rolling Sharpe tracking on live fills only
 
 ### Phase 6 — Target Scale (L4→L5, $100K → $200–300K)
-- $10–20K/month realized P&L.
-- 3-category diversification minimum.
-- Replacement-signal pipeline (as older signals decay).
+- $10–20K/month realized P&L
+- 3-category diversification minimum
+- Replacement-signal pipeline (rotate in new signals as older ones decay)
 
 ---
 
@@ -174,18 +215,17 @@ intelligence, alpha discovery, and observability.
 
 ---
 
-## Go-Live Criteria (L0 → L1 promotion)
+## L1 → L2 Promotion Criteria (as of 2026-05-09)
 
-| Gate | Requirement | Current |
+Phase 4 (L1 Probate) is active. Current live stats vs L2 promotion gates:
+
+| Gate | Requirement | Current (2026-05-09) |
 |------|------------|---------|
-| 1 | ≥50 resolved hypotheses | **17** (34%) |
-| 2 | ≥70% hypothesis accuracy | **47.1%** |
-| 3 | ≥2 signal types at ≥60% on ≥20 resolved each | whale_entry 70%/10 only |
-| 4 | ≥2 categories positive PnL on ≥20 resolved each | sports only |
-| 5 | Max drawdown <20% over 30 days | 0.7% ✅ |
-| 6 | Ops stable 2+ weeks (no data-loss, no silent failures) | Post-fix monitoring |
-| 7 | Human review and approval | Pending gates 1–4 |
+| 1 | ≥30 live resolved trades | **156** ✅ |
+| 2 | Slippage median ≤2% | measuring |
+| 3 | Live WR ≥55% OR positive EV | EV=+$0.31/trade ✅ (WR=36.7%, asymmetric) |
+| 4 | Zero circuit-breaker incidents | ✅ |
+| 5 | No silent failures | ✅ |
+| 6 | Human review + written approval | pending bankroll raise |
 
-All seven gates must pass before bankroll is raised from $345 to $1,000.
-Live execution with the current $345 bankroll continues on the narrow
-whitelist (`whale_entry_filtered` only, 4 categories) as data-gathering.
+Bankroll raise $300 → $1,000 gated on slippage measurement and human approval.

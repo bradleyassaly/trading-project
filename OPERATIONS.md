@@ -52,6 +52,7 @@ when not, alert on the critical points."
 | **Polymarket CLOB WS** | down | no live signals | reconnect with backoff | wait for PM recovery |
 | **Polymarket Gamma** | down | resolution checker can't resolve trades | trades stay open until Gamma is back; no data loss | wait for PM recovery |
 | **Circuit breaker** | halted | no trades placed (intentional) | NEVER auto-resets max-drawdown halt | manual `POST /api/circuit-breaker/reset` after investigating |
+| **Kill switch** | WR gate blocks positive-EV signal | trade skipped despite edge | EV bypass (≥5%) auto-skips WR gate for asymmetric-payoff signals | verify blended EV in kill_switch logs if a signal is blocked unexpectedly |
 | **Live executor** | Order rejected by CLOB | no position entered | retry once, then skip | check CLOB error message |
 | **Live executor** | Order timeout (2 min) | cancel order, no position | log + alert via Telegram | check CLOB status |
 | **Live executor** | Partial fill | smaller position than intended | record actual fill, adjust P&L | review in `trade_fills` table |
@@ -163,3 +164,5 @@ Recovery messages fire when a previously-down service comes back.
 | `🔴 LIVE TRADE EXECUTION FAILED` | Order to CLOB rejected | Check live executor logs; verify POLYMARKET_API_KEY and KillSwitch state |
 | `🟡 TASK FAILING REPEATEDLY` | Same scheduled task failed 3+ times | Check the task's log file under `logs/scheduler/` |
 | `[WhaleTripwire] CRITICAL: DB locked` | Whale detection is BLIND | Stop all services, clean stale shm files (see "How the DB locking fix works"), restart |
+| `⚠️ Signal Health Alert — New decay detected` | A monitored signal's IC14 turned negative on ≥10 resolved — edge may be decaying | Review signal_health table; consider removing from LIVE_SIGNAL_TYPES if IC30 also negative |
+| `⚠️ Signal Health Alert — IC30 dropped below 0.02` | Monitored signal approaching decay threshold | Watch next 6h run; if IC30 goes negative → action above |

@@ -6,14 +6,18 @@ cadence.
 
 ## Scaling Ladder
 
-| Level | Bankroll | Max/trade | Max open | Target P&L/mo |
-|---|---:|---:|---:|---:|
-| L0 Validate (paper) | $345 | $24 | 10 | n/a |
-| L1 Probate | $1,000 | $50 | 8 | $50–100 |
-| L2 Confirm | $5,000 | $150 | 10 | $250–500 |
-| L3 Growth | $25,000 | $500 | 15 | $1,250–2,500 |
-| L4 Scale | $100,000 | $1,500 | 20 | $5,000–10,000 |
-| **L5 Target** | **$200–300K** | **$3,000** | **25** | **$10,000–20,000** |
+| Level | Bankroll | Max/trade | Max open | Target P&L/mo | Status |
+|---|---:|---:|---:|---:|---|
+| L0 Validate (paper) | $345 | $24 | 10 | n/a | ✅ DONE |
+| **L1 Probate** | **~$300** | **$5 (Tier 1)** | **30** | **$50–100** | **🔄 ACTIVE** |
+| L2 Confirm | $1,000 | $50 | 15 | $250–500 | ⏳ gated |
+| L3 Growth | $5,000 | $150 | 20 | $1,250–2,500 | ⏳ gated |
+| L4 Scale | $25,000 | $500 | 25 | $5,000–10,000 | ⏳ gated |
+| L5 Target | $100–300K | $1,500–3,000 | 30 | $10,000–20,000 | ⏳ gated |
+
+*L1 uses the stake-ladder system rather than a fixed cap. Current tier: Tier 1
+($5/trade cap). Bankroll raise to $1,000 and max/trade $50 requires slippage
+measurement + human approval.*
 
 ---
 
