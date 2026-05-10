@@ -257,9 +257,11 @@ EXCLUDE_CATEGORIES: set[str] = set()  # no hard exclusions; tier-gating handles 
 #   Top wins yesterday were all 'mentions' subcategory (Elon tweets)
 # These ARE proven slices; widening here lets them through to live
 # instead of dying at LIVE_CAT_GATE while we wait for real samples.
+# science removed 2026-05-10: n=37 live trades, WR=22%, EV=-$0.21/trade.
+# crypto on watch: n=4, WR=0%, EV=-$1.22/trade — too small to drop yet.
 LIVE_TRADE_CATEGORIES = {
     "politics", "geopolitics", "sports", "crypto",
-    "entertainment", "economics", "science", "mentions",
+    "entertainment", "economics", "mentions",
 }
 # Signal types to exclude from paper bankroll (fire+record only, no capital).
 # 2026-04-27: max-hours-to-resolve preference. Resolved-hypothesis
