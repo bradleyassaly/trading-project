@@ -59,13 +59,17 @@ class KillSwitch:
     # faster; resolution_decay was repeatedly blocked at 10 despite only 4
     # genuinely open trades. With short-horizon markets, turnover is high
     # enough that 20 simultaneous positions carries acceptable risk.
-    MAX_OPEN_POSITIONS = 20
+    MAX_OPEN_POSITIONS = 30
     # Per-trade cap derived dynamically from live bankroll (7% of account
     # as phase-1 safety ramp; capped at $25 hard ceiling). Scales with
     # account growth without code changes.
     MAX_TRADE_USD_PCT = 0.07
     MAX_TRADE_USD_ABS_CAP = 25.0
     MIN_WIN_RATE = 0.52
+    # 2026-05-10: raised from 20 → 30. At $5/trade, 20-cap deployed $100
+    # max ($33% of $300 bankroll) and was blocking hundreds of signals.
+    # 30 positions × $5 = $150 deployed (50% of bankroll) — healthier
+    # deployment without over-concentrating risk.
     # 2026-04-25: probation/discovery tier WR floor. Standard 0.52 blocked
     # 45 live attempts in 24h. Drop to 0.45 for stakes <= probation cap so
     # real-money calibration data starts flowing — risk is bounded by the

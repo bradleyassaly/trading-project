@@ -23,7 +23,7 @@ class KellySizer:
 
     KELLY_FRACTION = 0.25
     MAX_PCT_OF_BANKROLL = 0.02
-    MIN_TRADE_USD = 10
+    MIN_TRADE_USD = 5       # must be >= CLOB minimum (5 tokens × ~$0.99 ≈ $4.95)
     MAX_TRADE_USD = 250
     MIN_LIVE_SAMPLE = 10    # below this we only return the probe size
 

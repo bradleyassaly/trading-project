@@ -142,18 +142,22 @@ class PolymarketLiveExecutor:
         except Exception:
             return base * 0.25
         if not row:
-            return base * 0.25
+            return max(5.0, base * 0.25)
         n = int(row[0] or 0)
         ev = float(row[1] or 0)
+        # Floor at $5 (CLOB minimum for 5 tokens at any price). Without this,
+        # the 0.25× conservative slice on a $5 ladder cap returns $1.25 which
+        # can never place a real order (CLOB rejects < 5 shares).
+        CLOB_MIN_FLOOR = 5.0
         if n < 8:
-            return base * 0.25
+            return max(CLOB_MIN_FLOOR, base * 0.25)
         if ev >= 0.30:
-            return base * 1.0
+            return max(CLOB_MIN_FLOOR, base * 1.0)
         if ev >= 0.15:
-            return base * 0.75
+            return max(CLOB_MIN_FLOOR, base * 0.75)
         if ev >= 0.05:
-            return base * 0.50
-        return base * 0.25
+            return max(CLOB_MIN_FLOOR, base * 0.50)
+        return max(CLOB_MIN_FLOOR, base * 0.25)
 
     def __init__(self) -> None:
         self._db = WalletDB()
