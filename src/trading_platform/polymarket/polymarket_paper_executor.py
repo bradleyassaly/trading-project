@@ -311,6 +311,15 @@ EXCLUDE_SIGNAL_TYPES = {
     "order_flow_imbalance", # 2026-05-04: n=31 resolved 35.5% WR -14.5% avg EV; no positive category slice
     "convergence",          # 2026-05-04: n=14 trade_hypotheses 29% acc; sports slice -36.8% EV
     "insider_entry",        # 2026-05-04: n=7 trade_hypotheses 29% acc; no positive EV slice
+    # 2026-05-09: correlation-cluster pruning (signal_health corr >= 0.7).
+    # Each cluster below keeps its highest-IC30 member; the rest are excluded.
+    # Cluster A (whale-based): whale_entry_filtered [IC30=+0.31, KEEP] >
+    #   whale_entry [excluded 2026-05-05, decay_flag] >
+    #   network_leader_entry [excluded 2026-05-02] > market_maker_flip [excluded 2026-05-02]
+    # Cluster B (cascade-based): wallet_reversal [IC30=+0.16, kept for paper data] >
+    #   convergence [excluded 2026-05-04] > cascade [excluded below] >
+    #   news_reactor [excluded 2026-04-18] > consensus_follower [excluded 2026-04-24]
+    "cascade",              # corr=1.857 with convergence; live WR=16% n=19; removed from live 2026-05-08
 }
 
 # 2026-05-02: signal-type EXCLUDE doesn't apply when (signal_type,

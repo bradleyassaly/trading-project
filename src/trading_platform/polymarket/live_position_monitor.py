@@ -193,12 +193,13 @@ def check_live_exits() -> dict[str, int]:
         # the balance query fails.
         if side not in ("YES", "BUY"):
             actual_tokens = clob.get_conditional_balance(token_id) if token_id else None
-            if actual_tokens is not None and actual_tokens < 0.001:
-                # Zero balance — market likely resolved; tokens already redeemed.
-                # Mark position closed at $0 rather than attempting a doomed sell.
+            if actual_tokens is not None and actual_tokens < 1.0:
+                # Below CLOB minimum sell size (1 token). Market may have resolved
+                # or position was a dust partial fill. Mark closed at $0 rather than
+                # looping forever on a doomed sell attempt.
                 logger.warning(
-                    "[live-exit] #%d %s has 0 CONDITIONAL balance — marking resolved_zero_balance",
-                    lid, sig_type,
+                    "[live-exit] #%d %s has dust CONDITIONAL balance %.4f — marking resolved_zero_balance",
+                    lid, sig_type, actual_tokens if actual_tokens is not None else 0,
                 )
                 try:
                     conn = get_connection()
@@ -230,9 +231,43 @@ def check_live_exits() -> dict[str, int]:
             # YES price as the sell target and the order never fills.
             exit_price_hint = max(0.01, 1.0 - current)
         else:
-            shares_held = float(shares or 0) or (float(size_usd or 0) / max(entry, 0.01))
+            # For YES positions, check actual balance to catch:
+            #   (a) dust positions (< 1 token) that can't meet CLOB minimum
+            #   (b) partial fills where DB `shares` > tokens actually received
+            actual_tokens = clob.get_conditional_balance(token_id) if token_id else None
+            if actual_tokens is not None and actual_tokens < 1.0:
+                logger.warning(
+                    "[live-exit] #%d %s has dust YES balance %.4f — marking resolved_zero_balance",
+                    lid, sig_type, actual_tokens,
+                )
+                try:
+                    conn = get_connection()
+                    try:
+                        conn.execute(
+                            """UPDATE live_trades
+                               SET exit_ts=?, exit_reason='resolved_zero_balance',
+                                   outcome='loss', realized_pnl=0
+                               WHERE id=?""",
+                            (int(time.time()), lid),
+                        )
+                        conn.commit()
+                    finally:
+                        try: conn.close()
+                        except Exception: pass
+                except Exception as exc:
+                    logger.error("dust-close failed for #%d: %s", lid, exc)
+                exited += 1
+                reasons["resolved_zero_balance"] = reasons.get("resolved_zero_balance", 0) + 1
+                continue
+            db_shares = float(shares or 0) or (float(size_usd or 0) / max(entry, 0.01))
+            # Cap at actual wallet balance — DB shares may be stale for partial fills
+            if actual_tokens is not None and 0 < actual_tokens < db_shares:
+                shares_held = actual_tokens
+            else:
+                shares_held = db_shares
             exit_price_hint = current
-        exact_sell_shares = max(1, int(shares_held))
+        # shares_held is guaranteed >= 1.0 at this point (dust handled above)
+        exact_sell_shares = int(shares_held)
         order_result = clob.place_market_order(
             token_id=token_id, side="SELL",
             size_usdc=float(size_usd or 0),
@@ -248,9 +283,12 @@ def check_live_exits() -> dict[str, int]:
             continue
 
         fill = order_result.filled_price or current
-        realized_pnl = (fill - entry) * float(size_usd or 0) / max(entry, 0.01) \
+        # Use shares_held (actual token count) instead of deriving from size_usd.
+        # size_usd can be stale/wrong for partially-filled GTC orders.
+        # SELL: entry=NO_entry, fill=NO_exit; BUY: entry=YES_entry, fill=YES_exit.
+        realized_pnl = float(shares_held) * (fill - entry) \
             if side in ("YES", "BUY") else \
-            (entry - fill) * float(size_usd or 0) / max(1 - entry, 0.01)
+            float(shares_held) * (entry - fill)
         outcome = "win" if realized_pnl > 0 else "loss"
 
         try:

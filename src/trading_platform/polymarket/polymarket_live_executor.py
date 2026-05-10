@@ -71,22 +71,26 @@ class PolymarketLiveExecutor:
     #   tier_entry:  n=15, WR=100%, EV=+32% (small sample, probation)
     #   whale_exit:  n=16, WR=100%, EV=+3.7%  (small sample, probation)
     LIVE_REAL_SIGNAL_TYPES: set[str] = {
-        "wallet_reversal",
-        # specialist_entry removed 2026-05-05: IC30=-0.202, IC14=-0.135, decay_flag=True.
-        # Re-add when IC30 recovers above 0.05 and decay_flag clears.
+        # wallet_reversal removed 2026-05-09: 60-day backtest WR=51%, EV=-0.024.
+        # All 3 live exits today were stop-losses. Re-add if EV recovers above 0.0
+        # on n>=50 resolved trades in a fresh 30-day window.
+        # specialist_entry re-added 2026-05-09: IC30=+0.050, IC14=+0.107, decay_flag cleared.
+        # 60-day backtest: WR=89%, EV=+0.204, n=79 resolved. Monitor IC30 daily.
+        "specialist_entry",
         "tier_entry", "whale_exit",
         # whale_entry_filtered: IC30=+0.313, +$574 paper PnL n=148 (sports blocked).
-        # cascade: IC14=+0.032 (recovering), +$76 paper PnL n=43.
-        "whale_entry_filtered", "cascade",
+        # cascade removed 2026-05-08: live WR=16% over 19 trades (paper 45% WR was in
+        # sports/geopolitics/science which are now category-blocked). Re-add when
+        # live WR recovers above 40% on n>=20 in allowed categories.
+        "whale_entry_filtered",
         # whale_entry removed 2026-05-05: IC30=-0.383, IC14=-0.674, decay_flag=True.
         # Fires 5k+/week, 100% blocked by kill switch (EV=-0.291). Pure noise.
         # Re-add if IC30 recovers above 0.0 for 7+ consecutive days.
         "reversal_confluence", "pre_resolution_entry",
         # resolution_decay: 85% WR, +185% EV, n=27 — best WR of any signal.
         "resolution_decay",
-        # oversized_bet: IC30=+0.121, +$107 paper PnL n=34, +33% avg EV.
-        # Asymmetric payoffs (low WR structural), WR floor overridden to 0.25.
-        "oversized_bet",
+        # oversized_bet removed 2026-05-09: 60-day backtest WR=36%, EV=-0.312.
+        # Re-add only if a fresh 30-day window shows EV > 0.0 on n>=20 resolved.
     }
 
     # ALWAYS True in source. Flip in your local instance only.
@@ -182,6 +186,28 @@ class PolymarketLiveExecutor:
         the signal back to dry-run.
         """
         from trading_platform.polymarket.db_connection import get_connection as _gc
+        # Signals with decay_flag=1 in signal_health are blocked from all live
+        # paths — including 3-dim slice promotion. IC30 degradation means recent
+        # predictions are anti-correlated with outcomes regardless of what a
+        # specific (signal × category × tier) slice showed historically.
+        try:
+            _conn = _gc(self._db_path)
+            try:
+                _decay = _conn.execute(
+                    "SELECT decay_flag FROM signal_health WHERE signal_type = ?",
+                    (signal_type,),
+                ).fetchone()
+            finally:
+                try: _conn.close()
+                except Exception: pass
+            if _decay and int(_decay[0] or 0):
+                logger.warning(
+                    "[LIVE][DECAY_BLOCK] %s — decay_flag=1 in signal_health, blocking live path",
+                    signal_type,
+                )
+                return True
+        except Exception:
+            pass
         promoted_via_3dim = False
         if signal_type not in self.LIVE_REAL_SIGNAL_TYPES:
             if category and wallet_tier:
@@ -870,18 +896,27 @@ class PolymarketLiveExecutor:
                 else "passive"
             )
 
-            # Use optimized limit order. Pass current_price (already direction-
-            # corrected) as price_hint so place_limit_order uses the right fallback
-            # when one side of the book is empty rather than re-fetching mid (which
-            # would return the YES price even for NO token queries).
-            if hasattr(self._clob, "place_limit_order"):
-                order_result: OrderResult = self._clob.place_limit_order(
+            # BUY YES (want_yes=True): fire-and-forget GTC via place_market_order.
+            # place_limit_order's passive→mid→aggressive escalation cancels after ~75s;
+            # on thin YES books this produced 33 "order timed out" errors/week.
+            # place_market_order posts at ask+tick and returns success for "live" status
+            # (GTC order sitting in book), letting the fill happen whenever liquidity
+            # arrives. The position monitor reconciles actual token balance on exit.
+            # SELL (want_yes=False) keeps place_limit_order — NO books are thin and
+            # aggressive limit pricing is needed to cross the spread reliably.
+            if want_yes:
+                order_result: OrderResult = self._clob.place_market_order(
+                    token_id=token_id, side="BUY", size_usdc=size_usd,
+                    price_hint=current_price,
+                )
+            elif hasattr(self._clob, "place_limit_order"):
+                order_result = self._clob.place_limit_order(
                     token_id=token_id, side="BUY", size_usdc=size_usd,
                     timeout_sec=30.0, aggression=_aggression,
                     price_hint=current_price,
                 )
             else:
-                order_result: OrderResult = self._clob.place_market_order(
+                order_result = self._clob.place_market_order(
                     token_id=token_id, side="BUY", size_usdc=size_usd, max_slippage=0.02,
                 )
             self._record_attempt(
@@ -999,8 +1034,9 @@ class PolymarketLiveExecutor:
             now_ts = int(time.time())
             fill_price = None
             shares = None
-            if order_result and order_result.filled_price:
-                fill_price = float(order_result.filled_price)
+            # Use `is not None` so a 0.0 avgFilledPrice doesn't silently skip.
+            if order_result and order_result.filled_price is not None:
+                fill_price = float(order_result.filled_price) or None  # keep None if 0.0
                 effective_price = fill_price or entry_price
                 if effective_price and size_usd:
                     direction = signal.get("direction", "BUY").upper()
