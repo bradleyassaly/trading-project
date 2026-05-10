@@ -281,6 +281,33 @@ SCHEDULE: list[Task] = [
         description="Recompute wallet metrics from the trade history",
     ),
     Task(
+        # 2026-05-10: export wallet_profiles from Postgres → parquet weekly.
+        # The --from-db path above rebuilds the Postgres wallet_profiles table
+        # but never writes the parquet file used by legacy reporting/analytics.
+        # This task exports the live Postgres snapshot so wallet_profiles.parquet
+        # stays fresh. Runs weekly (not daily) — the parquet is only for offline
+        # analysis; live trading reads from Postgres directly.
+        name="wallet_profiles_parquet_export",
+        cmd=(
+            "python -c \""
+            "import pandas as pd, os; "
+            "import psycopg; "
+            "host=os.getenv('POSTGRES_HOST','localhost'); "
+            "user=os.getenv('POSTGRES_USER','polymarket'); "
+            "pw=os.getenv('POSTGRES_PASSWORD','polymarket_dev'); "
+            "db=os.getenv('POSTGRES_DB','polymarket'); "
+            "dsn=f'host={host} user={user} password={pw} dbname={db}'; "
+            "conn=psycopg.connect(dsn); "
+            "df=pd.DataFrame(conn.execute('SELECT * FROM wallet_profiles').fetchall(), "
+            "  columns=[d[0] for d in conn.execute('SELECT * FROM wallet_profiles LIMIT 0').description]); "
+            "conn.close(); "
+            "df.to_parquet('/app/data/polymarket/wallet_profiles.parquet', index=False); "
+            "print(f'Exported {len(df)} wallet profiles to parquet')\""
+        ),
+        interval_seconds=7 * 24 * 3600,
+        description="Weekly export of wallet_profiles Postgres → parquet for offline analytics",
+    ),
+    Task(
         name="build_leaderboard",
         cmd="trading-cli data polymarket build-leaderboard",
         interval_seconds=24 * 3600,
@@ -725,6 +752,12 @@ SCHEDULE: list[Task] = [
         cmd="curl -fsS -X POST http://api:8001/api/paper/snapshot-equity",
         interval_seconds=60 * 60,
         description="Record equity curve data point (hourly)",
+    ),
+    Task(
+        name="live_equity_snapshot",
+        cmd="python scripts/snapshot_live_equity.py",
+        interval_seconds=60 * 60,
+        description="Record live portfolio equity curve (USDC + token value, hourly)",
     ),
     Task(
         name="position_mark_to_market",

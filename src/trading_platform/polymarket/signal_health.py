@@ -164,6 +164,16 @@ def compute_pairwise_corr(conn, window_days: int = 30) -> dict[tuple[str, str], 
     return out
 
 
+# Signals we actively watch for decay — alert when IC30 first crosses below threshold.
+_MONITORED_SIGNALS: frozenset[str] = frozenset({
+    "specialist_entry",
+    "whale_entry_filtered",
+    "resolution_decay",
+})
+# Alert threshold: IC30 below this warrants a Telegram heads-up even before full decay.
+_IC_WARN_THRESHOLD = 0.02
+
+
 def run_pipeline(db_path: str | None = None) -> dict[str, Any]:
     """Compute IC + correlations and upsert into signal_health."""
     t0 = time.time()
@@ -189,9 +199,21 @@ def run_pipeline(db_path: str | None = None) -> dict[str, Any]:
             if c > max_corr_for.get(b, ("", 0))[1]:
                 max_corr_for[b] = (a, c)
 
+        # Snapshot previous state so we only alert on *transitions*, not every run.
+        try:
+            prev_rows = conn.execute(
+                "SELECT signal_type, decay_flag, ic_30d FROM signal_health"
+            ).fetchall()
+            prev_decay: dict[str, int] = {r[0]: int(r[1] or 0) for r in prev_rows}
+            prev_ic30: dict[str, float] = {r[0]: float(r[2] or 0) for r in prev_rows}
+        except Exception:
+            prev_decay, prev_ic30 = {}, {}
+
         now = int(time.time())
         n_decay = 0
         n_corr_redundant = 0
+        newly_decayed: list[tuple[str, float, float, int]] = []   # (sig, ic30, ic14, n)
+        ic_warnings: list[tuple[str, float, float, int]] = []     # monitored, IC30 crossed below threshold
         for sig in sigs:
             ic_30, n_30 = compute_ic(30, sig, conn)
             ic_14, _ = compute_ic(14, sig, conn)
@@ -206,6 +228,16 @@ def run_pipeline(db_path: str | None = None) -> dict[str, Any]:
             decay = 1 if (ic_14 < 0 and n_30 >= 10) else 0
             if decay:
                 n_decay += 1
+                # Alert only when transitioning from healthy → decayed (not on repeat runs).
+                if prev_decay.get(sig, 0) == 0:
+                    newly_decayed.append((sig, ic_30, ic_14, n_30))
+            # Warn when a monitored signal's IC30 first crosses below the warn threshold.
+            if (
+                sig in _MONITORED_SIGNALS
+                and ic_30 < _IC_WARN_THRESHOLD
+                and prev_ic30.get(sig, 1.0) >= _IC_WARN_THRESHOLD
+            ):
+                ic_warnings.append((sig, ic_30, ic_14, n_30))
             peer, peer_corr = max_corr_for.get(sig, ("", 0.0))
             if peer_corr >= 0.7:
                 n_corr_redundant += 1
@@ -233,6 +265,28 @@ def run_pipeline(db_path: str | None = None) -> dict[str, Any]:
             except Exception as exc:
                 logger.debug("signal_health upsert %s failed: %s", sig, exc)
         conn.commit()
+
+        # Telegram alert — fires only on first-time decay transitions or IC30 threshold crossings.
+        if newly_decayed or ic_warnings:
+            try:
+                from dotenv import load_dotenv
+                load_dotenv()
+                from trading_platform.polymarket.telegram_alerts import get_alerter
+                alerter = get_alerter()
+                if alerter.enabled:
+                    lines = ["⚠️ <b>Signal Health Alert</b>"]
+                    if newly_decayed:
+                        lines.append("\n<b>New decay detected (IC14&lt;0, n≥10):</b>")
+                        for sig, ic30, ic14, n in newly_decayed:
+                            lines.append(f"  • {sig}: IC30={ic30:+.3f} IC14={ic14:+.3f} n={n}")
+                    if ic_warnings:
+                        lines.append(f"\n<b>IC30 dropped below {_IC_WARN_THRESHOLD:.2f} (monitored signal):</b>")
+                        for sig, ic30, ic14, n in ic_warnings:
+                            lines.append(f"  • {sig}: IC30={ic30:+.3f} IC14={ic14:+.3f} n={n}")
+                    alerter._send("\n".join(lines))
+            except Exception as exc:
+                logger.warning("signal_health Telegram alert failed: %s", exc)
+
         return {
             "elapsed_seconds": round(time.time() - t0, 1),
             "signals_processed": len(sigs),
