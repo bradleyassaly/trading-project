@@ -51,6 +51,10 @@ LADDER = [
 ]
 MIN_WR_FOR_PROMOTION = 0.55
 MIN_PNL_FOR_PROMOTION = 0.0
+# EV-based promotion path: positive average PnL/trade qualifies regardless
+# of WR — covers high-payout signals where avg_win >> avg_loss but WR < 55%.
+MIN_EV_FOR_PROMOTION = 0.0
+EV_PROMOTION_MIN_N = 15
 DEMOTE_CONSECUTIVE_LOSSES = 3
 DEMOTE_WR_THRESHOLD = 0.45
 DEMOTE_MIN_N = 10
@@ -139,11 +143,14 @@ def _evaluate_promotion(conn, current_cap: float) -> tuple[float, str]:
                 return LADDER[i - 1][1], (
                     f"DEMOTED: {consec_losses} consecutive real losses → drop to ${LADDER[i-1][1]}"
                 )
-    if n >= DEMOTE_MIN_N and wr < DEMOTE_WR_THRESHOLD:
+    ev = pnl / n if n > 0 else 0.0
+    if n >= DEMOTE_MIN_N and wr < DEMOTE_WR_THRESHOLD and ev <= 0:
+        # EV exception: positive avg PnL/trade blocks WR-based demotion.
+        # Signals with avg_win >> avg_loss sustain edge at 40% WR.
         for i, (idx, cap, _) in enumerate(LADDER):
             if cap == current_cap and i > 0:
                 return LADDER[i - 1][1], (
-                    f"DEMOTED: WR {wr*100:.0f}% < {DEMOTE_WR_THRESHOLD*100:.0f}% on n={n}"
+                    f"DEMOTED: WR {wr*100:.0f}% < {DEMOTE_WR_THRESHOLD*100:.0f}% on n={n} and EV<=0"
                 )
 
     # Promotion path
@@ -159,16 +166,20 @@ def _evaluate_promotion(conn, current_cap: float) -> tuple[float, str]:
                 # Gates for promotion
                 if n < min_trades:
                     return current_cap, f"hold at ${current_cap}: real n={n}/{min_trades}"
-                if wr < MIN_WR_FOR_PROMOTION:
+                wr_qualifies = wr >= MIN_WR_FOR_PROMOTION
+                ev = pnl / n if n > 0 else 0.0
+                ev_qualifies = ev > MIN_EV_FOR_PROMOTION and n >= EV_PROMOTION_MIN_N
+                if not (wr_qualifies or ev_qualifies):
                     return current_cap, (
                         f"hold at ${current_cap}: WR {wr*100:.0f}% < {MIN_WR_FOR_PROMOTION*100:.0f}%"
+                        f" and EV ${ev:.4f}/trade not qualifying (need n>={EV_PROMOTION_MIN_N})"
                     )
                 if pnl < MIN_PNL_FOR_PROMOTION:
                     return current_cap, f"hold at ${current_cap}: net PnL ${pnl:.2f} not positive"
-                # All checks pass — promote
+                promo_path = "WR" if wr_qualifies else f"EV(${ev:.2f}/trade)"
                 return next_cap, (
-                    f"PROMOTED tier {i}→{i+1}: n={n} WR={wr*100:.0f}% PnL=${pnl:.2f} "
-                    f"→ cap ${current_cap}→${next_cap}"
+                    f"PROMOTED tier {i}->{i+1} [{promo_path}]: n={n} WR={wr*100:.0f}% "
+                    f"PnL=${pnl:.2f} -> cap ${current_cap}->${next_cap}"
                 )
             else:
                 return current_cap, f"at top tier ${current_cap} (L5)"

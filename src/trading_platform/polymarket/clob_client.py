@@ -273,15 +273,22 @@ class ClobClient:
             order_id = resp.get("orderID") or resp.get("id")
             status = resp.get("status", "unknown")
             filled_raw = resp.get("avgFilledPrice")
-            filled_price = float(filled_raw) if filled_raw else current_price
-
+            # avgFilledPrice can be "0" or 0.0 for live GTC orders; treat as absent.
+            filled_price = (float(filled_raw) if filled_raw and float(filled_raw) > 0
+                            else current_price)
+            success = status in ("matched", "live", "delayed")
+            # Capture non-success CLOB status so callers can log what happened.
+            if not success:
+                err_str = f"CLOB status={status}" if status != "error" else str(resp)
+            else:
+                err_str = None
             return OrderResult(
-                success=status in ("matched", "live", "delayed"),
+                success=success,
                 order_id=order_id,
                 status=status,
                 filled_price=filled_price,
                 filled_size=float(actual_usdc),
-                error_msg=None if status != "error" else str(resp),
+                error_msg=err_str,
                 raw=resp,
             )
         except Exception as exc:
