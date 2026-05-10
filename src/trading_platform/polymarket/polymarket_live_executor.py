@@ -1077,11 +1077,12 @@ class PolymarketLiveExecutor:
             try:
                 _sig_price_raw = signal.get("entry_price") or signal.get("price")
                 _sig_price = float(_sig_price_raw) if _sig_price_raw is not None else None
-                # expected_price = CLOB mid at submission; slippage = fill - expected.
+                # expected_price = CLOB mid at submission.
+                # slippage_pct = |fill - expected| / expected (unsigned; gate = ≤2%).
                 _expected = float(entry_price) if entry_price is not None else None
                 _slippage = (
-                    round(fill_price - _expected, 4)
-                    if fill_price is not None and _expected is not None
+                    round(abs(fill_price - _expected) / _expected, 6)
+                    if fill_price is not None and _expected is not None and _expected > 0
                     else None
                 )
                 _fill_time_ms = (
