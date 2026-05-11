@@ -207,9 +207,9 @@ def check_live_exits() -> dict[str, int]:
                         conn.execute(
                             """UPDATE live_trades
                                SET exit_ts=?, exit_reason='resolved_zero_balance',
-                                   outcome='loss', realized_pnl=0
+                                   outcome='loss', realized_pnl=?
                                WHERE id=?""",
-                            (int(time.time()), lid),
+                            (int(time.time()), -float(size_usd or 0), lid),
                         )
                         conn.commit()
                     finally:
@@ -246,9 +246,9 @@ def check_live_exits() -> dict[str, int]:
                         conn.execute(
                             """UPDATE live_trades
                                SET exit_ts=?, exit_reason='resolved_zero_balance',
-                                   outcome='loss', realized_pnl=0
+                                   outcome='loss', realized_pnl=?
                                WHERE id=?""",
-                            (int(time.time()), lid),
+                            (int(time.time()), -float(size_usd or 0), lid),
                         )
                         conn.commit()
                     finally:

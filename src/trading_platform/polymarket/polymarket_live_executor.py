@@ -664,12 +664,25 @@ class PolymarketLiveExecutor:
                 pass
             return self._result(False, reason=f"BUY at {entry_px:.2f} (>= {FAVORITE_BLOCK_PRICE:.2f}): tail-risk blocked")
 
-        # Per-signal BUY entry ceiling (tighter than FAVORITE_BLOCK_PRICE for
-        # specific signals). Live data for whale_entry_filtered BUY 0.50-0.65:
-        # 5W/26L, -$18 PnL vs SELL entries at YES≥0.85: 23W/19L, +$44 PnL.
-        # Mid-market BUY copies are noise; near-resolution SELL (buy NO) is edge.
+        # Per-signal BUY entry ceilings. Live data analysis (n=162 trades):
+        #
+        # whale_entry_filtered BUY: only the near-NO zone (YES<0.05) is profitable
+        #   YES 0.00-0.05: n=16  WR=19%  EV=+$2.54  Total=+$40.68  ← keep
+        #   YES 0.05-0.50: mixed  EV=-$0.47  Total=-$17.66          ← block
+        #   YES 0.50+:     blocked by FAVORITE_BLOCK_PRICE already
+        #   → lower ceiling 0.50 → 0.05 so only lottery-ticket BUYs get through.
+        #
+        # cascade/oversized_bet/wallet_reversal BUY: all negative EV, block entirely.
+        #   cascade BUY:       n=14  WR=0%   EV=-$0.57  Total=-$7.95
+        #   oversized_bet BUY: n=14  WR=0%   EV=-$0.73  Total=-$10.28
+        #   wallet_reversal BUY: n=7 WR=29%  EV=-$0.48  Total=-$3.38
+        #   Their SELL side is profitable — this is SELL-only alpha, not directional.
+        #   Setting ceiling=0.0 blocks all BUY (any price ≥ 0.0).
         _BUY_ENTRY_CEILINGS: dict[str, float] = {
-            "whale_entry_filtered": 0.50,
+            "whale_entry_filtered": 0.05,
+            "cascade":              0.0,
+            "oversized_bet":        0.0,
+            "wallet_reversal":      0.0,
         }
         _sig_buy_ceil = _BUY_ENTRY_CEILINGS.get(sig_type)
         if want_yes and _sig_buy_ceil is not None:
