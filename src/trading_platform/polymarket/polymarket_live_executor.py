@@ -665,25 +665,23 @@ class PolymarketLiveExecutor:
                 pass
             return self._result(False, reason=f"BUY at {entry_px:.2f} (>= {FAVORITE_BLOCK_PRICE:.2f}): tail-risk blocked")
 
-        # Per-signal BUY entry ceilings. Live data analysis (n=162 trades):
+        # Per-signal BUY entry gates. Live data analysis (n=163 trades, 2026-05-12):
         #
-        # whale_entry_filtered BUY: only the near-NO zone (YES<0.05) is profitable
-        #   YES 0.00-0.05: n=16  WR=19%  EV=+$2.54  Total=+$40.68  ← keep
-        #   YES 0.05-0.50: mixed  EV=-$0.47  Total=-$17.66          ← block
-        #   YES 0.50+:     blocked by FAVORITE_BLOCK_PRICE already
-        #   → lower ceiling 0.50 → 0.05 so only lottery-ticket BUYs get through.
+        # whale_entry_filtered BUY by category:
+        #   politics    n=6  WR=33% avg=0.262 EV=+$7.93 Total=+$47.60  ← allow
+        #   science     n=16 WR=0%  avg=0.234 EV=-$0.91 Total=-$14.48  ← block category
+        #   crypto      n=4  WR=0%  avg=0.440 EV=-$1.22 Total=-$4.86   ← block category
+        #   entertainment n=7 WR=29% avg=0.169 EV=-$0.47 Total=-$3.30  ← allow (borderline)
+        #   High-price end (>0.65) blocked by FAVORITE_BLOCK_PRICE already.
         #
-        # cascade/oversized_bet/wallet_reversal BUY: all negative EV, block entirely.
-        #   cascade BUY:       n=14  WR=0%   EV=-$0.57  Total=-$7.95
-        #   oversized_bet BUY: n=14  WR=0%   EV=-$0.73  Total=-$10.28
-        #   wallet_reversal BUY: n=7 WR=29%  EV=-$0.48  Total=-$3.38
-        #   Their SELL side is profitable — this is SELL-only alpha, not directional.
+        # cascade/oversized_bet/wallet_reversal/resolution_decay BUY: all negative EV.
+        #   SELL side is profitable for all — these are SELL-only signals.
         #   Setting ceiling=0.0 blocks all BUY (any price ≥ 0.0).
         _BUY_ENTRY_CEILINGS: dict[str, float] = {
-            "whale_entry_filtered": 0.05,
             "cascade":              0.0,
             "oversized_bet":        0.0,
             "wallet_reversal":      0.0,
+            "resolution_decay":     0.0,
         }
         _sig_buy_ceil = _BUY_ENTRY_CEILINGS.get(sig_type)
         if want_yes and _sig_buy_ceil is not None:
@@ -692,6 +690,15 @@ class PolymarketLiveExecutor:
                     False,
                     reason=f"BUY@{entry_px:.3f} >= {sig_type} mid-market ceiling {_sig_buy_ceil:.2f}",
                 )
+
+        # whale_entry_filtered BUY: block in categories with 0% WR.
+        _WEF_BUY_BLOCKED_CATS: frozenset[str] = frozenset({"science", "crypto"})
+        raw_cat = (signal.get("category") or "").lower().strip()
+        if want_yes and sig_type == "whale_entry_filtered" and raw_cat in _WEF_BUY_BLOCKED_CATS:
+            return self._result(
+                False,
+                reason=f"whale_entry_filtered BUY blocked in {raw_cat} category (WR=0% over n≥4)",
+            )
 
         # 2. Kill switch check. If the switch returns a probation_cap,
         # the signal passed probation gates (>=5 resolved, positive EV,
