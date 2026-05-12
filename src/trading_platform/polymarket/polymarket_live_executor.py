@@ -644,71 +644,30 @@ class PolymarketLiveExecutor:
         # entry band from ~50% of signals to ~85%. NO-side blocking is
         # handled separately via EXCLUDE_SIGNAL_SIDE.
         want_yes = (signal.get("direction") or "BUY").upper() == "BUY"
-        FAVORITE_BLOCK_PRICE = 0.65
         raw_price = signal.get("entry_price") or signal.get("price")
         try:
             entry_px = float(raw_price) if raw_price is not None else None
         except (TypeError, ValueError):
             entry_px = None
-        if want_yes and entry_px is not None and entry_px >= FAVORITE_BLOCK_PRICE:
-            logger.info(
-                "[LIVE][FAV_GATE] BLOCK %s BUY@%.3f (>= %.2f) — copy-trade tail risk",
-                sig_type, entry_px, FAVORITE_BLOCK_PRICE,
+
+        # 2026-05-12: SELL-only mode. All BUY signals suspended until per-signal
+        # BUY edge is validated on ≥50 resolved paper trades with WR≥45% and
+        # EV>$0.25 (excluding top-3 outliers). Current live data shows BUY P&L
+        # ex-top-3 lottery wins is deeply negative across all signal types.
+        if want_yes:
+            return self._result(
+                False,
+                reason=f"BUY suspended: SELL-only mode active (validate BUY edge on ≥50 paper trades first)",
             )
-            try:
-                from trading_platform.polymarket.decision_trace import trace as _dt
-                _dt(signal=signal, gate="LIVE_FAV_GATE", passed=False,
-                    value=entry_px, threshold=FAVORITE_BLOCK_PRICE,
-                    detail=f"BUY@{entry_px:.3f}", surface="live",
-                    db_path=self._db_path)
-            except Exception:
-                pass
-            return self._result(False, reason=f"BUY at {entry_px:.2f} (>= {FAVORITE_BLOCK_PRICE:.2f}): tail-risk blocked")
 
         # Block SELL entries where YES < 5¢ (buying NO at 95¢+).
-        # Two -$5 losses on 2026-05-12 from entry=0.010 and 0.028: market
-        # resolved YES (the ~2% outcome), full stake wiped. At this price
-        # level the asymmetry is brutal — need 50+ wins to recover one loss.
+        # Two -$5 losses on 2026-05-12: market resolved YES (~2% outcome),
+        # full stake wiped. Need 50+ wins to recover one loss.
         NEAR_CERTAINTY_SELL_BLOCK = 0.05
-        if not want_yes and entry_px is not None and entry_px < NEAR_CERTAINTY_SELL_BLOCK:
+        if entry_px is not None and entry_px < NEAR_CERTAINTY_SELL_BLOCK:
             return self._result(
                 False,
                 reason=f"SELL@YES={entry_px:.3f} < {NEAR_CERTAINTY_SELL_BLOCK:.2f}: near-certainty black-swan risk",
-            )
-
-        # Per-signal BUY entry gates. Live data analysis (n=163 trades, 2026-05-12):
-        #
-        # whale_entry_filtered BUY by category:
-        #   politics    n=6  WR=33% avg=0.262 EV=+$7.93 Total=+$47.60  ← allow
-        #   science     n=16 WR=0%  avg=0.234 EV=-$0.91 Total=-$14.48  ← block category
-        #   crypto      n=4  WR=0%  avg=0.440 EV=-$1.22 Total=-$4.86   ← block category
-        #   entertainment n=7 WR=29% avg=0.169 EV=-$0.47 Total=-$3.30  ← allow (borderline)
-        #   High-price end (>0.65) blocked by FAVORITE_BLOCK_PRICE already.
-        #
-        # cascade/oversized_bet/wallet_reversal/resolution_decay BUY: all negative EV.
-        #   SELL side is profitable for all — these are SELL-only signals.
-        #   Setting ceiling=0.0 blocks all BUY (any price ≥ 0.0).
-        _BUY_ENTRY_CEILINGS: dict[str, float] = {
-            "cascade":              0.0,
-            "oversized_bet":        0.0,
-            "wallet_reversal":      0.0,
-            "resolution_decay":     0.0,
-        }
-        _sig_buy_ceil = _BUY_ENTRY_CEILINGS.get(sig_type)
-        if want_yes and _sig_buy_ceil is not None:
-            if entry_px is not None and entry_px >= _sig_buy_ceil:
-                return self._result(
-                    False,
-                    reason=f"BUY@{entry_px:.3f} >= {sig_type} mid-market ceiling {_sig_buy_ceil:.2f}",
-                )
-
-        # whale_entry_filtered BUY: block in categories with 0% WR.
-        _WEF_BUY_BLOCKED_CATS: frozenset[str] = frozenset({"science", "crypto"})
-        raw_cat = (signal.get("category") or "").lower().strip()
-        if want_yes and sig_type == "whale_entry_filtered" and raw_cat in _WEF_BUY_BLOCKED_CATS:
-            return self._result(
-                False,
-                reason=f"whale_entry_filtered BUY blocked in {raw_cat} category (WR=0% over n≥4)",
             )
 
         # 2. Kill switch check. If the switch returns a probation_cap,
