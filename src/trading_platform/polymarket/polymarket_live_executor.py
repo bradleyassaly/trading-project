@@ -934,29 +934,17 @@ class PolymarketLiveExecutor:
                 else "passive"
             )
 
-            # BUY YES (want_yes=True): fire-and-forget GTC via place_market_order.
-            # place_limit_order's passive→mid→aggressive escalation cancels after ~75s;
-            # on thin YES books this produced 33 "order timed out" errors/week.
-            # place_market_order posts at ask+tick and returns success for "live" status
-            # (GTC order sitting in book), letting the fill happen whenever liquidity
-            # arrives. The position monitor reconciles actual token balance on exit.
-            # SELL (want_yes=False) keeps place_limit_order — NO books are thin and
-            # aggressive limit pricing is needed to cross the spread reliably.
-            if want_yes:
-                order_result: OrderResult = self._clob.place_market_order(
-                    token_id=token_id, side="BUY", size_usdc=size_usd,
-                    price_hint=current_price,
-                )
-            elif hasattr(self._clob, "place_limit_order"):
-                order_result = self._clob.place_limit_order(
-                    token_id=token_id, side="BUY", size_usdc=size_usd,
-                    timeout_sec=30.0, aggression=_aggression,
-                    price_hint=current_price,
-                )
-            else:
-                order_result = self._clob.place_market_order(
-                    token_id=token_id, side="BUY", size_usdc=size_usd, max_slippage=0.02,
-                )
+            # Both BUY and SELL use place_market_order (GTC).
+            # place_limit_order's passive→mid→aggressive escalation cancels after 30s;
+            # thin books (YES or NO) produced 60+ "order timed out" / FOK errors/week.
+            # GTC posts at ask+tick and returns "live" immediately — the position monitor
+            # reconciles actual token balance on exit. For near-resolution SELL entries
+            # (YES≈0.999) the GTC order sits until resolved or cancelled; no more error
+            # status polluting stats from thin near-resolution NO books.
+            order_result: OrderResult = self._clob.place_market_order(
+                token_id=token_id, side="BUY", size_usdc=size_usd,
+                price_hint=current_price,
+            )
             self._record_attempt(
                 signal, size_usd, current_price, order_result,
                 dry_run=False,
