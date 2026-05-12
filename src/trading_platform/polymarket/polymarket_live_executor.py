@@ -643,13 +643,14 @@ class PolymarketLiveExecutor:
         # Lifting the live cap from 0.50 → 0.65 expands the live-eligible
         # entry band from ~50% of signals to ~85%. NO-side blocking is
         # handled separately via EXCLUDE_SIGNAL_SIDE.
+        want_yes = (signal.get("direction") or "BUY").upper() == "BUY"
         FAVORITE_BLOCK_PRICE = 0.65
         raw_price = signal.get("entry_price") or signal.get("price")
         try:
             entry_px = float(raw_price) if raw_price is not None else None
         except (TypeError, ValueError):
             entry_px = None
-        if (signal.get("direction") or "").upper() == "BUY" and entry_px is not None and entry_px >= FAVORITE_BLOCK_PRICE:
+        if want_yes and entry_px is not None and entry_px >= FAVORITE_BLOCK_PRICE:
             logger.info(
                 "[LIVE][FAV_GATE] BLOCK %s BUY@%.3f (>= %.2f) — copy-trade tail risk",
                 sig_type, entry_px, FAVORITE_BLOCK_PRICE,
@@ -750,8 +751,7 @@ class PolymarketLiveExecutor:
         # Polymarket CLOB always uses side=BUY and chooses YES/NO via token_id.
         # Previous code hardcoded tids[0] (YES) + side=BUY, which executed
         # the wrong direction on every SELL signal. Fixed 2026-04-14.
-        direction = (signal.get("direction") or "BUY").upper()
-        want_yes = direction == "BUY"
+        direction = "BUY" if want_yes else "SELL"
         outcome_label = "YES" if want_yes else "NO"
 
         # Prefer cached token_ids from the signal dict (set by signal
