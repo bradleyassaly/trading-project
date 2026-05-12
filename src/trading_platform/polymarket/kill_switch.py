@@ -317,6 +317,15 @@ class KillSwitch:
                     warnings,
                 )
 
+            # Discovery cap is tighter than probation; pick the right one.
+            # Initialised here so the IC14 block below can modify it safely.
+            cap = None
+            if probation:
+                if any("DISCOVERY" in w for w in warnings):
+                    cap = self.DISCOVERY_MAX_STAKE_USD
+                else:
+                    cap = self.PROBATION_MAX_STAKE_USD
+
             # IC14 decay penalty: if recent IC has collapsed, halve the stake cap.
             # This doesn't block the trade — it forces smaller size until the
             # signal proves it still has edge in the current market regime.
@@ -339,11 +348,16 @@ class KillSwitch:
             except Exception:
                 pass
 
-            # 6. Daily loss limit
+            # 6. Daily loss limit — based on LIVE trade P&L only.
+            # Paper trades run on every signal including unvalidated types
+            # (price_velocity, order_flow_imbalance) and can lose $100+/day
+            # on paper while live P&L stays flat. Reading paper P&L here
+            # caused the KS to block all live entries despite live losses
+            # being well within tolerance (confirmed 2026-05-12).
             today_start = int(time.time()) - 86400
             daily_pnl = conn.execute(
-                """SELECT COALESCE(SUM(realized_pnl), 0) FROM polymarket_paper_trades
-                   WHERE archived = 0 AND exit_ts >= ? AND realized_pnl IS NOT NULL""",
+                """SELECT COALESCE(SUM(realized_pnl), 0) FROM live_trades
+                   WHERE dry_run = 0 AND exit_ts >= %s AND realized_pnl IS NOT NULL""",
                 (today_start,),
             ).fetchone()[0] or 0.0
             daily_loss_pct = abs(min(0.0, daily_pnl)) / self.BANKROLL
@@ -373,13 +387,6 @@ class KillSwitch:
                     warnings,
                 )
 
-            # Discovery cap is tighter than probation; pick the right one.
-            cap = None
-            if probation:
-                if any("DISCOVERY" in w for w in warnings):
-                    cap = self.DISCOVERY_MAX_STAKE_USD
-                else:
-                    cap = self.PROBATION_MAX_STAKE_USD
             return KillSwitchResult(True, None, warnings, probation_cap=cap)
         finally:
             conn.close()
