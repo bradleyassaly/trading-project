@@ -2151,30 +2151,32 @@ class PolymarketPaperExecutor:
     # ── Exit logic + mark-to-market ────────────────────────────────────────
 
     # Default exit thresholds (overridden by _EXIT_PROFILES per signal type).
-    STOP_LOSS = -0.25
+    # 2026-05-12: widened from -0.25 → -0.50. 7-day data showed stop_loss
+    # had WR=0% (59 exits, -$48.92) while trailing_stop=88% WR and
+    # take_profit=96% WR. Tight stops were shaking out winning positions on
+    # normal noise; positions that survive to natural exits win almost always.
+    STOP_LOSS = -0.50
     TAKE_PROFIT = 0.40
     TRAILING_STOP_ACTIVATE = 0.20   # start trailing after +20% unrealized
     TRAILING_STOP_DRAWBACK = 0.10   # close if price pulls back 10pp from peak (MFE)
     TIME_DECAY_DAYS = 30
 
-    # Per-signal exit profiles — short-horizon signals (sports whale copies)
-    # get tighter stops; thesis-driven signals get wider bands.
+    # Per-signal exit profiles. All stop_loss values widened to -0.50 on
+    # 2026-05-12 — see STOP_LOSS comment above for rationale.
     _EXIT_PROFILES: dict[str, dict] = {
-        "whale_entry_filtered": {"sl": -0.20, "tp": 0.35, "trail_act": 0.15, "trail_back": 0.08, "time_days": 14},
-        "high_conviction_insider": {"sl": -0.15, "tp": 0.50, "trail_act": 0.25, "trail_back": 0.12, "time_days": 30},
-        "insider_entry": {"sl": -0.20, "tp": 0.40, "trail_act": 0.20, "trail_back": 0.10, "time_days": 21},
-        "specialist_entry": {"sl": -0.25, "tp": 0.45, "trail_act": 0.20, "trail_back": 0.10, "time_days": 21},
-        "network_leader_entry": {"sl": -0.20, "tp": 0.35, "trail_act": 0.15, "trail_back": 0.08, "time_days": 14},
-        "copyable_contrarian": {"sl": -0.30, "tp": 0.50, "trail_act": 0.25, "trail_back": 0.12, "time_days": 30},
-        # Discovery signals get wide stops — we want resolution data, not
-        # early exits. Let them ride to market resolution where possible.
-        "oversized_bet": {"sl": -0.40, "tp": 0.60, "trail_act": 0.30, "trail_back": 0.15, "time_days": 21},
-        "cascade": {"sl": -0.40, "tp": 0.60, "trail_act": 0.30, "trail_back": 0.15, "time_days": 21},
-        "market_maker_flip": {"sl": -0.40, "tp": 0.60, "trail_act": 0.30, "trail_back": 0.15, "time_days": 21},
-        "accumulation": {"sl": -0.40, "tp": 0.60, "trail_act": 0.30, "trail_back": 0.15, "time_days": 21},
+        "whale_entry_filtered": {"sl": -0.50, "tp": 0.35, "trail_act": 0.15, "trail_back": 0.08, "time_days": 14},
+        "high_conviction_insider": {"sl": -0.50, "tp": 0.50, "trail_act": 0.25, "trail_back": 0.12, "time_days": 30},
+        "insider_entry": {"sl": -0.50, "tp": 0.40, "trail_act": 0.20, "trail_back": 0.10, "time_days": 21},
+        "specialist_entry": {"sl": -0.50, "tp": 0.45, "trail_act": 0.20, "trail_back": 0.10, "time_days": 21},
+        "network_leader_entry": {"sl": -0.50, "tp": 0.35, "trail_act": 0.15, "trail_back": 0.08, "time_days": 14},
+        "copyable_contrarian": {"sl": -0.50, "tp": 0.50, "trail_act": 0.25, "trail_back": 0.12, "time_days": 30},
+        "oversized_bet": {"sl": -0.50, "tp": 0.60, "trail_act": 0.30, "trail_back": 0.15, "time_days": 21},
+        "cascade": {"sl": -0.50, "tp": 0.60, "trail_act": 0.30, "trail_back": 0.15, "time_days": 21},
+        "market_maker_flip": {"sl": -0.50, "tp": 0.60, "trail_act": 0.30, "trail_back": 0.15, "time_days": 21},
+        "accumulation": {"sl": -0.50, "tp": 0.60, "trail_act": 0.30, "trail_back": 0.15, "time_days": 21},
         "convergence": {"sl": -0.50, "tp": 0.70, "trail_act": 0.35, "trail_back": 0.20, "time_days": 30},
-        "wallet_reversal": {"sl": -0.40, "tp": 0.60, "trail_act": 0.30, "trail_back": 0.15, "time_days": 21},
-        "no_position_entry": {"sl": -0.40, "tp": 0.60, "trail_act": 0.30, "trail_back": 0.15, "time_days": 21},
+        "wallet_reversal": {"sl": -0.50, "tp": 0.60, "trail_act": 0.30, "trail_back": 0.15, "time_days": 21},
+        "no_position_entry": {"sl": -0.50, "tp": 0.60, "trail_act": 0.30, "trail_back": 0.15, "time_days": 21},
     }
     TIME_DECAY_MIN_MOVE = 0.05
     # Market-life exit: a position past 80% of market lifetime rarely improves —

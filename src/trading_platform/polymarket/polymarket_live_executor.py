@@ -665,6 +665,17 @@ class PolymarketLiveExecutor:
                 pass
             return self._result(False, reason=f"BUY at {entry_px:.2f} (>= {FAVORITE_BLOCK_PRICE:.2f}): tail-risk blocked")
 
+        # Block SELL entries where YES < 5¢ (buying NO at 95¢+).
+        # Two -$5 losses on 2026-05-12 from entry=0.010 and 0.028: market
+        # resolved YES (the ~2% outcome), full stake wiped. At this price
+        # level the asymmetry is brutal — need 50+ wins to recover one loss.
+        NEAR_CERTAINTY_SELL_BLOCK = 0.05
+        if not want_yes and entry_px is not None and entry_px < NEAR_CERTAINTY_SELL_BLOCK:
+            return self._result(
+                False,
+                reason=f"SELL@YES={entry_px:.3f} < {NEAR_CERTAINTY_SELL_BLOCK:.2f}: near-certainty black-swan risk",
+            )
+
         # Per-signal BUY entry gates. Live data analysis (n=163 trades, 2026-05-12):
         #
         # whale_entry_filtered BUY by category:
