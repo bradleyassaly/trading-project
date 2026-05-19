@@ -44,6 +44,39 @@ logger = logging.getLogger(__name__)
 _DEDUP_LOCKS: dict = {}
 _DEDUP_LOCKS_META = threading.Lock()
 
+# 2026-05-18: topic concentration cap. Weekend 5/15-18 booked 12 of 15 SELL
+# entries on Musk/CZ tweet-count markets — one Musk posting burst would have
+# correlated-lossed the whole pool. Cap open positions per "topic stem"
+# (question with numbers/dates/years stripped, first 6 words).
+MAX_OPEN_PER_TOPIC = 3
+
+_TOPIC_STRIP_DATE = __import__("re").compile(
+    r"\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+\d+\b",
+    __import__("re").IGNORECASE,
+)
+_TOPIC_STRIP_RANGE = __import__("re").compile(r"\d+\s*[-–]\s*\d+")
+_TOPIC_STRIP_NUMS = __import__("re").compile(r"\b\d+\b")
+_TOPIC_STRIP_WS = __import__("re").compile(r"\s+")
+
+
+def _topic_stem(question: str | None) -> str:
+    """Normalize a market question to a topic key for concentration grouping.
+
+    "Will Elon Musk post 240-259 tweets from May 12 to May 19, 2026?"
+    "Will Elon Musk post 65-89 tweets from May 16 to May 23, 2026?"
+        → both produce "will elon musk post tweets from"
+
+    Returns "" when input is empty/falsy so callers can skip the check.
+    """
+    if not question:
+        return ""
+    q = question.lower()
+    q = _TOPIC_STRIP_DATE.sub("", q)
+    q = _TOPIC_STRIP_RANGE.sub("", q)
+    q = _TOPIC_STRIP_NUMS.sub("", q)
+    q = _TOPIC_STRIP_WS.sub(" ", q).strip()
+    return " ".join(q.split()[:6])
+
 
 class PolymarketLiveExecutor:
     """Live trading executor with multi-layer safety gating."""
@@ -341,6 +374,9 @@ class PolymarketLiveExecutor:
                     from datetime import datetime, timezone as _tz
                     _end = datetime.fromisoformat(str(_hrow[0]).replace("Z", "+00:00"))
                     _days_out = (_end - datetime.now(tz=_tz.utc)).total_seconds() / 86400
+                    # Stash for _record_attempt so we can correlate hold time
+                    # against actual time-to-resolution post-trade.
+                    signal["_resolution_ts"] = int(_end.timestamp())
                     if _days_out > LIVE_MAX_HORIZON_DAYS:
                         logger.debug(
                             "[LIVE] SKIP %s — market resolves in %.0f days (> %d day limit)",
@@ -650,24 +686,46 @@ class PolymarketLiveExecutor:
         except (TypeError, ValueError):
             entry_px = None
 
-        # 2026-05-12: SELL-only mode. All BUY signals suspended until per-signal
-        # BUY edge is validated on ≥50 resolved paper trades with WR≥45% and
-        # EV>$0.25 (excluding top-3 outliers). Current live data shows BUY P&L
-        # ex-top-3 lottery wins is deeply negative across all signal types.
+        # 2026-05-12: SELL-only mode.
+        #
+        # BUY re-entry criteria (check monthly via scripts/_alpha_calc.py):
+        #   1. ≥50 resolved paper trades for the signal in allowed categories
+        #   2. WR ≥ 45% (not lottery-ticket-dependent)
+        #   3. EV > +$0.25/trade EXCLUDING top-3 individual wins
+        #      (the ex-outlier requirement prevents a handful of 10× wins
+        #       hiding a structurally negative distribution)
+        #   4. Allowed categories only — science/crypto remain blocked for BUY
+        #      regardless (0% WR on n≥20 across all signals)
+        #   5. Re-add signal to LIVE_REAL_SIGNAL_TYPES and set its BUY ceiling;
+        #      start at $5/trade and re-evaluate after 30 resolved live trades.
+        #
+        # Current evidence (2026-05-12):
+        #   - All BUY signals: ex-top-3 total PnL only +$4.16 over 26 days
+        #   - politics BUY is the one viable candidate (n=34, WR=50%, avg 26¢)
+        #     but needs 50 resolved paper trades before re-enabling live.
         if want_yes:
             return self._result(
                 False,
-                reason=f"BUY suspended: SELL-only mode active (validate BUY edge on ≥50 paper trades first)",
+                reason="BUY suspended: SELL-only mode active (see executor comment for re-entry criteria)",
             )
 
-        # Block SELL entries where YES < 5¢ (buying NO at 95¢+).
-        # Two -$5 losses on 2026-05-12: market resolved YES (~2% outcome),
-        # full stake wiped. Need 50+ wins to recover one loss.
-        NEAR_CERTAINTY_SELL_BLOCK = 0.05
-        if entry_px is not None and entry_px < NEAR_CERTAINTY_SELL_BLOCK:
+        # Block SELL entries where YES is near certainty in either direction.
+        # Lower bound: YES < 5¢ → buying NO at 95¢+ means one YES-resolution
+        #   wipes the entire stake; need 50+ wins to recover.
+        # Upper bound: YES > 95¢ → buying NO at < 5¢ means:
+        #   (a) orders rarely fill (29 timeouts in 7d), and
+        #   (b) the market is already near-resolved YES — NO has no upside.
+        NEAR_CERTAINTY_SELL_BLOCK_LO = 0.05
+        NEAR_CERTAINTY_SELL_BLOCK_HI = 0.95
+        if entry_px is not None and entry_px < NEAR_CERTAINTY_SELL_BLOCK_LO:
             return self._result(
                 False,
-                reason=f"SELL@YES={entry_px:.3f} < {NEAR_CERTAINTY_SELL_BLOCK:.2f}: near-certainty black-swan risk",
+                reason=f"SELL@YES={entry_px:.3f} < {NEAR_CERTAINTY_SELL_BLOCK_LO:.2f}: near-certainty black-swan risk",
+            )
+        if entry_px is not None and entry_px > NEAR_CERTAINTY_SELL_BLOCK_HI:
+            return self._result(
+                False,
+                reason=f"SELL@YES={entry_px:.3f} > {NEAR_CERTAINTY_SELL_BLOCK_HI:.2f}: near-resolved YES, NO has no upside",
             )
 
         # 2. Kill switch check. If the switch returns a probation_cap,
@@ -789,6 +847,9 @@ class PolymarketLiveExecutor:
         book = self._clob.get_order_book(token_id)
         asks = book.get("asks") or []
         ask_depth = sum(float(a.get("size", 0)) * float(a.get("price", 0)) for a in asks[:5])
+        # Stash for _record_attempt — lets us correlate fill outcomes against
+        # the actual depth we saw (not just the pass/fail gate).
+        signal["_ask_depth"] = ask_depth
         if ask_depth < size_usd * 2:
             return self._result(
                 False,
@@ -810,6 +871,42 @@ class PolymarketLiveExecutor:
                 sig_type, size_usd, runtime_cap,
             )
             size_usd = runtime_cap
+
+        # 2026-05-12: per-(signal × direction) sizing correction.
+        # Bridges the Brier-0.32 gap between predicted confidence and
+        # realized WR until the upstream calibration is fixed. Read from
+        # signal_sizing_multipliers (refreshed daily by
+        # scripts/update_sizing_multipliers.py). Applied AFTER ladder cap
+        # so the cap stays hard; under-confident signals can still go up
+        # to the cap but no further.
+        if not is_dry:
+            try:
+                from trading_platform.polymarket.db_connection import get_connection as _gc
+                _mc = _gc(self._db_path)
+                try:
+                    _mr = _mc.execute(
+                        """SELECT multiplier, actual_wr, mean_confidence
+                             FROM signal_sizing_multipliers
+                            WHERE signal_type = ? AND direction = ?""",
+                        (sig_type, signal.get("direction", "BUY").upper()),
+                    ).fetchone()
+                finally:
+                    try: _mc.close()
+                    except Exception: pass
+                if _mr and _mr[0]:
+                    mult = float(_mr[0])
+                    pre = size_usd
+                    size_usd = min(runtime_cap, size_usd * mult)
+                    if abs(mult - 1.0) > 0.05:
+                        logger.info(
+                            "[LIVE][CALIB_MULT] %s %s ×%.2f (WR=%.0f%% conf=%.0f%%) "
+                            "$%.2f→$%.2f",
+                            sig_type, signal.get("direction", "BUY"), mult,
+                            float(_mr[1] or 0) * 100, float(_mr[2] or 0) * 100,
+                            pre, size_usd,
+                        )
+            except Exception as _mex:
+                logger.debug("[LIVE][CALIB_MULT] lookup failed: %s", _mex)
 
         logger.info(
             "[LIVE%s] %s %s $%.2f @ %.3f | conf=%.0f%% | %s",
@@ -894,6 +991,41 @@ class PolymarketLiveExecutor:
                 except Exception as _derr:
                     logger.warning("[LIVE] dedup check failed — blocking: %s", _derr)
                     return self._result(False, reason="dedup check error — blocked")
+
+                # Topic concentration cap. See MAX_OPEN_PER_TOPIC docstring.
+                # Stems share across question variants (e.g. all Musk tweet-count
+                # markets collapse to one stem); we cap open positions per stem
+                # so one author's behavior can't correlated-loss the whole pool.
+                _stem = _topic_stem(signal.get("question"))
+                if _stem and len(_stem) >= 8:
+                    try:
+                        from trading_platform.polymarket.db_connection import get_connection as _gc
+                        _tconn = _gc(self._db_path)
+                        try:
+                            # Count open SELL-direction matches with the same stem.
+                            # We rebuild the stem in SQL with a LIKE prefix match
+                            # using the first 4 stem words — Postgres can't easily
+                            # run the regex normalization, so we just LIKE-match
+                            # on the leading raw text and accept some false negatives.
+                            _prefix_words = " ".join(_stem.split()[:4])
+                            _row = _tconn.execute(
+                                """SELECT COUNT(*) FROM live_trades
+                                   WHERE dry_run = 0 AND exit_ts IS NULL
+                                     AND direction = ?
+                                     AND LOWER(question) LIKE ?""",
+                                (_dedup_direction, f"{_prefix_words}%"),
+                            ).fetchone()
+                        finally:
+                            try: _tconn.close()
+                            except Exception: pass
+                        _open_cnt = int(_row[0] or 0) if _row else 0
+                        if _open_cnt >= MAX_OPEN_PER_TOPIC:
+                            return self._result(
+                                False,
+                                reason=f"topic_cap: {_open_cnt} open {_dedup_direction} on '{_stem[:40]}'",
+                            )
+                    except Exception as _terr:
+                        logger.warning("[LIVE] topic_cap check failed (continuing): %s", _terr)
 
             # 6. LIVE — submit. Polymarket CLOB side is always BUY; YES vs NO
             # is determined by token_id.
@@ -1068,14 +1200,32 @@ class PolymarketLiveExecutor:
                     if order_result and order_result.fill_time_ms is not None
                     else None
                 )
+                # Resolve src_wallet from any of the keys the signal engine
+                # uses. The original `source_wallet`/`signal_wallet` lookup
+                # missed every smart-money signal (which sets `wallet`) —
+                # 2/397 trades populated before this fix.
+                _src_wallet = (
+                    signal.get("wallet")
+                    or signal.get("source_wallet")
+                    or signal.get("signal_wallet")
+                )
+                _wallet_tier = (
+                    signal.get("wallet_tier")
+                    or signal.get("wallet_tier_at_fire")
+                )
+                _fired_at = signal.get("fired_at") or None
+                _resolution_ts = signal.get("_resolution_ts")
+                _ask_depth = signal.get("_ask_depth")
                 conn.execute(
                     """INSERT INTO live_trades
                        (attempted_at, signal_type, condition_id, question, direction,
                         confidence, size_usd, entry_price, order_id, status,
                         dry_run, error_msg, token_id, side, fill_price, shares,
                         category, signal_wallet, submitted_at, filled_at, signal_price,
-                        expected_price, slippage, fill_time_ms)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        expected_price, slippage, fill_time_ms,
+                        resolution_date, ask_depth_entry, signal_fired_at, wallet_tier)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                               ?, ?, ?, ?)""",
                     (
                         now_ts,
                         signal.get("signal_type"),
@@ -1094,13 +1244,17 @@ class PolymarketLiveExecutor:
                         fill_price,
                         shares,
                         signal.get("category"),
-                        signal.get("source_wallet") or signal.get("signal_wallet"),
+                        _src_wallet,
                         now_ts,
                         now_ts if status in ("matched", "live") else None,
                         _sig_price,
                         _expected,
                         _slippage,
                         _fill_time_ms,
+                        _resolution_ts,
+                        _ask_depth,
+                        _fired_at,
+                        _wallet_tier,
                     ),
                 )
             finally:

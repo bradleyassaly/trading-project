@@ -133,7 +133,12 @@ def check_live_exits() -> dict[str, int]:
 
         prof = _exit_profile(sig_type or "")
 
-        # Update mark + MAE/MFE in DB
+        # Update mark + MAE/MFE in DB.
+        # `current` is YES-space price (clob.get_mid_price always returns YES).
+        # peak_yes_price/peak_no_price store the most favorable price reached
+        # for each side — lets us quantify trailing-stop leakage post-exit
+        # (peak_no − exit_no on SELL = $ left on the table per share).
+        _no_now = max(0.0, 1.0 - float(current))
         try:
             conn = get_connection()
             try:
@@ -141,11 +146,16 @@ def check_live_exits() -> dict[str, int]:
                     """UPDATE live_trades
                        SET last_mark_price = ?, last_mark_ts = ?, unrealized_pnl = ?,
                            mae = CASE WHEN mae IS NULL OR ? < mae THEN ? ELSE mae END,
-                           mfe = CASE WHEN mfe IS NULL OR ? > mfe THEN ? ELSE mfe END
+                           mfe = CASE WHEN mfe IS NULL OR ? > mfe THEN ? ELSE mfe END,
+                           peak_yes_price = CASE WHEN peak_yes_price IS NULL OR ? > peak_yes_price THEN ? ELSE peak_yes_price END,
+                           peak_no_price = CASE WHEN peak_no_price IS NULL OR ? > peak_no_price THEN ? ELSE peak_no_price END
                        WHERE id = ?""",
                     (current, int(time.time()), unrealized_dollars,
                      unrealized_dollars, unrealized_dollars,
-                     unrealized_dollars, unrealized_dollars, lid),
+                     unrealized_dollars, unrealized_dollars,
+                     current, current,
+                     _no_now, _no_now,
+                     lid),
                 )
                 conn.commit()
             finally:
@@ -201,15 +211,26 @@ def check_live_exits() -> dict[str, int]:
                     "[live-exit] #%d %s has dust CONDITIONAL balance %.4f — marking resolved_zero_balance",
                     lid, sig_type, actual_tokens if actual_tokens is not None else 0,
                 )
+                # Realized P&L = -(actual cost basis), NOT -size_usd. size_usd is the
+                # INTENDED allocation; the position only spent capital on shares that
+                # actually filled. For SELL (long NO): cost per share = (1 - fill_price).
+                # If fill_price is None or shares = 0, the order never opened → P&L = 0.
+                db_shares = float(shares or 0)
+                if fill_price is None or db_shares <= 0:
+                    realized = 0.0
+                    outcome_val = None  # never opened — not a real loss
+                else:
+                    realized = -db_shares * (1.0 - float(fill_price))
+                    outcome_val = "loss" if realized < 0 else None
                 try:
                     conn = get_connection()
                     try:
                         conn.execute(
                             """UPDATE live_trades
                                SET exit_ts=?, exit_reason='resolved_zero_balance',
-                                   outcome='loss', realized_pnl=?
+                                   outcome=?, realized_pnl=?
                                WHERE id=?""",
-                            (int(time.time()), -float(size_usd or 0), lid),
+                            (int(time.time()), outcome_val, round(realized, 4), lid),
                         )
                         conn.commit()
                     finally:
@@ -240,15 +261,25 @@ def check_live_exits() -> dict[str, int]:
                     "[live-exit] #%d %s has dust YES balance %.4f — marking resolved_zero_balance",
                     lid, sig_type, actual_tokens,
                 )
+                # Realized P&L = -(actual cost basis). For BUY (long YES): cost per
+                # share = fill_price. If fill_price is None or shares = 0, the order
+                # never opened → P&L = 0.
+                db_shares = float(shares or 0)
+                if fill_price is None or db_shares <= 0:
+                    realized = 0.0
+                    outcome_val = None
+                else:
+                    realized = -db_shares * float(fill_price)
+                    outcome_val = "loss" if realized < 0 else None
                 try:
                     conn = get_connection()
                     try:
                         conn.execute(
                             """UPDATE live_trades
                                SET exit_ts=?, exit_reason='resolved_zero_balance',
-                                   outcome='loss', realized_pnl=?
+                                   outcome=?, realized_pnl=?
                                WHERE id=?""",
-                            (int(time.time()), -float(size_usd or 0), lid),
+                            (int(time.time()), outcome_val, round(realized, 4), lid),
                         )
                         conn.commit()
                     finally:

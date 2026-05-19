@@ -338,6 +338,29 @@ SCHEDULE: list[Task] = [
         description="Persist daily calibration report snapshot",
     ),
     Task(
+        # 2026-05-12: post-execution sizing correction. Computes per-
+        # (signal × direction) multipliers from realized live WR ÷ predicted
+        # confidence, capped to [0.25, 2.0]. Bridges the Brier-0.32 gap
+        # between confidence and actual outcomes until the upstream model
+        # is fixed. Executor reads from signal_sizing_multipliers at trade
+        # time; requires n>=15 resolved per slice before any write.
+        name="update_sizing_multipliers",
+        cmd="python /app/scripts/update_sizing_multipliers.py --days 30",
+        interval_seconds=24 * 3600,
+        description="Refresh per-(signal × direction) sizing multipliers from live WR",
+    ),
+    Task(
+        # 2026-05-12: unified daily review — P&L, slippage, trailing-stop
+        # leakage, resolution timing, rejections, calibration drift, alpha
+        # decay. Output goes to logs/scheduler/daily_system_review.log.
+        # The recursive improvement loop: measure → identify drift → flag
+        # for action. Multipliers auto-refresh; everything else is manual.
+        name="daily_system_review",
+        cmd="python /app/scripts/daily_system_review.py --apply-multipliers",
+        interval_seconds=24 * 3600,
+        description="Daily system review — recursive improvement loop",
+    ),
+    Task(
         name="circuit_breaker_daily_reset",
         # Inline Python so we don't depend on a CLI command — clears
         # daily_pnl + daily_halted on the cumulative-drawdown breaker.

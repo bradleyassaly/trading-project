@@ -54,7 +54,10 @@ class KillSwitchResult:
 class KillSwitch:
     """Multi-layer pre-trade safety check."""
 
-    MAX_DAILY_LOSS_PCT = 0.10
+    # 2026-05-12: tightened from 10% → 5% (~$15 on $300 bankroll).
+    # At SELL-only $5/trade, 3 consecutive stop-losses = -$15 = 5%. That's
+    # the circuit breaker — pause new entries for the rest of the UTC day.
+    MAX_DAILY_LOSS_PCT = 0.05
     # 2026-05-06: raised 10→20. 30-day horizon gate means positions resolve
     # faster; resolution_decay was repeatedly blocked at 10 despite only 4
     # genuinely open trades. With short-horizon markets, turnover is high
@@ -354,7 +357,14 @@ class KillSwitch:
             # on paper while live P&L stays flat. Reading paper P&L here
             # caused the KS to block all live entries despite live losses
             # being well within tolerance (confirmed 2026-05-12).
-            today_start = int(time.time()) - 86400
+            # 2026-05-12: use UTC calendar day (midnight→now) not rolling 24h.
+            # Rolling window meant hitting the limit at 23:59 would block
+            # for a full 24h; UTC-day resets cleanly at midnight.
+            import datetime as _dt
+            _today_utc = _dt.datetime.utcnow().replace(
+                hour=0, minute=0, second=0, microsecond=0
+            )
+            today_start = int(_today_utc.timestamp())
             daily_pnl = conn.execute(
                 """SELECT COALESCE(SUM(realized_pnl), 0) FROM live_trades
                    WHERE dry_run = 0 AND exit_ts >= %s AND realized_pnl IS NOT NULL""",

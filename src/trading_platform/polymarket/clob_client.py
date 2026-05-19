@@ -264,7 +264,20 @@ class ClobClient:
                 logger.warning("[clob] get_neg_risk lookup failed (%s), defaulting to False", _nr_exc)
             opts = PartialCreateOrderOptions(tick_size="0.01", neg_risk=neg_risk_flag)
             _order = client.create_order(order_args, opts)
-            resp = client.post_order(_order, order_type=OrderType.GTC)
+            # Polymarket treats marketable GTC orders as FOK server-side and
+            # rejects when book depth at our target < order size. Retry as FAK
+            # (Fill And Kill) so we accept whatever the book can fill instead
+            # of losing the entry entirely. Was costing ~14 SELL entries/week.
+            try:
+                resp = client.post_order(_order, order_type=OrderType.GTC)
+            except Exception as _gtc_exc:
+                if "FOK" in str(_gtc_exc) or "couldn't be fully filled" in str(_gtc_exc):
+                    logger.info(
+                        "[clob] GTC rejected as FOK (thin book) — retrying as FAK for partial fill"
+                    )
+                    resp = client.post_order(_order, order_type=OrderType.FAK)
+                else:
+                    raise
             logger.info(
                 "[clob] market-as-GTC %s %d shares @ %.2f = $%.2f neg_risk=%s",
                 side.upper(), shares_int, target, actual_usdc, neg_risk_flag,
@@ -273,9 +286,20 @@ class ClobClient:
             order_id = resp.get("orderID") or resp.get("id")
             status = resp.get("status", "unknown")
             filled_raw = resp.get("avgFilledPrice")
-            # avgFilledPrice can be "0" or 0.0 for live GTC orders; treat as absent.
-            filled_price = (float(filled_raw) if filled_raw and float(filled_raw) > 0
-                            else current_price)
+            # CLOB returns avgFilledPrice=0/"0" synchronously even on matched
+            # orders (the trade-detail enrichment lands later). Distinguish:
+            #   - matched: terminally filled — fall back to `target` (limit
+            #     price). The order matched at <= target by construction, so
+            #     this is a conservative cost-basis estimate. Same pattern
+            #     as place_limit_order's `filled_price=float(fp) if fp else price`.
+            #   - live: still resting in book — leave NULL so the position
+            #     monitor backfills via balance check.
+            if filled_raw and float(filled_raw) > 0:
+                filled_price = float(filled_raw)
+            elif status == "matched":
+                filled_price = float(target)
+            else:
+                filled_price = None
             success = status in ("matched", "live", "delayed")
             # Capture non-success CLOB status so callers can log what happened.
             if not success:
@@ -407,7 +431,18 @@ class ClobClient:
                 logger.warning("[clob] get_neg_risk lookup failed (%s), defaulting to False", _nr_exc)
             _opts = PartialCreateOrderOptions(tick_size="0.01", neg_risk=neg_risk_flag)
             _order = client.create_order(order_args, _opts)
-            resp = client.post_order(_order, order_type=OrderType.GTC)
+            # Same FOK-retry-as-FAK fallback as place_market_order — server
+            # rejects marketable GTC when book depth at target < order size.
+            try:
+                resp = client.post_order(_order, order_type=OrderType.GTC)
+            except Exception as _gtc_exc:
+                if "FOK" in str(_gtc_exc) or "couldn't be fully filled" in str(_gtc_exc):
+                    logger.info(
+                        "[clob] GTC rejected as FOK (thin book) — retrying as FAK for partial fill"
+                    )
+                    resp = client.post_order(_order, order_type=OrderType.FAK)
+                else:
+                    raise
             order_id = resp.get("orderID") or resp.get("id")
             status = resp.get("status", "unknown")
 
