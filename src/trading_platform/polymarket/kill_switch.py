@@ -378,6 +378,29 @@ class KillSwitch:
                     warnings,
                 )
 
+            # 6b. Rolling 7d realized P&L circuit breaker (2026-05-19).
+            # The daily limit only catches a single bad day. A slow bleed
+            # across a week wouldn't trip it but could chew through 15%+
+            # of bankroll undetected. Halt new entries when the rolling
+            # 7d realized < -10% of bankroll (~$27 on $267) — gives the
+            # daily review one cycle to identify the cause before more
+            # capital is committed.
+            ROLLING_7D_HALT_PCT = 0.10
+            week_start = int(time.time()) - 7 * 86400
+            week_pnl = conn.execute(
+                """SELECT COALESCE(SUM(realized_pnl), 0) FROM live_trades
+                   WHERE dry_run = 0 AND exit_ts >= %s AND realized_pnl IS NOT NULL""",
+                (week_start,),
+            ).fetchone()[0] or 0.0
+            week_loss_pct = abs(min(0.0, week_pnl)) / self.BANKROLL
+            if week_loss_pct >= ROLLING_7D_HALT_PCT:
+                return KillSwitchResult(
+                    False,
+                    f"7d rolling loss circuit breaker: ${week_pnl:.2f} "
+                    f"({week_loss_pct:.1%} >= {ROLLING_7D_HALT_PCT:.0%})",
+                    warnings,
+                )
+
             # 7. Open live position count — exit_ts IS NULL guards against
             # closed trades with status='matched' being counted as open.
             # The exit path updates exit_ts but not status, so status alone
