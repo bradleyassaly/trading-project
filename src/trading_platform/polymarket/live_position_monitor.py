@@ -81,7 +81,7 @@ def check_live_exits() -> dict[str, int]:
             SELECT id, condition_id, token_id, side, fill_price, size_usd,
                    shares, signal_type, signal_wallet, submitted_at,
                    COALESCE(mfe, 0) AS mfe, last_mark_price,
-                   entry_price
+                   entry_price, status
             FROM live_trades
             WHERE dry_run = 0
               AND exit_ts IS NULL AND status NOT IN ('error', 'blocked')
@@ -100,7 +100,7 @@ def check_live_exits() -> dict[str, int]:
     for row in rows:
         (lid, cid, token_id, side, fill_price, size_usd, shares,
          sig_type, src_wallet, submitted_at, mfe_dollars, last_mark,
-         entry_price) = row
+         entry_price, trade_status) = row
         if not cid or not token_id:
             continue
         # Use fill_price when available; fall back to entry_price for orders
@@ -211,14 +211,21 @@ def check_live_exits() -> dict[str, int]:
                     "[live-exit] #%d %s has dust CONDITIONAL balance %.4f — marking resolved_zero_balance",
                     lid, sig_type, actual_tokens if actual_tokens is not None else 0,
                 )
-                # Realized P&L = -(actual cost basis), NOT -size_usd. size_usd is the
-                # INTENDED allocation; the position only spent capital on shares that
-                # actually filled. For SELL (long NO): cost per share = (1 - fill_price).
-                # If fill_price is None or shares = 0, the order never opened → P&L = 0.
+                # Three cases (see scripts/backfill_zero_balance_pnl.py for parity):
+                #   1. status != 'matched' (e.g. 'live'): order rested in the
+                #      book but never matched. No capital committed on-chain
+                #      → realized = 0. Found 2 historical $-5 phantom losses
+                #      this way (#9673, #9688: orders posted at near-resolved
+                #      markets with no liquidity).
+                #   2. status='matched' but fp/shares missing: same outcome
+                #      via a different code path → realized = 0.
+                #   3. status='matched' with fp + shares: legitimate fill that
+                #      went to zero balance (resolved against us) → realized
+                #      = -(cost basis). For SELL (long NO): cost = shares × (1 - fp).
                 db_shares = float(shares or 0)
-                if fill_price is None or db_shares <= 0:
+                if trade_status != "matched" or fill_price is None or db_shares <= 0:
                     realized = 0.0
-                    outcome_val = None  # never opened — not a real loss
+                    outcome_val = None  # never matched on-chain
                 else:
                     realized = -db_shares * (1.0 - float(fill_price))
                     outcome_val = "loss" if realized < 0 else None
@@ -261,11 +268,11 @@ def check_live_exits() -> dict[str, int]:
                     "[live-exit] #%d %s has dust YES balance %.4f — marking resolved_zero_balance",
                     lid, sig_type, actual_tokens,
                 )
-                # Realized P&L = -(actual cost basis). For BUY (long YES): cost per
-                # share = fill_price. If fill_price is None or shares = 0, the order
-                # never opened → P&L = 0.
+                # Same three-case logic as the SELL branch above. For BUY (long
+                # YES): cost per share = fill_price. status != 'matched' →
+                # order never matched → realized = 0.
                 db_shares = float(shares or 0)
-                if fill_price is None or db_shares <= 0:
+                if trade_status != "matched" or fill_price is None or db_shares <= 0:
                     realized = 0.0
                     outcome_val = None
                 else:

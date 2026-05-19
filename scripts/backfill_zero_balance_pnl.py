@@ -25,26 +25,35 @@ def main():
 
     conn = get_connection()
     rows = conn.execute("""
-        SELECT id, direction, fill_price, shares, size_usd, realized_pnl, outcome
+        SELECT id, direction, fill_price, shares, size_usd, realized_pnl, outcome, status
           FROM live_trades
          WHERE dry_run=0 AND exit_reason='resolved_zero_balance'
     """).fetchall()
 
     print(f"Found {len(rows)} rows with exit_reason='resolved_zero_balance'")
-    print(f"{'id':>5} {'dir':<5} {'fill':>7} {'shares':>7} {'size':>6} "
+    print(f"{'id':>5} {'st':<8} {'dir':<5} {'fill':>7} {'shares':>7} {'size':>6} "
           f"{'pnl_was':>8} {'pnl_new':>9} {'outc_was':<8} {'outc_new':<8}")
 
     updates = []
     delta_total = 0.0
     for r in rows:
-        rid, direction, fp, sh, sz, pnl_was, outc_was = r
+        rid, direction, fp, sh, sz, pnl_was, outc_was, status = r
         fp_v = float(fp) if fp is not None else None
         sh_v = float(sh or 0)
         pnl_was = float(pnl_was or 0)
 
-        if fp_v is None or sh_v <= 0:
+        # Three cases for resolved_zero_balance:
+        #   1. status != 'matched' (e.g. 'live', 'cancelled'): order never filled,
+        #      no capital was committed on-chain → P&L = $0
+        #   2. status='matched' but fp/shares missing: same — never opened
+        #   3. status='matched' with fp + shares: legitimate fill that later went
+        #      to zero balance (resolved against us) → P&L = -(cost basis)
+        if status != "matched":
             pnl_new = 0.0
-            outc_new = None  # never opened
+            outc_new = None  # never matched on-chain
+        elif fp_v is None or sh_v <= 0:
+            pnl_new = 0.0
+            outc_new = None
         else:
             if (direction or "").upper() == "BUY":
                 pnl_new = -sh_v * fp_v
@@ -57,7 +66,7 @@ def main():
             continue  # no change needed
 
         delta_total += (pnl_new - pnl_was)
-        print(f"{rid:>5} {str(direction):<5} "
+        print(f"{rid:>5} {str(status or ''):<8} {str(direction):<5} "
               f"{('N/A' if fp_v is None else f'{fp_v:.3f}'):>7} "
               f"{sh_v:>7.2f} {float(sz or 0):>6.2f} "
               f"{pnl_was:>+8.2f} {pnl_new:>+9.4f} "
