@@ -233,6 +233,47 @@ def section_decay(conn, now_ts):
               f"delta={decay:+.2f}{flag}")
 
 
+def section_stale_equity(conn, now_ts):
+    """Detect frozen equity snapshots — a sign of stale balance-API caching.
+
+    On 2026-05-18, the live_equity snapshot reported tokens=$5.43 for 15+
+    consecutive runs while real on-chain SELL positions held $60+. Root
+    cause: py_clob_client_v2 connection pool returned stale balances after
+    the container had been up for weeks. Restart cleared it. This check
+    flags it on a daily cadence so we catch a recurrence within hours,
+    not days.
+    """
+    section("8. EQUITY-SNAPSHOT FRESHNESS (stale-balance detector)")
+    # Look at the last 24h of snapshots; count how many had identical tokens
+    # value (open_market_value) when there were also non-trivial trade
+    # exits/entries in the same window. Identical mkt across >5 snapshots
+    # while activity occurred = strong stale signal.
+    cutoff = now_ts - 86400
+    rows = conn.execute("""
+        SELECT open_market_value, COUNT(*) n
+          FROM live_equity_snapshots
+         WHERE ts >= %s
+         GROUP BY open_market_value
+        HAVING COUNT(*) >= 5
+         ORDER BY n DESC LIMIT 3
+    """, (cutoff,)).fetchall()
+    if not rows:
+        print("  OK — no identical-tokens-value clusters in the last 24h.")
+    else:
+        print("  WARNING — tokens value frozen across multiple snapshots:")
+        for r in rows:
+            print(f"    tokens=${float(r[0] or 0):.2f}  repeated {r[1]} times")
+        # Cross-check: were there trade events that should have moved mkt?
+        trade_evts = conn.execute("""
+            SELECT COUNT(*) FROM live_trades
+             WHERE dry_run=0 AND (attempted_at >= %s OR exit_ts >= %s)
+        """, (cutoff, cutoff)).fetchone()[0]
+        if trade_evts:
+            print(f"  {trade_evts} trade events in the same window — "
+                  "stale balance API likely. Recommend: restart scheduler "
+                  "+ live-collect containers to refresh connection pool.")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--apply-multipliers", action="store_true",
@@ -252,6 +293,7 @@ def main():
         section_rejections(conn, now_ts)
         section_calibration(conn, args)
         section_decay(conn, now_ts)
+        section_stale_equity(conn, now_ts)
     finally:
         conn.close()
 
