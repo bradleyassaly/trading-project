@@ -27,6 +27,12 @@ nul
 .claude/settings.local.json
 .claude/scheduled_tasks.lock
 
+# Auto-generated daily reports (existing committed reports — alpha_audit_*,
+# copy_trading_*, etc. — stay tracked; only the scheduled-task outputs are ignored)
+reports/morning_briefing_*.md
+reports/backfill_check_*.md
+reports/weekly_review_*.md
+
 # Env / secrets
 .env
 .env.*
