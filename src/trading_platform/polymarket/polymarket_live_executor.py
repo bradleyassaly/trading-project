@@ -687,27 +687,40 @@ class PolymarketLiveExecutor:
             entry_px = None
 
         # 2026-05-12: SELL-only mode.
+        # 2026-05-19: surgical BUY re-enablement for resolution_decay only —
+        # the one signal that passed the rigorous criteria:
+        #   n=50 resolved paper, WR=64%, ex-top-3 EV=+$1.99/trade.
+        # Source alpha (time-decay mispricing of near-resolution markets) is
+        # uncorrelated to whale-flow signals — adds real diversification.
+        # Discovery tier ($1 cap) applies until n>=15 live resolved.
+        # Category gate: science is hard-blocked (paper n=11, WR=18%, -$34).
         #
-        # BUY re-entry criteria (check monthly via scripts/_alpha_calc.py):
-        #   1. ≥50 resolved paper trades for the signal in allowed categories
-        #   2. WR ≥ 45% (not lottery-ticket-dependent)
-        #   3. EV > +$0.25/trade EXCLUDING top-3 individual wins
-        #      (the ex-outlier requirement prevents a handful of 10× wins
-        #       hiding a structurally negative distribution)
-        #   4. Allowed categories only — science/crypto remain blocked for BUY
-        #      regardless (0% WR on n≥20 across all signals)
-        #   5. Re-add signal to LIVE_REAL_SIGNAL_TYPES and set its BUY ceiling;
-        #      start at $5/trade and re-evaluate after 30 resolved live trades.
-        #
-        # Current evidence (2026-05-12):
-        #   - All BUY signals: ex-top-3 total PnL only +$4.16 over 26 days
-        #   - politics BUY is the one viable candidate (n=34, WR=50%, avg 26¢)
-        #     but needs 50 resolved paper trades before re-enabling live.
+        # BUY re-entry criteria for other signals (apply quarterly):
+        #   1. n>=50 resolved paper trades for the signal in allowed categories
+        #   2. WR>=45% (not lottery-ticket-dependent)
+        #   3. EV>+$0.25/trade EXCLUDING top-3 individual wins
+        #      (rejects lottery-ticket distributions like politics BUY which
+        #       had n=23, ex-top-3 EV=-$0.70 driven by one +$49.85 outlier)
+        #   4. Add signal to BUY_REENABLED_SIGNALS; gate categories explicitly
+        #   5. Discovery tier handles the first ~15 live trades at $1 cap
+        BUY_REENABLED_SIGNALS = {"resolution_decay"}
+        # Per-signal hard-block category list (paper data clearly negative).
+        BUY_BLOCKED_CATEGORIES = {
+            "resolution_decay": {"science"},
+        }
         if want_yes:
-            return self._result(
-                False,
-                reason="BUY suspended: SELL-only mode active (see executor comment for re-entry criteria)",
-            )
+            if sig_type not in BUY_REENABLED_SIGNALS:
+                return self._result(
+                    False,
+                    reason=f"BUY suspended for {sig_type} — only resolution_decay re-enabled (n=50 paper, WR=64%, ex-top-3 EV=+$1.99)",
+                )
+            _blocked_cats = BUY_BLOCKED_CATEGORIES.get(sig_type, set())
+            _sig_cat = (signal.get("category") or "").lower()
+            if _sig_cat in _blocked_cats:
+                return self._result(
+                    False,
+                    reason=f"BUY {sig_type} blocked in category {_sig_cat} (paper data clearly negative)",
+                )
 
         # Block SELL entries where YES is near certainty in either direction.
         # Lower bound: YES < 5¢ → buying NO at 95¢+ means one YES-resolution

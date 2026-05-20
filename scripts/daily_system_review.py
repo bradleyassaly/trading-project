@@ -233,6 +233,50 @@ def section_decay(conn, now_ts):
               f"delta={decay:+.2f}{flag}")
 
 
+def section_attribution(conn, now_ts):
+    """Per-(signal × direction) revenue attribution over 7d and 30d.
+
+    Surfaces signal monoculture risk and decay-by-strategy. As of 2026-05-19
+    wallet_reversal SELL drove ~70% of weekly revenue — that's the kind of
+    concentration this section is designed to flag.
+    """
+    section("9. PER-STRATEGY ATTRIBUTION (revenue share by signal × direction)")
+    for label, days in (("Last 7d", 7), ("Last 30d", 30)):
+        cutoff = now_ts - days * 86400
+        rows = conn.execute("""
+            SELECT signal_type, direction,
+                   COUNT(*) n,
+                   SUM(CASE WHEN outcome='win' THEN 1 ELSE 0 END) wins,
+                   ROUND(SUM(COALESCE(realized_pnl, 0))::numeric, 2) pnl
+              FROM live_trades
+             WHERE dry_run=0 AND exit_ts >= %s
+               AND realized_pnl IS NOT NULL
+             GROUP BY 1, 2
+             ORDER BY 5 DESC
+        """, (cutoff,)).fetchall()
+        if not rows:
+            print(f"  {label}: no resolved trades")
+            continue
+        total = sum(float(r[4] or 0) for r in rows)
+        total_abs = sum(abs(float(r[4] or 0)) for r in rows)
+        print(f"\n  {label} — total realized: ${total:.2f}")
+        if total_abs <= 0:
+            continue
+        for r in rows:
+            sig, di, n, wins, pnl = r
+            wr = (wins / max(n, 1)) * 100
+            share = abs(float(pnl)) / total_abs * 100
+            bar = "█" * min(int(share / 5), 14)  # 14-char max bar
+            print(f"    {sig:<22s} {di:<5s} n={n:3d} WR={wr:3.0f}% "
+                  f"pnl=${float(pnl):>+7.2f}  {share:>4.0f}% {bar}")
+        # Monoculture flag
+        if rows and total_abs > 0:
+            top_share = abs(float(rows[0][4])) / total_abs
+            if top_share >= 0.50:
+                print(f"  MONOCULTURE — {rows[0][0]} {rows[0][1]} drives "
+                      f"{top_share:.0%} of |realized PnL|; add an uncorrelated signal.")
+
+
 def section_stale_equity(conn, now_ts):
     """Detect frozen equity snapshots — a sign of stale balance-API caching.
 
@@ -293,6 +337,7 @@ def main():
         section_rejections(conn, now_ts)
         section_calibration(conn, args)
         section_decay(conn, now_ts)
+        section_attribution(conn, now_ts)
         section_stale_equity(conn, now_ts)
     finally:
         conn.close()
