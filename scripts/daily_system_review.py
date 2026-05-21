@@ -288,34 +288,56 @@ def section_stale_equity(conn, now_ts):
     not days.
     """
     section("8. EQUITY-SNAPSHOT FRESHNESS (stale-balance detector)")
-    # Look at the last 24h of snapshots; count how many had identical tokens
-    # value (open_market_value) when there were also non-trivial trade
-    # exits/entries in the same window. Identical mkt across >5 snapshots
-    # while activity occurred = strong stale signal.
+    # Detect frozen open_market_value across consecutive snapshots — the
+    # signature of the 2026-05-18 stale-balance-API incident.
+    #
+    # Tuning (refined 2026-05-20 after first false positive):
+    #   - Threshold raised 5 → 10 consecutive identical snapshots.
+    #     Near-resolved SELL positions (YES ≈ 0.001) genuinely don't move
+    #     for hours; 5 was too sensitive. 10 ≈ 10h of static value, which
+    #     is only suspicious if real fills happened in that window.
+    #   - The "stale API" call-to-action only fires when there were actual
+    #     FILLS in the window (not just attempts/blocks). Fills change
+    #     on-chain conditional balances; if balance API returns the same
+    #     mkt value across 10+ snapshots with new fills, the API is stale.
+    #   - Without recent fills, the cluster is informational only — likely
+    #     just a low-vol period on near-resolved positions.
     cutoff = now_ts - 86400
+    THRESHOLD = 10
     rows = conn.execute("""
         SELECT open_market_value, COUNT(*) n
           FROM live_equity_snapshots
          WHERE ts >= %s
          GROUP BY open_market_value
-        HAVING COUNT(*) >= 5
+        HAVING COUNT(*) >= %s
          ORDER BY n DESC LIMIT 3
-    """, (cutoff,)).fetchall()
+    """, (cutoff, THRESHOLD)).fetchall()
     if not rows:
-        print("  OK — no identical-tokens-value clusters in the last 24h.")
+        print(f"  OK — no clusters of {THRESHOLD}+ identical snapshots in 24h.")
     else:
-        print("  WARNING — tokens value frozen across multiple snapshots:")
+        # FILLS (state-changing on-chain events), not just attempts/blocks
+        fills = conn.execute("""
+            SELECT COUNT(*) FROM live_trades
+             WHERE dry_run=0 AND attempted_at >= %s
+               AND status IN ('matched','live')
+        """, (cutoff,)).fetchone()[0]
+        exits = conn.execute("""
+            SELECT COUNT(*) FROM live_trades
+             WHERE dry_run=0 AND exit_ts >= %s
+               AND realized_pnl IS NOT NULL
+        """, (cutoff,)).fetchone()[0]
+        actionable = (fills + exits) >= 2
+        prefix = "WARNING" if actionable else "INFO   "
+        print(f"  {prefix} — open_market_value frozen across snapshots:")
         for r in rows:
             print(f"    tokens=${float(r[0] or 0):.2f}  repeated {r[1]} times")
-        # Cross-check: were there trade events that should have moved mkt?
-        trade_evts = conn.execute("""
-            SELECT COUNT(*) FROM live_trades
-             WHERE dry_run=0 AND (attempted_at >= %s OR exit_ts >= %s)
-        """, (cutoff, cutoff)).fetchone()[0]
-        if trade_evts:
-            print(f"  {trade_evts} trade events in the same window — "
-                  "stale balance API likely. Recommend: restart scheduler "
-                  "+ live-collect containers to refresh connection pool.")
+        print(f"  Window activity: {fills} fills + {exits} exits in last 24h")
+        if actionable:
+            print(f"  ACTION — fills occurred but mkt frozen → balance API likely stale.")
+            print(f"  Run: docker compose restart scheduler live-collect")
+        else:
+            print(f"  No-op — low fill activity makes static value plausible "
+                  f"(near-resolved SELL positions don't move).")
 
 
 def main():

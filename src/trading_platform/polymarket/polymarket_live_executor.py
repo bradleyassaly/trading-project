@@ -727,6 +727,21 @@ class PolymarketLiveExecutor:
                                      dry_run=self.DRY_RUN, status="blocked",
                                      error_msg=_reason)
                 return self._result(False, reason=_reason)
+            # Minimum live fill price for re-enabled BUY signals. Paper
+            # accepts [0.05, 0.40] but live fillable band is [0.10, 0.85]
+            # — below 0.10, ask-side books are too thin for reliable
+            # fills (the bitcoin-79k market kept retrying for hours at
+            # 0.052 because the signal generator emits but live never
+            # fills). Block here with a clear reason instead of failing
+            # silently in CLOB depth checks.
+            BUY_LIVE_MIN_ENTRY = 0.10
+            if entry_px is not None and entry_px < BUY_LIVE_MIN_ENTRY:
+                _reason = (f"{sig_type} BUY entry_px={entry_px:.3f} < "
+                           f"{BUY_LIVE_MIN_ENTRY:.2f}: below live fillable floor")
+                self._record_attempt(signal, 0.0, None, None,
+                                     dry_run=self.DRY_RUN, status="blocked",
+                                     error_msg=_reason)
+                return self._result(False, reason=_reason)
             # resolution_decay BUY reaching this point — log loudly so we can
             # see it cross the gate during normal operation.
             logger.info(
