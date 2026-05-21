@@ -710,17 +710,29 @@ class PolymarketLiveExecutor:
         }
         if want_yes:
             if sig_type not in BUY_REENABLED_SIGNALS:
-                return self._result(
-                    False,
-                    reason=f"BUY suspended for {sig_type} — only resolution_decay re-enabled (n=50 paper, WR=64%, ex-top-3 EV=+$1.99)",
-                )
+                _reason = f"BUY suspended for {sig_type} — only resolution_decay re-enabled"
+                # 2026-05-20: observability — record blocked BUY attempts so we
+                # can audit which signals are being routed to live. Yesterday's
+                # promotion of resolution_decay produced 0 visible attempts;
+                # without a paper trail we can't tell where rejection happens.
+                self._record_attempt(signal, 0.0, None, None,
+                                     dry_run=self.DRY_RUN, status="blocked",
+                                     error_msg=_reason)
+                return self._result(False, reason=_reason)
             _blocked_cats = BUY_BLOCKED_CATEGORIES.get(sig_type, set())
             _sig_cat = (signal.get("category") or "").lower()
             if _sig_cat in _blocked_cats:
-                return self._result(
-                    False,
-                    reason=f"BUY {sig_type} blocked in category {_sig_cat} (paper data clearly negative)",
-                )
+                _reason = f"BUY {sig_type} blocked in category {_sig_cat}"
+                self._record_attempt(signal, 0.0, None, None,
+                                     dry_run=self.DRY_RUN, status="blocked",
+                                     error_msg=_reason)
+                return self._result(False, reason=_reason)
+            # resolution_decay BUY reaching this point — log loudly so we can
+            # see it cross the gate during normal operation.
+            logger.info(
+                "[LIVE][BUY_REENABLED] %s passing BUY gate, cat=%s entry_px=%.3f",
+                sig_type, _sig_cat or "(unset)", entry_px if entry_px is not None else -1,
+            )
 
         # Block SELL entries where YES is near certainty in either direction.
         # Lower bound: YES < 5¢ → buying NO at 95¢+ means one YES-resolution
