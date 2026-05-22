@@ -361,6 +361,18 @@ SCHEDULE: list[Task] = [
         description="Daily system review — recursive improvement loop",
     ),
     Task(
+        # 2026-05-21: Polymarket-truth reconciler. Compares DB cash + open
+        # position shares against on-chain reality every 4h. Logs DRIFT
+        # entries that daily_system_review surfaces. Catches the class of
+        # bug that hid $57 of equity for 5+ days (2026-05-18 stale balance)
+        # and $10 of phantom losses (2026-05-12 status=live vs matched).
+        # Polymarket dashboard is the truth set — [[feedback_polymarket_is_truth]].
+        name="reconcile_polymarket_truth",
+        cmd="python /app/scripts/reconcile_polymarket_truth.py",
+        interval_seconds=4 * 3600,
+        description="Reconcile DB cash + position shares vs on-chain reality",
+    ),
+    Task(
         name="circuit_breaker_daily_reset",
         # Inline Python so we don't depend on a CLI command — clears
         # daily_pnl + daily_halted on the cumulative-drawdown breaker.

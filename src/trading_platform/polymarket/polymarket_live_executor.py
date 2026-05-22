@@ -351,14 +351,28 @@ class PolymarketLiveExecutor:
         # returned 403 "Trading restricted" to avoid burning error records.
         if condition_id and condition_id in self._restricted_conditions:
             logger.debug("[LIVE] SKIP restricted condition %s", condition_id[:16])
-            return self._result(False, reason="condition_id in restricted cache")
+            return self._block(signal, "condition_id in restricted cache (prior 403)")
 
-        # 2026-05-05: market horizon gate. Live trades on markets resolving
-        # more than 30 days out take too long to resolve, stalling the
-        # kill switch's sample accumulation (need 15 resolved to reach full
-        # Kelly). Skip live; paper still tracks them for signal validation.
+        # 2026-05-05: market horizon gate. Two bounds:
+        #   UPPER (30 days) — resolution too slow stalls kill-switch sample
+        #     accumulation; need 15 resolved to reach full Kelly.
+        #   LOWER (4 hours, added 2026-05-21) — SELL orders on markets within
+        #     hours of resolution face collapsed liquidity: wallets have
+        #     already exited because they know the outcome, leaving no
+        #     counter-side. Past-24h zero-fill rate was 57% (4 of 7) on
+        #     near-resolution markets (Natural Gas May 21 Up/Down, Senate
+        #     reconciliation by May, Gold Week of May 1, Brazil STF
+        #     impeachment). Blocking these eliminates the bleed.
+        #
+        # Lookup strategy: local markets table first (fast), Gamma API
+        # fallback when condition_id isn't in the local cache. Our trades
+        # come from whale-flow signals across the whole Polymarket universe
+        # but the markets table only caches top-N by volume — so Gamma
+        # fallback is the common path, not the exception.
         LIVE_MAX_HORIZON_DAYS = 30
+        LIVE_MIN_HOURS_TO_RESOLVE = 4.0
         if condition_id:
+            end_date_iso = None
             try:
                 from trading_platform.polymarket.db_connection import get_connection as _gc
                 _hconn = _gc(self._db_path)
@@ -371,23 +385,49 @@ class PolymarketLiveExecutor:
                     try: _hconn.close()
                     except Exception: pass
                 if _hrow and _hrow[0]:
-                    from datetime import datetime, timezone as _tz
-                    _end = datetime.fromisoformat(str(_hrow[0]).replace("Z", "+00:00"))
-                    _days_out = (_end - datetime.now(tz=_tz.utc)).total_seconds() / 86400
-                    # Stash for _record_attempt so we can correlate hold time
-                    # against actual time-to-resolution post-trade.
-                    signal["_resolution_ts"] = int(_end.timestamp())
-                    if _days_out > LIVE_MAX_HORIZON_DAYS:
-                        logger.debug(
-                            "[LIVE] SKIP %s — market resolves in %.0f days (> %d day limit)",
-                            condition_id[:16], _days_out, LIVE_MAX_HORIZON_DAYS,
-                        )
-                        return self._result(
-                            False,
-                            reason=f"market resolves in {_days_out:.0f}d (limit {LIVE_MAX_HORIZON_DAYS}d)",
-                        )
+                    end_date_iso = str(_hrow[0])
             except Exception as _hex:
-                logger.debug("[LIVE] horizon check failed (proceeding): %s", _hex)
+                logger.debug("[LIVE] markets-table horizon lookup failed: %s", _hex)
+
+            # Gamma fallback for markets not in local cache.
+            if not end_date_iso:
+                try:
+                    import requests as _req
+                    r = _req.get(
+                        "https://gamma-api.polymarket.com/markets",
+                        params={"condition_ids": condition_id},
+                        timeout=5,
+                    )
+                    data = r.json()
+                    m = data[0] if isinstance(data, list) and data else None
+                    if m and (m.get("conditionId") or "").lower() == condition_id.lower():
+                        end_date_iso = m.get("endDate") or m.get("end_date_iso")
+                except Exception as _gex:
+                    logger.debug("[LIVE] gamma horizon fallback failed: %s", _gex)
+
+            if end_date_iso:
+                try:
+                    from datetime import datetime, timezone as _tz
+                    _end = datetime.fromisoformat(str(end_date_iso).replace("Z", "+00:00"))
+                    _hours_out = (_end - datetime.now(tz=_tz.utc)).total_seconds() / 3600
+                    _days_out = _hours_out / 24
+                    signal["_resolution_ts"] = int(_end.timestamp())
+                    if _hours_out < LIVE_MIN_HOURS_TO_RESOLVE:
+                        _reason = (f"market resolves in {_hours_out:.1f}h "
+                                   f"(min {LIVE_MIN_HOURS_TO_RESOLVE:.0f}h) — "
+                                   f"thin-book zero-fill risk")
+                        logger.info("[LIVE][HORIZON_LO] %s %s", sig_type, _reason)
+                        self._record_attempt(signal, 0.0, None, None,
+                                             dry_run=self.DRY_RUN, status="blocked",
+                                             error_msg=_reason)
+                        return self._result(False, reason=_reason)
+                    if _days_out > LIVE_MAX_HORIZON_DAYS:
+                        _reason = (f"market resolves in {_days_out:.0f}d "
+                                   f"(max {LIVE_MAX_HORIZON_DAYS}d)")
+                        logger.debug("[LIVE] SKIP %s — %s", condition_id[:16], _reason)
+                        return self._block(signal, _reason)
+                except Exception as _hex:
+                    logger.debug("[LIVE] horizon parse failed (proceeding): %s", _hex)
 
         # 2026-04-25: isotonic calibration on the inbound confidence.
         # Mirrors paper executor — the same overconfidence bias affects
@@ -421,11 +461,11 @@ class PolymarketLiveExecutor:
         # has proven live edge by slice — allowlist takes precedence.
         if sig_type in EXCLUDE_SIGNAL_TYPES and sig_type not in self.LIVE_REAL_SIGNAL_TYPES:
             logger.debug("[LIVE] BLOCKED signal_type=%s (excluded)", sig_type)
-            return self._result(False, reason=f"signal_type {sig_type} excluded from live")
+            return self._block(signal, f"signal_type {sig_type} excluded from live")
         _sig_side = (signal.get("side") or "").upper()
         if _sig_side and (sig_type, _sig_side) in EXCLUDE_SIGNAL_SIDE:
             logger.info("[LIVE][SIDE_GATE] BLOCKED %s side=%s", sig_type, _sig_side)
-            return self._result(False, reason=f"{sig_type} {_sig_side} excluded from live")
+            return self._block(signal, f"{sig_type} {_sig_side} excluded from live")
         raw_cat = signal.get("category") or ""
         cat = raw_cat.lower() if isinstance(raw_cat, str) else ""
         # Re-classify when category is empty/other/wallet_derived — the
@@ -471,7 +511,7 @@ class PolymarketLiveExecutor:
         }
         if cat in _CAT_BLOCKS.get(sig_type, set()):
             logger.info("[LIVE] BLOCKED %s × %s — per-signal category block", sig_type, cat)
-            return self._result(False, reason=f"{sig_type} blocked in category {cat}")
+            return self._block(signal, f"{sig_type} blocked in category {cat}")
 
         # 2026-05-02: per-(signal, category) bypass with Wilson-95
         # lower bound. Raw EV check (n>=10, EV>=10%) admits noisy
@@ -530,13 +570,13 @@ class PolymarketLiveExecutor:
                     db_path=self._db_path)
             except Exception:
                 pass
-            return self._result(False, reason=f"category '{cat}' not approved for live")
+            return self._block(signal, f"category '{cat}' not approved for live")
 
         # 0. Emergency stop check
         stopped, stop_reason = self._kill.is_emergency_stopped()
         if stopped:
             logger.warning("[LIVE] Emergency stop active: %s", stop_reason)
-            return self._result(False, reason=f"Emergency stop: {stop_reason}")
+            return self._block(signal, f"Emergency stop: {stop_reason}")
 
         # 0b. Circuit breaker check (cumulative drawdown layer)
         try:
@@ -545,7 +585,7 @@ class PolymarketLiveExecutor:
             allowed, cb_reason = cb.can_trade()
             if not allowed:
                 logger.warning("[LIVE] Circuit breaker blocked: %s", cb_reason)
-                return self._result(False, reason=f"circuit breaker: {cb_reason}")
+                return self._block(signal, f"circuit breaker: {cb_reason}")
         except Exception as exc:
             logger.debug("circuit breaker check failed (proceeding): %s", exc)
 
@@ -608,7 +648,7 @@ class PolymarketLiveExecutor:
                             db_path=self._db_path)
                     except Exception:
                         pass
-                    return self._result(False, reason=f"farmer/wash wallet {src_wallet[:14]} blocked")
+                    return self._block(signal, f"farmer/wash wallet {src_wallet[:14]} blocked")
                 if z_row and z_row[0] is not None and float(z_row[0]) >= 1.0:
                     z_boost = min(1.4, 1.0 + 0.15 * (float(z_row[0]) - 1.0))
                     if z_boost > 1.0:
@@ -660,13 +700,13 @@ class PolymarketLiveExecutor:
                 logger.info("[LIVE][SPECIALIST_BOOST] size $%.2f → $%.2f", size_usd, boosted)
                 size_usd = boosted
         if size_usd <= 0:
-            return self._result(False, reason=f"Kelly says no edge for {sig_type}")
+            return self._block(signal, f"Kelly says no edge for {sig_type}")
 
         # 1b. Stale price guard — abort if signal is old or price moved
         fired_at = signal.get("fired_at") or 0
         age_sec = time.time() - fired_at
         if age_sec > 900:
-            return self._result(False, reason=f"Signal too old ({age_sec/60:.0f}m)")
+            return self._block(signal, f"Signal too old ({age_sec/60:.0f}m)")
 
         # 1c. Favorite guard. The data backing this changed.
         # Pre-Apr-18 (when set at >=0.50): only YES side with ep≥0.7 was the
@@ -838,10 +878,10 @@ class PolymarketLiveExecutor:
             # Cached miss — hit Gamma live for this one cid
             tids = self._resolve_token_ids(condition_id)
             if not tids or len(tids) < 2:
-                return self._result(False, reason=f"No token_ids for {condition_id[:20]}")
+                return self._block(signal, f"No token_ids for {condition_id[:20]}", size_usd)
             token_id = tids[0] if want_yes else tids[1]
         if not token_id:
-            return self._result(False, reason=f"No {outcome_label} token_id for {condition_id[:20]}")
+            return self._block(signal, f"No {outcome_label} token_id for {condition_id[:20]}", size_usd)
 
         # 4. Current price + liquidity check (ON THE TOKEN WE'RE BUYING)
         # Polymarket's /midpoint endpoint always returns the YES-token market
@@ -849,7 +889,7 @@ class PolymarketLiveExecutor:
         # (buying NO token), flip to get the actual NO-token price.
         _yes_mid = self._clob.get_mid_price(token_id)
         if _yes_mid is None:
-            return self._result(False, reason="Could not fetch current price from CLOB")
+            return self._block(signal, "Could not fetch current price from CLOB", size_usd)
         current_price = _yes_mid if want_yes else max(0.01, 1.0 - _yes_mid)
 
         # Live-price BUY gate: catches signals where entry_price was None/0 so
@@ -1030,7 +1070,7 @@ class PolymarketLiveExecutor:
                         )
                 except Exception as _derr:
                     logger.warning("[LIVE] dedup check failed — blocking: %s", _derr)
-                    return self._result(False, reason="dedup check error — blocked")
+                    return self._block(signal, "dedup check error — blocked", size_usd)
 
                 # Topic concentration cap. See MAX_OPEN_PER_TOPIC docstring.
                 # Stems share across question variants (e.g. all Musk tweet-count
@@ -1070,7 +1110,7 @@ class PolymarketLiveExecutor:
             # 6. LIVE — submit. Polymarket CLOB side is always BUY; YES vs NO
             # is determined by token_id.
             if not self._clob.is_configured:
-                return self._result(False, reason="CLOB not configured — set POLYMARKET_API_KEY etc.")
+                return self._block(signal, "CLOB not configured — set POLYMARKET_API_KEY etc.", size_usd)
 
             # Aggression routing: SELL direction (buying NO token) and wallet_reversal
             # use aggressive pricing for guaranteed fills. Passive bidding on thin NO
@@ -1351,6 +1391,30 @@ class PolymarketLiveExecutor:
             "filled_price": filled_price,
             "reason": reason,
         }
+
+    def _block(
+        self,
+        signal: dict[str, Any],
+        reason: str,
+        size_usd: float = 0.0,
+    ) -> dict[str, Any]:
+        """Record a blocked attempt to live_trades + return _result(False).
+
+        2026-05-21: every silent _result(False) early return now goes
+        through this helper so the rejection appears in live_trades with
+        a clear reason. Yesterday's recurring lesson — silent gates
+        hide bugs (resolution_decay non-firing, $10 phantom losses).
+        Default observability for the executor: rejected = recorded.
+        """
+        try:
+            self._record_attempt(
+                signal, size_usd, None, None,
+                dry_run=self.DRY_RUN, status="blocked",
+                error_msg=reason,
+            )
+        except Exception as exc:
+            logger.debug("_block record_attempt failed (proceeding): %s", exc)
+        return self._result(False, reason=reason)
 
     def test_dry_run(self, signal_type: str = "price_velocity") -> dict[str, Any]:
         """Synthetic dry-run test for the kill switch + sizer pipeline."""

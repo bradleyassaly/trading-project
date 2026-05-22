@@ -340,6 +340,47 @@ def section_stale_equity(conn, now_ts):
                   f"(near-resolved SELL positions don't move).")
 
 
+def section_polymarket_reconcile(conn, now_ts):
+    """Surface drift between DB and on-chain Polymarket truth.
+
+    Reads the latest reconcile_polymarket.log written by the scheduled
+    reconciler (every 4h). Lists any DRIFT lines so the operator sees
+    persistent disagreements between DB cash/positions and on-chain
+    reality without having to grep logs.
+    """
+    section("10. POLYMARKET-TRUTH RECONCILIATION (last drift report)")
+    import os
+    log_path = "/app/logs/scheduler/reconcile_polymarket_truth.log"
+    if not os.path.exists(log_path):
+        # Fallback for local runs
+        log_path = "logs/scheduler/reconcile_polymarket_truth.log"
+    if not os.path.exists(log_path):
+        print("  No reconciler log yet — task may not have fired since deploy.")
+        return
+    # Read backwards to find the last "===" block (most recent run)
+    try:
+        with open(log_path, "r") as f:
+            lines = f.readlines()
+        if not lines:
+            print("  Reconciler log empty.")
+            return
+        # Find last "===" header
+        last_hdr = None
+        for i in range(len(lines) - 1, -1, -1):
+            if lines[i].startswith("=== Polymarket-truth reconciliation"):
+                last_hdr = i
+                break
+        if last_hdr is None:
+            print("  No reconciliation block found in log.")
+            return
+        block = lines[last_hdr:]
+        # Trim to 30 lines max so a verbose drift doesn't blow up the review
+        for ln in block[:30]:
+            print(f"  {ln.rstrip()}")
+    except Exception as exc:
+        print(f"  Could not read reconciler log: {exc}")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--apply-multipliers", action="store_true",
@@ -361,6 +402,7 @@ def main():
         section_decay(conn, now_ts)
         section_attribution(conn, now_ts)
         section_stale_equity(conn, now_ts)
+        section_polymarket_reconcile(conn, now_ts)
     finally:
         conn.close()
 
