@@ -923,18 +923,43 @@ class PolymarketLiveExecutor:
                                 f"(signal={entry_in_token_frame:.3f} now={current_price:.3f})"),
                     )
 
-        # Liquidity guard: check orderbook depth on THE token we're buying
+        # Liquidity guard: check FILLABLE orderbook depth at or below our
+        # limit price.
+        #
+        # 2026-05-22 bug fix: the previous check summed ALL top-5 asks
+        # regardless of price. Yesterday 5 of 8 SELL attempts had depth
+        # values of $50k-$298k but still zero-filled — the depth was at
+        # prices ABOVE our limit. Polymarket's CLOB FOK semantics need
+        # depth AT OR BELOW our limit price. Without that filter, the
+        # check is meaningless.
+        #
+        # For SELL (we buy NO): our limit is current_price (NO mid).
+        # Asks at price <= current_price * (1 + slack) are reachable.
+        # We allow 5% slack so a market that's 1¢ above mid still counts.
         book = self._clob.get_order_book(token_id)
         asks = book.get("asks") or []
-        ask_depth = sum(float(a.get("size", 0)) * float(a.get("price", 0)) for a in asks[:5])
-        # Stash for _record_attempt — lets us correlate fill outcomes against
-        # the actual depth we saw (not just the pass/fail gate).
-        signal["_ask_depth"] = ask_depth
-        if ask_depth < size_usd * 2:
-            return self._result(
-                False,
-                reason=f"Thin liquidity on {outcome_label} (ask depth ${ask_depth:.0f} < 2x trade ${size_usd:.0f})",
-            )
+        # Sort by price ascending (best ask first)
+        try:
+            asks_sorted = sorted(asks, key=lambda a: float(a.get("price", 1.0)))
+        except Exception:
+            asks_sorted = asks
+        # All-asks depth (legacy metric, kept for telemetry)
+        all_depth = sum(float(a.get("size", 0)) * float(a.get("price", 0))
+                        for a in asks_sorted[:10])
+        # Fillable depth: asks at price <= current_price × 1.05
+        _limit_price = float(current_price) * 1.05
+        fillable_asks = [a for a in asks_sorted
+                         if float(a.get("price", 1)) <= _limit_price]
+        fillable_depth = sum(float(a.get("size", 0)) * float(a.get("price", 0))
+                              for a in fillable_asks)
+        signal["_ask_depth"] = fillable_depth
+        signal["_ask_depth_total"] = all_depth
+        if fillable_depth < size_usd * 1.5:
+            _reason = (f"Thin fillable {outcome_label} liquidity: "
+                       f"${fillable_depth:.1f} at price<={_limit_price:.3f} "
+                       f"(need >${size_usd * 1.5:.1f}, total book ${all_depth:.0f})")
+            logger.info("[LIVE][DEPTH_BLOCK] %s %s", sig_type, _reason)
+            return self._block(signal, _reason, size_usd)
 
         # 2026-04-28: per-signal DRY_RUN check + real-trade hard cap.
         # 2026-05-02: cap is now ladder-driven AND slice-scaled.

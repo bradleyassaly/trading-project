@@ -39,6 +39,7 @@ from trading_platform.polymarket.db_connection import get_connection
 USDC_DRIFT_USD = 1.0           # $1 drift in cash balance
 SHARES_DRIFT_PCT = 0.05         # 5% of DB-tracked shares
 SHARES_DRIFT_ABS = 5.0          # OR 5 shares absolute, whichever is larger
+OPEN_MKT_DRIFT_USD = 2.0        # $2 drift in computed-vs-snapshot open_mkt
 
 
 def _make_clob():
@@ -159,6 +160,67 @@ def reconcile() -> dict:
             else:
                 report["ok"].append(entry)
 
+        # ── 3. Snapshot open_mkt cross-check ────────────────────────────────
+        # Compute "true" open_mkt right now from on-chain holdings × current
+        # CLOB mid prices, then compare to the latest live_equity_snapshot's
+        # open_market_value. If they diverge meaningfully AND the snapshot
+        # is fresh (<2h old), the snapshot logic is producing wrong numbers
+        # — exactly the recurring source of the $5/day gap between my
+        # equity Δ and Polymarket's "1 day PnL". See
+        # [[feedback_polymarket_is_truth]].
+        try:
+            from trading_platform.polymarket.clob_client import ClobClient
+            _clob = ClobClient()
+            true_open_mkt = 0.0
+            # Pull last_mark_price as fallback when /midpoint returns null
+            # for one-sided/near-resolved books — same fallback chain the
+            # snapshot already uses internally.
+            marks = {r[0]: conn.execute(
+                "SELECT last_mark_price FROM live_trades WHERE id = ?",
+                (r[0],)).fetchone() for r in open_positions}
+            for r in open_positions:
+                lid, sig, di, tid, sh_db, sz, fp, ep = r
+                try:
+                    result = client.get_balance_allowance(
+                        BalanceAllowanceParams(asset_type=AssetType.CONDITIONAL,
+                                               token_id=tid)
+                    )
+                    real_shares = int(result.get("balance", 0)) / 1_000_000
+                    yes_mid = _clob.get_mid_price(tid)
+                    # Fallback chain: /midpoint → last_mark_price → entry_price.
+                    if yes_mid is None:
+                        m = marks.get(lid)
+                        if m and m[0] is not None:
+                            yes_mid = float(m[0])
+                        elif ep is not None:
+                            yes_mid = float(ep)
+                    if yes_mid is None: continue
+                    if di == "SELL":
+                        no_mid = max(1.0 - float(yes_mid), 0.001)
+                        true_open_mkt += real_shares * no_mid
+                    else:
+                        true_open_mkt += real_shares * float(yes_mid)
+                except Exception:
+                    continue
+            if last_snap and last_snap[2] is not None:
+                snap_open_mkt = float(last_snap[2])
+                snap_age_sec = int(time.time()) - int(last_snap[0])
+                diff = true_open_mkt - snap_open_mkt
+                entry = {
+                    "metric": "snapshot_open_mkt",
+                    "snapshot_value": round(snap_open_mkt, 2),
+                    "true_value_now": round(true_open_mkt, 2),
+                    "diff": round(diff, 2),
+                    "snapshot_age_sec": snap_age_sec,
+                }
+                # Only flag as drift if snapshot is recent (else mark moved)
+                if abs(diff) > OPEN_MKT_DRIFT_USD and snap_age_sec < 2 * 3600:
+                    report["drifts"].append(entry)
+                else:
+                    report["ok"].append(entry)
+        except Exception as exc:
+            report["errors"].append(f"open_mkt cross-check failed: {exc}")
+
     finally:
         try: conn.close()
         except Exception: pass
@@ -182,6 +244,10 @@ def print_human(report: dict) -> None:
             if d["metric"] == "usdc_balance":
                 print(f"  USDC: db=${d['db']:.4f} on-chain=${d['onchain']:.4f} "
                       f"diff=${d['diff']:+.4f}  (snapshot age {d['snapshot_age_sec']}s)")
+            elif d["metric"] == "snapshot_open_mkt":
+                print(f"  SNAPSHOT open_mkt: snap=${d['snapshot_value']} "
+                      f"true_now=${d['true_value_now']} diff=${d['diff']:+.2f}  "
+                      f"(age {d['snapshot_age_sec']}s)")
             else:
                 src = d.get("shares_source", "?")
                 print(f"  #{d['trade_id']} {d['signal_type']} {d['direction']}: "
