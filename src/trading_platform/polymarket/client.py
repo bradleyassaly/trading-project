@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import logging
 import time
 from dataclasses import dataclass
 from typing import Any
 
 import requests
+
+logger = logging.getLogger(__name__)
 
 _DEFAULT_TIMEOUT = 15
 _DEFAULT_SLEEP_SEC = 0.05
@@ -113,16 +116,35 @@ class PolymarketClient:
         end_date_max: str | None = None,
         active: bool | None = None,
         _page_size: int = 100,
+        _max_offset: int = 10_000,
     ) -> list[dict[str, Any]]:
-        """Paginate through all markets for a given tag_slug."""
+        """Paginate through all markets for a given tag_slug.
+
+        2026-05-23: resilient pagination. Polymarket Gamma started
+        returning 422 Unprocessable Entity past offset=10000 on filtered
+        queries. The previous loop let the 422 propagate, which bailed
+        the entire fetch — live-collect ended up in a tight retry loop
+        emitting NO signals (live attempts dropped 9→2 in 24h).
+        Now: cap at _max_offset (10K markets is plenty) AND catch HTTP
+        errors mid-pagination, returning what we have so the caller
+        proceeds with partial data.
+        """
+        import requests as _req
         all_markets: list[dict[str, Any]] = []
         offset = 0
-        while True:
-            page, next_offset = self.get_markets(
-                tag_slug=tag_slug, closed=closed, limit=_page_size, offset=offset,
-                order=order, ascending=ascending, end_date_min=end_date_min,
-                end_date_max=end_date_max, active=active,
-            )
+        while offset < _max_offset:
+            try:
+                page, next_offset = self.get_markets(
+                    tag_slug=tag_slug, closed=closed, limit=_page_size, offset=offset,
+                    order=order, ascending=ascending, end_date_min=end_date_min,
+                    end_date_max=end_date_max, active=active,
+                )
+            except _req.HTTPError as exc:
+                logger.warning(
+                    "[gamma] pagination halted at offset=%d (%s) — returning %d markets",
+                    offset, exc, len(all_markets),
+                )
+                break
             all_markets.extend(page)
             if next_offset is None:
                 break
