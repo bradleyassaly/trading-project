@@ -373,6 +373,28 @@ SCHEDULE: list[Task] = [
         description="Reconcile DB cash + position shares vs on-chain reality",
     ),
     Task(
+        # 2026-05-23: per-wallet revenue attribution. Rolls up live_trades
+        # by signal_wallet, computes 30d PnL with CIs, flags auto-demote
+        # candidates (30d PnL <= -$10 on n>=5). Daily cadence — wallets
+        # don't change tier overnight. Output: logs/scheduler/wallet_attribution.log
+        # for the daily review to surface in Section 12.
+        name="wallet_attribution",
+        cmd="python /app/scripts/wallet_attribution.py",
+        interval_seconds=24 * 3600,
+        description="Per-wallet revenue attribution + auto-tier recommendation",
+    ),
+    Task(
+        # 2026-05-23: WS-vs-poll reconciliation. Detects when wallet_trades
+        # ingestion drops below 50% of 7d baseline (= WS or poller broken).
+        # Volume is the primary health signal; fresh-rate is informational.
+        # 6h cadence — long enough that one poll cycle is included, short
+        # enough to catch a degradation within hours, not days.
+        name="ws_poll_reconcile",
+        cmd="python /app/scripts/ws_poll_reconcile.py",
+        interval_seconds=6 * 3600,
+        description="Detect wallet_trades ingestion degradation",
+    ),
+    Task(
         name="circuit_breaker_daily_reset",
         # Inline Python so we don't depend on a CLI command — clears
         # daily_pnl + daily_halted on the cumulative-drawdown breaker.

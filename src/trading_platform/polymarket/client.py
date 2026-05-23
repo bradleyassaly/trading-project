@@ -40,9 +40,27 @@ class PolymarketClient:
 
     def _get(self, url: str, params: dict[str, Any] | None = None) -> Any:
         time.sleep(self.config.request_sleep_sec)
-        response = self._session.get(url, params=params, timeout=_DEFAULT_TIMEOUT)
-        response.raise_for_status()
-        return response.json()
+        try:
+            response = self._session.get(url, params=params, timeout=_DEFAULT_TIMEOUT)
+            response.raise_for_status()
+            # 2026-05-23: health tracking — report success per host so the
+            # daily review can flag silent APIs early. Last incident: Gamma
+            # silently 422'd for 24h. Lazy import to avoid circular deps.
+            try:
+                from trading_platform.polymarket.api_health import record_success
+                api_name = "gamma" if "gamma-api" in url else ("clob" if "clob.polymarket" in url else "polymarket_other")
+                record_success(api_name)
+            except Exception:
+                pass
+            return response.json()
+        except Exception as exc:
+            try:
+                from trading_platform.polymarket.api_health import record_error
+                api_name = "gamma" if "gamma-api" in url else ("clob" if "clob.polymarket" in url else "polymarket_other")
+                record_error(api_name, str(exc))
+            except Exception:
+                pass
+            raise
 
     # ── Gamma API ─────────────────────────────────────────────────────────────
 

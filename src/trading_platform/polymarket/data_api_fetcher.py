@@ -249,9 +249,17 @@ class PolymarketDataApiFetcher:
             resp = self._session.get(f"{self._base}/trades", params=params, timeout=15)
             resp.raise_for_status()
             data = resp.json()
+            try:
+                from trading_platform.polymarket.api_health import record_success
+                record_success("data_api_trades")
+            except Exception: pass
             return data if isinstance(data, list) else data.get("data", data.get("trades", []))
         except Exception as exc:
             logger.warning("Data API fetch failed: %s", exc)
+            try:
+                from trading_platform.polymarket.api_health import record_error
+                record_error("data_api_trades", str(exc))
+            except Exception: pass
             return []
 
 

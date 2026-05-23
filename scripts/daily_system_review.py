@@ -340,6 +340,52 @@ def section_stale_equity(conn, now_ts):
                   f"(near-resolved SELL positions don't move).")
 
 
+def section_api_health(conn, now_ts):
+    """External-API health: surface any silent dependency early.
+
+    2026-05-23: built after the Gamma 422 incident silently killed live
+    signal flow for 24h. The pattern (stale balance API hid $57; Gamma
+    422 dropped 7 SELL/day) shows external dependencies degrade silently
+    and we notice only when realized PnL deviates. This section flags
+    any tracked API whose last success is older than the freshness
+    threshold for that API.
+    """
+    section("11. EXTERNAL-API HEALTH (silent-dependency detector)")
+    try:
+        from trading_platform.polymarket.api_health import get_status
+        rows = get_status()
+    except Exception as exc:
+        print(f"  api_health module error: {exc}")
+        return
+    if not rows:
+        print("  No api_health rows yet — instrumentation hasn't fired since deploy.")
+        return
+    # Per-API freshness thresholds (seconds).
+    THRESHOLDS = {
+        "gamma": 600,           # markets/midpoint should be every few min
+        "clob": 600,            # balance/order endpoints — every few min
+        "data_api_trades": 1800,  # wallet poller is 10m cadence
+        "polymarket_other": 3600,
+    }
+    any_stale = False
+    for r in rows:
+        thr = THRESHOLDS.get(r["api_name"], 3600)
+        age = r["last_success_age_sec"]
+        age_s = f"{age}s" if age is not None and age < 120 else (f"{age//60}m" if age else "never")
+        flag = ""
+        if age is None or age > thr:
+            flag = f"  STALE — silent {age_s} (threshold {thr}s)"
+            any_stale = True
+        elif r["error_24h"] > 0:
+            flag = f"  errors_24h={r['error_24h']}"
+        print(f"  {r['api_name']:<22s} last_success={age_s:>7s}  "
+              f"24h: {r['success_24h']} ok / {r['error_24h']} err{flag}")
+    if any_stale:
+        print()
+        print("  ACTION — at least one API is silent. Investigate before silent volume loss.")
+        print("  (Most likely: external API changed semantics; check container logs for HTTP errors.)")
+
+
 def section_polymarket_reconcile(conn, now_ts):
     """Surface drift between DB and on-chain Polymarket truth.
 
@@ -403,6 +449,7 @@ def main():
         section_attribution(conn, now_ts)
         section_stale_equity(conn, now_ts)
         section_polymarket_reconcile(conn, now_ts)
+        section_api_health(conn, now_ts)
     finally:
         conn.close()
 
