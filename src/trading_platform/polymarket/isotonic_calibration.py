@@ -63,6 +63,17 @@ def _ensure_schema(conn) -> None:
         )
     except Exception:
         pass
+    # 2026-05-25: per-slice calibration. Analyzer (calibration_per_slice.py)
+    # showed Brier 0.58→0.26 on wallet_reversal SELL with a per-(signal × direction)
+    # fit. apply_calibration() now prefers per-slice > per-category > global.
+    # See [[project_wallet_system_gaps.md]] section "calibration".
+    for col in ("signal_type", "direction"):
+        try:
+            conn.execute(
+                f"ALTER TABLE alpha_calibration_curve ADD COLUMN IF NOT EXISTS {col} TEXT"
+            )
+        except Exception:
+            pass
 
 
 def isotonic_regression(
@@ -245,12 +256,168 @@ def fit_calibration(
         except Exception: pass
 
 
+# ── Per-slice fit (2026-05-25) ─────────────────────────────────────────────
+# The existing fit_calibration() above fits on `trade_hypotheses.alpha_score`
+# (raw signal). The Brier-0.30-0.58 we measured was on the FINAL post-pipeline
+# `confidence` value the executor actually saw. They diverge — fitting on
+# alpha_score is mis-calibrating the wrong thing.
+#
+# fit_calibration_per_slice() below fits on (live_trades.confidence, outcome)
+# pairs per (signal_type, direction). Persists with the new columns.
+# apply_calibration() gains a feature-flag-gated lookup that prefers
+# per-slice curves when ENABLE_PER_SLICE_CALIB=1.
+
+
+def fit_calibration_per_slice(
+    signal_type: str,
+    direction: str,
+    window_days: int = 60,
+    db_path: str | None = None,
+) -> dict[str, Any]:
+    """Fit isotonic curve on LIVE outcomes per (signal × direction).
+
+    Reads (confidence, outcome) pairs from live_trades — the final
+    post-pipeline confidence + actual win/loss. This is what the
+    executor's Kelly sizer should be calibrated against, not the raw
+    alpha_score that fit_calibration() uses.
+
+    Persists to alpha_calibration_curve with signal_type + direction
+    columns populated. apply_calibration() picks it up if
+    ENABLE_PER_SLICE_CALIB=1.
+    """
+    t0 = time.time()
+    cutoff = int(time.time()) - window_days * 86400
+    conn = get_connection(db_path) if db_path else get_connection()
+    try:
+        _ensure_schema(conn)
+        try:
+            rows = conn.execute(
+                """SELECT confidence,
+                          CASE WHEN outcome='win' THEN 1
+                               WHEN outcome='loss' THEN 0 END as y
+                     FROM live_trades
+                    WHERE dry_run=0 AND exit_ts >= ?
+                      AND outcome IN ('win','loss')
+                      AND confidence IS NOT NULL
+                      AND signal_type = ? AND direction = ?""",
+                (cutoff, signal_type, direction),
+            ).fetchall()
+        except Exception as exc:
+            return {"error": f"query: {exc}"}
+
+        if len(rows) < 15:
+            return {
+                "signal_type": signal_type, "direction": direction,
+                "n": len(rows), "skipped": "need n>=15",
+            }
+
+        xs = [max(0.0, min(1.0, float(r[0]))) for r in rows]
+        ys = [int(r[1]) for r in rows]
+
+        brier_before = sum((xs[i] - ys[i]) ** 2 for i in range(len(xs))) / len(xs)
+        breakpoints = isotonic_regression(xs, ys)
+        bp_x = [b[0] for b in breakpoints]
+        bp_y = [b[1] for b in breakpoints]
+
+        def _apply(x: float) -> float:
+            if not bp_x: return x
+            i = bisect.bisect_right(bp_x, x) - 1
+            return bp_y[0] if i < 0 else bp_y[i]
+
+        brier_after = sum((_apply(xs[i]) - ys[i]) ** 2 for i in range(len(xs))) / len(xs)
+        improvement = brier_before - brier_after
+
+        # Guards — same shape as global fit
+        bp_range = (max(bp_y) - min(bp_y)) if bp_y else 0
+        bp_max = max(bp_y) if bp_y else 0
+        if bp_range < 0.15:
+            return {"signal_type": signal_type, "direction": direction,
+                    "n": len(rows), "skipped": f"flat curve (bp_range={bp_range:.2f})"}
+        if improvement <= 0.005:
+            return {"signal_type": signal_type, "direction": direction,
+                    "n": len(rows), "skipped": "no Brier improvement",
+                    "brier_before": round(brier_before, 4),
+                    "brier_after": round(brier_after, 4)}
+
+        now = int(time.time())
+        breakpoints_json = json.dumps(
+            [{"x": round(x, 4), "y": round(y, 4)} for x, y in breakpoints]
+        )
+        try:
+            conn.execute(
+                """INSERT INTO alpha_calibration_curve
+                     (fitted_at, n_samples, breakpoints_json,
+                      brier_before, brier_after, window_days,
+                      category, signal_type, direction)
+                   VALUES (?,?,?,?,?,?,?,?,?)""",
+                (now, len(rows), breakpoints_json,
+                 round(brier_before, 6), round(brier_after, 6),
+                 window_days, None, signal_type, direction),
+            )
+            conn.commit()
+            logger.info("[CALIB][PER_SLICE] %s/%s n=%d Brier %.3f→%.3f",
+                        signal_type, direction, len(rows),
+                        brier_before, brier_after)
+        except Exception as exc:
+            logger.warning("per-slice calibration persist failed: %s", exc)
+
+        return {
+            "signal_type": signal_type, "direction": direction,
+            "n": len(rows),
+            "brier_before": round(brier_before, 4),
+            "brier_after": round(brier_after, 4),
+            "improvement_pct": round(100 * improvement / max(brier_before, 1e-6), 1),
+            "n_breakpoints": len(breakpoints),
+            "elapsed_seconds": round(time.time() - t0, 1),
+        }
+    finally:
+        try: conn.close()
+        except Exception: pass
+
+
 # ── Lookup API ──────────────────────────────────────────────────────────────
 
 # Cache: keyed by category string ("" = global). Each entry is the
 # bisect-ready (bp_x, bp_y) pair plus a fitted_at timestamp for TTL.
 _curve_cache: dict[str, dict[str, Any]] = {}
+_per_slice_cache: dict[tuple[str, str], dict[str, Any]] = {}
 _curve_ttl_seconds = 300
+
+
+def _load_per_slice_curve(signal_type: str, direction: str,
+                          db_path: str | None = None) -> None:
+    """Load the latest per-(signal × direction) curve into cache."""
+    key = (signal_type, direction)
+    now = time.time()
+    cached = _per_slice_cache.get(key)
+    if cached and now - cached.get("fitted_at", 0) < _curve_ttl_seconds:
+        return
+    conn = get_connection(db_path) if db_path else get_connection()
+    try:
+        try:
+            row = conn.execute(
+                """SELECT breakpoints_json FROM alpha_calibration_curve
+                    WHERE signal_type = ? AND direction = ?
+                    ORDER BY fitted_at DESC LIMIT 1""",
+                (signal_type, direction),
+            ).fetchone()
+        except Exception:
+            row = None
+        if not row:
+            _per_slice_cache[key] = {"fitted_at": now, "bp_x": [], "bp_y": []}
+            return
+        try:
+            bps = json.loads(row[0])
+            _per_slice_cache[key] = {
+                "fitted_at": now,
+                "bp_x": [float(b["x"]) for b in bps],
+                "bp_y": [float(b["y"]) for b in bps],
+            }
+        except Exception:
+            _per_slice_cache[key] = {"fitted_at": now, "bp_x": [], "bp_y": []}
+    finally:
+        try: conn.close()
+        except Exception: pass
 
 
 def _load_curve(category: str | None, db_path: str | None = None) -> None:
@@ -296,19 +463,41 @@ def apply_calibration(
     alpha_score: float,
     category: str | None = None,
     db_path: str | None = None,
+    signal_type: str | None = None,
+    direction: str | None = None,
 ) -> float:
     """Map raw alpha_score through the latest isotonic curve.
 
-    Prefers per-category curve when available; falls back to global.
-    Identity fallback on cold start.
+    Lookup precedence (when ENABLE_PER_SLICE_CALIB=1):
+        per-(signal × direction) → per-category → global
+    Default (env unset): per-category → global (original behaviour).
+
+    2026-05-25: per-slice is shadow-mode by default. Set
+    ENABLE_PER_SLICE_CALIB=1 to swap Kelly's calibrated confidence to
+    the per-slice curve. After 14d shadow proves no regression,
+    flip the env to enable in production. Until then, the per-slice
+    curves are fit + persisted but NOT used at trade time.
     """
+    import os as _os
     if alpha_score is None:
         return 0.0
     try:
         x = max(0.0, min(1.0, float(alpha_score)))
     except (TypeError, ValueError):
         return 0.0
-    # Try per-category first
+
+    # 1. Per-slice (only if feature flag set + signal info available)
+    if (_os.environ.get("ENABLE_PER_SLICE_CALIB", "").lower() in ("1", "true", "yes")
+            and signal_type and direction):
+        _load_per_slice_curve(signal_type, direction, db_path)
+        cached = _per_slice_cache.get((signal_type, direction)) or {}
+        bp_x = cached.get("bp_x") or []
+        bp_y = cached.get("bp_y") or []
+        if bp_x:
+            i = bisect.bisect_right(bp_x, x) - 1
+            return bp_y[0] if i < 0 else bp_y[i]
+
+    # 2. Per-category
     if category:
         _load_curve(category, db_path)
         cached = _curve_cache.get(category) or {}
@@ -317,7 +506,8 @@ def apply_calibration(
         if bp_x:
             i = bisect.bisect_right(bp_x, x) - 1
             return bp_y[0] if i < 0 else bp_y[i]
-    # Fall back to global
+
+    # 3. Global
     _load_curve(None, db_path)
     cached = _curve_cache.get("") or {}
     bp_x = cached.get("bp_x") or []

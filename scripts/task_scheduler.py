@@ -379,9 +379,14 @@ SCHEDULE: list[Task] = [
         # don't change tier overnight. Output: logs/scheduler/wallet_attribution.log
         # for the daily review to surface in Section 12.
         name="wallet_attribution",
-        cmd="python /app/scripts/wallet_attribution.py",
+        # 2026-05-25: flipped to --apply. The script's auto-demote
+        # threshold is conservative (30d PnL <= -$10 AND n>=5), so
+        # only wallets with strong negative live evidence get flagged.
+        # Executor reads wallet_overrides table and blocks signals from
+        # DEMOTED wallets. Closes the Layer-5 attribution feedback loop.
+        cmd="python /app/scripts/wallet_attribution.py --apply",
         interval_seconds=24 * 3600,
-        description="Per-wallet revenue attribution + auto-tier recommendation",
+        description="Per-wallet revenue attribution + AUTO-APPLY tier downgrade",
     ),
     Task(
         # 2026-05-23: WS-vs-poll reconciliation. Detects when wallet_trades
@@ -393,6 +398,31 @@ SCHEDULE: list[Task] = [
         cmd="python /app/scripts/ws_poll_reconcile.py",
         interval_seconds=6 * 3600,
         description="Detect wallet_trades ingestion degradation",
+    ),
+    Task(
+        # 2026-05-25: monitor-alert dispatcher. Polls api_health, reconciler,
+        # ws_poll_reconcile, wallet_attribution every 15 min and fires
+        # Telegram pipeline alerts on anomalies. send_pipeline_alert has
+        # 30-min cooldown per component so we don't spam.
+        # Bridges the gap between "monitor runs" and "operator sees it".
+        # Yesterday's Gamma 422 would have surfaced within 15 min instead
+        # of being caught only via Polymarket UI mismatch.
+        name="monitor_alerts",
+        cmd="python /app/scripts/monitor_alerts.py",
+        interval_seconds=15 * 60,
+        description="Telegram-alert dispatcher for the 4 observability monitors",
+    ),
+    Task(
+        # 2026-05-25: per-(signal × direction) calibration refit. Reads
+        # live_trades.confidence vs outcome; fits isotonic per slice.
+        # Currently SHADOW — set ENABLE_PER_SLICE_CALIB=1 to swap into
+        # Kelly sizing. Analyzer proved Brier 0.58→0.26 on biggest slice.
+        # Weekly cadence — Brier changes slowly and live data accumulates
+        # at ~6 trades/day, so 7d gives ~40 new samples per fit.
+        name="refit_per_slice_calibration",
+        cmd="python /app/scripts/refit_per_slice_calibration.py",
+        interval_seconds=7 * 24 * 3600,
+        description="Weekly per-slice calibration refit (shadow until env enabled)",
     ),
     Task(
         name="circuit_breaker_daily_reset",

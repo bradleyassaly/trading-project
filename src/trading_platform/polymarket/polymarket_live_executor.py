@@ -680,6 +680,31 @@ class PolymarketLiveExecutor:
             except Exception as exc:
                 logger.debug("[LIVE] behavioral metrics lookup failed: %s", exc)
 
+        # 0e. Wallet override gate. Layer-5 attribution can auto-demote
+        # wallets whose 30d live PnL drops below -$10 on n>=5
+        # (wallet_attribution.py --apply populates wallet_overrides).
+        # Closes the attribution feedback loop. Fail-open if table missing.
+        if src_wallet:
+            try:
+                from trading_platform.polymarket.db_connection import get_connection as _gc
+                _woconn = _gc(self._db_path)
+                try:
+                    _wo = _woconn.execute(
+                        "SELECT tier_override, reason FROM wallet_overrides "
+                        "WHERE wallet = ? LIMIT 1",
+                        (src_wallet,),
+                    ).fetchone()
+                finally:
+                    try: _woconn.close()
+                    except Exception: pass
+                if _wo and (_wo[0] or "").upper() == "DEMOTED":
+                    return self._block(
+                        signal,
+                        f"wallet auto-demoted: {src_wallet[:14]} ({(_wo[1] or '')[:60]})"
+                    )
+            except Exception as _woexc:
+                logger.debug("wallet_overrides check failed (proceeding): %s", _woexc)
+
         # 1. Kelly size. Hard cap at 7% of current live bankroll so a
         # single bad trade can't blow out the account — derived from
         # live bankroll rather than hardcoded $25 so the cap tracks
