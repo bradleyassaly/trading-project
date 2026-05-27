@@ -1217,16 +1217,52 @@ class WhaleSignalEngine:
         # 2026-04-27: enrich with subdomain from markets table so the
         # paper executor's z-subdomain lookup + alert badges have it.
         # Cheap single-row lookup; falls back to None on miss.
+        # 2026-05-27: also pull end_date_iso for a horizon pre-filter.
+        # Volume forensics showed 6,010 blocks/month from
+        # already_resolved + long_horizon (>30d). Pre-filtering at
+        # signal source eliminates that wasted compute + log noise.
         _subcat = None
+        _end_iso = None
         try:
             with self.db._lock:
                 _r = self.db._conn.execute(
-                    "SELECT subcategory FROM markets WHERE condition_id = ?",
+                    "SELECT subcategory, end_date_iso FROM markets WHERE condition_id = ?",
                     (trade.condition_id,),
                 ).fetchone()
-            _subcat = _r[0] if _r else None
+            if _r:
+                _subcat = _r[0]
+                _end_iso = _r[1]
         except Exception:
             pass
+
+        # Horizon pre-filter: skip signals on markets that have already
+        # resolved OR resolve more than 30d out. These ALWAYS get blocked
+        # downstream (already_resolved / long_horizon gate). Saves the
+        # paper + live executors from being called on dead-on-arrival
+        # signals. Fail-open if we don't have end_date_iso (live executor
+        # will still gate it).
+        if _end_iso:
+            try:
+                from datetime import datetime, timezone as _tz
+                _clean = _end_iso.replace("Z", "+00:00") if _end_iso.endswith("Z") else _end_iso
+                _end = datetime.fromisoformat(_clean)
+                if _end.tzinfo is None:
+                    _end = _end.replace(tzinfo=_tz.utc)
+                _hours_out = (_end - datetime.now(tz=_tz.utc)).total_seconds() / 3600
+                if _hours_out <= 0:
+                    logger.debug(
+                        "[PRE_FILTER] %s skipped — market already resolved (%.1fh ago)",
+                        signal_type, -_hours_out,
+                    )
+                    return None
+                if _hours_out > 30 * 24:
+                    logger.debug(
+                        "[PRE_FILTER] %s skipped — market resolves in %.0fd (>30d)",
+                        signal_type, _hours_out / 24,
+                    )
+                    return None
+            except Exception:
+                pass
 
         signal = {
             "signal_type": signal_type,
