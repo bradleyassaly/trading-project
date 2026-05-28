@@ -36,14 +36,35 @@ API_THRESHOLDS = {
 
 
 def check_api_health(alerter) -> int:
-    """Return count of alerts fired."""
+    """Return count of alerts fired.
+
+    2026-05-28 fix: previously `if age is not None and age > thr` fell
+    through silently when age was None (meaning last_success_ts is
+    NULL — recorder bug OR API has never succeeded). That's the WORST
+    failure mode — we don't know if the API is dead or just untracked.
+    Now: alert on EITHER stale (age > threshold) OR untracked
+    (success_count > 0 but age is None — record_success() bug).
+    """
     from trading_platform.polymarket.api_health import get_status
     rows = get_status()
     fired = 0
     for r in rows:
         thr = API_THRESHOLDS.get(r["api_name"], 3600)
         age = r["last_success_age_sec"]
-        # Only alert for APIs that have been seen at least once but are stale
+        if age is None and (r.get("success_24h", 0) or 0) > 0:
+            # Counter says successes occurred but timestamp is NULL —
+            # record_success() upsert is broken or schema migration left
+            # rows in an inconsistent state. Alert loudly.
+            alerter.send_pipeline_alert(
+                component=f"api:{r['api_name']}",
+                message=(f"UNTRACKED — success_count_24h={r['success_24h']} "
+                         f"but last_success_ts is NULL. "
+                         f"record_success() upsert is broken; api_health "
+                         f"data is unreliable until fixed."),
+                level="warning",
+            )
+            fired += 1
+            continue
         if age is not None and age > thr:
             alerter.send_pipeline_alert(
                 component=f"api:{r['api_name']}",

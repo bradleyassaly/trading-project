@@ -1239,8 +1239,26 @@ class WhaleSignalEngine:
         # resolved OR resolve more than 30d out. These ALWAYS get blocked
         # downstream (already_resolved / long_horizon gate). Saves the
         # paper + live executors from being called on dead-on-arrival
-        # signals. Fail-open if we don't have end_date_iso (live executor
-        # will still gate it).
+        # signals.
+        # 2026-05-28: extended with Gamma fallback when local markets
+        # table doesn't have end_date_iso. Yesterday's deploy cut
+        # already_resolved blocks 35% but long_horizon only -0% because
+        # the markets table is sparse for non-curated cids that the
+        # wallet engine fires on. Gamma covers those.
+        if not _end_iso:
+            try:
+                import requests as _req
+                r = _req.get(
+                    "https://gamma-api.polymarket.com/markets",
+                    params={"condition_ids": trade.condition_id}, timeout=4,
+                )
+                data = r.json()
+                m = data[0] if isinstance(data, list) and data else None
+                if m and (m.get("conditionId") or "").lower() == trade.condition_id.lower():
+                    _end_iso = m.get("endDate") or m.get("end_date_iso")
+            except Exception:
+                pass
+
         if _end_iso:
             try:
                 from datetime import datetime, timezone as _tz

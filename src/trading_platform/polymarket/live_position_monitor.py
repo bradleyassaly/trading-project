@@ -320,6 +320,33 @@ def check_live_exits() -> dict[str, int]:
             )
             continue
 
+        # 2026-05-28 BUG FIX: verify the on-chain balance actually dropped
+        # before booking realized_pnl. Previously, place_market_order
+        # returned success=True for status='live' (order resting in book,
+        # not filled). We then recorded realized_pnl as if the position
+        # had been sold — but the shares were still in the wallet.
+        # On 2026-05-27 this hid ~$18 of fictitious profit (#32224, #30316
+        # both marked closed at +$9.38 / +$8.82, on-chain still held 10/11
+        # shares each). Polymarket dashboard showed -$8.61 reality vs my
+        # +$16.26 fictional realized.
+        #
+        # Fix: re-query CONDITIONAL balance post-order. If significant
+        # balance remains, the order didn't fully fill — leave the trade
+        # open and let next cycle retry. Only record closed when balance
+        # drops below threshold (1 share for dust).
+        try:
+            post_balance = clob.get_conditional_balance(token_id) if token_id else None
+        except Exception:
+            post_balance = None
+        if post_balance is not None and post_balance >= 1.0:
+            logger.warning(
+                "[live-exit] %s exit DID NOT FILL for #%d (%s) — "
+                "on-chain balance still %.2f (was %.2f). "
+                "Leaving position open; will retry next cycle.",
+                exit_reason, lid, sig_type, post_balance, shares_held,
+            )
+            continue
+
         fill = order_result.filled_price or current
         # Use shares_held (actual token count) instead of deriving from size_usd.
         # size_usd can be stale/wrong for partially-filled GTC orders.
