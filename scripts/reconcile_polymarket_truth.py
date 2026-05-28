@@ -98,6 +98,48 @@ def reconcile() -> dict:
             else:
                 report["ok"].append(entry)
 
+        # ── 1b. Fictitious-close detector (2026-05-28) ─────────────────────
+        # Today's discovery: live_position_monitor marked 11 trades closed
+        # with realized_pnl recorded, but on-chain still held the tokens.
+        # place_market_order returned success=True for status='live'
+        # (order resting in book, not filled). Fix shipped, but if the
+        # bug regresses we want to catch it within the reconciler's
+        # 4-hour cadence, not via Polymarket dashboard 24h later.
+        #
+        # Check: any trade closed in past 24h with on-chain balance > 0
+        # is fictitious — the exit order didn't fill.
+        ficticious_closes = conn.execute("""
+            SELECT id, signal_type, direction, token_id, realized_pnl,
+                   exit_reason, exit_ts
+              FROM live_trades
+             WHERE dry_run=0 AND exit_ts IS NOT NULL
+               AND token_id IS NOT NULL
+               AND exit_ts >= EXTRACT(EPOCH FROM NOW())::BIGINT - 86400
+               AND exit_reason IN ('take_profit','trailing_stop','stop_loss',
+                                   'whale_mirror_exit','time_decay')
+        """).fetchall()
+        for r in ficticious_closes:
+            lid, sig, di, tid, pnl, er, ets = r
+            try:
+                result = client.get_balance_allowance(
+                    BalanceAllowanceParams(asset_type=AssetType.CONDITIONAL,
+                                           token_id=tid)
+                )
+                bal = int(result.get("balance", 0)) / 1_000_000
+            except Exception:
+                continue
+            if bal >= 1.0:
+                entry = {
+                    "metric": "fictitious_close",
+                    "trade_id": int(lid),
+                    "signal_type": sig,
+                    "direction": di,
+                    "exit_reason": er,
+                    "recorded_pnl": float(pnl) if pnl is not None else None,
+                    "onchain_balance": round(bal, 4),
+                }
+                report["drifts"].append(entry)
+
         # ── 2. Per-position shares reconciliation ──────────────────────────
         open_positions = conn.execute("""
             SELECT id, signal_type, direction, token_id, shares, size_usd,
@@ -248,6 +290,12 @@ def print_human(report: dict) -> None:
                 print(f"  SNAPSHOT open_mkt: snap=${d['snapshot_value']} "
                       f"true_now=${d['true_value_now']} diff=${d['diff']:+.2f}  "
                       f"(age {d['snapshot_age_sec']}s)")
+            elif d["metric"] == "fictitious_close":
+                print(f"  FICTITIOUS CLOSE: #{d['trade_id']} {d['signal_type']} "
+                      f"{d['direction']} exit={d['exit_reason']} "
+                      f"recorded_pnl=${d['recorded_pnl']} "
+                      f"on-chain still holds {d['onchain_balance']} shares "
+                      f"— exit order didn't fill")
             else:
                 src = d.get("shares_source", "?")
                 print(f"  #{d['trade_id']} {d['signal_type']} {d['direction']}: "

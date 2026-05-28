@@ -400,6 +400,20 @@ SCHEDULE: list[Task] = [
         description="Detect wallet_trades ingestion degradation",
     ),
     Task(
+        # 2026-05-28: continuous DB.shares sync. The stale-shares column
+        # has bitten us 3 times (5/22 initial discovery, 5/27 today's
+        # fictitious closes, 5/28 the underlying drift recurs). One-shot
+        # backfills don't prevent recurrence. Hourly cadence keeps
+        # live_trades.shares aligned with on-chain CONDITIONAL balance
+        # for ALL open positions. Cheap: ~5 API calls × 5-10 positions.
+        # Without this: take_profit math is wrong, calibration WR is
+        # wrong, downstream sizing is wrong.
+        name="sync_shares_from_onchain",
+        cmd="python /app/scripts/backfill_shares_from_onchain.py --apply",
+        interval_seconds=3600,
+        description="Hourly DB.shares sync from on-chain CONDITIONAL balances",
+    ),
+    Task(
         # 2026-05-25: monitor-alert dispatcher. Polls api_health, reconciler,
         # ws_poll_reconcile, wallet_attribution every 15 min and fires
         # Telegram pipeline alerts on anomalies. send_pipeline_alert has
