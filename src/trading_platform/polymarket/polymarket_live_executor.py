@@ -277,6 +277,16 @@ class PolymarketLiveExecutor:
         # 30-day horizon filter). Three $1 stop-losses on wrong markets
         # should not demote a signal that has strong paper evidence.
         # Only trades with size_usd > $1.50 count toward the demote gate.
+        #
+        # 2026-05-31: also exclude resolved_zero_balance from the loss count.
+        # When a market resolves against us (NO position on a YES-resolving
+        # market), that's a MARKET OUTCOME not a signal-quality issue.
+        # Bug surfaced today: whale_entry_filtered was auto-demoted to
+        # paper because its last 3 closes were #26563/#20474 (both
+        # resolved_zero_balance) + #9671 (time_decay). 2 of 3 were
+        # market-outcome losses, not strategy losses. The signal had been
+        # profitable on take_profit/trailing_stop exits. Filtering out
+        # resolved_zero_balance restores accurate signal-quality assessment.
         try:
             _conn = _gc(self._db_path)
             try:
@@ -285,6 +295,8 @@ class PolymarketLiveExecutor:
                         WHERE signal_type = ? AND dry_run = 0
                           AND outcome IN ('win','loss')
                           AND size_usd > 1.50
+                          AND COALESCE(exit_reason, '') NOT IN
+                              ('resolved_zero_balance', 'time_decay')
                         ORDER BY exit_ts DESC LIMIT 3""",
                     (signal_type,),
                 ).fetchall()
@@ -293,8 +305,9 @@ class PolymarketLiveExecutor:
                 except Exception: pass
             if len(_row) >= 3 and all((r[0] or "") == "loss" for r in _row):
                 logger.warning(
-                    "[LIVE][AUTO_DEMOTE] %s — 3 consecutive real losses (size>$1.50), "
-                    "back to dry-run", signal_type,
+                    "[LIVE][AUTO_DEMOTE] %s — 3 consecutive real losses "
+                    "(size>$1.50, action-triggered exits only), back to dry-run",
+                    signal_type,
                 )
                 return True
         except Exception:
