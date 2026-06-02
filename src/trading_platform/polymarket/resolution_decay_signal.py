@@ -77,8 +77,36 @@ def _api_post(url: str, payload: dict, timeout: float = 10.0) -> dict | None:
 
 
 def _candidate_markets(conn) -> list[dict[str, Any]]:
-    """Pull markets resolving within the next 24h with token ids set."""
+    """Pull markets resolving within the next 24h with token ids set.
+
+    2026-06-01: exclude cids that recently failed CLOB price-fetch.
+    Audit showed 193 wasted attempts in 7d concentrated on 2 specific
+    cids — likely markets that are in our local cache but CLOB
+    doesn't have a tradeable price for (delisted / paused / pre-trading).
+    The signal generator kept emitting them every 15-min cycle.
+    Skip any cid that's had >= 2 'Could not fetch current price from CLOB'
+    blocks in the past 24h.
+    """
     now = time.time()
+    failed_cids = set()
+    try:
+        cutoff_24h = int(now) - 86400
+        bad_rows = conn.execute(
+            """SELECT DISTINCT condition_id FROM live_trades
+                WHERE attempted_at >= ?
+                  AND error_msg LIKE ?
+             GROUP BY condition_id HAVING COUNT(*) >= 2""",
+            (cutoff_24h, '%Could not fetch current price%'),
+        ).fetchall()
+        failed_cids = {r[0] for r in bad_rows if r[0]}
+        if failed_cids:
+            logger.debug(
+                "[resolution_decay] excluding %d cids with recent CLOB price-fetch failures",
+                len(failed_cids),
+            )
+    except Exception:
+        pass
+
     rows = conn.execute(
         """SELECT condition_id, slug, question, end_date_iso,
                   yes_token_id, no_token_id, outcome_prices, volume_24h
@@ -93,6 +121,8 @@ def _candidate_markets(conn) -> list[dict[str, Any]]:
     out = []
     for r in rows:
         cid, slug, q, end_iso, yes_tid, no_tid, prices_raw, vol = r
+        if cid in failed_cids:
+            continue  # CLOB doesn't have a price for this market — skip
         try:
             from datetime import datetime, timezone
             clean = end_iso.replace("Z", "+00:00") if end_iso.endswith("Z") else end_iso
