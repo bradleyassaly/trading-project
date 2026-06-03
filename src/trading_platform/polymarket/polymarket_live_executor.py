@@ -602,6 +602,28 @@ class PolymarketLiveExecutor:
         except Exception as exc:
             logger.debug("circuit breaker check failed (proceeding): %s", exc)
 
+        # 0b'. Forward-looking VaR gate (Phase 3 — vol-aware risk).
+        # Halts new entries if last 30d VaR(5%) already exceeds VAR_HARD_CAP_FRAC
+        # of equity. Defaults off (shadow). Set ENABLE_VAR_GATE=1 to enforce.
+        try:
+            import os as _os
+            if _os.environ.get("ENABLE_VAR_GATE", "0").lower() in ("1", "true", "yes"):
+                from trading_platform.polymarket.portfolio_risk import assess as _pf_assess
+                _pf = _pf_assess()
+                _cap = float(_os.environ.get("VAR_HARD_CAP_FRAC", "0.10"))
+                _frac = _pf.get("var5_frac")
+                if _frac is not None and _frac > _cap:
+                    logger.warning(
+                        "[LIVE] VaR gate blocked: VaR(5%%)=%.1f%% > cap %.1f%%",
+                        _frac * 100, _cap * 100,
+                    )
+                    return self._block(
+                        signal,
+                        f"VaR(5%) {_frac*100:.1f}% exceeds cap {_cap*100:.0f}%",
+                    )
+        except Exception as exc:
+            logger.debug("VaR gate check failed (proceeding): %s", exc)
+
         # 0c. Specialist boost (mirrors paper executor ~L628). Specialist
         # wallets trading in their proven category earn 1.25x confidence
         # and 2x alpha → roughly 2x stake. Applied pre-Kelly so the
@@ -1330,14 +1352,26 @@ class PolymarketLiveExecutor:
             try:
                 _sig_price_raw = signal.get("entry_price") or signal.get("price")
                 _sig_price = float(_sig_price_raw) if _sig_price_raw is not None else None
-                # expected_price = CLOB mid at submission.
-                # slippage_pct = |fill - expected| / expected (unsigned; gate = ≤2%).
+                # expected_price = our target (signal entry).
+                # slippage = |fill - expected| / expected  (legacy unsigned; kept for back-compat gate).
+                # slippage_signed = adverse-direction slippage; positive = bad.
+                #   BUY:  (fill - expected) / expected   (paid more than target)
+                #   SELL: (expected - fill) / expected   (sold below target)
+                # slippage_cost_usd = |fill - expected| × shares (always nonneg, $ terms)
                 _expected = float(entry_price) if entry_price is not None else None
-                _slippage = (
-                    round(abs(fill_price - _expected) / _expected, 6)
-                    if fill_price is not None and _expected is not None and _expected > 0
-                    else None
-                )
+                _direction_for_slip = (signal.get("direction") or "BUY").upper()
+                if fill_price is not None and _expected is not None and _expected > 0:
+                    _delta = float(fill_price) - _expected
+                    _slippage = round(abs(_delta) / _expected, 6)
+                    if _direction_for_slip == "SELL":
+                        _slippage_signed = round(-_delta / _expected, 6)
+                    else:
+                        _slippage_signed = round(_delta / _expected, 6)
+                    _slippage_cost_usd = round(abs(_delta) * float(shares or 0), 4) if shares else None
+                else:
+                    _slippage = None
+                    _slippage_signed = None
+                    _slippage_cost_usd = None
                 _fill_time_ms = (
                     order_result.fill_time_ms
                     if order_result and order_result.fill_time_ms is not None
@@ -1365,9 +1399,9 @@ class PolymarketLiveExecutor:
                         confidence, size_usd, entry_price, order_id, status,
                         dry_run, error_msg, token_id, side, fill_price, shares,
                         category, signal_wallet, submitted_at, filled_at, signal_price,
-                        expected_price, slippage, fill_time_ms,
+                        expected_price, slippage, slippage_signed, slippage_cost_usd, fill_time_ms,
                         resolution_date, ask_depth_entry, signal_fired_at, wallet_tier)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                                ?, ?, ?, ?)""",
                     (
                         now_ts,
@@ -1393,6 +1427,8 @@ class PolymarketLiveExecutor:
                         _sig_price,
                         _expected,
                         _slippage,
+                        _slippage_signed,
+                        _slippage_cost_usd,
                         _fill_time_ms,
                         _resolution_ts,
                         _ask_depth,

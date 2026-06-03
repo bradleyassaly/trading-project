@@ -159,6 +159,7 @@ class ClobClient:
                 raw={},
             )
 
+        _submit_ts = time.time()
         try:
             # Polymarket uses a proxy-wallet custody model: users deposit
             # into a shared CTF-compatible proxy, and Polymarket tracks
@@ -268,14 +269,67 @@ class ClobClient:
             # rejects when book depth at our target < order size. Retry as FAK
             # (Fill And Kill) so we accept whatever the book can fill instead
             # of losing the entry entirely. Was costing ~14 SELL entries/week.
+            #
+            # 2026-06-03: Take-profit exits were 100% blocked for weeks because
+            # a prior status='live' SELL on the same token locks the entire
+            # CONDITIONAL balance ("sum of active orders == balance"). Detect
+            # that error, cancel stale orders on this asset, retry once.
+            def _post():
+                try:
+                    return client.post_order(_order, order_type=OrderType.GTC)
+                except Exception as _gtc_exc:
+                    if "FOK" in str(_gtc_exc) or "couldn't be fully filled" in str(_gtc_exc):
+                        logger.info(
+                            "[clob] GTC rejected as FOK (thin book) — retrying as FAK for partial fill"
+                        )
+                        return client.post_order(_order, order_type=OrderType.FAK)
+                    raise
             try:
-                resp = client.post_order(_order, order_type=OrderType.GTC)
-            except Exception as _gtc_exc:
-                if "FOK" in str(_gtc_exc) or "couldn't be fully filled" in str(_gtc_exc):
-                    logger.info(
-                        "[clob] GTC rejected as FOK (thin book) — retrying as FAK for partial fill"
+                resp = _post()
+            except Exception as _post_exc:
+                err = str(_post_exc).lower()
+                if (
+                    side.upper() == "SELL"
+                    and "not enough balance" in err
+                    and "active orders" in err
+                ):
+                    try:
+                        from py_clob_client_v2.clob_types import OrderMarketCancelParams
+                        cancel_resp = client.cancel_market_orders(
+                            OrderMarketCancelParams(asset_id=token_id)
+                        )
+                        n_cancelled = len(cancel_resp.get("canceled", [])) if isinstance(cancel_resp, dict) else 0
+                        logger.warning(
+                            "[clob] balance locked by stale orders on %s... — cancelled %d, retrying SELL",
+                            token_id[:12], n_cancelled,
+                        )
+                    except Exception as _cancel_exc:
+                        logger.error("[clob] cancel_market_orders failed: %s", _cancel_exc)
+                        raise _post_exc
+                    # Brief settle pause so the cancel propagates server-side
+                    time.sleep(0.5)
+                    # The CLOB rejects identical retries as "Duplicated"
+                    # because order hashes are deterministic from
+                    # (token_id, price, size, side, expiration). Perturb
+                    # price by 1 tick to change the hash. For SELL this
+                    # is slightly more aggressive (drop bid); for BUY
+                    # slightly worse (raise ask) — accepted tradeoff vs
+                    # the position staying stuck forever.
+                    _retry_price = max(0.01, min(0.99,
+                        target - 0.01 if side.upper() == "SELL" else target + 0.01
+                    ))
+                    _order = client.create_order(
+                        OrderArgs(
+                            token_id=token_id, price=_retry_price,
+                            size=float(shares_int), side=side.upper(),
+                        ),
+                        opts,
                     )
-                    resp = client.post_order(_order, order_type=OrderType.FAK)
+                    logger.info(
+                        "[clob] retry order rebuilt at %.2f (was %.2f) to dodge hash collision",
+                        _retry_price, target,
+                    )
+                    resp = _post()
                 else:
                     raise
             logger.info(
@@ -301,6 +355,25 @@ class ClobClient:
             else:
                 filled_price = None
             success = status in ("matched", "live", "delayed")
+
+            # 2026-06-03: regression guard. The YES/NO token-space confusion
+            # that drained ~$40 of BUY signals through May 7 (commit 9d8a019
+            # fixed the underlying order-format issue) leaves a forensic
+            # signature: filled_price diverges from price_hint by >0.30 in
+            # the wrong direction. If price_hint was supplied and the fill
+            # came back in a clearly different space, that's the bug coming
+            # back — surface as ERROR so it can't slip in silently again.
+            if (
+                filled_price is not None
+                and price_hint is not None
+                and abs(filled_price - price_hint) > 0.30
+            ):
+                logger.error(
+                    "[clob] YES/NO REGRESSION GUARD tripped: filled_price=%.3f "
+                    "diverged >0.30 from price_hint=%.3f on side=%s token=%s... "
+                    "target=%.3f. Investigate token_id derivation.",
+                    filled_price, price_hint, side.upper(), token_id[:12], target,
+                )
             # Capture non-success CLOB status so callers can log what happened.
             if not success:
                 err_str = f"CLOB status={status}" if status != "error" else str(resp)
@@ -314,6 +387,7 @@ class ClobClient:
                 filled_size=float(actual_usdc),
                 error_msg=err_str,
                 raw=resp,
+                fill_time_ms=int((time.time() - _submit_ts) * 1000),
             )
         except Exception as exc:
             logger.warning("place_market_order failed: %s", exc)
@@ -321,6 +395,7 @@ class ClobClient:
                 success=False, order_id=None, status="error",
                 filled_price=None, filled_size=None,
                 error_msg=str(exc), raw={},
+                fill_time_ms=int((time.time() - _submit_ts) * 1000),
             )
 
     def place_limit_order(
