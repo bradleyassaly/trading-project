@@ -77,6 +77,15 @@ SIGNAL_BANKROLL = {
     # 2026-04-25: Phase B independent signal. Decoupled from whale flow.
     # Modest 5K bankroll until validated.
     "resolution_decay":        5_000,
+
+    # 2026-06-04: confluence signals were blocking ~3K signals/day at
+    # NOT_IN_BANKROLL despite being a logical-AND quality filter
+    # (multiple distinct whale-derived signals firing on same market
+    # within 5 min). Zero historical resolved trades for either — pure
+    # probation. $500 = enough to fire ~10 paper trades/day and
+    # generate decision data within 30 days. Promote on EV > +0.10 / n>=30.
+    "confluence_2plus":          500,
+    "reversal_confluence":       500,
 }
 
 MIN_CONFIDENCE = 0.35
@@ -2245,21 +2254,40 @@ class PolymarketPaperExecutor:
             # Look up per-signal exit profile (tighter for short-horizon,
             # wider for thesis-driven). Falls back to class-level defaults.
             sig_type = pos.get("signal_type") or ""
-            prof = self._EXIT_PROFILES.get(sig_type, {})
+            prof = dict(self._EXIT_PROFILES.get(sig_type, {}))
             sl = prof.get("sl", self.STOP_LOSS)
             tp = prof.get("tp", self.TAKE_PROFIT)
             trail_act = prof.get("trail_act", self.TRAILING_STOP_ACTIVATE)
             trail_back = prof.get("trail_back", self.TRAILING_STOP_DRAWBACK)
             time_days = prof.get("time_days", self.TIME_DECAY_DAYS)
 
+            # 2026-06-02: direction-specific TP ladder for wallet_reversal SELL.
+            # Mirrors live_position_monitor._exit_profile — see that file for
+            # rationale (capture was 37% of MFE; tightened trail + earlier TP).
+            pos_dir = "BUY" if side in ("YES", "BUY") else "SELL"
+            trail_ladder = None
+            if sig_type == "wallet_reversal" and pos_dir == "SELL":
+                tp = 0.40
+                trail_ladder = [(0.50, 0.03), (0.30, 0.06), (0.15, 0.10)]
+
             # Trailing stop: once MFE exceeds activation, close if price
             # has fallen trail_back from the peak. MFE is tracked by
             # _update_mark → mfe column on each paper_trade row.
             mfe_pct = float(pos.get("mfe") or 0) / max(float(pos.get("size_usd") or 1), 1)
-            if exit_reason is None and mfe_pct >= trail_act and unrealized <= (mfe_pct - trail_back):
+            if exit_reason is None and trail_ladder:
+                for mfe_thr, back in trail_ladder:
+                    if mfe_pct >= mfe_thr and unrealized <= (mfe_pct - back):
+                        exit_reason = "trailing_stop"
+                        break
+            if exit_reason is None and not trail_ladder \
+                    and mfe_pct >= trail_act and unrealized <= (mfe_pct - trail_back):
                 exit_reason = "trailing_stop"
 
-            if exit_reason is None and unrealized <= sl:
+            # 2026-06-02: skip stop_loss for SELL at fp>=0.90 (lottery-ticket
+            # SELLs are already near max-loss; whipsaw on noise). Mirror of
+            # live_position_monitor._decide_exit logic.
+            skip_sl = pos_dir == "SELL" and entry is not None and float(entry) >= 0.90
+            if exit_reason is None and not skip_sl and unrealized <= sl:
                 exit_reason = "stop_loss"
             elif exit_reason is None and unrealized >= tp:
                 exit_reason = "take_profit"

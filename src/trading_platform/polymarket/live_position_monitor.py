@@ -121,7 +121,8 @@ def check_live_exits() -> dict[str, int]:
             SELECT id, condition_id, token_id, side, fill_price, size_usd,
                    shares, signal_type, signal_wallet, submitted_at,
                    COALESCE(mfe, 0) AS mfe, last_mark_price,
-                   entry_price, status
+                   entry_price, status, resolution_date,
+                   COALESCE(exit_attempts, 0) AS exit_attempts_so_far
             FROM live_trades
             WHERE dry_run = 0
               AND exit_ts IS NULL AND status NOT IN ('error', 'blocked')
@@ -141,9 +142,25 @@ def check_live_exits() -> dict[str, int]:
     for row in rows:
         (lid, cid, token_id, side, fill_price, size_usd, shares,
          sig_type, src_wallet, submitted_at, mfe_dollars, last_mark,
-         entry_price, trade_status) = row
+         entry_price, trade_status, resolution_date, exit_attempts_so_far) = row
         if not cid or not token_id:
             continue
+        # 2026-06-04: late-stage exit policy.
+        # Near-resolution SELL positions have no intermediate-price takers
+        # (the book is empty 1-2¢ inside the eventual outcome). Trying to
+        # exit them just churns CLOB rate budget and Telegram alerts.
+        # Once we've failed >= 5 times AND we're within 2 days of resolution,
+        # stop attempting. Let it resolve naturally. This bounds the
+        # observed pattern of 7+ positions all retrying every cycle.
+        if resolution_date and exit_attempts_so_far >= 5:
+            days_to_resolve = (float(resolution_date) - time.time()) / 86400.0
+            if 0 < days_to_resolve <= 2.0:
+                logger.info(
+                    "[live-exit] holding #%d (%s) to resolution: %.1fd left, %d attempts already",
+                    lid, sig_type, days_to_resolve, exit_attempts_so_far,
+                )
+                reasons["holding_to_resolution"] = reasons.get("holding_to_resolution", 0) + 1
+                continue
         # Use fill_price when available; fall back to entry_price for orders
         # where avgFilledPrice was 0 (FOK match without price echo).
         effective_fill = fill_price if fill_price else entry_price

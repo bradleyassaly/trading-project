@@ -33,7 +33,10 @@ from trading_platform.polymarket.db_connection import get_connection
 logger = logging.getLogger(__name__)
 
 # ── Config ────────────────────────────────────────────────────────────────
-NAIVE_COPY_MAX_OPEN = int(os.environ.get("NAIVE_COPY_MAX_OPEN", "10"))
+# 2026-06-04: bumped from 10 → 50. Shadow rows don't consume capital,
+# but the existing cap stalled accumulation after one morning of fills.
+# Bump until we have 30 resolved shadow trades for cohort validation.
+NAIVE_COPY_MAX_OPEN = int(os.environ.get("NAIVE_COPY_MAX_OPEN", "50"))
 NAIVE_COPY_STAKE_USD = float(os.environ.get("NAIVE_COPY_STAKE_USD", "5.0"))
 NAIVE_COPY_LOOKBACK_MIN = int(os.environ.get("NAIVE_COPY_LOOKBACK_MIN", "75"))
 NAIVE_COPY_LIVE_ENABLED = os.environ.get("NAIVE_COPY_LIVE_ENABLED", "0") == "1"
