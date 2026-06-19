@@ -77,7 +77,10 @@ def main():
 
     fitted = sum(1 for r in results if "brier_after" in r and "skipped" not in r)
     print(f"\nFitted + persisted: {fitted} curves")
-    print("ENABLE_PER_SLICE_CALIB=1 to activate; currently shadow mode.")
+    _live = os.environ.get("ENABLE_PER_SLICE_CALIB", "").lower() in ("1", "true", "yes")
+    print("LIVE — curves drive Kelly's calibrated confidence (ENABLE_PER_SLICE_CALIB=1)"
+          if _live else
+          "SHADOW — set ENABLE_PER_SLICE_CALIB=1 to drive Kelly sizing.")
 
 
 if __name__ == "__main__":

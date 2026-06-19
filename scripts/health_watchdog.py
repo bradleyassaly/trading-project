@@ -266,6 +266,43 @@ def check_hypothesis_drift() -> ComponentState:
         return ComponentState("hypothesis_drift", False, f"check err: {str(e)[:80]}")
 
 
+# External dead-man's switch. The in-stack watchdog cannot alert when the
+# HOST is off — it dies with the host. On 2026-06-10→15 the host PC was
+# powered off for ~5.7 days while unattended and nothing surfaced it; the
+# whole stack (watchdog + Telegram included) was down. The only way to catch
+# host-down is an OUTBOUND ping to a service OFF this host: each cycle we ping
+# HEARTBEAT_PING_URL; if those pings stop arriving, that external monitor
+# (e.g. a free healthchecks.io check with period 5m + grace) alerts the
+# operator. Set HEARTBEAT_PING_URL to the check's ping URL to enable; unset =
+# no-op (preserves current behaviour).
+HEARTBEAT_PING_URL = os.environ.get("HEARTBEAT_PING_URL", "").strip()
+# Components whose failure should escalate the external monitor to a paging
+# state (ping the /fail endpoint) rather than a plain liveness ping. Soft
+# checks (disk, hypothesis_drift) are excluded — they shouldn't page the phone.
+_HEARTBEAT_HARD_COMPONENTS = {"api", "db", "scheduler", "live_collect"}
+
+
+def _external_heartbeat(states: list[ComponentState]) -> None:
+    """Ping an external monitor so host-down is detectable off-host.
+
+    Sends a liveness ping each cycle. If any hard component is unhealthy and
+    the ping URL supports it (healthchecks.io-style), append ``/fail`` so the
+    external monitor escalates immediately instead of waiting for the grace
+    window to lapse. Best-effort: never raises, never blocks the loop.
+    """
+    if not HEARTBEAT_PING_URL:
+        return
+    hard_down = any(
+        (not s.healthy) and s.name in _HEARTBEAT_HARD_COMPONENTS for s in states
+    )
+    url = HEARTBEAT_PING_URL.rstrip("/") + "/fail" if hard_down else HEARTBEAT_PING_URL
+    try:
+        with urllib.request.urlopen(url, timeout=8.0) as resp:
+            resp.read(64)
+    except Exception as exc:  # noqa: BLE001 - heartbeat must never crash the loop
+        logger.debug("[heartbeat] external ping failed: %s", exc)
+
+
 def _send_alert(message: str, *, loud: bool = False) -> None:
     try:
         from trading_platform.polymarket.telegram_alerts import get_alerter
@@ -328,6 +365,11 @@ def main() -> None:
         in_grace = (now - startup_ts) < STARTUP_GRACE_SECONDS
         if in_grace and any(not s.healthy for s in states):
             logger.info("[grace] suppressed alerts during startup window")
+
+        # External dead-man's switch — ping off-host so a host-down event
+        # (power off, crash, network loss) surfaces even though the in-stack
+        # watchdog dies with the host. No-op unless HEARTBEAT_PING_URL is set.
+        _external_heartbeat(states)
 
         # Compute new failures and recoveries. Require N consecutive cycles
         # to avoid alerting on single-cycle blips (container restart, slow

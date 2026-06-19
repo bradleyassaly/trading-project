@@ -446,6 +446,20 @@ class PolymarketLiveExecutor:
         # Mirrors paper executor — the same overconfidence bias affects
         # live-bound signals (Brier 0.35 → 0.24 after correction).
         # Falls back to identity if curve hasn't been fit yet.
+        #
+        # 2026-06-17: pass signal_type + direction so apply_calibration uses
+        # the per-(signal × direction) curve when ENABLE_PER_SLICE_CALIB=1.
+        # The per-slice curves have been fit + persisted weekly since
+        # 2026-05-25 (refit_per_slice_calibration) and validated out-of-band
+        # (Brier whale SELL 0.41→0.21, wallet_reversal SELL 0.56→0.28,
+        # specialist SELL 0.27→0.10). Previously this call passed only
+        # `category`, so the per-slice branch never fired at trade time and
+        # the entire per-slice correction was carried by the sizing-multiplier
+        # band-aid. Wiring the calibrated curve in directly makes `confidence`
+        # trustworthy; the multipliers then self-retire toward 1.0 as the next
+        # update_sizing_multipliers refit recomputes actual_WR / mean_confidence
+        # on the now-calibrated confidence. Final size stays clamped to
+        # runtime_cap, so the transition cannot over-size.
         try:
             from trading_platform.polymarket.isotonic_calibration import apply_calibration
             raw_conf = confidence
@@ -453,6 +467,8 @@ class PolymarketLiveExecutor:
                 confidence,
                 category=(signal.get("category") or "").lower() or None,
                 db_path=self._db_path,
+                signal_type=sig_type,
+                direction=(signal.get("direction") or "").upper() or None,
             )
             if abs(confidence - raw_conf) > 0.02:
                 logger.info(
@@ -868,6 +884,25 @@ class PolymarketLiveExecutor:
                 reason=f"SELL@YES={entry_px:.3f} > {NEAR_CERTAINTY_SELL_BLOCK_HI:.2f}: near-resolved YES, NO has no upside",
             )
 
+        # 2026-06-18: per-signal SELL entry floor. Some signals only have edge
+        # on clearly-overpriced YES; their mid-range entries are near-coinflip
+        # full-stake bets with no measured edge. specialist_entry SELL by entry
+        # band (180d resolved):
+        #     YES < 0.70:  n=5,  -$15.72  (every sub-band negative)
+        #     YES >= 0.70: n=15, +$19.11  (avg +$1.27)
+        # — vs whale_entry_filtered SELL, which is profitable across ALL bands
+        # and is intentionally NOT floored. Revisit per-signal as n grows.
+        SELL_MIN_YES_ENTRY = {"specialist_entry": 0.70}
+        _sell_floor = SELL_MIN_YES_ENTRY.get(sig_type)
+        if (_sell_floor is not None and entry_px is not None
+                and entry_px < _sell_floor):
+            _reason = (f"{sig_type} SELL@YES={entry_px:.3f} < {_sell_floor:.2f}: "
+                       f"no measured edge below floor (mid-range -EV)")
+            self._record_attempt(signal, 0.0, None, None,
+                                 dry_run=self.DRY_RUN, status="blocked",
+                                 error_msg=_reason)
+            return self._result(False, reason=_reason)
+
         # 2. Kill switch check. If the switch returns a probation_cap,
         # the signal passed probation gates (>=5 resolved, positive EV,
         # acceptable WR) but hasn't hit MIN_RESOLVED_HARD — clamp size
@@ -1044,7 +1079,28 @@ class PolymarketLiveExecutor:
         # scripts/update_sizing_multipliers.py). Applied AFTER ladder cap
         # so the cap stays hard; under-confident signals can still go up
         # to the cap but no further.
-        if not is_dry:
+        #
+        # 2026-06-18: skip the multiplier for any slice the per-slice
+        # isotonic curve already calibrates — confidence (and therefore
+        # Kelly's size) is now corrected directly upstream, so applying the
+        # multiplier on top would double-correct. The multiplier stays as a
+        # fallback only for slices without a live per-slice curve. As the
+        # multiplier window fills with per-slice-calibrated confidence it
+        # would drift to ~1.0 anyway; this just removes the transient.
+        from trading_platform.polymarket.isotonic_calibration import (
+            per_slice_curve_active,
+        )
+        _per_slice_on = per_slice_curve_active(
+            sig_type, (signal.get("direction") or "").upper() or None,
+            self._db_path,
+        )
+        if not is_dry and _per_slice_on:
+            logger.info(
+                "[LIVE][CALIB_MULT] %s %s — skipped (per-slice curve active; "
+                "avoids double-correction)",
+                sig_type, signal.get("direction", "?"),
+            )
+        if not is_dry and not _per_slice_on:
             try:
                 from trading_platform.polymarket.db_connection import get_connection as _gc
                 _mc = _gc(self._db_path)

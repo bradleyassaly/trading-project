@@ -98,6 +98,61 @@ def section_slippage(conn, now_ts):
         print("  No fills with clean fill_price in last 7d (recent fix; "
               "data accumulates from here)")
 
+    # 2026-06-02: per-(signal,direction) slippage attribution. Surfaces the
+    # 47-61% BUY slippage problem at the cell level so we can see WHICH
+    # signals are paying spread and which are not. Dollar terms make the
+    # leak comparable to realized PnL columns.
+    print()
+    print("  Per-(signal, direction) slippage attribution (last 30d):")
+    rows = conn.execute("""
+        SELECT signal_type, direction,
+               COUNT(*) n,
+               AVG(slippage) avg_slip_pct,
+               SUM(slippage * size_usd / NULLIF(fill_price, 0)) slip_dollars
+          FROM live_trades
+         WHERE dry_run=0 AND slippage IS NOT NULL
+           AND fill_price > 0
+           AND attempted_at > %s
+         GROUP BY signal_type, direction
+        HAVING COUNT(*) >= 3
+         ORDER BY slip_dollars ASC NULLS LAST
+    """, (now_ts - 30 * 86400,)).fetchall()
+    if rows:
+        print(f"    {'Signal':<28} {'Dir':<5} {'n':>4} {'avg%':>7} {'$ cost':>9}")
+        for r in rows:
+            sig, dire, n, slip_pct, slip_dol = r
+            slip_pct_f = float(slip_pct or 0) * 100
+            slip_dol_f = float(slip_dol or 0)
+            print(f"    {str(sig):<28} {str(dire):<5} {int(n):>4} "
+                  f"{slip_pct_f:>+6.1f}% ${slip_dol_f:>+7.2f}")
+
+    # Worst per-trade offenders — these are where the dollars actually leaked
+    print()
+    print("  Top-10 worst per-trade slippage hits (last 30d):")
+    rows = conn.execute("""
+        SELECT id, signal_type, direction,
+               entry_price, fill_price, slippage,
+               size_usd,
+               slippage * size_usd / NULLIF(fill_price, 0) slip_dollars,
+               LEFT(question, 40) q
+          FROM live_trades
+         WHERE dry_run=0 AND slippage IS NOT NULL
+           AND fill_price > 0 AND size_usd > 0
+           AND attempted_at > %s
+         ORDER BY slip_dollars ASC NULLS LAST
+         LIMIT 10
+    """, (now_ts - 30 * 86400,)).fetchall()
+    if rows:
+        print(f"    {'#id':<7} {'sig':<22} {'dir':<5} {'entry→fill':<14} "
+              f"{'sz':>6} {'cost':>8}")
+        for r in rows:
+            tid, sig, dire, ep, fp, slip, sz, dol, q = r
+            ep_f = float(ep or 0); fp_f = float(fp or 0)
+            print(f"    #{int(tid):<6} {str(sig):<22} {str(dire):<5} "
+                  f"{ep_f:.3f}→{fp_f:.3f}  ${float(sz or 0):>5.1f} "
+                  f"${float(dol or 0):>+6.2f}")
+            print(f"         {str(q)}")
+
 
 def section_trailing_leak(conn, now_ts):
     section("3. TRAILING-STOP LEAKAGE (peak vs exit, last 14d)")
@@ -187,6 +242,44 @@ def section_calibration(conn, args):
                   f"{age_h:>5.1f}h")
     else:
         print("  No multipliers in table yet")
+
+    # 2026-06-18: calibration-vs-multiplier convergence tracker. Per-slice
+    # isotonic calibration now drives Kelly's confidence (ENABLE_PER_SLICE_CALIB
+    # + executor passes signal_type/direction). As confidence calibrates, the
+    # multiplier (= actual_WR / mean_confidence) should drift toward 1.0 — that
+    # is the signal the band-aid is retiring. This block surfaces the drift so
+    # we can confirm convergence before removing the multiplier read entirely.
+    conv = conn.execute("""
+        SELECT lt.signal_type, lt.direction,
+               COUNT(*) n,
+               AVG(lt.confidence) mean_conf,
+               AVG(CASE WHEN lt.outcome='win' THEN 1.0 ELSE 0.0 END) wr,
+               MAX(m.multiplier) mult
+          FROM live_trades lt
+          LEFT JOIN signal_sizing_multipliers m
+                 ON m.signal_type = lt.signal_type AND m.direction = lt.direction
+         WHERE lt.dry_run=0 AND lt.outcome IN ('win','loss')
+           AND lt.confidence IS NOT NULL
+           AND lt.exit_ts >= EXTRACT(EPOCH FROM NOW())::BIGINT - 30*86400
+         GROUP BY 1,2
+        HAVING COUNT(*) >= 8
+         ORDER BY 3 DESC
+    """).fetchall()
+    if conv:
+        print()
+        print("  Calib→multiplier convergence (30d; mult should approach 1.0):")
+        print(f"    {'Signal':<24}{'Dir':<5}{'n':>3} {'calibConf':>9} {'WR':>6} "
+              f"{'mult':>6}  status")
+        for r in conv:
+            sig, di, n, mc, wr, mult = r
+            mc = float(mc or 0); wr = float(wr or 0)
+            mult = float(mult) if mult is not None else 1.0
+            # Converged when the live multiplier is within ~20% of 1.0 — i.e.
+            # calibrated confidence already matches realized WR, band-aid idle.
+            status = "converged" if 0.8 <= mult <= 1.25 else "correcting"
+            gap = wr - mc  # residual miscalibration the multiplier still patches
+            print(f"    {str(sig):<24}{str(di):<5}{int(n):>3} {mc:>9.3f} "
+                  f"{wr:>6.0%} {mult:>5.2f}x  {status} (WR−conf={gap:+.2f})")
 
     if args.apply_multipliers:
         print()

@@ -429,14 +429,30 @@ SCHEDULE: list[Task] = [
     Task(
         # 2026-05-25: per-(signal × direction) calibration refit. Reads
         # live_trades.confidence vs outcome; fits isotonic per slice.
-        # Currently SHADOW — set ENABLE_PER_SLICE_CALIB=1 to swap into
-        # Kelly sizing. Analyzer proved Brier 0.58→0.26 on biggest slice.
+        # 2026-06-17: now LIVE — ENABLE_PER_SLICE_CALIB=1 and the live
+        # executor passes signal_type+direction into apply_calibration, so
+        # these curves drive Kelly's calibrated confidence directly. The
+        # sizing multipliers self-retire toward 1.0 as confidence calibrates.
         # Weekly cadence — Brier changes slowly and live data accumulates
         # at ~6 trades/day, so 7d gives ~40 new samples per fit.
         name="refit_per_slice_calibration",
         cmd="python /app/scripts/refit_per_slice_calibration.py",
         interval_seconds=7 * 24 * 3600,
-        description="Weekly per-slice calibration refit (shadow until env enabled)",
+        description="Weekly per-slice calibration refit (live; drives Kelly confidence)",
+    ),
+    Task(
+        # 2026-06-17: book resolved-but-unbooked live positions from the
+        # data-api truth. The live monitor only books a loss on DUST token
+        # balance; when a market resolves against a SELL we hold a full
+        # balance of now-worthless NO tokens, so the loss never books and
+        # the position sits open forever (8 such on 2026-06-17, -$22.28,
+        # equity overstated). This sweeps them daily using the Gamma-
+        # independent /positions endpoint (redeemable + cashPnl). Idempotent
+        # and auditable (exit_reason='resolved_databook').
+        name="book_resolved_positions",
+        cmd="python /app/scripts/book_resolved_positions.py --apply",
+        interval_seconds=24 * 3600,
+        description="Daily: book resolved positions from data-api (anti-stuck)",
     ),
     Task(
         name="circuit_breaker_daily_reset",
