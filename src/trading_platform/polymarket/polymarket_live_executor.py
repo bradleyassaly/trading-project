@@ -756,6 +756,31 @@ class PolymarketLiveExecutor:
             if boosted > size_usd:
                 logger.info("[LIVE][SPECIALIST_BOOST] size $%.2f → $%.2f", size_usd, boosted)
                 size_usd = boosted
+        # 1a-ii. Earliness boost + collapsed-form gate (Phase 2, 2026-07-02).
+        # Paper has applied the [0.7, 1.3] earliness multiplier since
+        # 04-24; live never did. Additionally: a wallet at the 0.70-0.75
+        # floor means its recent EWMA WR is far below lifetime — lifetime
+        # WR is survivorship-biased and this wallet is likely "was smart
+        # money". Don't copy it live at all.
+        _e_wallet = signal.get("wallet") or signal.get("source_wallet") or ""
+        if _e_wallet and _e_wallet not in ("velocity_detector", "order_book_monitor"):
+            try:
+                from trading_platform.polymarket.wallet_earliness import get_earliness_boost
+                _eboost = float(get_earliness_boost(
+                    _e_wallet, (signal.get("category") or ""), db_path=self._db_path))
+            except Exception:
+                _eboost = 1.0
+            if _eboost <= 0.75:
+                _reason = (f"earliness gate: {_e_wallet[:14]} recent form collapsed "
+                           f"(boost {_eboost:.2f} <= 0.75)")
+                self._record_attempt(signal, 0.0, None, None,
+                                     dry_run=self.DRY_RUN, status="blocked",
+                                     error_msg=_reason)
+                return self._result(False, reason=_reason)
+            if _eboost != 1.0 and size_usd > 0:
+                logger.info("[LIVE][EARLINESS] %s in %s ×%.2f",
+                            _e_wallet[:14], signal.get("category"), _eboost)
+                size_usd = min(phase1_cap, size_usd * _eboost)
         if size_usd <= 0:
             return self._block(signal, f"Kelly says no edge for {sig_type}")
 
