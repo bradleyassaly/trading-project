@@ -361,7 +361,8 @@ class PolymarketLiveExecutor:
                 )
                 # Lazy-add columns that pre-date this schema — idempotent.
                 for col_ddl in ("outcome TEXT", "exit_ts INTEGER", "signal_price REAL",
-                                "whale_trade_ts BIGINT", "detection_latency_sec REAL"):
+                                "whale_trade_ts BIGINT", "detection_latency_sec REAL",
+                                "slippage_signed REAL", "slippage_cost_usd REAL"):
                     try:
                         conn.execute(f"ALTER TABLE live_trades ADD COLUMN {col_ddl}")
                     except Exception:
@@ -465,6 +466,20 @@ class PolymarketLiveExecutor:
         # Mirrors paper executor — the same overconfidence bias affects
         # live-bound signals (Brier 0.35 → 0.24 after correction).
         # Falls back to identity if curve hasn't been fit yet.
+        #
+        # 2026-06-17: pass signal_type + direction so apply_calibration uses
+        # the per-(signal × direction) curve when ENABLE_PER_SLICE_CALIB=1.
+        # The per-slice curves have been fit + persisted weekly since
+        # 2026-05-25 (refit_per_slice_calibration) and validated out-of-band
+        # (Brier whale SELL 0.41→0.21, wallet_reversal SELL 0.56→0.28,
+        # specialist SELL 0.27→0.10). Previously this call passed only
+        # `category`, so the per-slice branch never fired at trade time and
+        # the entire per-slice correction was carried by the sizing-multiplier
+        # band-aid. Wiring the calibrated curve in directly makes `confidence`
+        # trustworthy; the multipliers then self-retire toward 1.0 as the next
+        # update_sizing_multipliers refit recomputes actual_WR / mean_confidence
+        # on the now-calibrated confidence. Final size stays clamped to
+        # runtime_cap, so the transition cannot over-size.
         try:
             from trading_platform.polymarket.isotonic_calibration import apply_calibration
             raw_conf = confidence
@@ -472,6 +487,8 @@ class PolymarketLiveExecutor:
                 confidence,
                 category=(signal.get("category") or "").lower() or None,
                 db_path=self._db_path,
+                signal_type=sig_type,
+                direction=(signal.get("direction") or "").upper() or None,
             )
             if abs(confidence - raw_conf) > 0.02:
                 logger.info(
@@ -620,6 +637,28 @@ class PolymarketLiveExecutor:
                 return self._block(signal, f"circuit breaker: {cb_reason}")
         except Exception as exc:
             logger.debug("circuit breaker check failed (proceeding): %s", exc)
+
+        # 0b'. Forward-looking VaR gate (Phase 3 — vol-aware risk).
+        # Halts new entries if last 30d VaR(5%) already exceeds VAR_HARD_CAP_FRAC
+        # of equity. Defaults off (shadow). Set ENABLE_VAR_GATE=1 to enforce.
+        try:
+            import os as _os
+            if _os.environ.get("ENABLE_VAR_GATE", "0").lower() in ("1", "true", "yes"):
+                from trading_platform.polymarket.portfolio_risk import assess as _pf_assess
+                _pf = _pf_assess()
+                _cap = float(_os.environ.get("VAR_HARD_CAP_FRAC", "0.10"))
+                _frac = _pf.get("var5_frac")
+                if _frac is not None and _frac > _cap:
+                    logger.warning(
+                        "[LIVE] VaR gate blocked: VaR(5%%)=%.1f%% > cap %.1f%%",
+                        _frac * 100, _cap * 100,
+                    )
+                    return self._block(
+                        signal,
+                        f"VaR(5%) {_frac*100:.1f}% exceeds cap {_cap*100:.0f}%",
+                    )
+        except Exception as exc:
+            logger.debug("VaR gate check failed (proceeding): %s", exc)
 
         # 0c. Specialist boost (mirrors paper executor ~L628). Specialist
         # wallets trading in their proven category earn 1.25x confidence
@@ -925,6 +964,25 @@ class PolymarketLiveExecutor:
                 reason=f"SELL@YES={entry_px:.3f} > {NEAR_CERTAINTY_SELL_BLOCK_HI:.2f}: near-resolved YES, NO has no upside",
             )
 
+        # 2026-06-18: per-signal SELL entry floor. Some signals only have edge
+        # on clearly-overpriced YES; their mid-range entries are near-coinflip
+        # full-stake bets with no measured edge. specialist_entry SELL by entry
+        # band (180d resolved):
+        #     YES < 0.70:  n=5,  -$15.72  (every sub-band negative)
+        #     YES >= 0.70: n=15, +$19.11  (avg +$1.27)
+        # — vs whale_entry_filtered SELL, which is profitable across ALL bands
+        # and is intentionally NOT floored. Revisit per-signal as n grows.
+        SELL_MIN_YES_ENTRY = {"specialist_entry": 0.70}
+        _sell_floor = SELL_MIN_YES_ENTRY.get(sig_type)
+        if (_sell_floor is not None and entry_px is not None
+                and entry_px < _sell_floor):
+            _reason = (f"{sig_type} SELL@YES={entry_px:.3f} < {_sell_floor:.2f}: "
+                       f"no measured edge below floor (mid-range -EV)")
+            self._record_attempt(signal, 0.0, None, None,
+                                 dry_run=self.DRY_RUN, status="blocked",
+                                 error_msg=_reason)
+            return self._result(False, reason=_reason)
+
         # 2. Kill switch check. If the switch returns a probation_cap,
         # the signal passed probation gates (>=5 resolved, positive EV,
         # acceptable WR) but hasn't hit MIN_RESOLVED_HARD — clamp size
@@ -1101,7 +1159,28 @@ class PolymarketLiveExecutor:
         # scripts/update_sizing_multipliers.py). Applied AFTER ladder cap
         # so the cap stays hard; under-confident signals can still go up
         # to the cap but no further.
-        if not is_dry:
+        #
+        # 2026-06-18: skip the multiplier for any slice the per-slice
+        # isotonic curve already calibrates — confidence (and therefore
+        # Kelly's size) is now corrected directly upstream, so applying the
+        # multiplier on top would double-correct. The multiplier stays as a
+        # fallback only for slices without a live per-slice curve. As the
+        # multiplier window fills with per-slice-calibrated confidence it
+        # would drift to ~1.0 anyway; this just removes the transient.
+        from trading_platform.polymarket.isotonic_calibration import (
+            per_slice_curve_active,
+        )
+        _per_slice_on = per_slice_curve_active(
+            sig_type, (signal.get("direction") or "").upper() or None,
+            self._db_path,
+        )
+        if not is_dry and _per_slice_on:
+            logger.info(
+                "[LIVE][CALIB_MULT] %s %s — skipped (per-slice curve active; "
+                "avoids double-correction)",
+                sig_type, signal.get("direction", "?"),
+            )
+        if not is_dry and not _per_slice_on:
             try:
                 from trading_platform.polymarket.db_connection import get_connection as _gc
                 _mc = _gc(self._db_path)
@@ -1409,14 +1488,26 @@ class PolymarketLiveExecutor:
             try:
                 _sig_price_raw = signal.get("entry_price") or signal.get("price")
                 _sig_price = float(_sig_price_raw) if _sig_price_raw is not None else None
-                # expected_price = CLOB mid at submission.
-                # slippage_pct = |fill - expected| / expected (unsigned; gate = ≤2%).
+                # expected_price = our target (signal entry).
+                # slippage = |fill - expected| / expected  (legacy unsigned; kept for back-compat gate).
+                # slippage_signed = adverse-direction slippage; positive = bad.
+                #   BUY:  (fill - expected) / expected   (paid more than target)
+                #   SELL: (expected - fill) / expected   (sold below target)
+                # slippage_cost_usd = |fill - expected| × shares (always nonneg, $ terms)
                 _expected = float(entry_price) if entry_price is not None else None
-                _slippage = (
-                    round(abs(fill_price - _expected) / _expected, 6)
-                    if fill_price is not None and _expected is not None and _expected > 0
-                    else None
-                )
+                _direction_for_slip = (signal.get("direction") or "BUY").upper()
+                if fill_price is not None and _expected is not None and _expected > 0:
+                    _delta = float(fill_price) - _expected
+                    _slippage = round(abs(_delta) / _expected, 6)
+                    if _direction_for_slip == "SELL":
+                        _slippage_signed = round(-_delta / _expected, 6)
+                    else:
+                        _slippage_signed = round(_delta / _expected, 6)
+                    _slippage_cost_usd = round(abs(_delta) * float(shares or 0), 4) if shares else None
+                else:
+                    _slippage = None
+                    _slippage_signed = None
+                    _slippage_cost_usd = None
                 _fill_time_ms = (
                     order_result.fill_time_ms
                     if order_result and order_result.fill_time_ms is not None
@@ -1451,10 +1542,10 @@ class PolymarketLiveExecutor:
                         confidence, size_usd, entry_price, order_id, status,
                         dry_run, error_msg, token_id, side, fill_price, shares,
                         category, signal_wallet, submitted_at, filled_at, signal_price,
-                        expected_price, slippage, fill_time_ms,
+                        expected_price, slippage, slippage_signed, slippage_cost_usd, fill_time_ms,
                         resolution_date, ask_depth_entry, signal_fired_at, wallet_tier,
                         whale_trade_ts, detection_latency_sec)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                                ?, ?, ?, ?, ?, ?)""",
                     (
                         now_ts,
@@ -1480,6 +1571,8 @@ class PolymarketLiveExecutor:
                         _sig_price,
                         _expected,
                         _slippage,
+                        _slippage_signed,
+                        _slippage_cost_usd,
                         _fill_time_ms,
                         _resolution_ts,
                         _ask_depth,

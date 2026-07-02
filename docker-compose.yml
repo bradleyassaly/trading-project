@@ -58,6 +58,13 @@ services:
       # Mirror lane flags so /api/ladder/status reports them correctly.
       - LIVE_DISCOVERY_ENABLED=1
       - PHASE_B_RESOLUTION_DECAY_ENABLED=1
+      # 2026-06-02: per-slice calibration ACTIVE. Shadow data (5 days)
+      # confirmed Brier 0.58→0.18 on top signals; current calibration is
+      # provably INVERTED at 0.50+ confidence band (mean conf 0.59 →
+      # actual WR 25%). Wait-14-days was insurance against unknown
+      # unknowns; data already proves the case. See execution audit
+      # 2026-06-02 in chat log.
+      - ENABLE_PER_SLICE_CALIB=1
     depends_on:
       postgres:
         condition: service_healthy
@@ -121,6 +128,8 @@ services:
       # Phase B independent signal feature flag (see live-collect block).
       # Enabled here so the scheduler task can read it.
       - PHASE_B_RESOLUTION_DECAY_ENABLED=1
+      # 2026-06-02: per-slice calibration active for scheduled tasks.
+      - ENABLE_PER_SLICE_CALIB=1
     restart: unless-stopped
     # 2026-04-18: bumped from 512m → 2g. compute-open-positions was
     # OOM-killed (exit=137) every 2h for 36+ hours; loads pandas +
@@ -187,6 +196,8 @@ services:
       # through the same FAV_GATE / SIDE_GATE / calibration / Kelly
       # stack, so a bad signal can't escape the existing guards.
       - PHASE_B_RESOLUTION_DECAY_ENABLED=1
+      # 2026-06-02: per-slice calibration ACTIVE. Same rationale as api block.
+      - ENABLE_PER_SLICE_CALIB=1
     restart: unless-stopped
     mem_limit: 2g
     memswap_limit: 2g
@@ -316,6 +327,12 @@ services:
       - POSTGRES_PASSWORD=polymarket_dev
       - POSTGRES_DB=polymarket
       - DB_BACKEND=postgres
+      # External dead-man's switch. Set this in .env to a healthchecks.io
+      # (or similar) ping URL with period 5m + grace ~10m. When the HOST is
+      # off, these pings stop and the EXTERNAL monitor pages you — the one
+      # failure mode the in-stack watchdog can't catch (see 2026-06-10→15
+      # ~5.7d unattended host-off). Empty = disabled (no behaviour change).
+      - HEARTBEAT_PING_URL=${HEARTBEAT_PING_URL:-}
     restart: unless-stopped
     mem_limit: 256m
     memswap_limit: 256m

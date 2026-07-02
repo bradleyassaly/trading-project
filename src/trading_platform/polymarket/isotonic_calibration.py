@@ -518,6 +518,28 @@ def apply_calibration(
     return bp_y[0] if i < 0 else bp_y[i]
 
 
+def per_slice_curve_active(signal_type: str | None, direction: str | None,
+                           db_path: str | None = None) -> bool:
+    """True when per-slice calibration is enabled AND a non-empty per-(signal
+    × direction) curve exists — i.e. apply_calibration() is already correcting
+    this slice's confidence directly.
+
+    Callers (the live executor) use this to avoid double-correcting: the
+    sizing-multiplier band-aid should be SKIPPED for any slice the per-slice
+    curve already calibrates, and kept only as a fallback for uncovered slices.
+    """
+    import os as _os
+    if _os.environ.get("ENABLE_PER_SLICE_CALIB", "").lower() not in ("1", "true", "yes"):
+        return False
+    if not signal_type or not direction:
+        return False
+    try:
+        _load_per_slice_curve(signal_type, direction, db_path)
+        return bool((_per_slice_cache.get((signal_type, direction)) or {}).get("bp_x"))
+    except Exception:
+        return False
+
+
 def main() -> int:
     """Fit global curve + per-category curves for any category with
     enough resolved data. Per-category curves take precedence at

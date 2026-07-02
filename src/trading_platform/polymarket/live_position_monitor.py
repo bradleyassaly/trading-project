@@ -26,22 +26,43 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
-def _exit_profile(signal_type: str) -> dict[str, float]:
-    """Per-signal exit thresholds — must mirror paper_executor's profiles
-    so live behavior matches what the paper data calibrated.
+def _exit_profile(signal_type: str, direction: str = "BUY") -> dict[str, Any]:
+    """Per-(signal, direction) exit thresholds.
+
+    Mirrors paper_executor's profiles so live behavior matches what the paper
+    data calibrated. Direction-specific overrides apply on top.
+
+    2026-06-02: added direction-specific override for wallet_reversal SELL.
+    Audit (90d) showed wallet_reversal SELL captured only ~37% of MFE vs
+    84-99% on other (signal, direction) cells. Root cause: single trail tier
+    (act=0.30, back=0.15) is too loose for the volatile NO-side moves
+    these positions ride. Tighter ladder + earlier TP gets us closer to
+    the per-MFE peak.
     """
     from trading_platform.polymarket.polymarket_paper_executor import (
         PolymarketPaperExecutor,
     )
     profiles = getattr(PolymarketPaperExecutor, "_EXIT_PROFILES", {})
-    default = {
+    default: dict[str, Any] = {
         "sl": getattr(PolymarketPaperExecutor, "STOP_LOSS", -0.25),
         "tp": getattr(PolymarketPaperExecutor, "TAKE_PROFIT", 0.40),
         "trail_act": getattr(PolymarketPaperExecutor, "TRAILING_STOP_ACTIVATE", 0.20),
         "trail_back": getattr(PolymarketPaperExecutor, "TRAILING_STOP_DRAWBACK", 0.10),
         "time_days": getattr(PolymarketPaperExecutor, "TIME_DECAY_DAYS", 30),
     }
-    return {**default, **profiles.get(signal_type, {})}
+    merged: dict[str, Any] = {**default, **profiles.get(signal_type, {})}
+
+    # Direction-specific override: wallet_reversal SELL needs tighter capture.
+    # Tiered trail: as MFE grows, tighten trail_back to lock in more of the move.
+    if signal_type == "wallet_reversal" and direction == "SELL":
+        merged["tp"] = 0.40  # was 0.60 — fire earlier (was leaking giant winners)
+        merged["trail_ladder"] = [
+            # (mfe_threshold, trail_back)  — first match wins, evaluate top→bottom
+            (0.50, 0.03),  # MFE >= 50% → exit on 3pp pullback (very tight)
+            (0.30, 0.06),  # MFE >= 30% → 6pp
+            (0.15, 0.10),  # MFE >= 15% → 10pp (early lock-in tier)
+        ]
+    return merged
 
 
 def _decide_exit(
@@ -53,15 +74,34 @@ def _decide_exit(
     age_days: float,
     profile: dict,
 ) -> str | None:
-    """Pure-function exit decision. Returns reason or None."""
+    """Pure-function exit decision. Returns reason or None.
+
+    2026-06-02: stop_loss is now SKIPPED for SELL entries at fp>=0.90.
+    Audit showed 71 stop_loss exits for -$57.20 total — biggest single
+    loss category. For "lottery ticket" SELLs at fp=0.99 (NO at 1¢),
+    the position is already near max-loss at entry: there's effectively
+    nothing to stop out from. The stop_loss gate fires on noise as YES
+    ticks up briefly, then YES often retreats. Whipsaw.
+    Trailing_stop + take_profit still apply (those exit on real moves).
+    For SELL at fp < 0.90 (mid-band), stop_loss still fires as designed.
+    """
     if side in ("YES", "BUY"):
         unrealized = (current - entry) / max(entry, 0.01)
     else:
         unrealized = (entry - current) / max(1 - entry, 0.01)
 
-    if mfe_pct >= profile["trail_act"] and unrealized <= (mfe_pct - profile["trail_back"]):
+    # Tiered trail (multi-level TP ladder): profile["trail_ladder"] = [(mfe, back), ...]
+    # Top-down, first match wins. Tighter trail at higher MFE locks in winners.
+    ladder = profile.get("trail_ladder")
+    if ladder:
+        for mfe_threshold, back in ladder:
+            if mfe_pct >= mfe_threshold and unrealized <= (mfe_pct - back):
+                return "trailing_stop"
+    elif mfe_pct >= profile["trail_act"] and unrealized <= (mfe_pct - profile["trail_back"]):
         return "trailing_stop"
-    if unrealized <= profile["sl"]:
+    # Skip stop_loss for high-fp SELLs (lottery tickets — can't stop)
+    skip_sl = (side not in ("YES", "BUY")) and entry is not None and entry >= 0.90
+    if not skip_sl and unrealized <= profile["sl"]:
         return "stop_loss"
     if unrealized >= profile["tp"]:
         return "take_profit"
@@ -81,10 +121,12 @@ def check_live_exits() -> dict[str, int]:
             SELECT id, condition_id, token_id, side, fill_price, size_usd,
                    shares, signal_type, signal_wallet, submitted_at,
                    COALESCE(mfe, 0) AS mfe, last_mark_price,
-                   entry_price, status
+                   entry_price, status, resolution_date,
+                   COALESCE(exit_attempts, 0) AS exit_attempts_so_far
             FROM live_trades
             WHERE dry_run = 0
               AND exit_ts IS NULL AND status NOT IN ('error', 'blocked')
+              AND COALESCE(exit_stuck, 0) = 0
         """).fetchall()
     finally:
         try: conn.close()
@@ -100,9 +142,25 @@ def check_live_exits() -> dict[str, int]:
     for row in rows:
         (lid, cid, token_id, side, fill_price, size_usd, shares,
          sig_type, src_wallet, submitted_at, mfe_dollars, last_mark,
-         entry_price, trade_status) = row
+         entry_price, trade_status, resolution_date, exit_attempts_so_far) = row
         if not cid or not token_id:
             continue
+        # 2026-06-04: late-stage exit policy.
+        # Near-resolution SELL positions have no intermediate-price takers
+        # (the book is empty 1-2¢ inside the eventual outcome). Trying to
+        # exit them just churns CLOB rate budget and Telegram alerts.
+        # Once we've failed >= 5 times AND we're within 2 days of resolution,
+        # stop attempting. Let it resolve naturally. This bounds the
+        # observed pattern of 7+ positions all retrying every cycle.
+        if resolution_date and exit_attempts_so_far >= 5:
+            days_to_resolve = (float(resolution_date) - time.time()) / 86400.0
+            if 0 < days_to_resolve <= 2.0:
+                logger.info(
+                    "[live-exit] holding #%d (%s) to resolution: %.1fd left, %d attempts already",
+                    lid, sig_type, days_to_resolve, exit_attempts_so_far,
+                )
+                reasons["holding_to_resolution"] = reasons.get("holding_to_resolution", 0) + 1
+                continue
         # Use fill_price when available; fall back to entry_price for orders
         # where avgFilledPrice was 0 (FOK match without price echo).
         effective_fill = fill_price if fill_price else entry_price
@@ -131,7 +189,9 @@ def check_live_exits() -> dict[str, int]:
             else:
                 unrealized_dollars = unrealized_pct * float(size_usd or 0)
 
-        prof = _exit_profile(sig_type or "")
+        # Direction-specific profile (e.g., wallet_reversal SELL has tighter trail ladder)
+        direction = "BUY" if side in ("YES", "BUY") else "SELL"
+        prof = _exit_profile(sig_type or "", direction)
 
         # Update mark + MAE/MFE in DB.
         # `current` is YES-space price (clob.get_mid_price always returns YES).
@@ -314,10 +374,53 @@ def check_live_exits() -> dict[str, int]:
             price_hint=exit_price_hint,
         )
         if not order_result.success:
+            # Track retry state. After 5 attempts: telegram alert.
+            # After 20 attempts: mark stuck and stop trying.
+            try:
+                conn = get_connection()
+                try:
+                    conn.execute(
+                        """UPDATE live_trades
+                              SET exit_attempts = exit_attempts + 1,
+                                  exit_first_attempt_at = COALESCE(exit_first_attempt_at, %s),
+                                  exit_last_error = %s,
+                                  exit_stuck = CASE WHEN exit_attempts + 1 >= 20 THEN 1 ELSE 0 END
+                            WHERE id = %s""",
+                        (int(time.time()), (order_result.error_msg or "")[:500], lid),
+                    )
+                    new_attempts_row = conn.execute(
+                        "SELECT exit_attempts, exit_stuck FROM live_trades WHERE id = %s", (lid,)
+                    ).fetchone()
+                    conn.commit()
+                finally:
+                    try: conn.close()
+                    except Exception: pass
+            except Exception as _exc:
+                logger.debug("[live-exit] retry-state update failed for #%d: %s", lid, _exc)
+                new_attempts_row = None
+
+            attempts = int(new_attempts_row[0]) if new_attempts_row else 0
+            stuck = int(new_attempts_row[1]) if new_attempts_row else 0
             logger.warning(
-                "[live-exit] %s exit blocked for #%d (%s) — sell failed: %s",
-                exit_reason, lid, sig_type, order_result.error_msg,
+                "[live-exit] %s exit blocked for #%d (%s) attempts=%d stuck=%d — sell failed: %s",
+                exit_reason, lid, sig_type, attempts, stuck,
+                (order_result.error_msg or "")[:120],
             )
+            # Escalate via Telegram at attempts 5 and 20 (entry into stuck state).
+            if attempts in (5, 20):
+                try:
+                    from trading_platform.polymarket.telegram_alerts import get_alerter
+                    alerter = get_alerter()
+                    severity = "STUCK" if stuck else "RETRYING"
+                    alerter._send(
+                        f"⚠️ <b>EXIT {severity}</b>\n"
+                        f"#{lid} {sig_type} {exit_reason}\n"
+                        f"attempts={attempts}, size=${size_usd}\n"
+                        f"last: {(order_result.error_msg or '')[:200]}",
+                        disable_notification=(attempts < 20),
+                    )
+                except Exception:
+                    pass
             continue
 
         # 2026-05-28 BUG FIX: verify the on-chain balance actually dropped
@@ -522,7 +625,9 @@ def check_paper_exits() -> dict[str, int]:
             paper_shares = float(shares or 0) or (float(size_usd or 0) / max(1.0 - entry, 0.01))
             unrealized_dollars = unrealized_pct * float(size_usd or 0)
 
-        prof = _exit_profile(sig_type or "")
+        # Direction-specific profile (e.g., wallet_reversal SELL has tighter trail ladder)
+        direction = "BUY" if want_yes else "SELL"
+        prof = _exit_profile(sig_type or "", direction)
 
         # Update mark in DB.
         try:

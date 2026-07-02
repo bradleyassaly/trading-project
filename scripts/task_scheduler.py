@@ -429,14 +429,30 @@ SCHEDULE: list[Task] = [
     Task(
         # 2026-05-25: per-(signal × direction) calibration refit. Reads
         # live_trades.confidence vs outcome; fits isotonic per slice.
-        # Currently SHADOW — set ENABLE_PER_SLICE_CALIB=1 to swap into
-        # Kelly sizing. Analyzer proved Brier 0.58→0.26 on biggest slice.
+        # 2026-06-17: now LIVE — ENABLE_PER_SLICE_CALIB=1 and the live
+        # executor passes signal_type+direction into apply_calibration, so
+        # these curves drive Kelly's calibrated confidence directly. The
+        # sizing multipliers self-retire toward 1.0 as confidence calibrates.
         # Weekly cadence — Brier changes slowly and live data accumulates
         # at ~6 trades/day, so 7d gives ~40 new samples per fit.
         name="refit_per_slice_calibration",
         cmd="python /app/scripts/refit_per_slice_calibration.py",
         interval_seconds=7 * 24 * 3600,
-        description="Weekly per-slice calibration refit (shadow until env enabled)",
+        description="Weekly per-slice calibration refit (live; drives Kelly confidence)",
+    ),
+    Task(
+        # 2026-06-17: book resolved-but-unbooked live positions from the
+        # data-api truth. The live monitor only books a loss on DUST token
+        # balance; when a market resolves against a SELL we hold a full
+        # balance of now-worthless NO tokens, so the loss never books and
+        # the position sits open forever (8 such on 2026-06-17, -$22.28,
+        # equity overstated). This sweeps them daily using the Gamma-
+        # independent /positions endpoint (redeemable + cashPnl). Idempotent
+        # and auditable (exit_reason='resolved_databook').
+        name="book_resolved_positions",
+        cmd="python /app/scripts/book_resolved_positions.py --apply",
+        interval_seconds=24 * 3600,
+        description="Daily: book resolved positions from data-api (anti-stuck)",
     ),
     Task(
         name="circuit_breaker_daily_reset",
@@ -632,6 +648,29 @@ SCHEDULE: list[Task] = [
         description="Phase B: resolution-time decay independent signal",
     ),
     Task(
+        # 2026-06-03: naive-copy experiment. Shadow lane (dry_run=1) testing
+        # whether copying the top-50 high-WR cohort produces the +13.7%/47d
+        # ROI seen in the per-dollar backtest. Existing signal pipeline
+        # bypassed entirely — pure wallet-mirror.
+        # Promote to live (dry_run=0) by setting NAIVE_COPY_LIVE_ENABLED=1
+        # in api/live-collect environment ONLY AFTER 30 resolved shadow
+        # trades show EV > +$0.10/trade with WR > 55%.
+        name="naive_copy_signal",
+        cmd="python -m trading_platform.polymarket.naive_copy_signal",
+        interval_seconds=10 * 60,
+        description="Naive copy experiment: shadow BUYs from top-50 high-WR cohort",
+    ),
+    Task(
+        # 2026-06-03: rolling-window wallet quality recompute. Powers
+        # naive_copy cohort selection. Replaces alpha_score's lifetime-PnL
+        # weighting which surfaced volatile event winners (top-10 lost 36%
+        # in our 47d test window).
+        name="wallet_quality_recompute",
+        cmd="python -m trading_platform.polymarket.wallet_quality",
+        interval_seconds=6 * 3600,
+        description="Rolling 60d wallet quality score (wq_*) for cohort selection",
+    ),
+    Task(
         # 2026-04-30: Phase C — BTC 5-minute order-book imbalance +
         # velocity strategy. Highest sample-rate alpha (~288 markets/day
         # on BTC alone). Behind PHASE_C_BTC_5MIN_ENABLED. 60s cadence
@@ -639,7 +678,8 @@ SCHEDULE: list[Task] = [
         name="btc_5min_strategy",
         cmd="python -m trading_platform.polymarket.btc_5min_strategy",
         interval_seconds=60,
-        description="Phase C: BTC 5-min OB imbalance + velocity",
+        description="Phase C: BTC 5-min OB imbalance + velocity (DISABLED 2026-06-03: orphan, 0 live trades)",
+        enabled=False,
     ),
     Task(
         # 2026-04-30: Tick collector for crypto 5-min markets — fills
@@ -649,7 +689,8 @@ SCHEDULE: list[Task] = [
         name="crypto_5min_tick_collector",
         cmd="python -m trading_platform.polymarket.crypto_5min_tick_collector",
         interval_seconds=30,
-        description="Phase C: poll-based tick collection for 5-min markets",
+        description="Phase C: poll-based tick collection for 5-min markets (DISABLED 2026-06-03: orphan)",
+        enabled=False,
     ),
     Task(
         # 2026-04-30: 6-hypothesis race on crypto 5-min markets. Each
@@ -660,7 +701,8 @@ SCHEDULE: list[Task] = [
         name="crypto_5min_hypothesis_race",
         cmd="python -m trading_platform.polymarket.crypto_5min_hypothesis_race",
         interval_seconds=60,
-        description="Phase C: 6-hypothesis race for systematic comparison",
+        description="Phase C: 6-hypothesis race for systematic comparison (DISABLED 2026-06-03: orphan)",
+        enabled=False,
     ),
     Task(
         # 2026-04-30: Phase D — cross-platform arb scanner (PM vs
@@ -669,7 +711,8 @@ SCHEDULE: list[Task] = [
         name="cross_platform_arb",
         cmd="python -m trading_platform.polymarket.cross_platform_arb_strategy",
         interval_seconds=60,
-        description="Phase D: cross-platform arb (PM vs Kalshi)",
+        description="Phase D: cross-platform arb (PM vs Kalshi) (DISABLED 2026-06-03: orphan, 0 live trades)",
+        enabled=False,
     ),
     Task(
         # 2026-04-30: Kalshi market ingestion — populates kalshi_markets
@@ -680,7 +723,8 @@ SCHEDULE: list[Task] = [
         name="kalshi_ingest",
         cmd="python -m trading_platform.polymarket.kalshi_ingest",
         interval_seconds=15 * 60,
-        description="Pull active Kalshi top-2K markets for cross-platform arb",
+        description="Pull active Kalshi top-2K markets for cross-platform arb (DISABLED 2026-06-03: arb is dead)",
+        enabled=False,
     ),
     Task(
         # 2026-05-02: paper position archiver. Stale positions (>14d
@@ -759,7 +803,8 @@ SCHEDULE: list[Task] = [
         name="llm_market_matcher",
         cmd="python -m trading_platform.polymarket.llm_market_matcher",
         interval_seconds=24 * 3600,
-        description="LLM-confirm PM↔Kalshi candidate pairs",
+        description="LLM-confirm PM↔Kalshi candidate pairs (DISABLED 2026-06-03: arb is dead)",
+        enabled=False,
     ),
     Task(
         # 2026-05-01: hourly smoke tests catching cross-cutting issues
@@ -780,7 +825,8 @@ SCHEDULE: list[Task] = [
         name="kalshi_ingest_deep",
         cmd="python -m trading_platform.polymarket.kalshi_ingest --deep",
         interval_seconds=24 * 3600,
-        description="Daily deep Kalshi scan (politics/world/macro markets)",
+        description="Daily deep Kalshi scan (politics/world/macro markets) (DISABLED 2026-06-03: arb is dead)",
+        enabled=False,
     ),
     Task(
         # 2026-04-30: PM↔Kalshi auto-mapper. Scores PM/Kalshi pairs by
@@ -790,7 +836,8 @@ SCHEDULE: list[Task] = [
         name="cross_platform_mapper",
         cmd="python -m trading_platform.polymarket.cross_platform_mapper",
         interval_seconds=24 * 3600,
-        description="Auto-map PM↔Kalshi pairs by similarity",
+        description="Auto-map PM↔Kalshi pairs by similarity (DISABLED 2026-06-03: arb is dead)",
+        enabled=False,
     ),
     Task(
         # 2026-04-30: Phase E — sport pre-game CLV (line-move follow).
@@ -799,7 +846,8 @@ SCHEDULE: list[Task] = [
         name="sport_clv_strategy",
         cmd="python -m trading_platform.polymarket.sport_clv_strategy",
         interval_seconds=15 * 60,
-        description="Phase E: sport pre-game closing-line value",
+        description="Phase E: sport pre-game closing-line value (DISABLED 2026-06-03: orphan)",
+        enabled=False,
     ),
     Task(
         # 2026-04-30: Phase F — election-eve momentum (politics late
@@ -808,7 +856,8 @@ SCHEDULE: list[Task] = [
         name="election_eve_strategy",
         cmd="python -m trading_platform.polymarket.election_eve_strategy",
         interval_seconds=30 * 60,
-        description="Phase F: election-eve momentum (politics)",
+        description="Phase F: election-eve momentum (politics) (DISABLED 2026-06-03: orphan)",
+        enabled=False,
     ),
     Task(
         name="pnl_reconstruction",
