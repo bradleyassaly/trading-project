@@ -555,6 +555,96 @@ def section_reconciled_ev(conn, now_ts):
               f"{res['ev']:>+7.1%} {pnl_total:>+9.2f}$  {verdict}")
 
 
+def section_detection_latency(conn, now_ts):
+    """Phase-2 measurement: whale fill → our order attempt, per signal.
+
+    For copy-trading, latency IS the edge. The 04-24 audit measured a
+    9-min median tier-1 lag against a 2-5s design goal; this section
+    makes the number visible per trade so the CTFExchange-subscription
+    work (Phase 2 item 1) has a before/after baseline. Includes dry-run
+    attempts — they traverse the same detection path.
+    """
+    section("14. DETECTION LATENCY (whale fill → our attempt, last 7d)")
+    rows = conn.execute("""
+        SELECT signal_type,
+               COUNT(*) AS n,
+               PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY detection_latency_sec) AS p50,
+               PERCENTILE_CONT(0.9) WITHIN GROUP (ORDER BY detection_latency_sec) AS p90,
+               MAX(detection_latency_sec) AS worst
+          FROM live_trades
+         WHERE detection_latency_sec IS NOT NULL
+           AND attempted_at >= %s
+         GROUP BY signal_type
+         ORDER BY n DESC
+    """, (now_ts - 7 * 86400,)).fetchall()
+    if not rows:
+        print("  No latency-instrumented attempts yet (column ships 2026-07-02;")
+        print("  data accumulates from the next deploy).")
+        return
+    print(f"  {'signal':<26} {'n':>5} {'p50':>8} {'p90':>8} {'worst':>8}")
+    for r in rows:
+        sig, n, p50, p90, worst = r[0], int(r[1]), r[2], r[3], r[4]
+        fmt = lambda v: f"{v/60:.1f}m" if v and v >= 120 else (f"{v:.0f}s" if v is not None else "n/a")
+        flag = "  ⚠ >60s" if p50 and p50 > 60 else ""
+        print(f"  {sig:<26} {n:>5} {fmt(p50):>8} {fmt(p90):>8} {fmt(worst):>8}{flag}")
+    print("  Target (Phase-2 exit gate): p50 ≤ 10s on the whale-copy lane.")
+
+
+def section_tail_concentration(conn, now_ts):
+    """P2 flaw #9 measurement: how short-vol is the open book right now.
+
+    The resolution_decay lottery lane has an insurance-like payoff —
+    many small wins, rare large correlated losses. Before adding hard
+    per-event caps we need to SEE the concentration: open exposure by
+    entry-price band and by category, plus the single largest positions.
+    """
+    section("15. TAIL CONCENTRATION (open live positions)")
+    rows = conn.execute("""
+        SELECT CASE
+                 WHEN signal_price >= 0.90 OR signal_price <= 0.10
+                   THEN 'near-certainty (<=0.10 or >=0.90)'
+                 WHEN signal_price >= 0.70 OR signal_price <= 0.30
+                   THEN 'skewed (0.10-0.30 / 0.70-0.90)'
+                 ELSE 'mid (0.30-0.70)'
+               END AS band,
+               COUNT(*) AS n,
+               COALESCE(SUM(size_usd), 0) AS at_risk
+          FROM live_trades
+         WHERE dry_run = 0 AND exit_ts IS NULL
+           AND status IN ('submitted', 'live', 'matched')
+         GROUP BY 1 ORDER BY at_risk DESC
+    """).fetchall()
+    if not rows:
+        print("  No open live positions.")
+        return
+    total = sum(float(r[2]) for r in rows)
+    for r in rows:
+        band, n, risk = r[0], int(r[1]), float(r[2])
+        pct = risk / total if total else 0
+        print(f"  {band:<38} n={n:<3} ${risk:>8.2f}  ({pct:.0%} of open book)")
+    cats = conn.execute("""
+        SELECT COALESCE(category, '?'), COUNT(*), COALESCE(SUM(size_usd), 0)
+          FROM live_trades
+         WHERE dry_run = 0 AND exit_ts IS NULL
+           AND status IN ('submitted', 'live', 'matched')
+         GROUP BY 1 ORDER BY 3 DESC LIMIT 5
+    """).fetchall()
+    print("  By category:")
+    for r in cats:
+        print(f"    {r[0]:<20} n={int(r[1]):<3} ${float(r[2]):.2f}")
+    big = conn.execute("""
+        SELECT question, size_usd, signal_price
+          FROM live_trades
+         WHERE dry_run = 0 AND exit_ts IS NULL
+           AND status IN ('submitted', 'live', 'matched')
+         ORDER BY size_usd DESC NULLS LAST LIMIT 3
+    """).fetchall()
+    print("  Largest single positions:")
+    for r in big:
+        q = (r[0] or "?")[:60]
+        print(f"    ${float(r[1] or 0):>7.2f} @ {r[2] if r[2] is not None else '?'}  {q}")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--apply-multipliers", action="store_true",
@@ -580,6 +670,8 @@ def main():
         section_api_health(conn, now_ts)
         section_equity_agreement(conn, now_ts)
         section_reconciled_ev(conn, now_ts)
+        section_detection_latency(conn, now_ts)
+        section_tail_concentration(conn, now_ts)
     finally:
         conn.close()
 

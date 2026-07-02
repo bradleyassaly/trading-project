@@ -360,7 +360,8 @@ class PolymarketLiveExecutor:
                     "CREATE INDEX IF NOT EXISTS idx_live_trades_ts ON live_trades(attempted_at DESC)"
                 )
                 # Lazy-add columns that pre-date this schema — idempotent.
-                for col_ddl in ("outcome TEXT", "exit_ts INTEGER", "signal_price REAL"):
+                for col_ddl in ("outcome TEXT", "exit_ts INTEGER", "signal_price REAL",
+                                "whale_trade_ts BIGINT", "detection_latency_sec REAL"):
                     try:
                         conn.execute(f"ALTER TABLE live_trades ADD COLUMN {col_ddl}")
                     except Exception:
@@ -1412,6 +1413,13 @@ class PolymarketLiveExecutor:
                 _fired_at = signal.get("fired_at") or None
                 _resolution_ts = signal.get("_resolution_ts")
                 _ask_depth = signal.get("_ask_depth")
+                # Phase-2 latency measurement: whale's fill → this attempt.
+                _whale_ts = signal.get("whale_trade_ts") or None
+                _detect_latency = (
+                    float(now_ts - int(_whale_ts))
+                    if _whale_ts and int(_whale_ts) <= now_ts
+                    else None
+                )
                 conn.execute(
                     """INSERT INTO live_trades
                        (attempted_at, signal_type, condition_id, question, direction,
@@ -1419,9 +1427,10 @@ class PolymarketLiveExecutor:
                         dry_run, error_msg, token_id, side, fill_price, shares,
                         category, signal_wallet, submitted_at, filled_at, signal_price,
                         expected_price, slippage, fill_time_ms,
-                        resolution_date, ask_depth_entry, signal_fired_at, wallet_tier)
+                        resolution_date, ask_depth_entry, signal_fired_at, wallet_tier,
+                        whale_trade_ts, detection_latency_sec)
                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                               ?, ?, ?, ?)""",
+                               ?, ?, ?, ?, ?, ?)""",
                     (
                         now_ts,
                         signal.get("signal_type"),
@@ -1451,6 +1460,8 @@ class PolymarketLiveExecutor:
                         _ask_depth,
                         _fired_at,
                         _wallet_tier,
+                        _whale_ts,
+                        _detect_latency,
                     ),
                 )
             finally:

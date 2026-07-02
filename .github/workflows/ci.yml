@@ -8,27 +8,17 @@ jobs:
   test-and-lint:
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    services:
-      # DB-backed tests default to postgres://polymarket@localhost:5432
-      # (see db_connection.py). Without a service they hang on pool
-      # timeouts and fail — this was one reason CI ran red for weeks.
-      postgres:
-        image: postgres:16
-        env:
-          POSTGRES_USER: polymarket
-          POSTGRES_PASSWORD: polymarket_dev
-          POSTGRES_DB: polymarket
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U polymarket"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
     env:
-      # Fail fast if the service is somehow unreachable instead of the
-      # 60s-per-connection default that made failures look like hangs.
-      PG_POOL_TIMEOUT: "10"
+      # The polymarket test suite was written against SQLite (each test
+      # bootstraps a temp .db file and passes its path). The 2026-04-14
+      # Postgres cutover changed the runtime default to postgres, which
+      # made ~75 tests fail in CI with UndefinedTable/PoolTimeout —
+      # they were still creating SQLite fixtures while get_connection()
+      # routed to a database that didn't have their schema. Production
+      # keeps DB_BACKEND=postgres; CI pins the backend the tests were
+      # written for. (A bare postgres:16 service was tried first — it
+      # fixes the timeouts but not the missing per-test schemas.)
+      DB_BACKEND: sqlite
     steps:
       - uses: actions/checkout@v4
 

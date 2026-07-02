@@ -85,7 +85,6 @@ def _generate_market(
 
 
 def build_features(df: pd.DataFrame) -> pd.DataFrame:
-    import polars as pl
 
     pl_df = pl.from_pandas(df)
     pl_df = pl_df.with_columns([
