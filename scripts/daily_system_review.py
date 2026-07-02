@@ -427,6 +427,134 @@ def section_polymarket_reconcile(conn, now_ts):
         print(f"  Could not read reconciler log: {exc}")
 
 
+def section_equity_agreement(conn, now_ts):
+    """Phase-0 exit gate: on-chain equity and DB equity must agree.
+
+    SCALING_PLAN_2026-07-02.md Phase 0 requires 14 consecutive days of
+    on-chain/DB equity agreement (within $1 cash drift and no share
+    drifts) before any bankroll promotion. This section runs the
+    reconciler in-process, records today's PASS/FAIL in
+    equity_agreement_log, and prints the running streak so the operator
+    can see exactly where the 14-day clock stands.
+    """
+    section("12. EQUITY AGREEMENT — PHASE-0 EXIT GATE (14-day streak)")
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS equity_agreement_log (
+            day          TEXT PRIMARY KEY,
+            ts           BIGINT NOT NULL,
+            db_usdc      DOUBLE PRECISION,
+            onchain_usdc DOUBLE PRECISION,
+            usdc_diff    DOUBLE PRECISION,
+            n_drifts     BIGINT NOT NULL,
+            n_errors     BIGINT NOT NULL,
+            passed       BIGINT NOT NULL
+        )
+    """)
+    today = dt.datetime.utcnow().strftime("%Y-%m-%d")
+    try:
+        from reconcile_polymarket_truth import reconcile
+        report = reconcile()
+    except Exception as exc:
+        print(f"  Reconciler unavailable ({str(exc)[:80]}) — recording FAIL.")
+        report = {"drifts": [{"metric": "reconciler_error"}],
+                  "ok": [], "errors": [str(exc)[:200]]}
+
+    drifts = report.get("drifts", [])
+    errors = report.get("errors", [])
+    usdc_row = next((e for e in drifts + report.get("ok", [])
+                     if e.get("metric") == "usdc_balance"), {})
+    # Errors count as failure: "could not verify" is not agreement.
+    passed = 1 if (not drifts and not errors) else 0
+    conn.execute("""
+        INSERT INTO equity_agreement_log
+            (day, ts, db_usdc, onchain_usdc, usdc_diff, n_drifts, n_errors, passed)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+        ON CONFLICT (day) DO UPDATE SET
+            ts = EXCLUDED.ts, db_usdc = EXCLUDED.db_usdc,
+            onchain_usdc = EXCLUDED.onchain_usdc,
+            usdc_diff = EXCLUDED.usdc_diff, n_drifts = EXCLUDED.n_drifts,
+            n_errors = EXCLUDED.n_errors, passed = EXCLUDED.passed
+    """, (today, now_ts, usdc_row.get("db"), usdc_row.get("onchain"),
+          usdc_row.get("diff"), len(drifts), len(errors), passed))
+    conn.commit()
+
+    rows = conn.execute("""
+        SELECT day, passed, usdc_diff, n_drifts, n_errors
+          FROM equity_agreement_log ORDER BY day DESC LIMIT 20
+    """).fetchall()
+    streak = 0
+    for r in rows:
+        if int(r[1]) == 1:
+            streak += 1
+        else:
+            break
+    status = "PASS" if passed else "FAIL"
+    diff_s = f"${usdc_row['diff']:+.2f}" if usdc_row.get("diff") is not None else "n/a"
+    print(f"  Today: {status}  (usdc diff {diff_s}, "
+          f"{len(drifts)} drift(s), {len(errors)} error(s))")
+    print(f"  Streak: {streak}/14 consecutive agreeing days"
+          + ("  ✅ GATE MET" if streak >= 14 else ""))
+    for r in rows[:7]:
+        print(f"    {r[0]}  {'PASS' if int(r[1]) else 'FAIL'}"
+              f"  drifts={int(r[3])} errors={int(r[4])}")
+
+
+def section_reconciled_ev(conn, now_ts):
+    """Phase-0: per-signal EV verdicts split by exit-truth channel.
+
+    The 2026-05-27 audit showed action-triggered exits (take_profit /
+    trailing_stop / stop_loss / ...) can book fictitious P&L when the
+    exit order rests unfilled, while resolution exits settle on-chain
+    and cannot lie. Splitting EV by channel bounds how much of each
+    signal's measured edge could be contamination. Verdicts:
+      GO    — EV > 0 on both channels, n >= 30 total
+      PAPER — insufficient n, or channels disagree on sign
+      KILL  — EV < 0 on n >= 30
+    """
+    section("13. RECONCILED PER-SIGNAL EV VERDICTS (90d, by exit channel)")
+    rows = conn.execute("""
+        SELECT signal_type,
+               CASE WHEN exit_reason IN ('resolved_zero_balance', 'redeemed',
+                                         'resolution', 'market_resolved')
+                    THEN 'resolution' ELSE 'action' END AS channel,
+               COUNT(*) AS n,
+               COALESCE(SUM(realized_pnl), 0) AS pnl,
+               COALESCE(SUM(size_usd), 0) AS staked
+          FROM live_trades
+         WHERE dry_run = 0 AND exit_ts IS NOT NULL
+           AND outcome IN ('win', 'loss')
+           AND exit_ts >= %s
+         GROUP BY signal_type, 2
+         ORDER BY signal_type
+    """, (now_ts - 90 * 86400,)).fetchall()
+    by_sig: dict = {}
+    for r in rows:
+        sig, ch, n, pnl, staked = r[0], r[1], int(r[2]), float(r[3]), float(r[4])
+        d = by_sig.setdefault(sig, {})
+        d[ch] = {"n": n, "pnl": pnl, "ev": (pnl / staked) if staked else 0.0}
+    if not by_sig:
+        print("  No closed live trades in window.")
+        return
+    print(f"  {'signal':<24} {'n_act':>5} {'ev_act':>8} {'n_res':>5} "
+          f"{'ev_res':>8} {'total_pnl':>10}  verdict")
+    for sig, d in sorted(by_sig.items()):
+        act = d.get("action", {"n": 0, "pnl": 0.0, "ev": 0.0})
+        res = d.get("resolution", {"n": 0, "pnl": 0.0, "ev": 0.0})
+        n_total = act["n"] + res["n"]
+        pnl_total = act["pnl"] + res["pnl"]
+        evs = [c["ev"] for c in (act, res) if c["n"] > 0]
+        if n_total >= 30 and evs and all(e > 0 for e in evs):
+            verdict = "GO"
+        elif n_total >= 30 and evs and all(e < 0 for e in evs):
+            verdict = "KILL"
+        else:
+            verdict = "PAPER"
+        if act["n"] > 0 and res["n"] > 0 and (act["ev"] > 0) != (res["ev"] > 0):
+            verdict += " (channels disagree — audit fills)"
+        print(f"  {sig:<24} {act['n']:>5} {act['ev']:>+7.1%} {res['n']:>5} "
+              f"{res['ev']:>+7.1%} {pnl_total:>+9.2f}$  {verdict}")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--apply-multipliers", action="store_true",
@@ -450,6 +578,8 @@ def main():
         section_stale_equity(conn, now_ts)
         section_polymarket_reconcile(conn, now_ts)
         section_api_health(conn, now_ts)
+        section_equity_agreement(conn, now_ts)
+        section_reconciled_ev(conn, now_ts)
     finally:
         conn.close()
 
