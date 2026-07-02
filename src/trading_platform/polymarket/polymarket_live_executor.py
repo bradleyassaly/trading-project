@@ -828,6 +828,26 @@ class PolymarketLiveExecutor:
         age_sec = time.time() - fired_at
         if age_sec > 900:
             return self._block(signal, f"Signal too old ({age_sec/60:.0f}m)")
+        # 1b-ii. Stale WHALE-TRADE guard (2026-07-02). fired_at is when OUR
+        # engine fired; whale_trade_ts is when the whale actually filled.
+        # First day of latency instrumentation showed p90 detection latency
+        # of 10+ DAYS — the poller emits fresh-looking signals for whale
+        # trades made long ago (fired_at=now, so the 900s gate passes).
+        # Copying a days-old whale entry is not copy-trading, it's buying
+        # whatever the market already repriced. 30min allows the normal
+        # detection path (p50 ≈ 9min today) while cutting the tail.
+        MAX_WHALE_TRADE_AGE_SEC = 1800
+        _wt_ts = signal.get("whale_trade_ts") or 0
+        if _wt_ts and (time.time() - float(_wt_ts)) > MAX_WHALE_TRADE_AGE_SEC:
+            _wt_age_min = (time.time() - float(_wt_ts)) / 60
+            self._record_attempt(signal, 0.0, None, None,
+                                 dry_run=self.DRY_RUN, status="blocked",
+                                 error_msg=f"whale trade too old ({_wt_age_min:.0f}m)")
+            return self._result(
+                False,
+                reason=f"whale trade too old ({_wt_age_min:.0f}m > 30m): "
+                       "market has already repriced; not a copy",
+            )
 
         # 1c. Favorite guard. The data backing this changed.
         # Pre-Apr-18 (when set at >=0.50): only YES side with ep≥0.7 was the
