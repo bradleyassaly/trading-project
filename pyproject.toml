@@ -81,7 +81,8 @@ validation = [
 dev = [
   "pytest>=8.0",
   "ruff>=0.4",
-  "black>=24.0"
+  "black>=24.0",
+  "responses>=0.25"
 ]
 
 [project.scripts]

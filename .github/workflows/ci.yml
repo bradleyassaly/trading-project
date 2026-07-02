@@ -8,6 +8,27 @@ jobs:
   test-and-lint:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    services:
+      # DB-backed tests default to postgres://polymarket@localhost:5432
+      # (see db_connection.py). Without a service they hang on pool
+      # timeouts and fail — this was one reason CI ran red for weeks.
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: polymarket
+          POSTGRES_PASSWORD: polymarket_dev
+          POSTGRES_DB: polymarket
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U polymarket"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      # Fail fast if the service is somehow unreachable instead of the
+      # 60s-per-connection default that made failures look like hangs.
+      PG_POOL_TIMEOUT: "10"
     steps:
       - uses: actions/checkout@v4
 
