@@ -30,7 +30,10 @@ from trading_platform.polymarket.db_connection import get_connection
 logger = logging.getLogger(__name__)
 
 
-PAPER_TIER_A_MIN_N = 20
+# 2026-07-02: raised 20 → 30 to match the standing constraint that no
+# promotion happens on fewer than 30 resolved trades (ROADMAP_2026-04-24
+# core constraint #2; false-discovery control across parallel signals).
+PAPER_TIER_A_MIN_N = 30
 PAPER_TIER_A_MIN_EV = 0.05
 PAPER_TIER_B_MIN_N = 10
 BACKTEST_TIER_A_MIN_EV = 0.05

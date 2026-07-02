@@ -112,6 +112,27 @@ Nothing else matters until the books are trusted.
 agree within $1, zero silent task failures, and a per-signal EV table
 computed from reconciled outcomes only.
 
+### Phase 0.5 — Flaw burn-down (parallel to Phase 0)
+
+Concrete defects found in the 2026-07-02 code review, prioritized. P0
+items block any further live operation; P1 items block any promotion;
+P2 items block L2+; P3 is cheap hygiene done immediately.
+
+| Pri | Flaw | Where | Fix |
+|---|---|---|---|
+| **P0** | `LIVE_REAL_SIGNAL_TYPES` **bypasses** `DRY_RUN` — adding one string to a set fires real orders | `polymarket_live_executor.py:85–273` | One master live switch nothing can bypass; allowlist may only narrow it |
+| **P0** | All 5 execution gates **fail open** on API errors — risk checks vanish exactly when the venue degrades | `execution_gates.py:5` | Depth + exposure gates fail **closed** for live trades (paper stays fail-open) |
+| **P0** | Kill-switch **EV ≥ 5% bypass** of the WR floor consumes outcome data known to be contaminated by fictitious closes | `kill_switch.py` | Disable bypass by default until Phase 0 ledger reconciliation completes; re-enable via explicit env flag |
+| **P0** | **Split-brain stores**: paper executor defaults to legacy `data/kalshi/paper_trades.db` while the system runs on Postgres | `polymarket_paper_executor.py:481` | Single canonical store; legacy path removed or made read-only |
+| **P1** | **False-discovery machine**: slice promotion at n≥10 / WR≥60% across hundreds of parallel slices guarantees promoting noise | `slice_multiplier_promoter.py`, `auto_tier_promoter.py` | Raise minimum n, add out-of-sample confirmation window before any stake increase |
+| **P1** | Wallet quality model **excludes sports** from directional WR while sports is the only profitable copy category | `wallet_profiler.py`, WALLET_INTELLIGENCE.md | Score per-category end-to-end; global WR must not feed sizing |
+| **P1** | Phase-3 gate was **soft-bypassed** on circular "gate selection bias" reasoning | ROADMAP.md | Phase-2 exit gate in this plan is non-negotiable (rule 6) |
+| **P2** | Raw wallet **private key in plaintext env** on the same host as 60 scheduler tasks and a web API | `.env.live.template` | Hot wallet holds working float only; cold wallet + periodic sweep before L3 |
+| **P2** | `resolution_decay` lottery-SELL book is **short-vol shaped** — many small wins, rare large correlated losses | strategy | Per-event and per-day max-loss caps for correlated near-certainties before scaling the lane |
+| **P2** | **No staging environment** — changes deploy straight to the money host (how the fictitious-close bug shipped) | ops | Paper-only canary compose profile, 24–48h soak before live host |
+| **P2** | **Platform concentration** ($100–300K on one venue, visible on-chain copying, regulatory drift) has no owner or trigger | THESIS.md | Written de-scale triggers + weekly sweep policy |
+| **P3** | `tests/test_cli_grouping.py` imports deleted module; `debug_orch_test.py` breaks collection; stray root artifacts; CI lints syntax-errors only | tests/, CI | Fix imports, relocate debug script, delete stray files, widen ruff scope |
+
 ### Phase 1 — Consolidate to a provable book (weeks 2–4)
 
 Run a **two-lane live book + one discovery lane**, everything else

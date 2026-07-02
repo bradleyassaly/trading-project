@@ -313,7 +313,21 @@ class KillSwitch:
             # signals (e.g. whale_entry_filtered 38% WR, 3.4× win:loss) are
             # profitable even at low WR. WR gate only applies when EV is near
             # zero, where low WR could signal noise rather than real asymmetry.
-            if ev < self.EV_BYPASS_WR_THRESHOLD and effective_n >= 20 and wr < wr_floor:
+            #
+            # 2026-07-02: the bypass is now opt-in via
+            # POLYMARKET_EV_BYPASS_ENABLED=1. The EV feeding it comes from
+            # live_trades realized_pnl, which the 2026-05-27 audit showed was
+            # contaminated by fictitious closes (~$103 inflated over 90d).
+            # Until the on-chain ledger reconciliation is complete, an
+            # inflated EV must not be able to waive the WR floor. Note both
+            # current revenue signals pass their WR floors on their own
+            # (whale_entry_filtered 36.7% vs 0.30; resolution_decay 69% vs
+            # 0.35), so disabling the bypass does not halt the live book.
+            _ev_bypass_on = os.getenv(
+                "POLYMARKET_EV_BYPASS_ENABLED", ""
+            ).lower() in ("1", "true", "yes")
+            _wr_gate_applies = (not _ev_bypass_on) or ev < self.EV_BYPASS_WR_THRESHOLD
+            if _wr_gate_applies and effective_n >= 20 and wr < wr_floor:
                 return KillSwitchResult(
                     False,
                     f"{signal_type}: blended WR {wr:.0%} below minimum {wr_floor:.0%}",

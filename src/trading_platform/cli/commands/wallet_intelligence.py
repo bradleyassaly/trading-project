@@ -2,6 +2,10 @@
 from __future__ import annotations
 
 import argparse
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from trading_platform.polymarket.wallet_db import WalletDB
 
 
 def cmd_sync_wallet_trades(args: argparse.Namespace) -> None:

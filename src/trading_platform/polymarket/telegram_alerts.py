@@ -333,6 +333,7 @@ class TelegramAlerter:
         """Rich alert on tier-1 (or tier1h) whale detection."""
         return False  # suppressed — live entry/exit alerts are the signal of record
 
+        tier = getattr(trade, "tier", "") or ""
         # Filter: minimum trade size
         size = getattr(trade, "size", 0) or 0
         if size < self.MIN_WHALE_SIZE:
@@ -392,6 +393,7 @@ class TelegramAlerter:
         """Rich alert when a signal fires, with paper trade details if placed."""
         return False  # suppressed — live entry/exit alerts cover execution; daily digest covers signals
 
+        sig_type = signal.get("signal_type", "")
         # Per-market cooldown
         cid = signal.get("condition_id")
         if not self._check_market_cooldown(cid):
@@ -648,6 +650,7 @@ class TelegramAlerter:
         """Loud alert: S/A tier political / geopolitical wallet just moved."""
         return False  # suppressed — not actionable while trading restricted; re-enable when live
 
+        tier_u = (tier or "").upper()
         sig_type = signal.get("signal_type", "")
         cid = signal.get("condition_id")
         if not self._check_market_cooldown(cid):
@@ -683,6 +686,7 @@ class TelegramAlerter:
     def send_paper_trade(self, trade: dict) -> bool:
         """Alert when a paper trade is placed (standalone, without signal context)."""
         return False  # suppressed — paper placement noise; trade_resolved covers outcomes
+        question = (trade.get("question") or "")[:80]
         stake = trade.get("stake", 0) or 0
         conf = trade.get("confidence", 0) or 0
         sig = trade.get("signal_type", "")
@@ -870,6 +874,7 @@ class TelegramAlerter:
     def send_paper_trade_confirmation(self, signal: dict, trade: dict) -> bool:
         """Brief confirmation when the paper executor places a trade."""
         return False  # suppressed — too granular; trade_resolved covers outcomes
+        sig_type = signal.get("signal_type", "") or trade.get("signal_type", "")
         q = (signal.get("question") or "")[:60]
         price = trade.get("entry_price") or signal.get("price") or 0
         size = trade.get("size_usd") or 0

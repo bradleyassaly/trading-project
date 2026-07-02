@@ -4,6 +4,7 @@ import argparse
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 from trading_platform.cli.commands.alpha_research import cmd_alpha_research
 from trading_platform.cli.commands.refresh_research_inputs import cmd_refresh_research_inputs

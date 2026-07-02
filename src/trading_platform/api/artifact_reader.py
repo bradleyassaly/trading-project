@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -275,7 +276,10 @@ def read_pnl_summary() -> dict[str, Any]:
 # ── Signal performance ───────────────────────────────────────────────────────
 
 
-def read_signals_performance() -> dict[str, Any]:
+def read_signals_performance_legacy_kalshi() -> dict[str, Any]:
+    # Legacy Kalshi-artifacts version, shadowed since the polymarket
+    # implementation below was added (the later def won at import time).
+    # Renamed 2026-07-02 so the shadowing is explicit; no callers.
     # Check multiple result paths, pick the one with the most useful data
     candidates = [
         ("full_backtest_results", ARTIFACTS_ROOT / "kalshi_research" / "full_backtest_results.csv"),

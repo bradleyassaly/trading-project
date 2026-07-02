@@ -2,8 +2,17 @@
 Pre-trade execution gates — must ALL pass before any trade (paper or live).
 
 Each gate returns ``(passed, reason, data)`` where ``data`` is a dict of
-metrics for post-trade analysis. All gates **fail-open** on API errors so
-a flaky CLOB API never silently disables trading.
+metrics for post-trade analysis.
+
+Failure policy (changed 2026-07-02):
+- **paper**: all gates fail-open on API errors, so a flaky CLOB API never
+  silently disables paper data collection.
+- **live**: the two hard safety gates — **depth** and **exposure** — fail
+  CLOSED on API errors. A degraded venue API is exactly when books are
+  thinnest and exposure state is least knowable; real money does not
+  trade blind. Spread and staleness remain fail-open in live (soft
+  quality gates; blocking on them would halt trading on every book-API
+  blip without a safety payoff).
 
 Gates:
 1. Spread/Edge — Is expected EV > transaction costs?
@@ -57,7 +66,10 @@ class ExecutionGates:
         mode: str = "paper",
     ) -> None:
         self.db_path = db_path or _DEFAULT_DB
+        self.mode = mode
         self.thresholds = _LIVE_THRESHOLDS if mode == "live" else _PAPER_THRESHOLDS
+        # Hard safety gates (depth, exposure) fail closed in live mode.
+        self._pass_on_error = mode != "live"
 
     # ── Gate 1: Spread vs Edge ──────────────────────────────────────────────
 
@@ -128,7 +140,9 @@ class ExecutionGates:
                 timeout=5,
             )
             if not r.ok:
-                return True, "depth_unknown_pass", {}
+                if self._pass_on_error:
+                    return True, "depth_unknown_pass", {}
+                return False, f"depth_unknown_block_live: book API {r.status_code}", {}
 
             book = r.json()
             asks = book.get("asks", [])
@@ -149,7 +163,9 @@ class ExecutionGates:
                 "stake": stake,
             }
         except Exception as exc:
-            return True, f"depth_check_failed: {exc}", {}
+            if self._pass_on_error:
+                return True, f"depth_check_failed: {exc}", {}
+            return False, f"depth_check_failed_block_live: {exc}", {}
 
     # ── Gate 3: Price Staleness ─────────────────────────────────────────────
 
@@ -264,7 +280,9 @@ class ExecutionGates:
                 "open_positions": open_count + 1,
             }
         except Exception as exc:
-            return True, f"exposure_check_failed: {exc}", {}
+            if self._pass_on_error:
+                return True, f"exposure_check_failed: {exc}", {}
+            return False, f"exposure_check_failed_block_live: {exc}", {}
 
     # ── Gate 5: Drawdown ────────────────────────────────────────────────────
 

@@ -36,6 +36,7 @@ reports/weekly_review_*.md
 # Env / secrets
 .env
 .env.*
+!.env.live.template
 
 # Build / packaging
 build/
@@ -55,24 +56,25 @@ dist/
 .coverage.*
 htmlcov/
 
-# Trading outputs
-artifacts/
-artifacts_fast/
-artifacts_medium/
-artifacts/dashboard_data/
-artifacts/system_check/
-artifacts/system_check_ci/
+# Trading outputs.
+# IMPORTANT: these are ROOT-ANCHORED (leading slash) on purpose. Bare
+# patterns like "artifacts/" match at ANY depth and silently swallowed
+# src/trading_platform/artifacts/ (source code) until it was
+# reconstructed on 2026-07-02. Never add a bare directory name here.
+/artifacts/
+/artifacts_fast/
+/artifacts_medium/
+/results/
+/backtests/
+/checkpoints/
+/backups/
 reports/*.json
 reports/*.csv
 reports/*.parquet
 reports/*.html
-results/
-backtests/
-checkpoints/
 
-# Data files
-data/raw/
-data/processed/
+# Data files (root data dir only; src/trading_platform/data is source code)
+/data/
 *.csv
 *.parquet
 *.feather
@@ -81,20 +83,7 @@ data/processed/
 *.db
 *.sqlite
 
-# Json experiment files
-artifacts/experiments/*.json
-
 # Misc local tooling
 .cache/
 .python-version
 .act/
-data/
-artifacts/
-data/
-data/
-nul
-nul
-nul
-nul
-nul
-backups/
