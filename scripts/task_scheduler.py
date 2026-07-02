@@ -320,6 +320,15 @@ SCHEDULE: list[Task] = [
         description="Refresh the active market universe (daily)",
     ),
     Task(
+        name="index_full_active_universe",
+        cmd=("python -c \"from trading_platform.polymarket.markets_table "
+             "import refresh_active_universe; print(refresh_active_universe())\""),
+        interval_seconds=6 * 3600,
+        description=("Bulk-index ALL active Gamma markets (token ids) so "
+                     "chain-direct dispatch can copy fills on any market, "
+                     "not just the ~225 reactively-tracked ones"),
+    ),
+    Task(
         name="calibration_rebalance",
         cmd="curl -fsS -X POST http://api:8001/api/calibration/rebalance -H 'Content-Type: application/json' -d '{}'",
         interval_seconds=24 * 3600,

@@ -222,6 +222,110 @@ def refresh(
     }
 
 
+def refresh_active_universe(*, max_pages: int = 60, page_size: int = 100) -> dict:
+    """Bulk-index ALL active Gamma markets so token→market lookups hit.
+
+    2026-07-02: refresh() is reactive — it only fetches markets we already
+    touched via positions/signals/wallet_trades, which capped the tracked
+    universe at ~225 markets. Chain-direct dispatch (wallet_stream) can
+    only copy fills on markets whose token ids exist locally, so every
+    whale fill outside that set was watched but not copyable. This pages
+    the full active market list (thousands of rows, one call per 100)
+    and persists the same row shape. Run daily from the scheduler.
+    """
+    ensure_schema()
+    try:
+        import requests
+        session = requests.Session()
+    except ImportError:
+        return {"error": "requests unavailable"}
+
+    total = 0
+    failed_pages = 0
+    updates: list[tuple] = []
+    for page in range(max_pages):
+        try:
+            r = session.get(
+                _GAMMA_URL,
+                params={
+                    "active": "true", "closed": "false",
+                    "limit": page_size, "offset": page * page_size,
+                    "order": "volume24hr", "ascending": "false",
+                },
+                timeout=15,
+            )
+            r.raise_for_status()
+            data = r.json()
+        except Exception as exc:
+            logger.warning("universe page %d failed: %s", page, exc)
+            failed_pages += 1
+            if failed_pages >= 3:
+                break
+            time.sleep(2)
+            continue
+        if not isinstance(data, list) or not data:
+            break
+        for m in data:
+            cid = m.get("conditionId") or m.get("condition_id")
+            if not cid:
+                continue
+            updates.append(_extract_row(str(cid), m))
+        if len(updates) >= 200:
+            _persist(updates)
+            total += len(updates)
+            updates = []
+        if len(data) < page_size:
+            break
+        time.sleep(_SLEEP)
+    if updates:
+        _persist(updates)
+        total += len(updates)
+    logger.info("universe refresh: %d active markets indexed", total)
+    return {"indexed": total, "failed_pages": failed_pages}
+
+
+def get_by_token_id(token_id: str) -> dict | None:
+    """Resolve a market by CLOB token id — local table first, then Gamma.
+
+    The Gamma fallback (one ~200ms call) exists for chain-direct dispatch:
+    a whale fill on a market we haven't indexed is still worth copying,
+    and 200ms is 2,500× faster than waiting for data-api indexing. The
+    fetched row is persisted so the next lookup is local.
+    """
+    ensure_schema()
+    tid = str(token_id)
+    with db() as c:
+        row = c.execute(
+            """SELECT condition_id, question,
+                      CASE WHEN yes_token_id = ? THEN 'YES'
+                           WHEN no_token_id = ? THEN 'NO' END
+                 FROM markets
+                WHERE yes_token_id = ? OR no_token_id = ?
+                LIMIT 1""",
+            (tid, tid, tid, tid),
+        ).fetchone()
+    if row and row[0]:
+        return {"condition_id": row[0], "question": row[1] or "",
+                "outcome": row[2] or "YES"}
+    # Gamma by-token fallback.
+    try:
+        import requests
+        r = requests.get(_GAMMA_URL, params={"clob_token_ids": tid}, timeout=5)
+        r.raise_for_status()
+        data = r.json()
+        m = data[0] if isinstance(data, list) and data else None
+        cid = (m or {}).get("conditionId") or (m or {}).get("condition_id")
+        if m and cid:
+            _persist([_extract_row(str(cid), m)])
+            yes_tid, no_tid = get_token_ids(str(cid))
+            outcome = "YES" if str(yes_tid) == tid else ("NO" if str(no_tid) == tid else "YES")
+            return {"condition_id": str(cid),
+                    "question": m.get("question") or "", "outcome": outcome}
+    except Exception as exc:
+        logger.debug("gamma by-token lookup failed for %s: %s", tid[:16], exc)
+    return None
+
+
 def _persist(rows: list[tuple]) -> None:
     with db() as c:
         c.executemany(

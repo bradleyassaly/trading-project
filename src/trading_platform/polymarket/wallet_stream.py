@@ -297,6 +297,7 @@ class WalletStream:
         # process_wallet() IMMEDIATELY — seconds, not minutes. Dedup is
         # safe: process_wallet keys on transaction_hash + last_checked_ts,
         # so the later hydration poll re-delivering this fill is a no-op.
+        meta: dict | None = None
         if os.environ.get("CHAIN_DIRECT_DISPATCH", "1").lower() in ("1", "true", "yes"):
             meta = self._market_for_token(str(token_id))
             if meta:
@@ -337,6 +338,15 @@ class WalletStream:
                     "falling back to REST poll only", str(token_id)[:16],
                 )
 
+        # 2026-07-02 INSTANT MIRROR EXIT. Entry latency is fixed above; exits
+        # still waited for the 5-min monitor cycle — and whale_mirror_exit
+        # had the best per-trade exit economics in the April audit, half of
+        # which evaporates if we exit minutes after the whale. When a watched
+        # wallet SELLS a market we currently hold live, run the exit monitor
+        # immediately (it processes all open positions — cheap at our size).
+        if side == "SELL":
+            asyncio.create_task(self._maybe_trigger_exit_check(wallet, meta))
+
         # Hydration poll (also the only path for unknown tokens): fetches the
         # full data-api record (category enrichment, canonical fields). The
         # direct dispatch above already fired any signal; this is bookkeeping.
@@ -347,6 +357,46 @@ class WalletStream:
         self._last_poll[wallet] = now
         self._stats["polls_triggered"] += 1
         asyncio.create_task(self._poll_wallet(wallet))
+
+    async def _maybe_trigger_exit_check(self, wallet: str, meta: dict | None) -> None:
+        """Run the live exit monitor now if this whale-sell touches our book.
+
+        Trigger conditions: we hold an open live position either on the same
+        market (condition_id match) or sourced from this wallet (mirror
+        semantics). 60s debounce — the monitor sweeps all open positions,
+        so one run covers a burst of sells.
+        """
+        now = time.time()
+        if (now - getattr(self, "_last_exit_check", 0)) < 60:
+            return
+        try:
+            def _holds() -> bool:
+                from trading_platform.polymarket.db_connection import get_connection
+                conn = get_connection()
+                try:
+                    cid = (meta or {}).get("condition_id") or ""
+                    row = conn.execute(
+                        """SELECT 1 FROM live_trades
+                            WHERE dry_run = 0 AND exit_ts IS NULL
+                              AND (LOWER(COALESCE(signal_wallet, '')) = ?
+                                   OR (? != '' AND condition_id = ?))
+                            LIMIT 1""",
+                        (wallet.lower(), cid, cid),
+                    ).fetchone()
+                    return bool(row)
+                finally:
+                    try: conn.close()
+                    except Exception: pass
+            if not await asyncio.to_thread(_holds):
+                return
+            self._last_exit_check = now
+            self._stats["mirror_exit_triggers"] = self._stats.get("mirror_exit_triggers", 0) + 1
+            logger.info("[chain-direct] whale SELL touches our book — running exit monitor now")
+            from trading_platform.polymarket.live_position_monitor import check_live_exits
+            res = await asyncio.to_thread(check_live_exits)
+            logger.info("[chain-direct] triggered exit check → %s", res)
+        except Exception as exc:
+            logger.warning("[chain-direct] exit-check trigger failed: %s", exc)
 
     def _market_for_token(self, token_id: str) -> dict | None:
         """Local markets-table lookup: token → condition/question/side.
@@ -360,27 +410,11 @@ class WalletStream:
             return cached[1]
         meta: dict | None = None
         try:
-            from trading_platform.polymarket.db_connection import get_connection
-            conn = get_connection()
-            try:
-                row = conn.execute(
-                    """SELECT condition_id, question,
-                              CASE WHEN yes_token_id = ? THEN 'YES'
-                                   WHEN no_token_id = ? THEN 'NO' END
-                         FROM markets
-                        WHERE yes_token_id = ? OR no_token_id = ?
-                        LIMIT 1""",
-                    (token_id, token_id, token_id, token_id),
-                ).fetchone()
-            finally:
-                try: conn.close()
-                except Exception: pass
-            if row and row[0]:
-                meta = {
-                    "condition_id": row[0],
-                    "question": row[1] or "",
-                    "outcome": row[2] or "YES",
-                }
+            # Local markets table first; falls back to a one-shot Gamma
+            # by-token fetch (~200ms) and persists the result — a whale
+            # fill on an unindexed market is still worth copying.
+            from trading_platform.polymarket.markets_table import get_by_token_id
+            meta = get_by_token_id(token_id)
         except Exception as exc:
             logger.debug("token→market lookup failed for %s: %s", token_id[:16], exc)
         self._token_meta_cache[token_id] = (now, meta)

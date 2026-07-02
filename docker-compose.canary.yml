@@ -1,0 +1,143 @@
+# Staging canary — a paper-only twin of the live stack.
+#
+# P2 flaw #11 (SCALING_PLAN_2026-07-02.md): changes used to deploy
+# straight to the money host; both P&L-corrupting bugs shipped that way.
+# This file runs candidate code against its OWN Postgres with live
+# trading FORCED OFF, so a change soaks 24-48h before touching real money.
+#
+# Usage (from a checkout of the CANDIDATE code):
+#   docker compose -f docker-compose.canary.yml -p canary up -d --build
+#   docker compose -p canary logs -f scheduler        # watch it behave
+#   docker compose -f docker-compose.canary.yml -p canary down
+#
+# Standalone on purpose (not an override): merging with the main file
+# can't unpublish ports or rename containers reliably across compose
+# versions. No host ports are published; inspect via `docker compose
+# -p canary exec`. The named volume is auto-prefixed (canary_pgdata).
+#
+# POLYMARKET_LIVE_ENABLED is hard-set to 0 in every service —
+# `environment:` entries take precedence over `env_file:`, so even a
+# .env with live enabled cannot make the canary trade real money.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: canary-postgres
+    environment:
+      POSTGRES_USER: polymarket
+      POSTGRES_PASSWORD: polymarket_dev
+      POSTGRES_DB: polymarket
+    volumes:
+      - canary_pgdata:/var/lib/postgresql/data
+    restart: unless-stopped
+    mem_limit: 1g
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U polymarket -d polymarket"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+
+  scheduler:
+    build: .
+    container_name: canary-scheduler
+    command: python scripts/task_scheduler.py
+    volumes:
+      - .:/app
+    env_file: .env
+    environment:
+      - POLYMARKET_LIVE_ENABLED=0
+      - WALLET_DB_PATH=/app/data/polymarket/wallet_intelligence.db
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_USER=polymarket
+      - POSTGRES_PASSWORD=polymarket_dev
+      - POSTGRES_DB=polymarket
+      - DB_BACKEND=postgres
+      - PHASE_B_RESOLUTION_DECAY_ENABLED=1
+      # No Telegram from the canary — alerts must stay unambiguous.
+      - TELEGRAM_BOT_TOKEN=
+      - TELEGRAM_CHAT_ID=
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    mem_limit: 2g
+
+  live-collect:
+    build: .
+    container_name: canary-live-collect
+    command: trading-cli data polymarket live-collect
+    volumes:
+      - .:/app
+    env_file: .env
+    environment:
+      - POLYMARKET_LIVE_ENABLED=0
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_USER=polymarket
+      - POSTGRES_PASSWORD=polymarket_dev
+      - POSTGRES_DB=polymarket
+      - DB_BACKEND=postgres
+      - TELEGRAM_BOT_TOKEN=
+      - TELEGRAM_CHAT_ID=
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    mem_limit: 1g
+
+  wallet-poller:
+    build: .
+    container_name: canary-wallet-poller
+    command: >
+      sh -c '
+      set -e;
+      while true; do
+        trading-cli data polymarket poll-wallet-trades || echo "[canary-poller] cycle failed, retrying";
+        sleep "${POLLER_INTERVAL_SECONDS:-600}";
+      done'
+    volumes:
+      - .:/app
+    env_file: .env
+    environment:
+      - POLYMARKET_LIVE_ENABLED=0
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_USER=polymarket
+      - POSTGRES_PASSWORD=polymarket_dev
+      - POSTGRES_DB=polymarket
+      - DB_BACKEND=postgres
+      - TELEGRAM_BOT_TOKEN=
+      - TELEGRAM_CHAT_ID=
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    mem_limit: 1g
+
+  wallet-stream:
+    build: .
+    container_name: canary-wallet-stream
+    command: python -m trading_platform.polymarket.wallet_stream
+    volumes:
+      - .:/app
+    env_file: .env
+    environment:
+      - POLYMARKET_LIVE_ENABLED=0
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_USER=polymarket
+      - POSTGRES_PASSWORD=polymarket_dev
+      - POSTGRES_DB=polymarket
+      - DB_BACKEND=postgres
+      - TELEGRAM_BOT_TOKEN=
+      - TELEGRAM_CHAT_ID=
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    mem_limit: 1g
+
+volumes:
+  canary_pgdata:

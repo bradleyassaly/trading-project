@@ -216,6 +216,44 @@ def get_leaders(follower: str, min_n: int = MIN_CO_ENTRIES) -> list[dict]:
     return [dict(zip(cols, r)) for r in rows]
 
 
+def get_crowding_discount(wallet: str, *, min_n: int = MIN_CO_ENTRIES) -> float:
+    """Size discount for copying a heavily-copied whale, in [0.5, 1.0].
+
+    Phase 2 item 4 (SCALING_PLAN_2026-07-02.md): the more followers a
+    leader has, the more we are the marginal LATE copier — by the time
+    our order lands, earlier copiers have already moved the price, and
+    the whale's exit will be front-run the same way. Crowding is also
+    the early-warning signal for Claim-6 edge decay.
+
+    Mapping (followers with n_co_entries >= min_n):
+      0-2 followers  → 1.00  (uncrowded)
+      3-5            → 0.85
+      6-10           → 0.70
+      11+            → 0.50  (heavily copied — half size)
+
+    Fail-open to 1.0: a missing table or DB error must never block a
+    trade, only crowding evidence may shrink it.
+    """
+    try:
+        with db() as c:
+            row = c.execute(
+                "SELECT COUNT(*) FROM wallet_copy_relationships "
+                "WHERE leader_wallet = ? AND n_co_entries >= ?",
+                (wallet.lower(), min_n),
+            ).fetchone()
+        followers = int(row[0] or 0) if row else 0
+    except Exception as exc:
+        logger.debug("crowding lookup failed for %s: %s", wallet[:12], exc)
+        return 1.0
+    if followers <= 2:
+        return 1.0
+    if followers <= 5:
+        return 0.85
+    if followers <= 10:
+        return 0.70
+    return 0.50
+
+
 def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     result = refresh()

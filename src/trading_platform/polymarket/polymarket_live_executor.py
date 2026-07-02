@@ -820,6 +820,19 @@ class PolymarketLiveExecutor:
                 logger.info("[LIVE][EARLINESS] %s in %s ×%.2f",
                             _e_wallet[:14], signal.get("category"), _eboost)
                 size_usd = min(phase1_cap, size_usd * _eboost)
+            # 1a-iii. Crowding discount (Phase 2 item 4, 2026-07-02).
+            # Heavily-copied whales → we're the marginal late copier;
+            # shrink size instead of paying full spread for pre-moved
+            # prices. [0.5, 1.0]; fail-open to 1.0.
+            try:
+                from trading_platform.polymarket.wallet_copy_graph import get_crowding_discount
+                _crowd = float(get_crowding_discount(_e_wallet))
+            except Exception:
+                _crowd = 1.0
+            if _crowd < 1.0 and size_usd > 0:
+                logger.info("[LIVE][CROWDING] %s ×%.2f (heavily copied leader)",
+                            _e_wallet[:14], _crowd)
+                size_usd = size_usd * _crowd
         if size_usd <= 0:
             return self._block(signal, f"Kelly says no edge for {sig_type}")
 
@@ -1206,7 +1219,7 @@ class PolymarketLiveExecutor:
                 _mc = _gc(self._db_path)
                 try:
                     _mr = _mc.execute(
-                        """SELECT multiplier, actual_wr, mean_confidence
+                        """SELECT multiplier, actual_wr, mean_confidence, updated_at
                              FROM signal_sizing_multipliers
                             WHERE signal_type = ? AND direction = ?""",
                         (sig_type, signal.get("direction", "BUY").upper()),
@@ -1214,7 +1227,26 @@ class PolymarketLiveExecutor:
                 finally:
                     try: _mc.close()
                     except Exception: pass
-                if _mr and _mr[0]:
+                # 2026-07-02: multipliers expire. The 07-02 review showed
+                # 2.0x amplification still applied on 331h- and 1192h-old
+                # stats because the refresh (n>=15 in 30d) couldn't
+                # requalify any slice — staleness must decay to neutral,
+                # not persist as leverage on evidence that no longer exists.
+                MULT_MAX_AGE_SEC = 7 * 86400
+                _mult_fresh = bool(
+                    _mr and _mr[3]
+                    and (time.time() - float(_mr[3])) <= MULT_MAX_AGE_SEC
+                )
+                if _mr and _mr[0] and not _mult_fresh:
+                    logger.info(
+                        "[LIVE][CALIB_MULT] %s %s ×%.2f IGNORED — stale "
+                        "(%.0fh old > %dh max); sizing at 1.0x",
+                        sig_type, signal.get("direction", "BUY"),
+                        float(_mr[0]),
+                        (time.time() - float(_mr[3] or 0)) / 3600,
+                        MULT_MAX_AGE_SEC // 3600,
+                    )
+                if _mr and _mr[0] and _mult_fresh:
                     mult = float(_mr[0])
                     pre = size_usd
                     size_usd = min(runtime_cap, size_usd * mult)
