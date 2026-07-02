@@ -52,13 +52,16 @@ class TestClassifyKeywords:
         cat, src = classify_keywords("will-donald-trump-win-the-2024-us-presidential-election")
         assert cat == "politics"
 
-    def test_politics_iran_regime(self):
+    def test_geopolitics_iran_regime(self):
+        # Reclassified politics → geopolitics when the geopolitics
+        # category was split out (foreign-state events are geopolitics;
+        # domestic electoral events stay politics).
         cat, _ = classify_keywords("will-the-iranian-regime-fall-by-march-31")
-        assert cat == "politics"
+        assert cat == "geopolitics"
 
-    def test_politics_khamenei(self):
+    def test_geopolitics_khamenei(self):
         cat, _ = classify_keywords("khamenei-out-as-supreme-leader-of-iran-by-february-28")
-        assert cat == "politics"
+        assert cat == "geopolitics"
 
     def test_crypto_bitcoin(self):
         cat, _ = classify_keywords("will-bitcoin-dip-to-65k-in-march-2026")

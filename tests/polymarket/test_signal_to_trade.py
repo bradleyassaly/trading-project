@@ -72,6 +72,9 @@ class TestFillabilityFloor:
 
     def test_constants_are_what_we_expect(self) -> None:
         # Validated bounds from reports/win_rate_validation.md.
-        # Tightened from 0.05-0.95 to 0.10-0.80 based on profit-by-band analysis.
+        # Tightened from 0.05-0.95 to 0.10-0.80 based on profit-by-band
+        # analysis, then ceiling raised to 0.85 (live fillable band is
+        # [0.10, 0.85]; see polymarket_live_executor BUY_LIVE_MIN_ENTRY
+        # comments).
         assert MIN_ENTRY_PRICE == 0.10
-        assert MAX_ENTRY_PRICE == 0.80
+        assert MAX_ENTRY_PRICE == 0.85

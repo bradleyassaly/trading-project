@@ -78,7 +78,10 @@ def _bootstrap_db(tmp_path: Path) -> Path:
             recommended_stake_usd REAL,
             allocated_usd REAL,
             status TEXT DEFAULT 'building',
-            last_updated INTEGER
+            last_updated INTEGER,
+            max_consec_losses INTEGER DEFAULT 0,
+            max_drawdown_pct REAL,
+            sortino_ratio REAL
         );
         """
     )

@@ -413,7 +413,8 @@ class TestFusionFallback:
             minutes_since_whale_entry=10, convergence_count=1,
         )
         assert result.score > 0
-        assert result.decision in ("auto", "half", "skip")
+        # "learn" (quarter-Kelly, 0.05-0.4 band) added 2026-04-15.
+        assert result.decision in ("auto", "half", "learn", "skip")
 
     def test_compute_fusion_uses_enhanced_when_microstructure_present(self):
         microstructure = {
