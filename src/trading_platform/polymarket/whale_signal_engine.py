@@ -1296,6 +1296,10 @@ class WhaleSignalEngine:
             "wallet_tier": trade.wallet_tier,
             "directional_win_rate": trade.directional_win_rate,
             "fired_at": now_ts,
+            # The whale's own fill timestamp — lets executors record
+            # per-trade detection latency (whale fill → our order), the
+            # Phase-2 measurement in SCALING_PLAN_2026-07-02.md.
+            "whale_trade_ts": trade.timestamp,
             # Real clob token_ids (may be None if markets table not yet
             # populated for this cid). token_id is the side we'd trade;
             # yes/no ids are provided so both executors can make their

@@ -1,7 +1,7 @@
 """Auto-promote (signal_type, subdomain) tuples to elevated stake.
 
-When a slice reaches n>=10 / WR>=60% / positive PnL, write it to
-`stake_multiplier_overrides`. The paper executor reads this table at
+When a slice reaches n>=30 / WR>=60% / 95% Wilson lower bound > 50% /
+positive PnL, write it to `stake_multiplier_overrides`. The paper executor reads this table at
 signal-time and applies the multiplier on top of the static
 STAKE_MULTIPLIERS dict — so the highest-validated slices get extra
 stake without code change.
@@ -35,13 +35,32 @@ CREATE TABLE IF NOT EXISTS stake_multiplier_overrides (
 CREATE INDEX IF NOT EXISTS idx_smo_promoted ON stake_multiplier_overrides(promoted_at DESC);
 """
 
-# Promotion criteria
-MIN_RESOLVED = 10
+# Promotion criteria.
+# 2026-07-02: tightened for false-discovery control. The old bar
+# (n>=10, WR>=60%) is hit by a fair coin ~38% of the time — and with
+# hundreds of (signal × subdomain) slices tested in parallel, noise
+# slices WILL qualify and then get sized up. New bar: n>=30 AND the
+# 95% Wilson lower bound of WR must clear 0.50, i.e. the slice must be
+# statistically distinguishable from a coin flip before stake rises.
+MIN_RESOLVED = 30
 MIN_WR = 0.60
 MIN_PNL = 0.01
+WILSON_Z = 1.96          # 95% one-sided lower bound
+WILSON_LB_FLOOR = 0.50   # must beat a coin flip at the lower bound
 
 # Demotion criteria (recompute daily; row drops if no longer qualifies)
 DEMO_MIN_WR = 0.45  # below this, expire the override
+
+
+def _wilson_lower_bound(wins: int, n: int, z: float = WILSON_Z) -> float:
+    """95% Wilson score lower bound for a binomial proportion."""
+    if n <= 0:
+        return 0.0
+    phat = wins / n
+    denom = 1 + z * z / n
+    centre = phat + z * z / (2 * n)
+    margin = z * ((phat * (1 - phat) + z * z / (4 * n)) / n) ** 0.5
+    return (centre - margin) / denom
 
 
 def _ensure_schema(conn) -> None:
@@ -102,10 +121,12 @@ def run_promoter(db_path: str | None = None) -> dict[str, Any]:
             if not sig or not sub:
                 continue
             wr = wins / n if n else 0
+            wilson_lb = _wilson_lower_bound(wins, n)
             cand = {"signal_type": sig, "subdomain": sub,
-                    "n": n, "wr": round(wr, 3), "pnl": round(pnl, 2)}
+                    "n": n, "wr": round(wr, 3), "pnl": round(pnl, 2),
+                    "wilson_lb": round(wilson_lb, 3)}
             candidates.append(cand)
-            if wr >= MIN_WR and pnl >= MIN_PNL:
+            if wr >= MIN_WR and pnl >= MIN_PNL and wilson_lb > WILSON_LB_FLOOR:
                 mult = _multiplier_for(wr, pnl, n)
                 try:
                     conn.execute(

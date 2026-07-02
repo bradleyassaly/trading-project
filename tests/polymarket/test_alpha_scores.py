@@ -81,12 +81,27 @@ class TestComputeAlphaScores:
 
     def test_low_wr_not_copyable(self, tmp_path):
         db = _bootstrap_db(tmp_path)
-        # 45% WR over 30 trades — fails MIN_WR_COPYABLE = 0.55
-        _insert_trades(db, "0xabc", "politics", wins=14, losses=16)
+        # 46.7% WR over 30 trades fails MIN_WR_COPYABLE = 0.52, and the
+        # symmetric ±$100 payoffs (PF = 0.875, negative avg pnl) keep it
+        # out of the longshot gate (PF >= 1.5) too. The fixture default
+        # of +$100/-$50 would qualify via longshot — that gate is
+        # deliberate (see MIN_PF_LONGSHOT in alpha_scores.py), so this
+        # test pins the both-gates-fail case explicitly.
+        _insert_trades(db, "0xabc", "politics", wins=14, losses=16,
+                       win_pnl=100.0, loss_pnl=-100.0)
         result = compute_alpha_scores(db)
         assert result["scored"] == 1
         assert result["copyable"] == 0
         assert get_wallet_alpha(db, "0xabc", "politics") == 0.0
+
+    def test_low_wr_high_pf_copyable_via_longshot_gate(self, tmp_path):
+        db = _bootstrap_db(tmp_path)
+        # 46.7% WR but +$100/-$50 payoffs → PF 1.75 ≥ MIN_PF_LONGSHOT,
+        # positive avg pnl, WR above the 0.35 noise floor: copyable.
+        _insert_trades(db, "0xabc", "politics", wins=14, losses=16)
+        result = compute_alpha_scores(db)
+        assert result["scored"] == 1
+        assert result["copyable"] == 1
 
     def test_low_sample_not_scored(self, tmp_path):
         db = _bootstrap_db(tmp_path)

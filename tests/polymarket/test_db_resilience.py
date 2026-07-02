@@ -36,12 +36,15 @@ def _bootstrap(tmp_path: Path) -> Path:
 
 
 class TestGetConnection:
-    def test_returns_wal_mode_on_fresh_db(self, tmp_path):
+    def test_returns_delete_mode_on_fresh_db(self, tmp_path):
+        # Post-Postgres-cutover contract: the SQLite lane is test-only and
+        # deliberately sets journal_mode=DELETE (see _get_sqlite_connection);
+        # the WAL default belonged to the multi-process-SQLite era.
         db_path = _bootstrap(tmp_path)
         conn = get_connection(str(db_path))
         try:
             mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
-            assert mode == "wal"
+            assert mode == "delete"
         finally:
             conn.close()
 
@@ -137,16 +140,19 @@ class TestRetryWrapper:
             execute_with_retry(conn, "MALFORMED", base_delay=0.001)
         assert conn.execute.call_count == 1  # no retry on real errors
 
-    def test_commit_with_retry_succeeds(self):
+    def test_commit_with_retry_is_passthrough(self):
+        # Post-cutover contract: commit_with_retry is a documented no-op
+        # passthrough — "Postgres commit either succeeds or raises". A
+        # locked first commit therefore propagates, no retries.
         conn = _LockedThenOK(fail_count=1)
-        commit_with_retry(conn, base_delay=0.001)
-        assert conn.attempts == 2
-
-    def test_commit_with_retry_exhausts(self):
-        conn = _LockedThenOK(fail_count=999)
         with pytest.raises(sqlite3.OperationalError, match="locked"):
             commit_with_retry(conn, base_delay=0.001)
-        assert conn.attempts == RETRY_MAX_ATTEMPTS
+        assert conn.attempts == 1
+
+    def test_commit_with_retry_succeeds_when_commit_clean(self):
+        conn = _LockedThenOK(fail_count=0)
+        commit_with_retry(conn, base_delay=0.001)
+        assert conn.attempts == 1
 
 
 # ── round-trip: real WAL DB with concurrent writes ──────────────────────────

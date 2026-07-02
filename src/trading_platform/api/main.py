@@ -1561,7 +1561,7 @@ def signal_health() -> dict[str, Any]:
 
 
 @app.get("/api/calibration")
-def calibration_report(window_days: int = 30) -> dict[str, Any]:
+def calibration_metrics_report(window_days: int = 30) -> dict[str, Any]:
     """Brier score + reliability diagram + per-signal calibration over
     the last `window_days` of resolved hypotheses. Verdict is one of
     {well_calibrated, mild_miscalibration, poor_calibration} keyed off

@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import threading
 import time
 from typing import Any
@@ -223,6 +224,15 @@ class PolymarketLiveExecutor:
         the signal back to dry-run.
         """
         from trading_platform.polymarket.db_connection import get_connection as _gc
+        # 2026-07-02: MASTER SWITCH FIRST. Previously the env master switch
+        # was only enforced deep inside KillSwitch.check(), while both the
+        # allowlist and the 3-dim slice promotion below bypassed DRY_RUN
+        # entirely — two independent paths to real orders whose only
+        # backstop was that one buried env read. The master switch is now
+        # authoritative at the top of the gating chain: nothing below this
+        # line can produce a real order without POLYMARKET_LIVE_ENABLED=1.
+        if os.getenv("POLYMARKET_LIVE_ENABLED", "").lower() not in ("1", "true", "yes"):
+            return True
         # Signals with decay_flag=1 in signal_health are blocked from all live
         # paths — including 3-dim slice promotion. IC30 degradation means recent
         # predictions are anti-correlated with outcomes regardless of what a
@@ -247,7 +257,15 @@ class PolymarketLiveExecutor:
             pass
         promoted_via_3dim = False
         if signal_type not in self.LIVE_REAL_SIGNAL_TYPES:
-            if category and wallet_tier:
+            # 2026-07-02: 3-dim slice promotion now requires explicit opt-in.
+            # n>=5 / EV>=15% on one slice is far too weak to route a signal
+            # to real money automatically (hundreds of slices are tested in
+            # parallel — at that threshold noise WILL qualify). Off by
+            # default until the reconciled ledger justifies re-enabling.
+            _allow_3dim = os.getenv(
+                "POLYMARKET_ALLOW_3DIM_LIVE", ""
+            ).lower() in ("1", "true", "yes")
+            if _allow_3dim and category and wallet_tier:
                 try:
                     _conn = _gc(self._db_path)
                     try:
@@ -342,7 +360,8 @@ class PolymarketLiveExecutor:
                     "CREATE INDEX IF NOT EXISTS idx_live_trades_ts ON live_trades(attempted_at DESC)"
                 )
                 # Lazy-add columns that pre-date this schema — idempotent.
-                for col_ddl in ("outcome TEXT", "exit_ts INTEGER", "signal_price REAL"):
+                for col_ddl in ("outcome TEXT", "exit_ts INTEGER", "signal_price REAL",
+                                "whale_trade_ts BIGINT", "detection_latency_sec REAL"):
                     try:
                         conn.execute(f"ALTER TABLE live_trades ADD COLUMN {col_ddl}")
                     except Exception:
@@ -737,6 +756,31 @@ class PolymarketLiveExecutor:
             if boosted > size_usd:
                 logger.info("[LIVE][SPECIALIST_BOOST] size $%.2f → $%.2f", size_usd, boosted)
                 size_usd = boosted
+        # 1a-ii. Earliness boost + collapsed-form gate (Phase 2, 2026-07-02).
+        # Paper has applied the [0.7, 1.3] earliness multiplier since
+        # 04-24; live never did. Additionally: a wallet at the 0.70-0.75
+        # floor means its recent EWMA WR is far below lifetime — lifetime
+        # WR is survivorship-biased and this wallet is likely "was smart
+        # money". Don't copy it live at all.
+        _e_wallet = signal.get("wallet") or signal.get("source_wallet") or ""
+        if _e_wallet and _e_wallet not in ("velocity_detector", "order_book_monitor"):
+            try:
+                from trading_platform.polymarket.wallet_earliness import get_earliness_boost
+                _eboost = float(get_earliness_boost(
+                    _e_wallet, (signal.get("category") or ""), db_path=self._db_path))
+            except Exception:
+                _eboost = 1.0
+            if _eboost <= 0.75:
+                _reason = (f"earliness gate: {_e_wallet[:14]} recent form collapsed "
+                           f"(boost {_eboost:.2f} <= 0.75)")
+                self._record_attempt(signal, 0.0, None, None,
+                                     dry_run=self.DRY_RUN, status="blocked",
+                                     error_msg=_reason)
+                return self._result(False, reason=_reason)
+            if _eboost != 1.0 and size_usd > 0:
+                logger.info("[LIVE][EARLINESS] %s in %s ×%.2f",
+                            _e_wallet[:14], signal.get("category"), _eboost)
+                size_usd = min(phase1_cap, size_usd * _eboost)
         if size_usd <= 0:
             return self._block(signal, f"Kelly says no edge for {sig_type}")
 
@@ -763,6 +807,41 @@ class PolymarketLiveExecutor:
             entry_px = float(raw_price) if raw_price is not None else None
         except (TypeError, ValueError):
             entry_px = None
+
+        # 1c-i. Favorite guard + per-signal BUY entry ceilings.
+        # NOTE 2026-07-02: these definitions were deleted by the 2026-05-12
+        # SELL-only commit while their live-price checks (section 4 below)
+        # survived — so when BUY was re-enabled for resolution_decay on
+        # 2026-05-19, every BUY reaching section 4 raised NameError instead
+        # of being risk-checked. Restored from commit 0a57525.
+        # Favorite band data (8d cohort, Apr-24): favorite 0.70-0.85 = 15% WR,
+        # -$6; live cap set at 0.65.
+        FAVORITE_BLOCK_PRICE = 0.65
+        # Per-signal BUY entry ceiling (tighter than FAVORITE_BLOCK_PRICE).
+        # whale_entry_filtered BUY 0.50-0.65: 5W/26L, -$18 PnL.
+        _BUY_ENTRY_CEILINGS: dict[str, float] = {
+            "whale_entry_filtered": 0.50,
+        }
+        _sig_buy_ceil = _BUY_ENTRY_CEILINGS.get(sig_type)
+        if want_yes and entry_px is not None and entry_px >= FAVORITE_BLOCK_PRICE:
+            logger.info(
+                "[LIVE][FAV_GATE] BLOCK %s BUY@%.3f (>= %.2f) — copy-trade tail risk",
+                sig_type, entry_px, FAVORITE_BLOCK_PRICE,
+            )
+            try:
+                from trading_platform.polymarket.decision_trace import trace as _dt
+                _dt(signal=signal, gate="LIVE_FAV_GATE", passed=False,
+                    value=entry_px, threshold=FAVORITE_BLOCK_PRICE,
+                    detail=f"BUY@{entry_px:.3f}", surface="live",
+                    db_path=self._db_path)
+            except Exception:
+                pass
+            return self._result(False, reason=f"BUY at {entry_px:.2f} (>= {FAVORITE_BLOCK_PRICE:.2f}): tail-risk blocked")
+        if want_yes and _sig_buy_ceil is not None and entry_px is not None and entry_px >= _sig_buy_ceil:
+            return self._result(
+                False,
+                reason=f"BUY@{entry_px:.3f} >= {sig_type} mid-market ceiling {_sig_buy_ceil:.2f}",
+            )
 
         # 2026-05-12: SELL-only mode.
         # 2026-05-19: surgical BUY re-enablement for resolution_decay only —
@@ -1359,6 +1438,13 @@ class PolymarketLiveExecutor:
                 _fired_at = signal.get("fired_at") or None
                 _resolution_ts = signal.get("_resolution_ts")
                 _ask_depth = signal.get("_ask_depth")
+                # Phase-2 latency measurement: whale's fill → this attempt.
+                _whale_ts = signal.get("whale_trade_ts") or None
+                _detect_latency = (
+                    float(now_ts - int(_whale_ts))
+                    if _whale_ts and int(_whale_ts) <= now_ts
+                    else None
+                )
                 conn.execute(
                     """INSERT INTO live_trades
                        (attempted_at, signal_type, condition_id, question, direction,
@@ -1366,9 +1452,10 @@ class PolymarketLiveExecutor:
                         dry_run, error_msg, token_id, side, fill_price, shares,
                         category, signal_wallet, submitted_at, filled_at, signal_price,
                         expected_price, slippage, fill_time_ms,
-                        resolution_date, ask_depth_entry, signal_fired_at, wallet_tier)
+                        resolution_date, ask_depth_entry, signal_fired_at, wallet_tier,
+                        whale_trade_ts, detection_latency_sec)
                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                               ?, ?, ?, ?)""",
+                               ?, ?, ?, ?, ?, ?)""",
                     (
                         now_ts,
                         signal.get("signal_type"),
@@ -1398,6 +1485,8 @@ class PolymarketLiveExecutor:
                         _ask_depth,
                         _fired_at,
                         _wallet_tier,
+                        _whale_ts,
+                        _detect_latency,
                     ),
                 )
             finally:

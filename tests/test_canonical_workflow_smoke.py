@@ -522,10 +522,11 @@ def _build_canonical_exported_bundle_with_inputs(
         )
 
     refresh_config_path = tmp_path / "research_input_refresh.yaml"
+    symbols_yaml = "\n  - ".join(symbol_inputs.keys())
     refresh_config_path.write_text(
         f"""
 symbols:
-  - {"\n  - ".join(symbol_inputs.keys())}
+  - {symbols_yaml}
 sub_universe_id: canonical_smoke
 feature_dir: {feature_dir.as_posix()}
 metadata_dir: {metadata_dir.as_posix()}

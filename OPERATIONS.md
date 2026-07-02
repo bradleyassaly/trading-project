@@ -5,6 +5,38 @@ fail; this is what happens, what auto-recovers, and what needs you.
 
 ---
 
+## Deploying the 2026-07-02 safety changes (one-time checklist)
+
+The Phase-0.5 flaw burn-down (see `SCALING_PLAN_2026-07-02.md`) changed
+live-money behavior. On the next deploy to the live host:
+
+1. **Confirm `POLYMARKET_LIVE_ENABLED=1` in `.env`.** It is now the
+   single authoritative master switch, enforced at the top of the
+   dry-run gate — if unset, NOTHING trades live (previously the
+   allowlist and 3-dim slice promotion bypassed it).
+2. **Live BUYs work again.** `resolution_decay` BUYs had crashed with
+   `NameError` since 2026-05-19 (favorite-guard constants deleted by the
+   SELL-only commit). After restart, watch for `[LIVE][FAV_GATE]` and
+   `[LIVE][BUY_REENABLED]` log lines to confirm BUYs flow and get
+   risk-checked.
+3. **Two behaviors are now opt-in (default OFF)** — leave them off until
+   the ledger is reconciled:
+   - `POLYMARKET_ALLOW_3DIM_LIVE=1` re-enables 3-dim slice live promotion
+   - `POLYMARKET_EV_BYPASS_ENABLED=1` re-enables the EV waiver of the WR
+     floor
+4. **Depth/exposure gates now fail CLOSED in live mode.** If the CLOB
+   book API degrades, live entries will block with
+   `depth_unknown_block_live` / `exposure_check_failed_block_live`
+   reasons instead of trading blind. Paper is unchanged (fail-open).
+5. **Start the Phase-0 clock.** Run `python scripts/validate_realized_pnl.py`
+   over full history and triage the 63 known fictitious closes. The
+   daily review (`scripts/daily_system_review.py`) now has section 12
+   (on-chain/DB equity agreement, 14-day streak toward the Phase-0 exit
+   gate) and section 13 (per-signal EV verdicts split by exit-truth
+   channel). No bankroll promotion until section 12 reads 14/14.
+
+---
+
 ## Critical path for live trading
 
 ```

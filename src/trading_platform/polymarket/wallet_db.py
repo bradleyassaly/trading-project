@@ -480,7 +480,13 @@ class WalletDB:
                 recommended_stake_usd REAL,
                 allocated_usd REAL,
                 status TEXT DEFAULT 'building',
-                last_updated INTEGER
+                last_updated INTEGER,
+                -- 2026-07-02: backported from live Postgres, where these
+                -- were added via ALTER but never reached this canonical
+                -- CREATE — fresh DBs (tests) broke signal_evaluator writes.
+                max_consec_losses INTEGER DEFAULT 0,
+                max_drawdown_pct REAL,
+                sortino_ratio REAL
             )
         """)
         self._conn.execute("""
