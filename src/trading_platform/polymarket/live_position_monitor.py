@@ -20,10 +20,86 @@ position stays open and we log the error rather than crash.
 from __future__ import annotations
 
 import logging
+import os
 import time
+from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+_GAMMA_CSV = Path(__file__).resolve().parents[3] / "data" / "polymarket" / "gamma_resolution.csv"
+
+
+def _settle_dust_close(
+    *,
+    token_id: str | None,
+    condition_id: str | None,
+    direction: str,
+    trade_status: str | None,
+    fill_price: float | None,
+    db_shares: float,
+) -> tuple[float, str | None] | None:
+    """Determine realized P&L for a position whose on-chain balance hit dust.
+
+    A zero CONDITIONAL balance is AMBIGUOUS: it means either the market
+    resolved against us (tokens worthless) OR we WON and Polymarket
+    auto-redeemed the tokens into USDC. Until 2026-07-02 both dust
+    branches assumed loss, so auto-redeemed WINS were booked as losses —
+    the root cause of "Polymarket's PnL is higher than ours".
+
+    Truth sources, in order:
+      1. data-api /positions ``cashPnl`` — Polymarket's own number
+         (matches scripts/book_resolved_positions.py semantics).
+      2. gamma_resolution.csv via ResolutionResolver — market outcome
+         vs our side.
+      3. Neither available → return None. Caller must LEAVE THE TRADE
+         OPEN so the scheduled book_resolved_positions task can settle
+         it from data-api later; guessing "loss" corrupts the ledger.
+
+    Returns (realized_pnl, outcome) or None when truth is unavailable.
+    """
+    # Never matched on-chain → no capital was committed.
+    if trade_status != "matched" or fill_price is None or db_shares <= 0:
+        return 0.0, None
+
+    fp = float(fill_price)
+    want_yes = (direction or "BUY").upper() == "BUY"
+    # Cost basis: BUY holds YES at fp/share; SELL holds NO at (1-fp)/share.
+    cost = db_shares * (fp if want_yes else (1.0 - fp))
+
+    # 1. Polymarket's own cashPnl from the data-api positions endpoint.
+    wallet = (os.environ.get("POLYMARKET_FUNDER_ADDRESS")
+              or os.environ.get("POLYMARKET_WALLET_ADDRESS"))
+    if wallet and token_id:
+        try:
+            from trading_platform.polymarket.position_fetcher import PositionFetcher
+            for p in PositionFetcher().fetch_wallet_positions(wallet):
+                if str(p.get("asset")) == str(token_id):
+                    cash = p.get("cashPnl")
+                    if cash is not None:
+                        realized = float(cash)
+                        return realized, ("win" if realized > 0 else "loss")
+        except Exception as exc:
+            logger.debug("dust-settle: data-api lookup failed: %s", exc)
+
+    # 2. Market outcome from the resolution file.
+    try:
+        from trading_platform.polymarket.resolution_resolver import ResolutionResolver
+        resolver = ResolutionResolver(_GAMMA_CSV)
+        price = resolver.resolve(token_id or "", condition_id=condition_id)
+        if price is not None:
+            resolved_yes = price >= 99.0
+            we_won = resolved_yes if want_yes else not resolved_yes
+            if we_won:
+                # Payout $1/share on the side we hold.
+                realized = db_shares - cost
+                return round(realized, 4), "win"
+            return round(-cost, 4), "loss"
+    except Exception as exc:
+        logger.debug("dust-settle: resolution lookup failed: %s", exc)
+
+    # 3. Unknown — do not guess.
+    return None
 
 
 def _exit_profile(signal_type: str, direction: str = "BUY") -> dict[str, Any]:
@@ -271,24 +347,24 @@ def check_live_exits() -> dict[str, int]:
                     "[live-exit] #%d %s has dust CONDITIONAL balance %.4f — marking resolved_zero_balance",
                     lid, sig_type, actual_tokens if actual_tokens is not None else 0,
                 )
-                # Three cases (see scripts/backfill_zero_balance_pnl.py for parity):
-                #   1. status != 'matched' (e.g. 'live'): order rested in the
-                #      book but never matched. No capital committed on-chain
-                #      → realized = 0. Found 2 historical $-5 phantom losses
-                #      this way (#9673, #9688: orders posted at near-resolved
-                #      markets with no liquidity).
-                #   2. status='matched' but fp/shares missing: same outcome
-                #      via a different code path → realized = 0.
-                #   3. status='matched' with fp + shares: legitimate fill that
-                #      went to zero balance (resolved against us) → realized
-                #      = -(cost basis). For SELL (long NO): cost = shares × (1 - fp).
+                # 2026-07-02: settlement is delegated to _settle_dust_close.
+                # Zero balance no longer implies loss — auto-redeemed WINS
+                # also zero out. Truth comes from data-api cashPnl, then the
+                # resolution file; if neither knows, leave the trade OPEN for
+                # the scheduled book_resolved_positions task.
                 db_shares = float(shares or 0)
-                if trade_status != "matched" or fill_price is None or db_shares <= 0:
-                    realized = 0.0
-                    outcome_val = None  # never matched on-chain
-                else:
-                    realized = -db_shares * (1.0 - float(fill_price))
-                    outcome_val = "loss" if realized < 0 else None
+                settled = _settle_dust_close(
+                    token_id=token_id, condition_id=cid,
+                    direction="SELL", trade_status=trade_status,
+                    fill_price=fill_price, db_shares=db_shares,
+                )
+                if settled is None:
+                    logger.warning(
+                        "[live-exit] #%d %s dust balance but resolution unknown — "
+                        "leaving open for book_resolved_positions", lid, sig_type,
+                    )
+                    continue
+                realized, outcome_val = settled
                 try:
                     conn = get_connection()
                     try:
@@ -328,16 +404,22 @@ def check_live_exits() -> dict[str, int]:
                     "[live-exit] #%d %s has dust YES balance %.4f — marking resolved_zero_balance",
                     lid, sig_type, actual_tokens,
                 )
-                # Same three-case logic as the SELL branch above. For BUY (long
-                # YES): cost per share = fill_price. status != 'matched' →
-                # order never matched → realized = 0.
+                # Same settlement as the SELL branch: zero balance is
+                # ambiguous (loss OR auto-redeemed win) — resolve from truth
+                # sources, never assume.
                 db_shares = float(shares or 0)
-                if trade_status != "matched" or fill_price is None or db_shares <= 0:
-                    realized = 0.0
-                    outcome_val = None
-                else:
-                    realized = -db_shares * float(fill_price)
-                    outcome_val = "loss" if realized < 0 else None
+                settled = _settle_dust_close(
+                    token_id=token_id, condition_id=cid,
+                    direction="BUY", trade_status=trade_status,
+                    fill_price=fill_price, db_shares=db_shares,
+                )
+                if settled is None:
+                    logger.warning(
+                        "[live-exit] #%d %s dust YES balance but resolution unknown — "
+                        "leaving open for book_resolved_positions", lid, sig_type,
+                    )
+                    continue
+                realized, outcome_val = settled
                 try:
                     conn = get_connection()
                     try:
