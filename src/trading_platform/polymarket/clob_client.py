@@ -133,6 +133,7 @@ class ClobClient:
         max_slippage: float = 0.02,
         exact_shares: int | None = None,
         price_hint: float | None = None,
+        max_price: float | None = None,
     ) -> OrderResult:
         """Submit a market order to the CLOB. Requires py-clob-client."""
         if not self._configured:
@@ -206,7 +207,23 @@ class ClobClient:
                 asks = book.get("asks") or []
                 # asks are sorted ascending (lowest = best for buyer)
                 best_ask = float(asks[0]["price"]) if asks else current_price
+                # 2026-07-02: hard price ceiling. Entries used to post at
+                # best_ask+tick with NO bound relative to the signal's price
+                # — on thin books that produced 0.815→0.99 chases (22 cents
+                # of pure spread payment, larger than any whale edge).
+                # If the book is beyond the ceiling, REFUSE rather than rest
+                # a stale order that could fill days later.
+                if max_price is not None and best_ask > max_price:
+                    return OrderResult(
+                        success=False, order_id=None, status="blocked_chase",
+                        filled_price=None, filled_size=None,
+                        error_msg=(f"best ask {best_ask:.3f} > max_price "
+                                   f"{max_price:.3f} — refusing to chase"),
+                        raw={"best_ask": best_ask, "max_price": max_price},
+                    )
                 target = round(best_ask + tick, 2)
+                if max_price is not None:
+                    target = min(target, round(max_price, 2))
             else:
                 bids = book.get("bids") or []
                 # bids are sorted ascending; take the highest (best for seller)

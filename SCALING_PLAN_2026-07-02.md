@@ -246,6 +246,69 @@ data exists.
    rejected per THESIS.md's own framework — the platform then lives on
    market-structure alpha, which is a fine business but a different one.
 
+## Part 3.5 — North-star architecture: top-tier, not bot-tier
+
+Retail copy bots (the 2026 commercial/OSS field) define table stakes:
+sub-second on-chain detection, proportional sizing, mirror-exit as a
+first-class mode, pre-execution slippage/risk filters, per-leader
+budgets. We match or exceed them on leader *selection* (bootstrap-CI,
+farmer gating, earliness, tiering) and lag on *execution*. Closing that
+gap is Phase-2/3 work, mostly done or in flight.
+
+Top-tier systems (prop-desk / quant-fund grade) are distinguished by a
+different list. This is the long-run vision each scaling level should
+buy a piece of — none of it is required before L2, all of it before L5:
+
+1. **Cost-aware alpha accounting.** Edge is measured NET of modeled
+   impact and spread at target size, not gross. Every signal carries a
+   capacity estimate ("EV positive up to $X/trade on these books").
+   First step: implementation-shortfall attribution — decompose every
+   trade's P&L into alpha (signal price → resolution) vs execution
+   (signal price → fill) vs fees. We already record both prices; the
+   report is a day of work and turns section-2 slippage rows into a
+   per-signal execution budget.
+2. **Execution as its own optimized layer.** Maker/taker routing by
+   signal urgency (copy lanes take; resolution_decay makes), order
+   slicing above size thresholds, participation caps vs book depth,
+   venue-quirk handling. Bot-tier sends orders; top-tier *schedules*
+   them.
+3. **Portfolio-level capital allocation.** Not per-signal ladders but a
+   single optimizer over lanes: correlation-aware (10 politics copies ≠
+   10 independent bets — portfolio_risk.py's topic clusters are the
+   input), drawdown-budgeted, with netting when lanes disagree on the
+   same market.
+4. **Point-in-time research correctness.** Backtests must only see data
+   as it existed at decision time (wallet stats, prices, universe).
+   The wallet_profiles rebuild overwrites history — snapshotting
+   profiles (daily parquet already exists) enables honest replay and is
+   the difference between research and curve-fitting.
+5. **Research/production parity + reconciliation loop.** The same code
+   path that backtests a signal executes it live; daily automated
+   backtest-vs-live drift checks (why did live underperform sim?).
+   We have pieces (replay framework, signal_engine_backtest); parity is
+   not enforced.
+6. **Redundant data plane with SLAs.** Two independent feeds per
+   critical input (chain events + data-api already form this pair for
+   fills), staleness SLAs with alerts, automatic failover. api_health
+   is the seed; SLAs and failover are not defined.
+7. **Multi-scope kill switches.** Per-leader (shipped), per-signal
+   (shipped), per-topic-cluster, portfolio-day, and venue-level halts —
+   each with independent triggers and its own reset discipline.
+8. **The signal factory as the moat.** Top firms industrialize the
+   research loop: hypothesis → paper → promotion → decay-detection →
+   retirement, running continuously with statistical discipline
+   (multiple-comparisons control, out-of-sample confirmation). Ours
+   exists and is genuinely good — the Wilson-bound promoters and decay
+   flags are the right shape. The vision is that THIS loop, not any
+   single signal, is the durable asset: signals decay, the factory
+   doesn't.
+
+Sequencing rule: at each bankroll level, buy the item that caps the next
+level. L1→L2: execution attribution (#1) + maker routing (#2-lite).
+L2→L3: portfolio allocator (#3) + point-in-time snapshots (#4).
+L3→L5: parity enforcement (#5), data SLAs (#6), full kill-switch
+hierarchy (#7). The factory (#8) runs throughout.
+
 ## Part 4 — First 10 working days (concrete)
 
 | Day | Ship |

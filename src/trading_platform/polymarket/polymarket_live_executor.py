@@ -833,6 +833,47 @@ class PolymarketLiveExecutor:
                 logger.info("[LIVE][CROWDING] %s ×%.2f (heavily copied leader)",
                             _e_wallet[:14], _crowd)
                 size_usd = size_usd * _crowd
+            # 1a-iv. Per-leader budget (2026-07-02, state-of-the-art parity).
+            # Each copied wallet gets bounded capital and an auto-pause:
+            #   - max concurrent open live copies of one leader
+            #   - rolling-window realized loss on their copies pauses new ones
+            # Prevents one decaying leader from bleeding the whole book the
+            # way wallet_reversal's sources did (-$48 before the KILL).
+            try:
+                _max_open_per_leader = int(os.environ.get("LEADER_MAX_OPEN", "2"))
+                _leader_loss_pause = float(os.environ.get("LEADER_LOSS_PAUSE_USD", "10"))
+                from trading_platform.polymarket.db_connection import get_connection as _lgc
+                _lc = _lgc(self._db_path)
+                try:
+                    _lrow = _lc.execute(
+                        """SELECT
+                             SUM(CASE WHEN exit_ts IS NULL THEN 1 ELSE 0 END),
+                             COALESCE(SUM(CASE WHEN exit_ts >= ?
+                                          THEN realized_pnl ELSE 0 END), 0)
+                           FROM live_trades
+                           WHERE dry_run = 0
+                             AND LOWER(COALESCE(signal_wallet, '')) = ?""",
+                        (int(time.time()) - 14 * 86400, _e_wallet.lower()),
+                    ).fetchone()
+                finally:
+                    try: _lc.close()
+                    except Exception: pass
+                _open_n = int((_lrow or [0, 0])[0] or 0)
+                _pnl_14d = float((_lrow or [0, 0])[1] or 0)
+                if _open_n >= _max_open_per_leader:
+                    return self._block(
+                        signal,
+                        f"leader budget: {_e_wallet[:12]} already has "
+                        f"{_open_n} open copies (max {_max_open_per_leader})",
+                    )
+                if _pnl_14d <= -_leader_loss_pause:
+                    return self._block(
+                        signal,
+                        f"leader paused: {_e_wallet[:12]} copies lost "
+                        f"${-_pnl_14d:.2f} in 14d (pause at ${_leader_loss_pause:.0f})",
+                    )
+            except Exception as _lbexc:
+                logger.debug("leader-budget check failed (proceeding): %s", _lbexc)
         if size_usd <= 0:
             return self._block(signal, f"Kelly says no edge for {sig_type}")
 
@@ -1120,6 +1161,14 @@ class PolymarketLiveExecutor:
         # so the gate is meaningful on both cheap (0.05) and expensive (0.90)
         # tokens — 5% relative was ±0.0025 at 0.05, useless for drift detection.
         entry_price = float(signal.get("entry_price") or signal.get("price") or 0)
+        # Max-chase bound (2026-07-02). The whale's edge is a few cents;
+        # paying more than MAX_CHASE beyond THEIR fill price hands the whole
+        # edge (and more) to the spread. Adverse-direction only — favorable
+        # drift (token cheaper than the whale paid) is welcome. Also passed
+        # into place_market_order as a hard ceiling so a thin book cannot
+        # fill us deeper than the gate approved (the 0.815→0.99 bug class).
+        MAX_CHASE = float(os.environ.get("POLYMARKET_MAX_CHASE", "0.04"))
+        _order_max_price: float | None = None
         if entry_price > 0:
             entry_in_token_frame = entry_price if want_yes else (1.0 - entry_price)
             if entry_in_token_frame > 0:
@@ -1130,6 +1179,15 @@ class PolymarketLiveExecutor:
                         reason=(f"Price drifted {drift:.2f} since signal fired "
                                 f"(signal={entry_in_token_frame:.3f} now={current_price:.3f})"),
                     )
+                adverse = current_price - entry_in_token_frame
+                if adverse > MAX_CHASE:
+                    return self._result(
+                        False,
+                        reason=(f"price chased {adverse:.2f} beyond signal fill "
+                                f"({entry_in_token_frame:.3f}→{current_price:.3f}, "
+                                f"max {MAX_CHASE:.2f}) — edge already paid away"),
+                    )
+                _order_max_price = max(0.01, min(0.99, entry_in_token_frame + MAX_CHASE))
 
         # Liquidity guard: check FILLABLE orderbook depth at or below our
         # limit price.
@@ -1406,6 +1464,7 @@ class PolymarketLiveExecutor:
             order_result: OrderResult = self._clob.place_market_order(
                 token_id=token_id, side="BUY", size_usdc=size_usd,
                 price_hint=current_price,
+                max_price=_order_max_price,
             )
             self._record_attempt(
                 signal, size_usd, current_price, order_result,
