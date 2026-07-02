@@ -95,13 +95,18 @@ class TestExposureGate:
         assert "category_limit" in reason
 
     def test_max_positions_fails(self, tmp_path):
+        # Track the live threshold instead of hardcoding a count — the
+        # paper cap has moved 60 → 150 over time, and a hardcoded 10
+        # silently stopped testing the gate.
+        from trading_platform.polymarket.execution_gates import _PAPER_THRESHOLDS
+        cap = int(_PAPER_THRESHOLDS["max_positions"])
         db = _bootstrap(tmp_path)
         conn = sqlite3.connect(db)
-        for i in range(10):
+        for i in range(cap):
             conn.execute(
                 "INSERT INTO polymarket_paper_trades "
                 "(condition_id, side, size_usd, category, entry_ts, archived) "
-                "VALUES (?, 'YES', 100, 'other', ?, 0)",
+                "VALUES (?, 'YES', 1, 'other', ?, 0)",
                 (f"cid{i}", int(time.time())),
             )
         conn.commit()

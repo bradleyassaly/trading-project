@@ -244,12 +244,16 @@ class TestFusionDecision:
             days_since_last_trade=2,
             minutes_since_whale_entry=20, convergence_count=0,
         )
-        # Should be either half or auto depending on math; assert in range
+        # Decision follows the score band. "learn" (quarter-Kelly) was
+        # added 2026-04-15 for the 0.05-0.4 band — see fusion_score.py.
         assert f.score > 0
-        assert f.decision in ("half", "auto", "skip")
-        if 0.4 <= f.score < 0.6:
-            assert f.decision == "half"
-            assert f.stake_multiplier == 0.5
+        assert f.decision in ("auto", "half", "learn", "skip")
+        if f.score >= 0.6:
+            assert f.decision == "auto" and f.stake_multiplier == 1.0
+        elif f.score >= 0.4:
+            assert f.decision == "half" and f.stake_multiplier == 0.5
+        elif f.score >= 0.05:
+            assert f.decision == "learn" and f.stake_multiplier == 0.25
 
 
 # ── BankrollAllocator ───────────────────────────────────────────────────────

@@ -457,10 +457,23 @@ def get_connection(
 ) -> Any:
     """Open a connection. Returns a wrapper that looks like sqlite3.Connection.
 
-    Postgres is the only supported backend post-cutover. The DB_BACKEND=sqlite
-    fallback was removed to eliminate split-brain risk — two writers to two
-    databases was the root cause of multiple data-drift incidents.
+    Postgres is the production backend post-cutover; the runtime default
+    (DB_BACKEND unset → "postgres") is unchanged and the sqlite lane must
+    NEVER be enabled on the live host — two writers to two databases was
+    the root cause of multiple data-drift incidents.
+
+    2026-07-02: DB_BACKEND=sqlite is honored again, for TEST environments
+    only. The test suite bootstraps per-test SQLite fixtures and passes
+    their paths; after the cutover removed this branch, every such test
+    either hit UndefinedTable against a bare Postgres or waited out the
+    pool timeout in CI where no server exists (api_health's per-call
+    writes turned that into 90s+ hangs). CI sets DB_BACKEND=sqlite
+    explicitly; production compose files set nothing and get Postgres.
     """
+    if DB_BACKEND == "sqlite":
+        return _get_sqlite_connection(
+            db_path, check_same_thread=check_same_thread, row_factory=row_factory
+        )
     if not _psycopg_available:
         raise RuntimeError(
             "psycopg is not installed. Run: pip install 'psycopg[binary]>=3.1'"

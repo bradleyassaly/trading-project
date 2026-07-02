@@ -11,13 +11,13 @@ jobs:
     env:
       # The polymarket test suite was written against SQLite (each test
       # bootstraps a temp .db file and passes its path). The 2026-04-14
-      # Postgres cutover changed the runtime default to postgres, which
-      # made ~75 tests fail in CI with UndefinedTable/PoolTimeout —
-      # they were still creating SQLite fixtures while get_connection()
-      # routed to a database that didn't have their schema. Production
-      # keeps DB_BACKEND=postgres; CI pins the backend the tests were
-      # written for. (A bare postgres:16 service was tried first — it
-      # fixes the timeouts but not the missing per-test schemas.)
+      # Postgres cutover made get_connection() Postgres-only, which broke
+      # every such test in CI: UndefinedTable against a bare server, or
+      # 60s pool waits where no server exists. get_connection() honors
+      # DB_BACKEND=sqlite again as a test-only lane (production compose
+      # sets nothing and stays on Postgres). A bare postgres:16 service
+      # was tried first — it fixes timeouts but not the fixture schemas,
+      # which live in the per-test SQLite files.
       DB_BACKEND: sqlite
     steps:
       - uses: actions/checkout@v4
@@ -43,8 +43,9 @@ jobs:
         run: python -m ruff check src tests --select E9,F63,F7,F82,F811,F823 --target-version py310
 
       - name: Test
-        # Per-test timeout: a handful of tests make real network calls
-        # that hang on runner IPs (Cloudflare). 90s converts a hang into
-        # a visible failure instead of stalling the job to its 20-min
-        # kill (which is what a bare `pytest` did on 2026-07-02).
-        run: python -m pytest --timeout=90 --timeout-method=thread
+        # Per-test timeout: converts any hang into a visible failure
+        # instead of stalling the job to its 20-min kill (which is what
+        # a bare `pytest` did on 2026-07-02). Signal method (default) —
+        # thread method os._exit()s the whole run at the first timeout,
+        # discarding the summary.
+        run: python -m pytest --timeout=90
