@@ -94,10 +94,16 @@ class WalletStream:
         self._last_poll: dict[str, float] = {}  # wallet → last-trigger ts
         self._fetcher = None
         self._reconnect_requested = False
+        # token_id → (cached_at, meta|None). Local markets-table lookups for
+        # chain-direct dispatch; None is cached too so unknown tokens don't
+        # hammer the DB on every fill.
+        self._token_meta_cache: dict[str, tuple[float, dict | None]] = {}
         self._stats = {
             "events_seen": 0,
             "events_matched": 0,
             "polls_triggered": 0,
+            "chain_direct_dispatches": 0,
+            "chain_direct_misses": 0,
             "reconnects": 0,
             "started_at": time.time(),
         }
@@ -280,11 +286,60 @@ class WalletStream:
             wallet[:10], role, side, shares, price, usdc, tx_hash[:10] + "..." if tx_hash else "?",
         )
 
-        # Still trigger a single-wallet REST poll to hydrate the full
-        # wallet_trades record (market title, category, etc.) — chain
-        # event told us WHEN, REST tells us WHAT MARKET. But the
-        # latency improvement is real: we know a trade happened in
-        # ~2-5s instead of waiting for the 10-min poller cycle.
+        # 2026-07-02 CHAIN-DIRECT DISPATCH — the missing last mile.
+        # Previously we decoded the fill here and then WAITED on a Data API
+        # poll for market metadata ("chain tells us WHEN, REST tells us WHAT
+        # MARKET"). Data-api indexing lag made p50 whale-fill→our-attempt
+        # detection latency 8.8 MINUTES (daily review section 14, day 1).
+        # The local markets table already maps token_id → (condition_id,
+        # question, YES/NO side) for the tracked universe, so for known
+        # tokens we synthesize the data-api-shaped trade dict and feed
+        # process_wallet() IMMEDIATELY — seconds, not minutes. Dedup is
+        # safe: process_wallet keys on transaction_hash + last_checked_ts,
+        # so the later hydration poll re-delivering this fill is a no-op.
+        if os.environ.get("CHAIN_DIRECT_DISPATCH", "1").lower() in ("1", "true", "yes"):
+            meta = self._market_for_token(str(token_id))
+            if meta:
+                synthetic = {
+                    "proxyWallet": wallet,
+                    "side": side,
+                    "asset": str(token_id),
+                    "conditionId": meta["condition_id"],
+                    "size": shares,
+                    "price": price,
+                    # Receipt time ≈ block time on Polygon (2s blocks);
+                    # becomes whale_trade_ts downstream, so section 14's
+                    # latency metric measures this exact path.
+                    "timestamp": int(time.time()),
+                    "title": meta.get("question") or "",
+                    "outcome": meta.get("outcome") or "YES",
+                    "transactionHash": tx_hash,
+                }
+                try:
+                    from trading_platform.polymarket.wallet_trade_poller import WalletTradePoller
+                    if not hasattr(self, "_poller"):
+                        self._poller = WalletTradePoller(dry_run=False)
+                    res = await asyncio.to_thread(
+                        self._poller.process_wallet, wallet, [synthetic]
+                    )
+                    self._stats["chain_direct_dispatches"] += 1
+                    logger.info(
+                        "[chain-direct] dispatched %s %s %.2f@%.4f on %s → %s",
+                        wallet[:10], side, shares, price,
+                        (meta.get("question") or "?")[:40], res,
+                    )
+                except Exception as exc:
+                    logger.warning("[chain-direct] dispatch failed (poll will cover): %s", exc)
+            else:
+                self._stats["chain_direct_misses"] += 1
+                logger.info(
+                    "[chain-direct] token %s… not in local markets table — "
+                    "falling back to REST poll only", str(token_id)[:16],
+                )
+
+        # Hydration poll (also the only path for unknown tokens): fetches the
+        # full data-api record (category enrichment, canonical fields). The
+        # direct dispatch above already fired any signal; this is bookkeeping.
         now = time.time()
         last = self._last_poll.get(wallet, 0)
         if (now - last) < 3:  # tighter dedup for chain events
@@ -292,6 +347,44 @@ class WalletStream:
         self._last_poll[wallet] = now
         self._stats["polls_triggered"] += 1
         asyncio.create_task(self._poll_wallet(wallet))
+
+    def _market_for_token(self, token_id: str) -> dict | None:
+        """Local markets-table lookup: token → condition/question/side.
+
+        1h TTL cache including negative results (unknown tokens are usually
+        markets outside our tracked universe; they stay unknown for a while).
+        """
+        now = time.time()
+        cached = self._token_meta_cache.get(token_id)
+        if cached and (now - cached[0]) < 3600:
+            return cached[1]
+        meta: dict | None = None
+        try:
+            from trading_platform.polymarket.db_connection import get_connection
+            conn = get_connection()
+            try:
+                row = conn.execute(
+                    """SELECT condition_id, question,
+                              CASE WHEN yes_token_id = ? THEN 'YES'
+                                   WHEN no_token_id = ? THEN 'NO' END
+                         FROM markets
+                        WHERE yes_token_id = ? OR no_token_id = ?
+                        LIMIT 1""",
+                    (token_id, token_id, token_id, token_id),
+                ).fetchone()
+            finally:
+                try: conn.close()
+                except Exception: pass
+            if row and row[0]:
+                meta = {
+                    "condition_id": row[0],
+                    "question": row[1] or "",
+                    "outcome": row[2] or "YES",
+                }
+        except Exception as exc:
+            logger.debug("token→market lookup failed for %s: %s", token_id[:16], exc)
+        self._token_meta_cache[token_id] = (now, meta)
+        return meta
 
     async def _poll_wallet(self, wallet: str) -> None:
         """Fetch recent trades for one wallet, feed through the signal engine."""
