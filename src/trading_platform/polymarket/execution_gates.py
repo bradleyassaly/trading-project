@@ -40,10 +40,14 @@ _DEFAULT_DB = str(_PROJECT_ROOT / "data" / "polymarket" / "wallet_intelligence.d
 # 2026-05-02: 60-cap filled overnight (97 trades/24h after gate
 # unblocking). Bumping to 150. Real fix is auto-closing stale
 # positions, but cap raise is the immediate unblock. Live cap = 5.
+# 2026-07-05: 150 saturated again with FRESH positions (oldest 10 days,
+# archiver healthy) — the cap now throttles evidence collection that the
+# scaling gates depend on. Paper positions cost nothing; 300 keeps the
+# category-concentration math meaningful while doubling throughput.
 _PAPER_THRESHOLDS = {
     "max_price_move_pct": 0.05,
     "max_category_pct": 0.30,
-    "max_positions": 150,
+    "max_positions": 300,
     "depth_multiple": 2.0,
     "spread_safety_factor": 1.5,
 }

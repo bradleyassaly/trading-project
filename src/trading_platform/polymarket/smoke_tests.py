@@ -17,6 +17,7 @@ Each check returns (name, passed: bool, detail: str). Non-blocking.
 from __future__ import annotations
 
 import logging
+import os
 import time
 from typing import Any
 
@@ -47,7 +48,14 @@ def _check_kalshi_ingest_pace(conn) -> tuple[bool, str]:
     """Verify kalshi_ingest task isn't in sustained failure.
     2026-05-01: 40 consecutive timeouts went unnoticed for 7h before
     we noticed system was NOT_READY.
+    2026-07-05: kalshi_ingest was deliberately disabled 2026-06-03
+    (cross-platform arb is dead), so an empty last-hour count is the
+    EXPECTED state — this check failed on every run for a month and
+    trained us to ignore the smoke suite. Pass while ingestion is off;
+    re-arm via KALSHI_INGEST_ENABLED=1 if the arb lane ever returns.
     """
+    if os.environ.get("KALSHI_INGEST_ENABLED", "0") != "1":
+        return True, "kalshi ingest disabled (arb lane retired 2026-06-03) — skipped"
     try:
         n = conn.execute(
             "SELECT COUNT(*) FROM kalshi_markets "

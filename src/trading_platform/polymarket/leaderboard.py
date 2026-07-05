@@ -110,7 +110,12 @@ def build_leaderboard(db: WalletDB | None = None) -> dict[str, Any]:
     version = db.get_leaderboard_version() + 1
     db.begin_leaderboard_rebuild(version)
 
-    conn = sqlite3.connect(str(db._path))
+    # 2026-07-05: was raw sqlite3.connect — after the Postgres migration
+    # that read a stale SQLite file and the build "qualified" 0 wallets
+    # every night while 16k+ profiles sat in Postgres. Backend-aware
+    # connection is mandatory here (see db_connection module docs).
+    from trading_platform.polymarket.db_connection import get_connection
+    conn = get_connection(str(db._path))
     rows = conn.execute("""
         SELECT wallet, directional_win_rate, conviction_score,
                resolved_trades, total_volume_usdc, wallet_type,
@@ -275,7 +280,8 @@ def build_leaderboard(db: WalletDB | None = None) -> dict[str, Any]:
         r["rank"] = i + 1
 
     # Write to DB — migrate schema if needed
-    conn = sqlite3.connect(str(db._path))
+    from trading_platform.polymarket.db_connection import get_connection
+    conn = get_connection(str(db._path))
     existing_cols = {r[1] for r in conn.execute("PRAGMA table_info(leaderboard)").fetchall()}
     for col, typedef in [
         ("profit_factor", "REAL"), ("primary_category", "TEXT"),
@@ -295,6 +301,8 @@ def build_leaderboard(db: WalletDB | None = None) -> dict[str, Any]:
     locally_inserted = set()
     for r in leaderboard_rows:
         r["leaderboard_source"] = "local"
+        # Positional params — the Postgres connection wrapper translates
+        # `?` but not sqlite-style `:named` placeholders.
         conn.execute("""
             INSERT OR REPLACE INTO leaderboard
                 (wallet, tier, directional_win_rate, rolling_20_wr,
@@ -303,12 +311,14 @@ def build_leaderboard(db: WalletDB | None = None) -> dict[str, Any]:
                  profit_factor, primary_category, net_pnl_usdc, avg_position_size_usdc,
                  leaderboard_source)
             VALUES
-                (:wallet, :tier, :directional_win_rate, :rolling_20_wr,
-                 :conviction_score, :resolved_trades, :total_volume_usdc,
-                 :wallet_type, :last_trade_ts, :rank, :version, :updated_at,
-                 :profit_factor, :primary_category, :net_pnl_usdc, :avg_position_size_usdc,
-                 :leaderboard_source)
-        """, r)
+                (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            r["wallet"], r["tier"], r["directional_win_rate"], r["rolling_20_wr"],
+            r["conviction_score"], r["resolved_trades"], r["total_volume_usdc"],
+            r["wallet_type"], r["last_trade_ts"], r["rank"], r["version"], r["updated_at"],
+            r["profit_factor"], r["primary_category"], r["net_pnl_usdc"],
+            r["avg_position_size_usdc"], r["leaderboard_source"],
+        ))
         locally_inserted.add(r["wallet"])
 
     # Restore polymarket-sourced wallets not already locally classified.

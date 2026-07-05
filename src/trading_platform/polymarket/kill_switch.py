@@ -379,9 +379,29 @@ class KillSwitch:
                 hour=0, minute=0, second=0, microsecond=0
             )
             today_start = int(_today_utc.timestamp())
+            # 2026-07-05: window on the ECONOMIC date, not the booking date.
+            # Reconciliation channels (resolved_databook etc.) can book
+            # weeks-old losses in a single batch; exit_ts then reads as "we
+            # lost $115 today" and trips the breaker on stale losses
+            # (happened 2026-07-02: May-resolved markets back-booked at
+            # once, halting all live entries for 2+ days). When
+            # resolution_date is known and earlier than exit_ts, the loss
+            # economically belongs to the resolution day. An undated
+            # resolved_databook row is a legacy back-booking from before
+            # book_resolved_positions stamped resolution_date (it now
+            # always does) — its economic date is unknown-but-old, so it
+            # maps to 0 and falls out of every window.
+            _ECON_TS = (
+                "CASE "
+                "WHEN exit_reason = 'resolved_databook' "
+                "AND COALESCE(resolution_date, 0) <= 0 THEN 0 "
+                "WHEN COALESCE(resolution_date, 0) > 0 "
+                "AND resolution_date < exit_ts THEN resolution_date "
+                "ELSE exit_ts END"
+            )
             daily_pnl = conn.execute(
-                """SELECT COALESCE(SUM(realized_pnl), 0) FROM live_trades
-                   WHERE dry_run = 0 AND exit_ts >= %s AND realized_pnl IS NOT NULL""",
+                f"""SELECT COALESCE(SUM(realized_pnl), 0) FROM live_trades
+                   WHERE dry_run = 0 AND {_ECON_TS} >= %s AND realized_pnl IS NOT NULL""",
                 (today_start,),
             ).fetchone()[0] or 0.0
             daily_loss_pct = abs(min(0.0, daily_pnl)) / self.BANKROLL
@@ -402,8 +422,8 @@ class KillSwitch:
             ROLLING_7D_HALT_PCT = 0.10
             week_start = int(time.time()) - 7 * 86400
             week_pnl = conn.execute(
-                """SELECT COALESCE(SUM(realized_pnl), 0) FROM live_trades
-                   WHERE dry_run = 0 AND exit_ts >= %s AND realized_pnl IS NOT NULL""",
+                f"""SELECT COALESCE(SUM(realized_pnl), 0) FROM live_trades
+                   WHERE dry_run = 0 AND {_ECON_TS} >= %s AND realized_pnl IS NOT NULL""",
                 (week_start,),
             ).fetchone()[0] or 0.0
             week_loss_pct = abs(min(0.0, week_pnl)) / self.BANKROLL

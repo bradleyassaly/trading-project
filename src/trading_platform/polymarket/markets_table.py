@@ -66,7 +66,14 @@ def ensure_schema() -> None:
                 c.execute(stmt)
 
 
-def _fetch_one(condition_id: str, session: Any = None) -> dict | None:
+# Sentinel for a definitive "Gamma does not index this market" answer
+# (HTTP 200 with an empty list) — distinct from a transient fetch error.
+_NOT_IN_GAMMA = "not_in_gamma"
+
+
+def _fetch_one(condition_id: str, session: Any = None) -> dict | str | None:
+    """Return the market dict, _NOT_IN_GAMMA for a definitive miss, or
+    None for a transient error (bad status / network / parse)."""
     import requests
     s = session or requests
     try:
@@ -80,6 +87,8 @@ def _fetch_one(condition_id: str, session: Any = None) -> dict | None:
         data = r.json()
     except Exception:
         return None
+    if isinstance(data, list) and not data:
+        return _NOT_IN_GAMMA
     m = data[0] if isinstance(data, list) and data else None
     if not isinstance(m, dict):
         return None
@@ -196,12 +205,26 @@ def refresh(
 
     updated = 0
     failed = 0
+    tombstoned = 0
+    any_ok = False
     updates: list[tuple] = []
     for i, cid in enumerate(candidates):
         m = _fetch_one(cid, session=session)
         if m is None:
             failed += 1
+        elif m == _NOT_IN_GAMMA:
+            # 2026-07-05: Gamma answers 200/[] for delisted markets. These
+            # were counted as failures and never got a row, so the same
+            # dead condition_ids re-consumed the whole per-run budget every
+            # cycle (observed 490/500 "failed" per run). Write a tombstone
+            # so they only recheck after the staleness window. Tombstones
+            # only touch last_fetched_at/uma_status — a previously-cached
+            # snapshot keeps its endDate/outcome fields.
+            any_ok = True
+            tombstoned += 1
+            _persist_tombstone(cid)
         else:
+            any_ok = True
             updates.append(_extract_row(cid, m))
         # Batch commit every 50 to minimise lock time
         if len(updates) >= 50:
@@ -214,10 +237,20 @@ def refresh(
         _persist(updates)
         updated += len(updates)
 
+    try:
+        from trading_platform.polymarket import api_health
+        if any_ok:
+            api_health.record_success("gamma")
+        elif candidates and failed:
+            api_health.record_error("gamma", f"all {failed} single-market fetches failed")
+    except Exception:
+        pass
+
     return {
         "fetched": len(candidates),
         "updated": updated,
         "failed": failed,
+        "tombstoned": tombstoned,
         "skipped_fresh": len(rows) - len(candidates),
     }
 
@@ -243,32 +276,57 @@ def refresh_active_universe(*, max_pages: int = 60, page_size: int = 100) -> dic
     total = 0
     failed_pages = 0
     updates: list[tuple] = []
+    # 2026-07-05: Gamma 422s any offset > ~2000, so a straight
+    # volume-ordered walk dies at page 21 with everything below the top
+    # 2000 markets unindexed. Page in END-DATE WINDOWS instead: order by
+    # endDate ascending and, when the offset nears the cap, advance
+    # end_date_min to the highest end date seen and reset the offset.
+    # Duplicates across window edges are skipped via seen-cid tracking.
+    GAMMA_OFFSET_CAP = 2000
+    window_min = ""  # first window: no end_date_min bound
+    offset = 0
+    watermark = ""
+    seen_cids: set[str] = set()
+    any_ok = False
     for page in range(max_pages):
+        if offset + page_size > GAMMA_OFFSET_CAP:
+            if watermark and watermark > window_min:
+                window_min = watermark
+                offset = 0
+                logger.info("universe window advance: end_date_min=%s", window_min)
+            else:
+                logger.warning("universe window cannot advance past %s — stopping", window_min)
+                break
+        params = {
+            "active": "true", "closed": "false",
+            "limit": page_size, "offset": offset,
+            "order": "endDate", "ascending": "true",
+        }
+        if window_min:
+            params["end_date_min"] = window_min
         try:
-            r = session.get(
-                _GAMMA_URL,
-                params={
-                    "active": "true", "closed": "false",
-                    "limit": page_size, "offset": page * page_size,
-                    "order": "volume24hr", "ascending": "false",
-                },
-                timeout=15,
-            )
+            r = session.get(_GAMMA_URL, params=params, timeout=15)
             r.raise_for_status()
             data = r.json()
+            any_ok = True
         except Exception as exc:
-            logger.warning("universe page %d failed: %s", page, exc)
+            logger.warning("universe page %d (offset %d) failed: %s", page, offset, exc)
             failed_pages += 1
             if failed_pages >= 3:
                 break
             time.sleep(2)
+            offset += page_size
             continue
         if not isinstance(data, list) or not data:
             break
         for m in data:
             cid = m.get("conditionId") or m.get("condition_id")
-            if not cid:
+            if not cid or str(cid) in seen_cids:
                 continue
+            seen_cids.add(str(cid))
+            _end = str(m.get("endDateIso") or m.get("endDate") or "")[:10]
+            if _end > watermark:
+                watermark = _end
             updates.append(_extract_row(str(cid), m))
         if len(updates) >= 200:
             _persist(updates)
@@ -276,10 +334,19 @@ def refresh_active_universe(*, max_pages: int = 60, page_size: int = 100) -> dic
             updates = []
         if len(data) < page_size:
             break
+        offset += page_size
         time.sleep(_SLEEP)
     if updates:
         _persist(updates)
         total += len(updates)
+    try:
+        from trading_platform.polymarket import api_health
+        if any_ok:
+            api_health.record_success("gamma")
+        elif failed_pages:
+            api_health.record_error("gamma", f"universe refresh: {failed_pages} pages failed")
+    except Exception:
+        pass
     logger.info("universe refresh: %d active markets indexed", total)
     return {"indexed": total, "failed_pages": failed_pages}
 
@@ -324,6 +391,20 @@ def get_by_token_id(token_id: str) -> dict | None:
     except Exception as exc:
         logger.debug("gamma by-token lookup failed for %s: %s", tid[:16], exc)
     return None
+
+
+def _persist_tombstone(condition_id: str) -> None:
+    """Record 'Gamma does not index this market' without disturbing any
+    previously-cached snapshot fields."""
+    with db() as c:
+        c.execute(
+            """INSERT INTO markets (condition_id, uma_status, last_fetched_at)
+               VALUES (?, ?, ?)
+               ON CONFLICT (condition_id) DO UPDATE SET
+                 uma_status = EXCLUDED.uma_status,
+                 last_fetched_at = EXCLUDED.last_fetched_at""",
+            (condition_id, _NOT_IN_GAMMA, int(time.time())),
+        )
 
 
 def _persist(rows: list[tuple]) -> None:

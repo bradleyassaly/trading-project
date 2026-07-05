@@ -36,6 +36,9 @@ class GammaResolutionFetcher:
         self._sleep = sleep_sec
         self._session = requests.Session()
         self._session.headers.update({"Accept": "application/json"})
+        # Highest endDate (YYYY-MM-DD) seen while paging — the watermark used
+        # to advance the end_date_min window past Gamma's ~2000 offset cap.
+        self._last_end_date_seen: str = ""
 
     def fetch_resolved(
         self,
@@ -64,35 +67,70 @@ class GammaResolutionFetcher:
         cutoff = (datetime.now(tz=timezone.utc) - timedelta(days=since_days)).strftime("%Y-%m-%d")
         page_size = 100
         max_pages = 300
+        # 2026-07-05: Gamma rejects offset > ~2000 with 422 (observed: 2100
+        # fails, 2000 works). To cover result sets larger than the cap we
+        # page in END-DATE WINDOWS: order by endDate ascending, and when the
+        # offset approaches the cap, advance end_date_min to the last end
+        # date seen and reset offset to 0. Duplicate markets across window
+        # boundaries are dropped via seen-condition_id tracking.
+        GAMMA_OFFSET_CAP = 2000
+        window_min = cutoff
         offset = 0
         total_fetched = 0
+        seen_cids: set[str] = set()
+        any_page_ok = False
 
         # Write incrementally — don't buffer in memory
         fieldnames = ["ticker", "condition_id", "resolution_price", "resolves_yes", "question", "close_time", "volume"]
         rows_written = 0
+
+        from trading_platform.polymarket import api_health
 
         with output_path.open("w", newline="", encoding="utf-8") as fh:
             writer = csv.DictWriter(fh, fieldnames=fieldnames)
             writer.writeheader()
 
             for page_num in range(max_pages):
+                if offset + page_size > GAMMA_OFFSET_CAP:
+                    # Advance the window instead of paging past the cap.
+                    last_end = self._last_end_date_seen
+                    if last_end and last_end > window_min:
+                        window_min = last_end
+                    else:
+                        # Can't advance (2000+ markets share one end date) —
+                        # skip a day rather than loop forever.
+                        try:
+                            _d = datetime.strptime(window_min, "%Y-%m-%d")
+                            window_min = (_d + timedelta(days=1)).strftime("%Y-%m-%d")
+                            logger.warning(
+                                "Gamma window could not advance by data; skipping to %s",
+                                window_min,
+                            )
+                        except ValueError:
+                            break
+                    offset = 0
+                    print(f"  [window] advancing end_date_min → {window_min}, offset reset")
                 try:
                     time.sleep(self._sleep)
                     resp = self._session.get(
                         f"{self._base}/markets",
                         params={
                             "closed": "true",
-                            "end_date_min": cutoff,
+                            "end_date_min": window_min,
                             "limit": page_size,
                             "offset": offset,
+                            "order": "endDate",
+                            "ascending": "true",
                         },
                         timeout=15,
                     )
                     resp.raise_for_status()
                     raw = resp.json()
+                    any_page_ok = True
                 except Exception as exc:
                     logger.warning("Gamma fetch failed at offset %d: %s", offset, exc)
                     print(f"  [ERROR] Page {page_num}: {exc}")
+                    api_health.record_error("gamma", str(exc))
                     break
 
                 if isinstance(raw, list):
@@ -110,6 +148,15 @@ class GammaResolutionFetcher:
                 page_resolved = 0
 
                 for m in batch:
+                    # Track window watermark + dedupe across window overlaps
+                    _end_iso = str(m.get("endDateIso") or m.get("endDate") or "")[:10]
+                    if _end_iso and _end_iso > (self._last_end_date_seen or ""):
+                        self._last_end_date_seen = _end_iso
+                    _cid = m.get("conditionId") or ""
+                    if _cid:
+                        if _cid in seen_cids:
+                            continue
+                        seen_cids.add(_cid)
                     rp = self._extract_resolution(m)
                     if rp is None:
                         continue
@@ -169,6 +216,8 @@ class GammaResolutionFetcher:
             else:
                 print(f"  [WARN] Hit max page cap ({max_pages})")
 
+        if any_page_ok:
+            api_health.record_success("gamma")
         logger.info("Wrote %d resolutions to %s", rows_written, output_path)
         return rows_written
 

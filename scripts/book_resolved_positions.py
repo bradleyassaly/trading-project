@@ -37,6 +37,20 @@ from trading_platform.polymarket.db_connection import get_connection
 from trading_platform.polymarket.position_fetcher import PositionFetcher
 
 
+def _parse_end_date(end_date: str | None) -> int | None:
+    """data-api endDate ISO string → epoch seconds, or None if unparseable."""
+    if not end_date:
+        return None
+    from datetime import datetime, timezone
+    try:
+        dt = datetime.fromisoformat(str(end_date).replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return int(dt.timestamp())
+    except (ValueError, TypeError):
+        return None
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--apply", action="store_true",
@@ -93,8 +107,19 @@ def main() -> int:
         cur_price = p.get("curPrice")
         realized = round(float(cash_pnl), 2) if cash_pnl is not None else 0.0
         outcome = "win" if realized > 0 else "loss"
+        # Economic date of the loss/win: the market's end date, not the day
+        # this script happens to run. The kill-switch rolling-loss windows
+        # read resolution_date so a batch back-booking of old resolutions
+        # doesn't register as a single catastrophic day (2026-07-02 incident:
+        # May-resolved losses booked at once tripped the 7d breaker).
+        # Always stamp a resolution_date: endDate when known, else booking
+        # time. The kill-switch treats an undated resolved_databook row as
+        # a legacy pre-2026-07-05 back-booking and drops it from the loss
+        # windows — so fresh bookings must never be left undated.
+        res_ts = _parse_end_date(p.get("endDate"))
         to_book.append((tid, outcome, realized,
-                        float(cur_price) if cur_price is not None else 0.0))
+                        float(cur_price) if cur_price is not None else 0.0,
+                        res_ts if (res_ts and res_ts < now) else now))
         print(f"#{tid:<6}{str(direction):<5}{'BOOK':<10}{outcome:<8}"
               f"{realized:<+9.2f}{q}")
 
@@ -111,13 +136,14 @@ def main() -> int:
         return 0
 
     booked = 0
-    for tid, outcome, realized, cur_price in to_book:
+    for tid, outcome, realized, cur_price, res_ts in to_book:
         conn.execute(
             """UPDATE live_trades
                   SET exit_ts=%s, exit_price=%s, outcome=%s,
-                      realized_pnl=%s, exit_reason='resolved_databook'
+                      realized_pnl=%s, exit_reason='resolved_databook',
+                      resolution_date=COALESCE(resolution_date, %s)
                 WHERE id=%s AND exit_ts IS NULL""",
-            (now, cur_price, outcome, realized, tid),
+            (now, cur_price, outcome, realized, res_ts, tid),
         )
         booked += 1
     conn.commit()

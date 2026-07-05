@@ -29,6 +29,15 @@ logger = logging.getLogger(__name__)
 
 _GAMMA_CSV = Path(__file__).resolve().parents[3] / "data" / "polymarket" / "gamma_resolution.csv"
 
+# 2026-07-05: positions whose remaining market value is below this floor are
+# not worth exiting — the recoverable USDC is pennies and the far side of the
+# book is usually empty, so sell attempts rest unfilled forever. Abandon the
+# exit (exit_stuck=1) and let resolution/book_resolved_positions book the
+# outcome. Before this floor existed, dust SELLs produced an 11k-warning
+# cancel/re-place loop against the CLOB (one cycle every 5 minutes per
+# position since 2026-06-03).
+LIVE_EXIT_MIN_VALUE_USD = float(os.environ.get("LIVE_EXIT_MIN_VALUE_USD", "0.50"))
+
 
 def _settle_dust_close(
     *,
@@ -447,6 +456,36 @@ def check_live_exits() -> dict[str, int]:
                 shares_held = db_shares
             exit_price_hint = current
         # shares_held is guaranteed >= 1.0 at this point (dust handled above)
+        # Dust-VALUE abandon: >=1 token but the whole position is worth
+        # pennies (e.g. 24 NO tokens at 0.0025). exit_price_hint is already
+        # in the held token's price space for both branches.
+        position_value = float(shares_held) * float(exit_price_hint)
+        if position_value < LIVE_EXIT_MIN_VALUE_USD:
+            logger.warning(
+                "[live-exit] #%d (%s) remaining value $%.2f < $%.2f floor — "
+                "abandoning exit attempts; resolution booking will close it",
+                lid, sig_type, position_value, LIVE_EXIT_MIN_VALUE_USD,
+            )
+            try:
+                conn = get_connection()
+                try:
+                    conn.execute(
+                        """UPDATE live_trades
+                              SET exit_stuck = 1,
+                                  exit_first_attempt_at = COALESCE(exit_first_attempt_at, %s),
+                                  exit_last_error = %s
+                            WHERE id = %s""",
+                        (int(time.time()),
+                         f"abandoned_dust_value ${position_value:.2f}", lid),
+                    )
+                    conn.commit()
+                finally:
+                    try: conn.close()
+                    except Exception: pass
+            except Exception as _exc:
+                logger.debug("[live-exit] dust-abandon update failed for #%d: %s", lid, _exc)
+            reasons["abandoned_dust_value"] = reasons.get("abandoned_dust_value", 0) + 1
+            continue
         exact_sell_shares = int(shares_held)
         order_result = clob.place_market_order(
             token_id=token_id, side="SELL",
@@ -530,6 +569,29 @@ def check_live_exits() -> dict[str, int]:
                 "Leaving position open; will retry next cycle.",
                 exit_reason, lid, sig_type, post_balance, shares_held,
             )
+            # 2026-07-05: a resting-unfilled SELL is a failed exit attempt.
+            # Not counting it here meant the 20-attempt exit_stuck cap never
+            # engaged for empty-book positions — each cycle cancelled the
+            # previous resting order and re-placed forever (the 11k-warning
+            # livelock). With this, hopeless exits stop after 20 cycles.
+            try:
+                conn = get_connection()
+                try:
+                    conn.execute(
+                        """UPDATE live_trades
+                              SET exit_attempts = exit_attempts + 1,
+                                  exit_first_attempt_at = COALESCE(exit_first_attempt_at, %s),
+                                  exit_last_error = 'resting_unfilled',
+                                  exit_stuck = CASE WHEN exit_attempts + 1 >= 20 THEN 1 ELSE 0 END
+                            WHERE id = %s""",
+                        (int(time.time()), lid),
+                    )
+                    conn.commit()
+                finally:
+                    try: conn.close()
+                    except Exception: pass
+            except Exception as _exc:
+                logger.debug("[live-exit] unfilled-attempt update failed for #%d: %s", lid, _exc)
             continue
 
         fill = order_result.filled_price or current

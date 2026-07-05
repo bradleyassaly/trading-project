@@ -16,13 +16,15 @@ For each new cohort BUY:
     (current best-ask, captured as expected_price) so slippage can be
     measured retrospectively
 
-The existing resolution pipeline (signal_resolver + zero-balance handling)
-will populate realized_pnl when the market resolves. After ~30 resolved
-shadow trades, evaluate vs the +13.7% baseline. If it holds, flip to live
-with a hard budget cap by setting NAIVE_COPY_LIVE_ENABLED=1.
+Shadow rows are resolved by this module itself (_resolve_open_shadows,
+2026-07-05): nothing else in the exit pipeline touches dry_run=1 rows, and
+relying on signal_resolver left all 50 shadows unresolved for a month.
+After ~30 resolved shadow trades, evaluate vs the +13.7% baseline. If it
+holds, flip to live with a hard budget cap by setting NAIVE_COPY_LIVE_ENABLED=1.
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import time
@@ -41,6 +43,9 @@ NAIVE_COPY_STAKE_USD = float(os.environ.get("NAIVE_COPY_STAKE_USD", "5.0"))
 NAIVE_COPY_LOOKBACK_MIN = int(os.environ.get("NAIVE_COPY_LOOKBACK_MIN", "75"))
 NAIVE_COPY_LIVE_ENABLED = os.environ.get("NAIVE_COPY_LIVE_ENABLED", "0") == "1"
 NAIVE_COPY_PER_CYCLE_CAP = int(os.environ.get("NAIVE_COPY_PER_CYCLE_CAP", "5"))
+# Shadows whose market never shows a resolved outcome in the markets table
+# are written off at pnl=0 after this many days (max market horizon is 30d).
+NAIVE_COPY_SHADOW_EXPIRE_DAYS = int(os.environ.get("NAIVE_COPY_SHADOW_EXPIRE_DAYS", "30"))
 
 BLOCKED_CATEGORIES = {"science"}  # 0% WR in our existing pipeline
 PRICE_MIN = 0.10
@@ -68,6 +73,67 @@ def _get_cohort(conn) -> list[str]:
         """
     ).fetchall()
     return [r[0] for r in rows]
+
+
+def _resolve_open_shadows(conn) -> dict[str, int]:
+    """Book resolved/expired shadow copies so the open-count cap tracks
+    genuinely-live mirrors.
+
+    Shadow rows are dry_run=1 inserts that no exit path ever touches —
+    the live position monitor and paper resolutions both skip them. By
+    2026-07-05 all 50 open shadows dated from June 3-6 and the lane had
+    been pinned at cap (zero new inserts, zero new evidence) for a month.
+    Resolution rule matches the paper executor: market closed with an
+    outcome price at an extreme (>=0.99 / <=0.01). Shadows whose market
+    never resolves in the markets table expire at pnl=0 after
+    NAIVE_COPY_SHADOW_EXPIRE_DAYS.
+    """
+    out = {"resolved": 0, "expired": 0}
+    rows = conn.execute(
+        """
+        SELECT lt.id, lt.token_id, lt.entry_price, lt.shares, lt.attempted_at,
+               m.no_token_id, m.outcome_prices, m.closed
+          FROM live_trades lt
+          LEFT JOIN markets m ON m.condition_id = lt.condition_id
+         WHERE lt.signal_type = 'naive_copy_buy'
+           AND lt.dry_run = 1
+           AND lt.realized_pnl IS NULL
+        """
+    ).fetchall()
+    now = int(time.time())
+    for lid, token_id, entry_price, shares, attempted_at, no_tok, prices_raw, closed in rows:
+        final: float | None = None
+        if closed and prices_raw:
+            try:
+                prices = [float(x) for x in json.loads(prices_raw)]
+                idx = 1 if str(token_id) == str(no_tok) else 0
+                px = prices[idx]
+                if px >= 0.99 or px <= 0.01:
+                    final = float(round(px))
+            except (ValueError, TypeError, IndexError):
+                final = None
+        if final is not None:
+            pnl = round((shares or 0.0) * (final - (entry_price or 0.0)), 4)
+            conn.execute(
+                """UPDATE live_trades
+                      SET exit_ts=%s, exit_price=%s, realized_pnl=%s,
+                          outcome=%s, exit_reason='shadow_resolved'
+                    WHERE id=%s AND realized_pnl IS NULL""",
+                (now, final, pnl, "win" if pnl > 0 else "loss", lid),
+            )
+            out["resolved"] += 1
+        elif attempted_at and now - attempted_at > NAIVE_COPY_SHADOW_EXPIRE_DAYS * 86400:
+            conn.execute(
+                """UPDATE live_trades
+                      SET exit_ts=%s, realized_pnl=0, outcome='expired_unresolved',
+                          exit_reason='shadow_expired'
+                    WHERE id=%s AND realized_pnl IS NULL""",
+                (now, lid),
+            )
+            out["expired"] += 1
+    if out["resolved"] or out["expired"]:
+        conn.commit()
+    return out
 
 
 def _open_shadow_count(conn) -> int:
@@ -216,6 +282,13 @@ def run_cycle() -> dict[str, int]:
         if not cohort:
             logger.warning("[naive_copy] empty cohort — skipping")
             return stats
+
+        booked = _resolve_open_shadows(conn)
+        if booked["resolved"] or booked["expired"]:
+            logger.info(
+                "[naive_copy] shadow book-keeping: resolved=%d expired=%d",
+                booked["resolved"], booked["expired"],
+            )
 
         open_count = _open_shadow_count(conn)
         room = max(0, NAIVE_COPY_MAX_OPEN - open_count)

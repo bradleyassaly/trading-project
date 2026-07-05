@@ -1234,9 +1234,54 @@ class TelegramAlerter:
 
     def send_pipeline_alert(self, component: str, message: str, level: str = "warning") -> bool:
         now = time.time()
-        if level != "ok" and now - self._last_pipeline_alert.get(component, 0) < 1800:
+        # 2026-07-05: the in-memory cooldown dict resets on every process
+        # start — and monitor_alerts.py runs as a fresh subprocess each
+        # scheduler tick, so the "30-min cooldown" never suppressed anything
+        # (gamma-stale alert fired every ~15 min all night). Persist the
+        # per-component last-fire timestamp in the DB; fall back to the
+        # in-memory dict if the DB is unreachable.
+        last_fire = self._last_pipeline_alert.get(component, 0)
+        try:
+            from trading_platform.polymarket.db_connection import get_connection
+            conn = get_connection()
+            try:
+                conn.execute(
+                    """CREATE TABLE IF NOT EXISTS monitor_alert_state (
+                           component TEXT PRIMARY KEY,
+                           last_fired_ts BIGINT NOT NULL
+                       )"""
+                )
+                row = conn.execute(
+                    "SELECT last_fired_ts FROM monitor_alert_state WHERE component = ?",
+                    (component,),
+                ).fetchone()
+                if row and row[0]:
+                    last_fire = max(last_fire, float(row[0]))
+            finally:
+                try: conn.close()
+                except Exception: pass
+        except Exception as exc:
+            logger.debug("pipeline-alert cooldown read failed (%s): %s", component, exc)
+        if level != "ok" and now - last_fire < 1800:
             return False
         self._last_pipeline_alert[component] = now
+        try:
+            from trading_platform.polymarket.db_connection import get_connection
+            conn = get_connection()
+            try:
+                conn.execute(
+                    """INSERT INTO monitor_alert_state (component, last_fired_ts)
+                       VALUES (?, ?)
+                       ON CONFLICT (component) DO UPDATE SET
+                         last_fired_ts = EXCLUDED.last_fired_ts""",
+                    (component, int(now)),
+                )
+                conn.commit()
+            finally:
+                try: conn.close()
+                except Exception: pass
+        except Exception as exc:
+            logger.debug("pipeline-alert cooldown write failed (%s): %s", component, exc)
 
         level_e = {
             "warning": "\u26a0\ufe0f", "critical": "\U0001f6a8", "ok": "\u2705",

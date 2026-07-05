@@ -148,7 +148,11 @@ SIGNAL_CALIBRATION_TIER = {
     # well-calibrated DOES NOT mean profitable. Re-tier accordingly.
 
     # Tier A — proven backtest EV ≥ +10% on n ≥ 50
-    "wallet_reversal":       "A",  # n=192, WR=72%, EV=+10.1%
+    # wallet_reversal demoted A→C 2026-07-05: the +10.1% EV was the stale
+    # 2026-05-01 backtest (n=192). Fresh backtest EV=-8%, and the 90d
+    # reconciled live ledger shows -$48.08 (ev_act -40%, ev_res -54%)
+    # → verdict KILL. Also on LIVE_KILL_SIGNAL_TYPES in the live executor.
+    "wallet_reversal":       "C",
     "specialist_entry":      "A",  # n=60,  WR=80%, EV=+12.7%
     # Tier B — small-n positive EV (need more samples to graduate)
     "tier_entry":            "B",  # n=16, EV=+26% but small sample

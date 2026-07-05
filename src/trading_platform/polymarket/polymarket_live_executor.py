@@ -127,6 +127,16 @@ class PolymarketLiveExecutor:
         # Re-add only if a fresh 30-day window shows EV > 0.0 on n>=20 resolved.
     }
 
+    # 2026-07-05: hard KILL list. Overrides EVERY live-promotion path
+    # (allowlist above, 3-dim slice promotion, probation tiers). The daily
+    # review's reconciled per-signal verdict (section 13) is the entry
+    # criterion; removal requires a fresh positive reconciled window.
+    #   wallet_reversal: 90d reconciled -$48.08, ev_act -40%, ev_res -54%,
+    #   verdict KILL — worst live signal, largest booked losses on 7/2.
+    LIVE_KILL_SIGNAL_TYPES: set[str] = {
+        "wallet_reversal",
+    }
+
     # ALWAYS True in source. Flip in your local instance only.
     # Class default applies to non-allowlisted signal types.
     DRY_RUN: bool = True
@@ -232,6 +242,16 @@ class PolymarketLiveExecutor:
         # authoritative at the top of the gating chain: nothing below this
         # line can produce a real order without POLYMARKET_LIVE_ENABLED=1.
         if os.getenv("POLYMARKET_LIVE_ENABLED", "").lower() not in ("1", "true", "yes"):
+            return True
+        # Hard KILL list — beats every promotion path (allowlist, 3-dim
+        # slice, probation). A signal lands here when the reconciled
+        # per-signal EV verdict says KILL; nothing short of a code change
+        # puts it back on real money.
+        if signal_type in self.LIVE_KILL_SIGNAL_TYPES:
+            logger.info(
+                "[LIVE][KILL_LIST] %s — reconciled EV verdict KILL, dry-run only",
+                signal_type,
+            )
             return True
         # Signals with decay_flag=1 in signal_health are blocked from all live
         # paths — including 3-dim slice promotion. IC30 degradation means recent
