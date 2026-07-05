@@ -738,6 +738,42 @@ def section_tail_concentration(conn, now_ts):
         print(f"    ${float(r[1] or 0):>7.2f} @ {r[2] if r[2] is not None else '?'}  {q}")
 
 
+def section_copy_benchmark(conn, now_ts):
+    """Us vs naive copy — is the system earning its complexity?
+
+    Runs the per-wallet naive-copy backtest (wallet_trades resolution
+    enrichment, same filters as the naive_copy shadow lane, ex-top-3 EV
+    gate) and prints the head-to-head. If naive-copying some wallet ever
+    beats the system on ex-top-3 EV, that wallet is the new benchmark
+    the system has to justify itself against — or we just copy it.
+    """
+    section("16. COPY BENCHMARK (system vs per-wallet naive copy, 30d)")
+    try:
+        from trading_platform.polymarket.naive_copy_backtest import run_backtest
+        out = run_backtest(days=30, min_n=15)
+    except Exception as exc:
+        print(f"  backtest failed: {exc}")
+        return
+    s = out["our_system"]
+    print(f"  Our system:  n={s['n_closed']}  pnl=${s['realized_pnl']:+.2f}  "
+          f"per-$={s['pnl_per_dollar'] if s['pnl_per_dollar'] is not None else 'n/a'}  "
+          f"WR={s['wr'] if s['wr'] is not None else 'n/a'}")
+    print(f"  Copyable wallets (n>={out['min_n']}, WR>={out['min_wr']:.0%}, "
+          f"ex-top-3 EV>0): {len(out['qualified'])} of {out['wallets_with_min_n']} tested")
+    for r in out["qualified"][:5]:
+        print(f"    {r['wallet'][:14]}  n={r['n']}  WR={r['wr']:.0%}  "
+              f"exTop3=${r['ex_top3_ev']:+.3f}/tr  {r['top_category']}")
+    if not out["qualified"]:
+        best = out["top20"][0] if out["top20"] else None
+        if best:
+            print(f"    none qualify — best candidate {best['wallet'][:14]} "
+                  f"exTop3=${best['ex_top3_ev']:+.3f}/tr (needs > 0)")
+    sh = out["shadow_lane"]
+    print(f"  Shadow lane actuals: n={sh['n_resolved']} "
+          f"pnl=${sh['realized_pnl']:+.2f} "
+          f"WR={sh['wr'] if sh['wr'] is not None else 'n/a'}")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--apply-multipliers", action="store_true",
@@ -765,6 +801,7 @@ def main():
         section_reconciled_ev(conn, now_ts)
         section_detection_latency(conn, now_ts)
         section_tail_concentration(conn, now_ts)
+        section_copy_benchmark(conn, now_ts)
     finally:
         conn.close()
 
