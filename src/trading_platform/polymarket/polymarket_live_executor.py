@@ -822,7 +822,16 @@ class PolymarketLiveExecutor:
         # WR is survivorship-biased and this wallet is likely "was smart
         # money". Don't copy it live at all.
         _e_wallet = signal.get("wallet") or signal.get("source_wallet") or ""
-        if _e_wallet and _e_wallet not in ("velocity_detector", "order_book_monitor"):
+        # Leader-form machinery (earliness, crowding, per-leader budget)
+        # only applies to REAL on-chain leaders. Synthetic signal labels
+        # (phase_b_resolution_decay, confluence_det, velocity_detector…)
+        # are one shared "wallet" per signal — treating them as a leader
+        # made LEADER_MAX_OPEN=2 cap the entire resolution_decay lane at
+        # 2 concurrent positions (277 blocks in the hour after the
+        # 2026-07-05 halt recovery), and the $10 leader loss-pause would
+        # have frozen the whole signal. Synthetic lanes are risk-bounded
+        # by their own stake tiers, category gates and the kill switch.
+        if _e_wallet and _e_wallet.startswith("0x"):
             try:
                 from trading_platform.polymarket.wallet_earliness import get_earliness_boost
                 _eboost = float(get_earliness_boost(
