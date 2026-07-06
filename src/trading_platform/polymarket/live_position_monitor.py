@@ -106,6 +106,35 @@ def _settle_dust_close(
         except Exception as exc:
             logger.debug("dust-settle: data-api lookup failed: %s", exc)
 
+    # 1.5. Our own SELL fills — a zero balance can also mean WE SOLD the
+    # tokens (exit order filled but the booking raced the fill and the
+    # trade was left "open"; happened to six positions on 2026-07-06).
+    # Booking such a position at RESOLUTION payout would be wrong — e.g.
+    # sold at 0.40, market later resolved 1.00. The wallet's data-api
+    # trade history is the ground truth for what we actually received.
+    if wallet and token_id:
+        try:
+            import requests as _rq
+            _tr = _rq.get(
+                "https://data-api.polymarket.com/trades",
+                params={"user": wallet, "limit": 500}, timeout=15,
+            )
+            if _tr.ok:
+                proceeds = 0.0
+                sold = 0.0
+                for t in _tr.json():
+                    if str(t.get("asset")) == str(token_id) and \
+                            (t.get("side") or "").upper() == "SELL":
+                        sz = float(t.get("size") or 0)
+                        px = float(t.get("price") or 0)
+                        proceeds += sz * px
+                        sold += sz
+                if sold >= 1.0:
+                    realized = round(proceeds - cost, 4)
+                    return realized, ("win" if realized > 0 else "loss")
+        except Exception as exc:
+            logger.debug("dust-settle: sell-fill lookup failed: %s", exc)
+
     # 2. Market outcome from the resolution file.
     try:
         from trading_platform.polymarket.resolution_resolver import ResolutionResolver
@@ -579,6 +608,21 @@ def check_live_exits() -> dict[str, int]:
             post_balance = clob.get_conditional_balance(token_id) if token_id else None
         except Exception:
             post_balance = None
+        # 2026-07-06: the instant re-query RACES the GTC fill. All six
+        # 17:05 exits filled within seconds of placement, but the
+        # balance read ~0.3s later still showed the full holding, so
+        # every one was declared DID-NOT-FILL and left open — the fills
+        # then landed with no booking (ledger lost +$7.24 of realized
+        # exits until reconciled by hand). Give the fill a moment and
+        # re-check once before concluding the order is resting.
+        if post_balance is not None and post_balance >= 1.0:
+            time.sleep(10)
+            try:
+                _recheck = clob.get_conditional_balance(token_id) if token_id else None
+                if _recheck is not None:
+                    post_balance = _recheck
+            except Exception:
+                pass
         if post_balance is not None and post_balance >= 1.0:
             logger.warning(
                 "[live-exit] %s exit DID NOT FILL for #%d (%s) — "
