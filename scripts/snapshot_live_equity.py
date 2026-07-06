@@ -120,32 +120,88 @@ def _get_conditional_balance(token_id: str) -> float | None:
         return None
 
 
+_resolver_singleton = None
+
+
+def _get_resolution_payout(token_id: str) -> float | None:
+    """This token's resolved payout (1.0 / 0.0) from gamma_resolution.csv,
+    or None if the market hasn't resolved (or isn't in the file)."""
+    global _resolver_singleton
+    try:
+        if _resolver_singleton is None:
+            from pathlib import Path
+            from trading_platform.polymarket.resolution_resolver import ResolutionResolver
+            _csv = Path(__file__).resolve().parents[1] / "data" / "polymarket" / "gamma_resolution.csv"
+            _resolver_singleton = ResolutionResolver(str(_csv))
+        price = _resolver_singleton.resolve(token_id)
+        if price is None:
+            return None
+        if price >= 99.0:
+            return 1.0
+        if price <= 1.0:
+            return 0.0
+    except Exception:
+        pass
+    return None
+
+
+def _get_book_prices(token_id: str) -> tuple[float | None, float | None]:
+    """(best_yes_bid, best_yes_ask) from the normalized order book.
+    /book returns YES-space prices for all token queries."""
+    try:
+        book = _get_clob().get_order_book(token_id)
+        bids = book.get("bids") or []
+        asks = book.get("asks") or []
+        yes_bid = float(bids[0]["price"]) if bids else None
+        yes_ask = float(asks[0]["price"]) if asks else None
+        return yes_bid, yes_ask
+    except Exception:
+        return None, None
+
+
 def _position_value(direction: str, shares: float, fill_price: float,
                     token_id: str | None,
                     last_mark_yes: float | None = None) -> tuple[float, float]:
     """Return (cost_basis, market_value) for one open position.
 
-    For SELL (long NO): cost = shares * NO_entry = shares * (1 - fill_price).
-                        mkt  = shares * (1 - YES_mid).
-    For BUY  (long YES): cost = shares * fill_price.
-                         mkt  = shares * YES_mid.
-
-    Mid fallback chain: CLOB /midpoint → last_price → last_mark_price (from
-    position monitor's minute-by-minute updates) → entry. Without the
-    last_mark fallback, near-resolution markets with one-sided books would
-    silently revert to entry, hiding winning SELL positions whose YES has
-    collapsed to ~0 (real value = shares × 0.999 but reported = shares ×
-    NO_entry ≈ shares × 0.3). Caused the 5/15-5/18 $5.43 stuck-snapshot.
+    2026-07-06 rework: value what the position would actually FETCH, not
+    a mid. Thin/dead books produce phantom mids (empty post-game book →
+    mid ≈ 0.5 on worthless tokens); on 7/6 the snapshot ran $60 above
+    on-chain truth and printed a fictitious +$47 day while Polymarket
+    showed +$7.62. Valuation ladder:
+      1. Resolved payout (gamma_resolution.csv) — exact, covers dead books
+      2. Executable book side: long-YES at best YES bid; long-NO at
+         (1 - best YES ask) — the price a liquidation would hit
+      3. /midpoint → last trade → last_mark_price → entry (legacy chain,
+         still needed for unresolved markets with one-sided books; the
+         5/15-5/18 $5.43 stuck-snapshot is why entry stays the floor)
     """
-    mid = _get_mid(token_id) if token_id else None
-    if mid is None and last_mark_yes is not None:
-        mid = float(last_mark_yes)
-    if direction == "SELL":
-        entry = max(1.0 - fill_price, 0.001)
-        mkt_price = max(1.0 - mid, 0.001) if mid is not None else entry
-    else:
-        entry = max(fill_price, 0.001)
-        mkt_price = mid if mid is not None else entry
+    entry = max(1.0 - fill_price, 0.001) if direction == "SELL" \
+        else max(fill_price, 0.001)
+
+    mkt_price: float | None = None
+    if token_id:
+        payout = _get_resolution_payout(token_id)
+        if payout is not None:
+            # CSV rows are per-token: payout is already in the held
+            # token's own space for both directions.
+            return shares * entry, shares * payout
+        yes_bid, yes_ask = _get_book_prices(token_id)
+        if direction == "SELL":
+            if yes_ask is not None:
+                mkt_price = max(1.0 - yes_ask, 0.001)
+        else:
+            if yes_bid is not None:
+                mkt_price = yes_bid
+
+    if mkt_price is None:
+        mid = _get_mid(token_id) if token_id else None
+        if mid is None and last_mark_yes is not None:
+            mid = float(last_mark_yes)
+        if mid is not None:
+            mkt_price = max(1.0 - mid, 0.001) if direction == "SELL" else mid
+        else:
+            mkt_price = entry
     return shares * entry, shares * mkt_price
 
 
@@ -260,7 +316,7 @@ def take_snapshot() -> dict:
         f"(usdc=${result['usdc']:.2f} + tokens=${result['open_mkt']:.2f}) "
         f"realized={result['realized_cumul']:+.2f} "
         f"unrealized={result['unrealized']:+.2f} "
-        + (f"24h_chg={result['daily_change']:+.2f}" if result['daily_change'] is not None else "")
+        + (f"chg_vs_prior={result['daily_change']:+.2f}" if result['daily_change'] is not None else "")
     )
     return result
 

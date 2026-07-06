@@ -296,8 +296,27 @@ def check_live_exits() -> dict[str, int]:
         if not effective_fill:
             continue
 
-        # Fetch current mid price for the token we HOLD
-        current = clob.get_mid_price(token_id)
+        # Current YES-space price for the token we HOLD. 2026-07-06:
+        # prefer the EXECUTABLE side over the mid — thin/dead books make
+        # mids fictitious (empty post-game book → mid 0.5 on worthless
+        # tokens), which fires phantom take-profits and pollutes MFE/mark
+        # stats. For a long-YES position the exit hits the YES bid; for
+        # long-NO it effectively hits (1 - YES ask), so YES ask is the
+        # relevant YES-space price. Mid remains the fallback when the
+        # needed book side is empty.
+        current = None
+        try:
+            _book = clob.get_order_book(token_id)
+            _bids = _book.get("bids") or []
+            _asks = _book.get("asks") or []
+            if side in ("YES", "BUY"):
+                current = float(_bids[0]["price"]) if _bids else None
+            else:
+                current = float(_asks[0]["price"]) if _asks else None
+        except Exception:
+            current = None
+        if current is None:
+            current = clob.get_mid_price(token_id)
         if current is None:
             continue
 
