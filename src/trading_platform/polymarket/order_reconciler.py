@@ -24,10 +24,116 @@ logger = logging.getLogger(__name__)
 MAX_OPEN_MINUTES = 10
 
 
+def backfill_actual_fills(lookback_hours: int = 24) -> int:
+    """Correct fill_price/shares on recent OPEN matched entries from the
+    wallet's actual data-api fills.
+
+    place_market_order records fill_price = the limit TARGET
+    (best_ask + tick) when the CLOB's synchronous response lacks
+    avgFilledPrice — systematically ~1 tick worse than the real fill
+    (observed 2026-07-06: recorded 0.13/0.19/0.22 vs actual
+    0.12/0.18/0.21), overstating cost basis and understating PnL.
+    data-api /trades is the fill-level truth; entries are BUYs of the
+    held token for both directions. Only open positions are touched —
+    rewriting basis under an already-booked realized_pnl would corrupt
+    the ledger.
+
+    Returns count of corrected rows.
+    """
+    import os
+    from trading_platform.polymarket.db_connection import get_connection
+
+    wallet = (os.environ.get("POLYMARKET_FUNDER_ADDRESS")
+              or os.environ.get("POLYMARKET_WALLET_ADDRESS"))
+    if not wallet:
+        return 0
+
+    conn = get_connection()
+    try:
+        cutoff = int(time.time()) - lookback_hours * 3600
+        rows = conn.execute(
+            """SELECT id, token_id, attempted_at, fill_price, shares, size_usd
+                 FROM live_trades
+                WHERE dry_run = 0 AND status = 'matched'
+                  AND exit_ts IS NULL AND token_id IS NOT NULL
+                  AND attempted_at > ?""",
+            (cutoff,),
+        ).fetchall()
+    finally:
+        try: conn.close()
+        except Exception: pass
+    if not rows:
+        return 0
+
+    try:
+        import requests
+        r = requests.get(
+            "https://data-api.polymarket.com/trades",
+            params={"user": wallet, "limit": 500}, timeout=15,
+        )
+        fills = r.json() if r.ok else []
+    except Exception as exc:
+        logger.debug("[reconciler] fill backfill fetch failed: %s", exc)
+        return 0
+    if not isinstance(fills, list) or not fills:
+        return 0
+
+    corrected = 0
+    for lid, token_id, attempted_at, fp_db, sh_db, size_usd in rows:
+        # Entry fills: BUYs of the held token within [attempt-2m, attempt+2h]
+        tot_sz = 0.0
+        tot_cost = 0.0
+        for t in fills:
+            if str(t.get("asset")) != str(token_id):
+                continue
+            if (t.get("side") or "").upper() != "BUY":
+                continue
+            ts = int(t.get("timestamp") or 0)
+            if not (int(attempted_at) - 120 <= ts <= int(attempted_at) + 7200):
+                continue
+            sz = float(t.get("size") or 0)
+            px = float(t.get("price") or 0)
+            tot_sz += sz
+            tot_cost += sz * px
+        if tot_sz < 1.0:
+            continue
+        vwap = round(tot_cost / tot_sz, 4)
+        fp_old = float(fp_db) if fp_db is not None else None
+        sh_old = float(sh_db) if sh_db is not None else None
+        if (fp_old is not None and abs(vwap - fp_old) < 0.0005) and \
+                (sh_old is not None and abs(tot_sz - sh_old) < 0.5):
+            continue
+        conn = get_connection()
+        try:
+            conn.execute(
+                """UPDATE live_trades
+                      SET fill_price = ?, shares = ?
+                    WHERE id = ? AND exit_ts IS NULL""",
+                (vwap, tot_sz, lid),
+            )
+            conn.commit()
+        finally:
+            try: conn.close()
+            except Exception: pass
+        corrected += 1
+        logger.info(
+            "[reconciler] #%d fill corrected: price %s→%.4f shares %s→%.1f",
+            lid, f"{fp_old:.4f}" if fp_old is not None else "?", vwap,
+            f"{sh_old:.1f}" if sh_old is not None else "?", tot_sz,
+        )
+    return corrected
+
+
 def reconcile_open_orders() -> dict[str, int]:
     """One pass: resolve any orders stuck in 'live'/'submitted' status."""
     from trading_platform.polymarket.db_connection import get_connection
     from trading_platform.polymarket.clob_client import ClobClient
+
+    try:
+        fills_corrected = backfill_actual_fills()
+    except Exception as exc:
+        logger.debug("[reconciler] fill backfill failed: %s", exc)
+        fills_corrected = 0
 
     conn = get_connection()
     try:
@@ -45,12 +151,12 @@ def reconcile_open_orders() -> dict[str, int]:
         except Exception: pass
 
     if not rows:
-        return {"checked": 0, "filled": 0, "cancelled": 0, "still_open": 0}
+        return {"checked": 0, "filled": 0, "cancelled": 0, "still_open": 0, "fills_corrected": fills_corrected}
 
     clob = ClobClient()
     if not clob.is_configured:
         logger.debug("[reconciler] CLOB not configured, skipping")
-        return {"checked": 0, "filled": 0, "cancelled": 0, "still_open": 0}
+        return {"checked": 0, "filled": 0, "cancelled": 0, "still_open": 0, "fills_corrected": fills_corrected}
 
     filled = cancelled = still_open = 0
 
@@ -74,7 +180,7 @@ def reconcile_open_orders() -> dict[str, int]:
         py_client = PyClobClient(**client_kwargs)
     except Exception as exc:
         logger.debug("[reconciler] py_clob_client unavailable: %s", exc)
-        return {"checked": len(rows), "filled": 0, "cancelled": 0, "still_open": len(rows)}
+        return {"checked": len(rows), "filled": 0, "cancelled": 0, "still_open": len(rows), "fills_corrected": fills_corrected}
 
     for lid, order_id, entry_price, size_usd, submitted_at in rows:
         try:
@@ -145,7 +251,7 @@ def reconcile_open_orders() -> dict[str, int]:
             logger.debug("[reconciler] order %s check failed: %s", order_id[:16], exc)
             still_open += 1
 
-    return {"checked": len(rows), "filled": filled, "cancelled": cancelled, "still_open": still_open}
+    return {"checked": len(rows), "filled": filled, "cancelled": cancelled, "still_open": still_open, "fills_corrected": fills_corrected}
 
 
 def main() -> int:
