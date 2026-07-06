@@ -28,7 +28,12 @@ load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
 
 # Per-API freshness threshold — must agree with daily_system_review section 11
 API_THRESHOLDS = {
-    "gamma": 3600,            # silent >1h = real concern (instrumentation gap acknowledged)
+    # 2026-07-06: gamma raised 1h → 8h. Its recorders (markets_refresh,
+    # universe indexer, resolution fetcher) run on 6-24h cadences, so a
+    # 1h threshold read "stale" between perfectly healthy runs and
+    # re-alerted every cooldown window all day. 8h still catches a truly
+    # dead gamma within one working day.
+    "gamma": 8 * 3600,
     "clob": 600,
     "data_api_trades": 1800,
     "polymarket_other": 3600,
@@ -55,25 +60,29 @@ def check_api_health(alerter) -> int:
             # Counter says successes occurred but timestamp is NULL —
             # record_success() upsert is broken or schema migration left
             # rows in an inconsistent state. Alert loudly.
-            alerter.send_pipeline_alert(
+            # Count only alerts actually SENT — send_pipeline_alert
+            # returns False when the persisted cooldown suppresses it,
+            # and counting those made the log read "fired 1 alert" every
+            # run while nothing was being sent.
+            if alerter.send_pipeline_alert(
                 component=f"api:{r['api_name']}",
                 message=(f"UNTRACKED — success_count_24h={r['success_24h']} "
                          f"but last_success_ts is NULL. "
                          f"record_success() upsert is broken; api_health "
                          f"data is unreliable until fixed."),
                 level="warning",
-            )
-            fired += 1
+            ):
+                fired += 1
             continue
         if age is not None and age > thr:
-            alerter.send_pipeline_alert(
+            if alerter.send_pipeline_alert(
                 component=f"api:{r['api_name']}",
                 message=(f"silent {age//60}m (threshold {thr//60}m). "
                          f"24h: {r['success_24h']} ok / {r['error_24h']} err. "
                          f"Last error: {(r.get('last_error_msg') or 'none')[:80]}"),
                 level="critical" if age > 2 * thr else "warning",
-            )
-            fired += 1
+            ):
+                fired += 1
     return fired
 
 

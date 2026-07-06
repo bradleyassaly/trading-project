@@ -453,9 +453,13 @@ def section_api_health(conn, now_ts):
     if not rows:
         print("  No api_health rows yet — instrumentation hasn't fired since deploy.")
         return
-    # Per-API freshness thresholds (seconds).
+    # Per-API freshness thresholds (seconds). Keep in sync with
+    # scripts/monitor_alerts.py API_THRESHOLDS.
     THRESHOLDS = {
-        "gamma": 600,           # markets/midpoint should be every few min
+        # gamma recorders (markets_refresh / universe indexer / resolution
+        # fetcher) run on 6-24h cadences — 8h flags a genuinely dead API
+        # without reading "stale" between healthy runs (2026-07-06).
+        "gamma": 8 * 3600,
         "clob": 600,            # balance/order endpoints — every few min
         "data_api_trades": 1800,  # wallet poller is 10m cadence
         "polymarket_other": 3600,
