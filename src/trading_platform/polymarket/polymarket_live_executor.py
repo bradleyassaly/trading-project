@@ -1501,6 +1501,53 @@ class PolymarketLiveExecutor:
                     except Exception as _terr:
                         logger.warning("[LIVE] topic_cap check failed (continuing): %s", _terr)
 
+                # Per-EVENT exposure cap (2026-07-06). The topic-stem cap
+                # can't see that "Spread: Belgium (-1.5)", "Will Belgium
+                # win..." and "US vs. Belgium: O/U 3.5" are ONE football
+                # match — on 7/6 a single game carried 6 correlated
+                # positions ($30), including mutually exclusive outcomes
+                # whose combined YES cost exceeded $1 (guaranteed loss at
+                # resolution). Group by the Gamma parent-event slug cached
+                # in markets.event_slug and cap open live positions per
+                # event. Markets with no cached event_slug pass (cap
+                # degrades to topic-stem behavior until refresh catches up).
+                try:
+                    _max_per_event = int(os.environ.get("MAX_OPEN_PER_EVENT", "2"))
+                    from trading_platform.polymarket.db_connection import get_connection as _gc
+                    _econn = _gc(self._db_path)
+                    try:
+                        _ev_row = _econn.execute(
+                            "SELECT event_slug FROM markets WHERE condition_id = ?",
+                            (condition_id,),
+                        ).fetchone()
+                        _ev_slug = _ev_row[0] if _ev_row and _ev_row[0] else None
+                        if _ev_slug:
+                            # Polymarket splits busy games across two event
+                            # pages ("fifwc-usa-bel-2026-07-06" and
+                            # "...-more-markets") — same real-world event,
+                            # so normalize the suffix away before grouping.
+                            _ev_base = _ev_slug.replace("-more-markets", "")
+                            _ev_cnt = _econn.execute(
+                                """SELECT COUNT(*) FROM live_trades lt
+                                    JOIN markets m ON m.condition_id = lt.condition_id
+                                   WHERE lt.dry_run = 0 AND lt.exit_ts IS NULL
+                                     AND lt.status IN ('submitted','live','matched')
+                                     AND REPLACE(m.event_slug, '-more-markets', '') = ?""",
+                                (_ev_base,),
+                            ).fetchone()
+                            _ev_open = int(_ev_cnt[0] or 0) if _ev_cnt else 0
+                            if _ev_open >= _max_per_event:
+                                return self._block(
+                                    signal,
+                                    f"event cap: {_ev_open} open on event "
+                                    f"'{_ev_slug[:40]}' (max {_max_per_event})",
+                                )
+                    finally:
+                        try: _econn.close()
+                        except Exception: pass
+                except Exception as _eerr:
+                    logger.warning("[LIVE] event_cap check failed (continuing): %s", _eerr)
+
             # 6. LIVE — submit. Polymarket CLOB side is always BUY; YES vs NO
             # is determined by token_id.
             if not self._clob.is_configured:

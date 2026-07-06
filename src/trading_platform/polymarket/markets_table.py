@@ -52,14 +52,29 @@ CREATE TABLE IF NOT EXISTS markets (
     last_fetched_at   INTEGER NOT NULL,
     created_at_iso    TEXT,
     yes_token_id      TEXT,
-    no_token_id       TEXT
+    no_token_id       TEXT,
+    event_slug        TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_markets_end_date ON markets(end_date_iso);
 CREATE INDEX IF NOT EXISTS idx_markets_closed   ON markets(closed);
+CREATE INDEX IF NOT EXISTS idx_markets_event    ON markets(event_slug);
 """
 
 
 def ensure_schema() -> None:
+    # 2026-07-06: event_slug added for the per-event exposure cap — one
+    # football match carried 6 correlated positions because the
+    # topic-stem cap can't see that "Spread: Belgium (-1.5)" and "Will
+    # Belgium win..." are the same event. The ALTER must run BEFORE the
+    # index statements in _SCHEMA (CREATE TABLE IF NOT EXISTS is a no-op
+    # on existing deployments, so idx_markets_event would otherwise
+    # reference a missing column). Separate transaction: a failed ALTER
+    # ("already exists") poisons a shared Postgres transaction.
+    try:
+        with db() as c:
+            c.execute("ALTER TABLE markets ADD COLUMN event_slug TEXT")
+    except Exception:
+        pass  # already present (or table doesn't exist yet — created below)
     with db() as c:
         for stmt in _SCHEMA.split(";"):
             if stmt.strip():
@@ -115,6 +130,17 @@ def _extract_row(cid: str, m: dict) -> tuple:
     except Exception:
         pass
 
+    # Event slug: Gamma nests the parent event under "events". All markets
+    # of one real-world event (a match, an election night) share it — the
+    # unit the per-event exposure cap groups by.
+    event_slug = None
+    try:
+        evs = m.get("events")
+        if isinstance(evs, list) and evs and isinstance(evs[0], dict):
+            event_slug = evs[0].get("slug") or evs[0].get("ticker")
+    except Exception:
+        pass
+
     return (
         cid,
         m.get("slug"),
@@ -135,6 +161,7 @@ def _extract_row(cid: str, m: dict) -> tuple:
         m.get("createdAt") or m.get("startDate"),
         yes_tid,
         no_tid,
+        event_slug,
     )
 
 
@@ -414,8 +441,8 @@ def _persist(rows: list[tuple]) -> None:
             " condition_id, slug, question, end_date_iso, close_time_iso,"
             " volume, volume_24h, liquidity, outcomes_json, outcome_prices,"
             " tags_json, uma_status, closed, active, archived, last_fetched_at,"
-            " created_at_iso, yes_token_id, no_token_id"
-            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " created_at_iso, yes_token_id, no_token_id, event_slug"
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             rows,
         )
 
