@@ -478,6 +478,11 @@ class WalletStream:
                 )
                 async with websockets.connect(
                     self.ws_url, ping_interval=20, ping_timeout=10,
+                    # Default 1MB frame cap killed live_collector when its
+                    # snapshot outgrew it (see live_collector 2026-07-06);
+                    # same headroom here so a burst of matched logs can't
+                    # 1009-loop the chain-direct lane.
+                    max_size=16 * 1024 * 1024,
                 ) as ws:
                     await self._subscribe(ws)
                     self._reconnect_requested = False

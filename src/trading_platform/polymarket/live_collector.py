@@ -238,10 +238,18 @@ class PolymarketLiveCollector:
                 delay = min(delay * 2, self.config.reconnect_backoff_max)
 
     async def _connect_and_subscribe(self) -> None:
+        # max_size: the initial book snapshot for a 400+-market
+        # subscription arrives as ONE frame. At 442 markets it hit
+        # 1.26MB — over the websockets default 1MB limit — so the client
+        # sent 1009 (message too big) and reconnected forever (1,269
+        # consecutive attempts on 2026-07-06, fast lane fully down while
+        # every reconnect fetched the same too-big snapshot). 16MB gives
+        # ~5,600-market headroom.
         self._ws = await ws_connect(
             self.config.ws_url,
             ping_interval=self.config.ping_interval_sec,
             ping_timeout=self.config.ping_interval_sec,
+            max_size=16 * 1024 * 1024,
         )
         token_ids = [m.yes_token_id for m in self.markets]
         subscribe_msg = json.dumps({
