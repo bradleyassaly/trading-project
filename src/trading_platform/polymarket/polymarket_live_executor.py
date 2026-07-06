@@ -520,6 +520,28 @@ class PolymarketLiveExecutor:
         except Exception as exc:
             logger.debug("[LIVE][CALIB] apply failed: %s", exc)
 
+        # 0a-pre. Per-trade calibrated-EV gate for the hold-to-resolution
+        # lane (2026-07-06). resolution_decay BUYs hold to resolution, so
+        # for a binary payoff the trade is -EV whenever calibrated
+        # P(win) <= entry price — Kelly sizes off signal-level stats and
+        # never made this per-trade comparison, which let 2026-07-06
+        # entries fill at 0.22-0.35 with calibrated conf 0.167 (-32%/$
+        # expected). Whale-mirror lanes are exempt: they exit via
+        # TP/trailing before resolution, so conf<=price does not imply
+        # -EV there. Paper is exempt too — it must keep collecting the
+        # outcomes that feed calibration.
+        if sig_type == "resolution_decay" and \
+                (signal.get("direction") or "BUY").upper() == "BUY":
+            _gate_px = float(signal.get("price") or 0)
+            _min_edge = float(os.environ.get("RESOLUTION_DECAY_MIN_EDGE", "0.05"))
+            if _gate_px > 0 and confidence <= _gate_px * (1.0 + _min_edge):
+                return self._block(
+                    signal,
+                    f"calibrated-EV gate: conf {confidence:.3f} <= "
+                    f"px {_gate_px:.3f} × {1 + _min_edge:.2f} — hold-to-"
+                    f"resolution BUY is -EV",
+                )
+
         # 0a. Category allowlist — live trades restricted to categories
         # with statistically significant positive resolved EV.
         from trading_platform.polymarket.polymarket_paper_executor import (

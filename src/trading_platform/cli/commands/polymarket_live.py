@@ -69,8 +69,12 @@ def cmd_polymarket_live_collect(args: argparse.Namespace) -> None:
             print(f"[WARN] Could not load config {args.config}: {exc}")
 
     ms_cfg = cfg_raw.get("market_selection", {})
+    # 2026-07-06: 75 → 150. The chain-direct fast lane (2-4s detection)
+    # only covers subscribed markets; everything else waits for the
+    # poller (~5 min p50). Doubling volume coverage widens the fast lane
+    # at negligible ws cost.
     max_markets = int(
-        getattr(args, "max_markets", None) or ms_cfg.get("max_markets", 75)
+        getattr(args, "max_markets", None) or ms_cfg.get("max_markets", 150)
     )
     min_volume = float(ms_cfg.get("min_volume") or cfg_raw.get("live_min_volume", 10_000))
     horizon_days = int(ms_cfg.get("end_date_max_days") or cfg_raw.get("live_lookback_days", 30))
@@ -140,7 +144,10 @@ def cmd_polymarket_live_collect(args: argparse.Namespace) -> None:
             print(f"Wallet-derived markets: {len(wallet_cids)} total, {len(new_cids)} new")
 
             added = 0
-            for cid in list(new_cids)[:300]:  # cap at 300 extra
+            # 2026-07-06: 300 → 500 — wallet-derived markets are where
+            # watched whales actually trade, i.e. exactly the markets the
+            # fast lane exists for.
+            for cid in list(new_cids)[:500]:  # cap extra subscriptions
                 entry = _u._by_condition.get(cid)
                 if entry and entry.get("token_ids"):
                     live_infos.append(LiveMarketInfo(

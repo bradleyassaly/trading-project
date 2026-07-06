@@ -28,6 +28,7 @@ import json
 import logging
 import os
 import time
+from pathlib import Path
 from typing import Any
 
 from trading_platform.polymarket.db_connection import get_connection
@@ -75,6 +76,38 @@ def _get_cohort(conn) -> list[str]:
     return [r[0] for r in rows]
 
 
+def _load_resolution_csv() -> dict[str, float]:
+    """token_id → resolution payout (1.0 or 0.0) from gamma_resolution.csv.
+
+    The CSV is written by fetch_resolutions (one row per token, `ticker`
+    column IS the clob token id, resolution_price is THAT token's payout
+    on a 0-100 scale). Covers markets that resolve before the markets
+    table snapshot catches up — 2026-07-06: 36 open shadows were waiting
+    on markets-table coverage alone.
+    """
+    path = (Path(__file__).resolve().parents[3]
+            / "data" / "polymarket" / "gamma_resolution.csv")
+    out: dict[str, float] = {}
+    try:
+        import csv as _csv
+        with path.open(newline="", encoding="utf-8") as fh:
+            for row in _csv.DictReader(fh):
+                try:
+                    px = float(row.get("resolution_price") or "")
+                except (TypeError, ValueError):
+                    continue
+                tok = (row.get("ticker") or "").strip()
+                if not tok:
+                    continue
+                if px >= 99.0:
+                    out[tok] = 1.0
+                elif px <= 1.0:
+                    out[tok] = 0.0
+    except OSError:
+        pass
+    return out
+
+
 def _resolve_open_shadows(conn) -> dict[str, int]:
     """Book resolved/expired shadow copies so the open-count cap tracks
     genuinely-live mirrors.
@@ -84,11 +117,13 @@ def _resolve_open_shadows(conn) -> dict[str, int]:
     2026-07-05 all 50 open shadows dated from June 3-6 and the lane had
     been pinned at cap (zero new inserts, zero new evidence) for a month.
     Resolution rule matches the paper executor: market closed with an
-    outcome price at an extreme (>=0.99 / <=0.01). Shadows whose market
-    never resolves in the markets table expire at pnl=0 after
+    outcome price at an extreme (>=0.99 / <=0.01), with
+    gamma_resolution.csv as a per-token fallback. Shadows whose market
+    never resolves in either source expire at pnl=0 after
     NAIVE_COPY_SHADOW_EXPIRE_DAYS.
     """
     out = {"resolved": 0, "expired": 0}
+    csv_payouts = _load_resolution_csv()
     rows = conn.execute(
         """
         SELECT lt.id, lt.token_id, lt.entry_price, lt.shares, lt.attempted_at,
@@ -112,6 +147,8 @@ def _resolve_open_shadows(conn) -> dict[str, int]:
                     final = float(round(px))
             except (ValueError, TypeError, IndexError):
                 final = None
+        if final is None and token_id:
+            final = csv_payouts.get(str(token_id))
         if final is not None:
             pnl = round((shares or 0.0) * (final - (entry_price or 0.0)), 4)
             conn.execute(

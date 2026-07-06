@@ -149,10 +149,38 @@ def fit_calibration(
         except Exception as exc:
             return {"error": f"query: {exc}"}
 
+        source = "trade_hypotheses"
+        if len(rows) < 20:
+            # 2026-07-06 fallback: the hypothesis-resolution loop starved
+            # (18 resolved in 30d vs ~665 hypotheses created per week —
+            # resolution enrichment was down with the gamma outage), so
+            # the global curve went unfit for weeks while stale
+            # breakpoints mapped every input to ~0.717. Resolved paper
+            # trades carry the same (confidence, win/loss) information at
+            # ~100x the volume (1,894 in the same 30d window) and are
+            # already the ground truth the kill switch reads.
+            try:
+                _paper_sql = """SELECT confidence,
+                              CASE WHEN outcome = 'win' THEN 1 ELSE 0 END
+                         FROM polymarket_paper_trades
+                        WHERE exit_ts IS NOT NULL AND exit_ts > ?
+                          AND outcome IN ('win', 'loss')
+                          AND confidence IS NOT NULL"""
+                if category:
+                    rows = conn.execute(
+                        _paper_sql + " AND category = ?", (cutoff, category),
+                    ).fetchall()
+                else:
+                    rows = conn.execute(_paper_sql, (cutoff,)).fetchall()
+                source = "polymarket_paper_trades"
+            except Exception as exc:
+                return {"error": f"paper fallback query: {exc}"}
+
         if len(rows) < 20:
             return {
                 "n": len(rows),
                 "skipped": "need n>=20 for stable isotonic fit",
+                "source": source,
                 "elapsed_seconds": round(time.time() - t0, 1),
             }
 
@@ -243,6 +271,7 @@ def fit_calibration(
         return {
             "elapsed_seconds": round(time.time() - t0, 1),
             "n": len(rows),
+            "source": source,
             "n_breakpoints": len(breakpoints),
             "brier_before": round(brier_before, 4),
             "brier_after": round(brier_after, 4),

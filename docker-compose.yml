@@ -236,7 +236,10 @@ services:
       - POSTGRES_PASSWORD=polymarket_dev
       - POSTGRES_DB=polymarket
       - DB_BACKEND=postgres
-      - POLLER_INTERVAL_SECONDS=600
+      # 2026-07-06: 600 → 180. Detection p50 tracked the 10-min poll
+      # cadence (~5 min); 3-min cadence cuts the poller-lane p50 to ~90s.
+      # data-api headroom is ample (0.26% error rate at current volume).
+      - POLLER_INTERVAL_SECONDS=180
       # Same thread-pool caps as live-collect — prevents pyarrow/OpenBLAS
       # from spawning 32 threads on first pandas import.
       - OMP_NUM_THREADS=2
