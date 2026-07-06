@@ -100,8 +100,10 @@ class ExecutionGates:
             if not bids or not asks:
                 return False, "no_liquidity", {"spread": None, "bids": 0, "asks": 0}
 
-            best_bid = float(bids[0]["price"])
-            best_ask = float(asks[0]["price"])
+            # Raw /book returns both sides sorted descending — [0] is the
+            # WORST ask (0.99 dust quote), so take min/max explicitly.
+            best_bid = max(float(b["price"]) for b in bids)
+            best_ask = min(float(a["price"]) for a in asks)
             spread = best_ask - best_bid
             mid = (best_ask + best_bid) / 2
             spread_pct = spread / mid if mid > 0 else 1.0
@@ -198,7 +200,9 @@ class ExecutionGates:
             if not bids or not asks:
                 return False, "no_liquidity", {}
 
-            current_mid = (float(bids[0]["price"]) + float(asks[0]["price"])) / 2
+            # min/max, not [0] — raw /book sides are sorted descending
+            current_mid = (max(float(b["price"]) for b in bids)
+                           + min(float(a["price"]) for a in asks)) / 2
             price_move = (
                 abs(current_mid - whale_trade_price) / whale_trade_price
                 if whale_trade_price > 0 else 0

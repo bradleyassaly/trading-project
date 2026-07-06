@@ -32,8 +32,10 @@ class OrderExecutionStrategy:
         if not bids or not asks:
             return None
 
-        best_bid = float(bids[0]["price"])
-        best_ask = float(asks[0]["price"])
+        # min/max, not [0]: raw /book sides arrive sorted descending, so
+        # asks[0] is the worst quote (callers may pass unnormalized books)
+        best_bid = max(float(b["price"]) for b in bids)
+        best_ask = min(float(a["price"]) for a in asks)
         spread = best_ask - best_bid
 
         if side.upper() in ("BUY", "YES"):

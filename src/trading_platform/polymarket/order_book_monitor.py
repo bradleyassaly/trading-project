@@ -178,12 +178,14 @@ class OrderBookMonitor:
         total_usd = bid_usd + ask_usd
         imbalance = bid_usd / total_usd if total_usd >= self.MIN_TOTAL_USD else 0.5
 
+        # min/max, not [0] — raw book sides arrive sorted descending, so
+        # asks[0] is the worst quote (0.99 dust) and mid/spread skew high
         try:
-            best_bid = float(bids[0].get("price") or 0) if bids else 0.0
+            best_bid = max((float(b.get("price") or 0) for b in bids), default=0.0)
         except (TypeError, ValueError):
             best_bid = 0.0
         try:
-            best_ask = float(asks[0].get("price") or 1) if asks else 1.0
+            best_ask = min((float(a.get("price") or 1) for a in asks), default=1.0)
         except (TypeError, ValueError):
             best_ask = 1.0
 

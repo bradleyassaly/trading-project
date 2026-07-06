@@ -75,14 +75,33 @@ class ClobClient:
     # ── Public read endpoints (no auth) ────────────────────────────────────
 
     def get_order_book(self, token_id: str) -> dict[str, Any]:
-        """Fetch the current CLOB order book for a token."""
+        """Fetch the current CLOB order book for a token.
+
+        Normalized so [0] is always the BEST level on each side: asks
+        ascending, bids descending. The raw API returns both sides sorted
+        descending, so raw asks[0] is the WORST ask — any book carrying a
+        0.99 dust quote reads as "best ask 0.99". That single assumption
+        blocked all 59 live BUY attempts on 2026-07-05 via the max-chase
+        gate ("best ask 0.990 > max_price ... — refusing to chase").
+        """
         try:
             r = self._session.get(
                 f"{CLOB_BASE}/book", params={"token_id": token_id}, timeout=5,
             )
             if r.status_code != 200:
                 return {"error": f"HTTP {r.status_code}", "bids": [], "asks": []}
-            return r.json()
+            book = r.json()
+            if isinstance(book, dict):
+                try:
+                    book["asks"] = sorted(
+                        book.get("asks") or [],
+                        key=lambda x: float(x.get("price", 1.0)))
+                    book["bids"] = sorted(
+                        book.get("bids") or [],
+                        key=lambda x: float(x.get("price", 0.0)), reverse=True)
+                except (TypeError, ValueError):
+                    pass
+            return book
         except Exception as exc:
             return {"error": str(exc), "bids": [], "asks": []}
 

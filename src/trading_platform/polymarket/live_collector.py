@@ -317,8 +317,10 @@ class PolymarketLiveCollector:
         try:
             bids = msg.get("bids", [])
             asks = msg.get("asks", [])
-            best_bid = float(bids[0].get("price", 0)) if bids else 0.0
-            best_ask = float(asks[0].get("price", 0)) if asks else 0.0
+            # min/max, not [0] — book sides arrive sorted descending, so
+            # asks[0] is the worst quote and the mid skews high
+            best_bid = max((float(b.get("price", 0)) for b in bids), default=0.0)
+            best_ask = min((float(a.get("price", 0)) for a in asks if float(a.get("price", 0)) > 0), default=0.0)
             if best_bid > 0 and best_ask > 0:
                 price = (best_bid + best_ask) / 2.0
             elif best_bid > 0:
