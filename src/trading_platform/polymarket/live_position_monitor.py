@@ -47,6 +47,7 @@ def _settle_dust_close(
     trade_status: str | None,
     fill_price: float | None,
     db_shares: float,
+    size_usd: float = 0.0,
 ) -> tuple[float, str | None] | None:
     """Determine realized P&L for a position whose on-chain balance hit dust.
 
@@ -68,8 +69,22 @@ def _settle_dust_close(
     Returns (realized_pnl, outcome) or None when truth is unavailable.
     """
     # Never matched on-chain → no capital was committed.
-    if trade_status != "matched" or fill_price is None or db_shares <= 0:
+    if trade_status != "matched" or fill_price is None:
         return 0.0, None
+    # 2026-07-06: db_shares can be 0 on a REAL matched position — the
+    # hourly on-chain share sync used to overwrite shares with the
+    # post-resolution zero balance (fixed, but rows may still arrive
+    # zeroed). If capital was committed, derive the entry quantity from
+    # size_usd instead of booking (0, None) and silently erasing the
+    # outcome. Six resolved wins were booked at pnl=0 this way on 7/6.
+    if db_shares <= 0:
+        fp0 = float(fill_price)
+        per_share = fp0 if (direction or "BUY").upper() == "BUY" \
+            else max(1.0 - fp0, 0.01)
+        if size_usd and size_usd > 0 and per_share > 0:
+            db_shares = float(size_usd) / per_share
+        else:
+            return 0.0, None
 
     fp = float(fill_price)
     want_yes = (direction or "BUY").upper() == "BUY"
@@ -366,6 +381,7 @@ def check_live_exits() -> dict[str, int]:
                     token_id=token_id, condition_id=cid,
                     direction="SELL", trade_status=trade_status,
                     fill_price=fill_price, db_shares=db_shares,
+                    size_usd=float(size_usd or 0),
                 )
                 if settled is None:
                     logger.warning(
@@ -421,6 +437,7 @@ def check_live_exits() -> dict[str, int]:
                     token_id=token_id, condition_id=cid,
                     direction="BUY", trade_status=trade_status,
                     fill_price=fill_price, db_shares=db_shares,
+                    size_usd=float(size_usd or 0),
                 )
                 if settled is None:
                     logger.warning(

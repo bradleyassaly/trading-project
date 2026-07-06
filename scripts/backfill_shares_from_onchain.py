@@ -78,6 +78,15 @@ def main():
             continue
 
         db_sh = float(sh_db) if sh_db is not None else None
+        # 2026-07-06: never sync a ZERO balance onto recorded shares. A
+        # zero CONDITIONAL balance means the market resolved (loss, or
+        # win auto-redeemed) — that's the dust-settlement path's job.
+        # Overwriting shares with 0 here destroyed the cost basis before
+        # settlement ran: 6 resolved wins on 7/6 booked at pnl=0 because
+        # _settle_dust_close saw db_shares=0 → "no capital committed".
+        # The docstring always said "If on-chain > 0"; the code didn't.
+        if real <= 0:
+            continue
         # Compute drift; flag if > 5 shares OR > 5% of db value
         threshold = max(5.0, (db_sh or 0) * 0.05)
         if db_sh is None or abs(real - db_sh) > threshold:
