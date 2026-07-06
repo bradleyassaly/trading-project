@@ -1413,12 +1413,24 @@ class PolymarketLiveExecutor:
                     from trading_platform.polymarket.db_connection import get_connection as _gc
                     _dconn = _gc(self._db_path)
                     try:
+                        # Real (submitted/matched) open positions dedup
+                        # permanently. error/blocked rows dedup only for a
+                        # 2h cooldown: they still stop same-cycle retry
+                        # storms (the PSG ×15 incident this gate was built
+                        # for), but a transient failure no longer bans the
+                        # market forever — on 2026-07-05 the book-ordering
+                        # bug error'd 59 entries and the permanent dedup
+                        # then blocked every retry AFTER the bug was fixed
+                        # (error rows never get an exit_ts).
                         _dup = _dconn.execute(
                             """SELECT 1 FROM live_trades
                                WHERE condition_id = ? AND direction = ? AND dry_run = 0
                                  AND exit_ts IS NULL
+                                 AND (status NOT IN ('error', 'blocked')
+                                      OR attempted_at >= ?)
                                LIMIT 1""",
-                            (condition_id, _dedup_direction),
+                            (condition_id, _dedup_direction,
+                             int(time.time()) - 7200),
                         ).fetchone()
                     finally:
                         try: _dconn.close()
