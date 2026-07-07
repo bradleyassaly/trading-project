@@ -160,12 +160,17 @@ def fit_calibration(
             # ~100x the volume (1,894 in the same 30d window) and are
             # already the ground truth the kill switch reads.
             try:
-                _paper_sql = """SELECT confidence,
+                # 2026-07-07 (audit C3/F2): train on confidence_RAW, not the
+                # post-calibration/post-boost `confidence`. Fitting the curve
+                # on its own boosted output is a closed feedback loop
+                # (recursive shrinkage — the observable cause of Brier 0.32).
+                # Pre-2026-07-07 rows lack confidence_raw and are excluded.
+                _paper_sql = """SELECT confidence_raw,
                               CASE WHEN outcome = 'win' THEN 1 ELSE 0 END
                          FROM polymarket_paper_trades
                         WHERE exit_ts IS NOT NULL AND exit_ts > ?
                           AND outcome IN ('win', 'loss')
-                          AND confidence IS NOT NULL"""
+                          AND confidence_raw IS NOT NULL"""
                 if category:
                     rows = conn.execute(
                         _paper_sql + " AND category = ?", (cutoff, category),
@@ -305,10 +310,14 @@ def fit_calibration_per_slice(
 ) -> dict[str, Any]:
     """Fit isotonic curve on LIVE outcomes per (signal × direction).
 
-    Reads (confidence, outcome) pairs from live_trades — the final
-    post-pipeline confidence + actual win/loss. This is what the
-    executor's Kelly sizer should be calibrated against, not the raw
-    alpha_score that fit_calibration() uses.
+    Reads (confidence_raw, outcome) pairs from live_trades. 2026-07-07
+    (audit C3/F2): trains on confidence_RAW — the pre-calibration,
+    pre-boost signal confidence — not the post-pipeline `confidence`.
+    Training on the post-pipeline value closed a feedback loop (the curve
+    was fit on its own boosted output), and apply_calibration intercepts
+    the RAW inbound confidence, so the x-axis must be raw for the curve's
+    domain to match its input. Rows without confidence_raw (pre-2026-07-07)
+    are excluded rather than back-contaminated.
 
     Persists to alpha_calibration_curve with signal_type + direction
     columns populated. apply_calibration() picks it up if
@@ -321,13 +330,13 @@ def fit_calibration_per_slice(
         _ensure_schema(conn)
         try:
             rows = conn.execute(
-                """SELECT confidence,
+                """SELECT confidence_raw,
                           CASE WHEN outcome='win' THEN 1
                                WHEN outcome='loss' THEN 0 END as y
                      FROM live_trades
                     WHERE dry_run=0 AND exit_ts >= ?
                       AND outcome IN ('win','loss')
-                      AND confidence IS NOT NULL
+                      AND confidence_raw IS NOT NULL
                       AND signal_type = ? AND direction = ?""",
                 (cutoff, signal_type, direction),
             ).fetchall()
@@ -425,7 +434,7 @@ def _load_per_slice_curve(signal_type: str, direction: str,
     try:
         try:
             row = conn.execute(
-                """SELECT breakpoints_json FROM alpha_calibration_curve
+                """SELECT breakpoints_json, fitted_at FROM alpha_calibration_curve
                     WHERE signal_type = ? AND direction = ?
                     ORDER BY fitted_at DESC LIMIT 1""",
                 (signal_type, direction),
@@ -433,17 +442,18 @@ def _load_per_slice_curve(signal_type: str, direction: str,
         except Exception:
             row = None
         if not row:
-            _per_slice_cache[key] = {"fitted_at": now, "bp_x": [], "bp_y": []}
+            _per_slice_cache[key] = {"fitted_at": now, "db_fitted_at": 0, "bp_x": [], "bp_y": []}
             return
         try:
             bps = json.loads(row[0])
             _per_slice_cache[key] = {
                 "fitted_at": now,
+                "db_fitted_at": float(row[1] or 0),
                 "bp_x": [float(b["x"]) for b in bps],
                 "bp_y": [float(b["y"]) for b in bps],
             }
         except Exception:
-            _per_slice_cache[key] = {"fitted_at": now, "bp_x": [], "bp_y": []}
+            _per_slice_cache[key] = {"fitted_at": now, "db_fitted_at": 0, "bp_x": [], "bp_y": []}
     finally:
         try: conn.close()
         except Exception: pass
@@ -479,10 +489,18 @@ def _load_curve(category: str | None, db_path: str | None = None) -> None:
             bps = json.loads(row[0])
             bp_x = [float(b["x"]) for b in bps]
             bp_y = [float(b["y"]) for b in bps]
-            _curve_cache[cache_key] = {"fitted_at": now, "bp_x": bp_x, "bp_y": bp_y}
+            # Keep the cache-refresh clock (`fitted_at`=now) separate from the
+            # curve's real age (`db_fitted_at`). The old code overwrote the DB
+            # timestamp with load time, so a curve that hadn't refit in weeks
+            # always looked fresh and was served forever (audit finding 11 —
+            # the "mapped every input to ~0.717 for weeks" incident).
+            _curve_cache[cache_key] = {
+                "fitted_at": now, "db_fitted_at": float(row[1] or 0),
+                "bp_x": bp_x, "bp_y": bp_y,
+            }
         except Exception as exc:
             logger.debug("curve parse failed: %s", exc)
-            _curve_cache[cache_key] = {"fitted_at": now, "bp_x": [], "bp_y": []}
+            _curve_cache[cache_key] = {"fitted_at": now, "db_fitted_at": 0, "bp_x": [], "bp_y": []}
     finally:
         try: conn.close()
         except Exception: pass
@@ -515,6 +533,18 @@ def apply_calibration(
     except (TypeError, ValueError):
         return 0.0
 
+    # Max curve age at APPLY time. A curve that stopped refitting (its
+    # source loop starved, or every recent refit failed the persist guard)
+    # must not keep correcting live confidence forever — better to pass raw
+    # than to apply a stale map. 21d > the slowest refit cadence (weekly)
+    # with margin. Set MAX_CALIB_CURVE_AGE_DAYS to tune.
+    _max_age = float(_os.environ.get("MAX_CALIB_CURVE_AGE_DAYS", "21")) * 86400
+    _now = time.time()
+
+    def _fresh(cache: dict) -> bool:
+        age = _now - float(cache.get("db_fitted_at", 0) or 0)
+        return cache.get("db_fitted_at", 0) and age <= _max_age
+
     # 1. Per-slice (only if feature flag set + signal info available)
     if (_os.environ.get("ENABLE_PER_SLICE_CALIB", "").lower() in ("1", "true", "yes")
             and signal_type and direction):
@@ -522,7 +552,7 @@ def apply_calibration(
         cached = _per_slice_cache.get((signal_type, direction)) or {}
         bp_x = cached.get("bp_x") or []
         bp_y = cached.get("bp_y") or []
-        if bp_x:
+        if bp_x and _fresh(cached):
             i = bisect.bisect_right(bp_x, x) - 1
             return bp_y[0] if i < 0 else bp_y[i]
 
@@ -532,7 +562,7 @@ def apply_calibration(
         cached = _curve_cache.get(category) or {}
         bp_x = cached.get("bp_x") or []
         bp_y = cached.get("bp_y") or []
-        if bp_x:
+        if bp_x and _fresh(cached):
             i = bisect.bisect_right(bp_x, x) - 1
             return bp_y[0] if i < 0 else bp_y[i]
 
@@ -541,7 +571,7 @@ def apply_calibration(
     cached = _curve_cache.get("") or {}
     bp_x = cached.get("bp_x") or []
     bp_y = cached.get("bp_y") or []
-    if not bp_x:
+    if not bp_x or not _fresh(cached):
         return x
     i = bisect.bisect_right(bp_x, x) - 1
     return bp_y[0] if i < 0 else bp_y[i]

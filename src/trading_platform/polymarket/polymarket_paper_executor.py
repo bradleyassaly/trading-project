@@ -474,6 +474,7 @@ CREATE TABLE IF NOT EXISTS polymarket_paper_trades (
     size_usd REAL NOT NULL,
     signal_type TEXT NOT NULL,
     confidence REAL,
+    confidence_raw REAL,
     wallet TEXT,
     entry_ts INTEGER,
     exit_price REAL,
@@ -1661,14 +1662,15 @@ class PolymarketPaperExecutor:
                     """INSERT INTO polymarket_paper_trades
                        (condition_id, question, category, side, entry_price,
                         raw_entry_price, spread_cost, slippage_cost,
-                        size_usd, signal_type, confidence, wallet, entry_ts,
+                        size_usd, signal_type, confidence, confidence_raw, wallet, entry_ts,
                         fusion_score, fusion_components, wallet_tier_at_fire,
                         alpha_score_at_fire, entry_context,
                         archived)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)""",
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)""",
                     (condition_id, question, category, side, entry_price,
                      raw_entry_price, entry_spread_cost, entry_slippage_cost,
-                     stake, signal_type, confidence, wallet, now_ts,
+                     stake, signal_type, confidence,
+                     signal.get("confidence_raw", confidence), wallet, now_ts,
                      fusion_score_val, fusion_blob, signal.get("wallet_tier"),
                      alpha_at_fire, entry_ctx),
                 )
@@ -2808,12 +2810,15 @@ class PolymarketPaperExecutor:
             self._wallet_conn.execute(
                 """INSERT INTO polymarket_paper_trades
                    (condition_id, question, category, side, entry_price,
-                    size_usd, signal_type, confidence, wallet, entry_ts,
+                    size_usd, signal_type, confidence, confidence_raw, wallet, entry_ts,
                     archived, wallet_tier_at_fire, source_wallet,
                     detection_lag_seconds, whale_entry_price, alpha_score_at_fire)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)""",
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)""",
                 (condition_id, question[:200], category, side, ep,
-                 stake, signal_type, confidence, wallet[:42], now_ts,
+                 stake, signal_type, confidence,
+                 # This discovery/whale-copy path never runs the ensemble or
+                 # calibration, so confidence IS already raw (audit F2).
+                 signal.get("confidence_raw", confidence), wallet[:42], now_ts,
                  signal.get("wallet_tier", ""), signal.get("wallet", ""),
                  signal.get("detection_lag_seconds"), signal.get("price"),
                  signal.get("alpha_score", 0)),

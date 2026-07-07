@@ -366,6 +366,7 @@ class PolymarketLiveExecutor:
                         question TEXT,
                         direction TEXT,
                         confidence REAL,
+                        confidence_raw REAL,
                         size_usd REAL,
                         entry_price REAL,
                         order_id TEXT,
@@ -1760,14 +1761,14 @@ class PolymarketLiveExecutor:
                 conn.execute(
                     """INSERT INTO live_trades
                        (attempted_at, signal_type, condition_id, question, direction,
-                        confidence, size_usd, entry_price, order_id, status,
+                        confidence, confidence_raw, size_usd, entry_price, order_id, status,
                         dry_run, error_msg, token_id, side, fill_price, shares,
                         category, signal_wallet, submitted_at, filled_at, signal_price,
                         expected_price, slippage, slippage_signed, slippage_cost_usd, fill_time_ms,
                         resolution_date, ask_depth_entry, signal_fired_at, wallet_tier,
                         whale_trade_ts, detection_latency_sec)
                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                               ?, ?, ?, ?, ?, ?)""",
+                               ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         now_ts,
                         signal.get("signal_type"),
@@ -1775,6 +1776,11 @@ class PolymarketLiveExecutor:
                         (signal.get("question") or "")[:200],
                         signal.get("direction", "BUY"),
                         signal.get("confidence"),
+                        # confidence_raw: pre-calibration/pre-boost signal
+                        # confidence — the value calibration must train on
+                        # (audit F2). Falls back to confidence if the signal
+                        # never went through the calibration wiring.
+                        signal.get("confidence_raw", signal.get("confidence")),
                         float(size_usd) if size_usd is not None else None,
                         _expected,
                         order_result.order_id if order_result else None,
