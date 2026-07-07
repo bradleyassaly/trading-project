@@ -188,16 +188,25 @@ def refresh(
     ensure_schema()
     cutoff = int(time.time() - staleness_hours * 3600)
 
-    # Priority order: open positions first, then pending signals, then recent trades
+    # Priority order: open positions first, then recently-EXITED live
+    # positions (2026-07-06: their markets stopped refreshing the moment
+    # we sold, so no local source ever learned the resolution — the
+    # exit-policy counterfactual found 0 of 69 exits resolvable), then
+    # pending signals, then recent trades.
     priority_sql = f"""
     SELECT cid, min(priority) FROM (
       SELECT condition_id AS cid, 1 AS priority
       FROM polymarket_paper_trades WHERE exit_ts IS NULL AND archived = 0
       UNION ALL
       SELECT condition_id AS cid, 2 AS priority
-      FROM signal_outcomes WHERE resolution_price IS NULL AND signal_type != 'price_velocity'
+      FROM live_trades
+      WHERE dry_run = 0 AND exit_ts IS NOT NULL
+        AND exit_ts > strftime('%s','now','-60 days')
       UNION ALL
       SELECT condition_id AS cid, 3 AS priority
+      FROM signal_outcomes WHERE resolution_price IS NULL AND signal_type != 'price_velocity'
+      UNION ALL
+      SELECT condition_id AS cid, 4 AS priority
       FROM wallet_trades WHERE timestamp > strftime('%s','now','-7 days')
     ) GROUP BY cid
     """

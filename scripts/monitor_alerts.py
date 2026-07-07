@@ -149,6 +149,76 @@ def check_wallet_attribution(alerter) -> int:
     return 1
 
 
+def check_snapshot_truth(alerter) -> int:
+    """Compare the latest equity snapshot's open-position value against
+    Polymarket's own valuation (data-api /positions currentValue) — the
+    exact number the user sees on their portfolio page.
+
+    2026-07-06 origin: the snapshot ran $60 over on-chain truth (phantom
+    marks + unbooked exits) and printed a fictitious +$47 day. The
+    reconciler computes this diff but only every 4h and the drift window
+    fell between runs — the user's manual portfolio check caught it
+    first. This runs on the 15-min monitor cadence: one data-api call.
+    """
+    wallet = (os.environ.get("POLYMARKET_FUNDER_ADDRESS")
+              or os.environ.get("POLYMARKET_WALLET_ADDRESS"))
+    if not wallet:
+        return 0
+    try:
+        from trading_platform.polymarket.db_connection import get_connection
+        conn = get_connection()
+        try:
+            row = conn.execute(
+                """SELECT ts, open_market_value FROM live_equity_snapshots
+                   ORDER BY ts DESC LIMIT 1"""
+            ).fetchone()
+        finally:
+            try: conn.close()
+            except Exception: pass
+        if not row:
+            return 0
+        snap_ts, snap_val = int(row[0]), float(row[1] or 0)
+        # Stale snapshot says nothing about current truth — the hourly
+        # snapshot job has its own freshness alerting.
+        if time.time() - snap_ts > 2 * 3600:
+            return 0
+
+        import requests
+        r = requests.get(
+            "https://data-api.polymarket.com/positions",
+            params={"user": wallet, "limit": 500, "sizeThreshold": 0.01},
+            timeout=15,
+        )
+        if not r.ok:
+            return 0
+        true_val = 0.0
+        for p in r.json():
+            try:
+                cv = p.get("currentValue")
+                if cv is not None:
+                    true_val += float(cv)
+            except (TypeError, ValueError):
+                continue
+
+        diff = snap_val - true_val
+        threshold = max(10.0, 0.25 * max(true_val, 1.0))
+        if abs(diff) <= threshold:
+            return 0
+        if alerter.send_pipeline_alert(
+            component="snapshot_truth",
+            message=(f"equity snapshot diverges from Polymarket: "
+                     f"snapshot positions=${snap_val:.2f} vs "
+                     f"data-api=${true_val:.2f} (diff ${diff:+.2f}). "
+                     f"Snapshot equity is not trustworthy until reconciled — "
+                     f"check for unbooked exits / phantom marks / zeroed shares."),
+            level="critical" if abs(diff) > 2 * threshold else "warning",
+        ):
+            return 1
+    except Exception as exc:
+        print(f"  snapshot_truth check failed: {exc}")
+    return 0
+
+
 def main() -> int:
     from trading_platform.polymarket.telegram_alerts import get_alerter
     alerter = get_alerter()
@@ -157,6 +227,7 @@ def main() -> int:
     total += check_reconciler(alerter)
     total += check_ws_poll(alerter)
     total += check_wallet_attribution(alerter)
+    total += check_snapshot_truth(alerter)
     print(f"monitor_alerts fired {total} alert(s)")
     return 0
 
