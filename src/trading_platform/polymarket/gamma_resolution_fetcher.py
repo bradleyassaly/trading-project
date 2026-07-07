@@ -64,17 +64,23 @@ class GammaResolutionFetcher:
         output_path = Path(output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
-        cutoff = (datetime.now(tz=timezone.utc) - timedelta(days=since_days)).strftime("%Y-%m-%d")
+        _now = datetime.now(tz=timezone.utc)
+        cutoff = (_now - timedelta(days=since_days)).strftime("%Y-%m-%d")
         page_size = 100
         max_pages = 300
-        # 2026-07-05: Gamma rejects offset > ~2000 with 422 (observed: 2100
-        # fails, 2000 works). To cover result sets larger than the cap we
-        # page in END-DATE WINDOWS: order by endDate ascending, and when the
-        # offset approaches the cap, advance end_date_min to the last end
-        # date seen and reset offset to 0. Duplicate markets across window
-        # boundaries are dropped via seen-condition_id tracking.
+        # 2026-07-05: Gamma rejects offset > ~2000 with 422. Page in END-DATE
+        # WINDOWS to cover result sets larger than the cap.
+        # 2026-07-07 (audit C6): page NEWEST-FIRST (endDate DESCENDING). The
+        # ascending version exhausted its 30k-market budget ~15 days past the
+        # 90-day cutoff — with ~2000 closed markets/day, the CSV's newest
+        # close_time stayed frozen at ~cutoff (verified: rewritten daily but
+        # newest entry 2026-04-21) so every consumer was starved of RECENT
+        # resolutions. Descending spends the budget on the recent markets we
+        # actually need to book. Window advances by LOWERING end_date_max to
+        # the oldest end date seen; stop once we cross below the cutoff.
         GAMMA_OFFSET_CAP = 2000
-        window_min = cutoff
+        window_max = (_now + timedelta(days=1)).strftime("%Y-%m-%d")
+        oldest_seen = ""  # lowest endDate seen in the current window
         offset = 0
         total_fetched = 0
         seen_cids: set[str] = set()
@@ -92,35 +98,37 @@ class GammaResolutionFetcher:
 
             for page_num in range(max_pages):
                 if offset + page_size > GAMMA_OFFSET_CAP:
-                    # Advance the window instead of paging past the cap.
-                    last_end = self._last_end_date_seen
-                    if last_end and last_end > window_min:
-                        window_min = last_end
+                    # Advance the window DOWNWARD past the offset cap.
+                    if oldest_seen and oldest_seen < window_max:
+                        window_max = oldest_seen
                     else:
                         # Can't advance (2000+ markets share one end date) —
-                        # skip a day rather than loop forever.
+                        # step back a day rather than loop forever.
                         try:
-                            _d = datetime.strptime(window_min, "%Y-%m-%d")
-                            window_min = (_d + timedelta(days=1)).strftime("%Y-%m-%d")
+                            _d = datetime.strptime(window_max, "%Y-%m-%d")
+                            window_max = (_d - timedelta(days=1)).strftime("%Y-%m-%d")
                             logger.warning(
-                                "Gamma window could not advance by data; skipping to %s",
-                                window_min,
+                                "Gamma window could not advance by data; stepping to %s",
+                                window_max,
                             )
                         except ValueError:
                             break
                     offset = 0
-                    print(f"  [window] advancing end_date_min → {window_min}, offset reset")
+                    print(f"  [window] lowering end_date_max → {window_max}, offset reset")
+                    if window_max <= cutoff:
+                        break
                 try:
                     time.sleep(self._sleep)
                     resp = self._session.get(
                         f"{self._base}/markets",
                         params={
                             "closed": "true",
-                            "end_date_min": window_min,
+                            "end_date_min": cutoff,
+                            "end_date_max": window_max,
                             "limit": page_size,
                             "offset": offset,
                             "order": "endDate",
-                            "ascending": "true",
+                            "ascending": "false",
                         },
                         timeout=15,
                     )
@@ -148,10 +156,11 @@ class GammaResolutionFetcher:
                 page_resolved = 0
 
                 for m in batch:
-                    # Track window watermark + dedupe across window overlaps
+                    # Track the OLDEST endDate in this window (descending order)
+                    # so the window can advance downward past the offset cap.
                     _end_iso = str(m.get("endDateIso") or m.get("endDate") or "")[:10]
-                    if _end_iso and _end_iso > (self._last_end_date_seen or ""):
-                        self._last_end_date_seen = _end_iso
+                    if _end_iso and (oldest_seen == "" or _end_iso < oldest_seen):
+                        oldest_seen = _end_iso
                     _cid = m.get("conditionId") or ""
                     if _cid:
                         if _cid in seen_cids:

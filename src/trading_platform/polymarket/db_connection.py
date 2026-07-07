@@ -295,6 +295,37 @@ def _lookup_pk(pg_conn, table: str) -> list[str]:
         return [r[0] for r in cur.fetchall()]
 
 
+# Which tables have an integer `id` column — cached so RETURNING-id capture
+# (below) never risks a failed statement that could poison a transaction.
+_HAS_ID_COL_CACHE: dict[str, bool] = {}
+_INSERT_TARGET_RE = re.compile(r"INSERT\s+INTO\s+[\"']?(\w+)", re.IGNORECASE)
+
+
+def _insert_target_table(sql: str) -> str | None:
+    m = _INSERT_TARGET_RE.search(sql)
+    return m.group(1) if m else None
+
+
+def _table_has_id_column(table: str) -> bool:
+    if table in _HAS_ID_COL_CACHE:
+        return _HAS_ID_COL_CACHE[table]
+    has = False
+    try:
+        with _pg_raw_conn() as _c:
+            with _c.cursor() as cur:
+                cur.execute(
+                    "SELECT 1 FROM information_schema.columns "
+                    "WHERE table_schema='public' AND table_name=%s "
+                    "AND column_name='id' LIMIT 1",
+                    (table,),
+                )
+                has = cur.fetchone() is not None
+    except Exception:
+        has = False
+    _HAS_ID_COL_CACHE[table] = has
+    return has
+
+
 class _PgCursorWrapper:
     """Mimics sqlite3.Cursor. Auto-rewrites SQL on execute/executemany.
 
@@ -306,6 +337,7 @@ class _PgCursorWrapper:
         self._rewrite_cache = rewrite_cache
         self._row_factory = row_factory
         self._last_rewritten = None
+        self._lastrowid = None
 
     @property
     def description(self):
@@ -317,9 +349,13 @@ class _PgCursorWrapper:
 
     @property
     def lastrowid(self):
-        # psycopg doesn't auto-populate lastrowid; callers needing it must
-        # use RETURNING id.
-        return None
+        # 2026-07-07 (audit C5/F3): populated by RETURNING-id capture in
+        # execute() for single INSERTs into tables with an `id` column.
+        # Previously hardcoded None, which silently severed every consumer
+        # that links rows by lastrowid — 91% of trade_hypotheses had NULL
+        # trade_id, disabling the hypothesis + signal→paper linkage since
+        # the April cutover.
+        return self._lastrowid
 
     def execute(self, sql, params=None):
         # PRAGMA statements: most no-op under Postgres. One is special —
@@ -354,11 +390,32 @@ class _PgCursorWrapper:
         # modules can still call ensure_schema() under Postgres.
         if re.match(r"\s*CREATE\s+(TABLE|INDEX|UNIQUE\s+INDEX)", self._last_rewritten, re.IGNORECASE):
             self._last_rewritten = _convert_create_ddl(self._last_rewritten)
+        # RETURNING-id capture: for a single INSERT (not executemany) into a
+        # table that has an `id` column and no explicit RETURNING, append
+        # `RETURNING id` and stash the value so cursor.lastrowid works like
+        # SQLite. Guarded on _table_has_id_column so we never issue a
+        # statement that could fail and poison the transaction.
+        self._lastrowid = None
+        _rw = self._last_rewritten
+        _capture_id = False
+        _stripped = _rw.lstrip()
+        if _stripped[:6].upper() == "INSERT" and " RETURNING " not in _rw.upper():
+            _tbl = _insert_target_table(_rw)
+            if _tbl and _table_has_id_column(_tbl):
+                _rw = _rw.rstrip().rstrip(";") + " RETURNING id"
+                _capture_id = True
         try:
             if params is None:
-                self._cur.execute(self._last_rewritten)
+                self._cur.execute(_rw)
             else:
-                self._cur.execute(self._last_rewritten, params)
+                self._cur.execute(_rw, params)
+            if _capture_id:
+                try:
+                    _idrow = self._cur.fetchone()
+                    if _idrow is not None:
+                        self._lastrowid = _idrow[0]
+                except Exception:
+                    self._lastrowid = None
         except psycopg.errors.InFailedSqlTransaction:
             raise
         return self

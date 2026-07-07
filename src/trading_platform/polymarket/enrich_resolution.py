@@ -219,11 +219,15 @@ def _enrich_from_positions(db: WalletDB) -> int:
             except (TypeError, ValueError):
                 continue
 
-            # curPrice == 1.0 means this token's outcome won
-            # curPrice == 0.0 means this token's outcome lost
+            # curPrice == 1.0 means THIS token's outcome won; 0.0 means it
+            # lost. 2026-07-07 (audit C14): store the boolean token_won, NOT
+            # "YES"/"NO". The old code stored token_won AS the market_outcome
+            # label, so a winning NO token wrote market_outcome='YES' — the
+            # inversion that produced 6,496 markets with contradictory
+            # YES/NO rows. The true market outcome needs the token's ROLE
+            # (YES vs NO token), resolved below.
             if cp >= 0.99 or cp <= 0.01 or redeemable:
-                token_won = cp >= 0.99
-                resolved_assets[asset] = "YES" if token_won else "NO"
+                resolved_assets[asset] = cp >= 0.99  # token_won: bool
 
         time.sleep(0.3)
 
@@ -232,9 +236,25 @@ def _enrich_from_positions(db: WalletDB) -> int:
     if not resolved_assets:
         return 0
 
-    # Fetch current unresolved trades — acquire, fetchall, release immediately.
+    # Resolve each token's ROLE (YES vs NO) so token_won → market outcome.
+    # market resolves YES iff (the token is the YES token AND it won) OR
+    # (the token is the NO token AND it lost): market_YES ⇔ (is_yes == won).
+    role_is_yes: dict[str, bool] = {}
+    _assets = list(resolved_assets.keys())
     conn = get_connection()
     try:
+        for i in range(0, len(_assets), 500):
+            chunk = _assets[i:i + 500]
+            ph = ",".join("?" * len(chunk))
+            for yes_tok, no_tok in conn.execute(
+                f"SELECT yes_token_id, no_token_id FROM markets "
+                f"WHERE yes_token_id IN ({ph}) OR no_token_id IN ({ph})",
+                (*chunk, *chunk),
+            ).fetchall():
+                if yes_tok:
+                    role_is_yes[str(yes_tok)] = True
+                if no_tok:
+                    role_is_yes[str(no_tok)] = False
         unresolved = conn.execute(
             "SELECT id, asset, side, size, price FROM wallet_trades "
             "WHERE market_resolved = 0 AND asset IS NOT NULL"
@@ -248,8 +268,14 @@ def _enrich_from_positions(db: WalletDB) -> int:
         if asset not in resolved_assets:
             continue
 
-        market_outcome = resolved_assets[asset]
-        token_won = market_outcome == "YES"
+        token_won = bool(resolved_assets[asset])
+        # True market outcome from token role; None when role unknown (don't
+        # guess — leave market_outcome NULL, still record pnl + resolved).
+        is_yes = role_is_yes.get(str(asset))
+        if is_yes is None:
+            market_outcome = None
+        else:
+            market_outcome = "YES" if (is_yes == token_won) else "NO"
         size = size or 0
         price = price or 0
         side_upper = (side or "").upper()
