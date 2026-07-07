@@ -356,6 +356,7 @@ def _check_live_exits_locked() -> dict[str, int]:
         # relevant YES-space price. Mid remains the fallback when the
         # needed book side is empty.
         current = None
+        _book = None
         try:
             _book = clob.get_order_book(token_id)
             _bids = _book.get("bids") or []
@@ -612,6 +613,9 @@ def _check_live_exits_locked() -> dict[str, int]:
             exact_shares=exact_sell_shares,
             max_slippage=0.05,
             price_hint=exit_price_hint,
+            # P4: reuse the mark-price book fetched above. Error-dicts carry
+            # no freshness stamp, so the order method re-fetches them itself.
+            book=_book if isinstance(_book, dict) else None,
         )
         if not order_result.success:
             # Track retry state. After 5 attempts: telegram alert.

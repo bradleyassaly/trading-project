@@ -101,6 +101,9 @@ class ClobClient:
                         key=lambda x: float(x.get("price", 0.0)), reverse=True)
                 except (TypeError, ValueError):
                     pass
+                # P4: freshness stamp so order methods can accept a
+                # caller-threaded book and re-fetch only when stale.
+                book["_fetched_at"] = time.time()
             return book
         except Exception as exc:
             return {"error": str(exc), "bids": [], "asks": []}
@@ -153,8 +156,16 @@ class ClobClient:
         exact_shares: int | None = None,
         price_hint: float | None = None,
         max_price: float | None = None,
+        book: dict | None = None,
     ) -> OrderResult:
-        """Submit a market order to the CLOB. Requires py-clob-client."""
+        """Submit a market order to the CLOB. Requires py-clob-client.
+
+        `book`, when provided, MUST be a book returned by
+        ClobClient.get_order_book (normalized asks-ascending/bids-descending
+        — the pricing below depends on it); it is re-fetched if older than
+        10s. Lets the executor thread its depth-check fetch through instead
+        of paying a second REST round-trip (P4).
+        """
         if not self._configured:
             return OrderResult(
                 success=False, order_id=None, status="error",
@@ -221,7 +232,10 @@ class ClobClient:
             current_price = price_hint if price_hint is not None else (self.get_mid_price(token_id) or 0.5)
 
             tick = 0.01
-            book = self.get_order_book(token_id)
+            # P4: accept the caller's already-fetched normalized book; only
+            # re-fetch when missing or older than 10s.
+            if book is None or (time.time() - book.get("_fetched_at", 0)) > 10:
+                book = self.get_order_book(token_id)
             if side.upper() == "BUY":
                 asks = book.get("asks") or []
                 # asks are sorted ascending (lowest = best for buyer)
@@ -293,12 +307,25 @@ class ClobClient:
                 size=float(shares_int),
                 side=side.upper(),
             )
+            # P4: neg_risk is immutable per market — local markets-table
+            # cache first (with REST write-back on miss); the vendored
+            # client's per-instance cache is always cold because a fresh
+            # PyClobClient is constructed on every order.
             neg_risk_flag = False
+            _nr_cached = None
             try:
-                neg_risk_flag = bool(client.get_neg_risk(token_id))
-                logger.info("[clob] neg_risk=%s for %s...", neg_risk_flag, token_id[:12])
-            except Exception as _nr_exc:
-                logger.warning("[clob] get_neg_risk lookup failed (%s), defaulting to False", _nr_exc)
+                from trading_platform.polymarket.markets_table import get_neg_risk_cached
+                _nr_cached = get_neg_risk_cached(token_id)
+            except Exception:
+                _nr_cached = None
+            if _nr_cached is not None:
+                neg_risk_flag = _nr_cached
+            else:
+                try:
+                    neg_risk_flag = bool(client.get_neg_risk(token_id))
+                    logger.info("[clob] neg_risk=%s for %s...", neg_risk_flag, token_id[:12])
+                except Exception as _nr_exc:
+                    logger.warning("[clob] get_neg_risk lookup failed (%s), defaulting to False", _nr_exc)
             opts = PartialCreateOrderOptions(tick_size="0.01", neg_risk=neg_risk_flag)
             _order = client.create_order(order_args, opts)
             # Polymarket treats marketable GTC orders as FOK server-side and
@@ -442,6 +469,7 @@ class ClobClient:
         timeout_sec: float = 30.0,
         aggression: str = "passive",
         price_hint: float | None = None,
+        book: dict | None = None,
     ) -> OrderResult:
         """Place a limit order with fill monitoring.
 
@@ -486,7 +514,9 @@ class ClobClient:
             # token price. Prefer it over re-fetching mid (which always returns
             # the YES price even for NO token queries).
             mid_fallback = price_hint if price_hint is not None else (self.get_mid_price(token_id) or 0.5)
-            book = self.get_order_book(token_id)
+            # P4: same caller-threaded-book contract as place_market_order.
+            if book is None or (time.time() - book.get("_fetched_at", 0)) > 10:
+                book = self.get_order_book(token_id)
             bids = book.get("bids") or []
             asks = book.get("asks") or []
             best_bid = float(bids[0]["price"]) if bids else mid_fallback
@@ -534,12 +564,25 @@ class ClobClient:
                 token_id=token_id, price=price,
                 size=float(shares_int), side=side.upper(),
             )
+            # P4: neg_risk is immutable per market — local markets-table
+            # cache first (with REST write-back on miss); the vendored
+            # client's per-instance cache is always cold because a fresh
+            # PyClobClient is constructed on every order.
             neg_risk_flag = False
+            _nr_cached = None
             try:
-                neg_risk_flag = bool(client.get_neg_risk(token_id))
-                logger.info("[clob] neg_risk=%s for %s...", neg_risk_flag, token_id[:12])
-            except Exception as _nr_exc:
-                logger.warning("[clob] get_neg_risk lookup failed (%s), defaulting to False", _nr_exc)
+                from trading_platform.polymarket.markets_table import get_neg_risk_cached
+                _nr_cached = get_neg_risk_cached(token_id)
+            except Exception:
+                _nr_cached = None
+            if _nr_cached is not None:
+                neg_risk_flag = _nr_cached
+            else:
+                try:
+                    neg_risk_flag = bool(client.get_neg_risk(token_id))
+                    logger.info("[clob] neg_risk=%s for %s...", neg_risk_flag, token_id[:12])
+                except Exception as _nr_exc:
+                    logger.warning("[clob] get_neg_risk lookup failed (%s), defaulting to False", _nr_exc)
             _opts = PartialCreateOrderOptions(tick_size="0.01", neg_risk=neg_risk_flag)
             _order = client.create_order(order_args, _opts)
             # Same FOK-retry-as-FAK fallback as place_market_order — server

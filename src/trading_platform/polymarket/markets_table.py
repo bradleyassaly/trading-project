@@ -53,11 +53,14 @@ CREATE TABLE IF NOT EXISTS markets (
     created_at_iso    TEXT,
     yes_token_id      TEXT,
     no_token_id       TEXT,
-    event_slug        TEXT
+    event_slug        TEXT,
+    neg_risk          INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_markets_end_date ON markets(end_date_iso);
 CREATE INDEX IF NOT EXISTS idx_markets_closed   ON markets(closed);
 CREATE INDEX IF NOT EXISTS idx_markets_event    ON markets(event_slug);
+CREATE INDEX IF NOT EXISTS idx_markets_yes_token ON markets(yes_token_id);
+CREATE INDEX IF NOT EXISTS idx_markets_no_token  ON markets(no_token_id);
 """
 
 
@@ -75,6 +78,15 @@ def ensure_schema() -> None:
             c.execute("ALTER TABLE markets ADD COLUMN event_slug TEXT")
     except Exception:
         pass  # already present (or table doesn't exist yet — created below)
+    # 2026-07-07 (P4): neg_risk cache — NULL=unknown, 0=false, 1=true.
+    # neg_risk selects which exchange contract an order is signed against;
+    # a market's tokens are minted under one exchange and never move, so
+    # this is immutable and safe to cache forever.
+    try:
+        with db() as c:
+            c.execute("ALTER TABLE markets ADD COLUMN neg_risk INTEGER")
+    except Exception:
+        pass
     with db() as c:
         for stmt in _SCHEMA.split(";"):
             if stmt.strip():
@@ -162,6 +174,9 @@ def _extract_row(cid: str, m: dict) -> tuple:
         yes_tid,
         no_tid,
         event_slug,
+        # neg_risk: None (NULL) when Gamma omits the key so unknown stays
+        # unknown; verified Gamma's negRisk agrees with CLOB /neg-risk.
+        (1 if m.get("negRisk") else 0) if "negRisk" in m else None,
     )
 
 
@@ -450,10 +465,52 @@ def _persist(rows: list[tuple]) -> None:
             " condition_id, slug, question, end_date_iso, close_time_iso,"
             " volume, volume_24h, liquidity, outcomes_json, outcome_prices,"
             " tags_json, uma_status, closed, active, archived, last_fetched_at,"
-            " created_at_iso, yes_token_id, no_token_id, event_slug"
-            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " created_at_iso, yes_token_id, no_token_id, event_slug, neg_risk"
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             rows,
         )
+
+
+def get_neg_risk_cached(token_id: str) -> bool | None:
+    """P4: read-through neg_risk cache. neg_risk is immutable per market (it
+    selects which exchange contract orders are EIP-712-signed against), yet
+    the hot lane paid a REST round-trip for it on every order.
+
+    Local markets row first; on NULL/miss, one unauthenticated CLOB GET with
+    write-back (UPDATE only — never create skeleton rows). Returns None when
+    both sources fail; callers keep their existing fallback.
+    """
+    tid = str(token_id)
+    try:
+        with db() as c:
+            row = c.execute(
+                "SELECT neg_risk FROM markets "
+                "WHERE yes_token_id = ? OR no_token_id = ? LIMIT 1",
+                (tid, tid),
+            ).fetchone()
+    except Exception:
+        row = None
+    if row is not None and row[0] is not None:
+        return bool(row[0])
+    try:
+        import requests
+        r = requests.get("https://clob.polymarket.com/neg-risk",
+                         params={"token_id": tid}, timeout=5)
+        if r.status_code != 200:
+            return None
+        val = bool(r.json().get("neg_risk"))
+    except Exception:
+        return None
+    try:
+        with db() as c:
+            c.execute(
+                "UPDATE markets SET neg_risk = ? "
+                "WHERE yes_token_id = ? OR no_token_id = ?",
+                (1 if val else 0, tid, tid),
+            )
+    except Exception:
+        pass
+    return val
 
 
 def get_token_ids(condition_id: str) -> tuple[str | None, str | None]:

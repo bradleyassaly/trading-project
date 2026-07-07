@@ -1712,6 +1712,9 @@ class PolymarketLiveExecutor:
                 token_id=token_id, side="BUY", size_usdc=size_usd,
                 price_hint=current_price,
                 max_price=_order_max_price,
+                # P4: reuse the depth-check book (re-fetched inside if >10s
+                # old or an error-dict without a freshness stamp).
+                book=book,
             )
             self._record_attempt(
                 signal, size_usd, current_price, order_result,
