@@ -154,3 +154,19 @@ re-registered before any number is trusted:
 - Decision run: `--days 120`. A `--perfect-fill` flag reproduces run-1
   behavior for comparability; it is diagnostic-only and cannot drive the
   verdict.
+
+## Amendment 2 — registered 2026-07-07, before the 120d decision run
+
+**Disclosed motivation:** the 60d perfect-fill sanity run (run after
+Amendment 1) showed 42,665 copies / 223 wallets at min_n / **0 qualified
+wallets** — under the letter of the rule this is "INSUFFICIENT" (no
+top-decile to measure), which misreads overwhelming negative evidence as
+absence of data. The guard was written to protect against trusting a
+too-small top-decile mean, not to make an all-negative universe unfalsifiable.
+
+**Amended clause (applies to the 120d decision run and after):** if the
+poller lane has **≥ 10,000 total copies AND ≥ 100 wallets at min_n AND 0
+qualified wallets**, the verdict is **KILL** (no copyable cohort exists in
+the measured universe), not INSUFFICIENT. All other semantics unchanged.
+A KILL under this clause carries the same consequences as §"The rule":
+retire live copy-entry; the wallet graph survives as a feature source.
