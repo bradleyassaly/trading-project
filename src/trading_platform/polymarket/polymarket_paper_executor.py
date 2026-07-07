@@ -2318,9 +2318,15 @@ class PolymarketPaperExecutor:
                                 end_dt = end_dt.replace(tzinfo=timezone.utc)
                             now_dt = datetime.fromtimestamp(time.time(), tz=timezone.utc)
                             hours_to_resolve = (end_dt - now_dt).total_seconds() / 3600
-                            stake = float(pos.get("size_usd") or 1.0)
-                            unreal_pct = (float(unrealized) / max(stake, 1)) if stake else 0
-                            if 0 < hours_to_resolve <= 8 and -0.10 <= unreal_pct <= 0.05:
+                            # 2026-07-07 (audit F7): `unrealized` is ALREADY a
+                            # fractional return (compared to sl/tp above). The
+                            # old code divided it by stake dollars, making
+                            # unreal_pct ≈ 0 for every position → the "stuck
+                            # band" matched almost everything, force-exiting
+                            # nearly all positions within 8h of resolution at
+                            # mark and clipping the resolution winners the
+                            # signal's thesis depends on.
+                            if 0 < hours_to_resolve <= 8 and -0.10 <= unrealized <= 0.05:
                                 exit_reason = "pre_resolve_decay"
                     except Exception as exc:
                         logger.debug("pre_resolve_decay check failed for %s: %s", cid[:14], exc)
@@ -2876,16 +2882,22 @@ class PolymarketPaperExecutor:
 
     def get_open_positions(self) -> list[dict[str, Any]]:
         """Return open paper trades from polymarket_paper_trades."""
+        # 2026-07-07 (audit F7): mfe/mae/last_mark_price were NOT selected, so
+        # every consumer's pos.get("mfe") returned None — the trailing-stop
+        # exit family could never fire (mfe_pct always 0) and paper equity
+        # unrealized (derived from last_mark_price) was structurally 0.
         with self._wallet_lock:
             rows = self._wallet_conn.execute(
                 """SELECT id, condition_id, question, category, side, entry_price,
-                          size_usd, signal_type, confidence, wallet, entry_ts
+                          size_usd, signal_type, confidence, wallet, entry_ts,
+                          mfe, mae, last_mark_price
                    FROM polymarket_paper_trades
                    WHERE exit_ts IS NULL AND archived = 0
                    ORDER BY entry_ts DESC"""
             ).fetchall()
         cols = ["id", "condition_id", "question", "category", "side", "entry_price",
-                "size_usd", "signal_type", "confidence", "wallet", "entry_ts"]
+                "size_usd", "signal_type", "confidence", "wallet", "entry_ts",
+                "mfe", "mae", "last_mark_price"]
         return [dict(zip(cols, r)) for r in rows]
 
     def check_resolutions_v2(self) -> list[dict[str, Any]]:
