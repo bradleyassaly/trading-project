@@ -583,6 +583,17 @@ SCHEDULE: list[Task] = [
         description="Signal IC + correlation; decay + redundancy (every 6h)",
     ),
     Task(
+        # 2026-07-07 (roadmap C4): live-lane regime monitor on the two
+        # shipped edges (resolution_decay, whale_entry_filtered). The IC
+        # monitor above reads the PAPER lane and was blind to live drift
+        # (n_resolved_30d=0 vs 15 actual live resolutions at recon).
+        # Rolling EV + event-clustered CI bands; Telegram on transitions.
+        name="regime_monitor",
+        cmd="python -m trading_platform.polymarket.regime_monitor",
+        interval_seconds=6 * 3600,
+        description="Live-edge EV drift monitor with clustered CI bands (6h)",
+    ),
+    Task(
         # 2026-04-25: auto-promote insider wallets. Inserts into
         # insider_wallets any wallet with early_win_rate>=0.65 over n>=10
         # and avg_entry_hours_before_close>=12, excluding flagged farmers.

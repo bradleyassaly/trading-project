@@ -336,6 +336,22 @@ def section_decay(conn, now_ts):
                 print(f"    {str(st):<26} {why or (str(cw)+' corr='+str(cm))}")
     except Exception:
         pass
+    # C4: live-lane regime states for the shipped edges (regime_monitor, 6h).
+    try:
+        reg = conn.execute(
+            "SELECT signal_type, state, n_30d, ev_30d, ev_lo95_30d, "
+            "ev_hi95_30d, n_clusters_30d FROM signal_regime ORDER BY signal_type"
+        ).fetchall()
+        if reg:
+            print("  LIVE-EDGE REGIME (event-clustered 30d EV per $):")
+            for st, state, n30, ev, lo, hi, ncl in reg:
+                mark = "  <<< entire CI below zero" if state == "DRIFT_BREACH" else ""
+                print(f"    {str(st):<26} {str(state):<13} "
+                      f"EV={float(ev or 0):+.1%} [{float(lo or 0):+.1%}, "
+                      f"{float(hi or 0):+.1%}] n={int(n30 or 0)} "
+                      f"events={int(ncl or 0)}{mark}")
+    except Exception:
+        pass
 
 
 def section_attribution(conn, now_ts):
