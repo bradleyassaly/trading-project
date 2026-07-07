@@ -75,6 +75,10 @@ CREATE INDEX IF NOT EXISTS idx_wt_wallet ON wallet_trades(wallet);
 CREATE INDEX IF NOT EXISTS idx_wt_asset ON wallet_trades(asset);
 CREATE INDEX IF NOT EXISTS idx_wt_timestamp ON wallet_trades(timestamp);
 CREATE INDEX IF NOT EXISTS idx_wt_category ON wallet_trades(category);
+-- C1+C2: mirror-exit + taker-evidence lookups (the copyability diagnostic
+-- correlates leader sells with other wallets' buys in tight time windows).
+CREATE INDEX IF NOT EXISTS idx_wt_wallet_cid_side_ts ON wallet_trades(wallet, condition_id, side, timestamp);
+CREATE INDEX IF NOT EXISTS idx_wt_asset_ts ON wallet_trades(asset, timestamp);
 
 CREATE TABLE IF NOT EXISTS wallet_positions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -598,6 +602,10 @@ class WalletDB:
         """)
         self._conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_ticks_cid_ts ON market_ticks(condition_id, timestamp DESC)"
+        )
+        # C1+C2: fill-evidence lookups need (cid, token, ts) range scans.
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_ticks_cid_tok_ts ON market_ticks(condition_id, token_id, timestamp)"
         )
         self._conn.execute("""
             CREATE TABLE IF NOT EXISTS market_anomalies (

@@ -103,3 +103,54 @@ inflate the result.
 The rule did its job: it converted "should copy-trading exist?" from a vibe
 into a measured, guard-railed decision, and the measurement said "keep
 investigating, with named next steps" rather than either extreme.
+
+---
+
+## Amendment 1 — registered 2026-07-07, BEFORE the C1+C2 decision run
+
+Recon of the shipped diagnostic found three defects that must be fixed and
+re-registered before any number is trusted:
+
+1. **Survivorship drop (invalidates the run-1 headline).** Rows whose leader
+   never sold AND whose markets-join payout was unresolvable were silently
+   skipped: 43,082 eligible (wallet, market) first-BUY pairs at 60d vs 7,332
+   simulated — **83% of copies dropped**, all of them never-sold rows
+   (disproportionately hold-to-resolution losers). The "100% mirror-exit /
+   everyone is a scalper" finding was an artifact of the resolution join
+   failing, not a market fact. Fix: payout falls back to the sign of the
+   leader's enriched pnl (`pnl > 0 → 1.0 else 0.0`, valid because
+   enrich_resolution sets pnl = size·(1−price) if token won else −size·price,
+   and the fetch already filters pnl_reliable=1). **Zero copies are dropped
+   in the amended diagnostic; run-1/run-2 numbers are NOT comparable to the
+   amended run and the headline is expected to FALL.**
+2. **Cross-token exits.** The sell-lookup matched wallet+market+side without
+   matching the token — a leader selling the market's *other* token supplied
+   an exit price in the wrong token space. Fixed with `s.asset = f.asset`.
+3. **No fill-probability model.** Amended exit waterfall, per leg:
+   - Evidence = the best taker print (market_ticks, 6.5M rows / ~90d) or any
+     other wallet's BUY on the same token within
+     [sell_ts + latency, sell_ts + latency + FILL_WINDOW_S (default 900s)].
+   - `mirror_confirmed` — evidence ≥ leader's sell price − 0.01: exit at the
+     latency-slipped leader price.
+   - `mirror_degraded` — evidence exists but lower: exit at the evidence
+     price (we'd have sold into what actually traded).
+   - `unfilled` — market has tick coverage and NOTHING traded in the window:
+     the mirror sell does not fill; the copy books resolution payout instead.
+   - `mirror_assumed_nocoverage` — no tick coverage for the market at all:
+     assume the fill under `--no-evidence-policy assume-fill` (default) or
+     book resolution under `resolution`. Reported separately so the
+     assumption's weight is visible.
+4. **Costs ON by default** via cost_model.CostModel (spread + size-tier
+   slippage; resolution exits exempt). MIRROR_COST_BPS env still overrides.
+
+**Amended decision procedure (registered before the run):**
+- Primary metric unchanged: poller-lane top-decile net EV/trade vs the
+  +$0.10 floor, guard ≥5 top-decile wallets AND ≥150 copies.
+- Per-cluster (category) verdicts with guard ≥3 top-decile wallets AND ≥75
+  copies per cluster: **KILL only if the global metric is ≤ +$0.10 AND no
+  measurable cluster clears +$0.10**. KEEP-investigate if global OR any
+  measurable cluster clears the floor. INSUFFICIENT only if the global guard
+  fires and no cluster is measurable.
+- Decision run: `--days 120`. A `--perfect-fill` flag reproduces run-1
+  behavior for comparability; it is diagnostic-only and cannot drive the
+  verdict.
