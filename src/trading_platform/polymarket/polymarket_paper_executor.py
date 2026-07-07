@@ -911,6 +911,33 @@ class PolymarketPaperExecutor:
             except Exception:
                 pass
             return None
+        # P5 slice_gate: only status='killed' blocks PAPER (confidently -EV
+        # even at the optimistic Wilson bound). 'demoted' lets paper keep
+        # collecting the outcomes that could un-demote the slice. Fail-safe
+        # on stale/never-ran table.
+        try:
+            from trading_platform.polymarket.slice_multiplier_promoter import get_slice_gate
+            from trading_platform.polymarket import flags as _flags
+            _gs, _gf = get_slice_gate(signal_type, sig_cat,
+                                      db_path=str(self._wallet_db_path))
+            if _gf and _gs == "killed":
+                try:
+                    from trading_platform.polymarket.decision_trace import trace as _dt
+                    _dt(signal=signal,
+                        gate="SLICE_GATE" if _flags.SLICE_GATE_ENFORCE
+                        else "SLICE_GATE_SHADOW",
+                        passed=False, detail=f"killed: {signal_type}×{sig_cat}",
+                        surface="paper", db_path=str(self._wallet_db_path))
+                except Exception:
+                    pass
+                if _flags.SLICE_GATE_ENFORCE:
+                    logger.info("[SLICE_GATE] SKIP %s × %s (killed)",
+                                signal_type, sig_cat)
+                    return None
+                logger.info("[SLICE_GATE][SHADOW] would-skip %s × %s (killed)",
+                            signal_type, sig_cat)
+        except Exception as exc:
+            logger.debug("[SLICE_GATE] paper lookup failed (fail-safe): %s", exc)
         if sig_cat not in PAPER_TRADE_CATEGORIES:
             # 2026-04-29: PROMOTABLE_SIGNALS bypass. whale_entry has
             # P(acc≥55%)=0.96 on n=15 — its EV is proven independent of
@@ -1364,10 +1391,13 @@ class PolymarketPaperExecutor:
         if sig_subdomain_for_mult:
             try:
                 with self._wallet_lock:
+                    # P5: honor expires_at — it was written by the promoter
+                    # but read nowhere, so a stale boost never aged out.
                     _ovr = self._wallet_conn.execute(
                         "SELECT multiplier FROM stake_multiplier_overrides "
-                        "WHERE signal_type = ? AND subdomain = ?",
-                        (signal_type, sig_subdomain_for_mult),
+                        "WHERE signal_type = ? AND subdomain = ? "
+                        "AND (expires_at IS NULL OR expires_at > ?)",
+                        (signal_type, sig_subdomain_for_mult, int(time.time())),
                     ).fetchone()
                 if _ovr and _ovr[0]:
                     slice_mult = float(_ovr[0])

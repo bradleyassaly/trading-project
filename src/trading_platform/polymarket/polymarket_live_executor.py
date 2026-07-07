@@ -681,6 +681,36 @@ class PolymarketLiveExecutor:
         # 2026-05-06: cascade×geopolitics: 3 losses overnight (US-Iran peace deal).
         #             cascade×sports: PSG misclassified as 'science' — also block
         #             'science' for cascade since FC matches landing there.
+        # P5 slice_gate: DERIVED negative-slice blocklist (Wilson-bound
+        # demotions recomputed 6-hourly) — replaces the hardcoded lists
+        # below once enforced. Runs BEFORE the Wilson SLICE_BYPASS so a
+        # demoted slice can never bypass. Fail-safe: a stale/never-ran
+        # table falls through to the existing hardcoded behavior.
+        try:
+            from trading_platform.polymarket.slice_multiplier_promoter import get_slice_gate
+            from trading_platform.polymarket import flags as _flags
+            _gate_status, _gate_fresh = get_slice_gate(sig_type, cat,
+                                                       db_path=self._db_path)
+            if _gate_fresh and _gate_status in ("demoted", "killed"):
+                try:
+                    from trading_platform.polymarket.decision_trace import trace as _dt
+                    _dt(signal=signal,
+                        gate="LIVE_SLICE_GATE" if _flags.SLICE_GATE_ENFORCE
+                        else "LIVE_SLICE_GATE_SHADOW",
+                        passed=False, detail=f"{_gate_status}: {sig_type}×{cat}",
+                        surface="live", db_path=self._db_path)
+                except Exception:
+                    pass
+                if _flags.SLICE_GATE_ENFORCE:
+                    logger.info("[SLICE_GATE] BLOCK %s × %s (%s)",
+                                sig_type, cat, _gate_status)
+                    return self._block(
+                        signal, f"slice_gate {_gate_status}: {sig_type}×{cat}")
+                logger.info("[SLICE_GATE][SHADOW] would-block %s × %s (%s)",
+                            sig_type, cat, _gate_status)
+        except Exception as exc:
+            logger.debug("[SLICE_GATE] lookup failed (fail-safe): %s", exc)
+
         _CAT_BLOCKS: dict[str, set[str]] = {
             "whale_entry_filtered": {"sports", "geopolitics", "crypto"},
             "cascade": {"sports", "geopolitics", "science"},

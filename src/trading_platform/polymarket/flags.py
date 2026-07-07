@@ -76,6 +76,11 @@ VOL_TARGET_MAX_SCALE = _float("VOL_TARGET_MAX_SCALE", 1.5)
 VAR_GATE = _bool("ENABLE_VAR_GATE", False)
 VAR_HARD_CAP_FRAC = _float("VAR_HARD_CAP_FRAC", 0.10)
 
+# P5 slice demoter (slice_gate table). While False the executors log
+# [SLICE_GATE][SHADOW] would-blocks + decision_trace but do not block.
+# Flip after 3-5 days of shadow logs match expectation.
+SLICE_GATE_ENFORCE = _bool("SLICE_GATE_ENFORCE", False)
+
 
 # ── Order book monitor ───────────────────────────────────────────────────
 OB_MONITOR = _bool("POLYMARKET_ENABLE_OB_MONITOR", False)

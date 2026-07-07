@@ -626,8 +626,11 @@ SCHEDULE: list[Task] = [
         # Highest-EV scale move from scale_up_roadmap_2026-04-27.md.
         name="slice_multiplier_promoter",
         cmd="python -m trading_platform.polymarket.slice_multiplier_promoter",
-        interval_seconds=24 * 3600,
-        description="Daily auto-promote of validated (signal × subdomain) tuples",
+        # 2026-07-07 (P5): 24h → 6h; the pass now also DEMOTES/KILLS
+        # negative slices into slice_gate (Wilson bounds + pnl conjunct),
+        # so blocklist latency matters more than it did for boosts.
+        interval_seconds=6 * 3600,
+        description="Promote + demote (signal × subdomain) slices (6h)",
     ),
     Task(
         # 2026-04-27: sub-domain classifier. Polymarket markets aren't

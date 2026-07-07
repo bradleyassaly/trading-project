@@ -33,6 +33,28 @@ CREATE TABLE IF NOT EXISTS stake_multiplier_overrides (
     PRIMARY KEY (signal_type, subdomain)
 );
 CREATE INDEX IF NOT EXISTS idx_smo_promoted ON stake_multiplier_overrides(promoted_at DESC);
+CREATE TABLE IF NOT EXISTS slice_gate (
+    signal_type      TEXT NOT NULL,
+    category         TEXT NOT NULL,
+    status           TEXT NOT NULL,
+    n_resolved       BIGINT,
+    wins             BIGINT,
+    wr               DOUBLE PRECISION,
+    avg_entry        DOUBLE PRECISION,
+    wilson_lb        DOUBLE PRECISION,
+    ev_lb            DOUBLE PRECISION,
+    sum_pnl          DOUBLE PRECISION,
+    reason           TEXT,
+    computed_at      BIGINT NOT NULL,
+    PRIMARY KEY (signal_type, category)
+);
+CREATE TABLE IF NOT EXISTS slice_gate_meta (
+    id               SMALLINT PRIMARY KEY DEFAULT 1,
+    last_run_at      BIGINT NOT NULL,
+    candidates_tested BIGINT,
+    n_demoted        BIGINT,
+    n_killed         BIGINT
+);
 """
 
 # Promotion criteria.
@@ -61,6 +83,47 @@ def _wilson_lower_bound(wins: int, n: int, z: float = WILSON_Z) -> float:
     centre = phat + z * z / (2 * n)
     margin = z * ((phat * (1 - phat) + z * z / (4 * n)) / n) ** 0.5
     return (centre - margin) / denom
+
+
+def _wilson_upper_bound(wins: int, n: int, z: float = WILSON_Z) -> float:
+    """Symmetric Wilson upper bound — the DEMOTER's optimistic WR."""
+    if n <= 0:
+        return 1.0
+    phat = wins / n
+    denom = 1 + z * z / n
+    centre = phat + z * z / (2 * n)
+    margin = z * ((phat * (1 - phat) + z * z / (4 * n)) / n) ** 0.5
+    return (centre + margin) / denom
+
+
+def _slice_gate_decision(n: int, wins: int, avg_entry: float,
+                         sum_pnl: float, protected: bool,
+                         ) -> tuple[str | None, str]:
+    """P5: pure demotion/kill decision for one (signal × subdomain) slice.
+
+    KILL   — even the OPTIMISTIC (Wilson upper) win rate can't pay for the
+             average entry price AND realized pnl is negative: confidently
+             -EV, block paper bankroll + live.
+    DEMOTE — hold-to-resolution EV lower bound < 0 AND pnl <= 0: block live
+             capital only (paper keeps collecting; the slice can un-demote).
+    The sum_pnl conjunct is mandatory: WR alone would falsely kill
+    lottery-shaped slices (confluence_2plus × crypto: WR 22%, +$2110).
+    Protected signals (the live edges) get a higher n floor.
+    """
+    if n <= 0 or not avg_entry or avg_entry <= 0:
+        return (None, "no_data")
+    wilson_lb = _wilson_lower_bound(wins, n)
+    wilson_ub = _wilson_upper_bound(wins, n)
+    ev_lb = wilson_lb / avg_entry - 1.0
+    min_n = 30 if protected else 20
+    if n >= 30 and wilson_ub < avg_entry and sum_pnl < 0:
+        return ("killed",
+                f"wilson_ub={wilson_ub:.3f} < avg_entry={avg_entry:.3f} "
+                f"and pnl={sum_pnl:+.2f} at n={n}")
+    if n >= min_n and ev_lb < 0 and sum_pnl <= 0:
+        return ("demoted",
+                f"ev_lb={ev_lb:+.3f} < 0 and pnl={sum_pnl:+.2f} at n={n}")
+    return (None, f"ok ev_lb={ev_lb:+.3f} pnl={sum_pnl:+.2f} n={n}")
 
 
 def _ensure_schema(conn) -> None:
@@ -93,7 +156,8 @@ def run_promoter(db_path: str | None = None) -> dict[str, Any]:
                           COALESCE(m.subcategory, pt.category) AS subdomain,
                           COUNT(*) AS n,
                           SUM(CASE WHEN pt.outcome='win' THEN 1 ELSE 0 END) AS wins,
-                          SUM(pt.realized_pnl) AS pnl
+                          SUM(pt.realized_pnl) AS pnl,
+                          AVG(pt.entry_price) AS avg_entry
                      FROM polymarket_paper_trades pt
                      LEFT JOIN markets m ON m.condition_id = pt.condition_id
                     WHERE pt.archived = 0
@@ -101,8 +165,8 @@ def run_promoter(db_path: str | None = None) -> dict[str, Any]:
                       AND pt.entry_ts > ?
                       AND pt.outcome IN ('win', 'loss')
                     GROUP BY pt.signal_type, COALESCE(m.subcategory, pt.category)
-                   HAVING COUNT(*) >= ?""",
-                (cutoff, MIN_RESOLVED),
+                   HAVING COUNT(*) >= 20""",
+                (cutoff,),
             ).fetchall()
         except Exception as exc:
             return {"error": str(exc)[:200]}
@@ -114,19 +178,23 @@ def run_promoter(db_path: str | None = None) -> dict[str, Any]:
         now = int(time.time())
         expiry = now + 30 * 86400  # 30d freshness window
 
-        # Pass 1: promote / refresh qualifying tuples
+        # Pass 1: promote / refresh qualifying tuples (n >= MIN_RESOLVED;
+        # the query's HAVING floor is lower because pass 3 demotes at n>=20)
         promoted_keys: set[tuple[str, str]] = set()
         for r in rows:
             sig, sub, n, wins, pnl = r[0], r[1], int(r[2]), int(r[3] or 0), float(r[4] or 0)
+            avg_entry = float(r[5] or 0)
             if not sig or not sub:
                 continue
             wr = wins / n if n else 0
             wilson_lb = _wilson_lower_bound(wins, n)
             cand = {"signal_type": sig, "subdomain": sub,
-                    "n": n, "wr": round(wr, 3), "pnl": round(pnl, 2),
+                    "n": n, "wins": wins, "wr": round(wr, 3),
+                    "pnl": round(pnl, 2), "avg_entry": round(avg_entry, 4),
                     "wilson_lb": round(wilson_lb, 3)}
             candidates.append(cand)
-            if wr >= MIN_WR and pnl >= MIN_PNL and wilson_lb > WILSON_LB_FLOOR:
+            if (n >= MIN_RESOLVED and wr >= MIN_WR and pnl >= MIN_PNL
+                    and wilson_lb > WILSON_LB_FLOOR):
                 mult = _multiplier_for(wr, pnl, n)
                 try:
                     conn.execute(
@@ -150,26 +218,87 @@ def run_promoter(db_path: str | None = None) -> dict[str, Any]:
                     logger.debug("promote failed %s/%s: %s", sig, sub, exc)
 
         # Pass 2: demote any existing override whose tuple no longer
-        # qualifies. We DELETE rather than just expire so the gate
-        # has a clean read.
+        # qualifies. We DELETE rather than just expire so the gate has a
+        # clean read. P5 fix: compare against the CURRENT window's WR (the
+        # candidates just computed), not the wr stored at promote time — a
+        # slice promoted at 60% that decayed to 30% was held forever.
+        current_wr = {(c["signal_type"], c["subdomain"]): c["wr"]
+                      for c in candidates}
         try:
             existing = conn.execute(
                 "SELECT signal_type, subdomain, wr FROM stake_multiplier_overrides"
             ).fetchall()
             for r in existing:
-                sig, sub, wr = r[0], r[1], float(r[2] or 0)
-                if (sig, sub) not in promoted_keys and wr < DEMO_MIN_WR:
+                sig, sub, stored_wr = r[0], r[1], float(r[2] or 0)
+                if (sig, sub) in promoted_keys:
+                    continue
+                wr_now = current_wr.get((sig, sub), stored_wr)
+                if wr_now < DEMO_MIN_WR:
                     conn.execute(
                         "DELETE FROM stake_multiplier_overrides "
                         "WHERE signal_type = ? AND subdomain = ?",
                         (sig, sub),
                     )
                     n_demoted += 1
-                elif (sig, sub) not in promoted_keys:
+                else:
                     # Hold (still above demo threshold; data may be stale)
                     n_held += 1
         except Exception:
             pass
+
+        # Pass 3 (P5): negative-slice gate. Full refresh — an EMPTY
+        # slice_gate after a successful pass is a valid state, distinguished
+        # from never-ran/stale by the meta beacon.
+        n_gate_demoted = 0
+        n_gate_killed = 0
+        try:
+            from trading_platform.polymarket.signal_health import PROTECTED_SIGNALS
+        except Exception:
+            PROTECTED_SIGNALS = frozenset()
+        try:
+            conn.execute("DELETE FROM slice_gate")
+            for c in candidates:
+                status, reason = _slice_gate_decision(
+                    c["n"], c["wins"], c["avg_entry"], c["pnl"],
+                    protected=c["signal_type"] in PROTECTED_SIGNALS)
+                if status is None:
+                    continue
+                wilson_lb = c["wilson_lb"]
+                ev_lb = (wilson_lb / c["avg_entry"] - 1.0) if c["avg_entry"] else None
+                conn.execute(
+                    """INSERT INTO slice_gate
+                         (signal_type, category, status, n_resolved, wins,
+                          wr, avg_entry, wilson_lb, ev_lb, sum_pnl, reason,
+                          computed_at)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (c["signal_type"], c["subdomain"], status, c["n"],
+                     c["wins"], c["wr"], c["avg_entry"], wilson_lb,
+                     round(ev_lb, 4) if ev_lb is not None else None,
+                     c["pnl"], reason, now),
+                )
+                if status == "killed":
+                    n_gate_killed += 1
+                else:
+                    n_gate_demoted += 1
+                # A demoted/killed slice must not keep a stake BOOST row.
+                conn.execute(
+                    "DELETE FROM stake_multiplier_overrides "
+                    "WHERE signal_type = ? AND subdomain = ?",
+                    (c["signal_type"], c["subdomain"]),
+                )
+            conn.execute(
+                """INSERT INTO slice_gate_meta
+                     (id, last_run_at, candidates_tested, n_demoted, n_killed)
+                   VALUES (1, ?, ?, ?, ?)
+                   ON CONFLICT (id) DO UPDATE SET
+                     last_run_at = EXCLUDED.last_run_at,
+                     candidates_tested = EXCLUDED.candidates_tested,
+                     n_demoted = EXCLUDED.n_demoted,
+                     n_killed = EXCLUDED.n_killed""",
+                (now, len(candidates), n_gate_demoted, n_gate_killed),
+            )
+        except Exception as exc:
+            logger.warning("slice_gate pass failed: %s", exc)
 
         conn.commit()
         return {
@@ -178,11 +307,76 @@ def run_promoter(db_path: str | None = None) -> dict[str, Any]:
             "promoted_or_refreshed": n_promoted,
             "demoted": n_demoted,
             "held": n_held,
+            "gate_demoted": n_gate_demoted,
+            "gate_killed": n_gate_killed,
             "top_candidates": sorted(candidates, key=lambda c: -c["pnl"])[:5],
         }
     finally:
         try: conn.close()
         except Exception: pass
+
+
+# P5 reader cache: (loaded_at, {(sig, cat): status}, meta_fresh). The live
+# fast lane is 2-4s — per-signal SQL would be a real regression.
+_GATE_CACHE: dict[str, Any] = {"at": 0.0, "rows": {}, "fresh": False}
+_GATE_CACHE_TTL = 60.0
+_GATE_MAX_AGE_SEC = 48 * 3600
+
+
+def get_slice_gate(signal_type: str, category: str | None,
+                   db_path: str | None = None,
+                   max_age_sec: int = _GATE_MAX_AGE_SEC,
+                   ) -> tuple[str | None, bool]:
+    """P5: (status, fresh) for a (signal × category) slice.
+
+    fresh=False ⇒ the table is stale/never-ran — callers MUST fall back to
+    their existing hardcoded behavior (fail-safe, not fail-closed).
+
+    Category matching bridges the two granularities in play: the promoter
+    keys on markets.subcategory ('science/weather') while executor `cat` is
+    classifier output ('science'). Match exact, parent-prefix, or any child.
+    """
+    now = time.time()
+    if now - _GATE_CACHE["at"] > _GATE_CACHE_TTL:
+        rows: dict[tuple[str, str], str] = {}
+        fresh = False
+        try:
+            conn = get_connection(db_path) if db_path else get_connection()
+            try:
+                meta = conn.execute(
+                    "SELECT last_run_at FROM slice_gate_meta WHERE id = 1"
+                ).fetchone()
+                if meta and meta[0] and (now - int(meta[0])) <= max_age_sec:
+                    fresh = True
+                    for r in conn.execute(
+                            "SELECT signal_type, category, status FROM slice_gate"
+                    ).fetchall():
+                        rows[(r[0], r[1])] = r[2]
+            finally:
+                try: conn.close()
+                except Exception: pass
+        except Exception:
+            rows, fresh = {}, False
+        _GATE_CACHE.update({"at": now, "rows": rows, "fresh": fresh})
+
+    if not _GATE_CACHE["fresh"]:
+        return (None, False)
+    rows = _GATE_CACHE["rows"]
+    cat = (category or "other").lower()
+    hit = rows.get((signal_type, cat))
+    if hit:
+        return (hit, True)
+    # executor cat may be the PARENT of a promoter subdomain ('science' vs
+    # 'science/weather'): any gated child blocks the parent...
+    for (sig, c), status in rows.items():
+        if sig == signal_type and c.startswith(cat + "/"):
+            return (status, True)
+    # ...and a gated parent covers a child lookup.
+    if "/" in cat:
+        hit = rows.get((signal_type, cat.split("/")[0]))
+        if hit:
+            return (hit, True)
+    return (None, True)
 
 
 def main() -> int:
