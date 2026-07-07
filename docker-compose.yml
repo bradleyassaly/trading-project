@@ -23,7 +23,10 @@ services:
       POSTGRES_PASSWORD: polymarket_dev
       POSTGRES_DB: polymarket
     ports:
-      - "5432:5432"
+      # 2026-07-07 (audit F5): bind to loopback only. Was 0.0.0.0:5432,
+      # LAN-publishing the DB with the committed dev password. Host-local
+      # tools still connect; other containers use the docker network.
+      - "127.0.0.1:5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     restart: unless-stopped
@@ -43,7 +46,12 @@ services:
     container_name: polymarket-api
     command: uvicorn trading_platform.api.main:app --host 0.0.0.0 --port 8001
     ports:
-      - "8001:8001"
+      # 2026-07-07 (audit F5): bind to loopback only. Was 0.0.0.0:8001,
+      # exposing the UNauthenticated control plane (POST /api/live/clear-stop,
+      # /api/system/kill-switch/reset) to every device on the LAN. --host
+      # 0.0.0.0 is fine: it's the bind INSIDE the container; the published
+      # mapping is what gates host/LAN reachability.
+      - "127.0.0.1:8001:8001"
     volumes:
       - .:/app
     env_file: .env

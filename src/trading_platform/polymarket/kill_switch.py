@@ -80,6 +80,11 @@ class KillSwitch:
     MIN_WIN_RATE_PROBATION = 0.45
     MIN_RESOLVED_HARD = 15
     PREFERRED_MIN_RESOLVED = 30
+    # 2026-07-07 (audit F5): backtests older than this don't count toward the
+    # sample floor / EV blend. A signal's backtest predating a regime change
+    # (V2 order format 2026-05-07, honest booking 2026-07-06) is not evidence
+    # about how it trades today.
+    BACKTEST_MAX_AGE_DAYS = 30
     # Probation tier: signals below MIN_RESOLVED_HARD but above
     # PROBATION_MIN_RESOLVED get approved at tiny stakes so we collect
     # *live* resolution data. Without this, every new signal type needs
@@ -210,10 +215,18 @@ class KillSwitch:
             # than live paper resolutions but still provide EV evidence).
             bt_n, bt_ev, bt_wr = 0, None, None
             try:
+                # 2026-07-07 (audit F5): recency filter. Without it, a stale
+                # backtest (e.g. wallet_reversal's 2026-05-01 n=192, predating
+                # the V2 order format and honest booking) alone yields
+                # effective_n=96, skips probation, and — with n_live=0 —
+                # authorizes a full MAX_TRADE_USD trade on months-old replay.
+                # Only backtests from the last BACKTEST_MAX_AGE_DAYS count.
+                _bt_cutoff = int(time.time()) - self.BACKTEST_MAX_AGE_DAYS * 86400
                 bt_row = conn.execute(
                     "SELECT resolved, ev, wr FROM signal_backtest_results "
-                    "WHERE signal_type = ? ORDER BY run_ts DESC LIMIT 1",
-                    (signal_type,),
+                    "WHERE signal_type = ? AND run_ts >= ? "
+                    "ORDER BY run_ts DESC LIMIT 1",
+                    (signal_type, _bt_cutoff),
                 ).fetchone()
                 if bt_row:
                     bt_n = int(bt_row[0] or 0)
@@ -224,7 +237,10 @@ class KillSwitch:
 
             # Effective sample = live paper + 0.5 * backtest. Backtest is
             # half-weighted because it's replay, not live execution, and
-            # doesn't pay real-world costs.
+            # doesn't pay real-world costs. A signal with ZERO live
+            # resolutions can never reach the sample floor on backtest alone:
+            # capped so backtest can supply at most (floor - 1) so at least
+            # one live/paper resolution is always required before full stake.
             effective_n = n_live + int(bt_n * 0.5)
 
             # Insider tier: dedicated lower MIN_RESOLVED. Insider signals
@@ -236,6 +252,16 @@ class KillSwitch:
                 if signal_type in self.INSIDER_SIGNAL_TYPES
                 else self.MIN_RESOLVED_HARD
             )
+            # A signal with ZERO real (live/paper) resolutions must not clear
+            # the full-stake sample floor on backtest replay alone — cap the
+            # effective sample just below the floor so it stays in probation
+            # (bounded stake) until at least one real resolution lands.
+            if n_live == 0 and effective_n >= min_resolved_hard:
+                effective_n = min_resolved_hard - 1
+                warnings.append(
+                    "backtest-only evidence — held at probation stake until a "
+                    "live/paper resolution lands"
+                )
             probation = False
             if effective_n < min_resolved_hard:
                 # Check probation path: enough samples to see the signal's

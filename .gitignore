@@ -87,3 +87,7 @@ reports/*.html
 .cache/
 .python-version
 .act/
+
+# Secrets — never commit (Kalshi signing key was tracked through 2026-07-07; ROTATE it)
+.kalshi/
+*.pem
