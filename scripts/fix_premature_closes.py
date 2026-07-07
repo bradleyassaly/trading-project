@@ -35,6 +35,18 @@ def main():
     ap.add_argument("--days", type=int, default=7)
     args = ap.parse_args()
 
+    # Quarantine (2026-07-07 audit F6): --apply re-opens closed rows on a
+    # bare on-chain-balance check with no re-entry guard — tokens may belong
+    # to a NEWER trade on the same market, creating two open rows for one
+    # holding (snapshot double-count + double-book on the next exit). Require
+    # explicit opt-in for the mutating path.
+    if args.apply and os.environ.get("ALLOW_LEDGER_REPAIR") != "1":
+        raise SystemExit(
+            "QUARANTINED: fix_premature_closes.py --apply can corrupt the "
+            "ledger (audit F6). Set ALLOW_LEDGER_REPAIR=1 to override, or run "
+            "without --apply for a dry-run."
+        )
+
     from py_clob_client_v2 import ClobClient, ApiCreds
     from py_clob_client_v2.constants import POLYGON
     from py_clob_client_v2.clob_types import BalanceAllowanceParams, AssetType

@@ -18,6 +18,21 @@ import httpx
 
 from trading_platform.polymarket.db_connection import get_connection
 
+# ── QUARANTINE (2026-07-07 audit F6) ─────────────────────────────────────────
+# This script re-introduces THREE already-fixed ledger-corruption bugs and has
+# NO dry-run: (1) zero balance ⇒ unconditional loss/pnl=0, (2) zeroes
+# shares+size_usd (destroys cost basis), (3) SELL unrealized math is in the
+# wrong price space. Every write commits immediately. It is NOT scheduled; the
+# only way it runs is a manual invocation. Refuse unless the operator opts in
+# explicitly, having read reports/system_audit_2026-07-07.md.
+if os.environ.get("ALLOW_LEDGER_REPAIR") != "1":
+    raise SystemExit(
+        "QUARANTINED: scripts/reconcile_positions.py can corrupt the live "
+        "ledger (audit F6). It is superseded by book_resolved_positions.py "
+        "(data-api truth) and the live position monitor. If you truly intend "
+        "to run it, set ALLOW_LEDGER_REPAIR=1 — but prefer the safe path."
+    )
+
 pk = os.environ["POLYMARKET_PRIVATE_KEY"]
 api_key = os.environ["POLYMARKET_API_KEY"]
 api_secret = os.environ["POLYMARKET_API_SECRET"]

@@ -36,6 +36,16 @@ def main():
                     help="Window in days. Default 90 (all-time-ish for our system).")
     args = ap.parse_args()
 
+    # Quarantine (2026-07-07 audit F6): --apply nulls exit fields on a bare
+    # balance check with no re-entry guard (same hazard as
+    # fix_premature_closes). Require explicit opt-in for the mutating path.
+    if getattr(args, "apply", False) and os.environ.get("ALLOW_LEDGER_REPAIR") != "1":
+        raise SystemExit(
+            "QUARANTINED: validate_realized_pnl.py --apply can corrupt the "
+            "ledger (audit F6). Set ALLOW_LEDGER_REPAIR=1 to override, or run "
+            "without --apply for a dry-run."
+        )
+
     from py_clob_client_v2 import ClobClient, ApiCreds
     from py_clob_client_v2.constants import POLYGON
     from py_clob_client_v2.clob_types import BalanceAllowanceParams, AssetType
