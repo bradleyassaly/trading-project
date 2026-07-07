@@ -528,6 +528,14 @@ class WalletDB:
             ("unrealized_pnl", "REAL"),
             ("detection_lag_seconds", "INTEGER"),
             ("whale_entry_price", "REAL"),
+            # N3: full point-in-time signal dict for forensic replay + ML.
+            ("features_at_fire", "TEXT"),
+            # 2026-07-07: these two are INSERTed by the paper executor but were
+            # never in this migration — they only work because the prod PG
+            # table already has them. Adding so a fresh/rebuilt DB doesn't 500.
+            ("alpha_score_at_fire", "REAL"),
+            ("entry_context", "TEXT"),
+            ("confidence_raw", "REAL"),
         ]:
             if col not in ppt_cols:
                 try:

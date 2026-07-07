@@ -411,7 +411,8 @@ class PolymarketLiveExecutor:
                 # Lazy-add columns that pre-date this schema — idempotent.
                 for col_ddl in ("outcome TEXT", "exit_ts INTEGER", "signal_price REAL",
                                 "whale_trade_ts BIGINT", "detection_latency_sec REAL",
-                                "slippage_signed REAL", "slippage_cost_usd REAL"):
+                                "slippage_signed REAL", "slippage_cost_usd REAL",
+                                "features_at_fire TEXT"):
                     try:
                         conn.execute(f"ALTER TABLE live_trades ADD COLUMN {col_ddl}")
                     except Exception:
@@ -1840,9 +1841,9 @@ class PolymarketLiveExecutor:
                         category, signal_wallet, submitted_at, filled_at, signal_price,
                         expected_price, slippage, slippage_signed, slippage_cost_usd, fill_time_ms,
                         resolution_date, ask_depth_entry, signal_fired_at, wallet_tier,
-                        whale_trade_ts, detection_latency_sec)
+                        whale_trade_ts, detection_latency_sec, features_at_fire)
                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                               ?, ?, ?, ?, ?, ?, ?)""",
+                               ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         now_ts,
                         signal.get("signal_type"),
@@ -1881,6 +1882,11 @@ class PolymarketLiveExecutor:
                         _wallet_tier,
                         _whale_ts,
                         _detect_latency,
+                        # N3: full point-in-time signal dict for forensic
+                        # replay + future ML features. default=str tolerates
+                        # any non-JSON values; order_id/paper_trade_id live in
+                        # their own columns, not the blob.
+                        json.dumps(signal, default=str),
                     ),
                 )
             finally:
