@@ -48,11 +48,14 @@ def backfill_actual_fills(lookback_hours: int = 24) -> int:
     if not wallet:
         return 0
 
+    from trading_platform.polymarket.price_space import to_yes_space
+
     conn = get_connection()
     try:
         cutoff = int(time.time()) - lookback_hours * 3600
         rows = conn.execute(
-            """SELECT id, token_id, attempted_at, fill_price, shares, size_usd
+            """SELECT id, token_id, attempted_at, fill_price, shares, size_usd,
+                      direction
                  FROM live_trades
                 WHERE dry_run = 0 AND status = 'matched'
                   AND exit_ts IS NULL AND token_id IS NOT NULL
@@ -79,7 +82,7 @@ def backfill_actual_fills(lookback_hours: int = 24) -> int:
         return 0
 
     corrected = 0
-    for lid, token_id, attempted_at, fp_db, sh_db, size_usd in rows:
+    for lid, token_id, attempted_at, fp_db, sh_db, size_usd, direction in rows:
         # Entry fills: BUYs of the held token within [attempt-2m, attempt+2h]
         tot_sz = 0.0
         tot_cost = 0.0
@@ -97,7 +100,12 @@ def backfill_actual_fills(lookback_hours: int = 24) -> int:
             tot_cost += sz * px
         if tot_sz < 1.0:
             continue
-        vwap = round(tot_cost / tot_sz, 4)
+        # data-api prices are in the HELD token's own space (the NO token for
+        # a SELL). fill_price is stored YES-space by convention, so convert.
+        # 2026-07-07: the original version wrote the raw NO-space vwap here,
+        # inflating SELL cost basis ~10x on every corrected SELL row.
+        held_vwap = tot_cost / tot_sz
+        vwap = round(to_yes_space(direction, held_vwap), 4)
         fp_old = float(fp_db) if fp_db is not None else None
         sh_old = float(sh_db) if sh_db is not None else None
         if (fp_old is not None and abs(vwap - fp_old) < 0.0005) and \

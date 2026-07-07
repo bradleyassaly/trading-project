@@ -25,6 +25,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+from trading_platform.polymarket import price_space
+
 logger = logging.getLogger(__name__)
 
 _GAMMA_CSV = Path(__file__).resolve().parents[3] / "data" / "polymarket" / "gamma_resolution.csv"
@@ -324,16 +326,19 @@ def check_live_exits() -> dict[str, int]:
         # For SELL (long NO) positions, use actual CONDITIONAL token balance to
         # compute dollar PnL — DB size_usd reflects intended allocation while
         # GTC partial fills may leave only 1–N tokens in the wallet.
+        # entry and current are both YES-space. unrealized_pct is return on
+        # the held-token cost; unrealized_dollars uses actual on-chain tokens
+        # when available (GTC partials leave fewer tokens than size_usd implies).
         entry = float(effective_fill)
+        entry_held = price_space.held_token_price(side, entry)
+        cur_held = price_space.held_token_price(side, current)
+        unrealized_pct = (cur_held - entry_held) / max(entry_held, 0.01)
         if side in ("YES", "BUY"):
-            unrealized_pct = (current - entry) / max(entry, 0.01)
             unrealized_dollars = unrealized_pct * float(size_usd or 0)
         else:
-            unrealized_pct = (entry - current) / max(1 - entry, 0.01)
             actual_tok = clob.get_conditional_balance(token_id) if token_id else None
             if actual_tok is not None:
-                no_price_change = max(0.01, 1.0 - current) - max(0.01, 1.0 - entry)
-                unrealized_dollars = actual_tok * no_price_change
+                unrealized_dollars = actual_tok * (cur_held - entry_held)
             else:
                 unrealized_dollars = unrealized_pct * float(size_usd or 0)
 
@@ -674,14 +679,22 @@ def check_live_exits() -> dict[str, int]:
                 logger.debug("[live-exit] unfilled-attempt update failed for #%d: %s", lid, _exc)
             continue
 
-        fill = order_result.filled_price or current
-        # Use shares_held (actual token count) instead of deriving from size_usd.
-        # size_usd can be stale/wrong for partially-filled GTC orders.
-        # SELL: entry=NO_entry, fill=NO_exit; BUY: entry=YES_entry, fill=YES_exit.
-        realized_pnl = float(shares_held) * (fill - entry) \
-            if side in ("YES", "BUY") else \
-            float(shares_held) * (entry - fill)
+        # 2026-07-07: compute PnL in HELD-token space through the canonical
+        # price_space helper. order_result.filled_price is the exit price of
+        # the token we actually sold (NO-space for a SELL exit, YES-space for
+        # a BUY exit); the fallback `current` is YES-space, so it must be
+        # converted to held space for SELL. entry (fill_price) is YES-space.
+        # The prior `(entry - fill)` SELL formula mixed YES-entry with
+        # NO-exit and mis-signed/mis-scaled every NO exit.
+        if order_result.filled_price is not None:
+            exit_held = float(order_result.filled_price)
+        else:
+            exit_held = float(current) if side in ("YES", "BUY") \
+                else max(0.001, 1.0 - float(current))
+        entry_held = price_space.held_token_price(side, entry)  # entry is YES-space
+        realized_pnl = float(shares_held) * (exit_held - entry_held)
         outcome = "win" if realized_pnl > 0 else "loss"
+        exit_price_yes = round(price_space.to_yes_space(side, exit_held), 4)
 
         try:
             conn = get_connection()
@@ -690,8 +703,8 @@ def check_live_exits() -> dict[str, int]:
                     """UPDATE live_trades
                        SET exit_price = ?, exit_ts = ?, outcome = ?,
                            realized_pnl = ?, exit_reason = ?
-                       WHERE id = ?""",
-                    (fill, int(time.time()), outcome,
+                       WHERE id = ? AND exit_ts IS NULL""",
+                    (exit_price_yes, int(time.time()), outcome,
                      round(realized_pnl, 2), exit_reason, lid),
                 )
                 conn.commit()

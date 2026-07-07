@@ -193,6 +193,22 @@ class SignalResolver:
 
         is_win = 1 if (outcome_delta is not None and outcome_delta > 0) else 0
 
+        # 2026-07-07 (audit C4): realized_pnl was booked side-blind as
+        # (res_price - entry)*(size/entry) using the YES-frame for ALL
+        # trades — a NO-side win (res_price=0) booked as -100% loss while
+        # `outcome` said 'win'. Compute PnL-per-dollar in the HELD token's
+        # own space (NO for SELL/BUY_NO) so SQL can scale by size_usd.
+        _pnl_per_dollar = None
+        if entry_price is not None:
+            _ep = float(entry_price)
+            if (direction or "").upper() in ("BUY", "BUY_YES"):
+                _held_cost = max(_ep, 0.001)
+                _held_payout = res_price
+            else:
+                _held_cost = max(1.0 - _ep, 0.001)
+                _held_payout = 1.0 - res_price
+            _pnl_per_dollar = (_held_payout / _held_cost) - 1.0
+
         conn.execute(
             """UPDATE signal_outcomes
                SET resolution_price = ?,
@@ -216,9 +232,9 @@ class SignalResolver:
                        outcome = CASE WHEN ? > 0 THEN 'win' ELSE 'loss' END,
                        exit_reason = COALESCE(exit_reason, 'resolution'),
                        realized_pnl = COALESCE(realized_pnl,
-                         (? - entry_price) * (size_usd / entry_price))
+                         size_usd * ?)
                    WHERE id = ? AND exit_ts IS NULL""",
-                (res_price, outcome_delta, res_price, ptid),
+                (res_price, outcome_delta, _pnl_per_dollar, ptid),
             )
             paper_updated = bool(cur.rowcount)
             # Propagate MAE + paper_pnl + paper_stake_usd back from the
