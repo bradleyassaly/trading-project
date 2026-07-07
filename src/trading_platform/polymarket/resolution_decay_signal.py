@@ -213,6 +213,11 @@ def _emit_signal(market: dict, api_url: str) -> None:
             "question": market["question"][:200],
             "yes_token_id": market["yes_token_id"],
             "no_token_id": market["no_token_id"],
+            # N10: carry end_date_iso so the live executor's horizon gate is a
+            # dict read and skips a Gamma round-trip on the hot path. The
+            # candidate query already guarantees this is non-null and inside
+            # [now, now+24h].
+            "end_date_iso": market.get("end_iso"),
             "fired_at": now_ts,
         }
         # Paper executor invocation

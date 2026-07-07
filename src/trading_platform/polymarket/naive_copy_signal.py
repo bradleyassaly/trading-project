@@ -47,6 +47,10 @@ NAIVE_COPY_PER_CYCLE_CAP = int(os.environ.get("NAIVE_COPY_PER_CYCLE_CAP", "5"))
 # Shadows whose market never shows a resolved outcome in the markets table
 # are written off at pnl=0 after this many days (max market horizon is 30d).
 NAIVE_COPY_SHADOW_EXPIRE_DAYS = int(os.environ.get("NAIVE_COPY_SHADOW_EXPIRE_DAYS", "30"))
+# Cohort wash/sybil cutoff (roadmap N8). Matches wallet_behavior_metrics'
+# is_likely_farmer threshold (sybil_score >= 0.6); gating on the continuous
+# score too keeps the filter robust if that binary cutoff is later tuned.
+NAIVE_COPY_MAX_SYBIL = float(os.environ.get("NAIVE_COPY_MAX_SYBIL", "0.6"))
 
 BLOCKED_CATEGORIES = {"science"}  # 0% WR in our existing pipeline
 PRICE_MIN = 0.10
@@ -61,17 +65,28 @@ def _get_cohort(conn) -> list[str]:
     Replaces the lifetime-PnL ranking that flagged wallets with $4M
     lifetime PnL but −36% in the 47-day test window. wq_score combines
     60d WR + sample size + recency + size consistency. See wallet_quality.py.
+
+    2026-07-07 (roadmap N8): exclude wash-traders/sybils. wq_score can look
+    clean on a self-dealing wallet; the behavior pipeline flags them in
+    wallet_behavior_metrics (is_likely_farmer / sybil_score). LEFT JOIN with
+    IS-NULL tolerance so wallets not yet scored are still eligible — only
+    affirmatively-flagged farmers are dropped.
     """
     rows = conn.execute(
         """
-        SELECT wallet FROM wallet_profiles
-         WHERE wq_score IS NOT NULL
-           AND wq_n_60d >= 30
-           AND wq_wr_60d >= 0.55
-           AND wq_recency_days <= 30
-         ORDER BY wq_score DESC NULLS LAST
+        SELECT wp.wallet
+          FROM wallet_profiles wp
+          LEFT JOIN wallet_behavior_metrics wbm ON wbm.wallet = wp.wallet
+         WHERE wp.wq_score IS NOT NULL
+           AND wp.wq_n_60d >= 30
+           AND wp.wq_wr_60d >= 0.55
+           AND wp.wq_recency_days <= 30
+           AND (wbm.is_likely_farmer IS NULL OR wbm.is_likely_farmer = 0)
+           AND (wbm.sybil_score IS NULL OR wbm.sybil_score < ?)
+         ORDER BY wp.wq_score DESC NULLS LAST
          LIMIT 50
-        """
+        """,
+        (NAIVE_COPY_MAX_SYBIL,),
     ).fetchall()
     return [r[0] for r in rows]
 

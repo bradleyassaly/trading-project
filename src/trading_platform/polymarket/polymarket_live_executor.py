@@ -40,6 +40,34 @@ from trading_platform.polymarket.wallet_db import WalletDB
 
 logger = logging.getLogger(__name__)
 
+
+def _open_event_yes_cost(conn, condition_id: str, event_slug: str) -> tuple[float, int]:
+    """(summed YES cost/share, leg count) of our OTHER open BUY legs on the
+    same real-world event as ``condition_id`` (roadmap N7 helper).
+
+    entry_price for a BUY row is stored YES-space, so summing entry_price is
+    summing YES cost per share directly. Polymarket splits busy events across
+    a "-more-markets" overflow page, so normalize that suffix before grouping.
+    The candidate's own condition_id is excluded. Extracted for unit testing;
+    callers add the candidate's own YES price to the sum before comparing to 1.0.
+    """
+    base = (event_slug or "").replace("-more-markets", "")
+    row = conn.execute(
+        """SELECT COALESCE(SUM(lt.entry_price), 0), COUNT(*)
+             FROM live_trades lt
+             JOIN markets m ON m.condition_id = lt.condition_id
+            WHERE lt.dry_run = 0 AND lt.exit_ts IS NULL
+              AND lt.status IN ('submitted','live','matched')
+              AND lt.direction = 'BUY'
+              AND lt.entry_price IS NOT NULL
+              AND lt.condition_id <> ?
+              AND REPLACE(m.event_slug, '-more-markets', '') = ?""",
+        (condition_id, base),
+    ).fetchone()
+    return (float(row[0] or 0) if row else 0.0,
+            int(row[1] or 0) if row else 0)
+
+
 # In-process dedup: prevents concurrent signals for the same (condition_id, direction)
 # from racing past the DB check before either INSERT completes.
 _DEDUP_LOCKS: dict = {}
@@ -426,24 +454,33 @@ class PolymarketLiveExecutor:
         LIVE_MAX_HORIZON_DAYS = 30
         LIVE_MIN_HOURS_TO_RESOLVE = 4.0
         if condition_id:
-            end_date_iso = None
-            try:
-                from trading_platform.polymarket.db_connection import get_connection as _gc
-                _hconn = _gc(self._db_path)
+            # 2026-07-07 (roadmap N10): prefer end_date_iso carried on the
+            # signal dict. Both signal engines already know it (whale from its
+            # market pre-filter, resolution_decay from its query) — reading it
+            # here turns the horizon gate into a pure dict read and removes a
+            # synchronous Gamma round-trip from the fire-time hot path, which
+            # was the dominant latency term on the resolution_decay lane. The
+            # markets-table SELECT and Gamma GET remain as ordered fallbacks
+            # for whale signals across the full universe that don't carry it.
+            end_date_iso = signal.get("end_date_iso") or None
+            if not end_date_iso:
                 try:
-                    _hrow = _hconn.execute(
-                        "SELECT end_date_iso FROM markets WHERE condition_id = ?",
-                        (condition_id,),
-                    ).fetchone()
-                finally:
-                    try: _hconn.close()
-                    except Exception: pass
-                if _hrow and _hrow[0]:
-                    end_date_iso = str(_hrow[0])
-            except Exception as _hex:
-                logger.debug("[LIVE] markets-table horizon lookup failed: %s", _hex)
+                    from trading_platform.polymarket.db_connection import get_connection as _gc
+                    _hconn = _gc(self._db_path)
+                    try:
+                        _hrow = _hconn.execute(
+                            "SELECT end_date_iso FROM markets WHERE condition_id = ?",
+                            (condition_id,),
+                        ).fetchone()
+                    finally:
+                        try: _hconn.close()
+                        except Exception: pass
+                    if _hrow and _hrow[0]:
+                        end_date_iso = str(_hrow[0])
+                except Exception as _hex:
+                    logger.debug("[LIVE] markets-table horizon lookup failed: %s", _hex)
 
-            # Gamma fallback for markets not in local cache.
+            # Gamma fallback for markets not in local cache or signal dict.
             if not end_date_iso:
                 try:
                     import requests as _req
@@ -1548,6 +1585,43 @@ class PolymarketLiveExecutor:
                         except Exception: pass
                 except Exception as _eerr:
                     logger.warning("[LIVE] event_cap check failed (continuing): %s", _eerr)
+
+                # Complementary-leg guaranteed-loss block (roadmap N7). Two
+                # mutually-exclusive YES legs on one event can each be
+                # individually fine yet TOGETHER lock a loss: at resolution
+                # exactly one outcome pays 1.0, so if the summed YES cost per
+                # share across our open exclusive legs exceeds 1.0 we are
+                # guaranteed to lose. The event-cap gate (position count) does
+                # NOT catch this — two small legs pass it. (7/6 six-leg
+                # football incident: combined YES cost 1.02 = locked loss.)
+                # BUY-only: a SELL/NO entry is not part of the YES sum.
+                if want_yes:
+                    try:
+                        _cyes_max = float(os.environ.get("COMPLEMENTARY_YES_MAX", "1.0"))
+                        from trading_platform.polymarket.db_connection import get_connection as _cgc
+                        _cconn = _cgc(self._db_path)
+                        try:
+                            _cslug_row = _cconn.execute(
+                                "SELECT event_slug FROM markets WHERE condition_id = ?",
+                                (condition_id,),
+                            ).fetchone()
+                            _cslug = _cslug_row[0] if _cslug_row and _cslug_row[0] else None
+                            if _cslug:
+                                _open_yes, _n_legs = _open_event_yes_cost(
+                                    _cconn, condition_id, _cslug)
+                                _combined = _open_yes + float(current_price or 0)
+                                if _n_legs > 0 and _combined > _cyes_max + 1e-9:
+                                    return self._block(
+                                        signal,
+                                        f"complementary_loss: YES cost {_combined:.3f} > "
+                                        f"{_cyes_max:.2f} across {_n_legs + 1} open exclusive "
+                                        f"legs on event '{_cslug[:40]}' (guaranteed loss)",
+                                    )
+                        finally:
+                            try: _cconn.close()
+                            except Exception: pass
+                    except Exception as _cerr:
+                        logger.warning("[LIVE] complementary_loss check failed (continuing): %s", _cerr)
 
             # 6. LIVE — submit. Polymarket CLOB side is always BUY; YES vs NO
             # is determined by token_id.

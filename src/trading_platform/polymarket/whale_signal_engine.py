@@ -1307,6 +1307,10 @@ class WhaleSignalEngine:
             "token_id": trade_token_id,
             "yes_token_id": yes_tid,
             "no_token_id": no_tid,
+            # end_date_iso already resolved in the pre-filter (_end_iso above)
+            # — pass it so the live executor's horizon gate is a dict read and
+            # skips a synchronous Gamma round-trip on the hot path (N10).
+            "end_date_iso": _end_iso,
         }
         if extra:
             signal.update(extra)
