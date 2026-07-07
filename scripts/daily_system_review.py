@@ -324,6 +324,18 @@ def section_decay(conn, now_ts):
         print(f"  {str(sig):<28} {str(dire):<5} "
               f"7d={wr7:.0%}(n={int(n7)})  30d={wr30:.0%}(n={int(n30)})  "
               f"delta={decay:+.2f}{flag}")
+    # N9: correlation auto-deprecations (lower-IC member of a >=0.7 pair).
+    try:
+        dep = conn.execute(
+            "SELECT signal_type, correlated_with, correlation_max, deprecated_reason "
+            "FROM signal_health WHERE auto_deprecated = 1 ORDER BY signal_type"
+        ).fetchall()
+        if dep:
+            print("  CORRELATION AUTO-DEPRECATED (redundant — not traded):")
+            for st, cw, cm, why in dep:
+                print(f"    {str(st):<26} {why or (str(cw)+' corr='+str(cm))}")
+    except Exception:
+        pass
 
 
 def section_attribution(conn, now_ts):

@@ -596,6 +596,27 @@ class PolymarketLiveExecutor:
         if _sig_side and (sig_type, _sig_side) in EXCLUDE_SIGNAL_SIDE:
             logger.info("[LIVE][SIDE_GATE] BLOCKED %s side=%s", sig_type, _sig_side)
             return self._block(signal, f"{sig_type} {_sig_side} excluded from live")
+        # N9: correlation auto-deprecation also blocks live (allowlist
+        # overrides, matching EXCLUDE precedence). Protected signals never
+        # carry auto_deprecated=1.
+        if sig_type not in self.LIVE_REAL_SIGNAL_TYPES:
+            try:
+                from trading_platform.polymarket.db_connection import get_connection as _dgc
+                _dconn = _dgc(self._db_path)
+                try:
+                    _drow = _dconn.execute(
+                        "SELECT auto_deprecated, deprecated_reason FROM signal_health "
+                        "WHERE signal_type = ?",
+                        (sig_type,),
+                    ).fetchone()
+                finally:
+                    try: _dconn.close()
+                    except Exception: pass
+                if _drow and int(_drow[0] or 0) == 1:
+                    return self._block(
+                        signal, f"corr-deprecated: {_drow[1] or 'redundant'}")
+            except Exception as _dcerr:
+                logger.debug("[LIVE] corr-deprecate check failed (continuing): %s", _dcerr)
         raw_cat = signal.get("category") or ""
         cat = raw_cat.lower() if isinstance(raw_cat, str) else ""
         # Re-classify when category is empty/other/wallet_derived — the

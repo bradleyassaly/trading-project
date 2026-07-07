@@ -33,6 +33,17 @@ from trading_platform.polymarket.db_connection import get_connection
 logger = logging.getLogger(__name__)
 
 
+# Signals that can NEVER be auto-deprecated by correlation dedup (roadmap N9).
+# The two edges with reconciled-positive history — a transient IC dip must not
+# silently kill them (cf. the 2026-04-27 lesson: whale_entry's $889 alpha was
+# destroyed by IC-alone retirement).
+PROTECTED_SIGNALS = frozenset({"resolution_decay", "whale_entry_filtered"})
+
+# Minimum IC-sample floor before a signal may be auto-deprecated (mirror the
+# decay_flag n>=10 floor — never kill on thin data).
+_DEDUP_MIN_N = 10
+_DEDUP_CORR_THRESHOLD = 0.7
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS signal_health (
     signal_type      TEXT PRIMARY KEY,
@@ -43,9 +54,20 @@ CREATE TABLE IF NOT EXISTS signal_health (
     correlated_with  TEXT,
     correlation_max  DOUBLE PRECISION,
     decay_flag       BIGINT,
+    auto_deprecated  BIGINT DEFAULT 0,
+    deprecated_reason TEXT,
     last_updated     BIGINT NOT NULL
 );
 """
+
+# Idempotent ALTERs so the already-migrated Postgres prod table gains the N9
+# columns (CREATE TABLE IF NOT EXISTS won't add them). PG supports ADD COLUMN
+# IF NOT EXISTS; the sqlite test lane already has them from the fresh CREATE,
+# and the try/except swallows its lack of IF-NOT-EXISTS-on-ADD-COLUMN.
+_MIGRATIONS = [
+    "ALTER TABLE signal_health ADD COLUMN IF NOT EXISTS auto_deprecated BIGINT DEFAULT 0",
+    "ALTER TABLE signal_health ADD COLUMN IF NOT EXISTS deprecated_reason TEXT",
+]
 
 
 def _ensure_schema(conn) -> None:
@@ -56,6 +78,29 @@ def _ensure_schema(conn) -> None:
                 conn.execute(s)
             except Exception:
                 pass
+    for stmt in _MIGRATIONS:
+        try:
+            conn.execute(stmt)
+        except Exception:
+            pass
+
+
+def _corr_dedup_decision(sig, ic_sig, n_sig, peer, peer_corr, ic_peer,
+                         peer_known: bool = True) -> tuple[int, str | None]:
+    """N9 dedup decision: should ``sig`` be auto-deprecated against its top
+    correlate? Returns (auto_deprecated, reason). ``sig`` is the victim iff
+    the pair is correlated (>=0.7; note correlation_max can exceed 1.0, so no
+    upper clamp), sig is NOT protected, has n>=10, and is strictly the
+    lower-IC member (ties skipped to avoid run-to-run flip-flop). Protected
+    signals and thin-data signals are never deprecated; the survivor keeps
+    trading.
+    """
+    if (peer and peer_known and peer_corr >= _DEDUP_CORR_THRESHOLD
+            and sig not in PROTECTED_SIGNALS and n_sig >= _DEDUP_MIN_N
+            and ic_peer > ic_sig):
+        return 1, (f"corr={peer_corr:.2f} with {peer}, "
+                   f"IC {ic_sig:+.3f} < {ic_peer:+.3f}")
+    return 0, None
 
 
 def spearman_corr(xs: list[float], ys: list[float]) -> float:
@@ -212,10 +257,18 @@ def run_pipeline(db_path: str | None = None) -> dict[str, Any]:
         now = int(time.time())
         n_decay = 0
         n_corr_redundant = 0
+        n_auto_deprecated = 0
         newly_decayed: list[tuple[str, float, float, int]] = []   # (sig, ic30, ic14, n)
         ic_warnings: list[tuple[str, float, float, int]] = []     # monitored, IC30 crossed below threshold
+
+        # N9 pre-pass: compute (ic_30, n_30) for every signal once so the
+        # per-signal loop can compare a correlated PAIR's IC to pick the victim.
+        ic_by_sig: dict[str, tuple[float, int]] = {}
         for sig in sigs:
-            ic_30, n_30 = compute_ic(30, sig, conn)
+            ic_by_sig[sig] = compute_ic(30, sig, conn)
+
+        for sig in sigs:
+            ic_30, n_30 = ic_by_sig[sig]
             ic_14, _ = compute_ic(14, sig, conn)
             trend = "stable"
             if ic_30 != 0 and ic_14 != 0:
@@ -239,15 +292,27 @@ def run_pipeline(db_path: str | None = None) -> dict[str, Any]:
             ):
                 ic_warnings.append((sig, ic_30, ic_14, n_30))
             peer, peer_corr = max_corr_for.get(sig, ("", 0.0))
-            if peer_corr >= 0.7:
+            if peer_corr >= _DEDUP_CORR_THRESHOLD:
                 n_corr_redundant += 1
+
+            # N9: auto-deprecate the lower-IC member of a correlated pair
+            # (redundant signals triple-count the same event into Kelly). The
+            # decision is recomputed from scratch each run — a signal whose
+            # correlate dropped below threshold, or whose IC recovered above
+            # the survivor's, is resurrected (auto_deprecated reset to 0).
+            _ic_peer = ic_by_sig.get(peer, (0.0, 0))[0] if peer else 0.0
+            auto_dep, dep_reason = _corr_dedup_decision(
+                sig, ic_30, n_30, peer, peer_corr, _ic_peer, peer in ic_by_sig)
+            if auto_dep:
+                n_auto_deprecated += 1
             try:
                 conn.execute(
                     """INSERT INTO signal_health
                          (signal_type, n_resolved_30d, ic_30d, ic_14d,
                           ic_trend, correlated_with, correlation_max,
-                          decay_flag, last_updated)
-                       VALUES (?,?,?,?,?,?,?,?,?)
+                          decay_flag, auto_deprecated, deprecated_reason,
+                          last_updated)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?)
                        ON CONFLICT (signal_type) DO UPDATE SET
                          n_resolved_30d=EXCLUDED.n_resolved_30d,
                          ic_30d=EXCLUDED.ic_30d,
@@ -256,11 +321,13 @@ def run_pipeline(db_path: str | None = None) -> dict[str, Any]:
                          correlated_with=EXCLUDED.correlated_with,
                          correlation_max=EXCLUDED.correlation_max,
                          decay_flag=EXCLUDED.decay_flag,
+                         auto_deprecated=EXCLUDED.auto_deprecated,
+                         deprecated_reason=EXCLUDED.deprecated_reason,
                          last_updated=EXCLUDED.last_updated""",
                     (sig, n_30, round(ic_30, 4), round(ic_14, 4),
                      trend, peer if peer_corr >= 0.5 else None,
                      round(peer_corr, 3) if peer_corr else 0,
-                     decay, now),
+                     decay, auto_dep, dep_reason, now),
                 )
             except Exception as exc:
                 logger.debug("signal_health upsert %s failed: %s", sig, exc)
@@ -292,6 +359,7 @@ def run_pipeline(db_path: str | None = None) -> dict[str, Any]:
             "signals_processed": len(sigs),
             "decay_flagged": n_decay,
             "correlation_redundant": n_corr_redundant,
+            "auto_deprecated": n_auto_deprecated,
             "pairwise_corr_pairs": len(pairwise),
         }
     finally:

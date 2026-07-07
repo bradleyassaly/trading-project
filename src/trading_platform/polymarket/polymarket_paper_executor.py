@@ -778,6 +778,25 @@ class PolymarketPaperExecutor:
                 logger.debug("[CAT_GATE] SKIP excluded signal_type=%s", signal_type)
                 return None
 
+        # N9 (2026-07-07): correlation auto-deprecation gate. signal_health
+        # marks the lower-IC member of a >=0.7-correlated pair auto_deprecated=1
+        # (redundant signals otherwise triple-count the same event into Kelly).
+        # NOT bypassed by proven-slice — redundancy is orthogonal to per-slice
+        # EV. Protected signals can never carry auto_deprecated=1.
+        try:
+            with self._wallet_lock:
+                _dep = self._wallet_conn.execute(
+                    "SELECT auto_deprecated, deprecated_reason FROM signal_health "
+                    "WHERE signal_type = ?",
+                    (signal_type,),
+                ).fetchone()
+            if _dep and int(_dep[0] or 0) == 1:
+                logger.info("[CORR_DEPRECATE] SKIP %s — %s",
+                            signal_type, _dep[1] or "correlated redundant")
+                return None
+        except Exception as _cderr:
+            logger.debug("[CORR_DEPRECATE] check failed (continuing): %s", _cderr)
+
         # 2026-04-25: dynamic decay-flag gate. Originally blocked on
         # decay_flag=1 alone (IC<0 on n>=10). 2026-04-27 retuned: also
         # require lifetime PnL <= 0 in the same signal type. Reason —
