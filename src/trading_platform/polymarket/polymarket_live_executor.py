@@ -409,10 +409,27 @@ class PolymarketLiveExecutor:
                     "CREATE INDEX IF NOT EXISTS idx_live_trades_ts ON live_trades(attempted_at DESC)"
                 )
                 # Lazy-add columns that pre-date this schema — idempotent.
+                # (P6 audit) The fresh-CREATE above lacks most columns the
+                # attempt INSERT writes — on a truly fresh deployment every
+                # record silently failed. All INSERT columns now covered here.
                 for col_ddl in ("outcome TEXT", "exit_ts INTEGER", "signal_price REAL",
                                 "whale_trade_ts BIGINT", "detection_latency_sec REAL",
                                 "slippage_signed REAL", "slippage_cost_usd REAL",
-                                "features_at_fire TEXT"):
+                                "features_at_fire TEXT",
+                                "token_id TEXT", "side TEXT", "fill_price REAL",
+                                "shares REAL", "category TEXT", "signal_wallet TEXT",
+                                "submitted_at INTEGER", "filled_at INTEGER",
+                                "expected_price REAL", "slippage REAL",
+                                "fill_time_ms REAL", "resolution_date BIGINT",
+                                "ask_depth_entry REAL", "signal_fired_at BIGINT",
+                                "wallet_tier TEXT", "realized_pnl REAL",
+                                # P6: decision-time market context on EVERY
+                                # attempt (incl. rejects/errors) — the
+                                # measurement substrate execution work needs.
+                                "mid_at_decision REAL", "yes_mid_at_decision REAL",
+                                "best_ask_at_decision REAL", "best_bid_at_decision REAL",
+                                "spread_at_decision REAL", "book_target_price REAL",
+                                "slippage_c REAL", "spread_paid_c REAL"):
                     try:
                         conn.execute(f"ALTER TABLE live_trades ADD COLUMN {col_ddl}")
                     except Exception:
@@ -1291,6 +1308,12 @@ class PolymarketLiveExecutor:
         if _yes_mid is None:
             return self._block(signal, "Could not fetch current price from CLOB", size_usd)
         current_price = _yes_mid if want_yes else max(0.01, 1.0 - _yes_mid)
+        # P6: stash decision-time prices on the signal dict — _block() passes
+        # the SAME dict into _record_attempt, so every later gate records the
+        # market context it saw for free (incl. rejects, which the execution
+        # comparator has never been able to see). Held-token space.
+        signal["_mid_at_decision"] = current_price
+        signal["_yes_mid_at_decision"] = _yes_mid
 
         # Live-price BUY gate: catches signals where entry_price was None/0 so
         # the FAVORITE_BLOCK check above didn't fire, but the live market is already
@@ -1371,6 +1394,20 @@ class PolymarketLiveExecutor:
                               for a in fillable_asks)
         signal["_ask_depth"] = fillable_depth
         signal["_ask_depth_total"] = all_depth
+        # P6: book snapshot at decision time — spread_paid is computable on
+        # EVERY attempt from here on, including the depth block right below.
+        try:
+            signal["_best_ask_at_decision"] = (
+                float(asks_sorted[0]["price"]) if asks_sorted else None)
+            _bids = book.get("bids") or []
+            signal["_best_bid_at_decision"] = (
+                float(_bids[0]["price"]) if _bids else None)
+            if signal.get("_best_ask_at_decision") is not None \
+                    and signal.get("_best_bid_at_decision") is not None:
+                signal["_spread_at_decision"] = (
+                    signal["_best_ask_at_decision"] - signal["_best_bid_at_decision"])
+        except (TypeError, ValueError, KeyError):
+            pass
         if fillable_depth < size_usd * 1.5:
             _reason = (f"Thin fillable {outcome_label} liquidity: "
                        f"${fillable_depth:.1f} at price<={_limit_price:.3f} "
@@ -1890,6 +1927,29 @@ class PolymarketLiveExecutor:
                 _fired_at = signal.get("fired_at") or None
                 _resolution_ts = signal.get("_resolution_ts")
                 _ask_depth = signal.get("_ask_depth")
+                # P6: decision-time market context. Held-token cents; entries
+                # are always a CLOB BUY of the held token, so positive =
+                # adverse for both directions. spread_paid_c populates on
+                # every attempt with a book snapshot INCLUDING rejects — the
+                # information the execution comparator has never seen.
+                _mid_dec = signal.get("_mid_at_decision")
+                _best_ask_dec = (
+                    (order_result.best_ask_at_submit if order_result else None)
+                    or signal.get("_best_ask_at_decision")
+                )
+                _best_bid_dec = (
+                    (order_result.best_bid_at_submit if order_result else None)
+                    or signal.get("_best_bid_at_decision")
+                )
+                _book_target = order_result.target_price if order_result else None
+                _slippage_c = (
+                    round((float(fill_price) - float(_mid_dec)) * 100, 4)
+                    if fill_price is not None and _mid_dec is not None else None
+                )
+                _spread_paid_c = (
+                    round((float(_best_ask_dec) - float(_mid_dec)) * 100, 4)
+                    if _best_ask_dec is not None and _mid_dec is not None else None
+                )
                 # Phase-2 latency measurement: whale's fill → this attempt.
                 _whale_ts = signal.get("whale_trade_ts") or None
                 _detect_latency = (
@@ -1905,9 +1965,12 @@ class PolymarketLiveExecutor:
                         category, signal_wallet, submitted_at, filled_at, signal_price,
                         expected_price, slippage, slippage_signed, slippage_cost_usd, fill_time_ms,
                         resolution_date, ask_depth_entry, signal_fired_at, wallet_tier,
-                        whale_trade_ts, detection_latency_sec, features_at_fire)
+                        whale_trade_ts, detection_latency_sec, features_at_fire,
+                        mid_at_decision, yes_mid_at_decision, best_ask_at_decision,
+                        best_bid_at_decision, spread_at_decision, book_target_price,
+                        slippage_c, spread_paid_c)
                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                               ?, ?, ?, ?, ?, ?, ?, ?)""",
+                               ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         now_ts,
                         signal.get("signal_type"),
@@ -1951,8 +2014,19 @@ class PolymarketLiveExecutor:
                         # any non-JSON values; order_id/paper_trade_id live in
                         # their own columns, not the blob.
                         json.dumps(signal, default=str),
+                        _mid_dec,
+                        signal.get("_yes_mid_at_decision"),
+                        _best_ask_dec,
+                        _best_bid_dec,
+                        signal.get("_spread_at_decision"),
+                        _book_target,
+                        _slippage_c,
+                        _spread_paid_c,
                     ),
                 )
+                # PG pool runs autocommit; raw sqlite (test lane) rolls back
+                # on close without this.
+                conn.commit()
             finally:
                 try: conn.close()
                 except Exception: pass

@@ -51,6 +51,12 @@ class OrderResult:
     error_msg: str | None
     raw: dict
     fill_time_ms: int | None = None
+    # P6: the REAL posted limit + book top at submit time — the executor
+    # cannot reconstruct these after the fact. Populated by
+    # place_market_order on every return that follows its book fetch.
+    target_price: float | None = None
+    best_ask_at_submit: float | None = None
+    best_bid_at_submit: float | None = None
 
 
 class ClobClient:
@@ -191,6 +197,9 @@ class ClobClient:
             )
 
         _submit_ts = time.time()
+        # P6: book-top + posted-limit capture, attached to every return below
+        # (partial when the failure happened before the book/target stage).
+        _p6: dict = {}
         try:
             # Polymarket uses a proxy-wallet custody model: users deposit
             # into a shared CTF-compatible proxy, and Polymarket tracks
@@ -236,6 +245,12 @@ class ClobClient:
             # re-fetch when missing or older than 10s.
             if book is None or (time.time() - book.get("_fetched_at", 0)) > 10:
                 book = self.get_order_book(token_id)
+            try:
+                _b_asks, _b_bids = book.get("asks") or [], book.get("bids") or []
+                _p6["best_ask_at_submit"] = float(_b_asks[0]["price"]) if _b_asks else None
+                _p6["best_bid_at_submit"] = float(_b_bids[0]["price"]) if _b_bids else None
+            except (TypeError, ValueError, KeyError):
+                pass
             if side.upper() == "BUY":
                 asks = book.get("asks") or []
                 # asks are sorted ascending (lowest = best for buyer)
@@ -253,6 +268,7 @@ class ClobClient:
                         error_msg=(f"best ask {best_ask:.3f} > max_price "
                                    f"{max_price:.3f} — refusing to chase"),
                         raw={"best_ask": best_ask, "max_price": max_price},
+                        **_p6,
                     )
                 target = round(best_ask + tick, 2)
                 if max_price is not None:
@@ -272,6 +288,7 @@ class ClobClient:
                 target = round(current_price + tick, 2) if side.upper() == "BUY" \
                     else round(current_price - tick, 2)
                 target = max(0.01, min(0.99, target))
+            _p6["target_price"] = target
             if exact_shares is not None:
                 # Caller-supplied exact count (exit sells use this to avoid
                 # exceeding the token balance we actually hold).
@@ -283,7 +300,7 @@ class ClobClient:
                         success=False, order_id=None, status="error",
                         filled_price=None, filled_size=None,
                         error_msg=f"CLOB minimum BUY is $1.00; requested ${size_usdc:.2f}",
-                        raw={},
+                        raw={}, **_p6,
                     )
                 _CLOB_MIN_SHARES = 5
                 shares_int = max(_CLOB_MIN_SHARES, int(float(size_usdc) / target))
@@ -296,7 +313,7 @@ class ClobClient:
                             f"stake ${size_usdc:.2f} too small: CLOB min {_CLOB_MIN_SHARES} shares "
                             f"@ {target:.3f} = ${actual_usdc:.2f} ({actual_usdc / size_usdc:.1f}x)"
                         ),
-                        raw={},
+                        raw={}, **_p6,
                     )
             else:
                 shares_int = max(1, int(float(size_usdc) / target))
@@ -451,6 +468,7 @@ class ClobClient:
                 error_msg=err_str,
                 raw=resp,
                 fill_time_ms=int((time.time() - _submit_ts) * 1000),
+                **_p6,
             )
         except Exception as exc:
             logger.warning("place_market_order failed: %s", exc)
@@ -459,6 +477,7 @@ class ClobClient:
                 filled_price=None, filled_size=None,
                 error_msg=str(exc), raw={},
                 fill_time_ms=int((time.time() - _submit_ts) * 1000),
+                **_p6,
             )
 
     def place_limit_order(

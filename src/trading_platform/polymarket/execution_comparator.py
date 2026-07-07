@@ -56,3 +56,35 @@ class ExecutionComparator:
                 conn.close()
             except Exception:
                 pass
+
+    def attempts_breakdown(self, days: int = 7) -> list[dict[str, Any]]:
+        """P6: per-status cost view over ALL attempts — including rejects and
+        errors, which compare() filters out (the trades we didn't get were
+        invisible). RECORD-ONLY: nothing reads this into sizing/kill-switch
+        for now (per-status buckets are n=1-3 for weeks).
+        """
+        conn = get_connection(self._db_path)
+        cutoff = int(time.time()) - days * 86400
+        try:
+            rows = conn.execute(
+                """SELECT status, COUNT(*) n,
+                          AVG(spread_paid_c) avg_spread_paid_c,
+                          AVG(slippage_c) avg_slippage_c,
+                          AVG(size_usd) avg_size_usd
+                     FROM live_trades
+                    WHERE attempted_at > %s AND dry_run = 0
+                    GROUP BY status ORDER BY n DESC""",
+                (cutoff,),
+            ).fetchall()
+            return [
+                {"status": r[0], "n": int(r[1] or 0),
+                 "avg_spread_paid_c": round(float(r[2]), 3) if r[2] is not None else None,
+                 "avg_slippage_c": round(float(r[3]), 3) if r[3] is not None else None,
+                 "avg_size_usd": round(float(r[4]), 2) if r[4] is not None else None}
+                for r in rows
+            ]
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
