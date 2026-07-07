@@ -1450,7 +1450,9 @@ class PolymarketPaperExecutor:
             try:
                 with self._wallet_lock:
                     bm_row = self._wallet_conn.execute(
-                        "SELECT is_likely_farmer, sizing_p90_pct FROM wallet_behavior_metrics WHERE wallet = ?",
+                        "SELECT is_likely_farmer, sizing_p90_pct, is_copyable_ci, "
+                        "n_resolved, roi_lower_95 "
+                        "FROM wallet_behavior_metrics WHERE wallet = ?",
                         (src_wallet.lower(),),
                     ).fetchone()
                     z_row = self._wallet_conn.execute(
@@ -1470,6 +1472,24 @@ class PolymarketPaperExecutor:
                     except Exception:
                         pass
                     return None
+                # C3 shadow on the PAPER surface too: live copy volume is
+                # ~5 attempts/30d, so live-only shadow would take months to
+                # accrue a promotion sample. Never blocks paper flow.
+                if src_wallet.startswith("0x"):
+                    from trading_platform.polymarket.wallet_behavior_metrics import (
+                        copyable_ci_verdict,
+                    )
+                    _ci_row = (bm_row[2], bm_row[3], bm_row[4]) if bm_row else None
+                    _ok, _why = copyable_ci_verdict(_ci_row, src_wallet)
+                    try:
+                        from trading_platform.polymarket.decision_trace import trace as _dt
+                        _dt(signal=signal, gate="COPYABLE_CI_SHADOW", passed=_ok,
+                            value=float(bm_row[4]) if bm_row and bm_row[4] is not None else None,
+                            threshold=0.0,
+                            detail=f"wallet={src_wallet[:14]} {_why}",
+                            surface="paper", db_path=str(self._wallet_db_path))
+                    except Exception:
+                        pass
                 if z_row and z_row[0] is not None and float(z_row[0]) >= 1.0:
                     z_boost = min(1.4, 1.0 + 0.15 * (float(z_row[0]) - 1.0))
                     if z_boost > 1.0:

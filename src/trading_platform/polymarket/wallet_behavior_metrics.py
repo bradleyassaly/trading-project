@@ -320,6 +320,28 @@ def compute_for_wallet(
     }
 
 
+def copyable_ci_verdict(ci_row: tuple | None, wallet: str) -> tuple[bool, str]:
+    """C3: anti-survivorship verdict for copying `wallet`'s trades.
+
+    ci_row = (is_copyable_ci, n_resolved, roi_lower_95) or None.
+
+    is_copyable_ci (roi_lower_95 > 0 AND n >= 20, from the bootstrap CI
+    above) is the strongest anti-survivorship metric in the codebase and the
+    live executor never read it. A wallet with NO metrics row fails — an
+    unmeasured wallet is exactly what this gate must not copy. Truncated
+    wallet ids (12-char rows observed in live_trades.signal_wallet) are
+    flagged distinctly so shadow statistics don't misattribute them to
+    no_metrics.
+    """
+    if not wallet or len(wallet) != 42:
+        return (False, "truncated_wallet")
+    if ci_row is None:
+        return (False, "no_metrics")
+    ci, n, lb = ci_row
+    detail = f"n={int(n or 0)} roi_lb={float(lb if lb is not None else 0):+.3f}"
+    return (bool(ci == 1), detail)
+
+
 def run_pipeline(min_resolved: int = 20, db_path: str | None = None) -> dict:
     """Top-level: compute behavior metrics for every wallet with enough data.
 

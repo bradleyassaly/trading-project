@@ -799,7 +799,9 @@ class PolymarketLiveExecutor:
                 _bc = get_connection(self._db_path)
                 try:
                     bm_row = _bc.execute(
-                        "SELECT is_likely_farmer, sizing_p90_pct FROM wallet_behavior_metrics WHERE wallet = ?",
+                        "SELECT is_likely_farmer, sizing_p90_pct, is_copyable_ci, "
+                        "n_resolved, roi_lower_95 "
+                        "FROM wallet_behavior_metrics WHERE wallet = ?",
                         (src_wallet.lower(),),
                     ).fetchone()
                     z_row = _bc.execute(
@@ -822,6 +824,44 @@ class PolymarketLiveExecutor:
                     except Exception:
                         pass
                     return self._block(signal, f"farmer/wash wallet {src_wallet[:14]} blocked")
+                # C3 (2026-07-07): anti-survivorship copyable-CI gate.
+                # is_copyable_ci = roi_lower_95 > 0 AND n >= 20. SHADOW by
+                # default — traces pass/fail for the promotion review but
+                # never blocks; COPYABLE_CI_ENFORCE=1 blocks for real. Do
+                # NOT flip enforcement before the N6/C1+C2 copyability
+                # verdict (roadmap L127). Real 0x leaders only — synthetic
+                # sources (phase_b_resolution_decay etc.) are skipped.
+                if src_wallet.startswith("0x"):
+                    from trading_platform.polymarket.wallet_behavior_metrics import (
+                        copyable_ci_verdict,
+                    )
+                    _ci_row = (bm_row[2], bm_row[3], bm_row[4]) if bm_row else None
+                    _ok, _why = copyable_ci_verdict(_ci_row, src_wallet)
+                    _enforce = os.environ.get(
+                        "COPYABLE_CI_ENFORCE", "0").lower() in ("1", "true", "yes")
+                    try:
+                        from trading_platform.polymarket.decision_trace import trace as _dt
+                        _dt(signal=signal,
+                            gate="LIVE_COPYABLE_CI" if _enforce else "LIVE_COPYABLE_CI_SHADOW",
+                            passed=_ok,
+                            value=float(bm_row[4]) if bm_row and bm_row[4] is not None else None,
+                            threshold=0.0,
+                            detail=f"wallet={src_wallet[:14]} {_why}",
+                            surface="live", db_path=self._db_path)
+                    except Exception:
+                        pass
+                    if not _ok:
+                        if _enforce:
+                            logger.warning(
+                                "[LIVE][COPYABLE_CI] BLOCK %s wallet=%s %s",
+                                sig_type, src_wallet[:14], _why,
+                            )
+                            return self._block(
+                                signal, f"copyable-CI gate: {src_wallet[:14]} {_why}")
+                        logger.info(
+                            "[LIVE][COPYABLE_CI] WOULD_BLOCK %s wallet=%s %s (shadow)",
+                            sig_type, src_wallet[:14], _why,
+                        )
                 if z_row and z_row[0] is not None and float(z_row[0]) >= 1.0:
                     z_boost = min(1.4, 1.0 + 0.15 * (float(z_row[0]) - 1.0))
                     if z_boost > 1.0:
