@@ -28,9 +28,20 @@ CREATE TABLE IF NOT EXISTS live_equity_snapshots (
     open_count              BIGINT,
     realized_pnl_cumulative DOUBLE PRECISION,
     unrealized_pnl          DOUBLE PRECISION,
-    daily_change            DOUBLE PRECISION
+    daily_change            DOUBLE PRECISION,
+    deployed_pct            DOUBLE PRECISION,
+    idle_usdc               DOUBLE PRECISION,
+    unredeemed_value        DOUBLE PRECISION
 )
 """
+
+# N2 capital-efficiency columns — idempotent ALTERs for the already-existing
+# prod table (CREATE TABLE IF NOT EXISTS won't add them).
+_CAPITAL_MIGRATIONS = [
+    "ALTER TABLE live_equity_snapshots ADD COLUMN IF NOT EXISTS deployed_pct DOUBLE PRECISION",
+    "ALTER TABLE live_equity_snapshots ADD COLUMN IF NOT EXISTS idle_usdc DOUBLE PRECISION",
+    "ALTER TABLE live_equity_snapshots ADD COLUMN IF NOT EXISTS unredeemed_value DOUBLE PRECISION",
+]
 
 
 def _get_usdc() -> float | None:
@@ -210,6 +221,11 @@ def take_snapshot() -> dict:
     conn = get_connection()
 
     conn.execute(ENSURE_TABLE)
+    for _mig in _CAPITAL_MIGRATIONS:
+        try:
+            conn.execute(_mig)
+        except Exception:
+            pass
     conn.commit()
 
     # ── open positions tracked in DB ──────────────────────────────────────
@@ -229,6 +245,7 @@ def take_snapshot() -> dict:
 
     open_cost = 0.0
     open_mkt  = 0.0
+    unredeemed_value = 0.0  # N2: resolved-but-not-yet-swept payout value
     counted = 0
     for direction, fp, ep, sh, token_id, size_usd, last_mark in open_rows:
         price = float(fp) if fp is not None else float(ep)
@@ -250,6 +267,13 @@ def take_snapshot() -> dict:
         open_cost += cost
         open_mkt  += mkt
         counted += 1
+        # N2: this position's market has RESOLVED (payout known) but we still
+        # hold on-chain tokens — capital we're owed but haven't redeemed to
+        # USDC. Payout is per-token; losers contribute 0.
+        if token_id and on_chain is not None and on_chain > 0:
+            _payout = _get_resolution_payout(token_id)
+            if _payout is not None:
+                unredeemed_value += shares * _payout
 
     # ── cumulative realized PnL ───────────────────────────────────────────
     row = conn.execute("""
@@ -275,13 +299,18 @@ def take_snapshot() -> dict:
     total_equity = usdc + open_mkt
     unrealized   = open_mkt - open_cost
     daily_change = (total_equity - float(prior[0])) if prior else None
+    # N2 capital efficiency: idle USDC is the free collateral; deployed_pct is
+    # the fraction of equity in open token market value.
+    idle_usdc = usdc
+    deployed_pct = (open_mkt / total_equity) if total_equity > 0 else 0.0
 
     conn.execute("""
         INSERT INTO live_equity_snapshots
             (ts, usdc_balance, open_cost_basis, open_market_value,
              total_equity, open_count, realized_pnl_cumulative,
-             unrealized_pnl, daily_change)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+             unrealized_pnl, daily_change,
+             deployed_pct, idle_usdc, unredeemed_value)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         ON CONFLICT (ts) DO UPDATE
             SET usdc_balance            = EXCLUDED.usdc_balance,
                 open_cost_basis         = EXCLUDED.open_cost_basis,
@@ -290,12 +319,16 @@ def take_snapshot() -> dict:
                 open_count              = EXCLUDED.open_count,
                 realized_pnl_cumulative = EXCLUDED.realized_pnl_cumulative,
                 unrealized_pnl          = EXCLUDED.unrealized_pnl,
-                daily_change            = EXCLUDED.daily_change
+                daily_change            = EXCLUDED.daily_change,
+                deployed_pct            = EXCLUDED.deployed_pct,
+                idle_usdc               = EXCLUDED.idle_usdc,
+                unredeemed_value        = EXCLUDED.unredeemed_value
     """, (
         now_ts, round(usdc, 4), round(open_cost, 4), round(open_mkt, 4),
         round(total_equity, 4), counted,
         round(realized_cumul, 4), round(unrealized, 4),
         round(daily_change, 4) if daily_change is not None else None,
+        round(deployed_pct, 4), round(idle_usdc, 4), round(unredeemed_value, 4),
     ))
     conn.commit()
     conn.close()
@@ -310,10 +343,14 @@ def take_snapshot() -> dict:
         "realized_cumul": round(realized_cumul, 4),
         "unrealized": round(unrealized, 4),
         "daily_change": round(daily_change, 4) if daily_change is not None else None,
+        "deployed_pct": round(deployed_pct, 4),
+        "idle_usdc": round(idle_usdc, 4),
+        "unredeemed_value": round(unredeemed_value, 4),
     }
     print(
         f"[live_equity] equity=${result['total_equity']:.2f} "
         f"(usdc=${result['usdc']:.2f} + tokens=${result['open_mkt']:.2f}) "
+        f"deployed={result['deployed_pct']:.0%} unredeemed=${result['unredeemed_value']:.2f} "
         f"realized={result['realized_cumul']:+.2f} "
         f"unrealized={result['unrealized']:+.2f} "
         + (f"chg_vs_prior={result['daily_change']:+.2f}" if result['daily_change'] is not None else "")

@@ -382,6 +382,35 @@ def section_attribution(conn, now_ts):
                       f"{top_share:.0%} of |realized PnL|; add an uncorrelated signal.")
 
 
+def section_capital_efficiency(conn, now_ts):
+    """N2: how much of the book is actually working vs idle/trapped. Idle cash
+    and unredeemed resolved positions earn nothing; freeing them is a larger,
+    safer P&L delta than most new signals at this bankroll."""
+    section("18. CAPITAL EFFICIENCY (deployed / idle / unredeemed)")
+    try:
+        r = conn.execute(
+            """SELECT ts, total_equity, deployed_pct, idle_usdc, unredeemed_value
+                 FROM live_equity_snapshots ORDER BY ts DESC LIMIT 1"""
+        ).fetchone()
+    except Exception as exc:
+        print(f"  no snapshot: {exc}")
+        return
+    if not r:
+        print("  No equity snapshot yet.")
+        return
+    ts, eq, dep, idle, unred = r
+    eq = float(eq or 0); dep = float(dep or 0)
+    idle = float(idle or 0); unred = float(unred or 0)
+    print(f"  equity=${eq:.2f}  deployed={dep:.0%}  idle_usdc=${idle:.2f}  "
+          f"unredeemed=${unred:.2f}")
+    if unred > 5.0:
+        print(f"  ACTION — ${unred:.2f} in resolved-but-unredeemed positions. "
+              f"Redeem on polymarket.com to free the capital (no auto-sweep yet).")
+    if eq > 0 and dep < 0.40:
+        print(f"  LOW DEPLOYMENT — only {dep:.0%} of equity working; "
+              f"{(1 - dep):.0%} idle. More signals or larger stakes (within risk gates).")
+
+
 def section_stale_equity(conn, now_ts):
     """Detect frozen equity snapshots — a sign of stale balance-API caching.
 
@@ -951,6 +980,7 @@ def main():
         section_tail_concentration(conn, now_ts)
         section_copy_benchmark(conn, now_ts)
         section_exit_counterfactual(conn, now_ts)
+        section_capital_efficiency(conn, now_ts)
     finally:
         conn.close()
 
