@@ -67,6 +67,11 @@ class Task:
     enabled: bool = True
     consecutive_failures: int = 0
     first_failure_at: float | None = None
+    # Explicit per-task timeout (seconds). Overrides the default
+    # max(60, interval//2). Set for tasks that must NOT be SIGKILLed
+    # mid-pass — notably the live exit monitor, which places CLOB orders
+    # and books their fills; a kill between the two loses the booking.
+    timeout_override: int | None = None
 
     def next_run_at(self, now: float) -> float:
         if self.last_run_at is None:
@@ -937,6 +942,12 @@ SCHEDULE: list[Task] = [
         cmd="python -m trading_platform.polymarket.live_position_monitor",
         interval_seconds=5 * 60,
         description="Live position auto-exit monitor (every 5min)",
+        # 2026-07-07 (audit F4): 270s (was max(60,150)=150s). The pass sleeps
+        # ~10s per pending exit plus HTTP; a 150s SIGKILL landed mid-pass,
+        # between placing a CLOB order and booking its fill. The advisory
+        # lock now prevents the next tick from overlapping, so a near-interval
+        # timeout is safe.
+        timeout_override=270,
     ),
     Task(
         name="order_reconciler",
@@ -1128,7 +1139,8 @@ def _run_task(task: Task) -> None:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
-                timeout=max(60, task.interval_seconds // 2),
+                timeout=(task.timeout_override
+                         or max(60, task.interval_seconds // 2)),
             )
             if result.returncode == 0:
                 break

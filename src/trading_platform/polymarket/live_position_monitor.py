@@ -241,8 +241,57 @@ def _decide_exit(
     return None
 
 
+# Arbitrary constant key for the exit-monitor advisory lock. Postgres
+# advisory locks are global per-key; this serializes check_live_exits across
+# the scheduler AND the wallet-stream chain-direct trigger (both call it).
+_EXIT_LOCK_KEY = 748213001
+
+
 def check_live_exits() -> dict[str, int]:
-    """One pass: review every open live position; exit if conditions met."""
+    """One pass: review every open live position; exit if conditions met.
+
+    2026-07-07 (audit A4/F4): guarded by a Postgres advisory lock. This
+    function runs from BOTH the 5-min scheduler and the wallet-stream
+    chain-direct trigger; concurrent runs both SELECT the same open rows and
+    place SELL orders, and the second run's "not enough balance / active
+    orders" handler cancels the FIRST run's live order mid-fill. The lock
+    makes overlapping runs a no-op instead of a self-cancelling race.
+    """
+    from trading_platform.polymarket.db_connection import get_connection
+    from trading_platform.polymarket.clob_client import ClobClient
+
+    _lock_conn = get_connection()
+    try:
+        _got = _lock_conn.execute(
+            "SELECT pg_try_advisory_lock(%s)", (_EXIT_LOCK_KEY,)
+        ).fetchone()
+        _have_lock = bool(_got and _got[0])
+    except Exception:
+        # Non-PG backend (sqlite test lane) has no advisory locks — proceed
+        # unlocked; concurrency is a production-only concern.
+        _have_lock = True
+        _lock_conn = None
+    if not _have_lock:
+        logger.info("[live-exit] another exit pass holds the lock — skipping")
+        try:
+            if _lock_conn is not None:
+                _lock_conn.close()
+        except Exception:
+            pass
+        return {"checked": 0, "exited": 0, "reasons": {}, "skipped_locked": 1}
+
+    try:
+        return _check_live_exits_locked()
+    finally:
+        try:
+            if _lock_conn is not None:
+                _lock_conn.execute("SELECT pg_advisory_unlock(%s)", (_EXIT_LOCK_KEY,))
+                _lock_conn.close()
+        except Exception:
+            pass
+
+
+def _check_live_exits_locked() -> dict[str, int]:
     from trading_platform.polymarket.db_connection import get_connection
     from trading_platform.polymarket.clob_client import ClobClient
 
@@ -450,7 +499,7 @@ def check_live_exits() -> dict[str, int]:
                             """UPDATE live_trades
                                SET exit_ts=?, exit_reason='resolved_zero_balance',
                                    outcome=?, realized_pnl=?
-                               WHERE id=?""",
+                               WHERE id=? AND exit_ts IS NULL""",
                             (int(time.time()), outcome_val, round(realized, 4), lid),
                         )
                         conn.commit()
@@ -506,7 +555,7 @@ def check_live_exits() -> dict[str, int]:
                             """UPDATE live_trades
                                SET exit_ts=?, exit_reason='resolved_zero_balance',
                                    outcome=?, realized_pnl=?
-                               WHERE id=?""",
+                               WHERE id=? AND exit_ts IS NULL""",
                             (int(time.time()), outcome_val, round(realized, 4), lid),
                         )
                         conn.commit()
@@ -725,7 +774,7 @@ def check_live_exits() -> dict[str, int]:
             alerter._send(
                 f"\U0001f6a8 <b>LIVE EXIT</b> \U0001f6a8\n\n"
                 f"<b>{sig_type}</b> exited via <b>{exit_reason}</b>\n"
-                f"Entry: {entry:.3f} → Exit: {fill:.3f}\n"
+                f"Entry: {entry:.3f} → Exit: {exit_price_yes:.3f}\n"
                 f"PnL: <b>{sign}${realized_pnl:.2f}</b> ({outcome})\n"
                 f"Held {age_days:.1f} days",
                 disable_notification=False,
@@ -735,7 +784,7 @@ def check_live_exits() -> dict[str, int]:
 
         logger.info(
             "[live-exit] #%d %s @ %.3f → %s | pnl=%+.2f",
-            lid, sig_type, fill, exit_reason, realized_pnl,
+            lid, sig_type, exit_price_yes, exit_reason, realized_pnl,
         )
 
     return {"checked": len(rows), "exited": exited, "reasons": reasons}
