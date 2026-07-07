@@ -170,3 +170,43 @@ qualified wallets**, the verdict is **KILL** (no copyable cohort exists in
 the measured universe), not INSUFFICIENT. All other semantics unchanged.
 A KILL under this clause carries the same consequences as §"The rule":
 retire live copy-entry; the wallet graph survives as a feature source.
+
+---
+
+## DECISION RUN — 2026-07-07, 120d, costs on, fill-evidence on
+
+Full JSON: reports/mirror_copy_run_120d.json.
+
+- **118,646 copies** across the full universe; **787 wallets** at min_n=30;
+  only 16% of copies ever had a mirror sell (the survivorship fix at work —
+  run 1 saw only that 16%).
+- Poller lane: **0 qualified wallets. Fast lane: 1** (n=43, WR 56%,
+  +$1.27/tr — below every guard and not the primary metric).
+- Fill accounting (poller): 99,121 resolution-native, 10,479 assumed-fill
+  (no tick coverage), 3,814 confirmed, 3,638 unfilled→resolution,
+  1,594 degraded-to-evidence.
+- No cluster measurable above the floor.
+
+### VERDICT: **KILL** (Amendment 2 clause; poller lane, realistic model)
+
+Run 1/2's "copyable scalper cohort" (+$6.82/tr) was an artifact of silently
+dropping 83% of copies — every never-sold, disproportionately-losing
+hold-to-resolution row. With zero copies dropped, nobody qualifies even at
+min_n across 787 measured wallets. This CONFIRMS the original naive-copy
+verdict under the mirror-exit frame it was accused of missing, and it
+converges with the live C4 regime monitor (whale_entry_filtered in
+DRIFT_BREACH, 30d EV −54.8%/$, entire clustered CI below zero).
+
+**Actions taken (same session):**
+1. `whale_entry_filtered` added to LIVE_KILL_SIGNAL_TYPES (dry-run only,
+   same mechanism as wallet_reversal). Paper collection continues.
+2. Every [COPY]-entry roadmap item (C5 leader-conviction sizing, A4
+   lead-lag, P8 forward-edge model, C3 enforcement) is shelved per the
+   pre-registered rule; the wallet graph remains a feature source for the
+   resolution engine.
+3. C3's copyable-CI shadow gate keeps logging on paper (would-be evidence
+   if anyone ever re-litigates this with new data).
+
+A clean kill is a success: the harness, the fast lane, and the calibration
+loop now concentrate on the one engine that works (resolution_decay) instead
+of polishing a −EV lane.

@@ -1,0 +1,563 @@
+{
+  "window_days": 120,
+  "stake_usd": 5.0,
+  "min_n": 30,
+  "min_wr": 0.55,
+  "total_copies": 118646,
+  "copies_with_mirror_sell": 19525,
+  "slip_per_sec": 2e-05,
+  "cost_source": "cost_model",
+  "fill_window_s": 900,
+  "no_evidence_policy": "assume-fill",
+  "perfect_fill": false,
+  "fast_lane": {
+    "wallets_with_min_n": 787,
+    "qualified_count": 1,
+    "top_decile": {
+      "n_wallets": 1,
+      "distinct_events": 0,
+      "n": 43,
+      "total": 54.69,
+      "avg": 1.2718,
+      "wr": 0.558
+    },
+    "fill_accounting": {
+      "resolution_native": 99121,
+      "mirror_assumed_nocoverage": 9922,
+      "mirror_confirmed": 4622,
+      "unfilled": 3551,
+      "mirror_degraded": 1430
+    },
+    "clusters": {
+      "crypto": {
+        "qualified": 0,
+        "top_decile_wallets": 0,
+        "status": "insufficient",
+        "n": 0,
+        "total": 0.0,
+        "avg": 0.0,
+        "wr": 0.0
+      },
+      "economics": {
+        "qualified": 1,
+        "top_decile_wallets": 1,
+        "status": "insufficient",
+        "n": 37,
+        "total": 50.74,
+        "avg": 1.3715,
+        "wr": 0.703
+      },
+      "entertainment": {
+        "qualified": 1,
+        "top_decile_wallets": 1,
+        "status": "insufficient",
+        "n": 17,
+        "total": 95.31,
+        "avg": 5.6065,
+        "wr": 0.824
+      },
+      "geopolitics": {
+        "qualified": 2,
+        "top_decile_wallets": 1,
+        "status": "insufficient",
+        "n": 14,
+        "total": 17.75,
+        "avg": 1.2676,
+        "wr": 0.643
+      },
+      "other": {
+        "qualified": 0,
+        "top_decile_wallets": 0,
+        "status": "insufficient",
+        "n": 0,
+        "total": 0.0,
+        "avg": 0.0,
+        "wr": 0.0
+      },
+      "politics": {
+        "qualified": 1,
+        "top_decile_wallets": 1,
+        "status": "insufficient",
+        "n": 15,
+        "total": 35.09,
+        "avg": 2.339,
+        "wr": 0.667
+      },
+      "sports": {
+        "qualified": 0,
+        "top_decile_wallets": 0,
+        "status": "insufficient",
+        "n": 0,
+        "total": 0.0,
+        "avg": 0.0,
+        "wr": 0.0
+      },
+      "tweet_count": {
+        "qualified": 0,
+        "top_decile_wallets": 0,
+        "status": "insufficient",
+        "n": 0,
+        "total": 0.0,
+        "avg": 0.0,
+        "wr": 0.0
+      }
+    },
+    "top20": [
+      {
+        "wallet": "0xa022ba0a68e11a78348382ff168601012d4d77f8",
+        "n": 98,
+        "wr": 0.5,
+        "total": 99.89,
+        "avg": 1.0193,
+        "ex_top3_ev": 0.1548,
+        "qualifies": false
+      },
+      {
+        "wallet": "0x6d9fc316c3b8377060a44b852ba664adbfd59790",
+        "n": 43,
+        "wr": 0.558,
+        "total": 54.69,
+        "avg": 1.2718,
+        "ex_top3_ev": 0.0697,
+        "qualifies": true
+      },
+      {
+        "wallet": "0x4e25605fd905e9972efc0f4d8814530c655cd7a7",
+        "n": 44,
+        "wr": 0.659,
+        "total": 59.39,
+        "avg": 1.3497,
+        "ex_top3_ev": -0.0214,
+        "qualifies": false
+      },
+      {
+        "wallet": "0x41583f2efc720b8e2682750fffb67f2806fece9f",
+        "n": 163,
+        "wr": 0.405,
+        "total": 34.22,
+        "avg": 0.2099,
+        "ex_top3_ev": -0.3725,
+        "qualifies": false
+      },
+      {
+        "wallet": "0xfc0a7153e1907abcf7a0779a5603f65861f295ca",
+        "n": 39,
+        "wr": 0.487,
+        "total": 19.59,
+        "avg": 0.5024,
+        "ex_top3_ev": -0.4951,
+        "qualifies": false
+      },
+      {
+        "wallet": "0x8948d0059d2fbc9dd5aa877b34b8ab1c817376e5",
+        "n": 314,
+        "wr": 0.471,
+        "total": -82.07,
+        "avg": -0.2614,
+        "ex_top3_ev": -0.5063,
+        "qualifies": false
+      },
+      {
+        "wallet": "0xfc0847fe2ea938d6e2624650eb29ef8d8142a137",
+        "n": 113,
+        "wr": 0.425,
+        "total": -55.86,
+        "avg": -0.4943,
+        "ex_top3_ev": -0.5734,
+        "qualifies": false
+      },
+      {
+        "wallet": "0xf387570fc0f9d8fa1f07ce798fc98ff909a361c0",
+        "n": 256,
+        "wr": 0.258,
+        "total": -115.93,
+        "avg": -0.4529,
+        "ex_top3_ev": -0.615,
+        "qualifies": false
+      },
+      {
+        "wallet": "0x88c4919de76e526d55a32c1f8afb439dd1f1129a",
+        "n": 36,
+        "wr": 0.528,
+        "total": -7.16,
+        "avg": -0.199,
+        "ex_top3_ev": -0.6434,
+        "qualifies": false
+      },
+      {
+        "wallet": "0x2974bd0059e48f215c391882976e0f1b4c8c9c23",
+        "n": 40,
+        "wr": 0.575,
+        "total": -13.97,
+        "avg": -0.3492,
+        "ex_top3_ev": -0.7097,
+        "qualifies": false
+      },
+      {
+        "wallet": "0x41ce24339ea8d24a88eee59d43280979c13612fd",
+        "n": 51,
+        "wr": 0.451,
+        "total": 27.88,
+        "avg": 0.5466,
+        "ex_top3_ev": -0.7252,
+        "qualifies": false
+      },
+      {
+        "wallet": "0x7f9e2d1df78614564a70becc7fa14aa9a6623a0e",
+        "n": 38,
+        "wr": 0.605,
+        "total": -20.94,
+        "avg": -0.5509,
+        "ex_top3_ev": -0.7769,
+        "qualifies": false
+      },
+      {
+        "wallet": "0xefde9ff487fae209ab6e3157a8acb4276f9c783d",
+        "n": 94,
+        "wr": 0.426,
+        "total": 1.32,
+        "avg": 0.014,
+        "ex_top3_ev": -0.7891,
+        "qualifies": false
+      },
+      {
+        "wallet": "0xd67ba35aef659c872377a5ac2becb7ada7f85780",
+        "n": 46,
+        "wr": 0.543,
+        "total": -6.88,
+        "avg": -0.1496,
+        "ex_top3_ev": -0.8152,
+        "qualifies": false
+      },
+      {
+        "wallet": "0x77b0b896910b3388e01708521d1f92d1f5c2ba0b",
+        "n": 38,
+        "wr": 0.5,
+        "total": 0.39,
+        "avg": 0.0103,
+        "ex_top3_ev": -0.852,
+        "qualifies": false
+      },
+      {
+        "wallet": "0x417b75f912bb43f7da0fd43a83a5cf486e5218d3",
+        "n": 59,
+        "wr": 0.407,
+        "total": -6.28,
+        "avg": -0.1065,
+        "ex_top3_ev": -0.939,
+        "qualifies": false
+      },
+      {
+        "wallet": "0xbaa2bcb5439e985ce4ccf815b4700027d1b92c73",
+        "n": 66,
+        "wr": 0.424,
+        "total": -19.18,
+        "avg": -0.2907,
+        "ex_top3_ev": -0.95,
+        "qualifies": false
+      },
+      {
+        "wallet": "0x7e35a2a8cfd1eb1e69dacd043206db5a787f1a6c",
+        "n": 92,
+        "wr": 0.435,
+        "total": -15.02,
+        "avg": -0.1633,
+        "ex_top3_ev": -0.9885,
+        "qualifies": false
+      },
+      {
+        "wallet": "0x92d0cb81e6c891b835c8e0272e8c323095bd269e",
+        "n": 39,
+        "wr": 0.41,
+        "total": -8.77,
+        "avg": -0.225,
+        "ex_top3_ev": -1.028,
+        "qualifies": false
+      },
+      {
+        "wallet": "0x30ceffb3ac4ea49881e271d5a69883b60e0dfdce",
+        "n": 255,
+        "wr": 0.145,
+        "total": -239.02,
+        "avg": -0.9373,
+        "ex_top3_ev": -1.0667,
+        "qualifies": false
+      }
+    ]
+  },
+  "poller": {
+    "wallets_with_min_n": 787,
+    "qualified_count": 0,
+    "top_decile": {
+      "n_wallets": 0,
+      "distinct_events": 0,
+      "n": 0,
+      "total": 0.0,
+      "avg": 0.0,
+      "wr": 0.0
+    },
+    "fill_accounting": {
+      "resolution_native": 99121,
+      "mirror_confirmed": 3814,
+      "mirror_assumed_nocoverage": 10479,
+      "unfilled": 3638,
+      "mirror_degraded": 1594
+    },
+    "clusters": {
+      "crypto": {
+        "qualified": 0,
+        "top_decile_wallets": 0,
+        "status": "insufficient",
+        "n": 0,
+        "total": 0.0,
+        "avg": 0.0,
+        "wr": 0.0
+      },
+      "economics": {
+        "qualified": 1,
+        "top_decile_wallets": 1,
+        "status": "insufficient",
+        "n": 37,
+        "total": 47.88,
+        "avg": 1.2942,
+        "wr": 0.703
+      },
+      "entertainment": {
+        "qualified": 1,
+        "top_decile_wallets": 1,
+        "status": "insufficient",
+        "n": 17,
+        "total": 86.19,
+        "avg": 5.0698,
+        "wr": 0.765
+      },
+      "geopolitics": {
+        "qualified": 1,
+        "top_decile_wallets": 1,
+        "status": "insufficient",
+        "n": 14,
+        "total": 16.64,
+        "avg": 1.1885,
+        "wr": 0.643
+      },
+      "other": {
+        "qualified": 0,
+        "top_decile_wallets": 0,
+        "status": "insufficient",
+        "n": 0,
+        "total": 0.0,
+        "avg": 0.0,
+        "wr": 0.0
+      },
+      "politics": {
+        "qualified": 0,
+        "top_decile_wallets": 0,
+        "status": "insufficient",
+        "n": 0,
+        "total": 0.0,
+        "avg": 0.0,
+        "wr": 0.0
+      },
+      "sports": {
+        "qualified": 0,
+        "top_decile_wallets": 0,
+        "status": "insufficient",
+        "n": 0,
+        "total": 0.0,
+        "avg": 0.0,
+        "wr": 0.0
+      },
+      "tweet_count": {
+        "qualified": 0,
+        "top_decile_wallets": 0,
+        "status": "insufficient",
+        "n": 0,
+        "total": 0.0,
+        "avg": 0.0,
+        "wr": 0.0
+      }
+    },
+    "top20": [
+      {
+        "wallet": "0xa022ba0a68e11a78348382ff168601012d4d77f8",
+        "n": 98,
+        "wr": 0.48,
+        "total": 80.78,
+        "avg": 0.8243,
+        "ex_top3_ev": -0.0053,
+        "qualifies": false
+      },
+      {
+        "wallet": "0x4e25605fd905e9972efc0f4d8814530c655cd7a7",
+        "n": 44,
+        "wr": 0.659,
+        "total": 55.07,
+        "avg": 1.2516,
+        "ex_top3_ev": -0.0735,
+        "qualifies": false
+      },
+      {
+        "wallet": "0x6d9fc316c3b8377060a44b852ba664adbfd59790",
+        "n": 43,
+        "wr": 0.535,
+        "total": 39.55,
+        "avg": 0.9198,
+        "ex_top3_ev": -0.2561,
+        "qualifies": false
+      },
+      {
+        "wallet": "0x8948d0059d2fbc9dd5aa877b34b8ab1c817376e5",
+        "n": 314,
+        "wr": 0.471,
+        "total": -104.16,
+        "avg": -0.3317,
+        "ex_top3_ev": -0.5672,
+        "qualifies": false
+      },
+      {
+        "wallet": "0xfc0a7153e1907abcf7a0779a5603f65861f295ca",
+        "n": 39,
+        "wr": 0.487,
+        "total": 15.19,
+        "avg": 0.3895,
+        "ex_top3_ev": -0.5854,
+        "qualifies": false
+      },
+      {
+        "wallet": "0x88c4919de76e526d55a32c1f8afb439dd1f1129a",
+        "n": 36,
+        "wr": 0.528,
+        "total": -9.2,
+        "avg": -0.2556,
+        "ex_top3_ev": -0.6912,
+        "qualifies": false
+      },
+      {
+        "wallet": "0x41583f2efc720b8e2682750fffb67f2806fece9f",
+        "n": 163,
+        "wr": 0.35,
+        "total": -22.96,
+        "avg": -0.1409,
+        "ex_top3_ev": -0.701,
+        "qualifies": false
+      },
+      {
+        "wallet": "0xfc0847fe2ea938d6e2624650eb29ef8d8142a137",
+        "n": 113,
+        "wr": 0.336,
+        "total": -75.49,
+        "avg": -0.6681,
+        "ex_top3_ev": -0.7454,
+        "qualifies": false
+      },
+      {
+        "wallet": "0x2974bd0059e48f215c391882976e0f1b4c8c9c23",
+        "n": 40,
+        "wr": 0.575,
+        "total": -16.54,
+        "avg": -0.4136,
+        "ex_top3_ev": -0.7652,
+        "qualifies": false
+      },
+      {
+        "wallet": "0xf387570fc0f9d8fa1f07ce798fc98ff909a361c0",
+        "n": 256,
+        "wr": 0.246,
+        "total": -168.1,
+        "avg": -0.6567,
+        "ex_top3_ev": -0.8108,
+        "qualifies": false
+      },
+      {
+        "wallet": "0x7f9e2d1df78614564a70becc7fa14aa9a6623a0e",
+        "n": 38,
+        "wr": 0.605,
+        "total": -23.77,
+        "avg": -0.6255,
+        "ex_top3_ev": -0.8514,
+        "qualifies": false
+      },
+      {
+        "wallet": "0xd67ba35aef659c872377a5ac2becb7ada7f85780",
+        "n": 46,
+        "wr": 0.543,
+        "total": -9.68,
+        "avg": -0.2104,
+        "ex_top3_ev": -0.8615,
+        "qualifies": false
+      },
+      {
+        "wallet": "0x77b0b896910b3388e01708521d1f92d1f5c2ba0b",
+        "n": 38,
+        "wr": 0.421,
+        "total": -3.59,
+        "avg": -0.0945,
+        "ex_top3_ev": -0.9401,
+        "qualifies": false
+      },
+      {
+        "wallet": "0x41ce24339ea8d24a88eee59d43280979c13612fd",
+        "n": 51,
+        "wr": 0.412,
+        "total": 10.75,
+        "avg": 0.2107,
+        "ex_top3_ev": -1.0205,
+        "qualifies": false
+      },
+      {
+        "wallet": "0x417b75f912bb43f7da0fd43a83a5cf486e5218d3",
+        "n": 59,
+        "wr": 0.373,
+        "total": -13.0,
+        "avg": -0.2203,
+        "ex_top3_ev": -1.0305,
+        "qualifies": false
+      },
+      {
+        "wallet": "0x92d0cb81e6c891b835c8e0272e8c323095bd269e",
+        "n": 39,
+        "wr": 0.41,
+        "total": -10.64,
+        "avg": -0.2729,
+        "ex_top3_ev": -1.0564,
+        "qualifies": false
+      },
+      {
+        "wallet": "0x7e35a2a8cfd1eb1e69dacd043206db5a787f1a6c",
+        "n": 92,
+        "wr": 0.391,
+        "total": -28.59,
+        "avg": -0.3107,
+        "ex_top3_ev": -1.1071,
+        "qualifies": false
+      },
+      {
+        "wallet": "0xefde9ff487fae209ab6e3157a8acb4276f9c783d",
+        "n": 94,
+        "wr": 0.426,
+        "total": -31.41,
+        "avg": -0.3342,
+        "ex_top3_ev": -1.1128,
+        "qualifies": false
+      },
+      {
+        "wallet": "0xbaa2bcb5439e985ce4ccf815b4700027d1b92c73",
+        "n": 66,
+        "wr": 0.409,
+        "total": -33.31,
+        "avg": -0.5047,
+        "ex_top3_ev": -1.1497,
+        "qualifies": false
+      },
+      {
+        "wallet": "0x4478d7bd8a295691ac84f60a5ec2b47e122102a4",
+        "n": 57,
+        "wr": 0.474,
+        "total": 21.21,
+        "avg": 0.3721,
+        "ex_top3_ev": -1.1655,
+        "qualifies": false
+      }
+    ]
+  }
+}

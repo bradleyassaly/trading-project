@@ -163,6 +163,14 @@ class PolymarketLiveExecutor:
     #   verdict KILL — worst live signal, largest booked losses on 7/2.
     LIVE_KILL_SIGNAL_TYPES: set[str] = {
         "wallet_reversal",
+        # 2026-07-07 C1+C2 pre-registered KILL: 120d fill-modeled diagnostic,
+        # 118,646 copies / 787 wallets at min_n / ZERO qualified — no
+        # copyable cohort exists (run-1's "+$6.82 scalper cohort" was an 83%
+        # survivorship artifact). Independently, the C4 regime monitor has
+        # this signal in DRIFT_BREACH (30d EV -54.8%/$, entire CI < 0).
+        # Copy-ENTRY is retired per reports/mirror_copy_kill_rule.md; the
+        # wallet graph remains a feature source; paper keeps collecting.
+        "whale_entry_filtered",
     }
 
     # ALWAYS True in source. Flip in your local instance only.
