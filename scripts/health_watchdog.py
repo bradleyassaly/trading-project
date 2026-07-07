@@ -56,6 +56,23 @@ SCHEDULER_STALE_MULTIPLIER = 3
 # stack starts at once. Covers FastAPI boot + DB ready + initial healthcheck.
 STARTUP_GRACE_SECONDS = 120
 
+# N1 dead-man's-switch SLA thresholds.
+BALANCE_SNAPSHOT_STALE_S = int(os.environ.get("WATCHDOG_BALANCE_STALE_S", str(2 * 3600)))
+POLLER_STALE_S = int(os.environ.get("WATCHDOG_POLLER_STALE_S", str(15 * 60)))
+RECONCILE_MAX_AGE_S = int(os.environ.get("WATCHDOG_RECONCILE_MAX_AGE_S", str(26 * 3600)))
+# Components severe enough to auto-HALT live trading (write KILL_SWITCH_ACTIVE)
+# on sustained failure. Only balance_staleness: a frozen/stale balance API
+# means our equity and therefore our sizing is flat-out wrong — new entries
+# must stop. reconcile drift is a loud ALERT (investigate) but NOT an auto-halt:
+# the reconciler runs only every 4h, so a transient drift would wrongly halt
+# for hours, and real losses are already covered by the kill-switch breakers.
+_SEVERE_HALT_COMPONENTS = {"balance_staleness"}
+# Auto-halt requires MORE sustained failure than a plain alert, so a single
+# blip never trips the kill switch.
+HALT_CONSECUTIVE_FAILURES = int(os.environ.get("WATCHDOG_HALT_FAILURES", "4"))
+# Daily "still alive" ping cadence — silence then means the watchdog is dead.
+ALIVE_PING_INTERVAL_S = int(os.environ.get("WATCHDOG_ALIVE_PING_S", str(24 * 3600)))
+
 
 @dataclass
 class ComponentState:
@@ -348,8 +365,137 @@ def check_scheduler_consecutive_failures() -> ComponentState:
     return ComponentState("scheduler_failures", True, "no sustained failures")
 
 
+def _watchdog_pg():
+    """Open a short-lived psycopg connection using the watchdog's env, or
+    None if the sqlite backend is active or psycopg is unavailable."""
+    if os.environ.get("DB_BACKEND", "postgres").lower() != "postgres":
+        return None
+    import psycopg
+    return psycopg.connect(
+        host=os.environ.get("POSTGRES_HOST", "postgres"),
+        port=int(os.environ.get("POSTGRES_PORT", "5432")),
+        user=os.environ.get("POSTGRES_USER", "polymarket"),
+        password=os.environ.get("POSTGRES_PASSWORD", "polymarket_dev"),
+        dbname=os.environ.get("POSTGRES_DB", "polymarket"),
+        connect_timeout=3,
+    )
+
+
+def check_balance_staleness() -> ComponentState:
+    """The equity/balance view must be fresh AND moving. A frozen usdc_balance
+    across many snapshots is the documented stale-balance-API failure (froze at
+    $5.43 for 20 runs). Either mode makes our equity/sizing untrustworthy."""
+    name = "balance_staleness"
+    try:
+        conn = _watchdog_pg()
+        if conn is None:
+            return ComponentState(name, True, "skipped (sqlite backend)")
+        with conn:
+            rows = conn.execute(
+                "SELECT ts, usdc_balance FROM live_equity_snapshots "
+                "ORDER BY ts DESC LIMIT 8"
+            ).fetchall()
+        if not rows:
+            return ComponentState(name, False, "no equity snapshots")
+        age = time.time() - int(rows[0][0])
+        if age > BALANCE_SNAPSHOT_STALE_S:
+            return ComponentState(name, False,
+                                  f"no fresh equity snapshot in {age/60:.0f}m")
+        vals = [float(r[1]) for r in rows if r[1] is not None]
+        if len(vals) >= 6 and max(vals) - min(vals) < 1e-9:
+            span_h = (int(rows[0][0]) - int(rows[-1][0])) / 3600
+            return ComponentState(
+                name, False,
+                f"usdc_balance frozen at ${vals[0]:.2f} across {len(vals)} "
+                f"snapshots (~{span_h:.1f}h) — balance API likely stale")
+        return ComponentState(name, True, f"fresh ({age/60:.0f}m), moving")
+    except Exception as e:
+        return ComponentState(name, False, f"check err: {str(e)[:80]}")
+
+
+def check_poller_freshness() -> ComponentState:
+    """Wallet-trade ingestion must be recent — the poller writes synced_at on
+    every ingested trade. Stale ingestion means the copy/whale lanes are blind."""
+    name = "poller_freshness"
+    try:
+        conn = _watchdog_pg()
+        if conn is None:
+            return ComponentState(name, True, "skipped (sqlite backend)")
+        with conn:
+            row = conn.execute("SELECT MAX(synced_at) FROM wallet_trades").fetchone()
+        last = int(row[0]) if row and row[0] else 0
+        if not last:
+            return ComponentState(name, False, "no wallet_trades ingested")
+        age = time.time() - last
+        if age > POLLER_STALE_S:
+            return ComponentState(name, False,
+                                  f"no wallet-trade ingestion in {age/60:.0f}m")
+        return ComponentState(name, True, f"ingested {age/60:.0f}m ago")
+    except Exception as e:
+        return ComponentState(name, False, f"check err: {str(e)[:80]}")
+
+
+def check_reconcile_age() -> ComponentState:
+    """Days since reconcile_polymarket_truth last ran CLEAN (exit 0 = zero
+    drifts). A long gap means our ledger may silently diverge from on-chain."""
+    name = "reconcile_age"
+    if not SCHEDULER_STATE.exists():
+        return ComponentState(name, True, "no state file (skipped)")
+    try:
+        data = json.loads(SCHEDULER_STATE.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return ComponentState(name, False, f"bad state: {exc}")
+    task = next((t for t in data.get("tasks", [])
+                 if t.get("name") == "reconcile_polymarket_truth"), None)
+    if not task:
+        return ComponentState(name, True, "reconcile task not tracked")
+    last_run = task.get("last_run_at")
+    status = task.get("last_status")
+    if last_run is None:
+        return ComponentState(name, False, "reconcile has never run")
+    age = time.time() - float(last_run)
+    # 'failed' = the reconciler exits 2 on drift; that's an outstanding drift.
+    if status == "failed":
+        return ComponentState(name, False,
+                              f"reconcile drift OUTSTANDING (last run {age/3600:.0f}h ago)")
+    if age > RECONCILE_MAX_AGE_S:
+        return ComponentState(name, False,
+                              f"no clean reconcile in {age/3600:.0f}h")
+    return ComponentState(name, True, f"clean {age/3600:.0f}h ago")
+
+
+def _trip_kill_switch(reason: str) -> None:
+    """Write the KILL_SWITCH_ACTIVE flag via the canonical kill_switch API so
+    the live executor halts new entries. Idempotent-ish (emergency_stop just
+    rewrites the flag)."""
+    try:
+        from trading_platform.polymarket.kill_switch import KillSwitch
+        ks = KillSwitch(str(DB_PATH))
+        already, _ = ks.is_emergency_stopped()
+        if not already:
+            ks.emergency_stop(reason=reason)
+            logger.warning("[deadman] AUTO-HALT engaged: %s", reason)
+            _send_alert(
+                f"\U0001f6d1 <b>AUTO-HALT</b>\nLive trading halted by watchdog\n"
+                f"Reason: {reason}\nClear via /api or remove data/KILL_SWITCH_ACTIVE "
+                f"once resolved.", loud=True)
+    except Exception as exc:
+        logger.error("[deadman] failed to trip kill switch: %s", exc)
+
+
 def main() -> None:
     startup_ts = time.time()
+    # N1 (d): warn loudly at startup if the off-host dead-man's switch is unarmed.
+    if not HEARTBEAT_PING_URL:
+        logger.warning(
+            "[deadman] HEARTBEAT_PING_URL UNSET — a host-down event (power "
+            "off / crash / network loss) is NOT detectable off-host. Set it to "
+            "a healthchecks.io ping URL in .env.")
+        _send_alert(
+            "⚠️ <b>Dead-man's switch UNARMED</b>\nHEARTBEAT_PING_URL is "
+            "not set — if the host dies, nothing off-host will notice. Set it to "
+            "a healthchecks.io URL in .env.", loud=True)
+    _last_alive_ping = time.time()
     logger.info(
         "health watchdog starting (poll %ds, %d consecutive failures to alert, %ds grace)",
         POLL_INTERVAL_SECONDS, CONSECUTIVE_FAILURES_TO_ALERT, STARTUP_GRACE_SECONDS,
@@ -361,7 +507,9 @@ def main() -> None:
         states = [check_api(), check_db(), check_scheduler(),
                   check_live_collect(), check_wallet_stream(), check_disk(),
                   check_hypothesis_drift(),
-                  check_scheduler_consecutive_failures()]
+                  check_scheduler_consecutive_failures(),
+                  check_balance_staleness(), check_poller_freshness(),
+                  check_reconcile_age()]
         in_grace = (now - startup_ts) < STARTUP_GRACE_SECONDS
         if in_grace and any(not s.healthy for s in states):
             logger.info("[grace] suppressed alerts during startup window")
@@ -405,6 +553,22 @@ def main() -> None:
                 logger.info("[recover] %s back online", s.name)
                 _send_alert(msg, loud=False)
                 failure_state.pop(s.name, None)
+
+            # N1 (b): auto-HALT on SUSTAINED failure of a SEVERE component
+            # (untrustworthy balance/reconcile state). Higher threshold than a
+            # plain alert so a single blip never trips the kill switch.
+            if (not s.healthy and s.name in _SEVERE_HALT_COMPONENTS
+                    and fail_count.get(s.name, 0) >= HALT_CONSECUTIVE_FAILURES
+                    and not in_grace):
+                _trip_kill_switch(f"{s.name}: {s.detail[:120]}")
+
+        # N1 (c): daily "still alive" ping — silence itself becomes the alarm.
+        if now - _last_alive_ping >= ALIVE_PING_INTERVAL_S:
+            _last_alive_ping = now
+            healthy_n = sum(1 for s in states if s.healthy)
+            _send_alert(
+                f"\U0001f7e2 <b>Watchdog alive</b> — {healthy_n}/{len(states)} "
+                f"components healthy\n\n" + format_status(states), loud=False)
 
         time.sleep(POLL_INTERVAL_SECONDS)
 
