@@ -22,12 +22,20 @@ from __future__ import annotations
 import bisect
 import json
 import logging
+import os
 import time
 from typing import Any
 
 from trading_platform.polymarket.db_connection import get_connection
 
 logger = logging.getLogger(__name__)
+
+# N4 (2026-07-07): champion/challenger holdout. Fit on the older train slice,
+# gate persistence on the NEWEST tail (out-of-sample). An in-sample Brier
+# always improves under isotonic regression, so the old in-sample gate
+# persisted curves that memorized noise (the degenerate-collapse incidents).
+# Clamped to a sane band.
+HOLDOUT_FRAC = min(0.4, max(0.15, float(os.environ.get("CALIB_HOLDOUT_FRAC", "0.25"))))
 
 
 _SCHEMA = """
@@ -133,7 +141,8 @@ def fit_calibration(
                           AND resolved_at > ?
                           AND hypothesis_correct IN (0, 1)
                           AND alpha_score IS NOT NULL
-                          AND category = ?""",
+                          AND category = ?
+                        ORDER BY resolved_at ASC""",
                     (cutoff, category),
                 ).fetchall()
             else:
@@ -143,7 +152,8 @@ def fit_calibration(
                         WHERE resolved_at IS NOT NULL
                           AND resolved_at > ?
                           AND hypothesis_correct IN (0, 1)
-                          AND alpha_score IS NOT NULL""",
+                          AND alpha_score IS NOT NULL
+                        ORDER BY resolved_at ASC""",
                     (cutoff,),
                 ).fetchall()
         except Exception as exc:
@@ -173,31 +183,38 @@ def fit_calibration(
                           AND confidence_raw IS NOT NULL"""
                 if category:
                     rows = conn.execute(
-                        _paper_sql + " AND category = ?", (cutoff, category),
+                        _paper_sql + " AND category = ? ORDER BY exit_ts ASC",
+                        (cutoff, category),
                     ).fetchall()
                 else:
-                    rows = conn.execute(_paper_sql, (cutoff,)).fetchall()
+                    rows = conn.execute(
+                        _paper_sql + " ORDER BY exit_ts ASC", (cutoff,)).fetchall()
                 source = "polymarket_paper_trades"
             except Exception as exc:
                 return {"error": f"paper fallback query: {exc}"}
 
-        if len(rows) < 20:
+        # N4: time-ordered champion/challenger. Fit on the older TRAIN slice,
+        # judge on the NEWEST holdout tail. Require both partitions be big
+        # enough for their Briers to mean anything.
+        _n = len(rows)
+        split_idx = _n - max(8, int(round(_n * HOLDOUT_FRAC)))
+        train_rows = rows[:split_idx]
+        holdout_rows = rows[split_idx:]
+        if len(train_rows) < 20 or len(holdout_rows) < 8:
             return {
-                "n": len(rows),
-                "skipped": "need n>=20 for stable isotonic fit",
+                "n": _n, "n_train": len(train_rows), "n_holdout": len(holdout_rows),
+                "skipped": "need train>=20 and holdout>=8 for OOS gate",
                 "source": source,
                 "elapsed_seconds": round(time.time() - t0, 1),
             }
 
-        xs = [max(0.0, min(1.0, float(r[0]))) for r in rows]
-        ys = [int(r[1]) for r in rows]
+        xs_tr = [max(0.0, min(1.0, float(r[0]))) for r in train_rows]
+        ys_tr = [int(r[1]) for r in train_rows]
+        xs_ho = [max(0.0, min(1.0, float(r[0]))) for r in holdout_rows]
+        ys_ho = [int(r[1]) for r in holdout_rows]
 
-        # Brier before
-        brier_before = sum((xs[i] - ys[i]) ** 2 for i in range(len(xs))) / len(xs)
-
-        breakpoints = isotonic_regression(xs, ys)
-
-        # Brier after — apply curve to xs and recompute
+        # Fit on TRAIN only.
+        breakpoints = isotonic_regression(xs_tr, ys_tr)
         bp_x = [b[0] for b in breakpoints]
         bp_y = [b[1] for b in breakpoints]
 
@@ -209,9 +226,16 @@ def fit_calibration(
                 return bp_y[0]
             return bp_y[i]
 
-        brier_after = sum(
-            (_apply(xs[i]) - ys[i]) ** 2 for i in range(len(xs))
-        ) / len(xs)
+        # In-sample (train) Brier — persisted for back-compat/logging only.
+        brier_before = sum((xs_tr[i] - ys_tr[i]) ** 2 for i in range(len(xs_tr))) / len(xs_tr)
+        brier_after = sum((_apply(xs_tr[i]) - ys_tr[i]) ** 2 for i in range(len(xs_tr))) / len(xs_tr)
+
+        # OUT-OF-SAMPLE (holdout) Briers — what the gate actually checks.
+        # p_base is the TRAIN win-rate (a legitimate OOS base-rate null).
+        p_base = sum(ys_tr) / len(ys_tr)
+        brier_ho_before = sum((xs_ho[i] - ys_ho[i]) ** 2 for i in range(len(xs_ho))) / len(xs_ho)
+        brier_ho_after = sum((_apply(xs_ho[i]) - ys_ho[i]) ** 2 for i in range(len(xs_ho))) / len(xs_ho)
+        brier_ho_null = sum((p_base - ys_ho[i]) ** 2 for i in range(len(xs_ho))) / len(xs_ho)
 
         now = int(time.time())
         breakpoints_json = json.dumps(
@@ -235,10 +259,18 @@ def fit_calibration(
         # never map above 50%, breaking every conf>0.5 gate downstream.
         too_compressed = bp_max < 0.65
         too_small = len(rows) < 50
-        if brier_after >= brier_before * 0.99:
+        # N4: the primary gate is now OUT-OF-SAMPLE. The challenger (calibrated
+        # curve) must beat both the raw confidence AND the base-rate null on
+        # the held-out newest tail. An in-sample Brier always improves under
+        # isotonic regression, so the old in-sample gate rubber-stamped
+        # noise-memorizing curves.
+        oos_improved = (brier_ho_after < brier_ho_before * 0.99
+                        and brier_ho_after < brier_ho_null)
+        if not oos_improved:
             logger.info(
-                "[CALIB] %s curve not persisted (Brier %.4f → %.4f, no improvement)",
-                category or "GLOBAL", brier_before, brier_after,
+                "[CALIB] %s curve not persisted (holdout Brier raw=%.4f null=%.4f "
+                "cal=%.4f — no OOS improvement)",
+                category or "GLOBAL", brier_ho_before, brier_ho_null, brier_ho_after,
             )
         elif too_flat:
             logger.warning(
@@ -260,29 +292,41 @@ def fit_calibration(
             )
         else:
             try:
+                # Persist the HOLDOUT Briers (what the gate is on) so
+                # downstream displays reflect out-of-sample quality.
                 conn.execute(
                     """INSERT INTO alpha_calibration_curve
                          (fitted_at, n_samples, breakpoints_json,
                           brier_before, brier_after, window_days, category)
                        VALUES (?,?,?,?,?,?,?)""",
-                    (now, len(rows), breakpoints_json,
-                     round(brier_before, 6), round(brier_after, 6),
+                    (now, len(train_rows), breakpoints_json,
+                     round(brier_ho_before, 6), round(brier_ho_after, 6),
                      window_days, category),
                 )
                 conn.commit()
+                logger.info(
+                    "[CALIB] %s curve PERSISTED (holdout raw=%.4f null=%.4f cal=%.4f, "
+                    "train=%d holdout=%d)",
+                    category or "GLOBAL", brier_ho_before, brier_ho_null,
+                    brier_ho_after, len(train_rows), len(holdout_rows),
+                )
             except Exception as exc:
                 logger.warning("calibration curve persist failed: %s", exc)
 
         return {
             "elapsed_seconds": round(time.time() - t0, 1),
             "n": len(rows),
+            "n_train": len(train_rows),
+            "n_holdout": len(holdout_rows),
             "source": source,
             "n_breakpoints": len(breakpoints),
-            "brier_before": round(brier_before, 4),
-            "brier_after": round(brier_after, 4),
-            "improvement_pct": round(
-                100 * (brier_before - brier_after) / max(brier_before, 1e-6), 1,
-            ),
+            "brier_train_before": round(brier_before, 4),
+            "brier_train_after": round(brier_after, 4),
+            "brier_holdout_raw": round(brier_ho_before, 4),
+            "brier_holdout_null": round(brier_ho_null, 4),
+            "brier_holdout_cal": round(brier_ho_after, 4),
+            "oos_improved": bool(brier_ho_after < brier_ho_before * 0.99
+                                 and brier_ho_after < brier_ho_null),
             "breakpoints_json_preview": breakpoints_json[:300],
         }
     finally:
@@ -337,23 +381,32 @@ def fit_calibration_per_slice(
                     WHERE dry_run=0 AND exit_ts >= ?
                       AND outcome IN ('win','loss')
                       AND confidence_raw IS NOT NULL
-                      AND signal_type = ? AND direction = ?""",
+                      AND signal_type = ? AND direction = ?
+                    ORDER BY exit_ts ASC""",
                 (cutoff, signal_type, direction),
             ).fetchall()
         except Exception as exc:
             return {"error": f"query: {exc}"}
 
-        if len(rows) < 15:
+        # N4: time-ordered holdout, same as the global fit (smaller floors:
+        # per-slice live volume is scarcer, so train>=15 / holdout>=6).
+        _n = len(rows)
+        split_idx = _n - max(6, int(round(_n * HOLDOUT_FRAC)))
+        train_rows = rows[:split_idx]
+        holdout_rows = rows[split_idx:]
+        if len(train_rows) < 15 or len(holdout_rows) < 6:
             return {
                 "signal_type": signal_type, "direction": direction,
-                "n": len(rows), "skipped": "need n>=15",
+                "n": _n, "n_train": len(train_rows), "n_holdout": len(holdout_rows),
+                "skipped": "need train>=15 and holdout>=6",
             }
 
-        xs = [max(0.0, min(1.0, float(r[0]))) for r in rows]
-        ys = [int(r[1]) for r in rows]
+        xs_tr = [max(0.0, min(1.0, float(r[0]))) for r in train_rows]
+        ys_tr = [int(r[1]) for r in train_rows]
+        xs_ho = [max(0.0, min(1.0, float(r[0]))) for r in holdout_rows]
+        ys_ho = [int(r[1]) for r in holdout_rows]
 
-        brier_before = sum((xs[i] - ys[i]) ** 2 for i in range(len(xs))) / len(xs)
-        breakpoints = isotonic_regression(xs, ys)
+        breakpoints = isotonic_regression(xs_tr, ys_tr)
         bp_x = [b[0] for b in breakpoints]
         bp_y = [b[1] for b in breakpoints]
 
@@ -362,20 +415,29 @@ def fit_calibration_per_slice(
             i = bisect.bisect_right(bp_x, x) - 1
             return bp_y[0] if i < 0 else bp_y[i]
 
-        brier_after = sum((_apply(xs[i]) - ys[i]) ** 2 for i in range(len(xs))) / len(xs)
-        improvement = brier_before - brier_after
+        brier_before = sum((xs_tr[i] - ys_tr[i]) ** 2 for i in range(len(xs_tr))) / len(xs_tr)
+        brier_after = sum((_apply(xs_tr[i]) - ys_tr[i]) ** 2 for i in range(len(xs_tr))) / len(xs_tr)
+        p_base = sum(ys_tr) / len(ys_tr)
+        brier_ho_before = sum((xs_ho[i] - ys_ho[i]) ** 2 for i in range(len(xs_ho))) / len(xs_ho)
+        brier_ho_after = sum((_apply(xs_ho[i]) - ys_ho[i]) ** 2 for i in range(len(xs_ho))) / len(xs_ho)
+        brier_ho_null = sum((p_base - ys_ho[i]) ** 2 for i in range(len(xs_ho))) / len(xs_ho)
 
-        # Guards — same shape as global fit
+        # Guards — flat-curve on the train fit; persistence on OOS holdout.
         bp_range = (max(bp_y) - min(bp_y)) if bp_y else 0
         bp_max = max(bp_y) if bp_y else 0
         if bp_range < 0.15:
             return {"signal_type": signal_type, "direction": direction,
-                    "n": len(rows), "skipped": f"flat curve (bp_range={bp_range:.2f})"}
-        if improvement <= 0.005:
+                    "n": _n, "skipped": f"flat curve (bp_range={bp_range:.2f})"}
+        # Absolute holdout improvement (per-slice contract, not relative) AND
+        # beat the base-rate null.
+        if not (brier_ho_before - brier_ho_after > 0.005
+                and brier_ho_after < brier_ho_null):
             return {"signal_type": signal_type, "direction": direction,
-                    "n": len(rows), "skipped": "no Brier improvement",
-                    "brier_before": round(brier_before, 4),
-                    "brier_after": round(brier_after, 4)}
+                    "n": _n, "n_train": len(train_rows), "n_holdout": len(holdout_rows),
+                    "skipped": "no OOS holdout improvement",
+                    "brier_holdout_raw": round(brier_ho_before, 4),
+                    "brier_holdout_null": round(brier_ho_null, 4),
+                    "brier_holdout_cal": round(brier_ho_after, 4)}
 
         now = int(time.time())
         breakpoints_json = json.dumps(
@@ -388,23 +450,24 @@ def fit_calibration_per_slice(
                       brier_before, brier_after, window_days,
                       category, signal_type, direction)
                    VALUES (?,?,?,?,?,?,?,?,?)""",
-                (now, len(rows), breakpoints_json,
-                 round(brier_before, 6), round(brier_after, 6),
+                (now, len(train_rows), breakpoints_json,
+                 round(brier_ho_before, 6), round(brier_ho_after, 6),
                  window_days, None, signal_type, direction),
             )
             conn.commit()
-            logger.info("[CALIB][PER_SLICE] %s/%s n=%d Brier %.3f→%.3f",
-                        signal_type, direction, len(rows),
-                        brier_before, brier_after)
+            logger.info("[CALIB][PER_SLICE] %s/%s PERSISTED holdout raw=%.3f "
+                        "null=%.3f cal=%.3f (train=%d holdout=%d)",
+                        signal_type, direction, brier_ho_before, brier_ho_null,
+                        brier_ho_after, len(train_rows), len(holdout_rows))
         except Exception as exc:
             logger.warning("per-slice calibration persist failed: %s", exc)
 
         return {
             "signal_type": signal_type, "direction": direction,
-            "n": len(rows),
-            "brier_before": round(brier_before, 4),
-            "brier_after": round(brier_after, 4),
-            "improvement_pct": round(100 * improvement / max(brier_before, 1e-6), 1),
+            "n": _n, "n_train": len(train_rows), "n_holdout": len(holdout_rows),
+            "brier_holdout_raw": round(brier_ho_before, 4),
+            "brier_holdout_null": round(brier_ho_null, 4),
+            "brier_holdout_cal": round(brier_ho_after, 4),
             "n_breakpoints": len(breakpoints),
             "elapsed_seconds": round(time.time() - t0, 1),
         }
