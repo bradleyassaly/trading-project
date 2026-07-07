@@ -32,12 +32,30 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
-# Polymarket CTFExchange + USDC on Polygon. CTFExchange is the order
-# matcher — every trade causes USDC to move to/from this contract.
+# Polymarket exchange contracts on Polygon. The exchange is the order
+# matcher — every trade emits OrderFilled from one of these.
+#
+# V1 (dead): Polymarket migrated off these ~mid-June 2026 — eth_getLogs shows
+# ZERO logs on them while every live fill routes through the V2 vanity
+# deploys below. This is what actually darkened the fast lane for a week
+# (discovered 2026-07-07 by pulling receipts of our own fills).
 CTF_EXCHANGE = "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E"
 NEG_RISK_CTF_EXCHANGE = "0xC5d563A36AE78145C45a50134d48A1215220f80a"
+# V2 (live): vanity-address redeploys ("e111…" exchange, "e2222…" neg-risk),
+# verified 2026-07-07 against receipts of our watched wallets' fills.
+CTF_EXCHANGE_V2 = "0xe111180000d2663c0091e4f400237545b87b996b"
+NEG_RISK_CTF_EXCHANGE_V2 = "0xe2222d279d744050d28e00520010520000310f59"
+# All four, lowercase: public bor endpoints match `address` filters
+# case-sensitively (logs carry lowercase addresses), so checksummed
+# addresses in a filter silently match nothing.
+EXCHANGES = [a.lower() for a in (
+    CTF_EXCHANGE, NEG_RISK_CTF_EXCHANGE,
+    CTF_EXCHANGE_V2, NEG_RISK_CTF_EXCHANGE_V2,
+)]
 USDC_E = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"  # bridged, original
 USDC_NATIVE = "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359"  # native Polygon
+# V2 collateral ("c011a7e" ≈ collate[ral]): fills move this token, not USDC.
+COLLATERAL_V2 = "0xc011a7e12a19f7b1f670d46f03b03f3342e82dfb"
 TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
 # OrderFilled(bytes32 orderHash, address maker, address taker,
 #   uint256 makerAssetId, uint256 takerAssetId, uint256 makerAmountFilled,
@@ -45,6 +63,48 @@ TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523
 # Indexed: orderHash, maker, taker  → topics[1], topics[2], topics[3]
 # Non-indexed: 5 uint256 in data (makerAssetId, takerAssetId, makerAmount, takerAmount, fee)
 ORDER_FILLED_TOPIC = "0xd0a08e8c493f9c94f29311604c9de1b4e8c8d4c06bd0c789af57f2d65bfec0f6"
+# V2 OrderFilled: same indexed layout (orderHash, maker, taker) and the same
+# first four data words (makerAssetId, takerAssetId, makerAmountFilled,
+# takerAmountFilled); 7 data words total (verified against a known fill:
+# BUY 10 @ 0.99 decoded as its 0.01 complement leg on the neg-risk V2).
+ORDER_FILLED_TOPIC_V2 = "0xd543adfd945773f1a62f74f0ee55a5e3b9b1a28262980ba90b1a89f2ea84d8ee"
+ORDER_FILLED_TOPICS = [ORDER_FILLED_TOPIC, ORDER_FILLED_TOPIC_V2]
+
+# Endpoint failover pool. POLYGON_WS_URL/POLYGON_WSS_URL may be a comma-
+# separated list; these defaults are appended so a single flaky public
+# endpoint (drpc dropped every ~5 min for a week, 2026-06-30 → 07-07,
+# delivering ZERO events the whole time) can't silently kill the lane.
+DEFAULT_WS_URLS = [
+    "wss://polygon-bor-rpc.publicnode.com",
+    "wss://polygon.drpc.org",
+]
+
+# If a provider accepts our subscriptions but delivers nothing for this
+# long, assume the subscription is broken (some public RPCs ack
+# eth_subscribe filters they never serve) and rotate/escalate.
+SILENCE_REBOOT_SEC = int(os.environ.get("WS_SILENCE_REBOOT_SEC", "900"))
+
+
+def _parse_ws_urls() -> list[str]:
+    """Endpoint pool: env list first (priority order), defaults appended."""
+    raw = os.environ.get("POLYGON_WS_URL") or os.environ.get("POLYGON_WSS_URL") or ""
+    urls = [u.strip() for u in raw.split(",") if u.strip()]
+    for d in DEFAULT_WS_URLS:
+        if d not in urls:
+            urls.append(d)
+    return urls
+
+
+def _health_status(stats: dict, now: float, silence_sec: int = SILENCE_REBOOT_SEC) -> str:
+    """Heartbeat status. The old heartbeat wrote 'ok' unconditionally, so a
+    week of events=0 looked healthy to the watchdog. Degraded means: the
+    process is alive but the lane is not delivering."""
+    if stats.get("subscribe_errors", 0) > 0 and stats.get("events_seen", 0) == 0:
+        return "degraded"
+    last = stats.get("last_event_ts") or stats.get("started_at", now)
+    if (now - last) > silence_sec:
+        return "degraded"
+    return "ok"
 
 
 def _pad_addr(a: str) -> str:
@@ -87,13 +147,22 @@ def _load_watched_wallets() -> set[str]:
 class WalletStream:
     """Single-provider Polygon WS listener with auto-reconnect."""
 
-    def __init__(self, ws_url: str, watched: set[str]):
-        self.ws_url = ws_url
+    def __init__(self, ws_url: str | list[str], watched: set[str]):
+        self.ws_urls = [ws_url] if isinstance(ws_url, str) else list(ws_url)
+        self.ws_url = self.ws_urls[0]  # legacy attr, kept for callers/tests
         self.watched = {w.lower() for w in watched}
         self.dedup_window = int(os.environ.get("WS_DEDUP_WINDOW_SEC", "10"))
         self._last_poll: dict[str, float] = {}  # wallet → last-trigger ts
         self._fetcher = None
         self._reconnect_requested = False
+        # Escalation state: once a provider proves it won't serve the narrow
+        # 450-address topic filter, subscribe broad (OrderFilled on the two
+        # exchange contracts only) and filter client-side. Broad is free on
+        # public endpoints; metered users set WS_ALLOW_BROAD=0.
+        self._force_broad = os.environ.get("WS_FORCE_BROAD", "0").lower() in ("1", "true", "yes")
+        self._allow_broad = os.environ.get("WS_ALLOW_BROAD", "1").lower() in ("1", "true", "yes")
+        self._consec_failures = 0
+        self._events_this_conn = 0
         # token_id → (cached_at, meta|None). Local markets-table lookups for
         # chain-direct dispatch; None is cached too so unknown tokens don't
         # hammer the DB on every fill.
@@ -105,49 +174,132 @@ class WalletStream:
             "chain_direct_dispatches": 0,
             "chain_direct_misses": 0,
             "reconnects": 0,
+            "subscribe_errors": 0,
+            "silence_reboots": 0,
+            "last_event_ts": time.time(),
+            "mode": "narrow",
+            "endpoint": self.ws_url,
             "started_at": time.time(),
         }
 
-    async def _subscribe(self, ws) -> None:
-        """Register narrow Transfer subscriptions filtered to watched wallets.
+    def _broad_sub_msgs(self) -> list[dict]:
+        """Broad-mode subscription: OrderFilled on the two exchange contracts
+        with NO wallet topic filter — the handlers already filter maker/taker
+        against self.watched client-side. This is the fallback for providers
+        that reject or silently ignore the 450-address narrow filter.
 
-        Critical for free tier survival: passing the watched-wallet set
-        into the topic filter means the provider only delivers events
-        matching our wallets (~1–3/sec) instead of the full CTFExchange
-        flow (~168/sec). First version of this file used the broad filter
-        and burned 300M CU of Alchemy credits in ~25 min.
+        Deliberately does NOT include the broad USDC Transfer filter (all of
+        Polygon's USDC flow — that is what burned 300M Alchemy CU in 25 min).
+        OrderFilled on the exchanges is all Polymarket trades (~tens/sec),
+        which the chain-direct path needs anyway; Transfer only added
+        payout/redeem poll triggers, which the REST poller still covers.
+        """
+        return [
+            {
+                "jsonrpc": "2.0", "id": 10, "method": "eth_subscribe",
+                "params": [
+                    "logs",
+                    {
+                        "address": EXCHANGES,
+                        "topics": [ORDER_FILLED_TOPICS],
+                    },
+                ],
+            },
+        ]
+
+    async def _await_sub_confirms(self, ws, expected_ids: list,
+                                  timeout: float = 10.0) -> dict:
+        """Read frames until every eth_subscribe request id has a response.
+
+        The original code fired the subscribe messages and never read the
+        responses, so a provider rejecting the filter (or acking with an
+        error) left us 'listening' on nothing — the exact failure mode that
+        kept the fast lane dark for a week. Subscription events that arrive
+        interleaved are routed to the normal handler.
+
+        Returns {request_id: error_dict} — empty means all confirmed.
+        """
+        pending = set(expected_ids)
+        errors: dict = {}
+        deadline = time.time() + timeout
+        while pending and time.time() < deadline:
+            try:
+                raw = await asyncio.wait_for(
+                    ws.recv(), timeout=max(0.1, deadline - time.time()))
+            except asyncio.TimeoutError:
+                break
+            try:
+                msg = json.loads(raw)
+            except (ValueError, TypeError):
+                continue
+            if msg.get("method") == "eth_subscription":
+                await self._handle_log(msg.get("params") or {})
+                continue
+            mid = msg.get("id")
+            if mid in pending:
+                pending.discard(mid)
+                if "error" in msg:
+                    errors[mid] = msg["error"]
+                elif not msg.get("result"):
+                    errors[mid] = {"message": f"empty result: {msg!r}"[:200]}
+        for mid in pending:
+            errors[mid] = {"message": "no response before timeout"}
+        return errors
+
+    async def _subscribe(self, ws, broad: bool = False) -> dict:
+        """Register subscriptions; validate every response.
+
+        Narrow mode filters to watched wallets in the topic arrays —
+        critical for free tier survival on metered providers: the provider
+        only delivers events matching our wallets (~1–3/sec) instead of the
+        full CTFExchange flow (~168/sec). First version of this file used
+        the broad filter and burned 300M CU of Alchemy credits in ~25 min.
 
         Each JSON-RPC log filter supports arrays at topic positions. We
         still need two subscriptions because we can't AND (from=wallet
         AND to=CTFExchange) OR (from=CTFExchange AND to=wallet) in a
         single filter — the AND is across positions, not OR.
+
+        Returns {request_id: error} for rejected/unanswered subscriptions.
         """
+        if broad:
+            logger.info(
+                "[wallet-stream] subscribing BROAD (OrderFilled on both "
+                "exchanges, client-side filter over %d wallets)",
+                len(self.watched),
+            )
+            sub_msgs = self._broad_sub_msgs()
+            for m in sub_msgs:
+                await ws.send(json.dumps(m))
+            return await self._await_sub_confirms(ws, [m["id"] for m in sub_msgs])
+
         watched_padded = [_pad_addr(w) for w in self.watched]
-        ctf_padded = _pad_addr(CTF_EXCHANGE)
+        exchanges_padded = [_pad_addr(a) for a in EXCHANGES]
+        collateral = [a.lower() for a in (USDC_E, USDC_NATIVE, COLLATERAL_V2)]
         logger.info(
             "[wallet-stream] subscribing with %d watched addresses in topic filter",
             len(watched_padded),
         )
         sub_msgs = [
-            # Wallet → CTFExchange (BUY side: we're sending USDC)
+            # Wallet → exchange (BUY side: wallet sends collateral)
             {
                 "jsonrpc": "2.0", "id": 1, "method": "eth_subscribe",
                 "params": [
                     "logs",
                     {
-                        "address": [USDC_E, USDC_NATIVE],
-                        "topics": [TRANSFER_TOPIC, watched_padded, ctf_padded],
+                        "address": collateral,
+                        "topics": [TRANSFER_TOPIC, watched_padded, exchanges_padded],
                     },
                 ],
             },
-            # CTFExchange → Wallet (SELL side or payouts)
+            # Exchange → wallet (SELL side or payouts)
             {
                 "jsonrpc": "2.0", "id": 2, "method": "eth_subscribe",
                 "params": [
                     "logs",
                     {
-                        "address": [USDC_E, USDC_NATIVE],
-                        "topics": [TRANSFER_TOPIC, ctf_padded, watched_padded],
+                        "address": collateral,
+                        "topics": [TRANSFER_TOPIC, exchanges_padded, watched_padded],
                     },
                 ],
             },
@@ -158,8 +310,8 @@ class WalletStream:
                 "params": [
                     "logs",
                     {
-                        "address": [CTF_EXCHANGE, NEG_RISK_CTF_EXCHANGE],
-                        "topics": [ORDER_FILLED_TOPIC, None, watched_padded],
+                        "address": EXCHANGES,
+                        "topics": [ORDER_FILLED_TOPICS, None, watched_padded],
                     },
                 ],
             },
@@ -170,14 +322,15 @@ class WalletStream:
                 "params": [
                     "logs",
                     {
-                        "address": [CTF_EXCHANGE, NEG_RISK_CTF_EXCHANGE],
-                        "topics": [ORDER_FILLED_TOPIC, None, None, watched_padded],
+                        "address": EXCHANGES,
+                        "topics": [ORDER_FILLED_TOPICS, None, None, watched_padded],
                     },
                 ],
             },
         ]
         for m in sub_msgs:
             await ws.send(json.dumps(m))
+        return await self._await_sub_confirms(ws, [m["id"] for m in sub_msgs])
 
     async def _handle_log(self, params: dict) -> None:
         """Route incoming log event by topic0 to the right handler."""
@@ -192,7 +345,9 @@ class WalletStream:
             logger.debug("log decode failed: %s", exc)
             return
 
-        if topic0 == ORDER_FILLED_TOPIC.lower():
+        if topic0 in (ORDER_FILLED_TOPIC.lower(), ORDER_FILLED_TOPIC_V2.lower()):
+            # V1 and V2 share the decode: same indexed (orderHash, maker,
+            # taker) and same first four data words; V2 just appends extras.
             await self._handle_order_filled(log, topics)
         elif topic0 == TRANSFER_TOPIC.lower():
             await self._handle_transfer(log, topics)
@@ -462,41 +617,127 @@ class WalletStream:
         """
         self._reconnect_requested = True
 
+    def _delivery_proven(self) -> None:
+        """First frame on this connection: the endpoint actually delivers.
+        Only THIS resets the barren-connection counter — resetting on a mere
+        successful subscribe would let drpc (acks everything, delivers
+        nothing, drops every ~5 min) evade rotation forever."""
+        if self._events_this_conn == 0:
+            self._consec_failures = 0
+        self._events_this_conn += 1
+
+    def _on_conn_lost(self, url: str) -> bool:
+        """Connection ended in error. Returns True if we should rotate.
+
+        A connection that died WITHOUT delivering a single frame is barren;
+        3 barren cycles in a row = the endpoint is broken for us regardless
+        of how politely it acked the subscriptions (the observed drpc mode:
+        subscribe ok → zero events → drop at ~5 min, forever). Escalates to
+        broad-mode client-side filtering so delivery becomes continuously
+        observable on the next endpoint."""
+        self._stats["reconnects"] += 1
+        if self._events_this_conn > 0:
+            return False
+        self._consec_failures += 1
+        if self._consec_failures < 3:
+            return False
+        logger.error(
+            "[wallet-stream] %d consecutive BARREN connections on %s "
+            "(subscribed fine, delivered nothing) — rotating endpoint%s",
+            self._consec_failures, url,
+            " and escalating to BROAD" if (self._allow_broad and not self._force_broad) else "",
+        )
+        if self._allow_broad and not self._force_broad:
+            self._force_broad = True
+        self._consec_failures = 0
+        return True
+
     async def run(self) -> None:
-        """Main reconnect loop."""
+        """Main reconnect loop with endpoint rotation + delivery watchdogs.
+
+        Failure modes handled (all observed live 2026-06-30 → 07-07, when
+        the lane sat dark for a week on wss://polygon.drpc.org):
+          * subscribe rejected → retry BROAD on same endpoint, else rotate
+          * 3 consecutive barren connections (subscribe ok, zero frames
+            delivered, then dropped) → rotate endpoint + escalate broad
+          * connected but ZERO frames for SILENCE_REBOOT_SEC on a
+            long-lived connection → rotate endpoint + escalate broad
+        """
         reconnect_delay = int(os.environ.get("WS_RECONNECT_DELAY", "5"))
         try:
             import websockets
         except ImportError as exc:
             raise RuntimeError("websockets lib required; pip install websockets") from exc
 
+        idx = 0
         while True:
+            url = self.ws_urls[idx % len(self.ws_urls)]
+            self.ws_url = url
+            self._stats["endpoint"] = url
+            self._events_this_conn = 0
+            mode = "broad" if (self._force_broad and self._allow_broad) else "narrow"
             try:
                 logger.info(
-                    "[wallet-stream] connecting (watching %d wallets) …",
-                    len(self.watched),
+                    "[wallet-stream] connecting to %s (watching %d wallets, mode=%s) …",
+                    url, len(self.watched), mode,
                 )
                 async with websockets.connect(
-                    self.ws_url, ping_interval=20, ping_timeout=10,
+                    url, ping_interval=20, ping_timeout=10,
                     # Default 1MB frame cap killed live_collector when its
                     # snapshot outgrew it (see live_collector 2026-07-06);
                     # same headroom here so a burst of matched logs can't
                     # 1009-loop the chain-direct lane.
                     max_size=16 * 1024 * 1024,
                 ) as ws:
-                    await self._subscribe(ws)
+                    errors = await self._subscribe(ws, broad=(mode == "broad"))
+                    if errors and mode == "narrow" and self._allow_broad:
+                        self._stats["subscribe_errors"] += len(errors)
+                        logger.error(
+                            "[wallet-stream] narrow subscribe REJECTED on %s: %s "
+                            "— retrying broad with client-side filtering",
+                            url, errors,
+                        )
+                        mode = "broad"
+                        errors = await self._subscribe(ws, broad=True)
+                    if errors:
+                        self._stats["subscribe_errors"] += len(errors)
+                        raise RuntimeError(f"subscribe failed: {errors}")
+                    self._stats["mode"] = mode
                     self._reconnect_requested = False
-                    logger.info("[wallet-stream] subscribed — listening")
-                    async for raw in ws:
+                    # Start the silence clock at subscribe, not process start.
+                    self._stats["last_event_ts"] = time.time()
+                    logger.info("[wallet-stream] subscribed (%s) — listening", mode)
+                    while True:
                         if self._reconnect_requested:
                             logger.info("[wallet-stream] reconnect requested — closing")
                             await ws.close()
                             break
+                        try:
+                            raw = await asyncio.wait_for(ws.recv(), timeout=30)
+                        except asyncio.TimeoutError:
+                            silent_for = time.time() - self._stats["last_event_ts"]
+                            if silent_for > SILENCE_REBOOT_SEC:
+                                self._stats["silence_reboots"] += 1
+                                logger.error(
+                                    "[wallet-stream] SILENT %.0fs on %s (mode=%s) — "
+                                    "rotating endpoint%s", silent_for, url, mode,
+                                    " and escalating to BROAD"
+                                    if (self._allow_broad and not self._force_broad) else "",
+                                )
+                                if self._allow_broad and not self._force_broad:
+                                    self._force_broad = True
+                                await ws.close()
+                                idx += 1
+                                break
+                            continue
+                        self._delivery_proven()
+                        self._stats["last_event_ts"] = time.time()
                         msg = json.loads(raw)
                         if msg.get("method") == "eth_subscription":
                             await self._handle_log(msg.get("params") or {})
             except Exception as exc:
-                self._stats["reconnects"] += 1
+                if self._on_conn_lost(url):
+                    idx += 1
                 logger.warning(
                     "[wallet-stream] disconnect: %s — reconnecting in %ds",
                     exc, reconnect_delay,
@@ -554,18 +795,28 @@ async def _heartbeat(stream: WalletStream) -> None:
         try:
             conn = get_connection()
             try:
-                uptime = int(time.time() - stream._stats["started_at"])
+                now = time.time()
+                uptime = int(now - stream._stats["started_at"])
+                event_age = int(now - stream._stats.get("last_event_ts", now))
+                status = _health_status(stream._stats, now)
                 detail = (
                     f"events={stream._stats['events_seen']} "
                     f"matched={stream._stats['events_matched']} "
                     f"polls={stream._stats['polls_triggered']} "
+                    f"chain_direct={stream._stats['chain_direct_dispatches']} "
+                    f"chain_misses={stream._stats['chain_direct_misses']} "
                     f"reconnects={stream._stats['reconnects']} "
+                    f"sub_errors={stream._stats['subscribe_errors']} "
+                    f"silence_reboots={stream._stats['silence_reboots']} "
+                    f"mode={stream._stats['mode']} "
+                    f"last_event_age={event_age}s "
+                    f"endpoint={stream._stats['endpoint']} "
                     f"uptime={uptime}s"
                 )
                 conn.execute(
                     "INSERT INTO service_health (service, status, error_message, checked_at) "
                     "VALUES (?, ?, ?, ?)",
-                    ("wallet_stream", "ok", detail, int(time.time())),
+                    ("wallet_stream", status, detail, int(time.time())),
                 )
                 conn.commit()
             finally:
@@ -584,15 +835,11 @@ def main() -> int:
     except Exception:
         logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
-    # Accept both legacy POLYGON_WSS_URL and new POLYGON_WS_URL; fall back
-    # to a public free endpoint as the last-resort default so the service
-    # boots to a working state without any .env changes.
-    ws_url = (
-        os.environ.get("POLYGON_WS_URL")
-        or os.environ.get("POLYGON_WSS_URL")
-        or "wss://polygon-bor-rpc.publicnode.com"
-    )
-    logger.info("[wallet-stream] connecting to %s", ws_url)
+    # Accept both legacy POLYGON_WSS_URL and new POLYGON_WS_URL (comma-
+    # separated lists supported); public defaults are appended so a single
+    # flaky endpoint can't strand the lane.
+    ws_urls = _parse_ws_urls()
+    logger.info("[wallet-stream] endpoint pool: %s", ws_urls)
 
     watched = _load_watched_wallets()
     if not watched:
@@ -600,7 +847,7 @@ def main() -> int:
         return 3
     logger.info("[wallet-stream] loaded %d watched wallets", len(watched))
 
-    stream = WalletStream(ws_url=ws_url, watched=watched)
+    stream = WalletStream(ws_url=ws_urls, watched=watched)
 
     async def _run():
         await asyncio.gather(

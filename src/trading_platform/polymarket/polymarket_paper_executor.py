@@ -1278,7 +1278,11 @@ class PolymarketPaperExecutor:
                 bankroll=STARTING_BANKROLL,
                 starting_bankroll=STARTING_BANKROLL,
                 whale_trade_price=signal.get("price"),
-                whale_trade_ts=signal.get("timestamp") or signal.get("trade_ts"),
+                # Signal dicts carry "whale_trade_ts" (whale_signal_engine
+                # _fire_signal); the old "timestamp"/"trade_ts" keys never
+                # existed, so the staleness gate silently never ran.
+                whale_trade_ts=signal.get("whale_trade_ts")
+                or signal.get("timestamp") or signal.get("trade_ts"),
             )
             if not should_trade:
                 failed = [k for k, v in gate_results.items()

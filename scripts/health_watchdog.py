@@ -162,7 +162,13 @@ def check_scheduler() -> ComponentState:
 
 
 def _check_heartbeat(service_key: str, stale_s: int = 180) -> ComponentState:
-    """Generic service_health-row freshness check."""
+    """service_health-row freshness AND status check.
+
+    Freshness alone is not enough: wallet_stream wrote a fresh 'ok' row
+    every 60s for a WEEK while delivering zero events (2026-06-30 → 07-07).
+    Services now self-report 'degraded' when alive-but-not-working; treat
+    that as unhealthy so it alerts.
+    """
     if os.environ.get("DB_BACKEND", "postgres").lower() != "postgres":
         return ComponentState(service_key, True, "skipped (sqlite backend)")
     try:
@@ -175,16 +181,21 @@ def _check_heartbeat(service_key: str, stale_s: int = 180) -> ComponentState:
         with psycopg.connect(host=host, port=port, user=user,
                              password=pwd, dbname=dbn, connect_timeout=3) as conn:
             cur = conn.execute(
-                "SELECT MAX(checked_at) FROM service_health WHERE service = %s",
+                "SELECT checked_at, status, error_message FROM service_health "
+                "WHERE service = %s ORDER BY checked_at DESC LIMIT 1",
                 (service_key,),
             )
             row = cur.fetchone()
-        last = int(row[0]) if row and row[0] else 0
-        if not last:
+        if not row or not row[0]:
             return ComponentState(service_key, False, "no heartbeat yet")
+        last, status, detail = int(row[0]), (row[1] or "").lower(), row[2] or ""
         age = time.time() - last
         if age > stale_s:
             return ComponentState(service_key, False, f"last heartbeat {age:.0f}s ago (threshold {stale_s}s)")
+        if status and status != "ok":
+            return ComponentState(
+                service_key, False,
+                f"heartbeat fresh but status={status}: {detail[:160]}")
         return ComponentState(service_key, True, f"heartbeat {age:.0f}s ago")
     except Exception as e:
         return ComponentState(service_key, False, f"heartbeat check err: {str(e)[:80]}")
