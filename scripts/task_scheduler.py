@@ -375,6 +375,16 @@ SCHEDULE: list[Task] = [
         description="Daily exit-policy overrides from the exit counterfactual",
     ),
     Task(
+        # 2026-07-07 (A2): fit the empirical decay-curve lookup for
+        # resolution_decay from canonical-labeled history. Challenger only —
+        # the fired confidence stays on the hand-coded formula until
+        # DECAY_CURVE_ENFORCE=1 (gate: held-out Brier beats formula).
+        name="fit_decay_curves",
+        cmd="python -m trading_platform.polymarket.decay_curve",
+        interval_seconds=24 * 3600,
+        description="Daily empirical decay-curve fit (A2, challenger)",
+    ),
+    Task(
         # 2026-05-12: unified daily review — P&L, slippage, trailing-stop
         # leakage, resolution timing, rejections, calibration drift, alpha
         # decay. Output goes to logs/scheduler/daily_system_review.log.

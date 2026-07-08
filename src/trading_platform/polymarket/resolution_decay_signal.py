@@ -109,7 +109,8 @@ def _candidate_markets(conn) -> list[dict[str, Any]]:
 
     rows = conn.execute(
         """SELECT condition_id, slug, question, end_date_iso,
-                  yes_token_id, no_token_id, outcome_prices, volume_24h
+                  yes_token_id, no_token_id, outcome_prices, volume_24h,
+                  subcategory
              FROM markets
             WHERE end_date_iso IS NOT NULL
               AND end_date_iso > to_char(NOW(), 'YYYY-MM-DD"T"HH24:MI:SS')
@@ -120,7 +121,7 @@ def _candidate_markets(conn) -> list[dict[str, Any]]:
     ).fetchall()
     out = []
     for r in rows:
-        cid, slug, q, end_iso, yes_tid, no_tid, prices_raw, vol = r
+        cid, slug, q, end_iso, yes_tid, no_tid, prices_raw, vol, subcat = r
         if cid in failed_cids:
             continue  # CLOB doesn't have a price for this market — skip
         try:
@@ -136,10 +137,6 @@ def _candidate_markets(conn) -> list[dict[str, Any]]:
             continue
         if vol is not None and float(vol) < MIN_VOLUME_24H:
             continue
-        # Pull market subcategory so the signal payload + executor
-        # z-subdomain lookup have it
-        # (set later in _emit_signal)
-        pass
 
         # outcome_prices is JSON like '["0.18", "0.82"]' — yes price first
         yes_price = None
@@ -156,16 +153,38 @@ def _candidate_markets(conn) -> list[dict[str, Any]]:
             "condition_id": cid, "slug": slug or "", "question": q or "",
             "end_iso": end_iso, "yes_token_id": yes_tid, "no_token_id": no_tid,
             "yes_price": yes_price, "hours_to_resolve": hours_to_resolve,
-            "volume_24h": float(vol or 0),
+            "volume_24h": float(vol or 0), "subcategory": subcat,
         })
     return out
 
 
-def _confidence(hours_to_resolve: float, yes_price: float) -> float:
-    """Higher conf for closer-to-resolution + lower entry price."""
+def _confidence(hours_to_resolve: float, yes_price: float,
+                subcategory: str | None = None,
+                category: str | None = None) -> tuple[float, float | None]:
+    """(confidence, decay_lookup_p) — champion/challenger (roadmap A2).
+
+    Champion: the hand-coded formula (self-inconsistent past 24h, but it is
+    what the live edge was validated on). Challenger: the fitted
+    (slice × hours × price → resolve-YES rate) lookup, which rides along in
+    the payload until it beats the formula on held-out Brier.
+    DECAY_CURVE_ENFORCE=1 makes the lookup champion (fail-safe: formula on
+    None). Expect the flip to collapse throughput — the calibrated-EV gate
+    becomes real when confidence means P(YES).
+    """
     time_lift = 0.20 * (1 - hours_to_resolve / 24.0)
     price_lift = 0.15 * max(0.0, (0.20 - yes_price) / 0.10)
-    return min(0.85, max(0.10, 0.50 + time_lift + price_lift))
+    formula = min(0.85, max(0.10, 0.50 + time_lift + price_lift))
+    lookup_p = None
+    try:
+        from trading_platform.polymarket.decay_curve import lookup_probability
+        lookup_p = lookup_probability(subcategory, category,
+                                      hours_to_resolve, yes_price)
+    except Exception:
+        lookup_p = None
+    enforce = os.environ.get("DECAY_CURVE_ENFORCE", "0").lower() in ("1", "true", "yes")
+    if enforce and lookup_p is not None:
+        return lookup_p, lookup_p
+    return formula, lookup_p
 
 
 def _emit_signal(market: dict, api_url: str) -> None:
@@ -174,27 +193,38 @@ def _emit_signal(market: dict, api_url: str) -> None:
     so the existing paper executor picks it up unchanged."""
     conn = get_connection()
     try:
-        conf = _confidence(market["hours_to_resolve"], market["yes_price"])
+        # A2: derive category ONCE with the same classifier the executor
+        # uses, so fit-time and fire-time slice keys match.
+        category = None
+        try:
+            from trading_platform.polymarket.market_categorizer import classify_keywords
+            category, _src = classify_keywords(market.get("slug") or "",
+                                               market.get("question") or "")
+        except Exception:
+            category = None
+        conf, lookup_p = _confidence(market["hours_to_resolve"],
+                                     market["yes_price"],
+                                     subcategory=market.get("subcategory"),
+                                     category=category)
         now_ts = int(time.time())
-        # market_signals row — same shape as whale signals
+        # market_signals row — audit trail. (A2 fix: the previous INSERT
+        # named columns entry_price/side/wallet_tier that do not exist in
+        # market_signals; swallowed by the except, it NEVER landed a row.)
         try:
             conn.execute(
                 """INSERT INTO market_signals
-                     (signal_type, condition_id, fired_at, side, direction,
-                      entry_price, confidence, wallet, wallet_tier,
-                      slug, question, category)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                     (signal_type, condition_id, fired_at, direction,
+                      price, confidence, wallet, slug, question, category)
+                   VALUES (?,?,?,?,?,?,?,?,?,?)""",
                 (
-                    SIGNAL_TYPE, market["condition_id"], now_ts,
-                    "YES", "BUY", market["yes_price"], conf,
-                    "phase_b_resolution_decay", "synthetic",
-                    market["slug"], market["question"][:200] or "",
-                    None,
+                    SIGNAL_TYPE, market["condition_id"], now_ts, "BUY",
+                    market["yes_price"], conf, "phase_b_resolution_decay",
+                    market["slug"], market["question"][:200] or "", category,
                 ),
             )
             conn.commit()
         except Exception as exc:
-            logger.debug("market_signals insert failed: %s", exc)
+            logger.warning("market_signals insert failed: %s", exc)
 
         # Trigger executor by hitting the API endpoint that processes a
         # signal payload. Falls back to direct paper_executor if the
@@ -207,6 +237,11 @@ def _emit_signal(market: dict, api_url: str) -> None:
             "entry_price": market["yes_price"],
             "price": market["yes_price"],
             "confidence": conf,
+            # A2 challenger: fitted decay-curve P(YES); rides into
+            # features_at_fire for the champion/challenger Brier comparison.
+            "decay_lookup_p": lookup_p,
+            "category": category,
+            "subcategory": market.get("subcategory"),
             "wallet": "phase_b_resolution_decay",
             "wallet_tier": "synthetic",
             "slug": market["slug"],
