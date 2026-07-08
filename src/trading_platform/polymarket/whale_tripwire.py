@@ -40,6 +40,8 @@ class WhaleTrade:
     directional_win_rate: float
     conviction_score: float
     total_volume_usdc: float
+    # P3: delivery pipeline — 'chain_direct' (WS, seconds) or 'poller'.
+    source_lane: str = "poller"
 
 
 class WhaleTripwire:

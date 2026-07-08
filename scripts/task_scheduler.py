@@ -385,6 +385,16 @@ SCHEDULE: list[Task] = [
         description="Daily empirical decay-curve fit (A2, challenger)",
     ),
     Task(
+        # 2026-07-07 (P3): warm the markets table with condition_ids that
+        # WATCHED wallets traded but the local index lacks — 51% of their
+        # 7d markets had no row, so chain-direct dispatch fell back to the
+        # slow REST poll on the majority of watched fills.
+        name="warm_watched_markets",
+        cmd="python -m trading_platform.polymarket.markets_table --warm-watched",
+        interval_seconds=1800,
+        description="Warm markets index from watched wallets' trades (30min)",
+    ),
+    Task(
         # 2026-05-12: unified daily review — P&L, slippage, trailing-stop
         # leakage, resolution timing, rejections, calibration drift, alpha
         # decay. Output goes to logs/scheduler/daily_system_review.log.

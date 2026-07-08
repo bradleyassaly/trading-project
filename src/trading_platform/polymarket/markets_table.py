@@ -471,6 +471,56 @@ def _persist(rows: list[tuple]) -> None:
         )
 
 
+def warm_watched_markets(days: int = 7, max_fetches: int = 200) -> dict:
+    """P3: pre-index markets that WATCHED wallets trade.
+
+    The chain-direct fast lane dispatches instantly only for tokens the
+    local markets table knows; recon measured 51% of condition_ids traded
+    by watched wallets in the last 7d had NO markets row (+4% with NULL
+    token ids) — every one of those fills fell back to the slow REST poll.
+    This warms the gap from wallet_trades, capped per run. Scheduled 30min.
+    """
+    import requests
+    cutoff = int(time.time()) - days * 86400
+    with db() as c:
+        # Most-recently-traded first: Gamma delists resolved markets, so an
+        # unordered sweep burns the whole budget on tombstones (first run:
+        # 200/200 fetched were delisted). Fresh trades ⇒ market still live.
+        missing = [r[0] for r in c.execute(
+            """SELECT wt.condition_id
+                 FROM wallet_trades wt
+                 LEFT JOIN markets m ON m.condition_id = wt.condition_id
+                WHERE wt.timestamp > ?
+                  AND wt.condition_id IS NOT NULL
+                  AND (m.condition_id IS NULL OR m.yes_token_id IS NULL)
+                GROUP BY wt.condition_id
+                ORDER BY MAX(wt.timestamp) DESC""",
+            (cutoff,),
+        ).fetchall()]
+    if not missing:
+        return {"missing": 0, "fetched": 0, "persisted": 0, "tombstoned": 0}
+    session = requests.Session()
+    fetched = persisted = tombstoned = 0
+    rows: list[tuple] = []
+    for cid in missing[:max_fetches]:
+        m = _fetch_one(cid, session=session)
+        fetched += 1
+        if m == _NOT_IN_GAMMA:
+            _persist_tombstone(cid)
+            tombstoned += 1
+        elif isinstance(m, dict):
+            rows.append(_extract_row(cid, m))
+            persisted += 1
+        time.sleep(0.15)
+    if rows:
+        _persist(rows)
+    out = {"missing": len(missing), "fetched": fetched,
+           "persisted": persisted, "tombstoned": tombstoned,
+           "skipped": max(0, len(missing) - max_fetches)}
+    logger.info("[warm_watched_markets] %s", out)
+    return out
+
+
 def get_neg_risk_cached(token_id: str) -> bool | None:
     """P4: read-through neg_risk cache. neg_risk is immutable per market (it
     selects which exchange contract orders are EIP-712-signed against), yet
@@ -555,6 +605,9 @@ def get(condition_id: str) -> dict | None:
 
 def main() -> int:
     import sys
+    if "--warm-watched" in sys.argv:
+        print(f"warm: {warm_watched_markets()}")
+        return 0
     force = "--force" in sys.argv
     result = refresh(force_all=force)
     print(f"markets refresh: {result}")

@@ -115,6 +115,10 @@ class PolledTrade:
     timestamp: int
     tx_hash: str
     slug: str
+    # P3: which pipeline delivered this trade — 'chain_direct' (WS
+    # OrderFilled decode, seconds) or 'poller' (REST, minutes). A real
+    # tag; detection_latency_sec <= 10s was a contaminated proxy.
+    source_lane: str = "poller"
 
 
 class WalletTradePoller:
@@ -291,6 +295,7 @@ class WalletTradePoller:
             timestamp=ts,
             tx_hash=tx_hash,
             slug=slug,
+            source_lane=str(raw.get("source_lane") or "poller"),
         )
 
     # ── Build WhaleTrade from polled trade ──────────────────────────────────
@@ -322,6 +327,7 @@ class WalletTradePoller:
             directional_win_rate=profile.get("directional_win_rate") or 0,
             conviction_score=profile.get("conviction_score") or 0,
             total_volume_usdc=profile.get("total_volume_usdc") or 0,
+            source_lane=pt.source_lane,
         )
 
     # ── Main run loop ───────────────────────────────────────────────────────
@@ -582,6 +588,7 @@ class WalletTradePoller:
             directional_win_rate=profile.get("directional_win_rate") or 0,
             conviction_score=profile.get("conviction_score") or 0,
             total_volume_usdc=profile.get("total_volume_usdc") or 0,
+            source_lane=pt.source_lane,
         )
 
 

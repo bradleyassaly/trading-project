@@ -440,7 +440,9 @@ class PolymarketLiveExecutor:
                                 "mid_at_decision REAL", "yes_mid_at_decision REAL",
                                 "best_ask_at_decision REAL", "best_bid_at_decision REAL",
                                 "spread_at_decision REAL", "book_target_price REAL",
-                                "slippage_c REAL", "spread_paid_c REAL"):
+                                "slippage_c REAL", "spread_paid_c REAL",
+                                # P3: real delivery-lane tag
+                                "source_lane TEXT"):
                     try:
                         conn.execute(f"ALTER TABLE live_trades ADD COLUMN {col_ddl}")
                     except Exception:
@@ -2067,9 +2069,9 @@ class PolymarketLiveExecutor:
                         whale_trade_ts, detection_latency_sec, features_at_fire,
                         mid_at_decision, yes_mid_at_decision, best_ask_at_decision,
                         best_bid_at_decision, spread_at_decision, book_target_price,
-                        slippage_c, spread_paid_c)
+                        slippage_c, spread_paid_c, source_lane)
                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                               ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                               ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         now_ts,
                         signal.get("signal_type"),
@@ -2121,6 +2123,7 @@ class PolymarketLiveExecutor:
                         _book_target,
                         _slippage_c,
                         _spread_paid_c,
+                        signal.get("source_lane"),
                     ),
                 )
                 # PG pool runs autocommit; raw sqlite (test lane) rolls back

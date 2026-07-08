@@ -463,6 +463,9 @@ class WalletStream:
                     "conditionId": meta["condition_id"],
                     "size": shares,
                     "price": price,
+                    # P3: real lane tag, threaded through PolledTrade →
+                    # WhaleTrade → signal dict → live_trades.source_lane.
+                    "source_lane": "chain_direct",
                     # Receipt time ≈ block time on Polygon (2s blocks);
                     # becomes whale_trade_ts downstream, so section 14's
                     # latency metric measures this exact path.

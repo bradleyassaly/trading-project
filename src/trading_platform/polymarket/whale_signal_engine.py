@@ -1300,6 +1300,8 @@ class WhaleSignalEngine:
             # per-trade detection latency (whale fill → our order), the
             # Phase-2 measurement in SCALING_PLAN_2026-07-02.md.
             "whale_trade_ts": trade.timestamp,
+            # P3: real delivery-lane tag (chain_direct vs poller).
+            "source_lane": getattr(trade, "source_lane", "poller"),
             # Real clob token_ids (may be None if markets table not yet
             # populated for this cid). token_id is the side we'd trade;
             # yes/no ids are provided so both executors can make their
