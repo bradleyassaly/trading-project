@@ -418,10 +418,28 @@ def check_balance_staleness() -> ComponentState:
         vals = [float(r[1]) for r in rows if r[1] is not None]
         if len(vals) >= 6 and max(vals) - min(vals) < 1e-9:
             span_h = (int(rows[0][0]) - int(rows[-1][0])) / 3600
+            # 2026-07-08: frozen balance is only suspicious if money MOVED
+            # in the window. During a halt (or a quiet stretch) an unchanged
+            # USDC is expected — without this guard the detector re-tripped
+            # on the halt's own side effect (halt → no trades → frozen
+            # balance → new halt: a halt-lock loop).
+            window_lo = int(rows[-1][0])
+            with conn:
+                moved = conn.execute(
+                    "SELECT COUNT(*) FROM live_trades WHERE dry_run = 0 "
+                    "AND (filled_at >= %s OR exit_ts >= %s)",
+                    (window_lo, window_lo),
+                ).fetchone()
+            if int(moved[0] or 0) == 0:
+                return ComponentState(
+                    name, True,
+                    f"fresh ({age/60:.0f}m); usdc unchanged ${vals[0]:.2f} "
+                    f"but no fills/exits in {span_h:.1f}h — expected")
             return ComponentState(
                 name, False,
                 f"usdc_balance frozen at ${vals[0]:.2f} across {len(vals)} "
-                f"snapshots (~{span_h:.1f}h) — balance API likely stale")
+                f"snapshots (~{span_h:.1f}h) DESPITE {int(moved[0])} "
+                f"fills/exits — balance API likely stale")
         return ComponentState(name, True, f"fresh ({age/60:.0f}m), moving")
     except Exception as e:
         return ComponentState(name, False, f"check err: {str(e)[:80]}")
