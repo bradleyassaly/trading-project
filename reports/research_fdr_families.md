@@ -26,5 +26,6 @@ and register later.
 |---|---|---|---|
 | `a1_examples` | 20 | Harness shakedown: price bands, category bands, crowding. NOT for promotion — calibration of the tool itself. | 2026-07-08 |
 | `resolution_decay_refinements` | 20 | Predicates refining the one live edge: price/hours/subcategory cuts beyond the A2 lookup. Promotions must ALSO clear the A2 champion/challenger Brier gate. | 2026-07-08 |
+| `alpha_candidates_2026_07` | 20 | New-strategy exploration over resolved whale-BUY flow: does a wallet-quality / bet-size / crowding / favorite-side filter carry net-of-cost, point-in-time, event-clustered edge? The wallet graph as a FEATURE is explicitly allowed post-copy-KILL (kill rule §"what a clean kill means"); copy-ENTRY is not being revived. | 2026-07-08 |
 
 Add a row here (and commit) before running a new family.
