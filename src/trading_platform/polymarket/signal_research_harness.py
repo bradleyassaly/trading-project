@@ -75,7 +75,8 @@ class FeatureView:
     def __init__(self, trade: dict, wallet_hist: dict, token_ts: dict,
                  lag_s: int):
         self._t = trade
-        self._wh = wallet_hist      # wallet -> (ts_list, rows_list)
+        self._wh = wallet_hist      # wallet -> prefix-sum index (see
+                                    # _build_wallet_index); O(log n) windows
         self._tok = token_ts        # (cid) -> sorted ts list of BUYs
         self._lag = lag_s
 
@@ -102,35 +103,57 @@ class FeatureView:
         return max(0, hi - lo)
 
     # -- embargoed outcome features -------------------------------------------
-    def _wallet_rows_before(self, cutoff: int) -> list[dict]:
-        ts_list, rows = self._wh.get(self._t["wallet"], ([], []))
-        hi = bisect.bisect_right(ts_list, cutoff)
-        return rows[:hi]
+    def _window(self, days: int):
+        """(idx, wins, stake, pnl) over the wallet's prior BUYs in
+        [trade_ts − days, trade_ts − OUTCOME_EMBARGO_S]. O(log n) via
+        prefix sums (was O(n) per call → O(N²) over the stream, which
+        stalled the 250k-row replay). Returns None if the wallet is unseen."""
+        wl = self._wh.get(self._t["wallet"])
+        if not wl:
+            return None
+        ts = wl["ts"]
+        hi = bisect.bisect_right(ts, self._t["timestamp"] - OUTCOME_EMBARGO_S)
+        lo = bisect.bisect_left(ts, self._t["timestamp"] - days * 86400)
+        if hi <= lo:
+            return (0, 0, 0.0, 0.0)
+        return (hi - lo,
+                wl["cwins"][hi] - wl["cwins"][lo],
+                wl["cstake"][hi] - wl["cstake"][lo],
+                wl["cpnl"][hi] - wl["cpnl"][lo])
 
     def wallet_trailing_n(self, days: int = 30) -> int:
-        cutoff = self._t["timestamp"] - OUTCOME_EMBARGO_S
-        rows = self._wallet_rows_before(cutoff)
-        floor = self._t["timestamp"] - days * 86400
-        return sum(1 for r in rows if r["timestamp"] >= floor)
+        w = self._window(days)
+        return w[0] if w else 0
 
     def wallet_trailing_wr(self, days: int = 30) -> float | None:
-        cutoff = self._t["timestamp"] - OUTCOME_EMBARGO_S
-        floor = self._t["timestamp"] - days * 86400
-        rows = [r for r in self._wallet_rows_before(cutoff)
-                if r["timestamp"] >= floor]
-        if not rows:
+        w = self._window(days)
+        if not w or w[0] <= 0:
             return None
-        return sum(1 for r in rows if (r["pnl"] or 0) > 0) / len(rows)
+        return w[1] / w[0]
 
     def wallet_trailing_ev(self, days: int = 30) -> float | None:
-        cutoff = self._t["timestamp"] - OUTCOME_EMBARGO_S
-        floor = self._t["timestamp"] - days * 86400
-        rows = [r for r in self._wallet_rows_before(cutoff)
-                if r["timestamp"] >= floor]
-        stakes = sum(float(r["size"]) * float(r["price"]) for r in rows)
-        if not rows or stakes <= 0:
+        w = self._window(days)
+        if not w or w[0] <= 0 or w[2] <= 0:
             return None
-        return sum(float(r["pnl"] or 0) for r in rows) / stakes
+        return w[3] / w[2]
+
+
+def _build_wallet_index(trades: list[dict]) -> dict[str, dict]:
+    """Per-wallet prefix sums over ts-ordered BUYs, so FeatureView trailing
+    windows are O(log n). trades MUST be ascending by timestamp (the fetch
+    ORDERs BY timestamp). Shared by replay() and the tests so the fit-time
+    and test-time index structures can never drift."""
+    idx: dict[str, dict] = {}
+    for t in trades:
+        wl = idx.setdefault(t["wallet"], {"ts": [], "cwins": [0],
+                                          "cstake": [0.0], "cpnl": [0.0]})
+        wl["ts"].append(t["timestamp"])
+        won = 1 if (t.get("pnl") or 0) > 0 else 0
+        stake = float(t.get("size") or 0) * float(t.get("price") or 0)
+        wl["cwins"].append(wl["cwins"][-1] + won)
+        wl["cstake"].append(wl["cstake"][-1] + stake)
+        wl["cpnl"].append(wl["cpnl"][-1] + float(t.get("pnl") or 0))
+    return idx
 
 
 def _fetch(conn, days: int) -> list[dict]:
@@ -220,13 +243,10 @@ def replay(h: Hypothesis, *, days: int = 60, stake: float = 5.0,
         from trading_platform.polymarket import research_ledger as rl
         rl.ensure_schema(db_path=db_path)
 
-    # point-in-time indices
-    wallet_hist: dict[str, tuple[list, list]] = {}
+    # point-in-time indices (prefix-sum wallet index → O(log n) windows)
+    wallet_hist = _build_wallet_index(trades)
     token_ts: dict[str, list[int]] = {}
     for t in trades:
-        wl = wallet_hist.setdefault(t["wallet"], ([], []))
-        wl[0].append(t["timestamp"])
-        wl[1].append(t)
         token_ts.setdefault(t["condition_id"], []).append(t["timestamp"])
 
     entries: list[dict] = []

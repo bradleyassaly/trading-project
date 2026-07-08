@@ -25,12 +25,10 @@ def _mk_trade(ts, wallet="w1", cid="c1", price=0.2, size=10, pnl=5.0,
 
 
 def _fv(trade, history):
-    wallet_hist = {}
+    ordered = sorted(history, key=lambda x: x["timestamp"])
+    wallet_hist = srh._build_wallet_index(ordered)
     token_ts = {}
-    for t in sorted(history, key=lambda x: x["timestamp"]):
-        wl = wallet_hist.setdefault(t["wallet"], ([], []))
-        wl[0].append(t["timestamp"])
-        wl[1].append(t)
+    for t in ordered:
         token_ts.setdefault(t["condition_id"], []).append(t["timestamp"])
     return srh.FeatureView(trade, wallet_hist, token_ts, srh.INDEXING_LAG_S)
 
