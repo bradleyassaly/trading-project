@@ -278,12 +278,32 @@ class SignalResolver:
             resolved = 0
             paper_updates = 0
 
+            # ── Pass 0 (P1): canonical market_resolutions table ──────────
+            # One batch query, no HTTP, accumulates forever (unlike the
+            # rolling-window CSV). Highest-rank source wins by construction.
+            table_hits: dict[str, float] = {}
+            try:
+                from trading_platform.polymarket.resolutions import get_resolutions_bulk
+                _cids = list({(r[1] or "").lower() for r in pending if r[1]})
+                for cid_l, row in get_resolutions_bulk(
+                        _cids, db_path=str(self._db_path) if self._db_path else None
+                ).items():
+                    if row.get("payout_yes") is not None:
+                        table_hits[cid_l] = float(row["payout_yes"])
+            except Exception as exc:
+                logger.debug("resolutions-table pass failed (continuing): %s", exc)
+            if table_hits:
+                logger.info("Pass 0: %d resolutions from market_resolutions",
+                            len(table_hits))
+
             # ── Pass 1: cheap CSV lookup ──────────────────────────────────
             still_pending: list[tuple] = []
             for sid, cid, direction, entry_price, fired_at, ptid in pending:
                 if not cid:
                     continue
-                res_price = resolutions.get(cid.lower())
+                res_price = table_hits.get(cid.lower())
+                if res_price is None:
+                    res_price = resolutions.get(cid.lower())
                 if res_price is None:
                     still_pending.append((sid, cid, direction, entry_price, fired_at, ptid))
                     continue
@@ -342,7 +362,19 @@ class SignalResolver:
                     gamma_calls += 1
                     gamma_cache[cid.lower()] = yes_price
                     if yes_price is not None:
-                        _append_to_csv(self._gamma_csv, cid, yes_price)
+                        # P1: UMA-verified results now land in the durable
+                        # canonical table (highest automated rank) instead of
+                        # the CSV — whose 3-column append was misaligned with
+                        # the 7-column header AND truncated on every rebuild.
+                        try:
+                            from trading_platform.polymarket.resolutions import record_resolution
+                            record_resolution(
+                                cid, source="uma_gamma",
+                                resolves_yes=1 if yes_price >= 0.5 else 0,
+                                db_path=str(self._db_path) if self._db_path else None,
+                            )
+                        except Exception as exc:
+                            logger.debug("record_resolution failed: %s", exc)
                     time.sleep(_GAMMA_SLEEP_SEC)
 
                 # Apply resolutions to every row whose cid got a live answer

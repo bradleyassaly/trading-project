@@ -216,6 +216,29 @@ class GammaResolutionFetcher:
                         })
                         rows_written += 1
                     page_resolved += 1
+                    # P1: feed the canonical table. The CSV above is a
+                    # rolling window rewritten in truncate mode — anything
+                    # older than the window vanished on each run. The table
+                    # accumulates forever; the CSV becomes a feed, not truth.
+                    if cond_id:
+                        try:
+                            from trading_platform.polymarket.resolutions import record_resolution
+                            try:
+                                _res_at = int(datetime.fromisoformat(
+                                    str(close_time)[:19].replace("Z", "")
+                                ).replace(tzinfo=timezone.utc).timestamp())
+                            except Exception:
+                                _res_at = None
+                            record_resolution(
+                                cond_id, source="gamma_bulk",
+                                resolves_yes=1 if yes_won else 0,
+                                yes_token_id=clob_ids[0] if clob_ids else None,
+                                no_token_id=clob_ids[1] if len(clob_ids) > 1 else None,
+                                resolved_at=_res_at, question=question,
+                            )
+                        except Exception as _rexc:
+                            logger.debug("record_resolution failed for %s: %s",
+                                         cond_id[:14], _rexc)
 
                 print(f"  Page {page_num}: {len(batch)} markets, {page_resolved} resolved (total: {total_fetched} fetched, {rows_written} resolved)")
 
