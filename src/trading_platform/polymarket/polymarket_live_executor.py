@@ -79,6 +79,9 @@ _DEDUP_LOCKS_META = threading.Lock()
 # (question with numbers/dates/years stripped, first 6 words).
 MAX_OPEN_PER_TOPIC = 3
 
+# R2 cluster-gate degraded-alert rate limit (10 min between Telegram pages).
+_CLUSTER_GATE_LAST_ALERT: float = 0.0
+
 _TOPIC_STRIP_DATE = __import__("re").compile(
     r"\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+\d+\b",
     __import__("re").IGNORECASE,
@@ -1676,6 +1679,57 @@ class PolymarketLiveExecutor:
                     except Exception as _terr:
                         logger.warning("[LIVE] topic_cap check failed (continuing): %s", _terr)
 
+                # R2 (2026-07-07): cluster DOLLAR cap — the enforcement gap
+                # portfolio_risk.assess() computed but nothing read. Blocks
+                # the trade that would push its topic cluster past 20% of
+                # bankroll (marginal-delta). Cached 60s; degraded snapshots
+                # fail OPEN with a LOUD alert (never the silent-warning
+                # pattern of the neighbors — an erroring risk gate must be
+                # heard); breaches fail CLOSED. N7's complementary-leg gate
+                # below stays separate: a dollar cap does not subsume two
+                # small locked-loss legs.
+                try:
+                    from trading_platform.polymarket.portfolio_risk import (
+                        check_cluster_cap, record_open as _cluster_record_open,
+                        CLUSTER_GATE_ENFORCE as _CC_ENFORCE,
+                    )
+                    _cc = check_cluster_cap(signal.get("question"), size_usd,
+                                            db_path=self._db_path)
+                    if _cc.get("degraded"):
+                        logger.error("[LIVE][CLUSTER_GATE] DEGRADED — "
+                                     "proceeding: %s", _cc.get("reason"))
+                        global _CLUSTER_GATE_LAST_ALERT
+                        _now_alert = time.time()
+                        if _now_alert - _CLUSTER_GATE_LAST_ALERT > 600:
+                            _CLUSTER_GATE_LAST_ALERT = _now_alert
+                            try:
+                                from trading_platform.polymarket.telegram_alerts import get_alerter
+                                get_alerter().send_pipeline_alert(
+                                    "cluster_gate", _cc.get("reason") or "degraded",
+                                    level="error")
+                            except Exception:
+                                pass
+                    elif not _cc.get("allowed"):
+                        try:
+                            from trading_platform.polymarket.decision_trace import trace as _dt
+                            _dt(signal=signal,
+                                gate="LIVE_CLUSTER_CAP" if _CC_ENFORCE
+                                else "LIVE_CLUSTER_CAP_SHADOW",
+                                passed=False,
+                                value=_cc.get("projected_frac"),
+                                threshold=0.20,
+                                detail=(_cc.get("reason") or "")[:200],
+                                surface="live", db_path=self._db_path)
+                        except Exception:
+                            pass
+                        if _CC_ENFORCE:
+                            return self._block(signal, _cc["reason"], size_usd)
+                        logger.info("[LIVE][CLUSTER_GATE][SHADOW] would-block: %s",
+                                    _cc.get("reason"))
+                except Exception as _cerr:
+                    logger.error("[LIVE][CLUSTER_GATE] gate errored — "
+                                 "proceeding (fail-open): %s", _cerr)
+
                 # Per-EVENT exposure cap (2026-07-06). The topic-stem cap
                 # can't see that "Spread: Belgium (-1.5)", "Will Belgium
                 # win..." and "US vs. Belgium: O/U 3.5" are ONE football
@@ -1801,6 +1855,13 @@ class PolymarketLiveExecutor:
             if order_result.success:
                 fill = order_result.filled_price or current_price
                 logger.info("[LIVE] order placed: %s @ %.3f", order_result.order_id, fill)
+                # R2: bump the cached cluster so back-to-back signals in one
+                # burst see this exposure before the 60s cache refresh.
+                try:
+                    from trading_platform.polymarket.portfolio_risk import record_open
+                    record_open(signal.get("question"), size_usd)
+                except Exception as _rerr:
+                    logger.debug("[CLUSTER_GATE] record_open failed: %s", _rerr)
                 # LOUD Telegram alert — live fills get their own format so they
                 # stand out from paper trade notifications.
                 try:
