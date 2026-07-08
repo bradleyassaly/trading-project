@@ -228,20 +228,26 @@ def reconcile() -> dict:
                                                token_id=tid)
                     )
                     real_shares = int(result.get("balance", 0)) / 1_000_000
-                    yes_mid = _clob.get_mid_price(tid)
-                    # Fallback chain: /midpoint → last_mark_price → entry_price.
-                    if yes_mid is None:
+                    # 2026-07-08: /midpoint quotes the QUERIED token in its
+                    # own space post-migration — the mid IS the held token's
+                    # price for both directions, no flip. (The old 1−x on
+                    # SELL inverted worthless NO positions to ~$0.95, making
+                    # this reconciler flag the CORRECT snapshot as drifted.)
+                    held_price = _clob.get_mid_price(tid)
+                    if held_price is None:
+                        # Fallbacks are YES-space (monitor marks / our
+                        # fills) — those DO flip for SELL.
                         m = marks.get(lid)
+                        yes_space = None
                         if m and m[0] is not None:
-                            yes_mid = float(m[0])
+                            yes_space = float(m[0])
                         elif ep is not None:
-                            yes_mid = float(ep)
-                    if yes_mid is None: continue
-                    if di == "SELL":
-                        no_mid = max(1.0 - float(yes_mid), 0.001)
-                        true_open_mkt += real_shares * no_mid
-                    else:
-                        true_open_mkt += real_shares * float(yes_mid)
+                            yes_space = float(ep)
+                        if yes_space is None:
+                            continue
+                        held_price = (max(1.0 - yes_space, 0.001)
+                                      if di == "SELL" else yes_space)
+                    true_open_mkt += real_shares * float(held_price)
                 except Exception:
                     continue
             if last_snap and last_snap[2] is not None:

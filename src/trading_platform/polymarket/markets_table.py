@@ -493,9 +493,12 @@ def warm_watched_markets(days: int = 7, max_fetches: int = 200) -> dict:
                 WHERE wt.timestamp > ?
                   AND wt.condition_id IS NOT NULL
                   AND (m.condition_id IS NULL OR m.yes_token_id IS NULL)
+                  -- tombstones (Gamma doesn't index) have NULL token ids
+                  -- by design; without this they were re-fetched every run
+                  AND COALESCE(m.uma_status, '') != ?
                 GROUP BY wt.condition_id
                 ORDER BY MAX(wt.timestamp) DESC""",
-            (cutoff,),
+            (cutoff, _NOT_IN_GAMMA),
         ).fetchall()]
     if not missing:
         return {"missing": 0, "fetched": 0, "persisted": 0, "tombstoned": 0}

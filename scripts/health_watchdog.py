@@ -404,11 +404,27 @@ def check_balance_staleness() -> ComponentState:
         conn = _watchdog_pg()
         if conn is None:
             return ComponentState(name, True, "skipped (sqlite backend)")
+        # psycopg3 CLOSES the connection when a `with conn:` block exits
+        # (unlike psycopg2, which only ended the transaction). A second
+        # `with conn:` here therefore raised "the connection is closed" on
+        # every cycle the frozen branch ran — which is ALWAYS during a
+        # halt — making the check permanently unhealthy and the AUTO-CLEAR
+        # unreachable. The 7/8 fix re-created the very halt-lock loop it
+        # was written to break. BOTH queries now share one context.
         with conn:
             rows = conn.execute(
                 "SELECT ts, usdc_balance FROM live_equity_snapshots "
                 "ORDER BY ts DESC LIMIT 8"
             ).fetchall()
+            moved_n = None
+            if rows:
+                window_lo = int(rows[-1][0])
+                moved = conn.execute(
+                    "SELECT COUNT(*) FROM live_trades WHERE dry_run = 0 "
+                    "AND (filled_at >= %s OR exit_ts >= %s)",
+                    (window_lo, window_lo),
+                ).fetchone()
+                moved_n = int(moved[0] or 0)
         if not rows:
             return ComponentState(name, False, "no equity snapshots")
         age = time.time() - int(rows[0][0])
@@ -418,19 +434,10 @@ def check_balance_staleness() -> ComponentState:
         vals = [float(r[1]) for r in rows if r[1] is not None]
         if len(vals) >= 6 and max(vals) - min(vals) < 1e-9:
             span_h = (int(rows[0][0]) - int(rows[-1][0])) / 3600
-            # 2026-07-08: frozen balance is only suspicious if money MOVED
-            # in the window. During a halt (or a quiet stretch) an unchanged
-            # USDC is expected — without this guard the detector re-tripped
-            # on the halt's own side effect (halt → no trades → frozen
-            # balance → new halt: a halt-lock loop).
-            window_lo = int(rows[-1][0])
-            with conn:
-                moved = conn.execute(
-                    "SELECT COUNT(*) FROM live_trades WHERE dry_run = 0 "
-                    "AND (filled_at >= %s OR exit_ts >= %s)",
-                    (window_lo, window_lo),
-                ).fetchone()
-            if int(moved[0] or 0) == 0:
+            # Frozen balance is only suspicious if money MOVED in the
+            # window. During a halt (or a quiet stretch) an unchanged USDC
+            # is expected.
+            if (moved_n or 0) == 0:
                 return ComponentState(
                     name, True,
                     f"fresh ({age/60:.0f}m); usdc unchanged ${vals[0]:.2f} "
@@ -438,7 +445,7 @@ def check_balance_staleness() -> ComponentState:
             return ComponentState(
                 name, False,
                 f"usdc_balance frozen at ${vals[0]:.2f} across {len(vals)} "
-                f"snapshots (~{span_h:.1f}h) DESPITE {int(moved[0])} "
+                f"snapshots (~{span_h:.1f}h) DESPITE {moved_n} "
                 f"fills/exits — balance API likely stale")
         return ComponentState(name, True, f"fresh ({age/60:.0f}m), moving")
     except Exception as e:
