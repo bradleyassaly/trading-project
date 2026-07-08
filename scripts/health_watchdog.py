@@ -58,7 +58,10 @@ STARTUP_GRACE_SECONDS = 120
 
 # N1 dead-man's-switch SLA thresholds.
 BALANCE_SNAPSHOT_STALE_S = int(os.environ.get("WATCHDOG_BALANCE_STALE_S", str(2 * 3600)))
-POLLER_STALE_S = int(os.environ.get("WATCHDOG_POLLER_STALE_S", str(15 * 60)))
+# 2026-07-08: 15m → 45m. Whale ingestion is bursty (overnight lulls); the
+# tight threshold produced 12 false poller_freshness alerts/day on a 2h
+# metronome while ingestion was actually healthy (8,993 rows/24h).
+POLLER_STALE_S = int(os.environ.get("WATCHDOG_POLLER_STALE_S", str(45 * 60)))
 RECONCILE_MAX_AGE_S = int(os.environ.get("WATCHDOG_RECONCILE_MAX_AGE_S", str(26 * 3600)))
 # Components severe enough to auto-HALT live trading (write KILL_SWITCH_ACTIVE)
 # on sustained failure. Only balance_staleness: a frozen/stale balance API
@@ -475,6 +478,44 @@ def check_reconcile_age() -> ComponentState:
     return ComponentState(name, True, f"clean {age/3600:.0f}h ago")
 
 
+# Auto-clear: consecutive HEALTHY balance cycles required before a
+# watchdog-tripped balance_staleness halt un-trips itself. At the 60s poll
+# this is ~30 min of sustained recovery.
+AUTO_CLEAR_CONSECUTIVE = int(os.environ.get("WATCHDOG_AUTO_CLEAR_CYCLES", "30"))
+
+
+def _maybe_clear_kill_switch(healthy_streak: int) -> None:
+    """Un-trip a WATCHDOG-TRIPPED balance_staleness halt after sustained
+    recovery. Scoped strictly: only clears when the active halt's reason is
+    balance_staleness (the self-healing component) — manual halts and every
+    other reason stay until an operator clears them.
+
+    Design gap this closes (2026-07-07): a ~1h DNS outage tripped the halt
+    at 08:35 UTC; snapshots recovered by 17:18 but the file has no
+    auto-clear, so the one profitable signal sat blocked for ~18h with
+    thousands of attempts eaten silently.
+    """
+    if healthy_streak < AUTO_CLEAR_CONSECUTIVE:
+        return
+    try:
+        from trading_platform.polymarket.kill_switch import KillSwitch
+        ks = KillSwitch(str(DB_PATH))
+        active, reason = ks.is_emergency_stopped()
+        if not active or "balance_staleness" not in (reason or ""):
+            return
+        ks.clear_emergency_stop()
+        logger.warning("[deadman] AUTO-CLEAR: balance_staleness halt cleared "
+                       "after %d healthy cycles (was: %s)",
+                       healthy_streak, (reason or "")[:120])
+        _send_alert(
+            f"\U0001f7e2 <b>AUTO-CLEAR</b>\nThe balance_staleness kill switch "
+            f"un-tripped after {AUTO_CLEAR_CONSECUTIVE} consecutive healthy "
+            f"balance checks (~{AUTO_CLEAR_CONSECUTIVE * POLL_INTERVAL_SECONDS // 60} min).\n"
+            f"Was: {(reason or '')[:160]}\nLive entries resume.", loud=True)
+    except Exception as exc:
+        logger.error("[deadman] auto-clear failed: %s", exc)
+
+
 def _trip_kill_switch(reason: str) -> None:
     """Write the KILL_SWITCH_ACTIVE flag via the canonical kill_switch API so
     the live executor halts new entries. Idempotent-ish (emergency_stop just
@@ -513,6 +554,7 @@ def main() -> None:
     )
     failure_state: dict[str, float] = {}  # component_name → first_failure_ts
     fail_count: dict[str, int] = {}       # consecutive-failure counter
+    balance_healthy_streak = 0            # for the scoped halt auto-clear
     while True:
         now = time.time()
         states = [check_api(), check_db(), check_scheduler(),
@@ -572,6 +614,15 @@ def main() -> None:
                     and fail_count.get(s.name, 0) >= HALT_CONSECUTIVE_FAILURES
                     and not in_grace):
                 _trip_kill_switch(f"{s.name}: {s.detail[:120]}")
+
+            # Scoped auto-clear: sustained balance recovery un-trips a
+            # watchdog-tripped balance_staleness halt (2026-07-08 gap:
+            # an already-recovered halt blocked entries for ~18h).
+            if s.name == "balance_staleness":
+                balance_healthy_streak = (balance_healthy_streak + 1
+                                          if s.healthy else 0)
+                if not in_grace:
+                    _maybe_clear_kill_switch(balance_healthy_streak)
 
         # N1 (c): daily "still alive" ping — silence itself becomes the alarm.
         if now - _last_alive_ping >= ALIVE_PING_INTERVAL_S:

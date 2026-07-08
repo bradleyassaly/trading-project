@@ -1231,7 +1231,18 @@ class WalletDB:
 
     def stats(self) -> dict[str, int]:
         with self._lock:
-            profiles = self._conn.execute("SELECT COUNT(*) FROM wallet_profiles").fetchone()[0]
+            # The held connection can idle out during long-running callers
+            # (enrich_trade_resolution runs ~46 min, then its final stats()
+            # call hit psycopg IdleSessionTimeout 11 runs in a row — the
+            # whole successful enrichment was reported as a failure).
+            # Reconnect-once on a dead session.
+            try:
+                profiles = self._conn.execute("SELECT COUNT(*) FROM wallet_profiles").fetchone()[0]
+            except Exception:
+                try: self._conn.close()
+                except Exception: pass
+                self._conn = get_connection(str(self._path), check_same_thread=False)
+                profiles = self._conn.execute("SELECT COUNT(*) FROM wallet_profiles").fetchone()[0]
             trades = self._conn.execute("SELECT COUNT(*) FROM wallet_trades").fetchone()[0]
             positions = self._conn.execute("SELECT COUNT(*) FROM wallet_positions").fetchone()[0]
             signals = self._conn.execute("SELECT COUNT(*) FROM market_signals").fetchone()[0]

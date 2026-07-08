@@ -18,6 +18,10 @@ services:
   postgres:
     image: postgres:16-alpine
     container_name: polymarket-postgres
+    # 2026-07-08: docker's default 64MB /dev/shm made VACUUM ANALYZE fail
+    # ("could not resize shared memory segment") 10 weekly pg_prune runs in
+    # a row — table bloat was accumulating silently.
+    shm_size: 512mb
     environment:
       POSTGRES_USER: polymarket
       POSTGRES_PASSWORD: polymarket_dev
