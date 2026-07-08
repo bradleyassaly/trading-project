@@ -395,6 +395,49 @@ class SignalResolver:
 
                 conn.commit()
 
+            # ── P1 upgrade pass: UMA-verify recent low-rank rows ─────────
+            # gamma_bulk/wallet_vote rows are heuristic; write-once-wins
+            # means a wrong one sticks unless a HIGHER-rank source corrects
+            # it. Spend leftover Gamma budget promoting recent rows to
+            # uma_gamma (rank 90) — disagreements land in the conflicts
+            # table via record_resolution's precedence logic.
+            upgraded = 0
+            try:
+                from trading_platform.polymarket.resolutions import (
+                    SOURCE_RANK, record_resolution,
+                )
+                budget = min(200, max(0, self._max_gamma_calls - gamma_calls))
+                if budget > 0:
+                    cand = conn.execute(
+                        """SELECT condition_id FROM market_resolutions
+                            WHERE source_rank < ?
+                              AND COALESCE(resolved_at, recorded_at) > ?
+                            ORDER BY recorded_at DESC LIMIT ?""",
+                        (SOURCE_RANK["uma_gamma"],
+                         int(time.time()) - 45 * 86400, budget),
+                    ).fetchall()
+                    if cand:
+                        try:
+                            import requests as _rq
+                            _sess = _rq.Session()
+                        except ImportError:
+                            _sess = None
+                        for (cid,) in cand:
+                            yes_price = _fetch_gamma_resolution(cid, session=_sess)
+                            gamma_calls += 1
+                            if yes_price is not None:
+                                record_resolution(
+                                    cid, source="uma_gamma",
+                                    resolves_yes=1 if yes_price >= 0.5 else 0,
+                                    db_path=str(self._db_path) if self._db_path else None,
+                                )
+                                upgraded += 1
+                            time.sleep(_GAMMA_SLEEP_SEC)
+                        logger.info("upgrade pass: %d/%d rows UMA-verified",
+                                    upgraded, len(cand))
+            except Exception as exc:
+                logger.debug("upgrade pass failed (non-fatal): %s", exc)
+
             # Sanity check: resolution YES rate should be 15-25%, not 100%.
             # If it's higher, the gamma_resolution_fetcher bug may have
             # regressed. See reports/data_audit_2026-04-12.md.

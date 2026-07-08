@@ -103,6 +103,34 @@ def test_unknown_source_rejected(res_db):
                              db_path=res_db)
 
 
+# ---------------------------------------------------------------------------
+# Consumer cutover wiring (source-level regressions)
+# ---------------------------------------------------------------------------
+
+def test_consumers_cut_over_to_table():
+    import inspect
+    from trading_platform.polymarket import live_position_monitor as lpm
+    from trading_platform.polymarket import polymarket_paper_executor as ppe
+    from trading_platform.polymarket import enrich_resolution as er
+    from trading_platform.polymarket import signal_resolver as sr
+    # dust-close reads the canonical table before the CSV resolver
+    lpm_src = inspect.getsource(lpm)
+    assert "get_resolution" in lpm_src and "FALLBACK to CSV resolver" in lpm_src
+    # paper settlement: bulk table read + majority vote; the LIMIT-1 row
+    # lottery over contradictory wallet_trades is gone
+    v2 = inspect.getsource(ppe.PolymarketPaperExecutor.check_resolutions_v2)
+    assert "get_resolutions_bulk" in v2
+    assert "AND market_outcome IS NOT NULL LIMIT 1" not in v2  # the old lottery SQL
+    assert "contradictory" in v2
+    # enrich writes Polymarket's own settlement into the table
+    assert 'source="data_api_positions"' in inspect.getsource(er)
+    # resolver: Pass 0 table read + UMA upgrade pass + uma_gamma writes
+    sr_src = inspect.getsource(sr)
+    assert "get_resolutions_bulk" in sr_src
+    assert 'source="uma_gamma"' in sr_src
+    assert "upgrade pass" in sr_src
+
+
 def test_token_ids_survive_upgrade_without_them(res_db):
     # gamma_bulk knew the token ids; a later uma_gamma upgrade without them
     # must not NULL them out (COALESCE semantics).

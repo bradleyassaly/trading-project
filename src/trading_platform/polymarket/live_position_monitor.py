@@ -137,12 +137,28 @@ def _settle_dust_close(
         except Exception as exc:
             logger.debug("dust-settle: sell-fill lookup failed: %s", exc)
 
-    # 2. Market outcome from the resolution file.
+    # 2. Market outcome — canonical market_resolutions table first (P1;
+    # monotonic precedence, no token-space inversion), legacy CSV resolver
+    # as a logged fallback during the cutover week.
+    try:
+        from trading_platform.polymarket.resolutions import get_resolution
+        row = get_resolution(condition_id or "")
+        if row and row.get("resolves_yes") is not None:
+            resolved_yes = bool(row["resolves_yes"])
+            we_won = resolved_yes if want_yes else not resolved_yes
+            if we_won:
+                realized = db_shares - cost
+                return round(realized, 4), "win"
+            return round(-cost, 4), "loss"
+    except Exception as exc:
+        logger.debug("dust-settle: resolutions-table lookup failed: %s", exc)
     try:
         from trading_platform.polymarket.resolution_resolver import ResolutionResolver
         resolver = ResolutionResolver(_GAMMA_CSV)
         price = resolver.resolve(token_id or "", condition_id=condition_id)
         if price is not None:
+            logger.info("dust-settle: FALLBACK to CSV resolver for %s "
+                        "(not in market_resolutions)", (condition_id or "")[:14])
             resolved_yes = price >= 99.0
             we_won = resolved_yes if want_yes else not resolved_yes
             if we_won:

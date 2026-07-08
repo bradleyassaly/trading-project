@@ -240,21 +240,24 @@ def _enrich_from_positions(db: WalletDB) -> int:
     # market resolves YES iff (the token is the YES token AND it won) OR
     # (the token is the NO token AND it lost): market_YES ⇔ (is_yes == won).
     role_is_yes: dict[str, bool] = {}
+    market_of: dict[str, tuple] = {}  # asset -> (condition_id, yes_tok, no_tok)
     _assets = list(resolved_assets.keys())
     conn = get_connection()
     try:
         for i in range(0, len(_assets), 500):
             chunk = _assets[i:i + 500]
             ph = ",".join("?" * len(chunk))
-            for yes_tok, no_tok in conn.execute(
-                f"SELECT yes_token_id, no_token_id FROM markets "
+            for cid, yes_tok, no_tok in conn.execute(
+                f"SELECT condition_id, yes_token_id, no_token_id FROM markets "
                 f"WHERE yes_token_id IN ({ph}) OR no_token_id IN ({ph})",
                 (*chunk, *chunk),
             ).fetchall():
                 if yes_tok:
                     role_is_yes[str(yes_tok)] = True
+                    market_of[str(yes_tok)] = (cid, yes_tok, no_tok)
                 if no_tok:
                     role_is_yes[str(no_tok)] = False
+                    market_of[str(no_tok)] = (cid, yes_tok, no_tok)
         unresolved = conn.execute(
             "SELECT id, asset, side, size, price FROM wallet_trades "
             "WHERE market_resolved = 0 AND asset IS NOT NULL"
@@ -262,6 +265,25 @@ def _enrich_from_positions(db: WalletDB) -> int:
     finally:
         try: conn.close()
         except Exception: pass
+
+    # P1: feed the canonical table with Polymarket's OWN settlement data
+    # (rank data_api_positions=70 — above the bulk heuristic, below UMA).
+    # market resolves YES iff (is_yes == token_won); role-unknown tokens are
+    # skipped (never guess).
+    try:
+        from trading_platform.polymarket.resolutions import record_resolution
+        for asset, token_won in resolved_assets.items():
+            info = market_of.get(str(asset))
+            is_yes = role_is_yes.get(str(asset))
+            if not info or is_yes is None or not info[0]:
+                continue
+            record_resolution(
+                info[0], source="data_api_positions",
+                resolves_yes=1 if (is_yes == bool(token_won)) else 0,
+                yes_token_id=info[1], no_token_id=info[2],
+            )
+    except Exception as exc:
+        logger.debug("record_resolution (data_api) failed: %s", exc)
 
     batch: list[tuple] = []
     for trade_id, asset, side, size, price in unresolved:

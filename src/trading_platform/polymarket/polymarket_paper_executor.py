@@ -2980,22 +2980,52 @@ class PolymarketPaperExecutor:
         return [dict(zip(cols, r)) for r in rows]
 
     def check_resolutions_v2(self) -> list[dict[str, Any]]:
-        """Check open positions against wallet_trades for resolution."""
+        """Settle open positions — canonical market_resolutions first (P1),
+        wallet_trades MAJORITY vote as the cutover fallback.
+
+        The old read was `... LIMIT 1` with NO ORDER BY over a table where
+        6,619 condition_ids carry BOTH 'YES' and 'NO' outcomes — a row
+        lottery deciding paper P&L.
+        """
         open_positions = self.get_open_positions()
         resolved: list[dict[str, Any]] = []
+        table_hits: dict[str, int] = {}
+        try:
+            from trading_platform.polymarket.resolutions import get_resolutions_bulk
+            for cid_l, r in get_resolutions_bulk(
+                    [p["condition_id"] for p in open_positions if p.get("condition_id")],
+                    db_path=str(self._wallet_db_path)).items():
+                if r.get("resolves_yes") is not None:
+                    table_hits[cid_l] = int(r["resolves_yes"])
+        except Exception as exc:
+            logger.debug("resolutions-table settle pass failed: %s", exc)
         for pos in open_positions:
             cid = pos["condition_id"]
-            with self._wallet_lock:
-                row = self._wallet_conn.execute(
-                    """SELECT pnl, market_outcome FROM wallet_trades
-                       WHERE condition_id = ? AND market_resolved = 1
-                       AND market_outcome IS NOT NULL LIMIT 1""",
-                    (cid,),
-                ).fetchone()
-            if not row:
-                continue
-            pnl_per_dollar, outcome = row
-            outcome_yes = (outcome or "").upper() in ("YES", "1", "TRUE")
+            outcome_yes: bool | None = None
+            hit = table_hits.get((cid or "").lower())
+            if hit is not None:
+                outcome_yes = bool(hit)
+            else:
+                # Fallback: majority vote across the market's rows, refusing
+                # to settle on internal contradiction (was: LIMIT 1 lottery).
+                with self._wallet_lock:
+                    row = self._wallet_conn.execute(
+                        """SELECT SUM(CASE WHEN market_outcome = 'YES' THEN 1 ELSE 0 END),
+                                  SUM(CASE WHEN market_outcome = 'NO' THEN 1 ELSE 0 END)
+                           FROM wallet_trades
+                           WHERE condition_id = ? AND market_resolved = 1
+                             AND market_outcome IN ('YES', 'NO')""",
+                        (cid,),
+                    ).fetchone()
+                if not row or (not row[0] and not row[1]):
+                    continue
+                yes_n, no_n = int(row[0] or 0), int(row[1] or 0)
+                if yes_n and no_n:
+                    logger.info("[SETTLE_V2] %s… contradictory wallet_trades "
+                                "(%d YES / %d NO) — waiting for canonical "
+                                "resolution", (cid or "")[:14], yes_n, no_n)
+                    continue
+                outcome_yes = yes_n > 0
             won = (pos["side"] == "YES" and outcome_yes) or (pos["side"] == "NO" and not outcome_yes)
             entry = pos.get("entry_price") or 0.5
             if won:
