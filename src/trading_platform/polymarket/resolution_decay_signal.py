@@ -114,8 +114,15 @@ def _candidate_markets(conn) -> list[dict[str, Any]]:
              FROM markets
             WHERE end_date_iso IS NOT NULL
               AND end_date_iso > to_char(NOW(), 'YYYY-MM-DD"T"HH24:MI:SS')
+              -- 2026-07-08: 24h → 48h. MAX_HOURS_TO_RESOLVE was already 48
+              -- but this SQL cap starved the Python filter of everything
+              -- past 24h. The A2 decay table shows the strongest wedge in
+              -- the 12-24h bucket (sports/0.10-0.20 +7.6c, n=36) — flow
+              -- entering at 24-48h feeds those buckets; per-candidate
+              -- gates (calibrated-EV, thin-book, decay challenger) still
+              -- filter each fire.
               AND end_date_iso < to_char(
-                    NOW() + interval '24 hours', 'YYYY-MM-DD"T"HH24:MI:SS')
+                    NOW() + interval '48 hours', 'YYYY-MM-DD"T"HH24:MI:SS')
               AND yes_token_id IS NOT NULL
               AND no_token_id IS NOT NULL"""
     ).fetchall()

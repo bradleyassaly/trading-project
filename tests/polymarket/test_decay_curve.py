@@ -153,3 +153,30 @@ def test_market_signals_insert_uses_real_columns():
     # the phantom columns that made the insert silently fail forever
     assert "entry_price, confidence, wallet, wallet_tier" not in src
     assert "decay_lookup_p" in src  # challenger rides in the payload
+
+
+def test_live_decay_veto_is_veto_only_and_failsafe():
+    # The veto uses the honest empirical P to BLOCK a -wedge fire but never
+    # to authorize/up-size one; fail-safe when decay_lookup_p is absent;
+    # LIVE only (paper keeps collecting the full distribution).
+    import inspect
+    from trading_platform.polymarket import polymarket_live_executor as ple
+    src = inspect.getsource(ple)
+    assert "LIVE_DECAY_VETO" in src
+    assert "DECAY_CURVE_VETO" in src           # flag, default on
+    assert 'signal.get("decay_lookup_p")' in src
+    # veto only exists inside the resolution_decay BUY branch and returns
+    # self._block — it can only reduce trades, never permit new ones
+    assert "decay-curve veto" in src
+    # it is NOT in the paper executor (paper must keep collecting)
+    from trading_platform.polymarket import polymarket_paper_executor as ppe
+    assert "LIVE_DECAY_VETO" not in inspect.getsource(ppe)
+
+
+def test_scan_aperture_widened_to_48h():
+    import inspect
+    from trading_platform.polymarket import resolution_decay_signal as rds
+    src = inspect.getsource(rds)
+    # SQL cap now matches MAX_HOURS_TO_RESOLVE=48 (was a 24h starve)
+    assert "interval '48 hours'" in src
+    assert rds.MAX_HOURS_TO_RESOLVE == 48.0

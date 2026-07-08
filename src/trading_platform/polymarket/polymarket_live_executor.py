@@ -610,6 +610,36 @@ class PolymarketLiveExecutor:
                     f"px {_gate_px:.3f} × {1 + _min_edge:.2f} — hold-to-"
                     f"resolution BUY is -EV",
                 )
+            # 2026-07-08: veto-only decay-curve EV filter. The A2 challenger
+            # (decay_lookup_p, honest empirical P(YES) per slice×hours×price
+            # cell) rides in the payload; the hand-coded confidence above is
+            # overconfident (0.5-0.85 vs true ~0.17), so the formula gate
+            # alone passes -EV cells. This lets the honest P VETO a fire it
+            # would clear — but NEVER authorize/up-size one (asymmetric
+            # caution: strictly risk-reducing, so it respects the
+            # champion/challenger discipline before the DECAY_CURVE_ENFORCE
+            # Brier gate). LIVE ONLY — paper keeps collecting every fire so
+            # the Brier comparison sees the full distribution. Fail-safe:
+            # None lookup → no veto. This is what makes widening the scan
+            # aperture to 48h add only +wedge volume, not more -EV volume.
+            _decay_p = signal.get("decay_lookup_p")
+            if (_gate_px > 0 and _decay_p is not None
+                    and os.environ.get("DECAY_CURVE_VETO", "1").lower()
+                        in ("1", "true", "yes")
+                    and float(_decay_p) <= _gate_px * (1.0 + _min_edge)):
+                try:
+                    from trading_platform.polymarket.decision_trace import trace as _dt
+                    _dt(signal=signal, gate="LIVE_DECAY_VETO", passed=False,
+                        value=float(_decay_p), threshold=_gate_px * (1.0 + _min_edge),
+                        detail=f"decay_p {float(_decay_p):.3f} <= px {_gate_px:.3f}",
+                        surface="live", db_path=self._db_path)
+                except Exception:
+                    pass
+                return self._block(
+                    signal,
+                    f"decay-curve veto: empirical P {float(_decay_p):.3f} <= "
+                    f"px {_gate_px:.3f} × {1 + _min_edge:.2f} — cell has no "
+                    f"+wedge (formula conf {confidence:.3f} overconfident)")
 
         # 0a. Category allowlist — live trades restricted to categories
         # with statistically significant positive resolved EV.
