@@ -157,38 +157,72 @@ def _get_resolution_payout(token_id: str) -> float | None:
 
 
 def _get_book_prices(token_id: str) -> tuple[float | None, float | None]:
-    """(best_yes_bid, best_yes_ask) from the normalized order book.
-    /book returns YES-space prices for all token queries."""
+    """(best_bid, best_ask) of the QUERIED token's own book.
+
+    2026-07-08: post-migration the CLOB quotes each token in ITS OWN space
+    (probed: a NO token worth $0.049 quotes bid 0.035/ask 0.063). The old
+    'YES-space for all token queries' behavior is gone — no flips here."""
     try:
         book = _get_clob().get_order_book(token_id)
         bids = book.get("bids") or []
         asks = book.get("asks") or []
-        yes_bid = float(bids[0]["price"]) if bids else None
-        yes_ask = float(asks[0]["price"]) if asks else None
-        return yes_bid, yes_ask
+        bid = float(bids[0]["price"]) if bids else None
+        ask = float(asks[0]["price"]) if asks else None
+        return bid, ask
     except Exception:
         return None, None
 
 
+def _fetch_dataapi_positions() -> dict[str, float]:
+    """{asset(token_id): curPrice} from the data-api positions endpoint —
+    Polymarket's OWN per-position valuation (what the site displays),
+    held-token space by definition. The truth-first valuation source."""
+    try:
+        import requests
+        wallet = (os.environ.get("POLYMARKET_FUNDER_ADDRESS")
+                  or os.environ.get("POLYMARKET_WALLET_ADDRESS"))
+        if not wallet:
+            return {}
+        r = requests.get("https://data-api.polymarket.com/positions",
+                         params={"user": wallet, "limit": 300}, timeout=15)
+        if not r.ok:
+            return {}
+        out = {}
+        for p in r.json():
+            asset = str(p.get("asset") or "")
+            cp = p.get("curPrice")
+            if asset and cp is not None:
+                out[asset] = float(cp)
+        return out
+    except Exception:
+        return {}
+
+
 def _position_value(direction: str, shares: float, fill_price: float,
                     token_id: str | None,
-                    last_mark_yes: float | None = None) -> tuple[float, float]:
+                    last_mark_yes: float | None = None,
+                    dataapi_price: float | None = None) -> tuple[float, float]:
     """Return (cost_basis, market_value) for one open position.
 
-    2026-07-06 rework: value what the position would actually FETCH, not
-    a mid. Thin/dead books produce phantom mids (empty post-game book →
-    mid ≈ 0.5 on worthless tokens); on 7/6 the snapshot ran $60 above
-    on-chain truth and printed a fictitious +$47 day while Polymarket
-    showed +$7.62. Valuation ladder:
+    2026-07-08 rework: the CLOB /book and /midpoint now quote each token in
+    ITS OWN space (empirically probed after the exchange migration). The
+    old `1 - x` flips on SELL therefore INVERTED values — 5-cent NO tokens
+    valued at ~95 cents — and the snapshot ran ~$19 above the Polymarket
+    site ($312.50 vs the site's $293). Valuation ladder:
+      0. data-api curPrice — Polymarket's OWN per-position price (what the
+         site shows). Truth by construction, held-token space, no flips.
       1. Resolved payout (gamma_resolution.csv) — exact, covers dead books
-      2. Executable book side: long-YES at best YES bid; long-NO at
-         (1 - best YES ask) — the price a liquidation would hit
-      3. /midpoint → last trade → last_mark_price → entry (legacy chain,
-         still needed for unresolved markets with one-sided books; the
-         5/15-5/18 $5.43 stuck-snapshot is why entry stays the floor)
+      2. Best BID of the held token's own book — the price a liquidation
+         hits, same expression for both directions (no flips)
+      3. /midpoint (held space) → last_mark_price (monitor's YES-space
+         contract — flip for SELL) → entry (floor; the 5/15-5/18 $5.43
+         stuck-snapshot is why entry stays the floor)
     """
     entry = max(1.0 - fill_price, 0.001) if direction == "SELL" \
         else max(fill_price, 0.001)
+
+    if dataapi_price is not None:
+        return shares * entry, shares * max(float(dataapi_price), 0.0)
 
     mkt_price: float | None = None
     if token_id:
@@ -197,20 +231,18 @@ def _position_value(direction: str, shares: float, fill_price: float,
             # CSV rows are per-token: payout is already in the held
             # token's own space for both directions.
             return shares * entry, shares * payout
-        yes_bid, yes_ask = _get_book_prices(token_id)
-        if direction == "SELL":
-            if yes_ask is not None:
-                mkt_price = max(1.0 - yes_ask, 0.001)
-        else:
-            if yes_bid is not None:
-                mkt_price = yes_bid
+        held_bid, _held_ask = _get_book_prices(token_id)
+        if held_bid is not None:
+            mkt_price = held_bid
 
     if mkt_price is None:
         mid = _get_mid(token_id) if token_id else None
-        if mid is None and last_mark_yes is not None:
-            mid = float(last_mark_yes)
         if mid is not None:
-            mkt_price = max(1.0 - mid, 0.001) if direction == "SELL" else mid
+            mkt_price = mid  # held-token space — no flip
+        elif last_mark_yes is not None:
+            # the monitor writes YES-space marks; flip for SELL (held NO)
+            m = float(last_mark_yes)
+            mkt_price = max(1.0 - m, 0.001) if direction == "SELL" else m
         else:
             mkt_price = entry
     return shares * entry, shares * mkt_price
@@ -247,6 +279,10 @@ def take_snapshot() -> dict:
     open_mkt  = 0.0
     unredeemed_value = 0.0  # N2: resolved-but-not-yet-swept payout value
     counted = 0
+    # 2026-07-08: one truth fetch per snapshot — Polymarket's own per-asset
+    # curPrice (the number the site shows). Aligns equity with the site by
+    # construction instead of reconstructing it from books/mids.
+    _truth_prices = _fetch_dataapi_positions()
     for direction, fp, ep, sh, token_id, size_usd, last_mark in open_rows:
         price = float(fp) if fp is not None else float(ep)
         # On-chain balance is ground truth; DB shares is stale for GTC fills.
@@ -263,7 +299,8 @@ def take_snapshot() -> dict:
             if shares <= 0:
                 continue
         cost, mkt = _position_value(direction, shares, price, token_id,
-                                    last_mark_yes=last_mark)
+                                    last_mark_yes=last_mark,
+                                    dataapi_price=_truth_prices.get(str(token_id)))
         open_cost += cost
         open_mkt  += mkt
         counted += 1

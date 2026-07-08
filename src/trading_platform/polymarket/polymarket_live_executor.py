@@ -1347,10 +1347,15 @@ class PolymarketLiveExecutor:
         # Polymarket's /midpoint endpoint always returns the YES-token market
         # probability regardless of which token_id is queried. For SELL signals
         # (buying NO token), flip to get the actual NO-token price.
-        _yes_mid = self._clob.get_mid_price(token_id)
-        if _yes_mid is None:
+        # 2026-07-08: /midpoint quotes the QUERIED token in its own space
+        # post-migration (probed; the pre-migration "always YES-space"
+        # behavior is gone). token_id here is the side we'd trade, so the
+        # mid IS the held-token current price for both directions.
+        _held_mid = self._clob.get_mid_price(token_id)
+        if _held_mid is None:
             return self._block(signal, "Could not fetch current price from CLOB", size_usd)
-        current_price = _yes_mid if want_yes else max(0.01, 1.0 - _yes_mid)
+        current_price = _held_mid
+        _yes_mid = _held_mid if want_yes else max(0.01, 1.0 - _held_mid)
         # P6: stash decision-time prices on the signal dict — _block() passes
         # the SAME dict into _record_attempt, so every later gate records the
         # market context it saw for free (incl. rejects, which the execution

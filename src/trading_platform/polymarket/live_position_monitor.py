@@ -380,26 +380,30 @@ def _check_live_exits_locked() -> dict[str, int]:
 
         # Current YES-space price for the token we HOLD. 2026-07-06:
         # prefer the EXECUTABLE side over the mid — thin/dead books make
-        # mids fictitious (empty post-game book → mid 0.5 on worthless
-        # tokens), which fires phantom take-profits and pollutes MFE/mark
-        # stats. For a long-YES position the exit hits the YES bid; for
-        # long-NO it effectively hits (1 - YES ask), so YES ask is the
-        # relevant YES-space price. Mid remains the fallback when the
-        # needed book side is empty.
+        # mids fictitious. 2026-07-08 CORRECTION: post-migration the CLOB
+        # quotes each token in ITS OWN space (probed: a $0.049 NO token
+        # quotes bid 0.035/ask 0.063). A liquidation of the HELD token
+        # hits the held token's best BID for both directions; the old
+        # "YES ask" read on NO tokens was actually the NO ask, and the
+        # downstream 1−x flip inverted marks (phantom +94% unrealized on
+        # worthless NO positions, snapshot $19 above the site).
+        # `current` keeps its YES-space contract for everything below.
         current = None
         _book = None
         try:
             _book = clob.get_order_book(token_id)
             _bids = _book.get("bids") or []
-            _asks = _book.get("asks") or []
-            if side in ("YES", "BUY"):
-                current = float(_bids[0]["price"]) if _bids else None
-            else:
-                current = float(_asks[0]["price"]) if _asks else None
+            _held_bid = float(_bids[0]["price"]) if _bids else None
+            if _held_bid is not None:
+                current = _held_bid if side in ("YES", "BUY") \
+                    else max(0.01, 1.0 - _held_bid)
         except Exception:
             current = None
         if current is None:
-            current = clob.get_mid_price(token_id)
+            _held_mid = clob.get_mid_price(token_id)
+            if _held_mid is not None:
+                current = _held_mid if side in ("YES", "BUY") \
+                    else max(0.01, 1.0 - _held_mid)
         if current is None:
             continue
 
