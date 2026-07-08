@@ -364,6 +364,17 @@ SCHEDULE: list[Task] = [
         description="Refresh per-(signal × direction) sizing multipliers from live WR",
     ),
     Task(
+        # 2026-07-07 (A3): exit-policy overrides from the hold-vs-exit
+        # counterfactual. v1 only ever EXEMPTS stop_loss on slices where
+        # stops lose > $10 vs hold at n>=30 (the -$8.58 football-stops
+        # pattern); everything else is written as 'none' for audit. Exit
+        # monitors read fail-safe-closed (stale/missing => stops stay ON).
+        name="update_exit_policy",
+        cmd="python -m trading_platform.polymarket.exit_counterfactual --apply",
+        interval_seconds=24 * 3600,
+        description="Daily exit-policy overrides from the exit counterfactual",
+    ),
+    Task(
         # 2026-05-12: unified daily review — P&L, slippage, trailing-stop
         # leakage, resolution timing, rejections, calibration drift, alpha
         # decay. Output goes to logs/scheduler/daily_system_review.log.

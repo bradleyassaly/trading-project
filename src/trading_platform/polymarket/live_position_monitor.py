@@ -318,7 +318,8 @@ def _check_live_exits_locked() -> dict[str, int]:
                    shares, signal_type, signal_wallet, submitted_at,
                    COALESCE(mfe, 0) AS mfe, last_mark_price,
                    entry_price, status, resolution_date,
-                   COALESCE(exit_attempts, 0) AS exit_attempts_so_far
+                   COALESCE(exit_attempts, 0) AS exit_attempts_so_far,
+                   category
             FROM live_trades
             WHERE dry_run = 0
               AND exit_ts IS NULL AND status NOT IN ('error', 'blocked')
@@ -334,11 +335,25 @@ def _check_live_exits_locked() -> dict[str, int]:
     clob = ClobClient()
     exited = 0
     reasons: dict[str, int] = {}
+    # A3: per-pass cache of (sig_type, slice) -> stop-loss exemption. One
+    # lookup per distinct slice per sweep; fail-safe-CLOSED inside.
+    _sl_exempt_cache: dict[tuple, bool] = {}
+
+    def _sl_exempt(sig: str, cat: str | None) -> bool:
+        key = (sig or "", "sports" if (cat or "").lower() == "sports" else "other")
+        if key not in _sl_exempt_cache:
+            try:
+                from trading_platform.polymarket.exit_counterfactual import stop_loss_exempt
+                _sl_exempt_cache[key] = stop_loss_exempt(key[0], key[1])
+            except Exception:
+                _sl_exempt_cache[key] = False
+        return _sl_exempt_cache[key]
 
     for row in rows:
         (lid, cid, token_id, side, fill_price, size_usd, shares,
          sig_type, src_wallet, submitted_at, mfe_dollars, last_mark,
-         entry_price, trade_status, resolution_date, exit_attempts_so_far) = row
+         entry_price, trade_status, resolution_date, exit_attempts_so_far,
+         trade_category) = row
         if not cid or not token_id:
             continue
         # 2026-06-04: late-stage exit policy.
@@ -411,6 +426,13 @@ def _check_live_exits_locked() -> dict[str, int]:
         # Direction-specific profile (e.g., wallet_reversal SELL has tighter trail ladder)
         direction = "BUY" if side in ("YES", "BUY") else "SELL"
         prof = _exit_profile(sig_type or "", direction)
+        # A3: counterfactual-driven stop-loss exemption. When the daily
+        # exit-policy table says stops on this (signal × slice) LOSE > $10
+        # vs hold at n>=30 (the -$8.58 football-stops pattern), push the SL
+        # threshold out of reach — _decide_exit stays pure; trailing/TP/
+        # time-decay untouched; kill-switch hard stops are a separate layer.
+        if _sl_exempt(sig_type or "", trade_category):
+            prof = {**prof, "sl": -10.0}
 
         # Update mark + MAE/MFE in DB.
         # `current` is YES-space price (clob.get_mid_price always returns YES).
@@ -871,7 +893,7 @@ def check_paper_exits() -> dict[str, int]:
             """SELECT id, condition_id, token_id, side, fill_price, size_usd,
                       shares, signal_type, signal_wallet, submitted_at,
                       COALESCE(mfe, 0) AS mfe, last_mark_price,
-                      entry_price, direction
+                      entry_price, direction, category
                FROM live_trades
                WHERE dry_run = 1 AND status = %s
                  AND exit_ts IS NULL
@@ -890,11 +912,23 @@ def check_paper_exits() -> dict[str, int]:
     reasons: dict[str, int] = {}
     # Cache token_id resolutions within this pass to avoid duplicate API calls.
     _tok_cache: dict[tuple[str, bool], str | None] = {}
+    # A3: same stop-loss exemption as the live pass (paper/live parity).
+    _sl_exempt_cache: dict[tuple, bool] = {}
+
+    def _sl_exempt(sig: str, cat: str | None) -> bool:
+        key = (sig or "", "sports" if (cat or "").lower() == "sports" else "other")
+        if key not in _sl_exempt_cache:
+            try:
+                from trading_platform.polymarket.exit_counterfactual import stop_loss_exempt
+                _sl_exempt_cache[key] = stop_loss_exempt(key[0], key[1])
+            except Exception:
+                _sl_exempt_cache[key] = False
+        return _sl_exempt_cache[key]
 
     for row in rows:
         (lid, cid, token_id, side, fill_price, size_usd, shares,
          sig_type, src_wallet, submitted_at, mfe_dollars, last_mark,
-         entry_price, direction) = row
+         entry_price, direction, trade_category) = row
 
         # Use fill_price if set, else entry_price (paper trades are logged
         # with fill_price=None and entry_price=current_price_at_signal_time).
@@ -934,6 +968,9 @@ def check_paper_exits() -> dict[str, int]:
         # Direction-specific profile (e.g., wallet_reversal SELL has tighter trail ladder)
         direction = "BUY" if want_yes else "SELL"
         prof = _exit_profile(sig_type or "", direction)
+        # A3: counterfactual stop-loss exemption (paper/live parity).
+        if _sl_exempt(sig_type or "", trade_category):
+            prof = {**prof, "sl": -10.0}
 
         # Update mark in DB.
         try:

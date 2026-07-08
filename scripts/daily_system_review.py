@@ -849,100 +849,23 @@ def section_exit_counterfactual(conn, now_ts):
     hold-to-resolution evidence frame); negative delta = exits add value.
     """
     section("17. EXIT-POLICY COUNTERFACTUAL (sold-before-resolution, 60d)")
-    _PRE_RES_EXITS = ("stop_loss", "take_profit", "trailing_stop",
-                      "whale_mirror_exit", "time_decay",
-                      "reconciled_dataapi_sell", "market_life_expired")
-    cutoff = now_ts - 60 * 86400
-    # Resolution sources, broadest first: the markets table snapshot
-    # (m.closed + extreme outcome_prices, refreshed with priority on our
-    # own positions) then the gamma_resolution.csv per-token file. The
-    # CSV alone covered 0 of 69 exits on first run — its 90d sweep is a
-    # fraction of the sports-market universe.
-    rows = conn.execute(
-        """SELECT lt.signal_type, COALESCE(lt.category,'unknown'),
-                  lt.direction, lt.exit_reason,
-                  COALESCE(lt.fill_price, lt.entry_price), lt.shares,
-                  lt.size_usd, lt.realized_pnl, lt.token_id,
-                  m.closed, m.outcome_prices, m.no_token_id, m.yes_token_id,
-                  (SELECT wt.market_outcome FROM wallet_trades wt
-                    WHERE wt.condition_id = lt.condition_id
-                      AND wt.market_resolved = 1
-                      AND wt.market_outcome IN ('YES','NO')
-                    LIMIT 1) AS wt_outcome
-             FROM live_trades lt
-             LEFT JOIN markets m ON m.condition_id = lt.condition_id
-            WHERE lt.dry_run = 0 AND lt.realized_pnl IS NOT NULL
-              AND lt.exit_ts > ? AND lt.token_id IS NOT NULL
-              AND lt.exit_reason IN ({})""".format(
-                  ",".join("?" * len(_PRE_RES_EXITS))),
-        (cutoff, *_PRE_RES_EXITS),
-    ).fetchall()
-    if not rows:
-        print("  No pre-resolution exits in window.")
-        return
-
+    # A3: the computation lives in exit_counterfactual.py (it also feeds the
+    # exit_policy_overrides table the exit monitors read). This section is
+    # now a printer over the same aggregates, summed across exit_reason.
     try:
-        from pathlib import Path
-        from trading_platform.polymarket.resolution_resolver import ResolutionResolver
-        _csv = Path(__file__).resolve().parents[1] / "data" / "polymarket" / "gamma_resolution.csv"
-        resolver = ResolutionResolver(str(_csv))
+        from trading_platform.polymarket.exit_counterfactual import (
+            compute_exit_counterfactual,
+        )
+        per_key, unresolved = compute_exit_counterfactual(conn, now_ts, 60)
     except Exception as exc:
-        print(f"  resolver unavailable: {exc}")
+        print(f"  counterfactual unavailable: {exc}")
         return
-
-    import json as _json
     per_sig: dict = {}
-    unresolved = 0
-    for (sig, cat, direction, _exit_reason, fp, sh, usd, actual, token_id,
-         m_closed, m_prices, m_no_tok, m_yes_tok, wt_outcome) in rows:
-        payout = None
-        # Source 1: markets table snapshot
-        if m_closed and m_prices:
-            try:
-                prices = [float(x) for x in _json.loads(m_prices)]
-                idx = 1 if str(token_id) == str(m_no_tok) else 0
-                px = prices[idx]
-                if px >= 0.99:
-                    payout = 1.0
-                elif px <= 0.01:
-                    payout = 0.0
-            except (ValueError, TypeError, IndexError):
-                payout = None
-        # Source 2: per-token resolution file
-        if payout is None:
-            try:
-                price = resolver.resolve(str(token_id))
-            except Exception:
-                price = None
-            if price is not None:
-                payout = 1.0 if price >= 99.0 else (0.0 if price <= 1.0 else None)
-        # Source 3: wallet_trades market_outcome (data-api enrichment).
-        # Validated 2026-07-07 on 258k whale rows with zero
-        # contradictions: market_outcome='YES' <=> the YES-slot outcome
-        # won. Needs the cached yes/no token mapping to know which slot
-        # we held; Gamma delists resolved markets so this is the only
-        # source that reaches most of our exit history (94 of 146 cids).
-        if payout is None and wt_outcome in ("YES", "NO"):
-            if m_yes_tok and str(token_id) == str(m_yes_tok):
-                payout = 1.0 if wt_outcome == "YES" else 0.0
-            elif m_no_tok and str(token_id) == str(m_no_tok):
-                payout = 1.0 if wt_outcome == "NO" else 0.0
-        if payout is None:
-            unresolved += 1
-            continue
-        fp = float(fp or 0)
-        shares = float(sh or 0) or (float(usd or 0) / max(fp, 0.01))
-        if shares <= 0 or fp <= 0:
-            unresolved += 1
-            continue
-        cost = shares * (fp if (direction or "BUY").upper() == "BUY"
-                         else max(1.0 - fp, 0.001))
-        hold = shares * payout - cost
-        key = (sig, "sports" if (cat or "").lower() == "sports" else "other")
-        agg = per_sig.setdefault(key, {"n": 0, "actual": 0.0, "hold": 0.0})
-        agg["n"] += 1
-        agg["actual"] += float(actual)
-        agg["hold"] += hold
+    for (sig, sl, _reason), a in per_key.items():
+        agg = per_sig.setdefault((sig, sl), {"n": 0, "actual": 0.0, "hold": 0.0})
+        agg["n"] += a["n"]
+        agg["actual"] += a["actual"]
+        agg["hold"] += a["hold"]
 
     if not per_sig:
         print(f"  No resolvable exits yet ({unresolved} awaiting resolution data).")
