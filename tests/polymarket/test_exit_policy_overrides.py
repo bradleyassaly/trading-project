@@ -96,7 +96,7 @@ def _seed_exits(path, n, actual_each, hold_each, reason="stop_loss",
                    direction TEXT, exit_reason TEXT, fill_price REAL,
                    entry_price REAL, shares REAL, size_usd REAL,
                    realized_pnl REAL, token_id TEXT, condition_id TEXT,
-                   dry_run INT, exit_ts INT)""")
+                   dry_run INT, exit_ts INT, is_probe INT DEFAULT 0)""")
     c.execute("""CREATE TABLE IF NOT EXISTS markets (
                    condition_id TEXT, closed INT, outcome_prices TEXT,
                    yes_token_id TEXT, no_token_id TEXT)""")

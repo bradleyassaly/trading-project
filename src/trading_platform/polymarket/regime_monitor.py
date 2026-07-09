@@ -122,6 +122,7 @@ def _fetch(conn, signal_type: str, days: int, now: int) -> list[tuple]:
               AND lt.signal_type = ?
               AND lt.outcome IN ('win', 'loss')
               AND lt.size_usd > 0
+              AND COALESCE(lt.is_probe, 0) = 0
               AND COALESCE(lt.resolution_date, lt.exit_ts) > ?""",
         (signal_type, cutoff),
     ).fetchall()

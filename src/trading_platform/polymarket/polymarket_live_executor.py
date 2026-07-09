@@ -90,6 +90,23 @@ _CLUSTER_GATE_LAST_ALERT: float = 0.0
 DECAY_KELLY_FRACTION = float(os.environ.get("DECAY_KELLY_FRACTION", "0.25"))
 DECAY_KELLY_MAX_USD = float(os.environ.get("DECAY_KELLY_MAX_USD", "25"))
 
+# 2026-07-09: bounded EXECUTION-PROBE program (user request). $1 real
+# trades on candidates the EV gates would block but that sit in the
+# UNCERTAINTY BAND (unmeasured decay cells, or honest-P within PROBE_BAND
+# of the veto boundary) — where live fill/slippage data has the highest
+# information value. Purpose: populate the P6 execution dataset (fill rate,
+# spread paid, slippage vs price) that paper structurally cannot produce.
+# NOT an EV-learning channel (paper + the harness do that at 1000x the
+# speed) and NOT a copy re-test. Probes are tagged is_probe=1 and EXCLUDED
+# from the regime monitor / exit-counterfactual evidence. Hard bounds:
+# PROBE_DAILY_BUDGET_USD across the day, one probe per PROBE_MIN_INTERVAL_S.
+# Off by default; .env enables it for the agreed week.
+EXPLORATION_PROBES = os.environ.get("EXPLORATION_PROBES", "0").lower() in ("1", "true", "yes")
+PROBE_STAKE_USD = float(os.environ.get("PROBE_STAKE_USD", "1.0"))
+PROBE_DAILY_BUDGET_USD = float(os.environ.get("PROBE_DAILY_BUDGET_USD", "5.0"))
+PROBE_MIN_INTERVAL_S = int(os.environ.get("PROBE_MIN_INTERVAL_S", "3600"))
+PROBE_BAND = float(os.environ.get("PROBE_BAND", "0.05"))
+
 _TOPIC_STRIP_DATE = __import__("re").compile(
     r"\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+\d+\b",
     __import__("re").IGNORECASE,
@@ -291,6 +308,57 @@ class PolymarketLiveExecutor:
         stake = f * DECAY_KELLY_FRACTION * self._current_equity()
         return round(max(5.0, min(DECAY_KELLY_MAX_USD, stake)), 2)
 
+    def _maybe_probe(self, signal: dict, gate_px: float,
+                     decay_p: float | None) -> bool:
+        """Execution-probe eligibility for a candidate an EV gate is about
+        to block. True ⇒ caller tags signal['is_probe']=1 and lets it
+        continue at PROBE_STAKE_USD instead of blocking.
+
+        Conditions (ALL must hold):
+          * EXPLORATION_PROBES on and this is a resolution_decay BUY
+          * uncertainty band: decay_p is None (unmeasured cell — e.g. the
+            new 24-48h territory) OR |decay_p − px| <= PROBE_BAND (the
+            near-boundary cells where value-of-information peaks)
+          * daily budget not exhausted AND >= PROBE_MIN_INTERVAL_S since
+            the last probe (one combined indexed query; fail-safe False)
+        Every non-EV risk gate downstream (thin-book, depth, dedup, event
+        caps, cluster cap) still applies to the probe.
+        """
+        if not EXPLORATION_PROBES:
+            return False
+        if decay_p is not None and abs(float(decay_p) - gate_px) > PROBE_BAND:
+            return False  # confidently -EV cell: not uncertainty, just bad
+        try:
+            from trading_platform.polymarket.db_connection import get_connection
+            midnight = int(time.time()) - (int(time.time()) % 86400)
+            conn = get_connection(self._db_path)
+            try:
+                r = conn.execute(
+                    """SELECT COALESCE(SUM(size_usd), 0), MAX(attempted_at)
+                         FROM live_trades
+                        WHERE dry_run = 0 AND COALESCE(is_probe, 0) = 1
+                          AND status NOT IN ('blocked', 'error')
+                          AND attempted_at >= ?""",
+                    (midnight,),
+                ).fetchone()
+            finally:
+                try: conn.close()
+                except Exception: pass
+            spent = float(r[0] or 0)
+            last_ts = int(r[1]) if r and r[1] else 0
+            if spent + PROBE_STAKE_USD > PROBE_DAILY_BUDGET_USD:
+                return False
+            if time.time() - last_ts < PROBE_MIN_INTERVAL_S:
+                return False
+            logger.info(
+                "[PROBE] eligible: px=%.3f decay_p=%s budget_left=$%.2f",
+                gate_px, f"{decay_p:.3f}" if decay_p is not None else "unmeasured",
+                PROBE_DAILY_BUDGET_USD - spent)
+            return True
+        except Exception as exc:
+            logger.debug("[PROBE] eligibility check failed (no probe): %s", exc)
+            return False
+
     def __init__(self) -> None:
         self._db = WalletDB()
         self._db_path = str(self._db._path)
@@ -491,7 +559,10 @@ class PolymarketLiveExecutor:
                                 "spread_at_decision REAL", "book_target_price REAL",
                                 "slippage_c REAL", "spread_paid_c REAL",
                                 # P3: real delivery-lane tag
-                                "source_lane TEXT"):
+                                "source_lane TEXT",
+                                # 2026-07-09: $1 execution-probe tag —
+                                # excluded from all EV evidence streams
+                                "is_probe INTEGER"):
                     try:
                         conn.execute(f"ALTER TABLE live_trades ADD COLUMN {col_ddl}")
                     except Exception:
@@ -653,12 +724,16 @@ class PolymarketLiveExecutor:
             _gate_px = float(signal.get("price") or 0)
             _min_edge = float(os.environ.get("RESOLUTION_DECAY_MIN_EDGE", "0.05"))
             if _gate_px > 0 and confidence <= _gate_px * (1.0 + _min_edge):
-                return self._block(
-                    signal,
-                    f"calibrated-EV gate: conf {confidence:.3f} <= "
-                    f"px {_gate_px:.3f} × {1 + _min_edge:.2f} — hold-to-"
-                    f"resolution BUY is -EV",
-                )
+                if self._maybe_probe(signal, _gate_px,
+                                     signal.get("decay_lookup_p")):
+                    signal["is_probe"] = 1  # $1 execution probe — continue
+                else:
+                    return self._block(
+                        signal,
+                        f"calibrated-EV gate: conf {confidence:.3f} <= "
+                        f"px {_gate_px:.3f} × {1 + _min_edge:.2f} — hold-to-"
+                        f"resolution BUY is -EV",
+                    )
             # 2026-07-08: veto-only decay-curve EV filter. The A2 challenger
             # (decay_lookup_p, honest empirical P(YES) per slice×hours×price
             # cell) rides in the payload; the hand-coded confidence above is
@@ -673,28 +748,33 @@ class PolymarketLiveExecutor:
             # aperture to 48h add only +wedge volume, not more -EV volume.
             _decay_p = signal.get("decay_lookup_p")
             if (_gate_px > 0 and _decay_p is not None
+                    and not signal.get("is_probe")
                     and os.environ.get("DECAY_CURVE_VETO", "1").lower()
                         in ("1", "true", "yes")
                     and float(_decay_p) <= _gate_px * (1.0 + _min_edge)):
-                try:
-                    from trading_platform.polymarket.decision_trace import trace as _dt
-                    _dt(signal=signal, gate="LIVE_DECAY_VETO", passed=False,
-                        value=float(_decay_p), threshold=_gate_px * (1.0 + _min_edge),
-                        detail=f"decay_p {float(_decay_p):.3f} <= px {_gate_px:.3f}",
-                        surface="live", db_path=self._db_path)
-                except Exception:
-                    pass
-                return self._block(
-                    signal,
-                    f"decay-curve veto: empirical P {float(_decay_p):.3f} <= "
-                    f"px {_gate_px:.3f} × {1 + _min_edge:.2f} — cell has no "
-                    f"+wedge (formula conf {confidence:.3f} overconfident)")
+                if self._maybe_probe(signal, _gate_px, float(_decay_p)):
+                    signal["is_probe"] = 1  # $1 execution probe — continue
+                else:
+                    try:
+                        from trading_platform.polymarket.decision_trace import trace as _dt
+                        _dt(signal=signal, gate="LIVE_DECAY_VETO", passed=False,
+                            value=float(_decay_p), threshold=_gate_px * (1.0 + _min_edge),
+                            detail=f"decay_p {float(_decay_p):.3f} <= px {_gate_px:.3f}",
+                            surface="live", db_path=self._db_path)
+                    except Exception:
+                        pass
+                    return self._block(
+                        signal,
+                        f"decay-curve veto: empirical P {float(_decay_p):.3f} <= "
+                        f"px {_gate_px:.3f} × {1 + _min_edge:.2f} — cell has no "
+                        f"+wedge (formula conf {confidence:.3f} overconfident)")
             # Veto PASSED with a genuine measured wedge → stash the honest
             # Kelly stake so the runtime-cap step below can size it above the
             # flat $5 floor (still bounded + depth-clamped). Only when the
             # cell has real evidence (decay_p not None); unmeasured cells
             # keep $5. DECAY_KELLY_SIZING=0 disables.
             if (_gate_px > 0 and _decay_p is not None
+                    and not signal.get("is_probe")
                     and float(_decay_p) > _gate_px * (1.0 + _min_edge)
                     and os.environ.get("DECAY_KELLY_SIZING", "1").lower()
                         in ("1", "true", "yes")):
@@ -1566,6 +1646,15 @@ class PolymarketLiveExecutor:
         # (and the stake) above the flat $5 floor, but NEVER above what the
         # book can fill — fillable_depth/1.5 is exactly the depth-check bound
         # already verified above, so this can't exceed proven capacity.
+        # Execution probes trade at the fixed $1 stake — never Kelly-lifted,
+        # never ladder-lifted (the CLOB min-shares logic may stretch the
+        # effective fill to ~$0.75-2 depending on price; that's fine).
+        if signal.get("is_probe") and not is_dry:
+            size_usd = PROBE_STAKE_USD
+            runtime_cap = max(runtime_cap, PROBE_STAKE_USD)
+            logger.info("[PROBE] firing $%.2f execution probe on %s×%s @ %.3f",
+                        size_usd, sig_type, cat,
+                        float(signal.get("price") or 0))
         _dk = signal.get("_decay_kelly_usd")
         if _dk and not is_dry:
             _dk_fit = min(float(_dk), fillable_depth / 1.5) if fillable_depth else float(_dk)
@@ -1648,7 +1737,7 @@ class PolymarketLiveExecutor:
                         (time.time() - float(_mr[3] or 0)) / 3600,
                         MULT_MAX_AGE_SEC // 3600,
                     )
-                if _mr and _mr[0] and _mult_fresh:
+                if _mr and _mr[0] and _mult_fresh and not signal.get("is_probe"):
                     mult = float(_mr[0])
                     pre = size_usd
                     size_usd = min(runtime_cap, size_usd * mult)
@@ -2182,9 +2271,9 @@ class PolymarketLiveExecutor:
                         whale_trade_ts, detection_latency_sec, features_at_fire,
                         mid_at_decision, yes_mid_at_decision, best_ask_at_decision,
                         best_bid_at_decision, spread_at_decision, book_target_price,
-                        slippage_c, spread_paid_c, source_lane)
+                        slippage_c, spread_paid_c, source_lane, is_probe)
                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                               ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                               ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         now_ts,
                         signal.get("signal_type"),
@@ -2237,6 +2326,7 @@ class PolymarketLiveExecutor:
                         _slippage_c,
                         _spread_paid_c,
                         signal.get("source_lane"),
+                        1 if signal.get("is_probe") else 0,
                     ),
                 )
                 # PG pool runs autocommit; raw sqlite (test lane) rolls back

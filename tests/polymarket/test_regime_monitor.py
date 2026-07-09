@@ -100,10 +100,11 @@ def _seed(path, trades, slugs=None):
     c.execute("""CREATE TABLE live_trades (
                    dry_run INT, signal_type TEXT, outcome TEXT,
                    realized_pnl REAL, size_usd REAL,
-                   resolution_date INT, exit_ts INT, condition_id TEXT)""")
+                   resolution_date INT, exit_ts INT, condition_id TEXT,
+                   is_probe INT DEFAULT 0)""")
     c.execute("CREATE TABLE markets (condition_id TEXT, event_slug TEXT)")
     for st, pnl, stake, res, ex, cid in trades:
-        c.execute("INSERT INTO live_trades VALUES (0,?,?,?,?,?,?,?)",
+        c.execute("INSERT INTO live_trades VALUES (0,?,?,?,?,?,?,?,0)",
                   (st, "win" if pnl > 0 else "loss", pnl, stake, res, ex, cid))
     for cid, slug in (slugs or {}).items():
         c.execute("INSERT INTO markets VALUES (?,?)", (cid, slug))

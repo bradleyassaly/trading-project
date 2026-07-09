@@ -82,6 +82,7 @@ def compute_exit_counterfactual(conn, now_ts: int, window_days: int = 60,
              LEFT JOIN markets m ON m.condition_id = lt.condition_id
             WHERE lt.dry_run = 0 AND lt.realized_pnl IS NOT NULL
               AND lt.exit_ts > ? AND lt.token_id IS NOT NULL
+              AND COALESCE(lt.is_probe, 0) = 0
               AND lt.exit_reason IN ({})""".format(
                   ",".join("?" * len(PRE_RES_EXITS))),
         (cutoff, *PRE_RES_EXITS),

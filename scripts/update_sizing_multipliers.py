@@ -62,6 +62,7 @@ def main():
          WHERE dry_run=0 AND attempted_at > %s
            AND outcome IN ('win','loss')
            AND confidence IS NOT NULL
+           AND COALESCE(is_probe, 0) = 0
          GROUP BY signal_type, direction
          HAVING COUNT(*) >= %s
     """, (since, MIN_N)).fetchall()
