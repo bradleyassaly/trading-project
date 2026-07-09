@@ -395,6 +395,19 @@ SCHEDULE: list[Task] = [
         description="Warm markets index from watched wallets' trades (30min)",
     ),
     Task(
+        # 2026-07-09: standing wallet-persistence measurement (user question
+        # "should we copy individual wallets exclusively"). First run: rank
+        # persistence IS real (rho +0.56-0.66) but top-5 proportional-copy
+        # OOS is 'insufficient' (25 events, one -100% wallet). Weekly runs
+        # accumulate ledger evidence; promotion requires the standard bar +
+        # BH q<=0.10 + shadow ladder — the ONLY sanctioned path back to
+        # copy-entry per the kill rule.
+        name="wallet_persistence_test",
+        cmd="python scripts/wallet_persistence_test.py --record",
+        interval_seconds=7 * 24 * 3600,
+        description="Weekly per-wallet persistence + proportional-copy OOS (ledger)",
+    ),
+    Task(
         # 2026-05-12: unified daily review — P&L, slippage, trailing-stop
         # leakage, resolution timing, rejections, calibration drift, alpha
         # decay. Output goes to logs/scheduler/daily_system_review.log.
