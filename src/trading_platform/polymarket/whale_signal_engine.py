@@ -1488,7 +1488,31 @@ class WhaleSignalEngine:
             from trading_platform.polymarket.polymarket_paper_executor import PolymarketPaperExecutor
             if not hasattr(self, "_paper"):
                 self._paper = PolymarketPaperExecutor()
-            paper_trade = self._paper.execute_signal(signal)
+            try:
+                paper_trade = self._paper.execute_signal(signal)
+            except Exception as _exec_exc:
+                # The wallet-stream holds this paper executor for the whole
+                # process lifetime (~18h+), so its persistent psycopg3
+                # connection idles out ("the connection is closed") — the
+                # scheduler path never hits this because it builds a fresh
+                # executor per run. This silently killed the chain-direct
+                # fast-lane paper bookkeeping (48 fails / 0 placed / 20h,
+                # swallowed at the outer except). Rebuild once on a
+                # closed/stale connection and retry. (3rd instance of the
+                # stale-persistent-connection class this week — see also
+                # wallet_db.stats() and the watchdog balance check.)
+                if "closed" in str(_exec_exc).lower() or "ssl" in str(_exec_exc).lower():
+                    logger.warning("[SIGNAL→TRADE] paper conn stale (%s) — "
+                                   "rebuilding executor + retrying", _exec_exc)
+                    try:
+                        self._paper = PolymarketPaperExecutor()
+                        paper_trade = self._paper.execute_signal(signal)
+                    except Exception as _retry_exc:
+                        logger.warning("[SIGNAL→TRADE] retry after rebuild "
+                                       "failed: %s", _retry_exc)
+                        raise
+                else:
+                    raise
             if paper_trade:
                 signal["paper_stake"] = paper_trade["size_usd"]
                 signal["paper_trade_id"] = paper_trade["id"]
