@@ -82,6 +82,14 @@ MAX_OPEN_PER_TOPIC = 3
 # R2 cluster-gate degraded-alert rate limit (10 min between Telegram pages).
 _CLUSTER_GATE_LAST_ALERT: float = 0.0
 
+# 2026-07-09: honest-Kelly sizing for measured-+wedge resolution_decay
+# trades. Only lifts the stake on trades that PASS the decay veto (a real
+# wedge); quarter-Kelly, hard-capped, floored at the CLOB $5 min, and still
+# subject to the depth/thin-book and cluster caps. DECAY_KELLY_SIZING=0
+# reverts to the flat $5 ladder floor instantly.
+DECAY_KELLY_FRACTION = float(os.environ.get("DECAY_KELLY_FRACTION", "0.25"))
+DECAY_KELLY_MAX_USD = float(os.environ.get("DECAY_KELLY_MAX_USD", "25"))
+
 _TOPIC_STRIP_DATE = __import__("re").compile(
     r"\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+\d+\b",
     __import__("re").IGNORECASE,
@@ -241,6 +249,47 @@ class PolymarketLiveExecutor:
         if ev >= 0.05:
             return max(CLOB_MIN_FLOOR, base * 0.50)
         return max(CLOB_MIN_FLOOR, base * 0.25)
+
+    def _current_equity(self) -> float:
+        """Freshest truth equity for Kelly sizing; falls back to the .env
+        bankroll then a conservative constant."""
+        try:
+            from trading_platform.polymarket.db_connection import get_connection
+            conn = get_connection(self._db_path)
+            try:
+                r = conn.execute(
+                    "SELECT total_equity FROM live_equity_snapshots "
+                    "ORDER BY ts DESC LIMIT 1").fetchone()
+            finally:
+                try: conn.close()
+                except Exception: pass
+            if r and r[0] and float(r[0]) > 0:
+                return float(r[0])
+        except Exception:
+            pass
+        try:
+            return float(os.environ.get("POLYMARKET_LIVE_BANKROLL_USD", "290"))
+        except Exception:
+            return 290.0
+
+    def _decay_kelly_usd(self, decay_p: float, price: float) -> float:
+        """Fractional-Kelly stake on the HONEST decay-curve edge for a
+        measured-+wedge resolution_decay BUY (user request 2026-07-09).
+
+        Buying YES at `price` that resolves 1/0: net odds b=(1-price)/price,
+        Kelly f* = decay_p − (1−decay_p)/b. We stake DECAY_KELLY_FRACTION
+        (¼) of that on current equity, hard-capped at DECAY_KELLY_MAX_USD
+        and floored at the CLOB $5 minimum. Only ever called on a trade the
+        decay veto PASSED (a real wedge), so this can only size the rare
+        genuinely +EV trades — never authorizes a -wedge one."""
+        if price <= 0 or price >= 1:
+            return 5.0
+        b = (1.0 - price) / price
+        f = decay_p - (1.0 - decay_p) / b
+        if f <= 0:
+            return 5.0
+        stake = f * DECAY_KELLY_FRACTION * self._current_equity()
+        return round(max(5.0, min(DECAY_KELLY_MAX_USD, stake)), 2)
 
     def __init__(self) -> None:
         self._db = WalletDB()
@@ -640,6 +689,17 @@ class PolymarketLiveExecutor:
                     f"decay-curve veto: empirical P {float(_decay_p):.3f} <= "
                     f"px {_gate_px:.3f} × {1 + _min_edge:.2f} — cell has no "
                     f"+wedge (formula conf {confidence:.3f} overconfident)")
+            # Veto PASSED with a genuine measured wedge → stash the honest
+            # Kelly stake so the runtime-cap step below can size it above the
+            # flat $5 floor (still bounded + depth-clamped). Only when the
+            # cell has real evidence (decay_p not None); unmeasured cells
+            # keep $5. DECAY_KELLY_SIZING=0 disables.
+            if (_gate_px > 0 and _decay_p is not None
+                    and float(_decay_p) > _gate_px * (1.0 + _min_edge)
+                    and os.environ.get("DECAY_KELLY_SIZING", "1").lower()
+                        in ("1", "true", "yes")):
+                signal["_decay_kelly_usd"] = self._decay_kelly_usd(
+                    float(_decay_p), _gate_px)
 
         # 0a. Category allowlist — live trades restricted to categories
         # with statistically significant positive resolved EV.
@@ -1502,6 +1562,24 @@ class PolymarketLiveExecutor:
         _sig_wallet_tier = signal.get("wallet_tier") or signal.get("wallet_tier_at_fire")
         is_dry = self._is_dry_run_for(sig_type, category=cat, wallet_tier=_sig_wallet_tier)
         runtime_cap = self._live_real_cap(signal_type=sig_type, category=cat)
+        # Honest-Kelly lift for measured-+wedge decay trades: raise the cap
+        # (and the stake) above the flat $5 floor, but NEVER above what the
+        # book can fill — fillable_depth/1.5 is exactly the depth-check bound
+        # already verified above, so this can't exceed proven capacity.
+        _dk = signal.get("_decay_kelly_usd")
+        if _dk and not is_dry:
+            _dk_fit = min(float(_dk), fillable_depth / 1.5) if fillable_depth else float(_dk)
+            _dk_fit = max(5.0, _dk_fit)
+            if _dk_fit > runtime_cap:
+                runtime_cap = _dk_fit
+                logger.info(
+                    "[LIVE][DECAY_KELLY] %s×%s wedge-sized to $%.2f "
+                    "(¼-Kelly on honest P, was ladder $%.2f)",
+                    sig_type, cat, _dk_fit,
+                    self._live_real_cap(signal_type=sig_type, category=cat))
+            # size UP to the honest Kelly (formula size is off the wrong,
+            # overconfident edge — replace it), still ≤ runtime_cap.
+            size_usd = min(max(size_usd, _dk_fit), runtime_cap)
         if not is_dry and size_usd > runtime_cap:
             logger.warning(
                 "[LIVE][REAL_CAP] %s clamping size $%.2f → $%.2f (ladder cap)",
