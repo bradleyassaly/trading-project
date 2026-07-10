@@ -488,6 +488,16 @@ class PolymarketLiveExecutor:
         # market-outcome losses, not strategy losses. The signal had been
         # profitable on take_profit/trailing_stop exits. Filtering out
         # resolved_zero_balance restores accurate signal-quality assessment.
+        #
+        # 2026-07-10: same bug recurred through a newer booking channel —
+        # resolved_databook (book_resolved_positions via data-api) wasn't
+        # in the exclusion list, so one resolution loss + two stop-losses
+        # demoted resolution_decay. Worse, demote is a deadlock: demoted →
+        # all entries dry-run → the last-3 real-close window can never
+        # update → demoted until a months-out open position resolves.
+        # Exclusion is now NOT LIKE 'resolved%' so future resolution-
+        # booking channels can't re-break the "action-triggered exits
+        # only" intent this gate has always stated.
         try:
             _conn = _gc(self._db_path)
             try:
@@ -496,8 +506,8 @@ class PolymarketLiveExecutor:
                         WHERE signal_type = ? AND dry_run = 0
                           AND outcome IN ('win','loss')
                           AND size_usd > 1.50
-                          AND COALESCE(exit_reason, '') NOT IN
-                              ('resolved_zero_balance', 'time_decay')
+                          AND COALESCE(exit_reason, '') NOT LIKE 'resolved%'
+                          AND COALESCE(exit_reason, '') <> 'time_decay'
                         ORDER BY exit_ts DESC LIMIT 3""",
                     (signal_type,),
                 ).fetchall()
