@@ -116,13 +116,20 @@ class KillSwitch:
     # oversized_bet: IC30=0.121, 29% WR but +33% avg EV — valid.
     # wallet_reversal: IC30=0.160, 56% live WR but structural low WR on paper.
     # specialist_entry: IC30=0.050, 89% backtest WR but small live sample.
+    # resolution_decay: 0.35 → 0.30 on 2026-07-10. Avg entry px on the
+    # honest win/loss sample is 0.241, so breakeven WR is ~24% — a 0.35
+    # raw-WR floor demanded +45% ROI just to unhalt, far stricter relative
+    # to breakeven than any other row here. Honest sample: WR 34.4%
+    # (n=652, Wilson-95 LB 30.7%), avg EV +0.84/trade; live 30d WR 42.9%.
+    # 0.30 keeps the floor as a collapse guard (~breakeven+6pp at current
+    # prices) while the EV gate + regime DRIFT_BREACH do the finer work.
     WR_FLOOR_OVERRIDES: dict[str, float] = {
         "whale_entry_filtered": 0.30,
         "oversized_bet": 0.25,
         "cascade": 0.30,
         "wallet_reversal": 0.35,
         "specialist_entry": 0.35,
-        "resolution_decay": 0.35,
+        "resolution_decay": 0.30,
     }
     # EV threshold above which the WR gate is bypassed entirely. Signals
     # with confirmed positive EV (>= 5%) are profitable regardless of WR
