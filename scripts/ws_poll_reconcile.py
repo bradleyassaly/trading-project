@@ -15,6 +15,15 @@ window and flags degradation.
 If we'd had this reconciler, we'd have caught the WS drop within the
 first hour. Same shape as future wallet_stream silent failures.
 
+2026-07-09: the volume metric now measures TIMELY ingestion only.
+Deep-history backfill jobs (ingest_top_wallets_daily) insert rows whose
+trade `timestamp` is up to years older than `synced_at`; a 37k-row
+backfill burst on 2026-07-08 inflated the 7d baseline and fired a false
+"VOLUME DROP" CRITICAL every run while all ingestion paths were healthy.
+Both the 24h window and the 7d baseline exclude rows lagging more than
+BACKFILL_LAG_SEC — backfill volume says nothing about whether live
+ingestion is up.
+
 Usage:
     python scripts/ws_poll_reconcile.py          # human report
     python scripts/ws_poll_reconcile.py --json   # machine output
@@ -41,21 +50,27 @@ FRESH_THRESHOLD_SEC = 30
 # Critical thresholds
 MIN_FRESH_RATE = 0.20    # If <20% fresh, WS likely degraded
 MIN_RATE_RATIO = 0.5     # Vs prior week — alert if rate dropped >50%
+# 2026-07-09: rows whose synced_at lags timestamp by more than this are
+# deep-history backfill (ingest_top_wallets_daily), not live ingestion —
+# excluded from both volume windows. 86400, not tighter: the 2h sync
+# job's rows must stay in-window.
+BACKFILL_LAG_SEC = 86400
 
 
 def gather_metrics(conn, now_ts: int) -> dict:
     cutoff_24h = now_ts - 86400
     cutoff_7d = now_ts - 7 * 86400
 
-    # Volume by hour for past 24h
+    # Volume by hour for past 24h (timely rows only — see BACKFILL_LAG_SEC)
     rows = conn.execute("""
         SELECT date_trunc('hour', to_timestamp(synced_at)) hr,
                COUNT(*) total,
                SUM(CASE WHEN (synced_at - timestamp) <= %s THEN 1 ELSE 0 END) fresh
           FROM wallet_trades
          WHERE synced_at >= %s
+           AND (synced_at - timestamp) <= %s
          GROUP BY 1 ORDER BY 1
-    """, (FRESH_THRESHOLD_SEC, cutoff_24h)).fetchall()
+    """, (FRESH_THRESHOLD_SEC, cutoff_24h, BACKFILL_LAG_SEC)).fetchall()
     hours = [(r[0], int(r[1] or 0), int(r[2] or 0)) for r in rows]
 
     # Past 24h summary
@@ -63,13 +78,16 @@ def gather_metrics(conn, now_ts: int) -> dict:
     fresh_24h = sum(h[2] for h in hours)
     fresh_rate_24h = (fresh_24h / total_24h) if total_24h else 0
 
-    # Prior 7d baseline (same days-of-week if possible, but simple mean is fine)
+    # Prior 7d baseline (same days-of-week if possible, but simple mean is fine).
+    # Same backfill exclusion as the 24h window — a backfill burst in the
+    # baseline days makes a healthy 24h look like a drop (2026-07-08 incident).
     row = conn.execute("""
         SELECT COUNT(*) total,
                SUM(CASE WHEN (synced_at - timestamp) <= %s THEN 1 ELSE 0 END) fresh
           FROM wallet_trades
          WHERE synced_at >= %s AND synced_at < %s
-    """, (FRESH_THRESHOLD_SEC, cutoff_7d, cutoff_24h)).fetchone()
+           AND (synced_at - timestamp) <= %s
+    """, (FRESH_THRESHOLD_SEC, cutoff_7d, cutoff_24h, BACKFILL_LAG_SEC)).fetchone()
     total_7d = int(row[0] or 0)
     fresh_7d = int(row[1] or 0)
     # Per-day rate (baseline) for comparison

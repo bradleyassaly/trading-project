@@ -323,6 +323,13 @@ class PolymarketLiveExecutor:
             the last probe (one combined indexed query; fail-safe False)
         Every non-EV risk gate downstream (thin-book, depth, dedup, event
         caps, cluster cap) still applies to the probe.
+
+        2026-07-09: probes also waive kill-switch performance blocks
+        (KS_BLOCK codes EV and WR) at the KS branch in execute_signal —
+        the original wiring left the KS downstream of probe tagging, so a
+        signal-level WR halt starved the entire program (709 eligible / 0
+        fired on day one). Safety-class KS blocks (ENV, EMERGENCY,
+        DISABLED, MIN_RESOLVED, UNKNOWN) still bind on probes.
         """
         if not EXPLORATION_PROBES:
             return False
@@ -1481,15 +1488,27 @@ class PolymarketLiveExecutor:
             else:
                 code = "UNKNOWN"
                 level = logger.warning
-            level("[KS_BLOCK:%s] %s — %s", code, sig_type, reason_str[:200])
-            try:
-                from trading_platform.polymarket.decision_trace import trace as _dt
-                _dt(signal=signal, gate=f"KS_BLOCK_{code}", passed=False,
-                    detail=reason_str[:120], surface="live", db_path=self._db_path)
-            except Exception:
-                pass
-            self._record_attempt(signal, size_usd, None, None, dry_run=self.DRY_RUN, status="blocked", error_msg=ks.reason)
-            return self._result(False, reason=ks.reason)
+            # 2026-07-09: $1 execution probes bypass performance-class
+            # blocks (EV/WR) — the probe program exists to measure fill
+            # quality, which is independent of the signal's win rate, and
+            # its risk is bounded by the pinned $1 stake + daily budget +
+            # min interval. Safety-class blocks (ENV master switch,
+            # EMERGENCY, DISABLED, MIN_RESOLVED, UNKNOWN) still bind.
+            if signal.get("is_probe") and code in ("EV", "WR"):
+                logger.info(
+                    "[PROBE] kill-switch %s waived for $1 execution probe — %s",
+                    code, reason_str[:120],
+                )
+            else:
+                level("[KS_BLOCK:%s] %s — %s", code, sig_type, reason_str[:200])
+                try:
+                    from trading_platform.polymarket.decision_trace import trace as _dt
+                    _dt(signal=signal, gate=f"KS_BLOCK_{code}", passed=False,
+                        detail=reason_str[:120], surface="live", db_path=self._db_path)
+                except Exception:
+                    pass
+                self._record_attempt(signal, size_usd, None, None, dry_run=self.DRY_RUN, status="blocked", error_msg=ks.reason)
+                return self._result(False, reason=ks.reason)
 
         # 3. Resolve YES/NO token_ids (Gamma)
         # ── CRITICAL: A SELL signal means "buy NO token", not "sell YES token".

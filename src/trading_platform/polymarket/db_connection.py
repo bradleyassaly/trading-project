@@ -45,7 +45,12 @@ DEFAULT_DB_PATH = os.environ.get(
 )
 DB_BACKEND = os.environ.get("DB_BACKEND", "postgres").lower()
 
-PG_HOST = os.environ.get("POSTGRES_HOST", "localhost")
+# Default to 127.0.0.1, not "localhost": on Windows hosts "localhost"
+# resolves to ::1 first, but the compose file publishes Postgres on
+# 127.0.0.1 only — each pool connect then burns the full timeout on the
+# dead IPv6 attempt and getconn() times out. Containers set
+# POSTGRES_HOST=postgres explicitly and are unaffected.
+PG_HOST = os.environ.get("POSTGRES_HOST", "127.0.0.1")
 PG_PORT = int(os.environ.get("POSTGRES_PORT", "5432"))
 PG_USER = os.environ.get("POSTGRES_USER", "polymarket")
 PG_PASSWORD = os.environ.get("POSTGRES_PASSWORD", "polymarket_dev")
@@ -116,6 +121,7 @@ def _get_pool():
         conninfo = (
             f"host={PG_HOST} port={PG_PORT} user={PG_USER} "
             f"password={PG_PASSWORD} dbname={PG_DB} "
+            "connect_timeout=10 "
             "keepalives=1 keepalives_idle=30 "
             "keepalives_interval=10 keepalives_count=5"
         )

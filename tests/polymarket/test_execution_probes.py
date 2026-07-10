@@ -117,6 +117,23 @@ def test_wiring_invariants():
     assert '"is_probe INTEGER"' in src
 
 
+def test_probe_waives_performance_ks_blocks_only():
+    """2026-07-09: the KS sits downstream of probe tagging, so a signal-
+    level WR halt silently starved the whole probe program (709 eligible,
+    0 fired). Probes now waive performance-class KS blocks (EV/WR) only;
+    safety-class blocks (ENV/EMERGENCY/DISABLED/MIN_RESOLVED/UNKNOWN)
+    must still bind."""
+    src = inspect.getsource(ple)
+    # the waiver exists and is scoped to probe-tagged signals + EV/WR codes
+    assert 'signal.get("is_probe") and code in ("EV", "WR")' in src
+    # no wider waiver ever sneaks in
+    assert '"EMERGENCY")' not in src.split('code in ("EV", "WR")')[1][:200]
+    # non-probe path still records the block (else-branch preserved)
+    waiver_idx = src.index('signal.get("is_probe") and code in ("EV", "WR")')
+    tail = src[waiver_idx:waiver_idx + 1500]
+    assert 'status="blocked"' in tail
+
+
 def test_evidence_streams_exclude_probes():
     from trading_platform.polymarket import regime_monitor as rm
     from trading_platform.polymarket import exit_counterfactual as xc

@@ -209,6 +209,9 @@ def section_rejections(conn, now_ts):
                  WHEN error_msg LIKE '%%invalid amount%%' THEN 'min-stake'
                  WHEN error_msg LIKE '%%invalid signature%%' THEN 'sig'
                  WHEN error_msg LIKE '%%thin liquidity%%' THEN 'thin-liq'
+                 -- 2026-07-09: max-chase guard refusals were rendering as
+                 -- an opaque "other BUY n=61"
+                 WHEN error_msg LIKE '%%refusing to chase%%' THEN 'max-chase'
                  ELSE 'other'
             END class,
             direction,
@@ -221,6 +224,29 @@ def section_rejections(conn, now_ts):
         print("  No rejections in last 7d")
     for r in rows:
         print(f"  {str(r[0]):<10} {str(r[1]):<5}  n={int(r[2])}")
+
+    # 2026-07-09: whenever rows still land in 'other', show the top raw
+    # messages so new rejection families are self-explaining instead of
+    # hiding behind an opaque label until someone queries by hand. Keep
+    # the NOT LIKE list in sync with the CASE buckets above.
+    if any(str(r[0]) == 'other' for r in rows):
+        others = conn.execute("""
+            SELECT LEFT(COALESCE(error_msg, '(null)'), 60) msg, COUNT(*) n
+              FROM live_trades
+             WHERE dry_run=0 AND status='error' AND attempted_at > %s
+               AND COALESCE(error_msg, '') NOT LIKE '%%timed out%%'
+               AND COALESCE(error_msg, '') NOT LIKE '%%FOK%%'
+               AND COALESCE(error_msg, '') NOT LIKE '%%couldn%%fully filled%%'
+               AND COALESCE(error_msg, '') NOT LIKE '%%invalid amount%%'
+               AND COALESCE(error_msg, '') NOT LIKE '%%invalid signature%%'
+               AND COALESCE(error_msg, '') NOT LIKE '%%thin liquidity%%'
+               AND COALESCE(error_msg, '') NOT LIKE '%%refusing to chase%%'
+             GROUP BY 1 ORDER BY 2 DESC LIMIT 3
+        """, (now_ts - 7 * 86400,)).fetchall()
+        if others:
+            print("  Top 'other' rejection messages:")
+            for msg, n in others:
+                print(f"    n={int(n):3d}  {str(msg)}")
 
 
 def section_calibration(conn, args):
@@ -530,10 +556,16 @@ def section_api_health(conn, now_ts):
         if age is None or age > thr:
             flag = f"  STALE — silent {age_s} (threshold {thr}s)"
             any_stale = True
+        # 2026-07-09: success_count_24h / error_count_24h are never-reset
+        # lifetime counters (verified: values are monotonically cumulative
+        # across days), NOT 24h windows — label them as totals. A true
+        # windowed count needs timestamped events or a reset job; future
+        # work. Schema and monitor_alerts' use are unchanged (label fix
+        # only).
         elif r["error_24h"] > 0:
-            flag = f"  errors_24h={r['error_24h']}"
+            flag = f"  errors_total={r['error_24h']}"
         print(f"  {r['api_name']:<22s} last_success={age_s:>7s}  "
-              f"24h: {r['success_24h']} ok / {r['error_24h']} err{flag}")
+              f"total: {r['success_24h']} ok / {r['error_24h']} err{flag}")
     if any_stale:
         print()
         print("  ACTION — at least one API is silent. Investigate before silent volume loss.")

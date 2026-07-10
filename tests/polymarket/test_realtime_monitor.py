@@ -10,9 +10,15 @@ from unittest.mock import MagicMock, patch
 import pandas as pd
 import pytest
 
+from trading_platform.polymarket.alert_log import AlertLog
 from trading_platform.polymarket.alert_system import AlertSystem
 from trading_platform.polymarket.price_lookup import PriceLookup
 from trading_platform.polymarket.realtime_monitor import RealtimeMonitor
+
+# 2026-07-09: every RealtimeMonitor below gets monitor_log_path= and
+# alert_log= pointed at tmp_path. Without them the constructor writes to
+# the production logs/monitor.log and data/polymarket/alerts.jsonl (1294
+# synthetic rows had accumulated in the latter).
 
 
 def _mock_price_result():
@@ -89,6 +95,8 @@ def monitor_with_wallets(tmp_path):
         auto_trade=True,
         tier1_count=1,
         tier2_count=1,
+        monitor_log_path=tmp_path / "monitor.log",
+        alert_log=AlertLog(tmp_path / "alerts.jsonl"),
     )
     # Mock price lookup to return valid data for test tokens
     monitor._price_lookup = MagicMock(spec=PriceLookup)
@@ -168,6 +176,8 @@ class TestIlliquidMarket:
             auto_trade=True,
             tier1_count=1,
             tier2_count=0,
+            monitor_log_path=tmp_path / "monitor.log",
+            alert_log=AlertLog(tmp_path / "alerts.jsonl"),
         )
 
         # Mock price lookup to return illiquid market (no spread)
@@ -265,6 +275,8 @@ class TestWatchListLoading:
             prices_db_path=tmp_path / "none.db",
             tier1_count=2,
             tier2_count=2,
+            monitor_log_path=tmp_path / "monitor.log",
+            alert_log=AlertLog(tmp_path / "alerts.jsonl"),
         )
         assert len(monitor._tier1) == 2
         assert len(monitor._tier2) == 2
@@ -280,6 +292,8 @@ class TestWatchListLoading:
             tier1_count=2,
             tier2_count=3,
             tier1_only=True,
+            monitor_log_path=tmp_path / "monitor.log",
+            alert_log=AlertLog(tmp_path / "alerts.jsonl"),
         )
         assert len(monitor._tier1) == 2
         assert len(monitor._tier2) == 0
@@ -289,6 +303,8 @@ class TestWatchListLoading:
         monitor = RealtimeMonitor(
             wallet_profiles_path=tmp_path / "nonexistent.parquet",
             prices_db_path=tmp_path / "none.db",
+            monitor_log_path=tmp_path / "monitor.log",
+            alert_log=AlertLog(tmp_path / "alerts.jsonl"),
         )
         assert len(monitor.all_watched) == 0
 

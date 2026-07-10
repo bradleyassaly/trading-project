@@ -109,10 +109,15 @@ def check_reconciler(alerter) -> int:
     # Extract drift lines
     drift_lines = [ln for ln in block.split("\n") if "diff" in ln.lower() or "DRIFT" in ln]
     msg = "DB-vs-on-chain drift:\n" + "\n".join(drift_lines[:5])
-    alerter.send_pipeline_alert(
+    # 2026-07-09: count only alerts actually SENT — send_pipeline_alert
+    # returns False when the 30-min cooldown suppresses it. Same fix as
+    # check_api_health (2026-05-28); returning 1 unconditionally made the
+    # log read "fired 1 alert(s)" every run while nothing was being sent.
+    if alerter.send_pipeline_alert(
         component="reconciler", message=msg[:500], level="warning",
-    )
-    return 1
+    ):
+        return 1
+    return 0
 
 
 def check_ws_poll(alerter) -> int:
@@ -125,10 +130,13 @@ def check_ws_poll(alerter) -> int:
     alert_lines = [ln.strip() for ln in block.split("\n")
                     if ("ALERT" in ln or "CRITICAL" in ln) and ":" in ln]
     msg = "ingestion degraded:\n" + "\n".join(alert_lines[:3])
-    alerter.send_pipeline_alert(
+    # 2026-07-09: count only alerts actually SENT (cooldown returns
+    # False) — same fix as check_api_health, 2026-05-28.
+    if alerter.send_pipeline_alert(
         component="ws_poll", message=msg[:500], level="critical",
-    )
-    return 1
+    ):
+        return 1
+    return 0
 
 
 def check_wallet_attribution(alerter) -> int:
@@ -140,13 +148,16 @@ def check_wallet_attribution(alerter) -> int:
     m = re.search(r"AUTO-DEMOTE candidates \((\d+)\)", block)
     if not m or int(m.group(1)) == 0: return 0
     n = int(m.group(1))
-    alerter.send_pipeline_alert(
+    # 2026-07-09: count only alerts actually SENT (cooldown returns
+    # False) — same fix as check_api_health, 2026-05-28.
+    if alerter.send_pipeline_alert(
         component="wallet_attribution",
         message=f"{n} wallet(s) flagged for auto-demote (30d PnL <= -$10, n>=5). "
                 f"Review log + apply wallet_attribution.py --apply if accepted.",
         level="warning",
-    )
-    return 1
+    ):
+        return 1
+    return 0
 
 
 def check_snapshot_truth(alerter) -> int:

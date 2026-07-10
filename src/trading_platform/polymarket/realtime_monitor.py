@@ -37,6 +37,7 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_PROFILES = "data/polymarket/wallet_profiles.parquet"
 _DEFAULT_DB = "data/polymarket/live/prices.db"
+_DEFAULT_MONITOR_LOG = "logs/monitor.log"
 
 
 class RealtimeMonitor:
@@ -55,6 +56,8 @@ class RealtimeMonitor:
         tier1_count: int = 50,
         tier2_count: int = 100,
         tier1_only: bool = False,
+        monitor_log_path: str | Path = _DEFAULT_MONITOR_LOG,
+        alert_log: AlertLog | None = None,
     ) -> None:
         self._prices_db = Path(prices_db_path)
         self._price_lookup = PriceLookup(prices_db_path)
@@ -74,13 +77,23 @@ class RealtimeMonitor:
         self._trades_placed = 0
         self._sports_filtered = 0
         self._alerted_ids: set[str] = set()  # dedup alerts
-        self._alert_log = AlertLog()
+        # 2026-07-09: injectable so tests can point at a tmp file. AlertLog()
+        # defaults to the production data/polymarket/alerts.jsonl, and unit
+        # tests had appended 1294 synthetic fixture rows to it.
+        self._alert_log = alert_log if alert_log is not None else AlertLog()
 
         # Structured file logging
-        self._file_logger = logging.getLogger("monitor_file")
+        # 2026-07-09: logger name derives from the resolved log path. The old
+        # fixed name "monitor_file" was process-global: the first instance
+        # pinned its handler (and path) for every later instance, so tests
+        # constructing RealtimeMonitor wrote fixture lines into the production
+        # logs/monitor.log regardless of any path they might request.
+        log_path = Path(monitor_log_path)
+        self._file_logger = logging.getLogger(
+            f"monitor_file_{hash(str(log_path.resolve()))}"
+        )
         self._file_logger.setLevel(logging.INFO)
         if not self._file_logger.handlers:
-            log_path = Path("logs/monitor.log")
             log_path.parent.mkdir(parents=True, exist_ok=True)
             handler = logging.handlers.RotatingFileHandler(
                 str(log_path), maxBytes=10 * 1024 * 1024, backupCount=3,

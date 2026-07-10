@@ -2269,6 +2269,15 @@ class PolymarketPaperExecutor:
         "wallet_reversal": {"sl": -0.50, "tp": 0.60, "trail_act": 0.30, "trail_back": 0.15, "time_days": 21},
         "no_position_entry": {"sl": -0.50, "tp": 0.60, "trail_act": 0.30, "trail_back": 0.15, "time_days": 21},
     }
+    # 2026-07-09: signals whose thesis IS holding through resolution.
+    # resolution_decay positions sit at a flat mark (unrealized ≈ 0) until
+    # the market resolves, so the pre_resolve_decay "stuck band" clip
+    # force-closed essentially every one of them in the final 8h as a
+    # micro-loss — 268 such rows on 07-08/07-09 dragged the signal's
+    # all-time paper WR to 32% and tripped the kill-switch WR floor while
+    # the live lane was measuring 43% on genuine resolutions. These
+    # signals must ride to resolution to be measured honestly.
+    HOLD_TO_RESOLUTION_SIGNALS = frozenset({"resolution_decay"})
     TIME_DECAY_MIN_MOVE = 0.05
     # Market-life exit: a position past 80% of market lifetime rarely improves —
     # either resolve naturally (captured by check_and_resolve_open_trades) or
@@ -2383,7 +2392,10 @@ class PolymarketPaperExecutor:
                 # resolution lottery. New rule: if market resolves within
                 # 8h AND position PnL is in the "stuck" band [-10%, +5%],
                 # close at mark rather than wait for the binary outcome.
-                if not exit_reason:
+                # (Hold-to-resolution signals are exempt — see
+                # HOLD_TO_RESOLUTION_SIGNALS: for them the "stuck band" is
+                # the expected pre-resolution state, not a failure mode.)
+                if not exit_reason and sig_type not in self.HOLD_TO_RESOLUTION_SIGNALS:
                     try:
                         end_iso = self._lookup_market_end_date(cid)
                         if end_iso:
@@ -2418,7 +2430,13 @@ class PolymarketPaperExecutor:
                 # Market-life % exit: position is past 80% of market lifetime
                 # and hasn't resolved. Free the capital rather than tie it up
                 # waiting for a late resolution. Needs endDate from universe.
-                if not exit_reason:
+                # Hold-to-resolution signals are exempt for the same reason
+                # as pre_resolve_decay above: life is measured entry→end, so
+                # a signal that by construction enters 24-48h before
+                # resolution hits 80% hours before the outcome it exists to
+                # capture. (Never-resolving markets are still cleaned up by
+                # the outcome='expired' Gamma-deindex path and time_decay.)
+                if not exit_reason and sig_type not in self.HOLD_TO_RESOLUTION_SIGNALS:
                     try:
                         end_iso = self._lookup_market_end_date(cid)
                         if end_iso:

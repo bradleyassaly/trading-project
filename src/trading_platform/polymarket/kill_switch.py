@@ -195,6 +195,12 @@ class KillSwitch:
             # gave avg=-13.4 (interpreted as -0.134 EV — blocked); the
             # canonical realized_pnl/size_usd path gives +1.30. Now reads
             # the same source as KellySizer + readiness endpoint.
+            # 2026-07-09: outcome IN ('win','loss') — rows with
+            # outcome='expired' (market vanished from Gamma, pnl=0, never
+            # resolved) are neither wins nor losses, but the old query
+            # counted them as losses in the WR numerator/denominator. 67
+            # such rows dragged resolution_decay's blended WR from 36.05%
+            # to 32.4% and dark-halted the live lane below the 35% floor.
             row = conn.execute(
                 """SELECT COUNT(*) AS n,
                           AVG(realized_pnl / NULLIF(size_usd, 0)) AS avg_ev,
@@ -202,6 +208,7 @@ class KillSwitch:
                    FROM polymarket_paper_trades
                    WHERE signal_type = ? AND archived = 0
                      AND exit_ts IS NOT NULL
+                     AND outcome IN ('win', 'loss')
                      AND realized_pnl IS NOT NULL AND size_usd > 0""",
                 (signal_type,),
             ).fetchone()
