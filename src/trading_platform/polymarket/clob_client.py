@@ -41,6 +41,28 @@ logger = logging.getLogger(__name__)
 CLOB_BASE = "https://clob.polymarket.com"
 
 
+def _record_clob_health(ok: bool, msg: str = "") -> None:
+    """Record CLOB transport health (best-effort; never raises).
+
+    The live order/read path uses this client + py-clob-client, not
+    PolymarketClient._get, so api_health's "clob" row was only ever written
+    by the historical-backfill GET — perpetually STALE while orders flowed,
+    and blind to real CLOB failures. Instrument the actual transport boundary
+    here. Call ONLY for genuine API success/failure — never for strategy
+    refusals (min-size, max-chase), which are not API health signals.
+    """
+    try:
+        from trading_platform.polymarket.api_health import (
+            record_success, record_error,
+        )
+        if ok:
+            record_success("clob")
+        else:
+            record_error("clob", msg)
+    except Exception:
+        pass
+
+
 @dataclass
 class OrderResult:
     success: bool
@@ -95,6 +117,7 @@ class ClobClient:
                 f"{CLOB_BASE}/book", params={"token_id": token_id}, timeout=5,
             )
             if r.status_code != 200:
+                _record_clob_health(False, f"/book HTTP {r.status_code}")
                 return {"error": f"HTTP {r.status_code}", "bids": [], "asks": []}
             book = r.json()
             if isinstance(book, dict):
@@ -110,8 +133,10 @@ class ClobClient:
                 # P4: freshness stamp so order methods can accept a
                 # caller-threaded book and re-fetch only when stale.
                 book["_fetched_at"] = time.time()
+            _record_clob_health(True)
             return book
         except Exception as exc:
+            _record_clob_health(False, f"/book {exc}")
             return {"error": str(exc), "bids": [], "asks": []}
 
     def get_mid_price(self, token_id: str) -> float | None:
@@ -718,8 +743,10 @@ class ClobClient:
             result = client.get_balance_allowance(
                 BalanceAllowanceParams(asset_type=AssetType.CONDITIONAL, token_id=token_id)
             )
+            _record_clob_health(True)
             return int(result.get("balance", 0)) / 1_000_000
         except Exception as exc:
+            _record_clob_health(False, f"balance_allowance {exc}")
             logger.debug("[clob] conditional balance check failed for %s: %s", token_id[:16], exc)
             return None
 
