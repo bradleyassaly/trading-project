@@ -1008,6 +1008,22 @@ SCHEDULE: list[Task] = [
         timeout_override=270,
     ),
     Task(
+        name="live_mark_logger",
+        # 2026-07-12: fine-grained CLOB marks for open live positions within
+        # ~12h of resolution. Measurement-only (reads book, writes
+        # live_position_marks; never trades) — captures the sub-5-min price
+        # path so scripts/backtest_faster_poll.py can quantify whether faster
+        # exit polling would recover the resolution_decay peak-capture bleed.
+        # Also keeps the clob api_health row fresh via get_order_book.
+        cmd=(
+            "python -c \""
+            "from trading_platform.polymarket.live_mark_logger import capture_marks_once; "
+            "r = capture_marks_once(); print(f'[marks] {r}')\""
+        ),
+        interval_seconds=60,
+        description="Fine CLOB marks for near-resolution live positions (60s)",
+    ),
+    Task(
         name="order_reconciler",
         # Poll CLOB for any GTC orders stuck in 'live'/'submitted' status
         # (e.g., process restarted mid-poll). Marks them filled/cancelled
