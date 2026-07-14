@@ -67,6 +67,13 @@ class Task:
     enabled: bool = True
     consecutive_failures: int = 0
     first_failure_at: float | None = None
+    # Trading-critical (the live money loop: entry signal + exit monitor).
+    # The run loop executes due tasks synchronously in one pass, so a slow
+    # batch job can starve these. critical=True makes them run FIRST every
+    # pass — notably on recovery after an outage, when a large overdue backlog
+    # would otherwise block the money loop behind minutes of analysis jobs
+    # (2026-07-13: ~74min starved after a ~6.5h outage).
+    critical: bool = False
     # Explicit per-task timeout (seconds). Overrides the default
     # max(60, interval//2). Set for tasks that must NOT be SIGKILLed
     # mid-pass — notably the live exit monitor, which places CLOB orders
@@ -718,6 +725,7 @@ SCHEDULE: list[Task] = [
         cmd="python -m trading_platform.polymarket.resolution_decay_signal",
         interval_seconds=15 * 60,
         description="Phase B: resolution-time decay independent signal",
+        critical=True,  # the only live entry signal — must not starve on recovery
     ),
     Task(
         # 2026-06-03: naive-copy experiment. Shadow lane (dry_run=1) testing
@@ -1000,6 +1008,7 @@ SCHEDULE: list[Task] = [
         cmd="python -m trading_platform.polymarket.live_position_monitor",
         interval_seconds=5 * 60,
         description="Live position auto-exit monitor (every 5min)",
+        critical=True,  # places live SL/TP/trailing exits — must not starve
         # 2026-07-07 (audit F4): 270s (was max(60,150)=150s). The pass sleeps
         # ~10s per pending exit plus HTTP; a 150s SIGKILL landed mid-pass,
         # between placing a CLOB order and booking its fill. The advisory
@@ -1315,6 +1324,21 @@ def _load_state(tasks: list[Task]) -> None:
     logger.info("scheduler restored %d task timers from state", restored)
 
 
+def _due_tasks(schedule: list[Task], now: float) -> list[Task]:
+    """Enabled tasks that are due, ordered so trading-critical tasks run FIRST.
+
+    The loop runs due tasks synchronously in one pass, so a slow batch job
+    would otherwise block everything after it in list order. When many tasks
+    come due at once — especially recovering from an outage, where the whole
+    backlog is overdue — critical-first ordering resumes the live money loop
+    (entry signal + exit monitor) before minutes of analysis/backfill work.
+    Within a priority group, most-overdue (earliest next_run_at) runs first.
+    """
+    due = [t for t in schedule if t.enabled and now >= t.next_run_at(now)]
+    due.sort(key=lambda t: (not t.critical, t.next_run_at(now)))
+    return due
+
+
 def main() -> None:
     logger.info("scheduler starting with %d tasks", len([t for t in SCHEDULE if t.enabled]))
     _load_state(SCHEDULE)
@@ -1322,12 +1346,9 @@ def main() -> None:
     while True:
         now = time.time()
         ran_any = False
-        for task in SCHEDULE:
-            if not task.enabled:
-                continue
-            if now >= task.next_run_at(now):
-                _run_task(task)
-                ran_any = True
+        for task in _due_tasks(SCHEDULE, now):
+            _run_task(task)
+            ran_any = True
         if ran_any:
             _persist_state(SCHEDULE)
         # Sleep until the next due task or 30s, whichever is sooner
