@@ -158,6 +158,18 @@ SCHEDULE: list[Task] = [
         description="Resolve signal_outcomes from gamma CSV (every 4h)",
     ),
     Task(
+        name="clob_resolution_backfill",
+        # Gamma DELISTS a market once it resolves, so signal_resolver's
+        # uma_gamma/gamma_bulk paths miss it (~50% of concluded markets we
+        # traded had no market_resolutions row). The CLOB keeps settled markets
+        # with per-token winner flags — backfill canonical truth from there so
+        # exit-policy counterfactuals and net-of-cost EV audits have full
+        # coverage. Idempotent (record_resolution is monotonic).
+        cmd="python -m trading_platform.polymarket.clob_resolution_backfill --limit 400",
+        interval_seconds=6 * 3600,
+        description="Backfill market_resolutions from CLOB winner flags (every 6h)",
+    ),
+    Task(
         name="sync_wallet_trades",
         # Persists Data-API trades into the wallet_trades SQLite table.
         # Separate from `poll-wallet-trades` (signal-firing) and

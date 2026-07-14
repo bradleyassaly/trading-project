@@ -39,6 +39,13 @@ logger = logging.getLogger(__name__)
 SOURCE_RANK = {
     "manual": 100,
     "uma_gamma": 90,
+    # clob_winner: CLOB /markets/{cid} per-token winner flags. Gamma DELISTS a
+    # market once it resolves, so uma_gamma/gamma_bulk miss it (~50% of concluded
+    # markets we traded had no row here); the CLOB keeps the settled market with
+    # winner=True/False long after. Ranks above the gamma_bulk >=0.95 heuristic
+    # and data_api_positions (settled token truth, not a price heuristic), below
+    # uma_gamma's explicit UMA-resolved check.
+    "clob_winner": 80,
     "data_api_positions": 70,
     "gamma_bulk": 60,
     "wallet_trades_vote": 30,
