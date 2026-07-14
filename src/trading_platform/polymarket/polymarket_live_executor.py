@@ -135,6 +135,58 @@ def _topic_stem(question: str | None) -> str:
     return " ".join(q.split()[:6])
 
 
+def _vwap_fill_cost(asks_sorted: list, mid: Any,
+                    notional_usd: Any) -> dict | None:
+    """Walk the ask ladder to fill `notional_usd`; return the volume-weighted
+    fill price, its implied slippage vs `mid` in cents, and any unfilled
+    shortfall in dollars. Returns None on unusable inputs.
+
+    #2 Stage A (instrument-only): the live depth guard checks only aggregate
+    dollar depth at/under a 5% limit — a market with deep asks sitting well
+    above mid passes and still fills terribly. This measures the ACTUAL price
+    impact of walking the book for our size. Nothing gates on it yet; we
+    record it next to the realized fill so we can later test whether book-VWAP
+    slippage predicts bad resolution_decay fills, then gate on it (Stage B).
+
+    `asks_sorted` must be price-ascending; each entry a dict with price/size
+    (the CLOB book shape the executor already builds).
+    """
+    try:
+        mid = float(mid)
+        notional = float(notional_usd)
+    except (TypeError, ValueError):
+        return None
+    if mid <= 0 or notional <= 0:
+        return None
+    remaining = notional
+    spent = 0.0
+    shares = 0.0
+    for a in asks_sorted or []:
+        try:
+            px = float(a.get("price"))
+            sz = float(a.get("size"))
+        except (TypeError, ValueError, AttributeError):
+            continue
+        if px <= 0 or sz <= 0:
+            continue
+        take = min(remaining, px * sz)   # dollars taken from this level
+        if take <= 0:
+            continue
+        spent += take
+        shares += take / px
+        remaining -= take
+        if remaining <= 1e-9:
+            break
+    if shares <= 0:
+        return None
+    vwap = spent / shares
+    return {
+        "vwap": vwap,
+        "slippage_c": round((vwap - mid) * 100.0, 4),
+        "shortfall_usd": round(max(0.0, remaining), 4),
+    }
+
+
 class PolymarketLiveExecutor:
     """Live trading executor with multi-layer safety gating."""
 
@@ -575,6 +627,10 @@ class PolymarketLiveExecutor:
                                 "best_ask_at_decision REAL", "best_bid_at_decision REAL",
                                 "spread_at_decision REAL", "book_target_price REAL",
                                 "slippage_c REAL", "spread_paid_c REAL",
+                                # #2 Stage A: depth-walked VWAP price impact for
+                                # the sized order at decision time (instrument-
+                                # only; compare vs realized slippage_c).
+                                "vwap_slippage_c REAL",
                                 # P3: real delivery-lane tag
                                 "source_lane TEXT",
                                 # 2026-07-09: $1 execution-probe tag —
@@ -1655,6 +1711,17 @@ class PolymarketLiveExecutor:
                     signal["_best_ask_at_decision"] - signal["_best_bid_at_decision"])
         except (TypeError, ValueError, KeyError):
             pass
+        # #2 Stage A (instrument-only): depth-walked VWAP price impact for our
+        # size, vs the aggregate-dollar depth the block below tests. Stashed on
+        # the signal so it lands in live_trades (dedicated column + the
+        # features_at_fire blob on every path) next to the realized fill; no
+        # decision reads it yet. size here is the formula-sized stake (decay-
+        # Kelly lift, if any, happens below but is capped at fillable_depth/1.5,
+        # so this stays a conservative decision-time estimate).
+        _vwap = _vwap_fill_cost(asks_sorted, current_price, size_usd)
+        if _vwap is not None:
+            signal["_vwap_slippage_c"] = _vwap["slippage_c"]
+            signal["_vwap_shortfall_usd"] = _vwap["shortfall_usd"]
         if fillable_depth < size_usd * 1.5:
             _reason = (f"Thin fillable {outcome_label} liquidity: "
                        f"${fillable_depth:.1f} at price<={_limit_price:.3f} "
@@ -2300,9 +2367,9 @@ class PolymarketLiveExecutor:
                         whale_trade_ts, detection_latency_sec, features_at_fire,
                         mid_at_decision, yes_mid_at_decision, best_ask_at_decision,
                         best_bid_at_decision, spread_at_decision, book_target_price,
-                        slippage_c, spread_paid_c, source_lane, is_probe)
+                        slippage_c, spread_paid_c, vwap_slippage_c, source_lane, is_probe)
                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                               ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                               ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         now_ts,
                         signal.get("signal_type"),
@@ -2354,6 +2421,7 @@ class PolymarketLiveExecutor:
                         _book_target,
                         _slippage_c,
                         _spread_paid_c,
+                        signal.get("_vwap_slippage_c"),
                         signal.get("source_lane"),
                         1 if signal.get("is_probe") else 0,
                     ),
