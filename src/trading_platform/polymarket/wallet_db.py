@@ -1230,6 +1230,9 @@ class WalletDB:
     # ── Stats ────────────────────────────────────────────────────────────────
 
     def stats(self) -> dict[str, int]:
+        # get_connection is imported locally (as elsewhere in this module) —
+        # the reconnect path below referenced it without an import (F821).
+        from trading_platform.polymarket.db_connection import get_connection
         with self._lock:
             # The held connection can idle out during long-running callers
             # (enrich_trade_resolution runs ~46 min, then its final stats()
