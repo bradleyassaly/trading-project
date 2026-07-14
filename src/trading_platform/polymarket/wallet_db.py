@@ -698,6 +698,16 @@ class WalletDB:
             ("open_positions_count", "INTEGER"),
             ("open_positions_value", "REAL"),
             ("unrealized_pnl_estimate", "REAL"),
+            # On-chain cash flow (#1 — borrow from Predicts.guru). External
+            # USDC in/out is the hardest-to-fake skill signal: wash trades and
+            # phantom PnL can inflate modeled trade PnL, but real USDC withdrawn
+            # to an external address is money the wallet actually extracted.
+            # net_cash_out = withdrawals_usdc - deposits_usdc. Computed by
+            # wallet_cash_flow.py; feature source for the resolution engine.
+            ("deposits_usdc", "REAL"),
+            ("withdrawals_usdc", "REAL"),
+            ("net_cash_out", "REAL"),
+            ("cash_flow_synced_at", "INTEGER"),
         ]
         for col, typedef in new_cols:
             if col not in existing:
