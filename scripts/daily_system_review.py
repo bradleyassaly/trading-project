@@ -34,6 +34,23 @@ load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
 from trading_platform.polymarket.db_connection import get_connection
 
 
+# Economic-date windowing fragment — mirrors kill_switch.py's _ECON_TS so the
+# review's P&L windows agree with the breaker that already gates trading. A
+# batch of weeks-old resolutions booked today (exit_ts=now) would otherwise all
+# land in "today"/"7d"/"30d" (the 2026-07-02 back-booking incident); when
+# resolution_date is known and precedes exit_ts the P&L economically belongs to
+# the resolution day, and an undated resolved_databook back-booking maps to 0
+# (falls out of every window).
+_ECON_TS = (
+    "CASE "
+    "WHEN exit_reason = 'resolved_databook' "
+    "AND COALESCE(resolution_date, 0) <= 0 THEN 0 "
+    "WHEN COALESCE(resolution_date, 0) > 0 "
+    "AND resolution_date < exit_ts THEN resolution_date "
+    "ELSE exit_ts END"
+)
+
+
 def section(title: str):
     print()
     print("=" * 72)
@@ -43,8 +60,10 @@ def section(title: str):
 
 def section_pnl(conn, now_ts):
     section("1. P&L AND POSITION STATE")
-    today_utc = dt.datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
-    today_start = int(today_utc.timestamp())
+    # UTC midnight from the true epoch. naive utcnow().replace(...).timestamp()
+    # reads the value as LOCAL time on a non-UTC host, shifting the "UTC" day
+    # boundary by the host offset (the operator runs this on a UTC-5 Windows box).
+    today_start = now_ts - (now_ts % 86400)
     yesterday_start = today_start - 86400
 
     for label, s, u in [
@@ -53,12 +72,17 @@ def section_pnl(conn, now_ts):
         ("Last 7d", now_ts - 7 * 86400, now_ts),
         ("Last 30d", now_ts - 30 * 86400, now_ts),
     ]:
-        r = conn.execute("""
+        # WR over resolved rows only (win/loss); a bare ELSE 0.0 would count
+        # expired / zero-balance / NULL-outcome closes as losses and read
+        # several points below sections 7/13 in the same report. Windows on the
+        # economic date so a back-booked batch doesn't distort "today".
+        r = conn.execute(f"""
             SELECT COUNT(*) n,
                    COALESCE(SUM(realized_pnl), 0) pnl,
-                   AVG(CASE WHEN outcome='win' THEN 1.0 ELSE 0.0 END) wr
+                   AVG(CASE WHEN outcome='win' THEN 1.0
+                            WHEN outcome='loss' THEN 0.0 END) wr
               FROM live_trades
-             WHERE dry_run=0 AND exit_ts >= %s AND exit_ts < %s
+             WHERE dry_run=0 AND ({_ECON_TS}) >= %s AND ({_ECON_TS}) < %s
                AND realized_pnl IS NOT NULL
         """, (s, u)).fetchone()
         n, pnl, wr = int(r[0] or 0), float(r[1] or 0), float(r[2] or 0)
@@ -107,15 +131,15 @@ def section_slippage(conn, now_ts):
     rows = conn.execute("""
         SELECT signal_type, direction,
                COUNT(*) n,
-               AVG(slippage) avg_slip_pct,
-               SUM(slippage * size_usd / NULLIF(fill_price, 0)) slip_dollars
+               AVG(slippage_signed) avg_slip_pct,
+               SUM(slippage_cost_usd) slip_dollars
           FROM live_trades
-         WHERE dry_run=0 AND slippage IS NOT NULL
+         WHERE dry_run=0 AND slippage_cost_usd IS NOT NULL
            AND fill_price > 0
            AND attempted_at > %s
          GROUP BY signal_type, direction
         HAVING COUNT(*) >= 3
-         ORDER BY slip_dollars ASC NULLS LAST
+         ORDER BY slip_dollars DESC NULLS LAST
     """, (now_ts - 30 * 86400,)).fetchall()
     if rows:
         print(f"    {'Signal':<28} {'Dir':<5} {'n':>4} {'avg%':>7} {'$ cost':>9}")
@@ -131,15 +155,15 @@ def section_slippage(conn, now_ts):
     print("  Top-10 worst per-trade slippage hits (last 30d):")
     rows = conn.execute("""
         SELECT id, signal_type, direction,
-               entry_price, fill_price, slippage,
+               entry_price, fill_price, slippage_signed,
                size_usd,
-               slippage * size_usd / NULLIF(fill_price, 0) slip_dollars,
+               slippage_cost_usd slip_dollars,
                LEFT(question, 40) q
           FROM live_trades
-         WHERE dry_run=0 AND slippage IS NOT NULL
+         WHERE dry_run=0 AND slippage_cost_usd IS NOT NULL
            AND fill_price > 0 AND size_usd > 0
            AND attempted_at > %s
-         ORDER BY slip_dollars ASC NULLS LAST
+         ORDER BY slip_dollars DESC NULLS LAST
          LIMIT 10
     """, (now_ts - 30 * 86400,)).fetchall()
     if rows:
@@ -328,7 +352,7 @@ def section_decay(conn, now_ts):
     rows = conn.execute("""
         SELECT signal_type, direction,
                AVG(CASE WHEN exit_ts > %s AND outcome='win' THEN 1.0
-                        WHEN exit_ts > %s THEN 0.0 ELSE NULL END) wr_7d,
+                        WHEN exit_ts > %s AND outcome='loss' THEN 0.0 ELSE NULL END) wr_7d,
                COUNT(CASE WHEN exit_ts > %s AND outcome IN ('win','loss') THEN 1 END) n_7d,
                AVG(CASE WHEN outcome='win' THEN 1.0 WHEN outcome='loss' THEN 0.0 END) wr_30d,
                COUNT(CASE WHEN outcome IN ('win','loss') THEN 1 END) n_30d
@@ -360,8 +384,8 @@ def section_decay(conn, now_ts):
             print("  CORRELATION AUTO-DEPRECATED (redundant — not traded):")
             for st, cw, cm, why in dep:
                 print(f"    {str(st):<26} {why or (str(cw)+' corr='+str(cm))}")
-    except Exception:
-        pass
+    except Exception as exc:
+        print(f"  (correlation auto-deprecation unavailable: {exc})")
     # C4: live-lane regime states for the shipped edges (regime_monitor, 6h).
     try:
         reg = conn.execute(
@@ -376,8 +400,8 @@ def section_decay(conn, now_ts):
                       f"EV={float(ev or 0):+.1%} [{float(lo or 0):+.1%}, "
                       f"{float(hi or 0):+.1%}] n={int(n30 or 0)} "
                       f"events={int(ncl or 0)}{mark}")
-    except Exception:
-        pass
+    except Exception as exc:
+        print(f"  (live-edge regime unavailable: {exc})")
 
 
 def section_attribution(conn, now_ts):
@@ -390,13 +414,13 @@ def section_attribution(conn, now_ts):
     section("9. PER-STRATEGY ATTRIBUTION (revenue share by signal × direction)")
     for label, days in (("Last 7d", 7), ("Last 30d", 30)):
         cutoff = now_ts - days * 86400
-        rows = conn.execute("""
+        rows = conn.execute(f"""
             SELECT signal_type, direction,
                    COUNT(*) n,
                    SUM(CASE WHEN outcome='win' THEN 1 ELSE 0 END) wins,
                    ROUND(SUM(COALESCE(realized_pnl, 0))::numeric, 2) pnl
               FROM live_trades
-             WHERE dry_run=0 AND exit_ts >= %s
+             WHERE dry_run=0 AND ({_ECON_TS}) >= %s
                AND realized_pnl IS NOT NULL
              GROUP BY 1, 2
              ORDER BY 5 DESC
@@ -416,11 +440,15 @@ def section_attribution(conn, now_ts):
             bar = "█" * min(int(share / 5), 14)  # 14-char max bar
             print(f"    {sig:<22s} {di:<5s} n={n:3d} WR={wr:3.0f}% "
                   f"pnl=${float(pnl):>+7.2f}  {share:>4.0f}% {bar}")
-        # Monoculture flag
+        # Monoculture flag — rank by |PnL|, not signed PnL, or a dominant LOSER
+        # (rows are ORDER BY signed pnl DESC, so rows[0] is the top winner) is
+        # never flagged. The wallet_reversal case this section exists for was a
+        # loser driving ~70% of |PnL|.
         if rows and total_abs > 0:
-            top_share = abs(float(rows[0][4])) / total_abs
+            top = max(rows, key=lambda rr: abs(float(rr[4] or 0)))
+            top_share = abs(float(top[4] or 0)) / total_abs
             if top_share >= 0.50:
-                print(f"  MONOCULTURE — {rows[0][0]} {rows[0][1]} drives "
+                print(f"  MONOCULTURE — {top[0]} {top[1]} drives "
                       f"{top_share:.0%} of |realized PnL|; add an uncorrelated signal.")
 
 
@@ -636,7 +664,7 @@ def section_equity_agreement(conn, now_ts):
             passed       BIGINT NOT NULL
         )
     """)
-    today = dt.datetime.utcnow().strftime("%Y-%m-%d")
+    today = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%d")
     try:
         from reconcile_polymarket_truth import reconcile
         report = reconcile()
@@ -698,10 +726,16 @@ def section_reconciled_ev(conn, now_ts):
       KILL  — EV < 0 on n >= 30
     """
     section("13. RECONCILED PER-SIGNAL EV VERDICTS (90d, by exit channel)")
-    rows = conn.execute("""
+    # Channel split isolates possibly-fictitious action-exit P&L (stop/take-profit
+    # orders that can rest unfilled) from on-chain resolution truth. The booker
+    # writes exit_reason='resolved_databook'; classify every 'resolved%' reason as
+    # resolution (matches kill_switch.py / polymarket_live_executor.py's
+    # NOT LIKE 'resolved%' convention) or the on-chain losses leak into 'action'
+    # and flip the KILL/GO verdict. Exclude probes (regime_monitor excludes them).
+    rows = conn.execute(f"""
         SELECT signal_type,
-               CASE WHEN exit_reason IN ('resolved_zero_balance', 'redeemed',
-                                         'resolution', 'market_resolved')
+               CASE WHEN exit_reason LIKE 'resolved%%'
+                         OR exit_reason IN ('redeemed', 'resolution', 'market_resolved')
                     THEN 'resolution' ELSE 'action' END AS channel,
                COUNT(*) AS n,
                COALESCE(SUM(realized_pnl), 0) AS pnl,
@@ -709,7 +743,8 @@ def section_reconciled_ev(conn, now_ts):
           FROM live_trades
          WHERE dry_run = 0 AND exit_ts IS NOT NULL
            AND outcome IN ('win', 'loss')
-           AND exit_ts >= %s
+           AND COALESCE(is_probe, 0) = 0
+           AND ({_ECON_TS}) >= %s
          GROUP BY signal_type, 2
          ORDER BY signal_type
     """, (now_ts - 90 * 86400,)).fetchall()
@@ -893,27 +928,45 @@ def section_exit_counterfactual(conn, now_ts):
         print(f"  counterfactual unavailable: {exc}")
         return
     per_sig: dict = {}
+    # stop_loss-only view: the exit_policy_overrides job keys its exemption on
+    # exit_reason='stop_loss', so the human verdict must be driven by the
+    # stop_loss delta — not the blend across take_profit/trailing, where TP
+    # gains can mask a losing stop policy (or vice-versa) and point the operator
+    # opposite to the automated exemption.
+    per_sl_stop: dict = {}
     for (sig, sl, _reason), a in per_key.items():
         agg = per_sig.setdefault((sig, sl), {"n": 0, "actual": 0.0, "hold": 0.0})
         agg["n"] += a["n"]
         agg["actual"] += a["actual"]
         agg["hold"] += a["hold"]
+        if _reason == "stop_loss":
+            sagg = per_sl_stop.setdefault((sig, sl), {"n": 0, "actual": 0.0, "hold": 0.0})
+            sagg["n"] += a["n"]
+            sagg["actual"] += a["actual"]
+            sagg["hold"] += a["hold"]
 
     if not per_sig:
         print(f"  No resolvable exits yet ({unresolved} awaiting resolution data).")
         return
 
     print(f"  {'signal':<22}{'slice':<8}{'n':>4}{'actual$':>9}{'hold$':>9}"
-          f"{'delta$':>9}  verdict")
+          f"{'delta$':>9}{'SLdelta$':>9}  verdict (stop_loss grain)")
     tot_a = tot_h = 0.0
     for (sig, sl), a in sorted(per_sig.items(), key=lambda kv: kv[1]["actual"] - kv[1]["hold"]):
         delta = a["hold"] - a["actual"]
         tot_a += a["actual"]
         tot_h += a["hold"]
-        verdict = ("exits LOSING vs hold" if delta > 2 else
-                   "exits adding value" if delta < -2 else "~neutral")
+        sl_agg = per_sl_stop.get((sig, sl), {"n": 0, "actual": 0.0, "hold": 0.0})
+        sl_delta = sl_agg["hold"] - sl_agg["actual"]
+        # Verdict off the stop_loss grain, with a small-sample guard so a
+        # 1-trade slice can't read as an actionable "stops LOSING vs hold".
+        if sl_agg["n"] < 30:
+            verdict = f"insufficient stop_loss n ({sl_agg['n']}<30)"
+        else:
+            verdict = ("stops LOSING vs hold" if sl_delta > 2 else
+                       "stops adding value" if sl_delta < -2 else "~neutral")
         print(f"  {sig:<22}{sl:<8}{a['n']:>4}{a['actual']:>9.2f}"
-              f"{a['hold']:>9.2f}{delta:>+9.2f}  {verdict}")
+              f"{a['hold']:>9.2f}{delta:>+9.2f}{sl_delta:>+9.2f}  {verdict}")
     print(f"  {'TOTAL':<22}{'':<8}{sum(v['n'] for v in per_sig.values()):>4}"
           f"{tot_a:>9.2f}{tot_h:>9.2f}{tot_h - tot_a:>+9.2f}")
     if unresolved:
@@ -923,13 +976,21 @@ def section_exit_counterfactual(conn, now_ts):
 
 
 def main():
+    # The Windows console is cp1252 by default; several sections print Unicode
+    # glyphs (→ █ ✅ ⚠ ≤ −) that raise UnicodeEncodeError there and abort the
+    # whole review after section 1. Make stdout tolerant instead.
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError):
+        pass
+
     ap = argparse.ArgumentParser()
     ap.add_argument("--apply-multipliers", action="store_true",
                     help="Refresh signal_sizing_multipliers from latest data")
     args = ap.parse_args()
 
     now_ts = int(time.time())
-    today_str = dt.datetime.utcnow().strftime("%Y-%m-%d %H:%M")
+    today_str = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%d %H:%M")
     print(f"\nDAILY SYSTEM REVIEW — {today_str} UTC")
 
     conn = get_connection()

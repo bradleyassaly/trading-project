@@ -9,10 +9,19 @@ live position:
   4. Apply whale-mirror exit (source wallet sold the same market)
   5. On exit trigger: submit a SELL via py_clob_client + record exit_*
 
-Runs from the scheduler every 5 min. Same exit profiles as paper, so
-behavior is identical between paper and live for a given signal type —
-this matters because once a signal graduates to live, the exit logic
-should produce the same shape of trades as the paper-validated ones.
+Runs from the scheduler every 5 min. Uses the same per-signal SL / TP /
+trailing exit profiles as paper, so live exits should produce a similar
+shape of trades to the paper-validated ones once a signal graduates.
+
+NOTE (not fully identical): the paper executor additionally applies
+stuck-band / market-life / implied-shift clips (polymarket_paper_executor
+~line 2400+), and exempts HOLD_TO_RESOLUTION_SIGNALS (resolution_decay)
+from the stuck-band/market-life ones but NOT from implied_shift. The live
+monitor has none of those clips — a resolution_decay position with no
+SL/TP/trailing trigger rides to on-chain resolution. So for
+resolution_decay the paper lane can partial-capture via implied_shift
+while live holds to settlement; treat paper EV/WR as a biased (optimistic
+on captured moves) shadow of live for that signal until aligned.
 
 Safe-by-default: if py_clob_client is missing or sell fails, the
 position stays open and we log the error rather than crash.

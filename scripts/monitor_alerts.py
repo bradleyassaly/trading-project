@@ -78,7 +78,7 @@ def check_api_health(alerter) -> int:
             if alerter.send_pipeline_alert(
                 component=f"api:{r['api_name']}",
                 message=(f"silent {age//60}m (threshold {thr//60}m). "
-                         f"24h: {r['success_24h']} ok / {r['error_24h']} err. "
+                         f"total: {r['success_24h']} ok / {r['error_24h']} err. "
                          f"Last error: {(r.get('last_error_msg') or 'none')[:80]}"),
                 level="critical" if age > 2 * thr else "warning",
             ):

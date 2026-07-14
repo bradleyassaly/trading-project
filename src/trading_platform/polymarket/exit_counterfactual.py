@@ -151,12 +151,16 @@ def compute_exit_counterfactual(conn, now_ts: int, window_days: int = 60,
             unresolved += 1
             continue
         fp = float(fp or 0)
-        shares = float(sh or 0) or (float(usd or 0) / max(fp, 0.01))
+        # Direction-aware shares fallback: mirror the cost line's price space so
+        # a null-shares SELL row (NO priced 1-fp) doesn't divide the stake by the
+        # BUY-space price and understate shares ~ (1-fp)/fp x.
+        _is_buy = (direction or "BUY").upper() == "BUY"
+        _entry_px = max(fp, 0.01) if _is_buy else max(1.0 - fp, 0.001)
+        shares = float(sh or 0) or (float(usd or 0) / _entry_px)
         if shares <= 0 or fp <= 0:
             unresolved += 1
             continue
-        cost = shares * (fp if (direction or "BUY").upper() == "BUY"
-                         else max(1.0 - fp, 0.001))
+        cost = shares * (fp if _is_buy else max(1.0 - fp, 0.001))
         hold = shares * payout - cost
         key = (sig, "sports" if (cat or "").lower() == "sports" else "other",
                exit_reason or "unknown")

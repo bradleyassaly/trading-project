@@ -130,7 +130,12 @@ def get_status() -> list[dict]:
     """Return current api_health rows for reporting.
 
     Each row: {api_name, last_success_age_sec, last_error_age_sec,
-               last_error_msg, success_24h, error_24h, healthy}
+               last_error_msg, success_24h, error_24h}
+
+    Note: staleness is judged by callers against their own per-API
+    thresholds (daily_system_review.THRESHOLDS / monitor_alerts.API_THRESHOLDS),
+    so no single "healthy" flag is exposed here — a hardcoded window would
+    contradict the per-API thresholds (e.g. gamma tolerates 8h).
     """
     _ensure_table()
     now = int(time.time())
@@ -153,12 +158,6 @@ def get_status() -> list[dict]:
         last_error_ts = int(r[2] or 0)
         success_age = (now - last_success_ts) if last_success_ts else None
         error_age = (now - last_error_ts) if last_error_ts else None
-        # Healthy if last success within 1h AND error not more recent than success
-        healthy = (
-            success_age is not None
-            and success_age < 3600
-            and (error_age is None or last_error_ts < last_success_ts)
-        )
         out.append({
             "api_name": r[0],
             "last_success_age_sec": success_age,
@@ -166,6 +165,5 @@ def get_status() -> list[dict]:
             "last_error_msg": r[3],
             "success_24h": int(r[4] or 0),
             "error_24h": int(r[5] or 0),
-            "healthy": healthy,
         })
     return out

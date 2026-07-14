@@ -653,9 +653,20 @@ def main() -> None:
         if now - _last_alive_ping >= ALIVE_PING_INTERVAL_S:
             _last_alive_ping = now
             healthy_n = sum(1 for s in states if s.healthy)
+            # Recurring nag: an UNARMED external switch is the single reason a
+            # full-stack-down (wedged Docker engine, host off) goes silent —
+            # the in-stack watchdog dies with the stack, so only an off-host
+            # ping catches it. On 2026-07-13 that scenario cost ~6.5h dark with
+            # zero alert. Warn on every alive-ping, not just startup, until set.
+            armed_line = (
+                "" if HEARTBEAT_PING_URL else
+                "\n\n⚠️ <b>External dead-man's switch UNARMED</b> — "
+                "set HEARTBEAT_PING_URL (healthchecks.io) or a full-stack/host "
+                "outage will NOT be detectable off-host.")
             _send_alert(
                 f"\U0001f7e2 <b>Watchdog alive</b> — {healthy_n}/{len(states)} "
-                f"components healthy\n\n" + format_status(states), loud=False)
+                f"components healthy\n\n" + format_status(states) + armed_line,
+                loud=False)
 
         time.sleep(POLL_INTERVAL_SECONDS)
 
