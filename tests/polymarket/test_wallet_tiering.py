@@ -354,13 +354,21 @@ class TestPromotionGate:
 class TestEngineRoundTrip:
     def test_strong_wallet_promoted_to_s(self, tmp_path: Path):
         db_path = _bootstrap_db(tmp_path)
-        # 16 wins / 4 losses spread over 60 days
+        # 16 wins / 4 losses spread over 60 days, INTERLEAVED so the wallet is
+        # genuinely strong — a steady high-WR record. 2026-07-14: the original
+        # construction put all 4 losses LAST, which makes a *declining* wallet
+        # (trend_score -0.2, consistency 0.77 -> tier_score 0.59 -> A). The
+        # trend + consistency components correctly refuse S to a wallet whose
+        # recent trades are all losses; a "strong wallet promoted to S" test
+        # must therefore use a steady (or improving) record. See
+        # test_declining_wallet_denied_s below for the contrast.
         outcomes = []
         base_ts = int(time.time()) - 60 * 86400
-        for i in range(16):
-            outcomes.append(("win", 50.0, base_ts + i * 3 * 86400))
-        for i in range(4):
-            outcomes.append(("loss", -40.0, base_ts + (16 + i) * 3 * 86400))
+        for i in range(20):
+            if i % 5 == 0:  # losses at i=0,5,10,15 -> 4 losses / 16 wins
+                outcomes.append(("loss", -40.0, base_ts + i * 3 * 86400))
+            else:
+                outcomes.append(("win", 50.0, base_ts + i * 3 * 86400))
         _seed_trades(db_path, wallet="0xstrong", category="politics", outcomes=outcomes)
 
         engine = WalletTieringEngine(str(db_path))
@@ -369,6 +377,24 @@ class TestEngineRoundTrip:
         prof = engine.get_profile("0xstrong", "politics")
         assert prof["resolved_trades"] == 20
         assert prof["tier"] == "S"
+
+    def test_declining_wallet_denied_s(self, tmp_path: Path):
+        # Same 80% WR / 20 trades, but a win-streak THEN a loss-streak — a
+        # declining wallet. trend + consistency correctly hold it below the
+        # S gate (tier_score ~0.59 < 0.60). Locks in that raw WR alone can't
+        # buy S; recent-form and steadiness must agree.
+        db_path = _bootstrap_db(tmp_path)
+        base_ts = int(time.time()) - 60 * 86400
+        outcomes = [("win", 50.0, base_ts + i * 3 * 86400) for i in range(16)]
+        outcomes += [("loss", -40.0, base_ts + (16 + i) * 3 * 86400) for i in range(4)]
+        _seed_trades(db_path, wallet="0xdeclining", category="politics", outcomes=outcomes)
+
+        engine = WalletTieringEngine(str(db_path))
+        engine.evaluate_single_wallet("0xdeclining", "politics")
+        prof = engine.get_profile("0xdeclining", "politics")
+        assert prof["resolved_trades"] == 20
+        assert prof["win_rate"] == pytest.approx(0.8)
+        assert prof["tier"] != "S"  # declining record is denied S despite 80% WR
 
     def test_consecutive_losses_force_demotion(self, tmp_path: Path):
         db_path = _bootstrap_db(tmp_path)
