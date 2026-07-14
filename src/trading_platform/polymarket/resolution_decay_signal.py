@@ -110,7 +110,7 @@ def _candidate_markets(conn) -> list[dict[str, Any]]:
     rows = conn.execute(
         """SELECT condition_id, slug, question, end_date_iso,
                   yes_token_id, no_token_id, outcome_prices, volume_24h,
-                  subcategory
+                  subcategory, uma_status
              FROM markets
             WHERE end_date_iso IS NOT NULL
               AND end_date_iso > to_char(NOW(), 'YYYY-MM-DD"T"HH24:MI:SS')
@@ -128,7 +128,7 @@ def _candidate_markets(conn) -> list[dict[str, Any]]:
     ).fetchall()
     out = []
     for r in rows:
-        cid, slug, q, end_iso, yes_tid, no_tid, prices_raw, vol, subcat = r
+        cid, slug, q, end_iso, yes_tid, no_tid, prices_raw, vol, subcat, uma_status = r
         if cid in failed_cids:
             continue  # CLOB doesn't have a price for this market — skip
         try:
@@ -161,6 +161,13 @@ def _candidate_markets(conn) -> list[dict[str, Any]]:
             "end_iso": end_iso, "yes_token_id": yes_tid, "no_token_id": no_tid,
             "yes_price": yes_price, "hours_to_resolve": hours_to_resolve,
             "volume_24h": float(vol or 0), "subcategory": subcat,
+            # #6 Stage A (instrument-only): oracle state Gamma reports for
+            # this market at fire time. The thesis names the exact edge —
+            # "UMA proposed the outcome, the orderbook hasn't marked to 0/1
+            # yet" — vs revert-risk when a market is disputed. We capture it
+            # now (no decision change) so we can later measure whether it
+            # separates decay winners from losers before gating on it.
+            "uma_status": uma_status,
         })
     return out
 
@@ -260,6 +267,12 @@ def _emit_signal(market: dict, api_url: str) -> None:
             # candidate query already guarantees this is non-null and inside
             # [now, now+24h].
             "end_date_iso": market.get("end_iso"),
+            # #6 Stage A: oracle state at fire time, snapshotted verbatim into
+            # polymarket_paper_trades.features_at_fire (the executor dumps the
+            # whole payload). Instrument-only — nothing reads this to gate a
+            # trade yet. Measure first (does uma_status at fire predict a
+            # better resolve-YES rate?), then promote to a gate behind a flag.
+            "uma_status_at_fire": market.get("uma_status"),
             "fired_at": now_ts,
         }
         # Paper executor invocation
