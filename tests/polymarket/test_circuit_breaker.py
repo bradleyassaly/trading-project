@@ -20,6 +20,18 @@ from trading_platform.polymarket.circuit_breaker import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _force_sqlite_backend(monkeypatch):
+    """Pin these tests to the tmp-path SQLite DBs they bootstrap.
+
+    Under DB_BACKEND=postgres (the post-cutover default) connect_wallet_db()
+    IGNORES the explicit db path and routes to the shared Postgres database —
+    observed 2026-07-16: this suite ran record_trade()/configure() against the
+    PRODUCTION circuit_breaker_state row from pytest. Never remove this.
+    """
+    monkeypatch.setenv("DB_BACKEND", "sqlite")
+
+
 def _bootstrap_db(tmp_path: Path) -> Path:
     db = tmp_path / "wi.db"
     conn = sqlite3.connect(str(db))
@@ -152,6 +164,81 @@ class TestDrawdownTracking:
         allowed, reason = cb.can_trade()
         assert allowed is False
         assert "halted" in reason.lower()
+
+
+# ── Live equity sync (update_equity — the production feed) ────────────────
+
+
+class TestUpdateEquity:
+    def test_seeds_state_when_uninitialized(self, tmp_path):
+        cb = CircuitBreaker(str(_bootstrap_db(tmp_path)))
+        s = cb.update_equity(250.0)
+        assert s["starting_capital"] == 250.0
+        assert s["peak_equity"] == 250.0
+        assert s["current_equity"] == 250.0
+        assert cb.can_trade() == (True, "ok")
+
+    def test_level_based_tracking(self, tmp_path):
+        cb = CircuitBreaker(str(_bootstrap_db(tmp_path)))
+        cb.initialize(1000, daily_loss_limit=0.95)
+        cb.update_equity(1100)
+        assert cb.get_status()["peak_equity"] == 1100
+        cb.update_equity(900)
+        s = cb.get_status()
+        assert s["current_equity"] == 900
+        assert s["current_drawdown_pct"] == pytest.approx(200 / 1100, abs=1e-4)
+
+    def test_halts_on_live_drawdown(self, tmp_path):
+        cb = CircuitBreaker(str(_bootstrap_db(tmp_path)))
+        cb.initialize(1000, max_drawdown_pct=0.20, daily_loss_limit=0.95)
+        cb.update_equity(750)  # 25% below peak
+        s = cb.get_status()
+        assert s["is_halted"] is True
+        assert cb.can_trade()[0] is False
+
+    def test_noop_sync_touches_state_without_logging(self, tmp_path):
+        cb = CircuitBreaker(str(_bootstrap_db(tmp_path)))
+        cb.initialize(1000)
+        n_before = len(cb.get_log(limit=100))
+        s = cb.update_equity(1000.0)  # unchanged level
+        assert len(cb.get_log(limit=100)) == n_before
+        assert s["current_equity"] == 1000
+
+    def test_sync_logged_as_equity_sync(self, tmp_path):
+        cb = CircuitBreaker(str(_bootstrap_db(tmp_path)))
+        cb.initialize(1000, daily_loss_limit=0.95)
+        cb.update_equity(950)
+        events = cb.get_log(limit=10)
+        assert any(e["event_type"] == "equity_sync" for e in events)
+
+    def test_mark_to_market_daily_loss_halts(self, tmp_path):
+        cb = CircuitBreaker(str(_bootstrap_db(tmp_path)))
+        cb.initialize(1000, max_drawdown_pct=0.50, daily_loss_limit=0.05)
+        cb.update_equity(1000)  # prime the sync window (no-op delta)
+        cb.update_equity(930)   # -7% intraday mark move, prior sync today
+        s = cb.get_status()
+        assert s["daily_halted"] is True
+        assert s["is_halted"] is False
+
+    def test_first_sync_delta_not_booked_as_todays_loss(self, tmp_path):
+        """A first-ever sync carries losses accumulated over prior days
+        (prod 2026-07-16: -14.7% since the July-8 rebase). It must move
+        equity/drawdown but NOT daily_pnl — booking it as today's loss
+        would fire a false daily halt (the 2026-07-02 stale-loss outage
+        mode). Subsequent same-day syncs DO count."""
+        cb = CircuitBreaker(str(_bootstrap_db(tmp_path)))
+        cb.initialize(1000, max_drawdown_pct=0.50, daily_loss_limit=0.05)
+        cb.update_equity(853)  # first sync: -14.7%, like the real backlog
+        s = cb.get_status()
+        assert s["current_equity"] == pytest.approx(853)
+        assert s["current_drawdown_pct"] == pytest.approx(0.147, abs=1e-3)
+        assert s["daily_pnl"] == 0.0
+        assert s["daily_halted"] is False
+        assert s["is_halted"] is False
+        cb.update_equity(800)  # second sync, same day: counts
+        s = cb.get_status()
+        assert s["daily_pnl"] == pytest.approx(-53)
+        assert s["daily_halted"] is True  # 53/853 ≈ 6.2% >= 5%
 
 
 # ── Daily limits ───────────────────────────────────────────────────────────

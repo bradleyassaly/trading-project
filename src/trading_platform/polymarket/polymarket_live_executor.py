@@ -976,7 +976,11 @@ class PolymarketLiveExecutor:
             logger.warning("[LIVE] Emergency stop active: %s", stop_reason)
             return self._block(signal, f"Emergency stop: {stop_reason}")
 
-        # 0b. Circuit breaker check (cumulative drawdown layer)
+        # 0b. Circuit breaker check (Layer 3 — cumulative drawdown on the
+        # LIVE book). State is fed hourly by scripts/snapshot_live_equity.py
+        # via CircuitBreaker.update_equity() (mark-to-market truth equity);
+        # nothing else writes it. Fail-closed on an unseeded row: live
+        # entries stay blocked until the first equity snapshot lands.
         try:
             from trading_platform.polymarket.circuit_breaker import CircuitBreaker
             cb = CircuitBreaker(self._db_path)

@@ -370,6 +370,27 @@ def take_snapshot() -> dict:
     conn.commit()
     conn.close()
 
+    # ── Layer-3 risk feed ─────────────────────────────────────────────────
+    # The cumulative-drawdown circuit breaker (circuit_breaker.py) tracks
+    # THIS number, and this is its ONLY production writer. Level-based
+    # mark-to-market sync: missed or duplicated exit bookings self-correct
+    # on the next snapshot. Before 2026-07-16 the breaker was fed paper
+    # resolutions while the live executor consulted the gate — a 14.7%
+    # real drawdown read as 0%.
+    try:
+        from trading_platform.polymarket.circuit_breaker import CircuitBreaker
+        cb_state = CircuitBreaker().update_equity(
+            total_equity, source="snapshot_live_equity")
+        if cb_state:
+            print(
+                f"[live_equity] breaker: dd={float(cb_state.get('current_drawdown_pct') or 0):.1%} "
+                f"peak=${float(cb_state.get('peak_equity') or 0):.2f} "
+                f"halted={bool(cb_state.get('is_halted'))} "
+                f"daily_halted={bool(cb_state.get('daily_halted'))}"
+            )
+    except Exception as exc:
+        print(f"  circuit-breaker equity feed failed (non-fatal): {exc}")
+
     result = {
         "ts": now_ts,
         "usdc": round(usdc, 4),
