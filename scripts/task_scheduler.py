@@ -750,6 +750,18 @@ SCHEDULE: list[Task] = [
         description="Data-quality SLA: wallet coverage vs Polymarket truth (12h)",
     ),
     Task(
+        # 2026-07-16: deploy-drift guard. The bind mount means prod runs the
+        # local working tree; fixes merged to origin/main have twice sat
+        # un-running for DAYS (un-pulled tree, or pulled but containers never
+        # restarted) with no alert. Runs as a subprocess so the check itself
+        # always executes fresh code even when the scheduler is stale. Alerts
+        # on local-vs-origin sha mismatch and code-moved-after-process-start.
+        name="deploy_drift",
+        cmd="python scripts/check_deploy_drift.py",
+        interval_seconds=6 * 3600,
+        description="Deploy guard: local tree vs origin/main + restart drift (6h)",
+    ),
+    Task(
         # 2026-07-16: maker experiment — resting NO-side quotes on longshot
         # sports markets near resolution, i.e. be the counterparty the
         # dumb taker flow crosses into (three independent analyses converged

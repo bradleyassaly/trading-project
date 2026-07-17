@@ -5,6 +5,36 @@ fail; this is what happens, what auto-recovers, and what needs you.
 
 ---
 
+## Deploying code changes (EVERY deploy)
+
+`docker-compose.yml` bind-mounts `.:/app` for every service — **production
+runs whatever is in the local working tree**, not an image. "Merged to
+origin/main" therefore deploys NOTHING by itself, and a `git pull` deploys
+scheduler *subprocess* tasks only; long-lived python processes keep their
+stale imports until restarted. Both halves have silently failed for days
+(2026-07-13→16: EV-guard + scheduler-recovery fixes merged but never
+running). Every deploy is BOTH steps:
+
+```bash
+git pull --ff-only                     # 1. bring the tree to origin/main
+docker restart polymarket-scheduler polymarket-watchdog \
+    polymarket-telegram-bot polymarket-wallet-stream \
+    polymarket-wallet-poller polymarket-api polymarket-live-collect
+                                       # 2. reload every long-lived importer
+```
+
+(`polymarket-postgres` and `polymarket-frontend` don't import python code —
+leave them.) Local commits must be pushed promptly for the same reason in
+reverse: an un-pushed local commit means origin's view of "deployed" is wrong.
+
+**Guard:** the `deploy_drift` scheduler task (`scripts/check_deploy_drift.py`,
+6h) alerts on Telegram when local HEAD ≠ origin/main **or** when code moved
+after the scheduler process started (stale imports). It runs as a scheduler
+subprocess so the guard itself always executes fresh code. Manual check:
+`docker exec polymarket-scheduler python scripts/check_deploy_drift.py --verbose`.
+
+---
+
 ## Deploying the 2026-07-02 safety changes (one-time checklist)
 
 The Phase-0.5 flaw burn-down (see `SCALING_PLAN_2026-07-02.md`) changed
