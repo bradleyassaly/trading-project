@@ -107,6 +107,14 @@ PROBE_DAILY_BUDGET_USD = float(os.environ.get("PROBE_DAILY_BUDGET_USD", "5.0"))
 PROBE_MIN_INTERVAL_S = int(os.environ.get("PROBE_MIN_INTERVAL_S", "3600"))
 PROBE_BAND = float(os.environ.get("PROBE_BAND", "0.05"))
 
+# 2026-07-16: probation re-entry stake for wallets recovering from a
+# DEMOTED override (wallet_attribution.py plan_recoveries flips DEMOTED →
+# PROBATION once the wallet stops meeting the demote criteria). $5 = CLOB
+# minimum order — real re-measurement flow at minimal risk until the
+# override fully clears (30d pnl >= $0 on n >= 5) or re-demotes. The cap
+# beats every sizing boost including the decay-Kelly lift.
+WALLET_PROBATION_STAKE_USD = float(os.environ.get("WALLET_PROBATION_STAKE_USD", "5.0"))
+
 _TOPIC_STRIP_DATE = __import__("re").compile(
     r"\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+\d+\b",
     __import__("re").IGNORECASE,
@@ -1144,6 +1152,17 @@ class PolymarketLiveExecutor:
         # wallets whose 30d live PnL drops below -$10 on n>=5
         # (wallet_attribution.py --apply populates wallet_overrides).
         # Closes the attribution feedback loop. Fail-open if table missing.
+        # 2026-07-16: the gate is now two-way. The one-way DEMOTED ratchet
+        # silently killed ALL live trading for 3 days when the
+        # phase_b_resolution_decay slice was auto-demoted (07-13):
+        #   - DEMOTED blocks live entries but WAIVES $1 execution probes —
+        #     without the carve-out a demoted slice can never produce the
+        #     fresh 30d fills the recovery pass re-measures (deadlock:
+        #     demoted → no trades → stats frozen → demoted forever).
+        #   - PROBATION (set by wallet_attribution.plan_recoveries once the
+        #     wallet stops meeting the demote criteria) trades live again,
+        #     hard-capped at WALLET_PROBATION_STAKE_USD below.
+        _probation_wallet = False
         if src_wallet:
             try:
                 from trading_platform.polymarket.db_connection import get_connection as _gc
@@ -1157,10 +1176,25 @@ class PolymarketLiveExecutor:
                 finally:
                     try: _woconn.close()
                     except Exception: pass
-                if _wo and (_wo[0] or "").upper() == "DEMOTED":
-                    return self._block(
-                        signal,
-                        f"wallet auto-demoted: {src_wallet[:14]} ({(_wo[1] or '')[:60]})"
+                _wo_tier = ((_wo[0] if _wo else "") or "").upper()
+                if _wo_tier == "DEMOTED":
+                    if signal.get("is_probe"):
+                        logger.info(
+                            "[PROBE] DEMOTED override waived for $1 execution "
+                            "probe — %s (%s)",
+                            src_wallet[:14], (_wo[1] or "")[:60],
+                        )
+                    else:
+                        return self._block(
+                            signal,
+                            f"wallet auto-demoted: {src_wallet[:14]} ({(_wo[1] or '')[:60]})"
+                        )
+                elif _wo_tier == "PROBATION":
+                    _probation_wallet = True
+                    logger.info(
+                        "[LIVE][PROBATION] %s live at $%.2f probation cap (%s)",
+                        src_wallet[:14], WALLET_PROBATION_STAKE_USD,
+                        (_wo[1] or "")[:60],
                     )
             except Exception as _woexc:
                 logger.debug("wallet_overrides check failed (proceeding): %s", _woexc)
@@ -1174,6 +1208,12 @@ class PolymarketLiveExecutor:
         from trading_platform.polymarket.bankroll import get_bankroll
         live_bankroll = get_bankroll()
         phase1_cap = max(5.0, min(25.0, live_bankroll * 0.07))
+        # Probation re-entry (see gate 0e): every later boost (specialist
+        # 2x, earliness, crowding) min()s against phase1_cap, so lowering
+        # the cap itself bounds them all. The decay-Kelly lift bypasses
+        # phase1_cap — it gets its own clamp at the runtime-cap step.
+        if _probation_wallet:
+            phase1_cap = min(phase1_cap, WALLET_PROBATION_STAKE_USD)
         size_usd = self._sizer.get_trade_size(sig_type, confidence)
         if size_usd > phase1_cap:
             size_usd = phase1_cap
@@ -1698,6 +1738,15 @@ class PolymarketLiveExecutor:
             # size UP to the honest Kelly (formula size is off the wrong,
             # overconfident edge — replace it), still ≤ runtime_cap.
             size_usd = min(max(size_usd, _dk_fit), runtime_cap)
+        # Probation re-entry cap (see gate 0e) beats the ladder cap AND the
+        # decay-Kelly lift above — a wallet recovering from DEMOTED stays
+        # at re-measurement stake no matter how good the wedge looks.
+        if _probation_wallet and not is_dry and runtime_cap > WALLET_PROBATION_STAKE_USD:
+            logger.info(
+                "[LIVE][PROBATION] runtime cap $%.2f → $%.2f (probation wallet)",
+                runtime_cap, WALLET_PROBATION_STAKE_USD,
+            )
+            runtime_cap = WALLET_PROBATION_STAKE_USD
         if not is_dry and size_usd > runtime_cap:
             logger.warning(
                 "[LIVE][REAL_CAP] %s clamping size $%.2f → $%.2f (ladder cap)",
