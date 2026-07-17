@@ -145,6 +145,47 @@ def _max_yes_tick_since(c, condition_id: str, since: int) -> float | None:
     return float(row[0]) if row and row[0] is not None else None
 
 
+import re as _re
+
+# Hard-exclude: weather + price-target (crypto/stock/index) markets — both are
+# informed/forecast-driven near resolution (pickoff traps), not dumb sports flow.
+_EXCLUDE_RX = ("temperat", "weather", "rain", "snow", "degrees", "fahrenheit",
+               "celsius", "wind-speed", "hit-high", "hit-low", "-hit-", "price-above",
+               "price-below", "market-cap", "all-time-high", "-usd-", "bitcoin",
+               "ethereum", "-coin-", "nasdaq", "s-p-500", "stock")
+# Compound sports phrases — safe as substrings (unambiguous).
+_SPORTS_PHRASE = ("spread", "o/u", "corners", "btts", "moneyline", "first-half",
+                  "second-half", "to-win", "to-score", "total-goals", "-vs-",
+                  " vs ", "vs.", "-draw", "-utd", "-fc-")
+# Short/ambiguous codes — match only as whole hyphen/space tokens ("nba" must
+# not match inside "coinbase"). 'draw' also here to avoid 'withdrawal' etc.
+_SPORTS_TOKEN = {"fc", "cf", "atp", "wta", "itf", "nba", "nfl", "nhl", "mlb",
+                 "ufc", "mls", "epl", "draw", "match", "fifa", "uefa",
+                 # "[team] to win/beat" soccer+tennis markets carry no other
+                 # sports token; safe here since weather+price already excluded.
+                 "win", "wins", "beat", "beats", "advance", "advances",
+                 "qualify", "qualifies"}
+
+
+def _is_sports_market(subcategory: str | None, slug: str, question: str) -> bool:
+    """Positively classify sports; hard-exclude weather + price-target markets.
+    Enriched 'sports/%' is authoritative; for un-enriched NULL/'' rows require a
+    sports slug/question pattern and no excluded keyword. (categorize_slug is
+    useless — it labels these sports slugs 'other'.)"""
+    sub = (subcategory or "").lower()
+    if sub.startswith("sports/"):
+        return True
+    if sub:
+        return False  # enriched as something else (science/politics/crypto/...)
+    text = f"{slug or ''} {question or ''}".lower()
+    if any(w in text for w in _EXCLUDE_RX):
+        return False
+    if any(p in text for p in _SPORTS_PHRASE):
+        return True
+    tokens = set(_re.split(r"[^a-z0-9]+", text))
+    return bool(tokens & _SPORTS_TOKEN)
+
+
 def _kill_switch_active() -> bool:
     try:
         from trading_platform.polymarket.kill_switch import KillSwitch
@@ -161,11 +202,11 @@ def _kill_switch_active() -> bool:
 def manage_open_orders(c, clob) -> None:
     now = _now()
     rows = c.execute(
-        """SELECT id, live, condition_id, no_token_id, quote_price, implied_yes,
-                  shares, posted_at, order_id, yes_bid, yes_ask
+        """SELECT id, live, condition_id, no_token_id, yes_token_id, quote_price,
+                  implied_yes, shares, posted_at, order_id, yes_bid, yes_ask
            FROM maker_experiment_orders WHERE status = 'open'"""
     ).fetchall()
-    for (oid, live, cid, no_tid, q, impl_yes, shares, posted_at,
+    for (oid, live, cid, no_tid, yes_tid, q, impl_yes, shares, posted_at,
          order_id, yes_bid0, yes_ask0) in rows:
         # 1. Fill check
         filled_price = None
@@ -174,9 +215,17 @@ def manage_open_orders(c, clob) -> None:
             if st["status"] == "matched" or st["size_matched"] >= float(shares):
                 filled_price = st["filled_price"] or q
         elif not live:
-            # dry-run heuristic: a print at/above our implied YES ask means a
-            # taker paid our price. OPTIMISTIC (ignores queue priority).
-            hi = _max_yes_tick_since(c, cid, int(posted_at))
+            # dry-run fill proxy: a YES print at/above our implied ask means a
+            # taker paid our level (their NO-mint counterparty would be us).
+            # market_ticks is EMPTY for these thin near-resolution markets
+            # (verified 2026-07-16: 0/50 quotes had tick coverage), so poll the
+            # CLOB last-trade price on the YES token directly, with market_ticks
+            # as a fallback for WS-subscribed markets. Per-cycle sampling misses
+            # intra-cycle peaks => dry fills are now a LOWER bound (was: always
+            # 0). Queue priority still ignored => optimistic on fills it DOES see.
+            hi = clob.get_last_price(yes_tid) if yes_tid else None
+            tick_hi = _max_yes_tick_since(c, cid, int(posted_at))
+            hi = max([h for h in (hi, tick_hi) if h is not None], default=None)
             if hi is not None and hi >= float(impl_yes):
                 filled_price = q
         if filled_price is not None:
@@ -261,7 +310,7 @@ def _experiment_totals(c) -> dict:
     row = c.execute(
         """SELECT COUNT(*) FILTER (WHERE status='open'),
                   COALESCE(SUM(notional) FILTER (WHERE status IN ('open','filled')), 0),
-                  COALESCE(SUM(realized_pnl), 0)
+                  COALESCE(SUM(realized_pnl) FILTER (WHERE status != 'voided'), 0)
            FROM maker_experiment_orders"""
     ).fetchone()
     return {"open": int(row[0] or 0), "outstanding": float(row[1] or 0),
@@ -278,27 +327,29 @@ def post_new_quotes(c, clob) -> int:
     if slots <= 0 or tot["outstanding"] >= MAX_OUTSTANDING_USDC:
         return 0
 
-    # Category: subcategory 'sports/%' is authoritative; NULL subcategory is
-    # the un-enriched sports firehose (soccer/tennis slugs like
-    # col-vir-dil-...-draw — exactly where the loser flow traded). Explicitly
-    # excludes science/weather etc., where near-resolution quoting is a
-    # forecast-informed pickoff trap. (categorize_slug labels these sports
-    # slugs 'other', so it is useless here.)
+    # Universe: sports ONLY. The NULL-subcategory bucket is NOT a sports
+    # firehose (verified 2026-07-16: 525 other / 124 weather / 49 sports in a
+    # 24h window) — the first cut quoted weather temp markets, the exact
+    # forecast-informed pickoff trap this experiment excludes. So require
+    # sports POSITIVELY: enriched sports/% OR a NULL/'' subcategory whose slug
+    # matches a sports pattern AND is not weather (see _is_sports_slug).
     rows = c.execute(
         """SELECT condition_id, slug, question, end_date_iso, yes_token_id,
-                  no_token_id, outcome_prices, volume_24h
+                  no_token_id, outcome_prices, volume_24h, subcategory
            FROM markets
            WHERE end_date_iso IS NOT NULL
              AND end_date_iso > to_char(NOW(), 'YYYY-MM-DD"T"HH24:MI:SS')
              AND (subcategory LIKE 'sports/%' OR subcategory IS NULL
                   OR subcategory = '')
-           ORDER BY end_date_iso ASC LIMIT 400"""
+           ORDER BY end_date_iso ASC LIMIT 600"""
     ).fetchall()
     posted = 0
-    for cid, slug, question, end_iso, yes_tid, no_tid, prices_raw, vol in rows:
+    for cid, slug, question, end_iso, yes_tid, no_tid, prices_raw, vol, subcat in rows:
         if posted >= slots:
             break
         if not yes_tid or not no_tid:
+            continue
+        if not _is_sports_market(subcat, slug, question):
             continue
         if vol is not None and float(vol) < MIN_VOLUME_24H:
             continue
@@ -314,7 +365,8 @@ def post_new_quotes(c, clob) -> int:
             continue
         # one order per condition, ever (measurement independence)
         dup = c.execute(
-            "SELECT 1 FROM maker_experiment_orders WHERE condition_id=? LIMIT 1",
+            "SELECT 1 FROM maker_experiment_orders "
+            "WHERE condition_id=? AND status != 'voided' LIMIT 1",
             (cid,)).fetchone()
         if dup:
             continue
@@ -423,7 +475,7 @@ def evaluate() -> None:
                       COUNT(*) FILTER (WHERE pickoff IS NOT NULL),
                       AVG(filled_at - posted_at) FILTER (WHERE filled_at IS NOT NULL),
                       MIN(posted_at)
-               FROM maker_experiment_orders"""
+               FROM maker_experiment_orders WHERE status != 'voided'"""
         ).fetchone()
         (n_quotes, n_fills, n_resolved, pnl, resolved_notional,
          n_pickoff, n_marked, avg_ttf, first_post) = row
@@ -446,7 +498,8 @@ def evaluate() -> None:
             r = c.execute(
                 """SELECT COUNT(*) FILTER (WHERE status IN ('filled','resolved')),
                           COALESCE(SUM(realized_pnl),0)
-                   FROM maker_experiment_orders WHERE live=?""", (live,)).fetchone()
+                   FROM maker_experiment_orders
+                   WHERE live=? AND status != 'voided'""", (live,)).fetchone()
             if r and r[0]:
                 print(f"  [{'LIVE' if live else 'DRY (optimistic fills)'}] "
                       f"fills={r[0]} realized=${r[1]:+.2f}")
