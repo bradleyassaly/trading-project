@@ -2593,7 +2593,7 @@ class PolymarketPaperExecutor:
         size = float(pos.get("size_usd") or 0)
         entry = float(pos.get("entry_price") or 0)
 
-        exit_cost = cm.exit_cost(exit_price, side, size)
+        exit_cost = cm.exit_cost(exit_price, side, size, entry_price=entry)
 
         if side in ("YES", "BUY"):
             pnl = (exit_cost.effective_price - entry) * size / max(entry, 0.01)

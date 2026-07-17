@@ -63,6 +63,15 @@ BALANCE_SNAPSHOT_STALE_S = int(os.environ.get("WATCHDOG_BALANCE_STALE_S", str(2 
 # metronome while ingestion was actually healthy (8,993 rows/24h).
 POLLER_STALE_S = int(os.environ.get("WATCHDOG_POLLER_STALE_S", str(45 * 60)))
 RECONCILE_MAX_AGE_S = int(os.environ.get("WATCHDOG_RECONCILE_MAX_AGE_S", str(26 * 3600)))
+# Trading-liveness SLA. Every OTHER check here is infrastructure-liveness; the
+# stack can be 100% green while the money loop is dead (the 2026-07-13→16 case:
+# a silent auto-demote blocked every entry for ~3 DAYS and no check noticed).
+# This is the missing business-function heartbeat: alert when NO live fill has
+# landed in this many hours WHILE the engine is still actively generating
+# (blocked) signals — i.e. it WANTS to trade but something gates every attempt.
+# The "engine still trying" guard keeps a genuinely quiet market (no candidates)
+# from paging. 18h clears normal overnight lulls (real inter-fill gaps run ~8h).
+TRADING_LIVENESS_MAX_S = int(os.environ.get("WATCHDOG_TRADING_LIVENESS_S", str(18 * 3600)))
 # Components severe enough to auto-HALT live trading (write KILL_SWITCH_ACTIVE)
 # on sustained failure. Only balance_staleness: a frozen/stale balance API
 # means our equity and therefore our sizing is flat-out wrong — new entries
@@ -474,6 +483,58 @@ def check_poller_freshness() -> ComponentState:
         return ComponentState(name, False, f"check err: {str(e)[:80]}")
 
 
+def check_trading_liveness() -> ComponentState:
+    """Business-function heartbeat: the live lane must actually be FILLING, not
+    just be infrastructurally alive. Fires when no real fill has landed in
+    TRADING_LIVENESS_MAX_S while the signal engine is still generating attempts
+    that get blocked — the exact silent-dark-lane failure (auto-demote, stuck
+    gate, mis-config) that every other check is blind to. Names the top block
+    reason so the operator sees WHY, not just THAT, the lane went dark."""
+    name = "trading_liveness"
+    try:
+        conn = _watchdog_pg()
+        if conn is None:
+            return ComponentState(name, True, "skipped (sqlite backend)")
+        with conn:
+            row = conn.execute(
+                "SELECT MAX(GREATEST(COALESCE(filled_at,0), COALESCE(attempted_at,0))) "
+                "FROM live_trades WHERE dry_run = 0 AND status = 'matched'"
+            ).fetchone()
+            last_fill = int(row[0]) if row and row[0] else 0
+            # Is the engine still actively trying? Count blocked live-intent
+            # attempts in the last 2h; if zero, the market is genuinely quiet
+            # (nothing to trade) and a dark lane is expected — don't page.
+            since_2h = int(time.time()) - 2 * 3600
+            brow = conn.execute(
+                "SELECT COUNT(*), MODE() WITHIN GROUP (ORDER BY error_msg) "
+                "FROM live_trades WHERE status = 'blocked' AND attempted_at >= %s",
+                (since_2h,),
+            ).fetchone()
+            blocked_2h = int(brow[0]) if brow and brow[0] else 0
+            top_reason = (brow[1] if brow and brow[1] else "") or ""
+        if not last_fill:
+            # No live fill ever — only meaningful if the engine is trying.
+            if blocked_2h > 0:
+                return ComponentState(name, False,
+                                      f"no live fill EVER; {blocked_2h} attempts "
+                                      f"blocked in 2h — top: {top_reason[:80]}")
+            return ComponentState(name, True, "no live fills yet (engine idle)")
+        age = time.time() - last_fill
+        if age > TRADING_LIVENESS_MAX_S and blocked_2h > 0:
+            return ComponentState(
+                name, False,
+                f"DARK LANE: no live fill in {age/3600:.0f}h despite {blocked_2h} "
+                f"blocked attempts in 2h — top: {top_reason[:80]}")
+        if age > TRADING_LIVENESS_MAX_S:
+            # Dark but engine not generating — quiet market, informational only.
+            return ComponentState(name, True,
+                                  f"no fill in {age/3600:.0f}h (engine idle — no "
+                                  f"blocked attempts in 2h; quiet market)")
+        return ComponentState(name, True, f"last fill {age/3600:.1f}h ago")
+    except Exception as e:
+        return ComponentState(name, False, f"check err: {str(e)[:80]}")
+
+
 def check_reconcile_age() -> ComponentState:
     """Days since reconcile_polymarket_truth last ran CLEAN (exit 0 = zero
     drifts). A long gap means our ledger may silently diverge from on-chain."""
@@ -587,7 +648,7 @@ def main() -> None:
                   check_hypothesis_drift(),
                   check_scheduler_consecutive_failures(),
                   check_balance_staleness(), check_poller_freshness(),
-                  check_reconcile_age()]
+                  check_reconcile_age(), check_trading_liveness()]
         in_grace = (now - startup_ts) < STARTUP_GRACE_SECONDS
         if in_grace and any(not s.healthy for s in states):
             logger.info("[grace] suppressed alerts during startup window")

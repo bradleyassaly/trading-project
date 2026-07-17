@@ -252,7 +252,8 @@ def _book_copy(row: dict, latency_s: int, stake: float,
         if exit_px_gross is not None:
             if cost_model is not None:
                 exit_px = cost_model.exit_cost(
-                    exit_px_gross, "BUY", stake, is_resolution=False).effective_price
+                    exit_px_gross, "BUY", stake, is_resolution=False,
+                    entry_price=entry_px).effective_price
             else:
                 exit_px = exit_px_gross
 

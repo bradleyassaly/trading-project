@@ -775,11 +775,20 @@ class WalletDB:
         return dict(zip(cols, row))
 
     def get_profiles_needing_sync(self, max_age_hours: float = 2.0) -> list[str]:
-        """Return wallets whose last_synced_ts is older than max_age_hours."""
+        """Return wallets whose last_synced_ts is older than max_age_hours.
+
+        2026-07-16: was unordered — the caller takes [:top_n] of ~15k stale
+        rows, so which wallets got synced each cycle was an arbitrary lottery
+        (our highest-volume tracked wallet went unsynced for 9 days). Order:
+        previously-synced wallets first (the active roster, stalest first) so
+        they stay fresh; never-synced discovery wallets onboard behind them.
+        """
         cutoff = _now_ts() - int(max_age_hours * 3600)
         with self._lock:
             rows = self._conn.execute(
-                "SELECT wallet FROM wallet_profiles WHERE last_synced_ts IS NULL OR last_synced_ts < ?",
+                "SELECT wallet FROM wallet_profiles "
+                "WHERE last_synced_ts IS NULL OR last_synced_ts < ? "
+                "ORDER BY (last_synced_ts IS NULL), last_synced_ts",
                 (cutoff,),
             ).fetchall()
         return [r[0] for r in rows]
@@ -791,7 +800,16 @@ class WalletDB:
     # ── Trades ───────────────────────────────────────────────────────────────
 
     def upsert_trade(self, **fields: Any) -> bool:
-        """Insert a trade, skip if transaction_hash already exists. Returns True if inserted.
+        """Insert a fill, dedup on the composite fill key. Returns True if inserted.
+
+        2026-07-16: was ``SELECT 1 WHERE transaction_hash = ?`` then skip — one
+        row per TRANSACTION. A single tx routinely contains multiple fills (a
+        taker order matched against N makers emits N fills sharing the hash),
+        so every fill after the first was silently dropped: ~23% of an active
+        wallet's fills in the truth-comparison vs Polymarket's /activity, and
+        cross-wallet drops when maker+taker were both tracked. Dedup now rides
+        the ``wallet_trades_fill_key`` composite unique index
+        (tx, wallet, asset, side, size, price, ts) via ON CONFLICT DO NOTHING.
 
         Auto-classifies the trade's category from its slug+title if the
         caller didn't provide one. This ensures every new fill ingested
@@ -812,20 +830,16 @@ class WalletDB:
             except Exception:
                 fields["category"] = "other"
         with self._lock:
-            existing = self._conn.execute(
-                "SELECT 1 FROM wallet_trades WHERE transaction_hash = ?", (tx,)
-            ).fetchone()
-            if existing:
-                return False
             try:
                 cols = ", ".join(fields.keys())
                 placeholders = ", ".join("?" for _ in fields)
-                self._conn.execute(
-                    f"INSERT INTO wallet_trades ({cols}) VALUES ({placeholders})",
+                cur = self._conn.execute(
+                    f"INSERT INTO wallet_trades ({cols}) VALUES ({placeholders}) "
+                    f"ON CONFLICT DO NOTHING",
                     list(fields.values()),
                 )
                 self._conn.commit()
-                return True
+                return (getattr(cur, "rowcount", 0) or 0) > 0
             except sqlite3.IntegrityError:
                 return False
 

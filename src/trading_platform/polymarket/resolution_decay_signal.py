@@ -55,6 +55,14 @@ MAX_HOURS_TO_RESOLVE = 48.0
 # ~5-10× candidate volume.
 ENTRY_PRICE_LOW = 0.05
 ENTRY_PRICE_HIGH = 0.40
+# 2026-07-16 narrow-and-re-measure: the 0.20-0.30 YES-entry band held the
+# slice's ENTIRE 30d net loss (n=22, WR 18%, -$34.79) — and it was BROAD, not
+# one cluster (6 sessions 07-06..07-13, ~22 distinct markets). The flanking
+# bands were net positive: 0.05-0.20 (+$3.20) and 0.30-0.40 (+$2.87). Excluding
+# the loss band flips the slice ~breakeven-positive. Env-overridable so it can
+# be re-widened once the narrowed slice accumulates n. Set LOW==HIGH to disable.
+EXCLUDE_BAND_LOW = float(os.getenv("RESOLUTION_DECAY_EXCLUDE_LOW", "0.20"))
+EXCLUDE_BAND_HIGH = float(os.getenv("RESOLUTION_DECAY_EXCLUDE_HIGH", "0.30"))
 MIN_VOLUME_24H = 1000.0  # market must have any liquidity at all
 
 
@@ -154,6 +162,9 @@ def _candidate_markets(conn) -> list[dict[str, Any]]:
         except Exception:
             yes_price = None
         if yes_price is None or not (ENTRY_PRICE_LOW <= yes_price <= ENTRY_PRICE_HIGH):
+            continue
+        # Narrow-and-re-measure: skip the empirically loss-making entry band.
+        if EXCLUDE_BAND_LOW <= yes_price < EXCLUDE_BAND_HIGH:
             continue
 
         out.append({

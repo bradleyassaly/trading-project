@@ -201,8 +201,21 @@ class WalletTradePoller:
 
     # ── Fetch trades from Data API ──────────────────────────────────────────
 
-    def _fetch_wallet_trades(self, wallet: str, limit: int = 10) -> list[dict]:
-        """Fetch recent trades for a wallet from the Data API.
+    # Depth guard: pages per wallet per cycle. 6 pages x 500 = 3000 trades —
+    # enough for even a high-frequency maker between 3-min cycles, bounded so
+    # one hyperactive wallet can't monopolise the cycle.
+    MAX_FETCH_PAGES = 6
+    FETCH_PAGE_SIZE = 500
+
+    def _fetch_wallet_trades(self, wallet: str, cutoff_ts: int = 0) -> list[dict]:
+        """Fetch trades for a wallet from the Data API, paginating back to
+        ``cutoff_ts`` (the wallet's last-ingested checkpoint).
+
+        2026-07-16: was ``limit=10`` per cycle with NO pagination, which capped
+        ingestion at 10 trades / 3 min per wallet. The truth-comparison against
+        Polymarket's own /activity found we held only 23% of an active wallet's
+        trades (14% of notional) — every wallet-level metric built on that was
+        wrong. Now pages until it crosses the checkpoint or hits the page cap.
 
         Uses the existing PolymarketDataApiFetcher which has a proper
         requests.Session with correct headers (the Data API returns 403
@@ -221,10 +234,28 @@ class WalletTradePoller:
             from trading_platform.polymarket.data_api_fetcher import PolymarketDataApiFetcher
             if not hasattr(self, '_fetcher'):
                 self._fetcher = PolymarketDataApiFetcher()
-            # Data API uses "user" parameter (not "maker")
-            result = self._fetcher._fetch_page({"user": wallet, "limit": limit})
+            out: list[dict] = []
+            offset = 0
+            for _ in range(self.MAX_FETCH_PAGES):
+                # Data API uses "user" parameter (not "maker")
+                page = self._fetcher._fetch_page({
+                    "user": wallet, "limit": self.FETCH_PAGE_SIZE,
+                    "offset": offset,
+                })
+                if not page:
+                    break
+                out.extend(page)
+                offset += self.FETCH_PAGE_SIZE
+                # Stop once the oldest row on this page predates the
+                # checkpoint — everything older is already ingested.
+                try:
+                    oldest = min(int(float(r.get("timestamp") or 0)) for r in page)
+                except (TypeError, ValueError):
+                    oldest = 0
+                if len(page) < self.FETCH_PAGE_SIZE or (cutoff_ts and oldest <= cutoff_ts):
+                    break
             record_success(HOST)
-            return result
+            return out
         except Exception as exc:
             record_failure(HOST)
             logger.debug("Data API fetch failed for %s: %s", wallet[:10], exc)
@@ -372,8 +403,8 @@ class WalletTradePoller:
             categories = set((w_info.get("categories") or "").split(","))
             cutoff_ts = last_checked.get(wallet, 0)
 
-            # Fetch recent trades
-            raw_trades = self._fetch_wallet_trades(wallet)
+            # Fetch trades back to this wallet's last-ingested checkpoint
+            raw_trades = self._fetch_wallet_trades(wallet, cutoff_ts=cutoff_ts)
             wallets_polled += 1
 
             if not raw_trades:

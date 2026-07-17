@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import time
+import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 from typing import Any
@@ -323,8 +324,30 @@ class TelegramAlerter:
             )
             with urllib.request.urlopen(req, timeout=10) as resp:
                 return resp.status == 200
+        except urllib.error.HTTPError as exc:
+            # Telegram 400s on malformed HTML (e.g. an unescaped "<=" / "n>=5"
+            # in an interpolated reason string parses as a bad tag). Historically
+            # this was swallowed at DEBUG, so the ONE alert that named a 3-day
+            # dark-lane demote was silently dropped. Retry once as plain text so
+            # the message still reaches the operator, and log loudly either way.
+            if exc.code == 400 and body.get("parse_mode"):
+                try:
+                    body.pop("parse_mode", None)
+                    retry = urllib.request.Request(
+                        url, data=json.dumps(body).encode(),
+                        headers={"Content-Type": "application/json"}, method="POST")
+                    with urllib.request.urlopen(retry, timeout=10) as resp2:
+                        logger.warning(
+                            "Telegram HTML parse rejected (400); delivered as "
+                            "plain text. Fix the caller's markup.")
+                        return resp2.status == 200
+                except Exception as exc2:
+                    logger.warning("Telegram plain-text retry failed: %s", exc2)
+                    return False
+            logger.warning("Telegram send failed (HTTP %s): %s", exc.code, exc)
+            return False
         except Exception as exc:
-            logger.debug("Telegram send failed: %s", exc)
+            logger.warning("Telegram send failed: %s", exc)
             return False
 
     # ── Whale detection ──────────────────────────────────────────────────────

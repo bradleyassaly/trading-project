@@ -710,6 +710,95 @@ class ClobClient:
                 error_msg=str(exc), raw={},
             )
 
+    # ── Resting maker orders (2026-07-16 maker experiment) ──────────────────
+    # place_limit_order cancels after timeout_sec — a maker quote must REST
+    # and be managed across scheduler cycles instead. These three methods own
+    # that lifecycle: post-and-return, poll status, cancel by id.
+
+    def _build_signed_client(self):
+        from py_clob_client_v2 import ClobClient as PyClobClient, ApiCreds
+        from py_clob_client_v2.constants import POLYGON
+        import os as _os
+        funder = _os.environ.get("POLYMARKET_FUNDER_ADDRESS") or ""
+        kw = dict(
+            host=CLOB_BASE, chain_id=POLYGON, key=self._private_key,
+            creds=ApiCreds(api_key=self._api_key, api_secret=self._api_secret,
+                           api_passphrase=self._passphrase),
+        )
+        if funder:
+            kw["signature_type"] = int(_os.environ.get("POLYMARKET_SIGNATURE_TYPE", "1"))
+            kw["funder"] = funder
+        return PyClobClient(**kw)
+
+    def place_resting_limit(self, token_id: str, side: str, price: float,
+                            shares: float) -> OrderResult:
+        """Post a GTC limit order and RETURN immediately (no poll, no cancel).
+
+        The caller owns the order lifecycle via get_order_status /
+        cancel_order_by_id. Price is in the TOKEN's own space.
+        """
+        if not self._configured:
+            return OrderResult(success=False, order_id=None, status="error",
+                               filled_price=None, filled_size=None,
+                               error_msg="CLOB not configured", raw={})
+        try:
+            from py_clob_client_v2 import OrderType, PartialCreateOrderOptions
+            from py_clob_client_v2.clob_types import OrderArgsV2 as OrderArgs
+            client = self._build_signed_client()
+            price = max(0.01, min(0.99, round(float(price), 2)))
+            neg_risk_flag = False
+            try:
+                from trading_platform.polymarket.markets_table import get_neg_risk_cached
+                _nr = get_neg_risk_cached(token_id)
+                neg_risk_flag = bool(_nr) if _nr is not None else bool(client.get_neg_risk(token_id))
+            except Exception:
+                pass
+            order = client.create_order(
+                OrderArgs(token_id=token_id, price=price,
+                          size=float(shares), side=side.upper()),
+                PartialCreateOrderOptions(tick_size="0.01", neg_risk=neg_risk_flag),
+            )
+            resp = client.post_order(order, order_type=OrderType.GTC)
+            oid = resp.get("orderID") or resp.get("id")
+            status = resp.get("status", "unknown")
+            logger.info("[clob] resting %s %.0f sh @ %.2f on %s... -> %s (%s)",
+                        side.upper(), shares, price, token_id[:12], status, oid)
+            return OrderResult(success=bool(oid), order_id=oid, status=status,
+                               filled_price=None, filled_size=None,
+                               error_msg=None if oid else "no order id", raw=resp)
+        except Exception as exc:
+            logger.warning("place_resting_limit failed: %s", exc)
+            return OrderResult(success=False, order_id=None, status="error",
+                               filled_price=None, filled_size=None,
+                               error_msg=str(exc), raw={})
+
+    def get_order_status(self, order_id: str) -> dict[str, Any]:
+        """Return {status, filled_price, size_matched} for a resting order."""
+        try:
+            client = self._build_signed_client()
+            check = client.get_order(order_id) or {}
+            fp = check.get("avgFilledPrice")
+            if not fp:
+                trades = check.get("associate_trades") or []
+                fp = trades[0].get("price") if trades else None
+            return {"status": check.get("status", "unknown"),
+                    "filled_price": float(fp) if fp else None,
+                    "size_matched": float(check.get("size_matched") or 0),
+                    "raw": check}
+        except Exception as exc:
+            return {"status": "error", "filled_price": None,
+                    "size_matched": 0.0, "error": str(exc)}
+
+    def cancel_order_by_id(self, order_id: str) -> bool:
+        try:
+            from py_clob_client_v2.clob_types import OrderPayload
+            client = self._build_signed_client()
+            client.cancel_order(OrderPayload(orderID=order_id))
+            return True
+        except Exception as exc:
+            logger.warning("cancel_order_by_id(%s) failed: %s", order_id[:16], exc)
+            return False
+
     # ── Balance queries ────────────────────────────────────────────────────
 
     def get_conditional_balance(self, token_id: str) -> float | None:

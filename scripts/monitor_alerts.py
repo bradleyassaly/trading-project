@@ -152,7 +152,8 @@ def check_wallet_attribution(alerter) -> int:
     # False) — same fix as check_api_health, 2026-05-28.
     if alerter.send_pipeline_alert(
         component="wallet_attribution",
-        message=f"{n} wallet(s) flagged for auto-demote (30d PnL <= -$10, n>=5). "
+        message=f"{n} wallet(s) flagged for auto-demote (30d PnL at or below "
+                f"-$10 on 5+ trades). "
                 f"Review log + apply wallet_attribution.py --apply if accepted.",
         level="warning",
     ):

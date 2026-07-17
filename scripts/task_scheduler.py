@@ -740,6 +740,29 @@ SCHEDULE: list[Task] = [
         critical=True,  # the only live entry signal — must not starve on recovery
     ),
     Task(
+        # 2026-07-16: continuous data-quality SLA. Samples tracked wallets
+        # vs Polymarket's /activity and alerts when our fill coverage
+        # degrades (the 23%-coverage failure class). Backs the data-product
+        # claim "coverage verified daily, not asserted".
+        name="data_quality_sla",
+        cmd="python scripts/data_quality_sla.py",
+        interval_seconds=12 * 3600,
+        description="Data-quality SLA: wallet coverage vs Polymarket truth (12h)",
+    ),
+    Task(
+        # 2026-07-16: maker experiment — resting NO-side quotes on longshot
+        # sports markets near resolution, i.e. be the counterparty the
+        # dumb taker flow crosses into (three independent analyses converged
+        # on taker->maker; see memory 2026-07-16-fade-losers-test).
+        # Measurement-first with pre-registered kill/promote criteria in the
+        # module docstring. DRY-RUN unless MAKER_EXPERIMENT_LIVE=1 is set in
+        # the scheduler environment (operator-armed, ~$25 max outstanding).
+        name="maker_experiment",
+        cmd="python -m trading_platform.polymarket.maker_experiment",
+        interval_seconds=5 * 60,
+        description="Maker experiment: resting complement quotes vs dumb flow ($1-scale)",
+    ),
+    Task(
         # 2026-06-03: naive-copy experiment. Shadow lane (dry_run=1) testing
         # whether copying the top-50 high-WR cohort produces the +13.7%/47d
         # ROI seen in the per-dollar backtest. Existing signal pipeline
