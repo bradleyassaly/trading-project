@@ -82,25 +82,38 @@ def _settle_dust_close(
     # Never matched on-chain → no capital was committed.
     if trade_status != "matched" or fill_price is None:
         return 0.0, None
-    # 2026-07-06: db_shares can be 0 on a REAL matched position — the
-    # hourly on-chain share sync used to overwrite shares with the
-    # post-resolution zero balance (fixed, but rows may still arrive
-    # zeroed). If capital was committed, derive the entry quantity from
-    # size_usd instead of booking (0, None) and silently erasing the
-    # outcome. Six resolved wins were booked at pnl=0 this way on 7/6.
-    if db_shares <= 0:
-        fp0 = float(fill_price)
-        per_share = fp0 if (direction or "BUY").upper() == "BUY" \
-            else max(1.0 - fp0, 0.01)
-        if size_usd and size_usd > 0 and per_share > 0:
-            db_shares = float(size_usd) / per_share
-        else:
-            return 0.0, None
-
     fp = float(fill_price)
     want_yes = (direction or "BUY").upper() == "BUY"
     # Cost basis: BUY holds YES at fp/share; SELL holds NO at (1-fp)/share.
-    cost = db_shares * (fp if want_yes else (1.0 - fp))
+    per_share = fp if want_yes else max(1.0 - fp, 0.01)
+
+    # Entry-quantity reconstruction. db_shares is NOT trustworthy for a
+    # dust-settled position — the hourly on-chain share sync overwrites
+    # it with the CURRENT balance:
+    #   * 2026-07-06: zeroed rows booked six resolved wins at pnl=0.
+    #   * 2026-07-16 (trade 195966): 38 -> 0.003335 after our exit SELLs
+    #     filled but the booking raced them. A basis computed from the
+    #     dust flips the sign: sale proceeds ($3.42) minus dust cost
+    #     (~$0.0005) books a phantom +$3.42 WIN instead of the true
+    #     entry-basis -$2.28 LOSS.
+    # When the held value is dust but committed capital (size_usd)
+    # implies a materially larger entry, rebuild the entry quantity here
+    # (refined to the exact on-chain BUY quantity in the sell-fills
+    # branch below — size_usd is the intended stake and overstates
+    # partial fills).
+    entry_stomped = False
+    if size_usd and size_usd > 0 and per_share > 0:
+        implied_entry = float(size_usd) / per_share
+        if (db_shares * per_share < LIVE_EXIT_MIN_VALUE_USD
+                and db_shares < implied_entry * 0.5):
+            db_shares = implied_entry
+            entry_stomped = True
+    if db_shares <= 0:
+        # Zero balance AND no committed-capital info — cannot price the
+        # entry; do not guess.
+        return 0.0, None
+
+    cost = db_shares * per_share
 
     # 1. Polymarket's own cashPnl from the data-api positions endpoint.
     wallet = (os.environ.get("POLYMARKET_FUNDER_ADDRESS")
@@ -133,13 +146,23 @@ def _settle_dust_close(
             if _tr.ok:
                 proceeds = 0.0
                 sold = 0.0
+                bought = 0.0
                 for t in _tr.json():
-                    if str(t.get("asset")) == str(token_id) and \
-                            (t.get("side") or "").upper() == "SELL":
-                        sz = float(t.get("size") or 0)
-                        px = float(t.get("price") or 0)
+                    if str(t.get("asset")) != str(token_id):
+                        continue
+                    sz = float(t.get("size") or 0)
+                    px = float(t.get("price") or 0)
+                    if (t.get("side") or "").upper() == "SELL":
                         proceeds += sz * px
                         sold += sz
+                    else:
+                        bought += sz
+                # Entry basis from the actual on-chain BUY quantity —
+                # size_usd is the intended stake and overstates partial
+                # fills (195966: implied 41.4 shares vs 38 filled).
+                if entry_stomped and bought >= 1.0:
+                    db_shares = bought
+                    cost = db_shares * per_share
                 if sold >= 1.0:
                     realized = round(proceeds - cost, 4)
                     return realized, ("win" if realized > 0 else "loss")

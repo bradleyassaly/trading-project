@@ -38,8 +38,18 @@ from trading_platform.polymarket.db_connection import get_connection
 # Drift thresholds — anything above these is logged as DRIFT, not OK.
 USDC_DRIFT_USD = 1.0           # $1 drift in cash balance
 SHARES_DRIFT_PCT = 0.05         # 5% of DB-tracked shares
-SHARES_DRIFT_ABS = 5.0          # OR 5 shares absolute, whichever is larger
+# 2026-07-16: was 5.0 — most of our positions are UNDER 5 shares, so the
+# absolute floor made every drift on them invisible ("drifts: 0" while
+# trade 195966 sat liquidated-but-open for 5 days). The floor only needs
+# to absorb 1e-6 balance rounding, not swallow whole positions.
+SHARES_DRIFT_ABS = 0.5          # OR 0.5 shares absolute, whichever is larger
 OPEN_MKT_DRIFT_USD = 2.0        # $2 drift in computed-vs-snapshot open_mkt
+# Open trade whose on-chain balance is below the CLOB minimum sell size
+# (1 token) while committed capital says a real entry happened: the
+# position was liquidated/redeemed on-chain but never booked. The
+# share-diff check CANNOT catch this — the hourly share sync stomps
+# db.shares to match the on-chain dust, so db and chain agree.
+DUST_UNBOOKED_MIN_STAKE_USD = 1.0
 
 
 def _make_clob():
@@ -180,6 +190,23 @@ def reconcile() -> dict:
                         db_shares = float(sz or 0) / max(price, 0.001)
                     shares_source = "derived"
 
+            # ── 2b. Unbooked dust liquidation (2026-07-16, trade 195966) ──
+            # Balance below the CLOB minimum (1 token) on a trade that
+            # committed real capital: the tokens were sold/redeemed/burned
+            # on-chain but the trade row is still open. Flag it BEFORE the
+            # diff check — share sync makes db_shares == on-chain here, so
+            # diff is 0 and the position silently misreports as open.
+            if real_shares < 1.0 and float(sz or 0) >= DUST_UNBOOKED_MIN_STAKE_USD:
+                report["drifts"].append({
+                    "metric": "unbooked_dust_position",
+                    "trade_id": int(lid),
+                    "signal_type": sig,
+                    "direction": di,
+                    "onchain_shares": round(real_shares, 6),
+                    "size_usd": round(float(sz), 2),
+                })
+                continue
+
             entry = {
                 "metric": "position_shares",
                 "trade_id": int(lid),
@@ -302,6 +329,12 @@ def print_human(report: dict) -> None:
                       f"recorded_pnl=${d['recorded_pnl']} "
                       f"on-chain still holds {d['onchain_balance']} shares "
                       f"— exit order didn't fill")
+            elif d["metric"] == "unbooked_dust_position":
+                print(f"  UNBOOKED DUST: #{d['trade_id']} {d['signal_type']} "
+                      f"{d['direction']} committed ${d['size_usd']} but on-chain "
+                      f"holds only {d['onchain_shares']} tokens — liquidated/"
+                      f"redeemed on-chain, never booked. Settle from entry "
+                      f"basis (data-api trade history), NOT the dust shares.")
             else:
                 src = d.get("shares_source", "?")
                 print(f"  #{d['trade_id']} {d['signal_type']} {d['direction']}: "
