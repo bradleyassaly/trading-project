@@ -264,17 +264,60 @@ def manage_open_orders(c, clob) -> None:
                 logger.info("[maker] order %s cancelled (%s)", oid, reason)
 
 
-def update_fill_marks_and_resolutions(c) -> None:
+def _yes_price_now(c, clob, cid: str, yes_tid: str | None) -> float | None:
+    """Current YES price: CLOB last-trade first (market_ticks is EMPTY for the
+    thin near-resolution markets this experiment quotes — same blindness that
+    broke the dry-fill proxy), ticks as WS fallback."""
+    y = clob.get_last_price(yes_tid) if yes_tid else None
+    if y is None:
+        y = _latest_yes_tick(c, cid)
+    return y
+
+
+def _resolve_lookup(c, cid: str) -> int | None:
+    """resolves_yes for a maker-quoted market. market_resolutions first, but it
+    covers only ~15% of ended markets (Gamma delists) and its backfill's scope
+    is trades tables, not ours — so fall back to markets.outcome_prices pinning
+    to 0/1 after the market's end date."""
+    res = c.execute(
+        "SELECT resolves_yes FROM market_resolutions WHERE condition_id=? LIMIT 1",
+        (cid,)).fetchone()
+    if res is not None and res[0] is not None:
+        return int(res[0])
+    row = c.execute(
+        "SELECT end_date_iso, outcome_prices FROM markets WHERE condition_id=? LIMIT 1",
+        (cid,)).fetchone()
+    if not row or not row[0]:
+        return None
+    htr = _hours_to_resolve(row[0])
+    if htr is None or htr > -1.0:   # not ended (plus 1h settlement grace)
+        return None
+    try:
+        prices = json.loads(row[1]) if isinstance(row[1], str) else row[1]
+        yes = float(prices[0]) if isinstance(prices, list) and prices else None
+    except Exception:
+        return None
+    if yes is None:
+        return None
+    if yes <= 0.01:
+        return 0
+    if yes >= 0.99:
+        return 1
+    return None  # ended but prices not pinned yet — check next cycle
+
+
+def update_fill_marks_and_resolutions(c, clob) -> None:
     """Post-fill measurement: +5m/+30m marks (pickoff) and resolution booking."""
     now = _now()
     rows = c.execute(
-        """SELECT id, condition_id, fill_price, filled_at, mark_5m, mark_30m, shares, quote_price
+        """SELECT id, condition_id, yes_token_id, fill_price, filled_at,
+                  mark_5m, mark_30m, shares, quote_price
            FROM maker_experiment_orders WHERE status = 'filled'"""
     ).fetchall()
-    for oid, cid, fp, filled_at, m5, m30, shares, q in rows:
-        # marks in OUR token's space (NO) = 1 - yes_tick
+    for oid, cid, yes_tid, fp, filled_at, m5, m30, shares, q in rows:
+        # marks in OUR token's space (NO) = 1 - yes_price
         if m5 is None and now - int(filled_at) >= 300:
-            y = _latest_yes_tick(c, cid)
+            y = _yes_price_now(c, clob, cid, yes_tid)
             if y is not None:
                 mark = 1.0 - y
                 pickoff = 1 if mark <= float(fp) * 0.80 else 0
@@ -282,17 +325,14 @@ def update_fill_marks_and_resolutions(c) -> None:
                           (mark, pickoff, oid))
                 c.commit()
         if m30 is None and now - int(filled_at) >= 1800:
-            y = _latest_yes_tick(c, cid)
+            y = _yes_price_now(c, clob, cid, yes_tid)
             if y is not None:
                 c.execute("UPDATE maker_experiment_orders SET mark_30m=? WHERE id=?",
                           (1.0 - y, oid))
                 c.commit()
         # resolution booking
-        res = c.execute(
-            "SELECT resolves_yes FROM market_resolutions WHERE condition_id=? LIMIT 1",
-            (cid,)).fetchone()
-        if res is not None and res[0] is not None:
-            resolves_yes = int(res[0])
+        resolves_yes = _resolve_lookup(c, cid)
+        if resolves_yes is not None:
             # we hold NO: worth 1 if resolves NO, 0 if YES
             pnl = float(shares) * ((1.0 - float(fp)) if resolves_yes == 0 else (-float(fp)))
             c.execute(
@@ -307,11 +347,17 @@ def update_fill_marks_and_resolutions(c) -> None:
 # ── Quoting: post new resting orders ─────────────────────────────────────────
 
 def _experiment_totals(c) -> dict:
+    """Budget/slots for the CURRENT mode only. Dry rows must never consume the
+    live budget: on 2026-07-18 the 7 dry 'filled' rows held $24.50 of the $25
+    cap and silently blocked the armed live lane all night. Realized stop-loss
+    also per-mode (simulated dry PnL must not halt live, or vice versa)."""
+    mode = 1 if LIVE else 0
     row = c.execute(
         """SELECT COUNT(*) FILTER (WHERE status='open'),
                   COALESCE(SUM(notional) FILTER (WHERE status IN ('open','filled')), 0),
-                  COALESCE(SUM(realized_pnl) FILTER (WHERE status != 'voided'), 0)
-           FROM maker_experiment_orders"""
+                  COALESCE(SUM(realized_pnl), 0)
+           FROM maker_experiment_orders WHERE live = ? AND status != 'voided'""",
+        (mode,),
     ).fetchone()
     return {"open": int(row[0] or 0), "outstanding": float(row[1] or 0),
             "realized": float(row[2] or 0)}
@@ -363,11 +409,12 @@ def post_new_quotes(c, clob) -> int:
             yes_price = None
         if yes_price is None or not (YES_LONGSHOT_LO <= yes_price <= YES_LONGSHOT_HI):
             continue
-        # one order per condition, ever (measurement independence)
+        # one order per condition per MODE (measurement independence). Dry-phase
+        # rows must not permanently blacklist a condition for the live lane.
         dup = c.execute(
             "SELECT 1 FROM maker_experiment_orders "
-            "WHERE condition_id=? AND status != 'voided' LIMIT 1",
-            (cid,)).fetchone()
+            "WHERE condition_id=? AND live=? AND status != 'voided' LIMIT 1",
+            (cid, 1 if LIVE else 0)).fetchone()
         if dup:
             continue
 
@@ -425,11 +472,11 @@ def run_cycle() -> dict:
         if _kill_switch_active():
             # manage/cancel existing, never post new while halted
             manage_open_orders(c, clob)
-            update_fill_marks_and_resolutions(c)
+            update_fill_marks_and_resolutions(c, clob)
             logger.warning("[maker] kill switch active — managed existing, no new quotes")
             return {"posted": 0, "halted": True}
         manage_open_orders(c, clob)
-        update_fill_marks_and_resolutions(c)
+        update_fill_marks_and_resolutions(c, clob)
         posted = post_new_quotes(c, clob)
         t = _experiment_totals(c)
         print(f"[maker] cycle done: posted={posted} open={t['open']} "
