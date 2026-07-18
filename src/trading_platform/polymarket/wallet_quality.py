@@ -45,13 +45,14 @@ def recompute_all() -> dict[str, int]:
     conn = get_connection()
     try:
         # Aggregate per wallet in one pass — cheaper than per-wallet queries.
+        # size is SHARES; bet-size stats use size*price (USDC notional).
         rows = conn.execute(
             """
             SELECT wallet,
                    COUNT(*) FILTER (WHERE pnl IS NOT NULL) AS n,
                    COUNT(*) FILTER (WHERE pnl > 0) AS wins,
-                   AVG(size) FILTER (WHERE pnl IS NOT NULL) AS mean_size,
-                   STDDEV(size) FILTER (WHERE pnl IS NOT NULL) AS std_size,
+                   AVG(size * price) FILTER (WHERE pnl IS NOT NULL) AS mean_bet_usd,
+                   STDDEV(size * price) FILTER (WHERE pnl IS NOT NULL) AS std_bet_usd,
                    MAX(timestamp) AS last_ts
               FROM wallet_trades
              WHERE timestamp >= %s AND size > 0
@@ -67,15 +68,15 @@ def recompute_all() -> dict[str, int]:
             wallet = r[0]
             n = int(r[1] or 0)
             wins = int(r[2] or 0)
-            mean_size = float(r[3] or 0)
-            std_size = float(r[4] or 0)
+            mean_bet_usd = float(r[3] or 0)
+            std_bet_usd = float(r[4] or 0)
             last_ts = int(r[5] or 0)
 
-            if n == 0 or mean_size <= 0 or last_ts == 0:
+            if n == 0 or mean_bet_usd <= 0 or last_ts == 0:
                 continue
 
             wr = wins / n
-            size_cv = std_size / mean_size if mean_size > 0 else 1.0
+            size_cv = std_bet_usd / mean_bet_usd if mean_bet_usd > 0 else 1.0
             recency_days = (now_ts - last_ts) / 86400.0
             sample_factor = min(1.0, n / MIN_N_TARGET)
             recency_factor = math.exp(-recency_days / 14.0)

@@ -1027,7 +1027,7 @@ class WalletDB:
                 rows = self._conn.execute(f"""
                     SELECT wt.wallet,
                            SUM(wt.pnl) as profit,
-                           SUM(wt.size) as volume,
+                           SUM(wt.size * wt.price) as volume,
                            COUNT(*) as trades,
                            wp.wallet_type, wp.equity_score, wp.directional_win_rate,
                            wp.category_trades, wp.notes

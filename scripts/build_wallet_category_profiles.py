@@ -9,16 +9,21 @@ total PnL. It's designed to be run offline after category backfill, not
 from the hot signal path.
 
 Usage: .venv/Scripts/python.exe scripts/build_wallet_category_profiles.py
+
+2026-07-16: migrated from raw sqlite (stale post-Postgres-cutover) to
+db_connection.get_connection(), and avg_bet_size now stores USDC notional
+(size*price) — wallet_trades.size is SHARES.
 """
 from __future__ import annotations
 
 import math
-import sqlite3
 import sys
 import time
 from pathlib import Path
 
-DB_PATH = Path("data/polymarket/wallet_intelligence.db")
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
+from trading_platform.polymarket.db_connection import get_connection  # noqa: E402
 
 # Tier thresholds. Tuned to put the clear winners in S/A, the middle in B/C,
 # and the losers in D. Win rate is Laplace-smoothed so tiny samples don't
@@ -48,14 +53,14 @@ def tier_for(win_rate: float, resolved: int, total_pnl: float) -> str:
 
 
 def main() -> int:
-    if not DB_PATH.exists():
-        print(f"DB not found: {DB_PATH}", file=sys.stderr)
-        return 1
+    conn = get_connection()
 
-    conn = sqlite3.connect(str(DB_PATH), timeout=60)
-    conn.execute("PRAGMA busy_timeout=60000")
+    now_ts = int(time.time())
+    cutoff_30d = now_ts - 30 * 86400
+    cutoff_90d = now_ts - 90 * 86400
 
     print("[BUILD] aggregating resolved trades by (wallet, category)...")
+    # size is SHARES — avg_bet_size is USDC notional (size*price).
     rows = conn.execute("""
         SELECT wallet,
                category,
@@ -63,26 +68,26 @@ def main() -> int:
                SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END)              AS wins,
                SUM(CASE WHEN pnl <= 0 THEN 1 ELSE 0 END)             AS losses,
                SUM(COALESCE(pnl, 0))                                 AS total_pnl,
-               AVG(size)                                             AS avg_bet_size,
+               AVG(size * price)                                     AS avg_bet_size_usd,
                MAX(timestamp)                                        AS last_trade_at,
                SUM(CASE
-                   WHEN timestamp > unixepoch('now', '-30 days') AND pnl > 0 THEN 1
+                   WHEN timestamp > ? AND pnl > 0 THEN 1
                    ELSE 0
                END)                                                  AS wins_30d,
                SUM(CASE
-                   WHEN timestamp > unixepoch('now', '-30 days') THEN 1
+                   WHEN timestamp > ? THEN 1
                    ELSE 0
                END)                                                  AS resolved_30d,
                SUM(CASE
-                   WHEN timestamp > unixepoch('now', '-90 days') AND pnl > 0 THEN 1
+                   WHEN timestamp > ? AND pnl > 0 THEN 1
                    ELSE 0
                END)                                                  AS wins_90d,
                SUM(CASE
-                   WHEN timestamp > unixepoch('now', '-90 days') THEN 1
+                   WHEN timestamp > ? THEN 1
                    ELSE 0
                END)                                                  AS resolved_90d,
                SUM(CASE
-                   WHEN timestamp > unixepoch('now', '-30 days') THEN COALESCE(pnl, 0)
+                   WHEN timestamp > ? THEN COALESCE(pnl, 0)
                    ELSE 0
                END)                                                  AS monthly_pnl
         FROM wallet_trades
@@ -92,8 +97,8 @@ def main() -> int:
           AND category IS NOT NULL
           AND category != ''
         GROUP BY wallet, category
-        HAVING resolved >= 3
-    """).fetchall()
+        HAVING COUNT(*) >= 3
+    """, (cutoff_30d, cutoff_30d, cutoff_90d, cutoff_90d, cutoff_30d)).fetchall()
     print(f"[BUILD] {len(rows)} (wallet, category) pairs with >=3 resolved trades")
 
     # Category purity: fraction of that wallet's resolved trades in this category.
@@ -105,11 +110,10 @@ def main() -> int:
         GROUP BY wallet
     """).fetchall())
 
-    now_ts = int(time.time())
     records = []
     tier_counts: dict[str, int] = {}
     for (wallet, category, resolved, wins, losses, total_pnl,
-         avg_bet_size, last_trade_at, wins_30d, resolved_30d,
+         avg_bet_size_usd, last_trade_at, wins_30d, resolved_30d,
          wins_90d, resolved_90d, monthly_pnl) in rows:
 
         wr = smoothed_win_rate(wins or 0, losses or 0)
@@ -143,7 +147,7 @@ def main() -> int:
         records.append((
             wallet, category, tier, round(score, 2),
             round(wr_raw, 4), round(wr_30, 4), round(wr_90, 4),
-            resolved, round(avg_bet_size or 0, 2), round(monthly_pnl or 0, 2),
+            resolved, round(avg_bet_size_usd or 0, 2), round(monthly_pnl or 0, 2),
             round(consistency, 4), round(purity, 4), 0.0,
             last_trade_at or 0, now_ts, 0, now_ts,
         ))
@@ -169,8 +173,8 @@ def main() -> int:
     print("\n=== tier x category distribution ===")
     for row in conn.execute("""
         SELECT category, tier, COUNT(*) AS n,
-               ROUND(AVG(win_rate), 3)     AS avg_wr,
-               ROUND(SUM(monthly_pnl), 0)  AS sum_30d_pnl
+               ROUND(AVG(win_rate)::numeric, 3)     AS avg_wr,
+               ROUND(SUM(monthly_pnl)::numeric, 0)  AS sum_30d_pnl
         FROM wallet_category_profiles
         GROUP BY category, tier
         ORDER BY category,

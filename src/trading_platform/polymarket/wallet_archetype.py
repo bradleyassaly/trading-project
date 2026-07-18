@@ -13,10 +13,11 @@ from break-even (+0.006 EV) to statistically significant positive
 from __future__ import annotations
 
 import logging
-import sqlite3
 import time
 from pathlib import Path
 from typing import Any
+
+from trading_platform.polymarket.db_connection import get_connection
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +73,7 @@ def classify_wallet(stats: dict[str, Any]) -> str:
         return "research"
     if n_cats >= 3 and tpd < 20 and fills <= 10:
         return "diversified"
+    # total_volume is USDC notional (size*price), so this is $500k traded.
     if volume > 500_000 and fills <= 15:
         return "whale"
     return "unclassified"
@@ -84,24 +86,30 @@ class WalletArchetypeClassifier:
         self._cache: dict[str, tuple[str, bool]] = {}
         self._ensure_table()
 
+    def _connect(self):
+        # get_connection routes to Postgres in production (db_path only
+        # matters under the DB_BACKEND=sqlite test lane).
+        return get_connection(self._db_path)
+
     def _ensure_table(self) -> None:
         try:
-            conn = sqlite3.connect(self._db_path, timeout=30)
-            conn.executescript(_SCHEMA)
+            conn = self._connect()
+            conn.execute(_SCHEMA)
             conn.commit()
             conn.close()
         except Exception as exc:
             logger.debug("archetype table ensure failed: %s", exc)
 
     def classify_all(self) -> dict[str, int]:
-        conn = sqlite3.connect(self._db_path, timeout=60)
+        conn = self._connect()
+        # wallet_trades.size is SHARES; monetary stats use size*price (USDC).
         rows = conn.execute("""
             SELECT wallet,
                 COUNT(*) AS total_trades,
                 COUNT(DISTINCT condition_id) AS unique_markets,
                 CAST(COUNT(*) AS REAL)/NULLIF(COUNT(DISTINCT condition_id),0) AS fills_per_market,
-                AVG(size) AS avg_trade_size,
-                SUM(size) AS total_volume,
+                AVG(size * price) AS avg_trade_size,
+                SUM(size * price) AS total_volume,
                 SUM(CASE WHEN side='BUY' THEN 1 ELSE 0 END)*1.0/COUNT(*) AS buy_ratio,
                 COUNT(DISTINCT category) AS n_categories,
                 (MAX(timestamp)-MIN(timestamp))*1.0/NULLIF(COUNT(*)-1,0) AS avg_interval_sec,
@@ -110,7 +118,7 @@ class WalletArchetypeClassifier:
                 SUM(CASE WHEN price>=0.15 AND price<=0.85 THEN 1 ELSE 0 END)*1.0/COUNT(*) AS uncertain_price_ratio
             FROM wallet_trades
             GROUP BY wallet
-            HAVING total_trades >= 10
+            HAVING COUNT(*) >= 10
         """).fetchall()
 
         cols = [
@@ -134,14 +142,15 @@ class WalletArchetypeClassifier:
                 s["n_categories"], s["avg_trade_size"], s["total_volume"],
             ))
 
+        now_ts = int(time.time())
         conn.executemany(
             """INSERT OR REPLACE INTO wallet_archetypes
                (wallet, archetype, copyable, total_trades, fills_per_market,
                 trades_per_day, buy_ratio, extreme_price_ratio,
                 uncertain_price_ratio, n_categories, avg_trade_size,
                 total_volume, classified_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,unixepoch('now'))""",
-            batch,
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            [b + (now_ts,) for b in batch],
         )
         conn.commit()
         conn.close()
@@ -152,7 +161,7 @@ class WalletArchetypeClassifier:
         if self._cache:
             return
         try:
-            conn = sqlite3.connect(self._db_path, timeout=30)
+            conn = self._connect()
             for w, a, c in conn.execute("SELECT wallet, archetype, copyable FROM wallet_archetypes"):
                 self._cache[w] = (a, bool(c))
             conn.close()

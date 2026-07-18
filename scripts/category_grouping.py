@@ -1,4 +1,9 @@
-"""Category grouping analysis: politics vs geopolitics vs merged."""
+"""Category grouping analysis: politics vs geopolitics vs merged.
+
+NOTE: reads the legacy sqlite snapshot, which is FROZEN since the
+2026-04-14 Postgres cutover — treat results as historical. Live data
+lives in Postgres via db_connection.get_connection().
+"""
 import sqlite3
 import pandas as pd
 from scipy import stats
@@ -18,7 +23,8 @@ banner("PART 1 -- CATEGORY DISTRIBUTION")
 print("-- wallet_trades --")
 print(pd.read_sql("""
     SELECT category, COUNT(*) trades, COUNT(DISTINCT wallet) wallets,
-           COUNT(DISTINCT condition_id) markets, ROUND(SUM(size),0) volume
+           COUNT(DISTINCT condition_id) markets,
+           ROUND(SUM(size * price),0) volume_usdc
     FROM wallet_trades GROUP BY category ORDER BY trades DESC
 """, conn).to_string(index=False))
 

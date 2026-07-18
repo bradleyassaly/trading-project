@@ -65,7 +65,7 @@ def _classify_strategy(stats: dict) -> str:
     if trades_per_market > 2.5:
         return "accumulator"
 
-    # Conviction: large single trades, moderate entry price
+    # Conviction: large single trades ($500+ USDC notional), moderate entry price
     if avg_size > 500 and avg_entry > 0.35:
         return "conviction"
 
@@ -96,7 +96,7 @@ def analyze(top_n: int = 200, min_pnl: float = 0) -> dict:
                 SUM(CASE WHEN market_resolved=1 THEN 1 ELSE 0 END)              AS resolved,
                 ROUND(SUM(COALESCE(pnl, 0))::numeric, 2)                        AS total_pnl,
                 ROUND(AVG(price)::numeric, 3)                                    AS avg_entry,
-                ROUND(AVG(size)::numeric, 2)                                     AS avg_size,
+                ROUND(AVG(size * price)::numeric, 2)                             AS avg_size_usd,
                 COUNT(DISTINCT LOWER(category))                                  AS n_categories
             FROM wallet_trades
             GROUP BY wallet
@@ -148,7 +148,7 @@ def analyze(top_n: int = 200, min_pnl: float = 0) -> dict:
     category_specialists: dict[str, list[dict]] = {}
 
     for row in wallet_rows:
-        wallet, markets, wins, resolved, total_pnl, avg_entry, avg_size, n_cats = row
+        wallet, markets, wins, resolved, total_pnl, avg_entry, avg_size_usd, n_cats = row
         wr = wins / resolved if resolved else 0
         cats = sorted(
             wallet_cats.get(wallet, []),
@@ -159,7 +159,7 @@ def analyze(top_n: int = 200, min_pnl: float = 0) -> dict:
 
         stats = {
             "avg_entry_price": float(avg_entry or 0.5),
-            "avg_trade_size": float(avg_size or 0),
+            "avg_trade_size": float(avg_size_usd or 0),  # USDC notional
             "win_rate": wr,
             "n_categories": int(n_cats),
             "trades_per_market": int(resolved) / max(int(markets), 1),
@@ -176,7 +176,7 @@ def analyze(top_n: int = 200, min_pnl: float = 0) -> dict:
             "wilson_lower": round(_wilson_lower(int(wins), int(resolved)), 3),
             "total_pnl": float(total_pnl),
             "avg_entry": float(avg_entry or 0),
-            "avg_size": float(avg_size or 0),
+            "avg_size_usd": float(avg_size_usd or 0),
             "n_categories": int(n_cats),
             "strategy": strategy,
             "strong_categories": best_cats[:4],

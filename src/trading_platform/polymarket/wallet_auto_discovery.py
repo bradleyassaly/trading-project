@@ -74,7 +74,7 @@ def discover(
                 SUM(CASE WHEN wt.market_resolved=1 THEN 1 ELSE 0 END)                AS resolved,
                 ROUND(SUM(COALESCE(wt.pnl, 0))::numeric, 2)                         AS total_pnl,
                 ROUND(AVG(wt.price)::numeric, 3)                                     AS avg_entry,
-                ROUND(AVG(wt.size)::numeric, 2)                                      AS avg_size,
+                ROUND(AVG(wt.size * wt.price)::numeric, 2)                           AS avg_size_usd,
                 MAX(wt.timestamp)                                                     AS last_ts,
                 MODE() WITHIN GROUP (ORDER BY LOWER(wt.category))                    AS primary_cat
             FROM wallet_trades wt

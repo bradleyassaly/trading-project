@@ -139,7 +139,12 @@ class InsiderDetector:
             purity = cat_counts.most_common(1)[0][1] / len(wt) if cat_counts and wt else 0
 
             avg_ep = sum(t["entry_pct"] for t in wt) / len(wt) if wt else 0.5
-            avg_size = sum(t["size"] or 0 for t in wt) / len(wt) if wt else 0
+            # size is SHARES — avg_trade_size is USDC notional (size*price),
+            # matching the whale engine's trade_usdc comparison downstream.
+            avg_size = (
+                sum((t["size"] or 0) * (t["price"] or 0) for t in wt) / len(wt)
+                if wt else 0
+            )
 
             score = (
                 acc * 0.35

@@ -9,7 +9,7 @@ Strategies detected (all data-driven, no assumptions):
   accumulator     — same wallet, market, side, 3+ trades spaced >=1h apart
   flipper         — BUY then SELL on same market within 24h
   longshot        — entry price < 0.15
-  high_conviction — trade size >= 3x the wallet's own average
+  high_conviction — trade USDC notional >= 3x the wallet's own average
   contrarian      — buying against the implied-probability consensus
                     (BUY at price > 0.70 or SELL at price < 0.30)
   category_specialist — 80%+ of trades in one category
@@ -100,14 +100,15 @@ class _Agg:
 
 
 def _tag_trades_for_wallet(rows: list[tuple]) -> Iterable[tuple[str, tuple]]:
-    """Yield (strategy, (size, pnl, cid, ts)) tuples for one wallet's trades.
+    """Yield (strategy, (usd, pnl, cid, ts)) tuples for one wallet's trades.
 
     rows: [(cid, side, size, price, pnl, timestamp, category, market_resolved), ...]
-    ordered by timestamp ASC.
+    ordered by timestamp ASC. size is SHARES; the yielded first element is
+    USDC notional (size*price) — it feeds the avg_size_usd column.
     """
-    # --- pre-compute per-wallet stats for conviction tag ---
-    sizes = [float(r[2] or 0) for r in rows]
-    avg_size = sum(sizes) / len(sizes) if sizes else 0
+    # --- pre-compute per-wallet stats for conviction tag (USDC) ---
+    usd_sizes = [float(r[2] or 0) * float(r[3] or 0) for r in rows]
+    avg_usd = sum(usd_sizes) / len(usd_sizes) if usd_sizes else 0
 
     # --- pre-compute per-market activity for accumulator/flipper/scaler ---
     by_market: dict[str, list[tuple]] = defaultdict(list)
@@ -129,25 +130,26 @@ def _tag_trades_for_wallet(rows: list[tuple]) -> Iterable[tuple[str, tuple]]:
     for i, (cid, side, size, price, pnl, ts, cat, resolved) in enumerate(rows):
         size = float(size or 0)
         price = float(price or 0.5)
+        usd = size * price
         ts = int(ts or 0)
 
         # longshot
         if price < 0.15:
-            yield "longshot", (size, pnl, cid, ts)
+            yield "longshot", (usd, pnl, cid, ts)
 
         # contrarian (buying against consensus implied prob)
         if side == "BUY" and price > 0.70:
-            yield "contrarian", (size, pnl, cid, ts)
+            yield "contrarian", (usd, pnl, cid, ts)
         elif side == "SELL" and price < 0.30:
-            yield "contrarian", (size, pnl, cid, ts)
+            yield "contrarian", (usd, pnl, cid, ts)
 
-        # high_conviction
-        if avg_size > 0 and size >= 3 * avg_size:
-            yield "high_conviction", (size, pnl, cid, ts)
+        # high_conviction (money at risk, not share count)
+        if avg_usd > 0 and usd >= 3 * avg_usd:
+            yield "high_conviction", (usd, pnl, cid, ts)
 
         # category specialist: every trade counts if wallet has a dominant cat
         if dominant_cat and (cat or "other") == dominant_cat:
-            yield "category_specialist", (size, pnl, cid, ts)
+            yield "category_specialist", (usd, pnl, cid, ts)
 
     # --- accumulator: per-market same-side buy sequences spaced >=1h ---
     for cid, mkt_rows in by_market.items():
@@ -164,7 +166,7 @@ def _tag_trades_for_wallet(rows: list[tuple]) -> Iterable[tuple[str, tuple]]:
             avg_gap = sum(gaps) / max(len(gaps), 1)
             if avg_gap >= 3600:
                 for r in group_sorted:
-                    yield "accumulator", (float(r[2] or 0), r[4], r[0], int(r[5] or 0))
+                    yield "accumulator", (float(r[2] or 0) * float(r[3] or 0), r[4], r[0], int(r[5] or 0))
 
     # --- flipper: both BUY and SELL exist within 24h on same market ---
     for cid, mkt_rows in by_market.items():
@@ -175,8 +177,8 @@ def _tag_trades_for_wallet(rows: list[tuple]) -> Iterable[tuple[str, tuple]]:
         for b in buys:
             for s in sells:
                 if abs(int(s[5] or 0) - int(b[5] or 0)) <= 86400:
-                    yield "flipper", (float(b[2] or 0), b[4], b[0], int(b[5] or 0))
-                    yield "flipper", (float(s[2] or 0), s[4], s[0], int(s[5] or 0))
+                    yield "flipper", (float(b[2] or 0) * float(b[3] or 0), b[4], b[0], int(b[5] or 0))
+                    yield "flipper", (float(s[2] or 0) * float(s[3] or 0), s[4], s[0], int(s[5] or 0))
                     break  # count flipper once per buy
 
     # --- scaler: same-market same-side, size increasing over time ---
@@ -188,6 +190,8 @@ def _tag_trades_for_wallet(rows: list[tuple]) -> Iterable[tuple[str, tuple]]:
             )
             if len(group) < 3:
                 continue
+            # Detection stays on SHARES (position accumulation mechanics);
+            # the yielded stat is USDC notional like every other strategy.
             sizes_seq = [float(r[2] or 0) for r in group]
             # Strict monotonic (allow tiny jitter — 10% tolerance)
             is_scaling = all(
@@ -197,7 +201,7 @@ def _tag_trades_for_wallet(rows: list[tuple]) -> Iterable[tuple[str, tuple]]:
             )
             if is_scaling:
                 for r in group:
-                    yield "scaler", (float(r[2] or 0), r[4], r[0], int(r[5] or 0))
+                    yield "scaler", (float(r[2] or 0) * float(r[3] or 0), r[4], r[0], int(r[5] or 0))
 
 
 def _tag_deadline_trades(rows: list[tuple], end_dates: dict[str, int]) -> Iterable[tuple]:
@@ -211,7 +215,7 @@ def _tag_deadline_trades(rows: list[tuple], end_dates: dict[str, int]) -> Iterab
             continue
         hours_to_close = (end - int(ts)) / 3600
         if 0 < hours_to_close <= 48:
-            yield "deadline_trader", (float(size or 0), pnl, cid, int(ts))
+            yield "deadline_trader", (float(size or 0) * float(price or 0), pnl, cid, int(ts))
 
 
 def observe_all(min_trades_per_wallet: int = 10) -> dict:

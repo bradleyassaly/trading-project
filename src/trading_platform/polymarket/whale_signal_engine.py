@@ -568,18 +568,21 @@ class WhaleSignalEngine:
             return None
         if life_pct < 0.90:
             return None
-        # Check trade size is top-25% for this wallet (conviction)
+        # Check trade size is top-25% for this wallet (conviction).
+        # avg_position_size_usdc is USDC — compare the trade's USDC
+        # notional (size*price), not raw shares.
+        trade_usdc = float(trade.size or 0) * float(trade.price or 0)
         profile = self.db.get_profile(trade.wallet)
         if profile:
             avg_size = profile.get("avg_position_size_usdc") or profile.get("avg_win_size_usdc") or 0
-            if avg_size > 0 and trade.size < avg_size * 0.75:
+            if avg_size > 0 and trade_usdc > 0 and trade_usdc < avg_size * 0.75:
                 return None
         # Confidence: higher for tier1h, boosted by life_pct closeness to 1.0
         base = 0.60 if trade.wallet_tier == "tier1h" else 0.55 if trade.wallet_tier == "tier1" else 0.50
         confidence = min(base + (life_pct - 0.90) * 3.0, 0.85)
         # Compute hours remaining + size vs avg for Telegram context
         hours_left = max(0, (end_dt.timestamp() - now_ts) / 3600)
-        size_vs_avg = round(trade.size / avg_size, 1) if avg_size and avg_size > 0 else None
+        size_vs_avg = round(trade_usdc / avg_size, 1) if avg_size and avg_size > 0 else None
         return self._fire_signal("late_conviction", trade, round(confidence, 4), now_ts,
                                  extra={
                                      "market_life_pct": round(life_pct, 3),
@@ -689,7 +692,7 @@ class WhaleSignalEngine:
 
         At signal time we infer which strategy THIS TRADE matches:
           - longshot: price < 0.15
-          - high_conviction: trade.size >= 3x wallet avg_position_size
+          - high_conviction: trade USDC notional >= 3x wallet avg_position_size_usdc
           - flipper: wallet has prior SELL on same market in last 24h
                     (or BUY after prior SELL)
 
@@ -704,12 +707,13 @@ class WhaleSignalEngine:
         if price < 0.15:
             strategy_match = "longshot"
 
-        # 2) high_conviction — size >= 3x wallet's own avg
+        # 2) high_conviction — USDC notional >= 3x wallet's own avg (USDC)
         if strategy_match is None:
             profile = self.db.get_profile(trade.wallet)
             if profile:
                 avg_size = profile.get("avg_position_size_usdc") or 0
-                if avg_size > 0 and trade.size >= 3 * avg_size:
+                trade_usdc = float(trade.size or 0) * float(price)
+                if avg_size > 0 and trade_usdc >= 3 * avg_size:
                     strategy_match = "high_conviction"
 
         # 3) flipper — this trade flips the wallet's side on the same market

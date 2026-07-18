@@ -368,9 +368,10 @@ class WalletAnalyticsEngine:
                 "position_concentration": round(concentration, 3) if concentration is not None else None,
             }
 
-        # Fallback: count from wallet_trades
+        # Fallback: count from wallet_trades. size is SHARES — value must
+        # be size*price (USDC entry notional), not raw share count.
         fb_row = conn.execute(
-            """SELECT COUNT(DISTINCT condition_id), COALESCE(SUM(size), 0)
+            """SELECT COUNT(DISTINCT condition_id), COALESCE(SUM(size * price), 0)
                FROM wallet_trades
                WHERE wallet = ? AND market_resolved = 0""",
             (wallet,),

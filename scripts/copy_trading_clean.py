@@ -62,8 +62,8 @@ beh = pd.read_sql(f"""
     COUNT(*) AS total_trades,
     COUNT(DISTINCT condition_id) AS unique_markets,
     CAST(COUNT(*) AS REAL)/NULLIF(COUNT(DISTINCT condition_id),0) AS fills_per_market,
-    AVG(size) AS avg_trade_size,
-    SUM(size) AS total_volume,
+    AVG(size * price) AS avg_trade_size_usd,
+    SUM(size * price) AS total_volume_usd,
     SUM(CASE WHEN side='BUY' THEN 1 ELSE 0 END)*1.0/COUNT(*) AS buy_ratio,
     COUNT(DISTINCT category) AS n_categories,
     (MAX(timestamp)-MIN(timestamp))*1.0/NULLIF(COUNT(*)-1,0) AS avg_interval_sec,
@@ -171,9 +171,9 @@ enr = []
 for _, s in df.iterrows():
     side = "BUY" if s.get("direction","") == "BUY" else "SELL"
     r = conn.execute(
-        "SELECT SUM(size) FROM wallet_trades WHERE wallet=? AND condition_id=? AND side=? AND timestamp BETWEEN ? AND ?",
+        "SELECT SUM(size * price) FROM wallet_trades WHERE wallet=? AND condition_id=? AND side=? AND timestamp BETWEEN ? AND ?",
         (s["wallet"], s["condition_id"], side, s["fired_at"]-86400, s["fired_at"]+3600)).fetchone()
-    avg = conn.execute("SELECT AVG(size) FROM wallet_trades WHERE wallet=?", (s["wallet"],)).fetchone()
+    avg = conn.execute("SELECT AVG(size * price) FROM wallet_trades WHERE wallet=?", (s["wallet"],)).fetchone()
     enr.append({"id": s["id"], "trade_size": r[0] or 0, "avg_size": avg[0] or 1})
 enr_df = pd.DataFrame(enr)
 df = df.merge(enr_df, on="id", how="left")

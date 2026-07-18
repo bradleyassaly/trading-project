@@ -86,14 +86,16 @@ def _compute_profile(trades: list[dict[str, Any]]) -> dict[str, Any]:
     cat_wins: dict[str, int] = defaultdict(int)
     cat_total: dict[str, int] = defaultdict(int)
 
-    # Per-asset aggregation for directional win rate
+    # Per-asset aggregation for directional win rate.
+    # net_size/buy_vol/sell_vol are SHARES (direction); net_cost is the
+    # USDC cash deployed (size*price), used for monetary metrics.
     asset_positions: dict[str, dict[str, Any]] = defaultdict(lambda: {
-        "net_size": 0.0, "buy_vol": 0.0, "sell_vol": 0.0,
+        "net_size": 0.0, "buy_vol": 0.0, "sell_vol": 0.0, "net_cost": 0.0,
         "category": "other", "resolved": False, "outcome": None,
         "timestamps": [],
     })
 
-    total_size = 0.0
+    total_usdc = 0.0
     trade_timestamps: list[int] = []
     trade_sizes: list[float] = []
     pnl_wins: list[float] = []
@@ -105,10 +107,12 @@ def _compute_profile(trades: list[dict[str, Any]]) -> dict[str, Any]:
         asset = t.get("asset", "")
         side = (t.get("side") or "").upper()
         size = t.get("size") or 0.0
+        price = t.get("price") or 0.0
+        usdc = size * price
         ts = t.get("timestamp") or 0
         pnl = t.get("pnl")
 
-        total_size += size
+        total_usdc += usdc
         if size > 0:
             trade_sizes.append(size)
         if ts:
@@ -124,9 +128,11 @@ def _compute_profile(trades: list[dict[str, Any]]) -> dict[str, Any]:
         if side == "BUY":
             ap["net_size"] += size
             ap["buy_vol"] += size
+            ap["net_cost"] += usdc
         elif side == "SELL":
             ap["net_size"] -= size
             ap["sell_vol"] += size
+            ap["net_cost"] -= usdc
         if ts:
             ap["timestamps"].append(ts)
 
@@ -157,8 +163,8 @@ def _compute_profile(trades: list[dict[str, Any]]) -> dict[str, Any]:
     crypto_wr = _category_win_rate(asset_positions, "crypto")
     politics_wr = _category_win_rate(asset_positions, "politics")
 
-    # Average position size
-    position_sizes = [abs(ap["net_size"]) for ap in asset_positions.values() if abs(ap["net_size"]) > 0]
+    # Average position size in USDC (net cash deployed per asset)
+    position_sizes = [abs(ap["net_cost"]) for ap in asset_positions.values() if abs(ap["net_cost"]) > 0]
     avg_pos_size = sum(position_sizes) / len(position_sizes) if position_sizes else 0
 
     # Equity score: directional_wr * log(resolved_trades + 1) * type_multiplier
@@ -181,17 +187,18 @@ def _compute_profile(trades: list[dict[str, Any]]) -> dict[str, Any]:
     # Conviction score: equity * log(avg_position_size + 1)
     conviction_score = equity_score * math.log10(max(avg_pos_size, 1) + 1)
 
-    # Volume tier
-    if total_size >= 100_000:
+    # Volume tier (USDC notional traded)
+    if total_usdc >= 100_000:
         volume_tier = "whale"
-    elif total_size >= 10_000:
+    elif total_usdc >= 10_000:
         volume_tier = "active"
-    elif total_size >= 1_000:
+    elif total_usdc >= 1_000:
         volume_tier = "casual"
     else:
         volume_tier = "small"
 
-    # Large bet threshold: 75th percentile of trade sizes
+    # Large bet threshold: 75th percentile of trade sizes.
+    # Deliberately in SHARES — consumers compare it against raw trade.size.
     large_bet_threshold = 0.0
     if trade_sizes:
         sorted_sizes = sorted(trade_sizes)
@@ -205,7 +212,7 @@ def _compute_profile(trades: list[dict[str, Any]]) -> dict[str, Any]:
         "category_trades": json.dumps(dict(cat_counts)),
         "wallet_type": wallet_type,
         "avg_position_size_usdc": round(avg_pos_size, 2),
-        "total_volume_usdc": round(total_size, 2),
+        "total_volume_usdc": round(total_usdc, 2),
         "total_realized_pnl": round(net_pnl, 2),
         "equity_score": round(equity_score, 4),
         "last_trade_ts": max(trade_timestamps) if trade_timestamps else None,
@@ -256,8 +263,8 @@ def _classify_wallet_type(
     if any(len(outcomes) >= 10 for outcomes in event_outcomes.values()):
         return "market_maker"
 
-    # Directional: avg position > $10
-    avg_sizes = [abs(ap["net_size"]) for ap in positions.values() if abs(ap["net_size"]) > 0]
+    # Directional: avg position > $10 (USDC net cash deployed)
+    avg_sizes = [abs(ap["net_cost"]) for ap in positions.values() if abs(ap["net_cost"]) > 0]
     avg_pos = sum(avg_sizes) / len(avg_sizes) if avg_sizes else 0
     if avg_pos >= 10:
         return "directional"
