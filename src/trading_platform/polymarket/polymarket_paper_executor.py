@@ -533,25 +533,14 @@ class PolymarketPaperExecutor:
                 raise
             logger.debug("paper_trades schema executescript skipped (db locked): %s", exc)
 
-        # Self-heal circuit breaker anchor. The breaker row was historically
-        # initialized against a $100k placeholder while the paper book runs
-        # at STARTING_BANKROLL; any drawdown math against the wrong anchor
-        # is meaningless. Rebase when the gap exceeds ~5%.
-        try:
-            from trading_platform.polymarket.circuit_breaker import CircuitBreaker
-            cb = CircuitBreaker(str(self._wallet_db_path))
-            state = cb.initialize(starting_capital=STARTING_BANKROLL)
-            sc = float(state.get("starting_capital") or 0)
-            # Only rebase DOWN from a stale large placeholder (e.g. $100k init).
-            # Never rebase UP: a smaller starting_capital means the live system
-            # has been calibrated to actual bankroll — don't overwrite it.
-            if sc > 0 and sc > STARTING_BANKROLL * 1.5 and abs(sc - STARTING_BANKROLL) / sc > 0.05:
-                logger.info(
-                    "[CB] rebasing starting_capital %.0f → %.0f", sc, STARTING_BANKROLL,
-                )
-                cb.rebase(STARTING_BANKROLL)
-        except Exception as exc:
-            logger.debug("circuit breaker rebase check failed: %s", exc)
+        # NOTE (2026-07-16): the cumulative-drawdown circuit breaker tracks
+        # the LIVE book only. Its single state row is seeded and fed by
+        # scripts/snapshot_live_equity.py (mark-to-market truth equity) —
+        # paper code must not write breaker state. The old init/rebase
+        # self-heal here anchored it to the PAPER bankroll and paper
+        # resolutions fed record_trade(), so simulated losses could halt
+        # real trading (2026-07-02) while a 14.7% real drawdown read as 0%
+        # (2026-07-16).
 
     def _migrate(self) -> None:
         """Create tables if missing, add columns for Polymarket fields."""
@@ -997,13 +986,18 @@ class PolymarketPaperExecutor:
             logger.info("[PAPER] SKIP %s in excluded category %s", signal_type, category)
             return None
 
-        # Layer 3: cumulative drawdown circuit breaker. Blocks ALL trades
-        # — paper or live — once cumulative drawdown from peak crosses
-        # the threshold. Initialized lazily; absent state means no block.
+        # Layer 3: cumulative drawdown circuit breaker on the LIVE book
+        # (state fed by scripts/snapshot_live_equity.py). A live drawdown
+        # halt quiesces paper entries too — "halts ALL trading" by design.
+        # An UNSEEDED row (no live snapshot yet, e.g. fresh DB / tests)
+        # must not starve the paper evidence lane, so "not initialized"
+        # passes here; the live executor stays fail-closed on it.
         try:
             from trading_platform.polymarket.circuit_breaker import CircuitBreaker
             cb = CircuitBreaker(str(self._wallet_db_path))
             allowed, reason = cb.can_trade()
+            if not allowed and "not initialized" in reason:
+                allowed = True
             if not allowed:
                 logger.warning("[CIRCUIT_BREAKER] Trade blocked: %s", reason)
                 return None
@@ -2031,21 +2025,10 @@ class PolymarketPaperExecutor:
                 except Exception as exc:
                     logger.debug("AlertManager trade_resolved failed: %s", exc)
 
-                # Feed the cumulative-drawdown circuit breaker
-                try:
-                    from trading_platform.polymarket.circuit_breaker import CircuitBreaker
-                    CircuitBreaker(str(self._wallet_db_path)).record_trade(
-                        pnl_dollars=pnl,
-                        trade_details={
-                            "signal_type": sig_type,
-                            "trade_id": trade_id,
-                            "side": side,
-                            "size_usd": size_usd,
-                            "outcome": outcome,
-                        },
-                    )
-                except Exception as exc:
-                    logger.debug("circuit breaker record failed: %s", exc)
+                # Circuit breaker: intentionally NOT fed from paper
+                # resolutions. The breaker tracks live mark-to-market
+                # equity only, fed by scripts/snapshot_live_equity.py —
+                # see circuit_breaker.py (2026-07-16 redesign).
 
                 # Telegram alert (best effort)
                 try:

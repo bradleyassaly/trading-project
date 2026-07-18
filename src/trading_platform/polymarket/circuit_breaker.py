@@ -1,21 +1,38 @@
 """
-Circuit breaker — cumulative drawdown protection.
+Circuit breaker — cumulative drawdown protection for the LIVE book.
 
-Tracks portfolio equity and halts ALL trading if cumulative drawdown
-from peak equity exceeds a threshold. Requires explicit human reset
-to resume. Complements (does not replace) :class:`KillSwitch`, which
-handles per-trade gates and same-day loss limits.
+Tracks live portfolio equity (mark-to-market) and halts ALL trading if
+cumulative drawdown from peak equity exceeds a threshold. Requires
+explicit human reset to resume. Complements (does not replace)
+:class:`KillSwitch`, which handles per-trade gates and same-day loss
+limits.
 
-Three protection layers stack:
+Three protection layers stack — all fed by the LIVE book:
 
   Layer 1  Per-trade max stake     ← KillSwitch.MAX_TRADE_USD
   Layer 2  Daily loss limit        ← KillSwitch.MAX_DAILY_LOSS_PCT
-                                      AND CircuitBreaker daily_loss_limit
+                                      (realized, live_trades) AND
+                                      CircuitBreaker daily_loss_limit
+                                      (mark-to-market)
   Layer 3  Cumulative drawdown     ← THIS MODULE
 
 Without Layer 3, a system that loses 5% per day for 10 days passes
 every daily check while losing 50% cumulatively. The circuit breaker
 catches that scenario by halting on cumulative drawdown from peak.
+
+State feed (2026-07-16 redesign): the ONLY production writer is
+``scripts/snapshot_live_equity.py``, which pushes the hourly truth
+equity (on-chain USDC + data-api-valued open positions) through
+:meth:`update_equity`. It is level-based on purpose — summing booked
+``realized_pnl`` rows would inherit every booking bug (unbooked
+liquidations, double-booked exits), while an equity level self-corrects
+on the next snapshot. Before this redesign the breaker was fed PAPER
+resolutions while the live executor consulted the gate: simulated
+losses could halt real trading (2026-07-02) and a 14.7% real drawdown
+read as 0% (2026-07-16). Paper code must never write breaker state.
+
+Both executors READ the gate via :meth:`can_trade`; a live drawdown
+halt quiesces paper entries too ("halts ALL trading").
 
 State lives in two singleton-friendly tables:
 
@@ -153,16 +170,86 @@ class CircuitBreaker:
             return False, "bankrupt"
         return True, "ok"
 
+    def update_equity(
+        self,
+        total_equity: float,
+        source: str = "live_equity_snapshot",
+    ) -> dict[str, Any]:
+        """Level-based mark-to-market sync — THE live state feed.
+
+        Called by ``scripts/snapshot_live_equity.py`` with the truth
+        equity (on-chain USDC + data-api-valued open positions). Seeds
+        the state row on first-ever call. Peak/drawdown/halt logic
+        applies to the implied delta vs the stored equity; the delta
+        counts toward ``daily_pnl`` only when the PREVIOUS sync happened
+        inside the current daily window (a first sync or a post-gap sync
+        carries prior days' losses — cumulative drawdown still registers,
+        but no false daily halt).
+
+        Caveat: external cash flows (deposits/withdrawals) read as P&L
+        here — call :meth:`rebase` after moving money in or out.
+        """
+        eq = float(total_equity)
+        now = int(time.time())
+        s = self._read_state()
+        if not s:
+            state = self.initialize(starting_capital=eq)
+            self._stamp_equity_sync(now)
+            return state
+
+        prev_sync = self._read_last_equity_sync()
+        delta = eq - float(s["current_equity"])
+        if abs(delta) < 0.005:
+            # No material move — refresh timestamps for staleness
+            # monitors, but skip the log so hourly no-op syncs don't
+            # drown recent_log.
+            conn = connect_wallet_db(self._db_path)
+            try:
+                conn.execute(
+                    "UPDATE circuit_breaker_state SET last_updated = ? WHERE id = 1",
+                    (now,),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+            self._stamp_equity_sync(now)
+            return self._read_state() or {}
+
+        # Daily attribution: the delta is "today's P&L" only if the
+        # PREVIOUS sync happened inside the current daily window. A first
+        # sync (or one after a long gap) carries losses that economically
+        # belong to prior days — booking them as today's would fire a
+        # false daily halt (the 2026-07-02 stale-loss halt, again). The
+        # cumulative drawdown check is day-agnostic and always applies.
+        count_daily = (
+            prev_sync is not None
+            and prev_sync >= int(s.get("daily_reset_at") or 0)
+        )
+        state = self.record_trade(
+            pnl_dollars=delta,
+            trade_details={"kind": "equity_sync", "source": source, "equity": eq},
+            event_type="equity_sync",
+            count_toward_daily=count_daily,
+        )
+        self._stamp_equity_sync(now)
+        return self._read_state() or state
+
     def record_trade(
         self,
         pnl_dollars: float,
         trade_details: dict[str, Any] | None = None,
+        event_type: str = "trade",
+        count_toward_daily: bool = True,
     ) -> dict[str, Any]:
-        """Apply a trade outcome to the circuit breaker state.
+        """Apply a P&L delta to the circuit breaker state.
 
         Updates current_equity, peak_equity (if new peak), daily_pnl,
         and current_drawdown_pct. Triggers daily / drawdown halts when
         thresholds are crossed and dispatches Telegram alerts.
+
+        Production feeds go through :meth:`update_equity` (which calls
+        this with ``event_type="equity_sync"``) — do not wire paper
+        P&L into this method.
         """
         s = self._read_state()
         if not s:
@@ -180,7 +267,9 @@ class CircuitBreaker:
         else:
             drawdown_pct = 0.0
 
-        daily_pnl = float(s["daily_pnl"]) + float(pnl_dollars or 0)
+        daily_pnl = float(s["daily_pnl"])
+        if count_toward_daily:
+            daily_pnl += float(pnl_dollars or 0)
         max_dd = float(s["max_drawdown_pct"])
         daily_limit = float(s["daily_loss_limit"])
 
@@ -200,12 +289,24 @@ class CircuitBreaker:
         # Compute against the equity at the START of today, which we
         # approximate as current_equity - daily_pnl.
         equity_at_day_start = equity_after - daily_pnl
-        if equity_at_day_start > 0 and daily_pnl < 0:
+        if count_toward_daily and equity_at_day_start > 0 and daily_pnl < 0:
             daily_loss_frac = abs(daily_pnl) / equity_at_day_start
             if daily_loss_frac >= daily_limit and not s["daily_halted"]:
                 new_daily_halt = True
 
         now = int(time.time())
+        # Final values computed in Python, written as plain params. The
+        # previous CASE WHEN ?-with-int-param form raised DatatypeMismatch
+        # under Postgres ("CASE/WHEN must be type boolean, not smallint"),
+        # so EVERY record_trade write silently failed post-cutover — the
+        # breaker froze at its rebase anchor while callers swallowed the
+        # exception (found 2026-07-16).
+        is_halted_final = bool(new_halt or s["is_halted"])
+        halted_at_final = s.get("halted_at")
+        if new_halt and not halted_at_final:
+            halted_at_final = now
+        halted_reason_final = new_halt_reason if new_halt else s.get("halted_reason")
+        daily_halted_final = bool(new_daily_halt or s["daily_halted"])
         conn = connect_wallet_db(self._db_path)
         try:
             conn.execute(
@@ -214,19 +315,16 @@ class CircuitBreaker:
                     peak_equity = ?,
                     current_drawdown_pct = ?,
                     daily_pnl = ?,
-                    is_halted = CASE WHEN ? THEN 1 ELSE is_halted END,
-                    halted_at = CASE WHEN ? AND halted_at IS NULL THEN ? ELSE halted_at END,
-                    halted_reason = CASE WHEN ? THEN ? ELSE halted_reason END,
-                    daily_halted = CASE WHEN ? THEN 1 ELSE daily_halted END,
+                    is_halted = ?,
+                    halted_at = ?,
+                    halted_reason = ?,
+                    daily_halted = ?,
                     last_updated = ?
                    WHERE id = 1""",
                 (
                     equity_after, peak_after, drawdown_pct, daily_pnl,
-                    int(new_halt or s["is_halted"]),
-                    int(new_halt), now,
-                    int(new_halt), new_halt_reason or s.get("halted_reason"),
-                    int(new_daily_halt or s["daily_halted"]),
-                    now,
+                    int(is_halted_final), halted_at_final, halted_reason_final,
+                    int(daily_halted_final), now,
                 ),
             )
             conn.commit()
@@ -234,7 +332,7 @@ class CircuitBreaker:
             conn.close()
 
         # Audit log
-        log_event = "trade"
+        log_event = event_type
         if new_halt:
             log_event = "halt"
         elif new_daily_halt:
@@ -451,6 +549,44 @@ class CircuitBreaker:
         ]
 
     # ── Internal helpers ───────────────────────────────────────────────────
+
+    def _stamp_equity_sync(self, ts: int) -> None:
+        """Record when the live equity feed last ran. Kept OUT of
+        _read_state so a missing column can never brick can_trade();
+        the column is lazy-added here (idempotent, both backends)."""
+        try:
+            conn = connect_wallet_db(self._db_path)
+            try:
+                try:
+                    conn.execute(
+                        "ALTER TABLE circuit_breaker_state ADD COLUMN last_equity_sync_at INTEGER"
+                    )
+                except Exception:
+                    pass  # already exists
+                conn.execute(
+                    "UPDATE circuit_breaker_state SET last_equity_sync_at = ? WHERE id = 1",
+                    (int(ts),),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+        except Exception as exc:
+            logger.debug("[CB] equity-sync stamp failed: %s", exc)
+
+    def _read_last_equity_sync(self) -> int | None:
+        try:
+            conn = connect_wallet_db(self._db_path)
+            try:
+                row = conn.execute(
+                    "SELECT last_equity_sync_at FROM circuit_breaker_state WHERE id = 1"
+                ).fetchone()
+            finally:
+                conn.close()
+        except Exception:
+            return None
+        if not row or row[0] is None:
+            return None
+        return int(row[0])
 
     def _read_state(self) -> dict[str, Any] | None:
         try:
