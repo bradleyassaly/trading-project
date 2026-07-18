@@ -16,6 +16,7 @@ table so we don't fire the same alert twice within the cooldown.
 """
 from __future__ import annotations
 
+import html
 import os
 import re
 import sys
@@ -113,8 +114,11 @@ def check_reconciler(alerter) -> int:
     # returns False when the 30-min cooldown suppresses it. Same fix as
     # check_api_health (2026-05-28); returning 1 unconditionally made the
     # log read "fired 1 alert(s)" every run while nothing was being sent.
+    # 2026-07-16: escape raw log content — a "<" in a drift line would
+    # 400 the HTML-mode send and drop the alert silently.
     if alerter.send_pipeline_alert(
-        component="reconciler", message=msg[:500], level="warning",
+        component="reconciler", message=html.escape(msg[:500], quote=False),
+        level="warning",
     ):
         return 1
     return 0
@@ -132,8 +136,10 @@ def check_ws_poll(alerter) -> int:
     msg = "ingestion degraded:\n" + "\n".join(alert_lines[:3])
     # 2026-07-09: count only alerts actually SENT (cooldown returns
     # False) — same fix as check_api_health, 2026-05-28.
+    # 2026-07-16: escape raw log content (see check_reconciler).
     if alerter.send_pipeline_alert(
-        component="ws_poll", message=msg[:500], level="critical",
+        component="ws_poll", message=html.escape(msg[:500], quote=False),
+        level="critical",
     ):
         return 1
     return 0
@@ -150,10 +156,16 @@ def check_wallet_attribution(alerter) -> int:
     n = int(m.group(1))
     # 2026-07-09: count only alerts actually SENT (cooldown returns
     # False) — same fix as check_api_health, 2026-05-28.
+    # 2026-07-16: this message used to contain a raw "<=" — Telegram
+    # parses messages as HTML and 400s the whole send on a bare "<", so
+    # the ONE alert naming an auto-demote never delivered (the
+    # phase_b_resolution_decay demote went dark for 3 days). Keep this
+    # text free of < / >; wallet_attribution.py itself now sends the
+    # loud per-slice strategy-kill alert with proper escaping.
     if alerter.send_pipeline_alert(
         component="wallet_attribution",
-        message=f"{n} wallet(s) flagged for auto-demote (30d PnL at or below "
-                f"-$10 on 5+ trades). "
+        message=f"{n} wallet(s) flagged for auto-demote "
+                f"(30d PnL at or below -$10 on 5 or more trades). "
                 f"Review log + apply wallet_attribution.py --apply if accepted.",
         level="warning",
     ):

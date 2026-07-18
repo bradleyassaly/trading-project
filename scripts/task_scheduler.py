@@ -461,9 +461,13 @@ SCHEDULE: list[Task] = [
         # only wallets with strong negative live evidence get flagged.
         # Executor reads wallet_overrides table and blocks signals from
         # DEMOTED wallets. Closes the Layer-5 attribution feedback loop.
+        # 2026-07-16: --apply also runs the recovery pass (DEMOTED →
+        # PROBATION → cleared) and sends delivered Telegram alerts on
+        # every override transition — a pseudo-wallet demote is a
+        # strategy kill and must never again be silent (3-day dark lane).
         cmd="python /app/scripts/wallet_attribution.py --apply",
         interval_seconds=24 * 3600,
-        description="Per-wallet revenue attribution + AUTO-APPLY tier downgrade",
+        description="Per-wallet attribution + AUTO-APPLY tier downgrade/recovery",
     ),
     Task(
         # 2026-05-23: WS-vs-poll reconciliation. Detects when wallet_trades
