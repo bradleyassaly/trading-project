@@ -23,23 +23,26 @@ from trading_platform.polymarket.db_connection import get_connection
 
 
 def half_stats(conn, lo_ts, hi_ts, min_n):
+    # wallet_trades.size is SHARES; per-$ PnL must divide by USDC notional
+    # (size*price), not raw share count. Dividing by shares was a latent
+    # units bug that mislabeled a per-share figure as "per_dollar".
     rows = conn.execute(
         """SELECT wallet,
                   COUNT(*) n,
                   SUM(pnl) tot_pnl,
-                  SUM(ABS(size)) tot_size
+                  SUM(ABS(size * price)) tot_usdc
            FROM wallet_trades
            WHERE market_resolved = 1 AND pnl_reliable = 1 AND pnl IS NOT NULL
-             AND size IS NOT NULL AND size > 0
+             AND size IS NOT NULL AND size > 0 AND price > 0
              AND timestamp >= ? AND timestamp < ?
            GROUP BY wallet
            HAVING COUNT(*) >= ?""",
         (lo_ts, hi_ts, min_n),
     ).fetchall()
     out = {}
-    for w, n, tot_pnl, tot_size in rows:
-        if tot_size and tot_size > 0:
-            out[w] = {"n": n, "per_dollar": tot_pnl / tot_size, "pnl": tot_pnl}
+    for w, n, tot_pnl, tot_usdc in rows:
+        if tot_usdc and tot_usdc > 0:
+            out[w] = {"n": n, "per_dollar": tot_pnl / tot_usdc, "pnl": tot_pnl}
     return out
 
 
