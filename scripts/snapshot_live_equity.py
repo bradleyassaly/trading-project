@@ -41,7 +41,61 @@ _CAPITAL_MIGRATIONS = [
     "ALTER TABLE live_equity_snapshots ADD COLUMN IF NOT EXISTS deployed_pct DOUBLE PRECISION",
     "ALTER TABLE live_equity_snapshots ADD COLUMN IF NOT EXISTS idle_usdc DOUBLE PRECISION",
     "ALTER TABLE live_equity_snapshots ADD COLUMN IF NOT EXISTS unredeemed_value DOUBLE PRECISION",
+    # 2026-07-19: USDC locked in open resting BUY orders is still our capital
+    # but invisible to the balance API — omitting it created a ~$17 phantom
+    # "drawdown" that (with unbooked maker fills) false-fired the breaker.
+    "ALTER TABLE live_equity_snapshots ADD COLUMN IF NOT EXISTS locked_order_usdc DOUBLE PRECISION",
 ]
+
+
+def _get_locked_order_usdc() -> float:
+    """USDC committed to open resting BUY orders on the CLOB (BUYs escrow
+    cash; SELLs escrow tokens, already counted via conditional balances).
+    Returns 0.0 on any failure — snapshot must not die on this."""
+    try:
+        from trading_platform.polymarket.clob_client import ClobClient
+        client = ClobClient()._build_signed_client()
+        orders = client.get_open_orders()
+        if isinstance(orders, dict):
+            orders = orders.get("data") or orders.get("orders") or []
+        total = 0.0
+        for o in orders:
+            if (o.get("side") or "").upper() != "BUY":
+                continue
+            px = float(o.get("price") or 0)
+            sz = float(o.get("original_size") or o.get("size") or 0)
+            matched = float(o.get("size_matched") or 0)
+            total += px * max(sz - matched, 0.0)
+        return round(total, 4)
+    except Exception as exc:
+        print(f"  locked-order lookup failed (counting 0): {str(exc)[:80]}")
+        return 0.0
+
+
+def _get_maker_positions(conn) -> tuple[float, float, int]:
+    """(cost, market_value, count) of live maker-experiment fills held to
+    resolution — they live in maker_experiment_orders, not live_trades, so the
+    snapshot was blind to them (part of the 2026-07-19 phantom drawdown)."""
+    try:
+        rows = conn.execute(
+            """SELECT shares, fill_price, yes_token_id, condition_id
+               FROM maker_experiment_orders
+               WHERE live = 1 AND status = 'filled'"""
+        ).fetchall()
+    except Exception:
+        return 0.0, 0.0, 0
+    cost = mkt = 0.0
+    n = 0
+    for shares, fp, yes_tid, cid in rows:
+        sh = float(shares or 0)
+        if sh <= 0:
+            continue
+        cost += sh * float(fp or 0)
+        yes_now = _get_mid(yes_tid) if yes_tid else None
+        no_now = (1.0 - yes_now) if yes_now is not None else float(fp or 0)
+        mkt += sh * no_now
+        n += 1
+    return round(cost, 4), round(mkt, 4), n
 
 
 def _get_usdc() -> float | None:
@@ -333,7 +387,15 @@ def take_snapshot() -> dict:
         conn.close()
         return {}
 
-    total_equity = usdc + open_mkt
+    # 2026-07-19: two formerly-invisible capital buckets (their omission
+    # created a ~$35 phantom drawdown that false-fired the circuit breaker):
+    locked_orders = _get_locked_order_usdc()
+    mk_cost, mk_mkt, mk_n = _get_maker_positions(conn)
+    open_cost += mk_cost
+    open_mkt += mk_mkt
+    counted += mk_n
+
+    total_equity = usdc + open_mkt + locked_orders
     unrealized   = open_mkt - open_cost
     daily_change = (total_equity - float(prior[0])) if prior else None
     # N2 capital efficiency: idle USDC is the free collateral; deployed_pct is
@@ -346,8 +408,8 @@ def take_snapshot() -> dict:
             (ts, usdc_balance, open_cost_basis, open_market_value,
              total_equity, open_count, realized_pnl_cumulative,
              unrealized_pnl, daily_change,
-             deployed_pct, idle_usdc, unredeemed_value)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+             deployed_pct, idle_usdc, unredeemed_value, locked_order_usdc)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         ON CONFLICT (ts) DO UPDATE
             SET usdc_balance            = EXCLUDED.usdc_balance,
                 open_cost_basis         = EXCLUDED.open_cost_basis,
@@ -359,13 +421,15 @@ def take_snapshot() -> dict:
                 daily_change            = EXCLUDED.daily_change,
                 deployed_pct            = EXCLUDED.deployed_pct,
                 idle_usdc               = EXCLUDED.idle_usdc,
-                unredeemed_value        = EXCLUDED.unredeemed_value
+                unredeemed_value        = EXCLUDED.unredeemed_value,
+                locked_order_usdc       = EXCLUDED.locked_order_usdc
     """, (
         now_ts, round(usdc, 4), round(open_cost, 4), round(open_mkt, 4),
         round(total_equity, 4), counted,
         round(realized_cumul, 4), round(unrealized, 4),
         round(daily_change, 4) if daily_change is not None else None,
         round(deployed_pct, 4), round(idle_usdc, 4), round(unredeemed_value, 4),
+        round(locked_orders, 4),
     ))
     conn.commit()
     conn.close()

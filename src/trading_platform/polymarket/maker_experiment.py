@@ -10,6 +10,10 @@ WHY (2026-07-16, three independent derivations — see memory 2026-07-16-fade-lo
 WHAT: post small resting BUY orders on the COMPLEMENT (NO side) of longshot
 sports markets near resolution — the exact segment where loser flow
 concentrates (they buy YES longshots at 0.05-0.40 that resolve NO ~86%).
+UNIVERSE NOTE (2026-07-19, explicit): "sports" includes esports (LoL/CS) and
+golf — the classifier matched them from the clean restart's day 0 and real
+fills arrived from them, so they are IN for this window (changing the
+universe mid-window would violate the pre-registration; revisit at the gate).
 On Polymarket's CLOB a resting NO-bid at (1-p) IS the counterparty to a taker
 buying YES at p (complete-set minting). We earn their crossing.
 
@@ -210,10 +214,15 @@ def manage_open_orders(c, clob) -> None:
          order_id, yes_bid0, yes_ask0) in rows:
         # 1. Fill check
         filled_price = None
+        filled_shares = None
         if live and order_id:
             st = clob.get_order_status(order_id)
-            if st["status"] == "matched" or st["size_matched"] >= float(shares):
+            # ANY matched size is a fill worth booking — the 2026-07-19 eval
+            # found ~$22 of real fills invisible because this required FULL
+            # match while partials + cancel-race matches slipped through.
+            if st["status"] == "matched" or st["size_matched"] > 0:
                 filled_price = st["filled_price"] or q
+                filled_shares = st["size_matched"] or float(shares)
         elif not live:
             # dry-run fill proxy: a YES print at/above our implied ask means a
             # taker paid our level (their NO-mint counterparty would be us).
@@ -229,12 +238,15 @@ def manage_open_orders(c, clob) -> None:
             if hi is not None and hi >= float(impl_yes):
                 filled_price = q
         if filled_price is not None:
+            sh = float(filled_shares) if filled_shares else float(shares)
             c.execute(
                 "UPDATE maker_experiment_orders SET status='filled', filled_at=?, "
-                "fill_price=? WHERE id=?",
-                (now, float(filled_price), oid))
+                "fill_price=?, shares=?, notional=? WHERE id=?",
+                (now, float(filled_price), sh,
+                 round(sh * float(filled_price), 2), oid))
             c.commit()
-            logger.info("[maker] order %s FILLED @ %.2f (live=%s)", oid, filled_price, live)
+            logger.info("[maker] order %s FILLED %.1fsh @ %.2f (live=%s)",
+                        oid, sh, filled_price, live)
             continue
 
         # 2. Cancel conditions
@@ -256,12 +268,98 @@ def manage_open_orders(c, clob) -> None:
             ok = True
             if live and order_id:
                 ok = clob.cancel_order_by_id(order_id)
+                # Cancel-race check (2026-07-19): a taker can match the order
+                # in the window before the cancel lands. The cancel "succeeds"
+                # but tokens were delivered — re-read matched size and book the
+                # fill instead of erasing it (this exact race hid ~$22 of real
+                # fills as 'cancelled' rows).
+                st = clob.get_order_status(order_id)
+                if (st.get("size_matched") or 0) > 0:
+                    sh = float(st["size_matched"])
+                    fpx = st.get("filled_price") or q
+                    c.execute(
+                        "UPDATE maker_experiment_orders SET status='filled', "
+                        "filled_at=?, fill_price=?, shares=?, notional=? WHERE id=?",
+                        (now, float(fpx), sh, round(sh * float(fpx), 2), oid))
+                    c.commit()
+                    logger.info("[maker] order %s FILLED-in-cancel-race %.1fsh @ %.2f",
+                                oid, sh, fpx)
+                    continue
             if ok:
                 c.execute(
                     "UPDATE maker_experiment_orders SET status='cancelled', "
                     "cancel_reason=? WHERE id=?", (reason, oid))
                 c.commit()
                 logger.info("[maker] order %s cancelled (%s)", oid, reason)
+
+
+def reconcile_fills_from_activity(c) -> int:
+    """Self-healing truth pass: book live fills our polling missed.
+
+    2026-07-19: data-api /positions showed ~5-6 maker NO fills (~$22) that our
+    DB had as 'cancelled' — matches landed in the cancel race / between status
+    polls. Ground truth is the funder wallet's own /activity feed: any BUY of
+    one of our no_token_ids inside an order's open window IS our fill (the
+    experiment is the only thing buying these NO tokens at 5-share scale).
+    Re-books those rows as filled with the actual price/size. Idempotent.
+    """
+    import urllib.request
+    funder = (os.environ.get("POLYMARKET_FUNDER_ADDRESS") or "").lower()
+    if not funder:
+        return 0
+    rows = c.execute(
+        """SELECT id, no_token_id, posted_at, shares FROM maker_experiment_orders
+           WHERE live=1 AND status IN ('cancelled', 'open')
+             AND posted_at > ? """,
+        (_now() - 5 * 86400,),
+    ).fetchall()
+    if not rows:
+        return 0
+    try:
+        hdrs = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
+        acts: list[dict] = []
+        for off in (0, 500):
+            req = urllib.request.Request(
+                f"https://data-api.polymarket.com/activity?user={funder}"
+                f"&limit=500&offset={off}&type=TRADE", headers=hdrs)
+            with urllib.request.urlopen(req, timeout=15) as r:
+                page = json.loads(r.read().decode())
+            acts.extend(page)
+            if len(page) < 500:
+                break
+    except Exception as exc:
+        logger.debug("[maker] activity reconcile fetch failed: %s", exc)
+        return 0
+    # index our BUY activity by asset
+    by_asset: dict[str, list] = {}
+    for t in acts:
+        if (t.get("side") or "").upper() != "BUY":
+            continue
+        by_asset.setdefault(str(t.get("asset")), []).append(t)
+    booked = 0
+    for oid, no_tid, posted_at, shares in rows:
+        cand = by_asset.get(str(no_tid)) or []
+        hits = [t for t in cand
+                if int(t.get("timestamp") or 0) >= int(posted_at) - 60]
+        if not hits:
+            continue
+        sh = sum(float(t.get("size") or 0) for t in hits)
+        usdc = sum(float(t.get("usdcSize") or 0) for t in hits)
+        if sh <= 0:
+            continue
+        fpx = usdc / sh
+        first_ts = min(int(t["timestamp"]) for t in hits)
+        c.execute(
+            "UPDATE maker_experiment_orders SET status='filled', filled_at=?, "
+            "fill_price=?, shares=?, notional=?, cancel_reason=NULL WHERE id=?",
+            (first_ts, round(fpx, 4), sh, round(usdc, 2), oid))
+        c.commit()
+        booked += 1
+        logger.info("[maker] order %s RECONCILED-FILLED %.1fsh @ %.3f (activity truth)",
+                    oid, sh, fpx)
+        # consume so a second row on the same asset can't double-claim
+        by_asset[str(no_tid)] = [t for t in cand if t not in hits]
+    return booked
 
 
 def _yes_price_now(c, clob, cid: str, yes_tid: str | None) -> float | None:
@@ -315,8 +413,12 @@ def update_fill_marks_and_resolutions(c, clob) -> None:
            FROM maker_experiment_orders WHERE status = 'filled'"""
     ).fetchall()
     for oid, cid, yes_tid, fp, filled_at, m5, m30, shares, q in rows:
-        # marks in OUR token's space (NO) = 1 - yes_price
-        if m5 is None and now - int(filled_at) >= 300:
+        # marks in OUR token's space (NO) = 1 - yes_price. HONESTY WINDOW: a
+        # mark is only "the +5m mark" if taken within [5m, 30m) of the fill;
+        # late-discovered fills (activity reconcile) keep NULL marks rather
+        # than mislabeling the current price as a 5-minute mark.
+        age = now - int(filled_at)
+        if m5 is None and 300 <= age < 1800:
             y = _yes_price_now(c, clob, cid, yes_tid)
             if y is not None:
                 mark = 1.0 - y
@@ -324,7 +426,7 @@ def update_fill_marks_and_resolutions(c, clob) -> None:
                 c.execute("UPDATE maker_experiment_orders SET mark_5m=?, pickoff=? WHERE id=?",
                           (mark, pickoff, oid))
                 c.commit()
-        if m30 is None and now - int(filled_at) >= 1800:
+        if m30 is None and 1800 <= age < 7200:
             y = _yes_price_now(c, clob, cid, yes_tid)
             if y is not None:
                 c.execute("UPDATE maker_experiment_orders SET mark_30m=? WHERE id=?",
@@ -463,17 +565,36 @@ def post_new_quotes(c, clob) -> int:
 
 # ── Cycle + CLI ──────────────────────────────────────────────────────────────
 
+def _breaker_blocks_trading() -> bool:
+    """Account-level max-drawdown halt pauses NEW maker quotes too — a 30%+
+    account drawdown must stop all new risk regardless of which lane caused
+    it. (2026-07-19: previously the maker only honored the kill-switch file
+    and kept quoting through a breaker halt.) Fail-open on read errors: the
+    breaker is an account gate, not this experiment's own safety (the $25 /
+    $15 bounds are, and they're enforced in-code)."""
+    try:
+        from trading_platform.polymarket.circuit_breaker import CircuitBreaker
+        allowed, reason = CircuitBreaker().can_trade()
+        if not allowed:
+            logger.warning("[maker] circuit breaker blocks new quotes: %s", reason)
+        return not allowed
+    except Exception:
+        return False
+
+
 def run_cycle() -> dict:
     ensure_table()
     from trading_platform.polymarket.clob_client import ClobClient
     clob = ClobClient()
     c = _conn()
     try:
-        if _kill_switch_active():
+        if LIVE:
+            reconcile_fills_from_activity(c)  # self-heal missed fills first
+        if _kill_switch_active() or _breaker_blocks_trading():
             # manage/cancel existing, never post new while halted
             manage_open_orders(c, clob)
             update_fill_marks_and_resolutions(c, clob)
-            logger.warning("[maker] kill switch active — managed existing, no new quotes")
+            logger.warning("[maker] halted — managed existing, no new quotes")
             return {"posted": 0, "halted": True}
         manage_open_orders(c, clob)
         update_fill_marks_and_resolutions(c, clob)
