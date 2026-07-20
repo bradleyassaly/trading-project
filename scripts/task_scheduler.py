@@ -1413,9 +1413,21 @@ def _beat() -> None:
 
 def _stall_watchdog() -> None:
     import threading  # noqa: F401  (documents intent; thread started below)
+    last_check = time.time()
     while True:
         time.sleep(60)
-        stalled_s = time.time() - _LOOP_HEARTBEAT
+        now = time.time()
+        wall_jump = now - last_check
+        last_check = now
+        if wall_jump > 300:
+            # Our own 60s sleep took >5min of wall time — the HOST slept or
+            # suspended (this runs on a desktop that restarts/sleeps; the
+            # 2026-07-19 "7h stall" was actually a host restart). The loop
+            # wasn't wedged, the machine was gone: re-arm instead of firing
+            # a misleading self-restart.
+            _beat()
+            continue
+        stalled_s = now - _LOOP_HEARTBEAT
         if stalled_s > STALL_EXIT_S:
             msg = (f"[stall-watchdog] dispatch loop silent {stalled_s/60:.0f}m "
                    f"(> {STALL_EXIT_S//60}m) — self-terminating so docker "
@@ -1431,12 +1443,34 @@ def _stall_watchdog() -> None:
             os._exit(42)
 
 
+def _graceful_shutdown(signum, frame) -> None:
+    """SIGTERM (docker stop / host shutdown, ~10s grace): pull resting maker
+    quotes off the book before dying. This host is a DESKTOP that restarts and
+    sleeps — while it's down nobody manages the quotes (no cancels, no
+    near-resolution pullback), so stale bids sit exposed to pickoff for the
+    whole outage. Cancelling on the way out costs seconds and caps that risk;
+    the maker re-quotes fresh markets on revival."""
+    logger.warning("[shutdown] signal %s — cancelling resting maker quotes", signum)
+    if os.environ.get("MAKER_EXPERIMENT_LIVE", "0").strip() in ("1", "true", "yes"):
+        try:
+            subprocess.run(
+                [sys.executable, "-m",
+                 "trading_platform.polymarket.maker_experiment", "--cancel-all"],
+                timeout=8,
+            )
+        except Exception as exc:
+            logger.error("[shutdown] cancel-all failed: %s", exc)
+    os._exit(0)
+
+
 def main() -> None:
     logger.info("scheduler starting with %d tasks (stall self-heal: %dm)",
                 len([t for t in SCHEDULE if t.enabled]), STALL_EXIT_S // 60)
     _load_state(SCHEDULE)
     _persist_state(SCHEDULE)
+    import signal
     import threading
+    signal.signal(signal.SIGTERM, _graceful_shutdown)
     threading.Thread(target=_stall_watchdog, daemon=True,
                      name="stall-watchdog").start()
     while True:
