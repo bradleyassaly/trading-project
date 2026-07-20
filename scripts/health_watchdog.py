@@ -535,6 +535,37 @@ def check_trading_liveness() -> ComponentState:
         return ComponentState(name, False, f"check err: {str(e)[:80]}")
 
 
+def check_firehose() -> ComponentState:
+    """Chain-firehose liveness: distinct wallets ingested in the last 15min.
+
+    Catches every silent-degradation mode seen on 2026-07-20 in one signal:
+    persist dead (DB conn rot: 4.5h outage, hundreds of wallets -> 0),
+    narrow-mode reversion (.env regenerated without WS_FORCE_BROAD: ~2000 ->
+    <50 wallets), WS provider dark, or CHAIN_FIREHOSE_PERSIST flipped off.
+    Threshold 100 sits far below broad-mode reality (~2000+/15min) and above
+    narrow mode's tracked-only trickle."""
+    name = "firehose"
+    try:
+        conn = _watchdog_pg()
+        if conn is None:
+            return ComponentState(name, True, "skipped (sqlite backend)")
+        with conn:
+            row = conn.execute(
+                "SELECT COUNT(DISTINCT wallet), COUNT(*) FROM wallet_trades "
+                "WHERE synced_at >= %s", (int(time.time()) - 900,)
+            ).fetchone()
+        wallets, rows = int(row[0] or 0), int(row[1] or 0)
+        threshold = int(os.environ.get("WATCHDOG_FIREHOSE_MIN_WALLETS", "100"))
+        if wallets < threshold:
+            return ComponentState(
+                name, False,
+                f"only {wallets} distinct wallets ingested in 15m "
+                f"(threshold {threshold}) — firehose degraded/narrow/dead")
+        return ComponentState(name, True, f"{wallets} wallets / {rows} rows in 15m")
+    except Exception as e:
+        return ComponentState(name, False, f"check err: {str(e)[:80]}")
+
+
 def check_reconcile_age() -> ComponentState:
     """Days since reconcile_polymarket_truth last ran CLEAN (exit 0 = zero
     drifts). A long gap means our ledger may silently diverge from on-chain."""
@@ -648,7 +679,8 @@ def main() -> None:
                   check_hypothesis_drift(),
                   check_scheduler_consecutive_failures(),
                   check_balance_staleness(), check_poller_freshness(),
-                  check_reconcile_age(), check_trading_liveness()]
+                  check_reconcile_age(), check_trading_liveness(),
+                  check_firehose()]
         in_grace = (now - startup_ts) < STARTUP_GRACE_SECONDS
         if in_grace and any(not s.healthy for s in states):
             logger.info("[grace] suppressed alerts during startup window")

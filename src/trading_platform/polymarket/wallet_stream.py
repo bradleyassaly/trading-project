@@ -99,6 +99,21 @@ FIREHOSE_MODE = os.environ.get("CHAIN_FIREHOSE_PERSIST", "all").strip().lower()
 FIREHOSE_RPC_HTTP = os.environ.get(
     "POLYGON_RPC_HTTP", "https://polygon-bor-rpc.publicnode.com")
 
+# CTF (ConditionalTokens) lifecycle events — SPLIT mints a full outcome set
+# for $1 collateral, MERGE burns one back, REDEMPTION settles after
+# resolution. Invisible to /activity TRADE feeds and to OrderFilled — the
+# one-leg accounting blindness that made arb/MM wallets look like pure
+# losers (2026-07-16 fade-test artifact). Topic hashes derived at build time
+# via eth_utils.keccak of the canonical Gnosis CTF signatures (verified in
+# the prod container 2026-07-20); we subscribe by TOPIC ONLY (no address)
+# and self-verify relevance by requiring condition_id to exist in our
+# markets table — no trusted-address assumption needed.
+CTF_SPLIT_TOPIC = "0x2e6bb91f8cbcda0c93623c54d0403a43514fabc40084ec96b6d5379a74786298"
+CTF_MERGE_TOPIC = "0x6f13ca62553fcc2bcd2372180a43949c1e4cebba603901ede2f4e14f36b282ca"
+CTF_REDEEM_TOPIC = "0x2682012a4a4f1973119f1c9b90745d1bd91fa2bab387344f044cb3586864d18d"
+_CTF_TOPIC_TYPE = {CTF_SPLIT_TOPIC: "split", CTF_MERGE_TOPIC: "merge",
+                   CTF_REDEEM_TOPIC: "redeem"}
+
 
 def _parse_ws_urls() -> list[str]:
     """Endpoint pool: env list first (priority order), defaults appended."""
@@ -218,6 +233,23 @@ class WalletStream:
                         "address": EXCHANGES,
                         "topics": [ORDER_FILLED_TOPICS],
                     },
+                ],
+            },
+            # newHeads: one small frame per block (~0.5/s) carrying number +
+            # timestamp — feeds the block-ts cache so the firehose never has
+            # to fetch timestamps over HTTP (the HTTP fetcher got our IP
+            # 429-limited at publicnode within hours on 2026-07-20).
+            {
+                "jsonrpc": "2.0", "id": 11, "method": "eth_subscribe",
+                "params": ["newHeads"],
+            },
+            # CTF split/merge/redeem — topic-only (see _CTF_TOPIC_TYPE note).
+            {
+                "jsonrpc": "2.0", "id": 12, "method": "eth_subscribe",
+                "params": [
+                    "logs",
+                    {"topics": [[CTF_SPLIT_TOPIC, CTF_MERGE_TOPIC,
+                                 CTF_REDEEM_TOPIC]]},
                 ],
             },
         ]
@@ -354,12 +386,28 @@ class WalletStream:
             log = params.get("result") or {}
             topics = log.get("topics") or []
             if not topics:
+                # newHeads frame: a block header, not a log. Feed the
+                # block-ts cache (number/timestamp are hex strings).
+                num, ts = log.get("number"), log.get("timestamp")
+                if num and ts:
+                    cache = getattr(self, "_blk_ts_cache", None)
+                    if cache is None:
+                        cache = self._blk_ts_cache = {}
+                    if len(cache) > 4000:
+                        cache.clear()
+                    try:
+                        cache[num] = int(ts, 16)
+                    except (TypeError, ValueError):
+                        pass
                 return
             topic0 = topics[0].lower()
         except Exception as exc:
             logger.debug("log decode failed: %s", exc)
             return
 
+        if topic0 in _CTF_TOPIC_TYPE:
+            await self._handle_ctf_event(log, topics, _CTF_TOPIC_TYPE[topic0])
+            return
         if topic0 in (ORDER_FILLED_TOPIC.lower(), ORDER_FILLED_TOPIC_V2.lower()):
             # V1 and V2 share the decode: same indexed (orderHash, maker,
             # taker) and same first four data words; V2 just appends extras.
@@ -638,10 +686,123 @@ class WalletStream:
                         n += 1
                 return n
 
-            n = await asyncio.to_thread(_write)
+            sem = getattr(self, "_persist_sem", None)
+            if sem is None:
+                # Bound in-flight DB writes so a slow/stuck DB back-pressures
+                # instead of spawning unbounded tasks (stream must stay alive).
+                sem = self._persist_sem = asyncio.Semaphore(8)
+            async with sem:
+                try:
+                    n = await asyncio.to_thread(_write)
+                except Exception:
+                    # 2026-07-20: the cached WalletDB pinned ONE pooled
+                    # connection; when it died (pool max_lifetime / PG hiccup)
+                    # every write failed FOREVER and the DEBUG-level log hid a
+                    # 4.5h persist outage. Self-heal: drop the instance, retry
+                    # once on a fresh connection.
+                    if hasattr(self, "_firehose_db"):
+                        try:
+                            self._firehose_db._conn.close()
+                        except Exception:
+                            pass
+                        del self._firehose_db
+                    n = await asyncio.to_thread(_write)
             self._stats["firehose_rows"] = self._stats.get("firehose_rows", 0) + n
         except Exception as exc:
-            logger.debug("[firehose] persist failed: %s", exc)
+            self._stats["firehose_errors"] = self._stats.get("firehose_errors", 0) + 1
+            if self._stats["firehose_errors"] % 50 == 1:  # loud but not spammy
+                logger.warning("[firehose] persist failed (%d total): %s",
+                               self._stats["firehose_errors"], str(exc)[:120])
+
+    def _known_condition(self, cid: str) -> bool:
+        """Is this condition_id a Polymarket market we know? (10-min cached
+        set — the self-verifying filter for the topic-only CTF subscription:
+        non-Polymarket CTF deployments fail this and are dropped.)"""
+        import time as _t
+        now = _t.time()
+        if now - getattr(self, "_cid_cache_ts", 0) > 600:
+            try:
+                from trading_platform.polymarket.db_connection import get_connection
+                conn = get_connection()
+                try:
+                    rows = conn.execute(
+                        "SELECT condition_id FROM markets WHERE condition_id IS NOT NULL"
+                    ).fetchall()
+                finally:
+                    conn.close()
+                self._cid_cache = {r[0].lower() for r in rows if r[0]}
+            except Exception as exc:
+                logger.debug("[ctf] cid cache load failed: %s", exc)
+                self._cid_cache = getattr(self, "_cid_cache", set())
+            self._cid_cache_ts = now
+        return cid.lower() in getattr(self, "_cid_cache", set())
+
+    async def _handle_ctf_event(self, log: dict, topics: list, etype: str) -> None:
+        """Persist SPLIT/MERGE/REDEEM for Polymarket markets.
+
+        Layout (all three events share it): topics = [sig, stakeholder,
+        parentCollectionId, conditionId]; data head = [collateralToken,
+        offset(partition/indexSets), amount|payout]. Amounts are collateral
+        units (USDC 1e6). We store the stakeholder's cash-flow event keyed by
+        condition — the missing legs for FIFO on arb/MM wallets.
+        """
+        try:
+            if len(topics) < 4 or FIREHOSE_MODE == "off":
+                return
+            wallet = _addr_from_topic(topics[1])
+            cid = topics[3].lower()
+            if not self._known_condition(cid):
+                return
+            data_hex = (log.get("data") or "0x").lower().replace("0x", "")
+            if len(data_hex) < 64 * 3:
+                return
+            amount = int(data_hex[128:192], 16) / 1e6
+            if amount <= 0:
+                return
+            tx = log.get("transactionHash") or ""
+            ts = await self._block_timestamp(log.get("blockNumber"))
+
+            def _write() -> None:
+                from trading_platform.polymarket.db_connection import get_connection
+                conn = get_connection()
+                try:
+                    conn.execute("""
+                        CREATE TABLE IF NOT EXISTS wallet_ctf_events (
+                            id BIGSERIAL PRIMARY KEY,
+                            wallet TEXT NOT NULL,
+                            event_type TEXT NOT NULL,
+                            condition_id TEXT NOT NULL,
+                            amount_usdc DOUBLE PRECISION,
+                            transaction_hash TEXT,
+                            timestamp BIGINT,
+                            synced_at BIGINT
+                        )""")
+                    conn.execute("""
+                        CREATE UNIQUE INDEX IF NOT EXISTS wallet_ctf_events_key
+                        ON wallet_ctf_events (transaction_hash, wallet,
+                                              event_type, condition_id, amount_usdc)
+                    """)
+                    import time as _t
+                    conn.execute(
+                        "INSERT INTO wallet_ctf_events (wallet, event_type, "
+                        "condition_id, amount_usdc, transaction_hash, timestamp, "
+                        "synced_at) VALUES (?,?,?,?,?,?,?) ON CONFLICT DO NOTHING",
+                        (wallet, etype, cid, round(amount, 6), tx, ts, int(_t.time())))
+                    conn.commit()
+                finally:
+                    conn.close()
+
+            sem = getattr(self, "_persist_sem", None)
+            if sem is None:
+                sem = self._persist_sem = asyncio.Semaphore(8)
+            async with sem:
+                await asyncio.to_thread(_write)
+            self._stats["ctf_events"] = self._stats.get("ctf_events", 0) + 1
+        except Exception as exc:
+            self._stats["ctf_errors"] = self._stats.get("ctf_errors", 0) + 1
+            if self._stats["ctf_errors"] % 50 == 1:
+                logger.warning("[ctf] persist failed (%d total): %s",
+                               self._stats["ctf_errors"], str(exc)[:120])
 
     async def _maybe_trigger_exit_check(self, wallet: str, meta: dict | None) -> None:
         """Run the live exit monitor now if this whale-sell touches our book.

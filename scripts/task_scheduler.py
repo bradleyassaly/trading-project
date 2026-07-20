@@ -744,6 +744,16 @@ SCHEDULE: list[Task] = [
         critical=True,  # the only live entry signal — must not starve on recovery
     ),
     Task(
+        # 2026-07-20: firehose retention — archive non-roster fills older
+        # than FIREHOSE_RETAIN_DAYS (7) to daily parquet, then prune. The
+        # chain firehose writes ~8M rows/day; without this the DB grows
+        # ~2.5GB/day. Roster (wallet_profiles) history is kept forever.
+        name="firehose_retention",
+        cmd="python scripts/firehose_retention.py",
+        interval_seconds=24 * 3600,
+        description="Archive+prune non-roster firehose fills (daily)",
+    ),
+    Task(
         # 2026-07-16: continuous data-quality SLA. Samples tracked wallets
         # vs Polymarket's /activity and alerts when our fill coverage
         # degrades (the 23%-coverage failure class). Backs the data-product
