@@ -1390,14 +1390,61 @@ def _due_tasks(schedule: list[Task], now: float) -> list[Task]:
     return due
 
 
+# ── Dispatch-stall self-heal (2026-07-20) ────────────────────────────────────
+# Third multi-hour alive-but-not-dispatching stall (5.3h on 07-17, ~7h on
+# 07-19→20): the process stays up, the container reads healthy, but the
+# synchronous loop is wedged inside one task whose timeout never fired —
+# snapshots stop, the balance-staleness kill switch trips, and everything
+# waits for a human. Nothing OUTSIDE the loop can see this (the watchdog
+# container can't restart peers — no docker socket), so the process kills
+# ITSELF: a daemon thread hard-exits when no dispatch heartbeat lands for
+# STALL_EXIT_S, and docker's restart: unless-stopped revives the container.
+# Recovery-priority ordering (merged 07-17) then resumes the money loop first.
+# Threshold sits far above the longest legitimate task (~50min backtest) so a
+# slow-but-healthy pass never trips it.
+STALL_EXIT_S = int(os.environ.get("SCHEDULER_STALL_EXIT_S", str(90 * 60)))
+_LOOP_HEARTBEAT = time.time()
+
+
+def _beat() -> None:
+    global _LOOP_HEARTBEAT
+    _LOOP_HEARTBEAT = time.time()
+
+
+def _stall_watchdog() -> None:
+    import threading  # noqa: F401  (documents intent; thread started below)
+    while True:
+        time.sleep(60)
+        stalled_s = time.time() - _LOOP_HEARTBEAT
+        if stalled_s > STALL_EXIT_S:
+            msg = (f"[stall-watchdog] dispatch loop silent {stalled_s/60:.0f}m "
+                   f"(> {STALL_EXIT_S//60}m) — self-terminating so docker "
+                   f"restarts the scheduler")
+            logger.critical(msg)
+            try:
+                from trading_platform.polymarket.telegram_alerts import get_alerter
+                a = get_alerter()
+                if a.enabled:
+                    a._send(f"🔁 SCHEDULER SELF-RESTART\n{msg}", disable_notification=False)
+            except Exception:
+                pass
+            os._exit(42)
+
+
 def main() -> None:
-    logger.info("scheduler starting with %d tasks", len([t for t in SCHEDULE if t.enabled]))
+    logger.info("scheduler starting with %d tasks (stall self-heal: %dm)",
+                len([t for t in SCHEDULE if t.enabled]), STALL_EXIT_S // 60)
     _load_state(SCHEDULE)
     _persist_state(SCHEDULE)
+    import threading
+    threading.Thread(target=_stall_watchdog, daemon=True,
+                     name="stall-watchdog").start()
     while True:
+        _beat()
         now = time.time()
         ran_any = False
         for task in _due_tasks(SCHEDULE, now):
+            _beat()
             _run_task(task)
             ran_any = True
         if ran_any:
