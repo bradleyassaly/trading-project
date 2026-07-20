@@ -84,6 +84,21 @@ DEFAULT_WS_URLS = [
 # eth_subscribe filters they never serve) and rotate/escalate.
 SILENCE_REBOOT_SEC = int(os.environ.get("WS_SILENCE_REBOOT_SEC", "900"))
 
+# ── Chain firehose persist (2026-07-20) ──────────────────────────────────────
+# We already receive EVERY OrderFilled on both exchange contracts (broad
+# subscription) and used to discard all non-tracked wallets — the root cause
+# of the 2% realtime coverage vs Polymarket's own /activity. Now every decoded
+# fill is persisted to wallet_trades from BOTH perspectives (maker row + taker
+# row) with the BLOCK timestamp, so rows dedup exactly against data-api-sourced
+# rows on the composite fill key. Measured volume 2026-07-20: ~450k events/day
+# => ~900k wallet-rows/day (~27M/month; retention policy is a known follow-up).
+#   all    — persist every wallet's fills (the data-product goal; default)
+#   roster — persist only wallets present in wallet_profiles
+#   off    — legacy behavior (tracked-wallet dispatch only)
+FIREHOSE_MODE = os.environ.get("CHAIN_FIREHOSE_PERSIST", "all").strip().lower()
+FIREHOSE_RPC_HTTP = os.environ.get(
+    "POLYGON_RPC_HTTP", "https://polygon-bor-rpc.publicnode.com")
+
 
 def _parse_ws_urls() -> list[str]:
     """Endpoint pool: env list first (priority order), defaults appended."""
@@ -395,15 +410,9 @@ class WalletStream:
             return
         maker = _addr_from_topic(topics[2])
         taker = _addr_from_topic(topics[3])
-        if maker in self.watched:
-            wallet, role = maker, "maker"
-        elif taker in self.watched:
-            wallet, role = taker, "taker"
-        else:
-            return
-        self._stats["events_matched"] += 1
-        self._stats["order_filled_decoded"] = self._stats.get("order_filled_decoded", 0) + 1
 
+        # Decode BEFORE the tracked-wallet filter — the firehose persists
+        # every fill; only the fast-lane dispatch below is tracked-only.
         data_hex = (log.get("data") or "0x").lower().replace("0x", "")
         if len(data_hex) < 64 * 5:
             logger.debug("OrderFilled data too short: %d", len(data_hex))
@@ -420,13 +429,13 @@ class WalletStream:
         if maker_asset_id == 0 and taker_asset_id != 0:
             # Maker paid USDC → maker is BUYING the token
             # Price ≈ maker_amount (USDC) / taker_amount (shares)
-            side = "BUY" if role == "maker" else "SELL"
+            maker_side = "BUY"
             token_id = taker_asset_id
             usdc = maker_amount / 1e6
             shares = taker_amount / 1e6
         elif taker_asset_id == 0 and maker_asset_id != 0:
             # Maker sold token for USDC → maker is SELLING
-            side = "SELL" if role == "maker" else "BUY"
+            maker_side = "SELL"
             token_id = maker_asset_id
             usdc = taker_amount / 1e6
             shares = maker_amount / 1e6
@@ -435,6 +444,20 @@ class WalletStream:
             return
         price = usdc / shares if shares > 0 else 0
         tx_hash = log.get("transactionHash") or ""
+
+        if FIREHOSE_MODE != "off":
+            asyncio.create_task(self._persist_firehose(
+                log, maker, taker, maker_side, token_id, shares, price))
+
+        if maker in self.watched:
+            wallet, role = maker, "maker"
+        elif taker in self.watched:
+            wallet, role = taker, "taker"
+        else:
+            return
+        self._stats["events_matched"] += 1
+        self._stats["order_filled_decoded"] = self._stats.get("order_filled_decoded", 0) + 1
+        side = maker_side if role == "maker" else ("SELL" if maker_side == "BUY" else "BUY")
 
         logger.info(
             "[chain-trade] %s %s %s %.2f shares @ %.4f ($%.2f) tx=%s",
@@ -515,6 +538,110 @@ class WalletStream:
         self._last_poll[wallet] = now
         self._stats["polls_triggered"] += 1
         asyncio.create_task(self._poll_wallet(wallet))
+
+    async def _block_timestamp(self, block_hex: str | None) -> int:
+        """Block timestamp (cached per block; ~30 lookups/min worst case).
+        Falls back to arrival time — Polygon blocks are 2s, and the composite
+        fill key tolerates the rare mismatch as one duplicate row."""
+        import time as _t
+        if not block_hex:
+            return int(_t.time())
+        cache = getattr(self, "_blk_ts_cache", None)
+        if cache is None:
+            cache = self._blk_ts_cache = {}
+        if block_hex in cache:
+            return cache[block_hex]
+
+        def _fetch() -> int | None:
+            import json as _j
+            import urllib.request
+            body = _j.dumps({"jsonrpc": "2.0", "id": 1,
+                             "method": "eth_getBlockByNumber",
+                             "params": [block_hex, False]}).encode()
+            req = urllib.request.Request(
+                FIREHOSE_RPC_HTTP, data=body,
+                headers={"Content-Type": "application/json"})
+            with urllib.request.urlopen(req, timeout=6) as r:
+                res = _j.loads(r.read()).get("result") or {}
+            ts = int(res.get("timestamp", "0x0"), 16)
+            return ts or None
+
+        try:
+            ts = await asyncio.to_thread(_fetch)
+        except Exception:
+            ts = None
+        if not ts:
+            ts = int(_t.time())
+        if len(cache) > 4000:
+            cache.clear()
+        cache[block_hex] = ts
+        return ts
+
+    def _firehose_roster(self) -> set:
+        """wallet_profiles roster, cached 10 min (roster mode only)."""
+        import time as _t
+        now = _t.time()
+        if now - getattr(self, "_roster_ts", 0) < 600:
+            return getattr(self, "_roster_set", set())
+        try:
+            from trading_platform.polymarket.db_connection import get_connection
+            conn = get_connection()
+            try:
+                rows = conn.execute("SELECT wallet FROM wallet_profiles").fetchall()
+            finally:
+                conn.close()
+            self._roster_set = {r[0] for r in rows}
+        except Exception as exc:
+            logger.debug("[firehose] roster load failed: %s", exc)
+            self._roster_set = getattr(self, "_roster_set", set())
+        self._roster_ts = now
+        return self._roster_set
+
+    async def _persist_firehose(self, log: dict, maker: str, taker: str,
+                                maker_side: str, token_id: int,
+                                shares: float, price: float) -> None:
+        """Persist one decoded fill from BOTH wallet perspectives with the
+        block timestamp, so rows dedup exactly against data-api-sourced rows
+        on the composite fill key. This is the realtime completeness layer —
+        per-wallet API polling structurally cannot keep up with HF wallets."""
+        try:
+            tx = log.get("transactionHash") or ""
+            if not tx:
+                return
+            rows = [(maker, maker_side),
+                    (taker, "SELL" if maker_side == "BUY" else "BUY")]
+            if FIREHOSE_MODE == "roster":
+                roster = self._firehose_roster()
+                rows = [r for r in rows if r[0] in roster]
+                if not rows:
+                    return
+            ts = await self._block_timestamp(log.get("blockNumber"))
+            meta = self._market_for_token(str(token_id)) or {}
+
+            def _write() -> int:
+                from trading_platform.polymarket.wallet_db import WalletDB
+                if not hasattr(self, "_firehose_db"):
+                    self._firehose_db = WalletDB()
+                n = 0
+                import time as _t
+                for w, s in rows:
+                    if self._firehose_db.upsert_trade(
+                        wallet=w, proxy_wallet=w, asset=str(token_id),
+                        condition_id=meta.get("condition_id"),
+                        side=s, size=shares, price=price, timestamp=ts,
+                        title=meta.get("question") or "",
+                        slug=meta.get("slug") or "",
+                        outcome=meta.get("outcome") or "",
+                        event_slug="", transaction_hash=tx,
+                        synced_at=int(_t.time()),
+                    ):
+                        n += 1
+                return n
+
+            n = await asyncio.to_thread(_write)
+            self._stats["firehose_rows"] = self._stats.get("firehose_rows", 0) + n
+        except Exception as exc:
+            logger.debug("[firehose] persist failed: %s", exc)
 
     async def _maybe_trigger_exit_check(self, wallet: str, meta: dict | None) -> None:
         """Run the live exit monitor now if this whale-sell touches our book.
