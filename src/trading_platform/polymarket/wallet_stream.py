@@ -83,6 +83,10 @@ DEFAULT_WS_URLS = [
 # long, assume the subscription is broken (some public RPCs ack
 # eth_subscribe filters they never serve) and rotate/escalate.
 SILENCE_REBOOT_SEC = int(os.environ.get("WS_SILENCE_REBOOT_SEC", "900"))
+# Broad mode only: max seconds with ZERO OrderFilled events before we treat
+# the (heavy) fill subscription as silently dead and rotate — all of
+# Polymarket fills every few seconds, so 300s of nothing is unambiguous.
+FILL_SILENCE_REBOOT_SEC = int(os.environ.get("WS_FILL_SILENCE_REBOOT_SEC", "300"))
 
 # ── Chain firehose persist (2026-07-20) ──────────────────────────────────────
 # We already receive EVERY OrderFilled on both exchange contracts (broad
@@ -456,6 +460,7 @@ class WalletStream:
         """
         if len(topics) < 4:
             return
+        self._stats["last_fill_ts"] = time.time()
         maker = _addr_from_topic(topics[2])
         taker = _addr_from_topic(topics[3])
 
@@ -997,6 +1002,7 @@ class WalletStream:
                     self._reconnect_requested = False
                     # Start the silence clock at subscribe, not process start.
                     self._stats["last_event_ts"] = time.time()
+                    self._stats["last_fill_ts"] = time.time()
                     logger.info("[wallet-stream] subscribed (%s) — listening", mode)
                     while True:
                         if self._reconnect_requested:
@@ -1023,6 +1029,26 @@ class WalletStream:
                             continue
                         self._delivery_proven()
                         self._stats["last_event_ts"] = time.time()
+                        # FILL-silence check (2026-07-21): in broad mode the
+                        # newHeads/CTF subs keep frames flowing forever, so the
+                        # TimeoutError silence-reboot NEVER fires even when the
+                        # provider silently stops serving the (heavy) OrderFilled
+                        # sub — exactly what publicnode did at 16:41 on 07-20,
+                        # killing fill ingestion for 8.5h while CTF flowed. All
+                        # of Polymarket produces fills every few seconds; zero
+                        # OrderFilled for FILL_SILENCE_S on a broad sub = dead
+                        # subscription. Rotate.
+                        if mode == "broad" and (
+                                time.time() - self._stats.get("last_fill_ts", 0)
+                                > FILL_SILENCE_REBOOT_SEC):
+                            self._stats["silence_reboots"] += 1
+                            logger.error(
+                                "[wallet-stream] OrderFilled SILENT %.0fs on %s "
+                                "while other subs flow — rotating endpoint",
+                                time.time() - self._stats.get("last_fill_ts", 0), url)
+                            await ws.close()
+                            idx += 1
+                            break
                         msg = json.loads(raw)
                         if msg.get("method") == "eth_subscription":
                             await self._handle_log(msg.get("params") or {})
