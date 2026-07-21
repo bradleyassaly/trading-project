@@ -1013,6 +1013,24 @@ class WalletStream:
                             raw = await asyncio.wait_for(ws.recv(), timeout=30)
                         except asyncio.TimeoutError:
                             silent_for = time.time() - self._stats["last_event_ts"]
+                            # Broad mode: total silence should rotate on the
+                            # FILL clock (300s), not the general 900s one —
+                            # a hard-throttled endpoint (publicnode 01:25
+                            # 07-21: subscribed fine, zero frames ever) would
+                            # otherwise burn 15 dead minutes per attempt.
+                            if mode == "broad" and (
+                                    time.time() - self._stats.get("last_fill_ts", 0)
+                                    > FILL_SILENCE_REBOOT_SEC):
+                                self._stats["silence_reboots"] += 1
+                                logger.error(
+                                    "[wallet-stream] no OrderFilled for %.0fs "
+                                    "on %s (broad, total-silence path) — "
+                                    "rotating endpoint",
+                                    time.time() - self._stats.get("last_fill_ts", 0),
+                                    url)
+                                await ws.close()
+                                idx += 1
+                                break
                             if silent_for > SILENCE_REBOOT_SEC:
                                 self._stats["silence_reboots"] += 1
                                 logger.error(
