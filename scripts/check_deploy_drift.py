@@ -136,6 +136,48 @@ def code_moved_at(git_dir: str = GIT_DIR) -> float | None:
     return max(stamps) if stamps else None
 
 
+def lint_env_file(path: str = ".env") -> list[str]:
+    """Catch .env corruption before it silently disarms flags on a recreate.
+
+    2026-07-21 incident: `echo >>` onto a last-line-without-newline produced
+    'MAKER_EXPERIMENT_LIVE=1WS_FORCE_BROAD=1' as ONE line — both flags invalid
+    on any container recreate (the live maker experiment would have silently
+    disarmed). Rules: every non-comment line matches KEY=VALUE with a sane
+    key; no duplicate keys; no key containing '=' remnants of a mangled join
+    (a VALUE containing 'X_Y=' where X_Y looks like an env key).
+    """
+    import re
+    problems: list[str] = []
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            lines = fh.read().splitlines()
+    except FileNotFoundError:
+        return [f".env missing at {path}"]
+    seen: dict[str, int] = {}
+    key_rx = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+    mangle_rx = re.compile(r"[A-Z0-9][A-Z0-9_]{3,}=")
+    for i, ln in enumerate(lines, 1):
+        s = ln.strip()
+        if not s or s.startswith("#"):
+            continue
+        if "=" not in s:
+            problems.append(f".env:{i} not KEY=VALUE: {s[:60]!r}")
+            continue
+        key, val = s.split("=", 1)
+        if not key_rx.match(key):
+            problems.append(f".env:{i} malformed key {key[:40]!r}")
+        if key in seen:
+            problems.append(f".env:{i} duplicate key {key} (also line {seen[key]})")
+        seen[key] = i
+        # A value that itself contains SOMETHING_LIKE_A_KEY= is the mangled-
+        # join signature (unless quoted, comma-listed, or a URL query).
+        if (mangle_rx.search(val) and not val.startswith(('"', "'"))
+                and "://" not in val and "," not in val):
+            problems.append(
+                f".env:{i} value of {key} looks like a mangled join: {val[:60]!r}")
+    return problems
+
+
 def _alert(message: str) -> None:
     try:
         from trading_platform.polymarket.telegram_alerts import get_alerter
@@ -153,6 +195,7 @@ def main() -> int:
     args = ap.parse_args()
 
     problems: list[str] = []
+    problems.extend(lint_env_file())
 
     ref = checked_out_ref()
     expected_ref = f"refs/heads/{BRANCH}"

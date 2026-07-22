@@ -1450,6 +1450,19 @@ def _stall_watchdog() -> None:
                    f"(> {STALL_EXIT_S//60}m) — self-terminating so docker "
                    f"restarts the scheduler")
             logger.critical(msg)
+            # Capture WHERE the loop wedged before dying — four silent
+            # incidents and we still don't know the wedge site. Dump goes to
+            # a file (stderr/log pipe may itself be the dead component).
+            try:
+                import faulthandler
+                dump = PROJECT_ROOT / "logs" / "scheduler_stall_traceback.txt"
+                dump.parent.mkdir(parents=True, exist_ok=True)
+                with open(dump, "a") as fh:
+                    fh.write(f"\n===== stall dump {datetime.now(timezone.utc).isoformat()} "
+                             f"(silent {stalled_s/60:.0f}m) =====\n")
+                    faulthandler.dump_traceback(file=fh)
+            except Exception:
+                pass
             try:
                 from trading_platform.polymarket.telegram_alerts import get_alerter
                 a = get_alerter()
