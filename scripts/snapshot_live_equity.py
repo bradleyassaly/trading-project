@@ -72,30 +72,45 @@ def _get_locked_order_usdc() -> float:
         return 0.0
 
 
-def _get_maker_positions(conn) -> tuple[float, float, int]:
-    """(cost, market_value, count) of live maker-experiment fills held to
-    resolution — they live in maker_experiment_orders, not live_trades, so the
-    snapshot was blind to them (part of the 2026-07-19 phantom drawdown)."""
+def _get_maker_positions(conn) -> tuple[float, float, int, float]:
+    """(cost, market_value, count, unredeemed) of live maker-experiment
+    positions — they live in maker_experiment_orders, not live_trades, so the
+    snapshot was blind to them (part of the 2026-07-19 phantom drawdown).
+
+    2026-07-22: RESOLVED winners count too. Booking a fill as resolved used
+    to drop it from valuation entirely — but the winning NO tokens sit
+    UNREDEEMED in the wallet (no redeem sweep exists), worth $1/share at
+    settlement. 16 wins booked on 07-22 = ~$80 that would have vanished from
+    equity at the next snapshot, re-creating the phantom-drawdown/false-halt
+    class this function was added to fix."""
     try:
         rows = conn.execute(
-            """SELECT shares, fill_price, yes_token_id, condition_id
+            """SELECT status, shares, fill_price, yes_token_id, resolves_yes
                FROM maker_experiment_orders
-               WHERE live = 1 AND status = 'filled'"""
+               WHERE live = 1 AND status IN ('filled', 'resolved')"""
         ).fetchall()
     except Exception:
-        return 0.0, 0.0, 0
-    cost = mkt = 0.0
+        return 0.0, 0.0, 0, 0.0
+    cost = mkt = unredeemed = 0.0
     n = 0
-    for shares, fp, yes_tid, cid in rows:
+    for status, shares, fp, yes_tid, resolves_yes in rows:
         sh = float(shares or 0)
         if sh <= 0:
+            continue
+        if status == "resolved":
+            # We hold NO: winners pay $1/share until redeemed; losers are 0.
+            if resolves_yes == 0:
+                unredeemed += sh * 1.0
+                mkt += sh * 1.0
+                cost += sh * float(fp or 0)
+                n += 1
             continue
         cost += sh * float(fp or 0)
         yes_now = _get_mid(yes_tid) if yes_tid else None
         no_now = (1.0 - yes_now) if yes_now is not None else float(fp or 0)
         mkt += sh * no_now
         n += 1
-    return round(cost, 4), round(mkt, 4), n
+    return round(cost, 4), round(mkt, 4), n, round(unredeemed, 4)
 
 
 def _get_usdc() -> float | None:
@@ -390,10 +405,11 @@ def take_snapshot() -> dict:
     # 2026-07-19: two formerly-invisible capital buckets (their omission
     # created a ~$35 phantom drawdown that false-fired the circuit breaker):
     locked_orders = _get_locked_order_usdc()
-    mk_cost, mk_mkt, mk_n = _get_maker_positions(conn)
+    mk_cost, mk_mkt, mk_n, mk_unredeemed = _get_maker_positions(conn)
     open_cost += mk_cost
     open_mkt += mk_mkt
     counted += mk_n
+    unredeemed_value += mk_unredeemed
 
     total_equity = usdc + open_mkt + locked_orders
     unrealized   = open_mkt - open_cost

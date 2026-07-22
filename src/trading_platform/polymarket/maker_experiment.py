@@ -372,36 +372,66 @@ def _yes_price_now(c, clob, cid: str, yes_tid: str | None) -> float | None:
     return y
 
 
-def _resolve_lookup(c, cid: str) -> int | None:
-    """resolves_yes for a maker-quoted market. market_resolutions first, but it
-    covers only ~15% of ended markets (Gamma delists) and its backfill's scope
-    is trades tables, not ours — so fall back to markets.outcome_prices pinning
-    to 0/1 after the market's end date."""
+def _resolve_lookup(c, clob, cid: str, yes_tid: str | None,
+                    posted_at: int | None, htr_at_post: float | None) -> int | None:
+    """resolves_yes for a maker-quoted market, three fallbacks deep:
+
+    1. market_resolutions (canonical, ~15% coverage of ended markets).
+    2. markets.outcome_prices pinned to 0/1 — but Gamma STOPS REFRESHING
+       delisted markets, so ended markets freeze at stale mid values and
+       never pin (10 fills sat 'filled' for 90-110h on 2026-07-22, their
+       $38.45 phantom-locking the $25 budget and starving the poster).
+    3. CLOB last-trade price on the YES token: resolved markets pin to
+       ~0/~1 on the CLOB itself. Gated on the market being well past its
+       end time, computed from the maker row's OWN posted_at +
+       hours_to_resolve — no dependency on any refreshable table.
+    """
     res = c.execute(
         "SELECT resolves_yes FROM market_resolutions WHERE condition_id=? LIMIT 1",
         (cid,)).fetchone()
     if res is not None and res[0] is not None:
         return int(res[0])
+
+    # Ended? Prefer the self-contained estimate from the quote row itself.
+    ended = False
+    if posted_at and htr_at_post is not None:
+        ended = _now() > int(posted_at) + float(htr_at_post) * 3600 + 3600
+    if not ended:
+        row = c.execute(
+            "SELECT end_date_iso FROM markets WHERE condition_id=? LIMIT 1",
+            (cid,)).fetchone()
+        if row and row[0]:
+            h = _hours_to_resolve(row[0])
+            ended = h is not None and h < -1.0
+    if not ended:
+        return None
+
     row = c.execute(
-        "SELECT end_date_iso, outcome_prices FROM markets WHERE condition_id=? LIMIT 1",
+        "SELECT outcome_prices FROM markets WHERE condition_id=? LIMIT 1",
         (cid,)).fetchone()
-    if not row or not row[0]:
-        return None
-    htr = _hours_to_resolve(row[0])
-    if htr is None or htr > -1.0:   # not ended (plus 1h settlement grace)
-        return None
-    try:
-        prices = json.loads(row[1]) if isinstance(row[1], str) else row[1]
-        yes = float(prices[0]) if isinstance(prices, list) and prices else None
-    except Exception:
-        return None
-    if yes is None:
-        return None
-    if yes <= 0.01:
-        return 0
-    if yes >= 0.99:
-        return 1
-    return None  # ended but prices not pinned yet — check next cycle
+    if row and row[0]:
+        try:
+            prices = json.loads(row[0]) if isinstance(row[0], str) else row[0]
+            yes = float(prices[0]) if isinstance(prices, list) and prices else None
+        except Exception:
+            yes = None
+        if yes is not None:
+            if yes <= 0.01:
+                return 0
+            if yes >= 0.99:
+                return 1
+
+    # CLOB settlement pin — 2h extra grace so an in-flight resolution can't
+    # be misread; 0.03/0.97 mirrors the cost model's settlement band.
+    if yes_tid and posted_at and htr_at_post is not None and \
+            _now() > int(posted_at) + float(htr_at_post) * 3600 + 3 * 3600:
+        last = clob.get_last_price(yes_tid)
+        if last is not None:
+            if last <= 0.03:
+                return 0
+            if last >= 0.97:
+                return 1
+    return None  # ended but no source pins yet — check next cycle
 
 
 def update_fill_marks_and_resolutions(c, clob) -> None:
@@ -409,10 +439,12 @@ def update_fill_marks_and_resolutions(c, clob) -> None:
     now = _now()
     rows = c.execute(
         """SELECT id, condition_id, yes_token_id, fill_price, filled_at,
-                  mark_5m, mark_30m, shares, quote_price
+                  mark_5m, mark_30m, shares, quote_price, posted_at,
+                  hours_to_resolve
            FROM maker_experiment_orders WHERE status = 'filled'"""
     ).fetchall()
-    for oid, cid, yes_tid, fp, filled_at, m5, m30, shares, q in rows:
+    for (oid, cid, yes_tid, fp, filled_at, m5, m30, shares, q,
+         posted_at, htr_at_post) in rows:
         # marks in OUR token's space (NO) = 1 - yes_price. HONESTY WINDOW: a
         # mark is only "the +5m mark" if taken within [5m, 30m) of the fill;
         # late-discovered fills (activity reconcile) keep NULL marks rather
@@ -433,7 +465,7 @@ def update_fill_marks_and_resolutions(c, clob) -> None:
                           (1.0 - y, oid))
                 c.commit()
         # resolution booking
-        resolves_yes = _resolve_lookup(c, cid)
+        resolves_yes = _resolve_lookup(c, clob, cid, yes_tid, posted_at, htr_at_post)
         if resolves_yes is not None:
             # we hold NO: worth 1 if resolves NO, 0 if YES
             pnl = float(shares) * ((1.0 - float(fp)) if resolves_yes == 0 else (-float(fp)))
