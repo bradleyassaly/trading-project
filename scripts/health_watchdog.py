@@ -600,6 +600,43 @@ def check_reconcile_age() -> ComponentState:
 # this is ~30 min of sustained recovery.
 AUTO_CLEAR_CONSECUTIVE = int(os.environ.get("WATCHDOG_AUTO_CLEAR_CYCLES", "30"))
 
+# ── Scheduler auto-remediation (2026-07-22) ─────────────────────────────────
+# Fourth silent-scheduler incident in 5 days: process alive, zero dispatch,
+# zero logs — the in-process stall self-heal can't catch pre-main/log-dead
+# wedges, and the watchdog's alert-once design sent ONE Telegram at 01:21
+# then nothing for 23 hours. Detection without remediation. The watchdog now
+# RESTARTS the scheduler container via the docker socket when the scheduler
+# check fails this many consecutive cycles (3 x 300s = 15 min), rate-limited
+# to one remediation per 2h so a genuinely broken scheduler can't flap.
+SCHED_REMEDIATE_FAILURES = int(os.environ.get("WATCHDOG_SCHED_REMEDIATE_FAILURES", "3"))
+SCHED_REMEDIATE_COOLDOWN_S = int(os.environ.get("WATCHDOG_SCHED_REMEDIATE_COOLDOWN_S", str(2 * 3600)))
+DOCKER_SOCK = "/var/run/docker.sock"
+# Re-alert cadence for components that STAY failing (was: alert once, forever
+# silent — trivially missable).
+REALERT_INTERVAL_S = int(os.environ.get("WATCHDOG_REALERT_S", str(6 * 3600)))
+
+
+def _docker_restart(container: str, timeout_s: int = 10) -> bool:
+    """Restart a container via the docker socket (stdlib only)."""
+    import socket as _s
+    try:
+        sock = _s.socket(_s.AF_UNIX, _s.SOCK_STREAM)
+        sock.settimeout(timeout_s + 20)
+        sock.connect(DOCKER_SOCK)
+        req = (f"POST /containers/{container}/restart?t={timeout_s} HTTP/1.1\r\n"
+               f"Host: docker\r\nContent-Length: 0\r\n\r\n")
+        sock.sendall(req.encode())
+        resp = sock.recv(4096).decode(errors="replace")
+        sock.close()
+        ok = " 204 " in resp.split("\r\n", 1)[0] + " "
+        if not ok:
+            logger.error("[remediate] docker restart %s -> %s",
+                         container, resp[:120])
+        return ok
+    except Exception as exc:
+        logger.error("[remediate] docker socket restart failed: %s", exc)
+        return False
+
 
 def _maybe_clear_kill_switch(healthy_streak: int) -> None:
     """Un-trip a WATCHDOG-TRIPPED balance_staleness halt after sustained
@@ -671,6 +708,8 @@ def main() -> None:
     )
     failure_state: dict[str, float] = {}  # component_name → first_failure_ts
     fail_count: dict[str, int] = {}       # consecutive-failure counter
+    last_alert_ts: dict[str, float] = {}  # per-component re-alert throttle
+    last_remediation: dict[str, float] = {}  # auto-remediation cooldown
     balance_healthy_streak = 0            # for the scoped halt auto-clear
     while True:
         now = time.time()
@@ -706,6 +745,7 @@ def main() -> None:
                 and not in_grace
             ):
                 failure_state[s.name] = now
+                last_alert_ts[s.name] = now
                 msg = (
                     f"\U0001f534 <b>SYSTEM ALERT</b>\n"
                     f"Component <b>{s.name}</b> failing\n"
@@ -714,6 +754,38 @@ def main() -> None:
                 )
                 logger.warning("[alert] %s failing: %s", s.name, s.detail)
                 _send_alert(msg, loud=True)
+            elif (
+                not s.healthy and s.name in failure_state and not in_grace
+                and now - last_alert_ts.get(s.name, 0) >= REALERT_INTERVAL_S
+            ):
+                # Re-alert on STILL-failing components. The alert-once design
+                # sent a single Telegram about a dead scheduler at 01:21 on
+                # 2026-07-21 and then nothing for 23 hours.
+                last_alert_ts[s.name] = now
+                down_h = (now - failure_state[s.name]) / 3600
+                logger.warning("[re-alert] %s STILL failing (%.1fh): %s",
+                               s.name, down_h, s.detail)
+                _send_alert(
+                    f"\U0001f534 <b>STILL FAILING</b> ({down_h:.0f}h)\n"
+                    f"Component <b>{s.name}</b>\nDetail: {s.detail[:200]}",
+                    loud=True)
+
+            # Scheduler auto-remediation: dispatch-dead scheduler gets a
+            # container restart via the docker socket (rate-limited).
+            if (
+                s.name == "scheduler" and not s.healthy and not in_grace
+                and fail_count.get(s.name, 0) >= SCHED_REMEDIATE_FAILURES
+                and now - last_remediation.get("scheduler", 0) > SCHED_REMEDIATE_COOLDOWN_S
+            ):
+                last_remediation["scheduler"] = now
+                logger.warning("[remediate] scheduler failing %d cycles — "
+                               "restarting container", fail_count[s.name])
+                ok = _docker_restart("polymarket-scheduler")
+                _send_alert(
+                    f"\U0001f501 <b>AUTO-REMEDIATION</b>\nScheduler dispatch-dead "
+                    f"{fail_count[s.name]} cycles — container restart "
+                    f"{'succeeded' if ok else 'FAILED (check docker socket mount)'}.\n"
+                    f"Detail: {s.detail[:150]}", loud=True)
             elif s.healthy and s.name in failure_state:
                 duration_min = (now - failure_state[s.name]) / 60
                 msg = (

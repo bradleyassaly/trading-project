@@ -112,6 +112,9 @@ services:
   # ─── Scheduled tasks ───────────────────────────────────────────────────
   # The scheduler runs cron-like tasks against the trading-cli + the
   # local API. See scripts/task_scheduler.py for the schedule.
+  # NOTE: the watchdog service mounts the docker socket so it can RESTART a
+  # dispatch-dead scheduler (4 silent-scheduler incidents in 5 days; the
+  # in-process stall self-heal cannot catch pre-main/log-dead wedges).
   scheduler:
     build: .
     container_name: polymarket-scheduler
@@ -333,6 +336,10 @@ services:
     command: python scripts/health_watchdog.py
     volumes:
       - .:/app
+      # Docker socket: lets the watchdog RESTART a dispatch-dead scheduler
+      # (auto-remediation; rate-limited in health_watchdog.py). Works on
+      # Docker Desktop for Linux containers.
+      - /var/run/docker.sock:/var/run/docker.sock
     env_file: .env
     environment:
       - WALLET_DB_PATH=/app/data/polymarket/wallet_intelligence.db
