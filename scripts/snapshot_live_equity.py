@@ -77,15 +77,19 @@ def _get_maker_positions(conn) -> tuple[float, float, int, float]:
     positions — they live in maker_experiment_orders, not live_trades, so the
     snapshot was blind to them (part of the 2026-07-19 phantom drawdown).
 
-    2026-07-22: RESOLVED winners count too. Booking a fill as resolved used
-    to drop it from valuation entirely — but the winning NO tokens sit
-    UNREDEEMED in the wallet (no redeem sweep exists), worth $1/share at
-    settlement. 16 wins booked on 07-22 = ~$80 that would have vanished from
-    equity at the next snapshot, re-creating the phantom-drawdown/false-halt
-    class this function was added to fix."""
+    2026-07-22 v2 — TRUTH-KEYED: the first cut valued resolved winners at
+    $1/share as "unredeemed". WRONG by $80: Polymarket AUTO-REDEEMS winners
+    (59 REDEEM activity rows confirmed) — the proceeds were already inside
+    the USDC balance, so equity double-counted every win and printed $349
+    while the real portfolio was $232.88 (operator caught it). Rule now:
+    the data-api positions map is AUTHORITATIVE for maker tokens — a token
+    ABSENT from the wallet's positions is already cash (auto-redeemed) or
+    worthless, and counts 0. Only tokens Polymarket says we HOLD count."""
+    truth = _fetch_dataapi_positions()
     try:
         rows = conn.execute(
-            """SELECT status, shares, fill_price, yes_token_id, resolves_yes
+            """SELECT status, shares, fill_price, no_token_id, yes_token_id,
+                      resolves_yes
                FROM maker_experiment_orders
                WHERE live = 1 AND status IN ('filled', 'resolved')"""
         ).fetchall()
@@ -93,21 +97,29 @@ def _get_maker_positions(conn) -> tuple[float, float, int, float]:
         return 0.0, 0.0, 0, 0.0
     cost = mkt = unredeemed = 0.0
     n = 0
-    for status, shares, fp, yes_tid, resolves_yes in rows:
+    for status, shares, fp, no_tid, yes_tid, resolves_yes in rows:
         sh = float(shares or 0)
         if sh <= 0:
             continue
+        held_price = truth.get(str(no_tid)) if no_tid else None
+        if truth and held_price is None:
+            # Positions truth fetched and this token is NOT in the wallet:
+            # auto-redeemed (cash already reflects it) or lost. Value 0.
+            continue
         if status == "resolved":
-            # We hold NO: winners pay $1/share until redeemed; losers are 0.
-            if resolves_yes == 0:
+            if resolves_yes == 0 and held_price is not None:
+                # Still held AND won -> genuinely unredeemed settlement value.
                 unredeemed += sh * 1.0
                 mkt += sh * 1.0
                 cost += sh * float(fp or 0)
                 n += 1
             continue
         cost += sh * float(fp or 0)
-        yes_now = _get_mid(yes_tid) if yes_tid else None
-        no_now = (1.0 - yes_now) if yes_now is not None else float(fp or 0)
+        if held_price is not None:
+            no_now = float(held_price)
+        else:  # truth fetch failed entirely — fall back to mid estimate
+            yes_now = _get_mid(yes_tid) if yes_tid else None
+            no_now = (1.0 - yes_now) if yes_now is not None else float(fp or 0)
         mkt += sh * no_now
         n += 1
     return round(cost, 4), round(mkt, 4), n, round(unredeemed, 4)
@@ -353,6 +365,15 @@ def take_snapshot() -> dict:
     # construction instead of reconstructing it from books/mids.
     _truth_prices = _fetch_dataapi_positions()
     for direction, fp, ep, sh, token_id, size_usd, last_mark in open_rows:
+        # 2026-07-22: the positions truth-map is AUTHORITATIVE. A token absent
+        # from the wallet's own positions (when the fetch succeeded) is gone —
+        # auto-redeemed by Polymarket (winners become cash; 59 REDEEM rows
+        # confirmed) or otherwise exited without booking. Valuing such ghost
+        # rows at stale marks overstated equity ~$19.5 across 5 unbooked
+        # probe closures. Booking them properly is the reconciler's job; the
+        # snapshot must not count phantoms meanwhile.
+        if _truth_prices and str(token_id) not in _truth_prices:
+            continue
         price = float(fp) if fp is not None else float(ep)
         # On-chain balance is ground truth; DB shares is stale for GTC fills.
         on_chain = _get_conditional_balance(token_id) if token_id else None
