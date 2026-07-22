@@ -1048,6 +1048,13 @@ SCHEDULE: list[Task] = [
         name="live_equity_snapshot",
         cmd="python scripts/snapshot_live_equity.py",
         interval_seconds=60 * 60,
+        # 2026-07-21: CRITICAL — this snapshot is the balance-staleness kill
+        # switch's heartbeat AND the circuit breaker's live equity feed. When
+        # recovery backlogs starved it (twice this week), the kill switch
+        # stayed tripped for hours after the stack was healthy, freezing the
+        # maker experiment's gate progress. It must run in the first
+        # recovery wave with the money loop.
+        critical=True,
         description="Record live portfolio equity curve (USDC + token value, hourly)",
     ),
     Task(

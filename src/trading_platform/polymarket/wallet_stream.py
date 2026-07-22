@@ -117,6 +117,11 @@ CTF_MERGE_TOPIC = "0x6f13ca62553fcc2bcd2372180a43949c1e4cebba603901ede2f4e14f36b
 CTF_REDEEM_TOPIC = "0x2682012a4a4f1973119f1c9b90745d1bd91fa2bab387344f044cb3586864d18d"
 _CTF_TOPIC_TYPE = {CTF_SPLIT_TOPIC: "split", CTF_MERGE_TOPIC: "merge",
                    CTF_REDEEM_TOPIC: "redeem"}
+# Polymarket collateral addresses (lowercase) — the intrinsic per-event filter
+# for CTF events; see _handle_ctf_event.
+_CTF_COLLATERAL = {a.lower() for a in ("0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174",
+                                       "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359",
+                                       "0xc011a7e12a19f7b1f670d46f03b03f3342e82dfb")}
 
 
 def _parse_ws_urls() -> list[str]:
@@ -722,7 +727,14 @@ class WalletStream:
     def _known_condition(self, cid: str) -> bool:
         """Is this condition_id a Polymarket market we know? (10-min cached
         set — the self-verifying filter for the topic-only CTF subscription:
-        non-Polymarket CTF deployments fail this and are dropped.)"""
+        non-Polymarket CTF deployments fail this and are dropped.)
+
+        2026-07-21: markets alone is NOT enough — redemptions happen on
+        RESOLVED markets, which Gamma DELISTS, so a markets-only filter
+        silently dropped 100% of PayoutRedemption events (2,484 flowed
+        on-chain in one 3-min sample; we persisted zero). Union with
+        market_resolutions and conditions already seen in wallet_ctf_events
+        (a prior split/merge proves it's Polymarket)."""
         import time as _t
         now = _t.time()
         if now - getattr(self, "_cid_cache_ts", 0) > 600:
@@ -730,9 +742,11 @@ class WalletStream:
                 from trading_platform.polymarket.db_connection import get_connection
                 conn = get_connection()
                 try:
-                    rows = conn.execute(
-                        "SELECT condition_id FROM markets WHERE condition_id IS NOT NULL"
-                    ).fetchall()
+                    rows = conn.execute("""
+                        SELECT condition_id FROM markets WHERE condition_id IS NOT NULL
+                        UNION SELECT condition_id FROM market_resolutions
+                        UNION SELECT DISTINCT condition_id FROM wallet_ctf_events
+                    """).fetchall()
                 finally:
                     conn.close()
                 self._cid_cache = {r[0].lower() for r in rows if r[0]}
@@ -755,12 +769,30 @@ class WalletStream:
             if len(topics) < 4 or FIREHOSE_MODE == "off":
                 return
             wallet = _addr_from_topic(topics[1])
-            cid = topics[3].lower()
-            if not self._known_condition(cid):
-                return
             data_hex = (log.get("data") or "0x").lower().replace("0x", "")
             if len(data_hex) < 64 * 3:
                 return
+            # LAYOUTS DIFFER (verified on-chain 2026-07-21): split/merge do
+            # NOT index collateral -> topics=[sig,stakeholder,parentCid,cid],
+            # data=[collateral, offset, amount]. PayoutRedemption DOES index
+            # it -> topics=[sig,redeemer,collateral,parentCid], data=
+            # [conditionId, offset, payout]. The first cut parsed redeems
+            # with the split layout: cid=parentCollection(0x0), collateral=
+            # a conditionId fragment -> 100% of redeems (3,610/10min
+            # on-chain) rejected on garbage fields.
+            if etype == "redeem":
+                collateral = "0x" + topics[2][-40:].lower()
+                cid = "0x" + data_hex[0:64]
+            else:
+                collateral = "0x" + data_hex[24:64]
+                cid = topics[3].lower()
+            # Polymarket filter: collateral must be a Polymarket USDC —
+            # intrinsic to the event, so it survives Gamma delisting resolved
+            # markets (which silently killed the markets-table cid filter for
+            # redeems). cid-known fallback for any exotic-collateral market.
+            if collateral not in _CTF_COLLATERAL:
+                if not self._known_condition(cid):
+                    return
             amount = int(data_hex[128:192], 16) / 1e6
             if amount <= 0:
                 return
