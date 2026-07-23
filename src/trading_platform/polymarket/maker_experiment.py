@@ -661,7 +661,14 @@ def cancel_all() -> None:
 
 
 def evaluate() -> None:
-    """The pre-registered evaluation report."""
+    """The pre-registered evaluation report.
+
+    2026-07-23: the headline EV/$ and pickoff are LIVE-ONLY. The old query had
+    no live filter and pooled 4 dry-run resolved (optimistic-fill paper,
+    +0.13/$) into the live number, flattering the kill metric from the true
+    -0.087 to -0.058 — the same dry-as-live error class as the $349 equity
+    claim. A live-money gate must be judged on live fills only.
+    """
     ensure_table()
     c = _conn()
     try:
@@ -675,12 +682,13 @@ def evaluate() -> None:
                       COUNT(*) FILTER (WHERE pickoff IS NOT NULL),
                       AVG(filled_at - posted_at) FILTER (WHERE filled_at IS NOT NULL),
                       MIN(posted_at)
-               FROM maker_experiment_orders WHERE status != 'voided'"""
+               FROM maker_experiment_orders
+               WHERE status != 'voided' AND live = 1"""
         ).fetchone()
         (n_quotes, n_fills, n_resolved, pnl, resolved_notional,
          n_pickoff, n_marked, avg_ttf, first_post) = row
         days = ((_now() - int(first_post)) / 86400) if first_post else 0
-        print(f"\nMAKER EXPERIMENT — pre-registered evaluation "
+        print(f"\nMAKER EXPERIMENT — pre-registered evaluation (LIVE) "
               f"(day {days:.1f} of 14, {n_fills or 0}/50 fills)")
         print(f"  quotes: {n_quotes}  fills: {n_fills}  resolved: {n_resolved}")
         if n_quotes:
@@ -688,21 +696,25 @@ def evaluate() -> None:
                   + (f"   avg time-to-fill: {(avg_ttf or 0)/60:.0f}m" if avg_ttf else ""))
         if resolved_notional:
             print(f"  net EV/$ (resolved): {pnl/resolved_notional:+.3f}   realized: ${pnl:+.2f}")
+        # Pickoff: only trustworthy if we actually have live marks. Late-booked
+        # live fills miss the 5m mark window, so n_marked may be ~0 — say so
+        # rather than printing a dry-only rate as if it were live.
         if n_marked:
             pr = (n_pickoff or 0) / n_marked
-            print(f"  pickoff rate: {pr:.0%} ({n_pickoff}/{n_marked} marked fills)")
+            print(f"  pickoff rate: {pr:.0%} ({n_pickoff}/{n_marked} live-marked fills)")
+        else:
+            print("  pickoff rate: UNMEASURED (no live fills marked in-window — "
+                  "criterion inoperative; see mark-window bug)")
         print("\n  KILL if pickoff>0.50 (n>=20) | EV/$<=-0.10 (n>=30) | loss>=$15")
         print("  PROMOTE-consider if EV/$>=+0.05 (n>=50)")
-        # split live vs dry
-        for live in (1, 0):
-            r = c.execute(
-                """SELECT COUNT(*) FILTER (WHERE status IN ('filled','resolved')),
-                          COALESCE(SUM(realized_pnl),0)
-                   FROM maker_experiment_orders
-                   WHERE live=? AND status != 'voided'""", (live,)).fetchone()
-            if r and r[0]:
-                print(f"  [{'LIVE' if live else 'DRY (optimistic fills)'}] "
-                      f"fills={r[0]} realized=${r[1]:+.2f}")
+        # dry cohort shown separately for context (optimistic-fill paper).
+        r = c.execute(
+            """SELECT COUNT(*) FILTER (WHERE status IN ('filled','resolved')),
+                      COALESCE(SUM(realized_pnl),0)
+               FROM maker_experiment_orders
+               WHERE live=0 AND status != 'voided'""").fetchone()
+        if r and r[0]:
+            print(f"  [dry cohort, optimistic — NOT in gate] fills={r[0]} realized=${r[1]:+.2f}")
     finally:
         c.close()
 

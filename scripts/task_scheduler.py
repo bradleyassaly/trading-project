@@ -112,6 +112,11 @@ ALERT_TAIL_SPAM_EVERY = 100
 # Tasks that depend on commands not present in the CLI are commented
 # out with a TODO marker until the command is implemented.
 
+# Hard ceiling on any single task's runtime on the shared serial loop. Above
+# this a task is KILLED so the money path (snapshot, exits, maker) resumes;
+# it must not wedge the loop (2026-07-23 doom loop). Env-overridable.
+_MAX_TASK_TIMEOUT_S = int(os.environ.get("SCHEDULER_MAX_TASK_TIMEOUT_S", str(15 * 60)))
+
 SCHEDULE: list[Task] = [
     Task(
         name="paper_resolutions",
@@ -187,8 +192,15 @@ SCHEDULE: list[Task] = [
         # Faster validation than waiting for live fires to resolve —
         # lets us reject negative-EV signals before they consume paper
         # bankroll. Writes to signal_backtest_results.
-        cmd="python scripts/signal_engine_backtest.py --days 60 --write",
+        # 2026-07-23: --days 60 over the 5M-row (firehose-inflated)
+        # wallet_trades ran for HOURS and wedged the loop. Cut to 14d + an
+        # explicit 10-min timeout so it completes fast or is killed cleanly
+        # without starving the money path. (It validates whale/resolution
+        # signals that are mostly demoted/dead anyway; the live thesis is the
+        # maker experiment, which this does not touch.)
+        cmd="python scripts/signal_engine_backtest.py --days 14 --write",
         interval_seconds=7 * 24 * 3600,
+        timeout_override=600,
         description="Weekly signal-engine backtest (EV validation)",
     ),
     Task(
@@ -1283,6 +1295,19 @@ def _run_task(task: Task) -> None:
     try:
         while attempts < max_attempts:
             attempts += 1
+            # 2026-07-23 DOOM-LOOP FIX: the timeout was
+            # `interval_seconds // 2`, which for a weekly task (signal_engine_
+            # backtest, 604800s) is 84 HOURS — no timeout at all. A 60-day
+            # backtest over the now-5M-row wallet_trades wedged the single
+            # serial dispatch loop for hours; the stall self-heal restarted
+            # straight back into it, forever, starving snapshots (124-min
+            # cadence, about to false-trip the balance-staleness halt). NO
+            # task on the shared loop may block the money path beyond
+            # _MAX_TASK_TIMEOUT_S. A task needing longer must be moved off
+            # this loop (see the critical-loop-extraction work), not granted
+            # a longer wedge.
+            _timeout = task.timeout_override or max(60, task.interval_seconds // 2)
+            _timeout = min(_MAX_TASK_TIMEOUT_S, _timeout)
             result = subprocess.run(
                 task.cmd,
                 shell=True,
@@ -1290,8 +1315,7 @@ def _run_task(task: Task) -> None:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
-                timeout=(task.timeout_override
-                         or max(60, task.interval_seconds // 2)),
+                timeout=_timeout,
             )
             if result.returncode == 0:
                 break
