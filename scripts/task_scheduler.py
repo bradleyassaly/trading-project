@@ -1441,9 +1441,13 @@ def _due_tasks(schedule: list[Task], now: float) -> list[Task]:
 # ITSELF: a daemon thread hard-exits when no dispatch heartbeat lands for
 # STALL_EXIT_S, and docker's restart: unless-stopped revives the container.
 # Recovery-priority ordering (merged 07-17) then resumes the money loop first.
-# Threshold sits far above the longest legitimate task (~50min backtest) so a
-# slow-but-healthy pass never trips it.
-STALL_EXIT_S = int(os.environ.get("SCHEDULER_STALL_EXIT_S", str(90 * 60)))
+# 2026-07-23: dropped 90min -> 25min. Every task is now hard-capped at
+# _MAX_TASK_TIMEOUT_S (15min) and the heartbeat refreshes before EACH task, so
+# a dispatch loop silent >25min is genuinely wedged (not a slow task) — no
+# reason to bleed 90min before self-restarting. Cuts a real wedge's blast
+# radius from 90min to 25min (below the 120min balance-staleness halt, so a
+# wedge self-heals before it can false-trip the kill switch).
+STALL_EXIT_S = int(os.environ.get("SCHEDULER_STALL_EXIT_S", str(25 * 60)))
 _LOOP_HEARTBEAT = time.time()
 
 
