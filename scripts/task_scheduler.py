@@ -1494,26 +1494,35 @@ def _stall_watchdog() -> None:
                     a._send(f"🔁 SCHEDULER SELF-RESTART\n{msg}", disable_notification=False)
             except Exception:
                 pass
+            # os._exit bypasses the SIGTERM handler, so cancel resting maker
+            # quotes here too — else every self-restart orphans live orders on
+            # the book (unmanaged pickoff exposure until re-quote).
+            _cancel_maker_quotes("stall-self-restart")
             os._exit(42)
+
+
+def _cancel_maker_quotes(reason: str) -> None:
+    """Pull resting live maker quotes off the book (best-effort, ~8s). Called
+    on BOTH exit paths — SIGTERM and the stall self-restart — so a dying
+    scheduler never orphans live orders to unmanaged pickoff exposure."""
+    if os.environ.get("MAKER_EXPERIMENT_LIVE", "0").strip() not in ("1", "true", "yes"):
+        return
+    logger.warning("[shutdown] %s — cancelling resting maker quotes", reason)
+    try:
+        subprocess.run(
+            [sys.executable, "-m",
+             "trading_platform.polymarket.maker_experiment", "--cancel-all"],
+            timeout=8,
+        )
+    except Exception as exc:
+        logger.error("[shutdown] cancel-all failed: %s", exc)
 
 
 def _graceful_shutdown(signum, frame) -> None:
     """SIGTERM (docker stop / host shutdown, ~10s grace): pull resting maker
     quotes off the book before dying. This host is a DESKTOP that restarts and
-    sleeps — while it's down nobody manages the quotes (no cancels, no
-    near-resolution pullback), so stale bids sit exposed to pickoff for the
-    whole outage. Cancelling on the way out costs seconds and caps that risk;
-    the maker re-quotes fresh markets on revival."""
-    logger.warning("[shutdown] signal %s — cancelling resting maker quotes", signum)
-    if os.environ.get("MAKER_EXPERIMENT_LIVE", "0").strip() in ("1", "true", "yes"):
-        try:
-            subprocess.run(
-                [sys.executable, "-m",
-                 "trading_platform.polymarket.maker_experiment", "--cancel-all"],
-                timeout=8,
-            )
-        except Exception as exc:
-            logger.error("[shutdown] cancel-all failed: %s", exc)
+    sleeps — while it's down nobody manages the quotes."""
+    _cancel_maker_quotes(f"signal {signum}")
     os._exit(0)
 
 
