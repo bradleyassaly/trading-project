@@ -148,11 +148,15 @@ def test_narrow_subscribe_includes_watched_topics():
 
 def test_broad_subscribe_has_no_wallet_filter():
     s = _stream()
-    ws = FakeWS(responses=[{"id": 10, "result": "0xsub"}])
+    # Broad mode issues three subscriptions (2026-07-20): OrderFilled (id 10),
+    # newHeads (id 11), and the CTF split/merge/redeem topic sub (id 12).
+    ws = FakeWS(responses=[{"id": 10, "result": "0xsub"},
+                           {"id": 11, "result": "0xsub2"},
+                           {"id": 12, "result": "0xsub3"}])
     errors = asyncio.run(s._subscribe(ws, broad=True))
     assert errors == {}
-    assert len(ws.sent) == 1
-    params = ws.sent[0]["params"][1]
+    assert len(ws.sent) == 3
+    params = ws.sent[0]["params"][1]  # the OrderFilled sub (id 10)
     # both event generations OR'd at topic position 0
     assert params["topics"] == [[wst.ORDER_FILLED_TOPIC, wst.ORDER_FILLED_TOPIC_V2]]
     # V1 + V2 exchanges, all LOWERCASE (public bor endpoints match address

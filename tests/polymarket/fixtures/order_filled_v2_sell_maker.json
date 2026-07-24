@@ -1,0 +1,21 @@
+{
+  "_comment": "Fixture for tests/polymarket/test_chain_decoders.py. See _fixtures README. Do not hand-edit.",
+  "event": "OrderFilled (V2)",
+  "topic0": "0xd543adfd945773f1a62f74f0ee55a5e3b9b1a28262980ba90b1a89f2ea84d8ee",
+  "orientation": "maker SELL \u2014 makerAssetId=token, takerAssetId=0 (USDC)",
+  "source": "DERIVED (leg-swap of the real buy-maker capture)",
+  "_derivation": "The live V2 exchange never emits a maker-SELL OrderFilled (0 of 8,761 logs sampled 2026-07-23 \u2014 the USDC leg is always on the maker side; SELLs surface via the taker role). This log is the real buy-maker capture with data words [0]<->[1] and [2]<->[3] swapped, so it decodes to an identical token_id/usdc/shares/price but exercises the decoder's SELL branch. It exists only to guard that branch.",
+  "log": {
+    "address": "0xe111180000d2663c0091e4f400237545b87b996b",
+    "topics": [
+      "0xd543adfd945773f1a62f74f0ee55a5e3b9b1a28262980ba90b1a89f2ea84d8ee",
+      "0x6b7ee29343d821ed167ef82a2e53890eaa7e05beed139f67c8f11fea8e19027e",
+      "0x00000000000000000000000018e3861378b15f5a4ab5812ce006c7e8adfe1463",
+      "0x000000000000000000000000ce25e214d5cfe4f459cf67f08df581885aae7fdc"
+    ],
+    "data": "0xef718cbaf116e210a6260a4becc1057833cf3d90661da2640abed2b15785cba3000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000003085e00000000000000000000000000000000000000000000000000000000000146130000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+    "blockNumber": "0x568f9d5",
+    "transactionHash": "0x17c0938c78bfcce9a5e311ac26730dce26b6b3a7c5a4a41cb3da6c2302e7e0c5",
+    "logIndex": "0x192"
+  }
+}

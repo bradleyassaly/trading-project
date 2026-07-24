@@ -13,6 +13,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from trading_platform.polymarket import wallet_stream as wst
 from trading_platform.polymarket.wallet_stream import (
     ORDER_FILLED_TOPIC,
     WalletStream,
@@ -121,6 +122,10 @@ def test_unknown_token_falls_back_to_poll_only(monkeypatch):
 
 def test_flag_off_preserves_old_behavior(monkeypatch):
     monkeypatch.setenv("CHAIN_DIRECT_DISPATCH", "0")
+    # Isolate the chain-direct flag from the orthogonal firehose-persist path,
+    # which also resolves token→market metadata (added 2026-07-20). With both
+    # off, _market_for_token has no legitimate caller.
+    monkeypatch.setattr(wst, "FIREHOSE_MODE", "off")
     stream = _stream()
     stream._market_for_token = MagicMock()
     poller = MagicMock()

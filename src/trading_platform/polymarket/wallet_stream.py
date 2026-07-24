@@ -158,6 +158,122 @@ def _addr_from_topic(t: str) -> str:
     return "0x" + t[-40:]
 
 
+# ── Pure log decoders (extracted from the async handlers, 2026-07-23) ────────
+# These are the ONLY place the on-chain byte layouts live. They are pure and
+# synchronous (no self, no I/O), so every event type/orientation can be pinned
+# by a unit test against a real captured log — the 2026-07-21 REDEEM layout bug
+# (100% of redemptions silently dropped on garbage fields) was undetectable
+# precisely because the decode was inline, untested code inside an async
+# handler. The handlers now call these and apply policy (watched-wallet
+# routing, collateral filter, persistence) around the returned dict.
+
+def decode_order_filled(topics: list, data: str | None) -> dict | None:
+    """Decode an OrderFilled (V1 or V2) log into its economic fields.
+
+    Topic layout (3 indexed, shared V1/V2):
+      topics[0]=signature  topics[1]=orderHash  topics[2]=maker  topics[3]=taker
+    Data words (non-indexed; V1/V2 agree on the first four, V2 appends extras):
+      [0] makerAssetId  [1] takerAssetId
+      [2] makerAmountFilled  [3] takerAmountFilled  [4] fee (+ V2 extras)
+
+    asset_id 0 == USDC collateral; the non-zero side is the binary-outcome
+    conditional token. Direction is inferred from whichever leg is USDC:
+      * makerAssetId==0  → the maker paid USDC, i.e. maker is BUYING the token.
+      * takerAssetId==0  → the maker received USDC, i.e. maker is SELLING.
+    (Empirically the live V2 exchange always encodes the USDC leg on the maker
+    side, so a taker who is the watched wallet on a maker-BUY log is SELLING —
+    that inversion is the handler's job, not this decoder's.)
+
+    Returns None for a malformed log (fewer than 4 topics / fewer than 5 data
+    words) or a token↔token swap with no USDC leg (nothing to price). Amounts
+    are USDC/share units scaled by 1e6.
+    """
+    if len(topics) < 4:
+        return None
+    data_hex = (data or "0x").lower().replace("0x", "")
+    if len(data_hex) < 64 * 5:
+        return None
+    maker = _addr_from_topic(topics[2])
+    taker = _addr_from_topic(topics[3])
+
+    def _u256(i: int) -> int:
+        return int(data_hex[i * 64:(i + 1) * 64], 16)
+
+    maker_asset_id = _u256(0)
+    taker_asset_id = _u256(1)
+    maker_amount = _u256(2)
+    taker_amount = _u256(3)
+
+    if maker_asset_id == 0 and taker_asset_id != 0:
+        maker_side = "BUY"
+        token_id = taker_asset_id
+        usdc = maker_amount / 1e6
+        shares = taker_amount / 1e6
+    elif taker_asset_id == 0 and maker_asset_id != 0:
+        maker_side = "SELL"
+        token_id = maker_asset_id
+        usdc = taker_amount / 1e6
+        shares = maker_amount / 1e6
+    else:
+        return None
+    price = usdc / shares if shares > 0 else 0
+    return {
+        "maker": maker,
+        "taker": taker,
+        "maker_side": maker_side,
+        "token_id": token_id,
+        "shares": shares,
+        "usdc": usdc,
+        "price": price,
+        "maker_asset_id": maker_asset_id,
+        "taker_asset_id": taker_asset_id,
+    }
+
+
+def decode_ctf_event(etype: str, topics: list, data: str | None) -> dict | None:
+    """Decode a CTF PositionSplit / PositionsMerge / PayoutRedemption log.
+
+    CRITICAL: the layouts DIFFER per event (verified on-chain 2026-07-21) —
+    this is the exact bug that silently dropped 100% of redemptions:
+
+      split / merge:  topics=[sig, stakeholder, parentCollectionId, conditionId]
+                      data  =[collateralToken, partition/indexSets, amount]
+      redeem:         topics=[sig, redeemer, collateralToken, parentCollectionId]
+                      data  =[conditionId, indexSets, payout]
+
+    i.e. PayoutRedemption INDEXES the collateral token (topics[2]) and carries
+    the conditionId in DATA word 0 — the OPPOSITE of split/merge. Decoding a
+    redeem with the split layout reads conditionId=parentCollection (≈0x0) and
+    collateral=a conditionId fragment, so it never matches the Polymarket
+    collateral set and every redeem is rejected. The amount/payout is DATA
+    word 2 in USDC units (1e6) for all three.
+
+    Returns None for a malformed log (fewer than 4 topics / fewer than 3 data
+    words). The amount>0 check and the Polymarket-collateral membership test
+    are policy applied by the caller, not part of the decode.
+    """
+    if len(topics) < 4:
+        return None
+    data_hex = (data or "0x").lower().replace("0x", "")
+    if len(data_hex) < 64 * 3:
+        return None
+    wallet = _addr_from_topic(topics[1])
+    if etype == "redeem":
+        collateral = "0x" + topics[2][-40:].lower()
+        cid = "0x" + data_hex[0:64]
+    else:
+        collateral = "0x" + data_hex[24:64]
+        cid = topics[3].lower()
+    amount = int(data_hex[128:192], 16) / 1e6
+    return {
+        "wallet": wallet,
+        "event_type": etype,
+        "condition_id": cid,
+        "collateral": collateral,
+        "amount": amount,
+    }
+
+
 def _load_watched_wallets() -> set[str]:
     """Union of alpha-copyable + insider wallets. Refreshed at startup.
 
@@ -462,45 +578,27 @@ class WalletStream:
         For a BUY: maker's asset = USDC (id=0), taker's asset = token.
         For a SELL: maker's asset = token, taker's asset = USDC (id=0).
         We infer direction from whichever side has asset_id=0.
-        """
-        if len(topics) < 4:
-            return
-        self._stats["last_fill_ts"] = time.time()
-        maker = _addr_from_topic(topics[2])
-        taker = _addr_from_topic(topics[3])
 
+        The byte-level decode lives in the pure ``decode_order_filled`` so it
+        can be unit-tested against real captured logs; this handler applies
+        the tracked-wallet routing/dispatch policy around it.
+        """
+        # last_fill_ts feeds the fill-silence rotation clock: an OrderFilled
+        # log arrived (topics>=4) even if the specific decode is skipped.
+        if len(topics) >= 4:
+            self._stats["last_fill_ts"] = time.time()
         # Decode BEFORE the tracked-wallet filter — the firehose persists
         # every fill; only the fast-lane dispatch below is tracked-only.
-        data_hex = (log.get("data") or "0x").lower().replace("0x", "")
-        if len(data_hex) < 64 * 5:
-            logger.debug("OrderFilled data too short: %d", len(data_hex))
+        decoded = decode_order_filled(topics, log.get("data"))
+        if decoded is None:
             return
-        def _u256(i: int) -> int:
-            return int(data_hex[i * 64:(i + 1) * 64], 16)
-        maker_asset_id = _u256(0)
-        taker_asset_id = _u256(1)
-        maker_amount = _u256(2)
-        taker_amount = _u256(3)
-
-        # asset_id=0 represents USDC (collateral). The other side is the
-        # binary-outcome conditional token.
-        if maker_asset_id == 0 and taker_asset_id != 0:
-            # Maker paid USDC → maker is BUYING the token
-            # Price ≈ maker_amount (USDC) / taker_amount (shares)
-            maker_side = "BUY"
-            token_id = taker_asset_id
-            usdc = maker_amount / 1e6
-            shares = taker_amount / 1e6
-        elif taker_asset_id == 0 and maker_asset_id != 0:
-            # Maker sold token for USDC → maker is SELLING
-            maker_side = "SELL"
-            token_id = maker_asset_id
-            usdc = taker_amount / 1e6
-            shares = maker_amount / 1e6
-        else:
-            # Token-to-token — rare; skip
-            return
-        price = usdc / shares if shares > 0 else 0
+        maker = decoded["maker"]
+        taker = decoded["taker"]
+        maker_side = decoded["maker_side"]
+        token_id = decoded["token_id"]
+        usdc = decoded["usdc"]
+        shares = decoded["shares"]
+        price = decoded["price"]
         tx_hash = log.get("transactionHash") or ""
 
         if FIREHOSE_MODE != "off":
@@ -766,26 +864,18 @@ class WalletStream:
         condition — the missing legs for FIFO on arb/MM wallets.
         """
         try:
-            if len(topics) < 4 or FIREHOSE_MODE == "off":
+            if FIREHOSE_MODE == "off":
                 return
-            wallet = _addr_from_topic(topics[1])
-            data_hex = (log.get("data") or "0x").lower().replace("0x", "")
-            if len(data_hex) < 64 * 3:
+            # LAYOUTS DIFFER per event (verified on-chain 2026-07-21) — the
+            # redeem-vs-split layout bug that dropped 100% of redemptions lives
+            # in decode_ctf_event, now pure and unit-tested against real logs.
+            decoded = decode_ctf_event(etype, topics, log.get("data"))
+            if decoded is None:
                 return
-            # LAYOUTS DIFFER (verified on-chain 2026-07-21): split/merge do
-            # NOT index collateral -> topics=[sig,stakeholder,parentCid,cid],
-            # data=[collateral, offset, amount]. PayoutRedemption DOES index
-            # it -> topics=[sig,redeemer,collateral,parentCid], data=
-            # [conditionId, offset, payout]. The first cut parsed redeems
-            # with the split layout: cid=parentCollection(0x0), collateral=
-            # a conditionId fragment -> 100% of redeems (3,610/10min
-            # on-chain) rejected on garbage fields.
-            if etype == "redeem":
-                collateral = "0x" + topics[2][-40:].lower()
-                cid = "0x" + data_hex[0:64]
-            else:
-                collateral = "0x" + data_hex[24:64]
-                cid = topics[3].lower()
+            wallet = decoded["wallet"]
+            collateral = decoded["collateral"]
+            cid = decoded["condition_id"]
+            amount = decoded["amount"]
             # Polymarket filter: collateral must be a Polymarket USDC —
             # intrinsic to the event, so it survives Gamma delisting resolved
             # markets (which silently killed the markets-table cid filter for
@@ -793,7 +883,6 @@ class WalletStream:
             if collateral not in _CTF_COLLATERAL:
                 if not self._known_condition(cid):
                     return
-            amount = int(data_hex[128:192], 16) / 1e6
             if amount <= 0:
                 return
             tx = log.get("transactionHash") or ""
