@@ -787,19 +787,13 @@ SCHEDULE: list[Task] = [
         interval_seconds=6 * 3600,
         description="Deploy guard: local tree vs origin/main + restart drift (6h)",
     ),
-    Task(
-        # 2026-07-16: maker experiment — resting NO-side quotes on longshot
-        # sports markets near resolution, i.e. be the counterparty the
-        # dumb taker flow crosses into (three independent analyses converged
-        # on taker->maker; see memory 2026-07-16-fade-losers-test).
-        # Measurement-first with pre-registered kill/promote criteria in the
-        # module docstring. DRY-RUN unless MAKER_EXPERIMENT_LIVE=1 is set in
-        # the scheduler environment (operator-armed, ~$25 max outstanding).
-        name="maker_experiment",
-        cmd="python -m trading_platform.polymarket.maker_experiment",
-        interval_seconds=5 * 60,
-        description="Maker experiment: resting complement quotes vs dumb flow ($1-scale)",
-    ),
+    # MOVED 2026-07-23 → scripts/critical_loops.py (critical-loops container).
+    # maker_experiment managed resting LIVE quotes on the shared serial loop and
+    # died every time a batch job wedged the scheduler (4x in 5 days). It now
+    # runs in its own container with a hard-timeout thread so a batch wedge can't
+    # starve it, and that container — NOT this one — cancels resting quotes on
+    # shutdown (cancel_all is account-global; the scheduler's frequent restarts
+    # would otherwise yank the money loop's live book). See critical_loops.py.
     Task(
         # 2026-06-03: naive-copy experiment. Shadow lane (dry_run=1) testing
         # whether copying the top-50 high-WR cohort produces the +13.7%/47d
@@ -1056,19 +1050,12 @@ SCHEDULE: list[Task] = [
         interval_seconds=60 * 60,
         description="Record equity curve data point (hourly)",
     ),
-    Task(
-        name="live_equity_snapshot",
-        cmd="python scripts/snapshot_live_equity.py",
-        interval_seconds=60 * 60,
-        # 2026-07-21: CRITICAL — this snapshot is the balance-staleness kill
-        # switch's heartbeat AND the circuit breaker's live equity feed. When
-        # recovery backlogs starved it (twice this week), the kill switch
-        # stayed tripped for hours after the stack was healthy, freezing the
-        # maker experiment's gate progress. It must run in the first
-        # recovery wave with the money loop.
-        critical=True,
-        description="Record live portfolio equity curve (USDC + token value, hourly)",
-    ),
+    # MOVED 2026-07-23 → scripts/critical_loops.py (critical-loops container).
+    # live_equity_snapshot heartbeats the balance-staleness kill switch AND feeds
+    # the circuit breaker. Twice this week a recovery backlog on the shared serial
+    # loop starved it, leaving the kill switch tripped for hours after the stack
+    # was healthy. It now runs in the dedicated money-loop container, immune to
+    # batch-job backlogs. See critical_loops.py.
     Task(
         name="position_mark_to_market",
         cmd=(
@@ -1079,23 +1066,11 @@ SCHEDULE: list[Task] = [
         interval_seconds=30 * 60,
         description="Snapshot open positions with current unrealized P&L (every 30 min)",
     ),
-    Task(
-        name="live_position_monitor",
-        # Live trades have their own exit monitor (mirrors paper exits).
-        # Runs every 5 min so SL/TP/trailing exits fire promptly. The
-        # script is safe-by-default — sell failures leave position open
-        # and log; never crash. No-op when there are zero live positions.
-        cmd="python -m trading_platform.polymarket.live_position_monitor",
-        interval_seconds=5 * 60,
-        description="Live position auto-exit monitor (every 5min)",
-        critical=True,  # places live SL/TP/trailing exits — must not starve
-        # 2026-07-07 (audit F4): 270s (was max(60,150)=150s). The pass sleeps
-        # ~10s per pending exit plus HTTP; a 150s SIGKILL landed mid-pass,
-        # between placing a CLOB order and booking its fill. The advisory
-        # lock now prevents the next tick from overlapping, so a near-interval
-        # timeout is safe.
-        timeout_override=270,
-    ),
+    # MOVED 2026-07-23 → scripts/critical_loops.py (critical-loops container).
+    # live_position_monitor places live SL/TP/trailing exits; on the shared serial
+    # loop a batch wedge stopped exits from firing. It now runs in the dedicated
+    # money-loop container (270s hard timeout preserved so a kill never lands
+    # between placing a CLOB order and booking its fill). See critical_loops.py.
     Task(
         name="live_mark_logger",
         # 2026-07-12: fine-grained CLOB marks for open live positions within
@@ -1498,35 +1473,19 @@ def _stall_watchdog() -> None:
                     a._send(f"🔁 SCHEDULER SELF-RESTART\n{msg}", disable_notification=False)
             except Exception:
                 pass
-            # os._exit bypasses the SIGTERM handler, so cancel resting maker
-            # quotes here too — else every self-restart orphans live orders on
-            # the book (unmanaged pickoff exposure until re-quote).
-            _cancel_maker_quotes("stall-self-restart")
+            # 2026-07-23: maker-quote cancellation moved OUT of the scheduler —
+            # the maker experiment now runs in the critical-loops container,
+            # which owns its resting book and cancels on its OWN exit paths. The
+            # scheduler restarts far more often (self-heal + watchdog + batch
+            # churn) and cancel_all is account-global, so canceling here would
+            # repeatedly yank the money loop's live quotes off the book.
             os._exit(42)
 
 
-def _cancel_maker_quotes(reason: str) -> None:
-    """Pull resting live maker quotes off the book (best-effort, ~8s). Called
-    on BOTH exit paths — SIGTERM and the stall self-restart — so a dying
-    scheduler never orphans live orders to unmanaged pickoff exposure."""
-    if os.environ.get("MAKER_EXPERIMENT_LIVE", "0").strip() not in ("1", "true", "yes"):
-        return
-    logger.warning("[shutdown] %s — cancelling resting maker quotes", reason)
-    try:
-        subprocess.run(
-            [sys.executable, "-m",
-             "trading_platform.polymarket.maker_experiment", "--cancel-all"],
-            timeout=8,
-        )
-    except Exception as exc:
-        logger.error("[shutdown] cancel-all failed: %s", exc)
-
-
 def _graceful_shutdown(signum, frame) -> None:
-    """SIGTERM (docker stop / host shutdown, ~10s grace): pull resting maker
-    quotes off the book before dying. This host is a DESKTOP that restarts and
-    sleeps — while it's down nobody manages the quotes."""
-    _cancel_maker_quotes(f"signal {signum}")
+    """SIGTERM (docker stop / host shutdown): exit promptly. No maker cleanup —
+    that responsibility moved to the critical-loops container (see above)."""
+    logger.info("[shutdown] signal %s — exiting", signum)
     os._exit(0)
 
 

@@ -156,6 +156,49 @@ services:
       api:
         condition: service_healthy
 
+  # ─── Critical money loop (separate from the batch scheduler) ───────────
+  # 2026-07-23: the money-critical loops (live_equity_snapshot,
+  # live_position_monitor, maker_experiment) were EXTRACTED from the scheduler
+  # after it went silently dispatch-dead 4x in 5 days — every incident took the
+  # money loop down with it because it shared the scheduler's one serial loop
+  # (with a ~50-min backtest). This container runs ONLY those three, each in its
+  # own hard-timeout thread, so a batch-job wedge can never starve them again.
+  # It OWNS the resting maker quotes (cancels on shutdown); the scheduler no
+  # longer does. MAKER_EXPERIMENT_LIVE arms live quoting — comes from env_file
+  # (.env). Depends on postgres only (not api) for maximum isolation.
+  critical-loops:
+    build: .
+    container_name: polymarket-critical-loops
+    command: python scripts/critical_loops.py
+    volumes:
+      - .:/app
+    env_file: .env
+    environment:
+      - WALLET_DB_PATH=/app/data/polymarket/wallet_intelligence.db
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_USER=polymarket
+      - POSTGRES_PASSWORD=polymarket_dev
+      - POSTGRES_DB=polymarket
+      - DB_BACKEND=postgres
+      - PHASE_B_RESOLUTION_DECAY_ENABLED=1
+      - ENABLE_PER_SLICE_CALIB=1
+      # Cap numeric thread pools — up to 3 subprocesses can run concurrently
+      # (staggered startup), and pandas/pyarrow would otherwise each spawn a
+      # CPU-count thread pool + arena. Keeps peak RSS under the 512m cap.
+      - OMP_NUM_THREADS=2
+      - OPENBLAS_NUM_THREADS=2
+      - MKL_NUM_THREADS=2
+      - NUMEXPR_NUM_THREADS=2
+    restart: unless-stopped
+    # Money loops are light (short-lived subprocesses, no heavy parquet batch
+    # jobs like the scheduler) — 512m is ample with the thread-pool caps above.
+    mem_limit: 512m
+    memswap_limit: 512m
+    depends_on:
+      postgres:
+        condition: service_healthy
+
   # ─── Live signal collector ─────────────────────────────────────────────
   # Long-running CLOB WebSocket collector + signal engine. Subscribes
   # to the top N markets, watches whale wallets in wallet_intelligence.db,

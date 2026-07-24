@@ -218,6 +218,19 @@ def check_wallet_stream() -> ComponentState:
     return _check_heartbeat("wallet_stream", stale_s=180)
 
 
+def check_critical_loops() -> ComponentState:
+    """Money-loop runner heartbeat. As of 2026-07-23 the money-critical loops
+    (live_equity_snapshot / live_position_monitor / maker_experiment) run in a
+    SEPARATE container (scripts/critical_loops.py), extracted from the scheduler
+    after it went dispatch-dead 4x in 5 days and took the money loop down with
+    it each time. That container writes a 'critical_loops' service_health row
+    every ~60s and self-reports status='degraded' when a loop stops COMPLETING
+    (fresh heartbeat but stale last-success — the wallet_stream lesson). This
+    check catches the runner being dead/wedged; balance_staleness +
+    trading_liveness verify the OUTCOMES (fresh equity snapshot, live fills)."""
+    return _check_heartbeat("critical_loops", stale_s=180)
+
+
 def check_live_collect() -> ComponentState:
     """Detect silent WebSocket death via service_health heartbeat.
 
@@ -319,7 +332,7 @@ HEARTBEAT_PING_URL = os.environ.get("HEARTBEAT_PING_URL", "").strip()
 # Components whose failure should escalate the external monitor to a paging
 # state (ping the /fail endpoint) rather than a plain liveness ping. Soft
 # checks (disk, hypothesis_drift) are excluded — they shouldn't page the phone.
-_HEARTBEAT_HARD_COMPONENTS = {"api", "db", "scheduler", "live_collect"}
+_HEARTBEAT_HARD_COMPONENTS = {"api", "db", "scheduler", "critical_loops", "live_collect"}
 
 
 def _external_heartbeat(states: list[ComponentState]) -> None:
@@ -714,6 +727,7 @@ def main() -> None:
     while True:
         now = time.time()
         states = [check_api(), check_db(), check_scheduler(),
+                  check_critical_loops(),
                   check_live_collect(), check_wallet_stream(), check_disk(),
                   check_hypothesis_drift(),
                   check_scheduler_consecutive_failures(),
@@ -796,6 +810,27 @@ def main() -> None:
                 logger.info("[recover] %s back online", s.name)
                 _send_alert(msg, loud=False)
                 failure_state.pop(s.name, None)
+
+            # Critical-loops auto-remediation: same docker-socket restart as the
+            # scheduler, as a BACKSTOP. The container has its own in-process stall
+            # self-heal (os._exit → restart: unless-stopped); this catches the
+            # residual case where its heartbeat dies in a way the internal
+            # self-heal can't (stall thread itself dead, process fully hung, or
+            # container stopped). Rate-limited identically to the scheduler.
+            if (
+                s.name == "critical_loops" and not s.healthy and not in_grace
+                and fail_count.get(s.name, 0) >= SCHED_REMEDIATE_FAILURES
+                and now - last_remediation.get("critical_loops", 0) > SCHED_REMEDIATE_COOLDOWN_S
+            ):
+                last_remediation["critical_loops"] = now
+                logger.warning("[remediate] critical-loops failing %d cycles — "
+                               "restarting container", fail_count[s.name])
+                ok = _docker_restart("polymarket-critical-loops")
+                _send_alert(
+                    f"\U0001f501 <b>AUTO-REMEDIATION</b>\nCritical-loops runner "
+                    f"unhealthy {fail_count[s.name]} cycles — container restart "
+                    f"{'succeeded' if ok else 'FAILED (check docker socket mount)'}.\n"
+                    f"Detail: {s.detail[:150]}", loud=True)
 
             # N1 (b): auto-HALT on SUSTAINED failure of a SEVERE component
             # (untrustworthy balance/reconcile state). Higher threshold than a
