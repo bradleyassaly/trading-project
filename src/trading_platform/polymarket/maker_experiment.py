@@ -67,6 +67,12 @@ MAX_HOURS_TO_RESOLVE = 24.0
 CANCEL_UNDER_HOURS = 0.33         # cancel resting quotes <20min to resolution
 MAX_QUOTE_AGE_S = 45 * 60         # stale-quote cancel
 MAX_MID_DRIFT = 0.10              # book moved -> we're stale -> cancel
+# Late-booked live fills (reconcile_fills_from_activity books filled_at = the
+# on-chain time) can be first observed long after the +5m/+30m mark windows
+# closed. If the fill is caught before this cap AND the market is still live,
+# we take one "late" mark so pickoff is measurable; past the cap the mark has
+# decayed toward the resolution outcome, so we leave pickoff UNMEASURED instead.
+LATE_MARK_MAX_AGE_S = 6 * 3600
 YES_LONGSHOT_LO, YES_LONGSHOT_HI = 0.05, 0.40   # the dumb-flow band
 MIN_SPREAD = 0.02                 # only make when there is spread to earn
 MIN_VOLUME_24H = 500.0
@@ -104,12 +110,25 @@ def ensure_table() -> None:
                 fill_price DOUBLE PRECISION,
                 mark_5m DOUBLE PRECISION,
                 mark_30m DOUBLE PRECISION,
+                mark_late DOUBLE PRECISION,        -- late first-obs mark (basis='late')
                 resolved_at BIGINT,
                 resolves_yes BIGINT,
                 realized_pnl DOUBLE PRECISION,
-                pickoff BIGINT
+                pickoff BIGINT,
+                pickoff_basis TEXT                 -- which mark drove pickoff: 5m|30m|late
             )
         """)
+        # Additive migration for tables created before mark_late/pickoff_basis
+        # existed (CREATE TABLE IF NOT EXISTS won't add columns to an existing
+        # table). Idempotent; no-ops on a fresh table and on re-runs.
+        for ddl in (
+            "ALTER TABLE maker_experiment_orders ADD COLUMN IF NOT EXISTS mark_late DOUBLE PRECISION",
+            "ALTER TABLE maker_experiment_orders ADD COLUMN IF NOT EXISTS pickoff_basis TEXT",
+        ):
+            try:
+                c.execute(ddl)
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.debug("[maker] migration skipped (%s): %s", ddl[:60], exc)
         c.commit()
     finally:
         c.close()
@@ -434,38 +453,86 @@ def _resolve_lookup(c, clob, cid: str, yes_tid: str | None,
     return None  # ended but no source pins yet — check next cycle
 
 
+def _is_pickoff(mark: float, fill_price: float) -> int:
+    """Pre-registered pickoff test: our NO token lost >=20% of its fill value
+    shortly after the fill (informed flow crossed us). Same formula at every
+    horizon — only the mark's timestamp differs (tracked in pickoff_basis)."""
+    return 1 if mark <= float(fill_price) * 0.80 else 0
+
+
 def update_fill_marks_and_resolutions(c, clob) -> None:
-    """Post-fill measurement: +5m/+30m marks (pickoff) and resolution booking."""
+    """Post-fill measurement: adverse-selection marks (pickoff) + resolution.
+
+    Pickoff (pre-registered as mark_5m <= 80% of fill price) is computed from
+    the earliest mark we can honestly obtain, recorded in pickoff_basis:
+      '5m'   — the gold-standard mark, taken in [5m, 30m) of the fill.
+      '30m'  — the [30m, 2h) mark, used ONLY when the +5m window was missed.
+               Live fills booked late by reconcile_fills_from_activity() (their
+               filled_at is the on-chain time) routinely surface past the 5m
+               window; before this fallback their pickoff was never computed
+               (2026-07-23: 0 of 29 live fills marked while the reported "29%"
+               was all dry-run). Same criterion, lagged read.
+      'late' — a single mark taken at first observation for fills that missed
+               BOTH windows, but only while the market is still live and within
+               LATE_MARK_MAX_AGE_S; otherwise the mark has decayed into the
+               resolution outcome and we leave pickoff UNMEASURED (honest NULL).
+    Resolution-based adverse selection (a NO fill that resolved YES) is a
+    distinct, coarser signal — reported separately in evaluate(), never folded
+    into this mark-based pickoff (that would change the locked kill criterion).
+    """
     now = _now()
     rows = c.execute(
         """SELECT id, condition_id, yes_token_id, fill_price, filled_at,
-                  mark_5m, mark_30m, shares, quote_price, posted_at,
-                  hours_to_resolve
+                  mark_5m, mark_30m, mark_late, shares, quote_price, posted_at,
+                  hours_to_resolve, pickoff
            FROM maker_experiment_orders WHERE status = 'filled'"""
     ).fetchall()
-    for (oid, cid, yes_tid, fp, filled_at, m5, m30, shares, q,
-         posted_at, htr_at_post) in rows:
+    for (oid, cid, yes_tid, fp, filled_at, m5, m30, mlate, shares, q,
+         posted_at, htr_at_post, pickoff) in rows:
         # marks in OUR token's space (NO) = 1 - yes_price. HONESTY WINDOW: a
         # mark is only "the +5m mark" if taken within [5m, 30m) of the fill;
-        # late-discovered fills (activity reconcile) keep NULL marks rather
-        # than mislabeling the current price as a 5-minute mark.
+        # a later mark is stored under its true horizon (mark_30m / mark_late),
+        # never mislabeled as the 5-minute mark.
         age = now - int(filled_at)
+        # Resolution status is needed to gate the 'late' mark (a resolved
+        # market's price is settlement, not adverse selection) — look up once
+        # and reuse for booking below.
+        resolves_yes = _resolve_lookup(c, clob, cid, yes_tid, posted_at, htr_at_post)
+
         if m5 is None and 300 <= age < 1800:
             y = _yes_price_now(c, clob, cid, yes_tid)
             if y is not None:
                 mark = 1.0 - y
-                pickoff = 1 if mark <= float(fp) * 0.80 else 0
-                c.execute("UPDATE maker_experiment_orders SET mark_5m=?, pickoff=? WHERE id=?",
-                          (mark, pickoff, oid))
+                pickoff = _is_pickoff(mark, fp)
+                c.execute("UPDATE maker_experiment_orders SET mark_5m=?, pickoff=?, "
+                          "pickoff_basis='5m' WHERE id=?", (mark, pickoff, oid))
                 c.commit()
         if m30 is None and 1800 <= age < 7200:
             y = _yes_price_now(c, clob, cid, yes_tid)
             if y is not None:
-                c.execute("UPDATE maker_experiment_orders SET mark_30m=? WHERE id=?",
-                          (1.0 - y, oid))
+                mark = 1.0 - y
+                if pickoff is None:  # 5m never landed -> 30m carries pickoff
+                    pickoff = _is_pickoff(mark, fp)
+                    c.execute("UPDATE maker_experiment_orders SET mark_30m=?, pickoff=?, "
+                              "pickoff_basis='30m' WHERE id=?", (mark, pickoff, oid))
+                else:
+                    c.execute("UPDATE maker_experiment_orders SET mark_30m=? WHERE id=?",
+                              (mark, oid))
+                c.commit()
+        # 'late' capture: fill missed both windows (booked >2h after fill). Take
+        # one mark iff still unresolved and inside the staleness cap; else the
+        # criterion stays honestly UNMEASURED and resolution-adverse covers it.
+        if (pickoff is None and mlate is None and m5 is None and m30 is None
+                and resolves_yes is None
+                and 7200 <= age <= LATE_MARK_MAX_AGE_S):
+            y = _yes_price_now(c, clob, cid, yes_tid)
+            if y is not None:
+                mark = 1.0 - y
+                pickoff = _is_pickoff(mark, fp)
+                c.execute("UPDATE maker_experiment_orders SET mark_late=?, pickoff=?, "
+                          "pickoff_basis='late' WHERE id=?", (mark, pickoff, oid))
                 c.commit()
         # resolution booking
-        resolves_yes = _resolve_lookup(c, clob, cid, yes_tid, posted_at, htr_at_post)
         if resolves_yes is not None:
             # we hold NO: worth 1 if resolves NO, 0 if YES
             pnl = float(shares) * ((1.0 - float(fp)) if resolves_yes == 0 else (-float(fp)))
@@ -696,15 +763,40 @@ def evaluate() -> None:
                   + (f"   avg time-to-fill: {(avg_ttf or 0)/60:.0f}m" if avg_ttf else ""))
         if resolved_notional:
             print(f"  net EV/$ (resolved): {pnl/resolved_notional:+.3f}   realized: ${pnl:+.2f}")
-        # Pickoff: only trustworthy if we actually have live marks. Late-booked
-        # live fills miss the 5m mark window, so n_marked may be ~0 — say so
-        # rather than printing a dry-only rate as if it were live.
+        # Pickoff: mark-based, computed from the earliest honest mark (5m>30m>
+        # late). Late-booked live fills that missed every window stay NULL, so
+        # n_marked can be < n_fills — the breakdown shows which horizons the
+        # rate rests on (a 30m/late-only rate is a lagged read of the 5m gate).
         if n_marked:
             pr = (n_pickoff or 0) / n_marked
-            print(f"  pickoff rate: {pr:.0%} ({n_pickoff}/{n_marked} live-marked fills)")
+            bd = c.execute(
+                """SELECT COALESCE(pickoff_basis,'?'), COUNT(*)
+                   FROM maker_experiment_orders
+                   WHERE live=1 AND pickoff IS NOT NULL
+                   GROUP BY pickoff_basis ORDER BY pickoff_basis"""
+            ).fetchall()
+            basis = ", ".join(f"{int(n)}x{b}" for b, n in bd) or "?"
+            print(f"  pickoff rate: {pr:.0%} ({n_pickoff}/{n_marked} marked fills; "
+                  f"horizons: {basis})")
+            if not any(b == "5m" for b, _ in bd):
+                print("    (no +5m marks — rate is from +30m/late proxies of the "
+                      "pre-registered 5m criterion)")
         else:
             print("  pickoff rate: UNMEASURED (no live fills marked in-window — "
                   "criterion inoperative; see mark-window bug)")
+        # Resolution-based adverse selection: a NO fill that RESOLVED YES was on
+        # the wrong side at settlement. A distinct, coarser signal than pickoff
+        # (settlement, not a fast post-fill mark), but computable for EVERY
+        # resolved fill — so it covers the late-booked cohort the mark-based
+        # rate cannot. Context only; NOT the pre-registered kill metric.
+        radv = c.execute(
+            """SELECT COUNT(*) FILTER (WHERE resolves_yes=1),
+                      COUNT(*) FILTER (WHERE resolves_yes IS NOT NULL)
+               FROM maker_experiment_orders WHERE live=1 AND status='resolved'"""
+        ).fetchone()
+        if radv and radv[1]:
+            print(f"  resolution adverse-selection: {(radv[0] or 0)/radv[1]:.0%} "
+                  f"({radv[0]}/{radv[1]} NO fills resolved YES) — context, not the gate")
         print("\n  KILL if pickoff>0.50 (n>=20) | EV/$<=-0.10 (n>=30) | loss>=$15")
         print("  PROMOTE-consider if EV/$>=+0.05 (n>=50)")
         # dry cohort shown separately for context (optimistic-fill paper).
