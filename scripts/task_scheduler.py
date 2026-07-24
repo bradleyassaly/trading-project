@@ -548,6 +548,23 @@ SCHEDULE: list[Task] = [
         description="Daily: book resolved positions from data-api (anti-stuck)",
     ),
     Task(
+        # 2026-07-23: book positions Polymarket AUTO-REDEEMED for us. A
+        # redeemed winner is ABSENT from /positions (no SELL fill, tokens
+        # burned to USDC), so book_resolved_positions SKIPs it and the live
+        # monitor's dust settlement never sees the REDEEM payout — the row
+        # sat status='matched'/open forever, its win unbooked
+        # (realized_pnl_cumulative understated) and polluting open counts.
+        # Closes them from the funder wallet's own cash-flow truth
+        # (Σ SELL + Σ REDEEM − Σ BUY via /activity); the equity snapshot
+        # already zero-values these truth-absent tokens (074c1bc) so equity
+        # is conserved. Idempotent; runs AFTER book_resolved_positions so the
+        # /positions closer settles held-redeemable rows first.
+        name="reconcile_redeemed_positions",
+        cmd="python -m trading_platform.polymarket.redeem_reconciler --apply",
+        interval_seconds=24 * 3600,
+        description="Daily: book auto-redeemed positions from /activity (anti-stuck)",
+    ),
+    Task(
         name="circuit_breaker_daily_reset",
         # Inline Python so we don't depend on a CLI command — clears
         # daily_pnl + daily_halted on the cumulative-drawdown breaker.
