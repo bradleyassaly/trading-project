@@ -28,6 +28,10 @@ load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
 
 from trading_platform.polymarket.db_connection import get_connection
 
+# Absolute share-drift floor. Kept in lock-step with the reconciler's
+# SHARES_DRIFT_ABS so the corrector fixes exactly what the detector flags.
+SHARES_DRIFT_ABS = 0.5
+
 
 def _make_clob():
     from py_clob_client_v2 import ClobClient, ApiCreds
@@ -87,8 +91,11 @@ def main():
         # The docstring always said "If on-chain > 0"; the code didn't.
         if real <= 0:
             continue
-        # Compute drift; flag if > 5 shares OR > 5% of db value
-        threshold = max(5.0, (db_sh or 0) * 0.05)
+        # Compute drift; flag if > SHARES_DRIFT_ABS OR > 5% of db value
+        # (matches the reconciler detector so it corrects what it flags —
+        # 2026-07-24: was 5.0 while the detector flags at 0.5, so small
+        # drifts like #6348 db=2 vs on-chain=3 were flagged-forever-never-fixed).
+        threshold = max(SHARES_DRIFT_ABS, (db_sh or 0) * 0.05)
         if db_sh is None or abs(real - db_sh) > threshold:
             db_disp = f"{db_sh:.2f}" if db_sh is not None else "NULL"
             print(f"  #{lid} {sig:<22} {di:<5} db={db_disp:>10}  on-chain={real:>10.2f}  diff={real - (db_sh or 0):+.2f}")

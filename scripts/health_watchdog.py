@@ -390,6 +390,11 @@ def check_scheduler_consecutive_failures() -> ComponentState:
     for t in data.get("tasks", []):
         if not t.get("enabled", True):
             continue
+        # A designed drift-exit (last_status='drift') is not a crash — the
+        # scheduler already holds consecutive_failures at 0 for it, but skip
+        # explicitly so a stale pre-fix counter can't page as a crash.
+        if t.get("last_status") == "drift":
+            continue
         cf = int(t.get("consecutive_failures", 0) or 0)
         if cf >= 5:
             bad.append(f"{t['name']}={cf}x")
@@ -598,10 +603,15 @@ def check_reconcile_age() -> ComponentState:
     if last_run is None:
         return ComponentState(name, False, "reconcile has never run")
     age = time.time() - float(last_run)
-    # 'failed' = the reconciler exits 2 on drift; that's an outstanding drift.
+    # 'drift' = the reconciler completed and found DB-vs-on-chain drift.
+    # Unhealthy (investigate + book at source) but NOT a crash.
+    if status == "drift":
+        return ComponentState(name, False,
+                              f"reconcile DRIFT outstanding (last run {age/3600:.0f}h ago)")
+    # 'failed' = the reconciler process actually crashed (exit 1 / timeout).
     if status == "failed":
         return ComponentState(name, False,
-                              f"reconcile drift OUTSTANDING (last run {age/3600:.0f}h ago)")
+                              f"reconcile CRASHED (not drift) — last run {age/3600:.0f}h ago")
     if age > RECONCILE_MAX_AGE_S:
         return ComponentState(name, False,
                               f"no clean reconcile in {age/3600:.0f}h")

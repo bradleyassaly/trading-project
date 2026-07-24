@@ -61,12 +61,23 @@ class Task:
     interval_seconds: int
     description: str
     last_run_at: float | None = None
-    last_status: str | None = None  # 'ok' | 'failed' | None
+    last_status: str | None = None  # 'ok' | 'failed' | 'drift' | None
     last_duration_s: float | None = None
     last_error: str | None = None
     enabled: bool = True
     consecutive_failures: int = 0
     first_failure_at: float | None = None
+    # A task may exit non-zero BY DESIGN to signal a business finding rather
+    # than a crash — reconcile_polymarket_truth exits 2 on DB-vs-on-chain
+    # drift (errors:0). That is not a task failure; counting it as one inflated
+    # consecutive_failures and mis-fired the crash ladder for 63+h while the
+    # reconciler was healthy (2026-07-23). When exit == drift_exit_code we
+    # record last_status='drift' and leave the crash counters untouched; the
+    # drift is surfaced by monitor_alerts (log) + the watchdog reconcile_age
+    # check (status='drift'), not the failure path.
+    drift_exit_code: int | None = None
+    last_drift_at: float | None = None
+    consecutive_drifts: int = 0
     # Trading-critical (the live money loop: entry signal + exit monitor).
     # The run loop executes due tasks synchronously in one pass, so a slow
     # batch job can starve these. critical=True makes them run FIRST every
@@ -460,6 +471,10 @@ SCHEDULE: list[Task] = [
         cmd="python /app/scripts/reconcile_polymarket_truth.py",
         interval_seconds=4 * 3600,
         description="Reconcile DB cash + position shares vs on-chain reality",
+        # Exit 2 == "drift detected" (a designed finding, errors:0), NOT a
+        # crash. Surface it as its own state so a drifting reconciler stops
+        # inflating the crash-failure ladder. A real crash still exits 1.
+        drift_exit_code=2,
     ),
     Task(
         # 2026-05-23: per-wallet revenue attribution. Rolls up live_trades
@@ -1331,8 +1346,29 @@ def _run_task(task: Task) -> None:
             task.last_error = None
             task.consecutive_failures = 0
             task.first_failure_at = None
+            task.consecutive_drifts = 0
+            task.last_drift_at = None
             logger.info("[ok ] %s in %.1fs%s", task.name, elapsed,
                         f" ({attempts} attempts)" if attempts > 1 else "")
+            if prior_failures > 0:
+                _send_recovery_alert(task, prior_failures)
+        elif (task.drift_exit_code is not None
+              and result.returncode == task.drift_exit_code):
+            # Designed drift-exit — the task ran to completion and reported a
+            # finding, it did NOT crash. Reset the crash counters (a clean run
+            # happened) and record 'drift' distinctly. No crash alert; drift is
+            # surfaced by monitor_alerts (log) + watchdog reconcile_age.
+            prior_failures = task.consecutive_failures
+            task.last_status = "drift"
+            task.last_error = None
+            task.consecutive_failures = 0
+            task.first_failure_at = None
+            task.consecutive_drifts += 1
+            task.last_drift_at = started
+            logger.warning(
+                "[drift] %s exit=%d — drift detected (%d consecutive); "
+                "not a crash, crash-counter reset",
+                task.name, result.returncode, task.consecutive_drifts)
             if prior_failures > 0:
                 _send_recovery_alert(task, prior_failures)
         else:
@@ -1403,6 +1439,8 @@ def _load_state(tasks: list[Task]) -> None:
         t.last_error = row.get("last_error")
         t.consecutive_failures = int(row.get("consecutive_failures") or 0)
         t.first_failure_at = row.get("first_failure_at")
+        t.consecutive_drifts = int(row.get("consecutive_drifts") or 0)
+        t.last_drift_at = row.get("last_drift_at")
         if t.last_run_at is not None:
             restored += 1
     logger.info("scheduler restored %d task timers from state", restored)

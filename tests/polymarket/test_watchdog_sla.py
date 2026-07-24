@@ -34,10 +34,22 @@ def test_reconcile_clean_recent_is_healthy(hw):
 
 
 def test_reconcile_drift_outstanding_unhealthy(hw):
+    # 2026-07-23: the reconciler's designed drift-exit (code 2) is now recorded
+    # as last_status='drift', distinct from a crash ('failed'). Drift is still
+    # unhealthy and still says "drift".
+    _write_state(hw, [{"name": "reconcile_polymarket_truth",
+                       "last_run_at": time.time() - 3600, "last_status": "drift"}])
+    s = hw.check_reconcile_age()
+    assert not s.healthy and "drift" in s.detail.lower()
+
+
+def test_reconcile_crash_reads_as_crash_not_drift(hw):
+    # A real crash (exit 1 / timeout) is 'failed' and must read as a crash,
+    # not be mislabelled as drift.
     _write_state(hw, [{"name": "reconcile_polymarket_truth",
                        "last_run_at": time.time() - 3600, "last_status": "failed"}])
     s = hw.check_reconcile_age()
-    assert not s.healthy and "drift" in s.detail.lower()
+    assert not s.healthy and "crash" in s.detail.lower()
 
 
 def test_reconcile_too_old_unhealthy(hw):
