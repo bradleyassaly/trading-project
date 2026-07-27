@@ -30,7 +30,23 @@ from pathlib import Path
 from trading_platform.polymarket.db_connection import get_connection
 
 ARCHIVE_DIR = Path("data/polymarket/firehose_archive")
-BATCH = 100_000
+BATCH = int(__import__("os").environ.get("FIREHOSE_PRUNE_BATCH", "100000"))
+# Roll to a new parquet part once the day file exceeds this: the append path
+# is read-whole-file + concat + rewrite, which is quadratic in file size and
+# holds the entire file in RAM — fatal on a multi-day catch-up backlog.
+ROLL_BYTES = int(__import__("os").environ.get("FIREHOSE_ARCHIVE_ROLL_BYTES",
+                                              str(256 * 1024 * 1024)))
+
+
+def _archive_path(day: str) -> Path:
+    """Day file, rolling to fills_{day}_pN.parquet when the current part
+    is full (bounds the concat-rewrite cost and RAM per batch)."""
+    out = ARCHIVE_DIR / f"fills_{day}.parquet"
+    n = 0
+    while out.exists() and out.stat().st_size >= ROLL_BYTES:
+        n += 1
+        out = ARCHIVE_DIR / f"fills_{day}_p{n}.parquet"
+    return out
 
 
 def main():
@@ -70,6 +86,8 @@ def main():
                WHERE wt.synced_at < ?
                  AND NOT EXISTS (SELECT 1 FROM wallet_profiles wp
                                  WHERE wp.wallet = wt.wallet)
+                 AND NOT EXISTS (SELECT 1 FROM wallet_alpha_scores was
+                                 WHERE was.wallet = wt.wallet)
                ORDER BY wt.id LIMIT ?""",
             (cutoff, BATCH),
         ).fetchall()
@@ -81,13 +99,16 @@ def main():
         df = pl.DataFrame([dict(zip(cols, r)) for r in rows],
                           infer_schema_length=None)
         day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        out = ARCHIVE_DIR / f"fills_{day}.parquet"
-        if out.exists():  # append via concat (daily files stay modest)
+        out = _archive_path(day)
+        if out.exists():  # append via concat (parts stay under ROLL_BYTES)
             df = pl.concat([pl.read_parquet(out), df], how="vertical_relaxed")
         df.write_parquet(out, compression="zstd")
         ids = [r[0] for r in rows]
-        ph = ",".join("?" * len(ids))
-        conn.execute(f"DELETE FROM wallet_trades WHERE id IN ({ph})", ids)
+        # Single array bind — psycopg3 binds server-side with a hard 65,535
+        # parameter cap, so the old 100k-way "IN (?,?,...)" failed on EVERY
+        # batch (4 silent no-prune days; table hit 52 GB / 48M rows before
+        # the 2026-07-27 eval caught it).
+        conn.execute("DELETE FROM wallet_trades WHERE id = ANY(?)", (ids,))
         conn.commit()
         total_archived += len(rows)
         total_deleted += len(rows)
