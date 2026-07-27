@@ -58,6 +58,14 @@ STARTUP_GRACE_SECONDS = 120
 
 # N1 dead-man's-switch SLA thresholds.
 BALANCE_SNAPSHOT_STALE_S = int(os.environ.get("WATCHDOG_BALANCE_STALE_S", str(2 * 3600)))
+# Fills/exits booked within this many seconds of the OLDEST snapshot in the
+# staleness window don't count as "money moved but balance didn't": booking
+# lags the on-chain fill by seconds, so an exit whose proceeds were already
+# captured IN the boundary snapshot can carry exit_ts a few seconds AFTER it
+# (2026-07-27: chain fill 11:10:27 → snapshot 11:10:32 → booked 11:10:35
+# tripped a 5h false emergency stop). Real staleness involves hours of
+# movement, so the grace costs nothing.
+BALANCE_MOVE_GRACE_S = int(os.environ.get("WATCHDOG_BALANCE_MOVE_GRACE_S", "120"))
 # 2026-07-08: 15m → 45m. Whale ingestion is bursty (overnight lulls); the
 # tight threshold produced 12 false poller_freshness alerts/day on a 2h
 # metronome while ingestion was actually healthy (8,993 rows/24h).
@@ -445,10 +453,21 @@ def check_balance_staleness() -> ComponentState:
             ).fetchall()
             moved_n = None
             if rows:
-                window_lo = int(rows[-1][0])
+                # "Money moved" = an event that should have shifted USDC in a
+                # snapshot AFTER the oldest one in the window. Grace excludes
+                # bookings that straddle the boundary snapshot (proceeds were
+                # already in its balance read); bookkeeping closes
+                # (reconciled_redeem / resolved_* / expired) carry exit_ts =
+                # booking time for cash that moved hours or days earlier, so
+                # they never imply fresh movement. Both produced false
+                # emergency stops before (2026-07-27).
+                window_lo = int(rows[-1][0]) + BALANCE_MOVE_GRACE_S
                 moved = conn.execute(
                     "SELECT COUNT(*) FROM live_trades WHERE dry_run = 0 "
-                    "AND (filled_at >= %s OR exit_ts >= %s)",
+                    "AND (filled_at >= %s OR (exit_ts >= %s "
+                    "AND COALESCE(exit_reason, '') NOT IN "
+                    "('reconciled_redeem', 'resolved_databook', "
+                    "'resolved_zero_balance', 'expired')))",
                     (window_lo, window_lo),
                 ).fetchone()
                 moved_n = int(moved[0] or 0)
@@ -619,9 +638,14 @@ def check_reconcile_age() -> ComponentState:
 
 
 # Auto-clear: consecutive HEALTHY balance cycles required before a
-# watchdog-tripped balance_staleness halt un-trips itself. At the 60s poll
-# this is ~30 min of sustained recovery.
-AUTO_CLEAR_CONSECUTIVE = int(os.environ.get("WATCHDOG_AUTO_CLEAR_CYCLES", "30"))
+# watchdog-tripped balance_staleness halt un-trips itself. Sized in TIME
+# (~30 min of sustained recovery) and converted to cycles from the actual
+# poll interval — the old hardcoded 30 was written for a 60s poll and
+# silently became 2.5 HOURS of blocked entries when the poll moved to 300s.
+AUTO_CLEAR_TARGET_S = int(os.environ.get("WATCHDOG_AUTO_CLEAR_TARGET_S", str(30 * 60)))
+AUTO_CLEAR_CONSECUTIVE = int(os.environ.get(
+    "WATCHDOG_AUTO_CLEAR_CYCLES",
+    str(max(3, AUTO_CLEAR_TARGET_S // POLL_INTERVAL_SECONDS))))
 
 # ── Scheduler auto-remediation (2026-07-22) ─────────────────────────────────
 # Fourth silent-scheduler incident in 5 days: process alive, zero dispatch,

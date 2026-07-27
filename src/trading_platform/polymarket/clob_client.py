@@ -40,6 +40,28 @@ logger = logging.getLogger(__name__)
 
 CLOB_BASE = "https://clob.polymarket.com"
 
+# Exchange-enforced minimums for marketable BUYs (server rejects below).
+CLOB_MIN_BUY_USDC = 1.0
+CLOB_MIN_SHARES = 5
+
+
+def quantize_buy_shares(size_usdc: float, target: float) -> tuple[int, float]:
+    """Integer share count + submitted notional for a marketable BUY.
+
+    Shares truncate from size/target but never below the CLOB 5-share
+    floor — and never so low that the notional falls under the exchange's
+    $1.00 minimum. int() truncation alone turned $1.00 probe stakes into
+    $0.85–$0.96 submissions (e.g. $1.00 @ 0.17 → 5 sh = $0.85), which the
+    CLOB rejects 100% of the time (found 2026-07-27: 6/18 live attempts
+    lost). Callers still apply the 3x-overshoot guard on the result.
+    """
+    shares = max(CLOB_MIN_SHARES, int(float(size_usdc) / target))
+    usdc = round(shares * target, 2)
+    while usdc < CLOB_MIN_BUY_USDC:
+        shares += 1
+        usdc = round(shares * target, 2)
+    return shares, usdc
+
 
 def _record_clob_health(ok: bool, msg: str = "") -> None:
     """Record CLOB transport health (best-effort; never raises).
@@ -327,15 +349,13 @@ class ClobClient:
                         error_msg=f"CLOB minimum BUY is $1.00; requested ${size_usdc:.2f}",
                         raw={}, **_p6,
                     )
-                _CLOB_MIN_SHARES = 5
-                shares_int = max(_CLOB_MIN_SHARES, int(float(size_usdc) / target))
-                actual_usdc = round(shares_int * target, 2)
+                shares_int, actual_usdc = quantize_buy_shares(size_usdc, target)
                 if actual_usdc > float(size_usdc) * 3.0:
                     return OrderResult(
                         success=False, order_id=None, status="error",
                         filled_price=None, filled_size=None,
                         error_msg=(
-                            f"stake ${size_usdc:.2f} too small: CLOB min {_CLOB_MIN_SHARES} shares "
+                            f"stake ${size_usdc:.2f} too small: CLOB min {CLOB_MIN_SHARES} shares "
                             f"@ {target:.3f} = ${actual_usdc:.2f} ({actual_usdc / size_usdc:.1f}x)"
                         ),
                         raw={}, **_p6,
@@ -591,15 +611,20 @@ class ClobClient:
                     else round(mid_fallback - tick, 2)
                 price = max(0.01, min(0.99, price))
 
-            _CLOB_MIN_SHARES = 5
-            shares_int = max(_CLOB_MIN_SHARES, int(float(size_usdc) / price))
-            _limit_usdc = round(shares_int * price, 2)
+            if side.upper() == "BUY":
+                # Same sub-$1 quantization hazard as place_market_order: an
+                # aggressive limit BUY posts at ask+tick (i.e. marketable),
+                # where the CLOB enforces the $1.00 notional minimum.
+                shares_int, _limit_usdc = quantize_buy_shares(size_usdc, price)
+            else:
+                shares_int = max(CLOB_MIN_SHARES, int(float(size_usdc) / price))
+                _limit_usdc = round(shares_int * price, 2)
             if _limit_usdc > float(size_usdc) * 3.0:
                 return OrderResult(
                     success=False, order_id=None, status="error",
                     filled_price=None, filled_size=None,
                     error_msg=(
-                        f"stake ${size_usdc:.2f} too small: CLOB min {_CLOB_MIN_SHARES} shares "
+                        f"stake ${size_usdc:.2f} too small: CLOB min {CLOB_MIN_SHARES} shares "
                         f"@ {price:.3f} = ${_limit_usdc:.2f} ({_limit_usdc / size_usdc:.1f}x)"
                     ),
                     raw={},
