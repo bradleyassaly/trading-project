@@ -756,6 +756,12 @@ SCHEDULE: list[Task] = [
         name="resolution_decay_signal",
         cmd="python -m trading_platform.polymarket.resolution_decay_signal",
         interval_seconds=15 * 60,
+        # 2026-07-28: explicit timeout. The derived default (interval//2 =
+        # 450s) left ~25% headroom over the 325-365s baseline; DB-load
+        # amplification (stats() COUNT bursts → slow API gate → this task
+        # serializes ~1000 gate HTTP calls) blew it 57 runs straight.
+        # 900s = the scheduler cap.
+        timeout_override=900,
         description="Phase B: resolution-time decay independent signal",
         critical=True,  # the only live entry signal — must not starve on recovery
     ),

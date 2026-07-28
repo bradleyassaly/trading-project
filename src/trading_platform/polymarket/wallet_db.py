@@ -1270,12 +1270,36 @@ class WalletDB:
                 except Exception: pass
                 self._conn = get_connection(str(self._path), check_same_thread=False)
                 profiles = self._conn.execute("SELECT COUNT(*) FROM wallet_profiles").fetchone()[0]
-            trades = self._conn.execute("SELECT COUNT(*) FROM wallet_trades").fetchone()[0]
+            # 2026-07-28: wallet_trades is ~46M rows — a bare COUNT(*) is a
+            # multi-second 3-worker parallel scan, and stats() is called at
+            # the top of several scheduled CLI commands, so the counts were
+            # arriving in bursts that pinned postgres (344% CPU observed),
+            # slowed the API's per-signal gate, and blew the decay signal
+            # generator's task timeout 57 runs straight (it serializes
+            # ~1000 gate HTTP calls per pass). stats() is a display/logging
+            # surface — the planner's reltuples estimate is the right cost.
+            # sqlite (no pg_class) keeps the exact count; tiny tables too.
+            trades = self._estimated_count("wallet_trades")
             positions = self._conn.execute("SELECT COUNT(*) FROM wallet_positions").fetchone()[0]
             signals = self._conn.execute("SELECT COUNT(*) FROM market_signals").fetchone()[0]
             alerts = self._conn.execute("SELECT COUNT(*) FROM wallet_alerts").fetchone()[0]
         return {"profiles": profiles, "trades": trades, "positions": positions,
                 "signals": signals, "alerts": alerts}
+
+    def _estimated_count(self, table: str) -> int:
+        """Planner-estimate row count on postgres (instant); exact COUNT(*)
+        on sqlite or when the estimate is unavailable/stale-empty."""
+        try:
+            row = self._conn.execute(
+                "SELECT reltuples::bigint FROM pg_class WHERE relname = ?",
+                (table,),
+            ).fetchone()
+            if row and row[0] and int(row[0]) > 0:
+                return int(row[0])
+        except Exception:
+            pass
+        return self._conn.execute(
+            f"SELECT COUNT(*) FROM {table}").fetchone()[0]
 
     def close(self) -> None:
         with self._lock:

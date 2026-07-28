@@ -856,15 +856,36 @@ class PolymarketLiveExecutor:
             # pre-registered re-widen/kill criteria.
             _subcat = signal.get("subcategory")
             if not _subcat:
-                try:
-                    from trading_platform.polymarket.db_connection import get_connection as _gc
-                    _mc = _gc(self._db_path)
-                    _mrow = _mc.execute(
-                        "SELECT subcategory FROM markets WHERE condition_id = ?",
-                        (signal.get("condition_id"),)).fetchone()
-                    _subcat = _mrow[0] if _mrow else None
-                except Exception:
-                    _subcat = None  # fail-safe: band check still binds
+                # Per-run memo + ALWAYS-closed connection. The first
+                # deploy of this lookup leaked one pooled connection per
+                # decay signal (~1000/pass, pool max 20) — the generator
+                # runs this executor IN-PROCESS, so the pool exhausted in
+                # seconds and every later DB touch waited up to 60s,
+                # blowing the task timeout 57 runs straight (2026-07-28).
+                _cid = str(signal.get("condition_id") or "")
+                _memo = getattr(self, "_subcat_memo", None)
+                if _memo is None:
+                    _memo = self._subcat_memo = {}
+                if _cid in _memo:
+                    _subcat = _memo[_cid]
+                else:
+                    _mc = None
+                    try:
+                        from trading_platform.polymarket.db_connection import get_connection as _gc
+                        _mc = _gc(self._db_path)
+                        _mrow = _mc.execute(
+                            "SELECT subcategory FROM markets WHERE condition_id = ?",
+                            (_cid,)).fetchone()
+                        _subcat = _mrow[0] if _mrow else None
+                    except Exception:
+                        _subcat = None  # fail-safe: band check still binds
+                    finally:
+                        if _mc is not None:
+                            try:
+                                _mc.close()
+                            except Exception:
+                                pass
+                    _memo[_cid] = _subcat
             _band_block = decay_live_entry_block(_gate_px, _subcat)
             if _band_block:
                 try:
