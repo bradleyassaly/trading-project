@@ -179,11 +179,24 @@ def _run_once(job: Job) -> None:
             job.last_status = "failed"
             job.last_error = (result.stdout or "")[-400:]
             logger.warning("[fail] %s exit=%d", job.name, result.returncode)
-    except subprocess.TimeoutExpired:
+    except subprocess.TimeoutExpired as texc:
         job.last_status = "timeout"
         job.last_duration_s = time.time() - started
         job.last_error = f"timeout after {JOB_TIMEOUT_S}s"
         logger.warning("[timeout] %s (>%ds)", job.name, JOB_TIMEOUT_S)
+        # Write whatever the child produced — a timeout with an empty log
+        # is undiagnosable (wallet_strategy_observer's first 3600s timeout
+        # left zero output to reason from).
+        try:
+            partial = texc.output or b""
+            if isinstance(partial, bytes):
+                partial = partial.decode("utf-8", "replace")
+            with log_path.open("a", encoding="utf-8") as f:
+                f.write(f"\n=== {datetime.now(tz=timezone.utc).isoformat()} "
+                        f"(TIMEOUT after {JOB_TIMEOUT_S}s) ===\n")
+                f.write(partial[-20000:])
+        except Exception:
+            pass
     except Exception as exc:  # noqa: BLE001 — the runner must never die on a job error
         job.last_status = "failed"
         job.last_duration_s = time.time() - started
