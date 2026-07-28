@@ -136,9 +136,17 @@ def check_db() -> ComponentState:
             dbn = os.environ.get("POSTGRES_DB", "polymarket")
             with psycopg.connect(host=host, port=port, user=user,
                                  password=pwd, dbname=dbn, connect_timeout=3) as conn:
-                cur = conn.execute("SELECT COUNT(*) FROM wallet_trades")
-                n = cur.fetchone()[0]
-            return ComponentState("db", True, f"{n} wallet_trades (pg)")
+                # 2026-07-28: was a bare COUNT(*) — a 3-worker parallel
+                # scan of the 46M-row firehose table EVERY 60s cycle,
+                # keeping postgres pinned (344% CPU observed) and slowing
+                # every live gate DB touch. Liveness needs one row;
+                # the row count in the message is the planner estimate.
+                conn.execute("SELECT 1 FROM wallet_trades LIMIT 1").fetchone()
+                est = conn.execute(
+                    "SELECT reltuples::bigint FROM pg_class "
+                    "WHERE relname = 'wallet_trades'").fetchone()
+                n = int(est[0]) if est and est[0] else -1
+            return ComponentState("db", True, f"~{n} wallet_trades (pg)")
         except Exception as e:
             return ComponentState("db", False, f"pg: {str(e)[:80]}")
 
