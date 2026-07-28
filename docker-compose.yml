@@ -70,6 +70,12 @@ services:
       # Mirror lane flags so /api/ladder/status reports them correctly.
       - LIVE_DISCOVERY_ENABLED=1
       - PHASE_B_RESOLUTION_DECAY_ENABLED=1
+      # 2026-07-27 S1 slice surgery: enforce the slice gate (shadow since
+      # P5; now fed by the LIVE-truth overlay) + live-lane decay band
+      # 0.05-0.20 (paper keeps the full 0.05-0.40 aperture) + esports out.
+      - SLICE_GATE_ENFORCE=1
+      - RESOLUTION_DECAY_LIVE_ENTRY_HIGH=0.20
+      - RESOLUTION_DECAY_LIVE_EXCLUDE_SUBCATS=esports
       # 2026-06-02: per-slice calibration ACTIVE. Shadow data (5 days)
       # confirmed Brier 0.58→0.18 on top signals; current calibration is
       # provably INVERTED at 0.50+ confidence band (mean conf 0.59 →
@@ -143,6 +149,12 @@ services:
       # Phase B independent signal feature flag (see live-collect block).
       # Enabled here so the scheduler task can read it.
       - PHASE_B_RESOLUTION_DECAY_ENABLED=1
+      # 2026-07-27 S1 slice surgery: enforce the slice gate (shadow since
+      # P5; now fed by the LIVE-truth overlay) + live-lane decay band
+      # 0.05-0.20 (paper keeps the full 0.05-0.40 aperture) + esports out.
+      - SLICE_GATE_ENFORCE=1
+      - RESOLUTION_DECAY_LIVE_ENTRY_HIGH=0.20
+      - RESOLUTION_DECAY_LIVE_EXCLUDE_SUBCATS=esports
       # 2026-06-02: per-slice calibration active for scheduled tasks.
       - ENABLE_PER_SLICE_CALIB=1
     restart: unless-stopped
@@ -182,6 +194,12 @@ services:
       - POSTGRES_DB=polymarket
       - DB_BACKEND=postgres
       - PHASE_B_RESOLUTION_DECAY_ENABLED=1
+      # 2026-07-27 S1 slice surgery: enforce the slice gate (shadow since
+      # P5; now fed by the LIVE-truth overlay) + live-lane decay band
+      # 0.05-0.20 (paper keeps the full 0.05-0.40 aperture) + esports out.
+      - SLICE_GATE_ENFORCE=1
+      - RESOLUTION_DECAY_LIVE_ENTRY_HIGH=0.20
+      - RESOLUTION_DECAY_LIVE_EXCLUDE_SUBCATS=esports
       - ENABLE_PER_SLICE_CALIB=1
       # Cap numeric thread pools — up to 3 subprocesses can run concurrently
       # (staggered startup), and pandas/pyarrow would otherwise each spawn a
@@ -195,6 +213,44 @@ services:
     # jobs like the scheduler) — 512m is ample with the thread-pool caps above.
     mem_limit: 512m
     memswap_limit: 512m
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # ─── Slow-lane analytics (heavy batch jobs, own budget) ────────────────
+  # 2026-07-27: wallet_strategy_observer / wallet_behavior_metrics /
+  # wallet_profiles_rebuild were dying at the scheduler's 15-min task cap
+  # (observer: 9 consecutive cap-kills; metrics also OOM'd at 2 GiB), and
+  # the same day a heavy job exec'd into the scheduler starved dispatch
+  # until the watchdog restarted the container mid-job. Heavy analytics
+  # now run HERE: sequential (one job at a time — concurrent heavy jobs
+  # stacking RAM is the OOM mode), 60-min per-job timeout, 3 GiB.
+  # Also runs update_exit_policy (A3 counterfactual + the per-trade
+  # exit_counterfactuals table). SEQUENTIAL BY DESIGN — see slow_lane.py.
+  analytics-slow:
+    build: .
+    container_name: polymarket-analytics-slow
+    command: python scripts/slow_lane.py
+    volumes:
+      - .:/app
+    env_file: .env
+    environment:
+      - WALLET_DB_PATH=/app/data/polymarket/wallet_intelligence.db
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_USER=polymarket
+      - POSTGRES_PASSWORD=polymarket_dev
+      - POSTGRES_DB=polymarket
+      - DB_BACKEND=postgres
+      # Heavy pandas/pyarrow jobs — cap the implicit thread pools anyway;
+      # the memory budget is for DATA, not thread arenas.
+      - OMP_NUM_THREADS=4
+      - OPENBLAS_NUM_THREADS=4
+      - MKL_NUM_THREADS=4
+      - NUMEXPR_NUM_THREADS=4
+    restart: unless-stopped
+    mem_limit: 3g
+    memswap_limit: 3g
     depends_on:
       postgres:
         condition: service_healthy
@@ -254,6 +310,12 @@ services:
       # through the same FAV_GATE / SIDE_GATE / calibration / Kelly
       # stack, so a bad signal can't escape the existing guards.
       - PHASE_B_RESOLUTION_DECAY_ENABLED=1
+      # 2026-07-27 S1 slice surgery: enforce the slice gate (shadow since
+      # P5; now fed by the LIVE-truth overlay) + live-lane decay band
+      # 0.05-0.20 (paper keeps the full 0.05-0.40 aperture) + esports out.
+      - SLICE_GATE_ENFORCE=1
+      - RESOLUTION_DECAY_LIVE_ENTRY_HIGH=0.20
+      - RESOLUTION_DECAY_LIVE_EXCLUDE_SUBCATS=esports
       # 2026-06-02: per-slice calibration ACTIVE. Same rationale as api block.
       - ENABLE_PER_SLICE_CALIB=1
     restart: unless-stopped

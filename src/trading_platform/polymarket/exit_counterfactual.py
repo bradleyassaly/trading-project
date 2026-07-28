@@ -47,6 +47,23 @@ CREATE TABLE IF NOT EXISTS exit_policy_overrides (
     updated_at     BIGINT NOT NULL,
     PRIMARY KEY (signal_type, category_slice, exit_reason)
 );
+CREATE TABLE IF NOT EXISTS exit_counterfactuals (
+    trade_id       BIGINT PRIMARY KEY,
+    condition_id   TEXT,
+    signal_type    TEXT,
+    category       TEXT,
+    exit_reason    TEXT,
+    exit_ts        BIGINT,
+    shares         DOUBLE PRECISION,
+    cost_usd       DOUBLE PRECISION,
+    realized_pnl   DOUBLE PRECISION,
+    payout         DOUBLE PRECISION,
+    pnl_if_held    DOUBLE PRECISION,
+    exit_alpha     DOUBLE PRECISION,
+    computed_at    BIGINT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_ecf_reason ON exit_counterfactuals(exit_reason);
+CREATE INDEX IF NOT EXISTS idx_ecf_exit_ts ON exit_counterfactuals(exit_ts);
 """
 
 
@@ -58,6 +75,7 @@ def _ensure_schema(conn) -> None:
 
 
 def compute_exit_counterfactual(conn, now_ts: int, window_days: int = 60,
+                                persist: bool = True,
                                 ) -> tuple[dict[tuple, dict], int]:
     """{(signal_type, slice, exit_reason): {n, actual, hold}}, n_unresolved.
 
@@ -77,7 +95,7 @@ def compute_exit_counterfactual(conn, now_ts: int, window_days: int = 60,
                       AND wt.market_resolved = 1
                       AND wt.market_outcome IN ('YES','NO')
                     LIMIT 1) AS wt_outcome,
-                  lt.condition_id
+                  lt.condition_id, lt.id, lt.exit_ts
              FROM live_trades lt
              LEFT JOIN markets m ON m.condition_id = lt.condition_id
             WHERE lt.dry_run = 0 AND lt.realized_pnl IS NOT NULL
@@ -112,7 +130,8 @@ def compute_exit_counterfactual(conn, now_ts: int, window_days: int = 60,
     per_key: dict[tuple, dict] = {}
     unresolved = 0
     for (sig, cat, direction, exit_reason, fp, sh, usd, actual, token_id,
-         m_closed, m_prices, m_no_tok, m_yes_tok, wt_outcome, cid) in rows:
+         m_closed, m_prices, m_no_tok, m_yes_tok, wt_outcome, cid,
+         trade_id, exit_ts) in rows:
         payout = None
         # Source 0: canonical market_resolutions
         rj = canonical.get((cid or "").lower())
@@ -168,6 +187,31 @@ def compute_exit_counterfactual(conn, now_ts: int, window_days: int = 60,
         agg["n"] += 1
         agg["actual"] += float(actual)
         agg["hold"] += hold
+        # 2026-07-27 (slow-lane X1): persist the PER-TRADE counterfactual.
+        # The aggregate above only survives as a rolling-window snapshot in
+        # exit_policy_overrides — history evaporated on every refresh, so
+        # every exit-policy debate re-argued from one-off backtests. Rows
+        # are immutable once written (resolution truth doesn't change):
+        # ON CONFLICT DO NOTHING makes re-runs free and lets the window
+        # roll forward while the table keeps everything. exit_alpha =
+        # realized − hold; POSITIVE means the exit BEAT holding.
+        if persist:
+            try:
+                conn.execute(
+                    """INSERT INTO exit_counterfactuals
+                         (trade_id, condition_id, signal_type, category,
+                          exit_reason, exit_ts, shares, cost_usd, realized_pnl,
+                          payout, pnl_if_held, exit_alpha, computed_at)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+                       ON CONFLICT (trade_id) DO NOTHING""",
+                    (trade_id, cid, sig, cat, exit_reason or "unknown",
+                     exit_ts, round(shares, 6), round(cost, 4),
+                     round(float(actual), 4), round(payout, 4),
+                     round(hold, 4), round(float(actual) - hold, 4), now_ts),
+                )
+            except Exception as exc:
+                logger.debug("exit_counterfactuals persist failed #%s: %s",
+                             trade_id, exc)
     return per_key, unresolved
 
 
@@ -180,7 +224,8 @@ def update_exit_policy(db_path: str | None = None, dry_run: bool = False,
     conn = get_connection(db_path) if db_path else get_connection()
     try:
         _ensure_schema(conn)
-        per_key, unresolved = compute_exit_counterfactual(conn, now, window_days)
+        per_key, unresolved = compute_exit_counterfactual(
+            conn, now, window_days, persist=not dry_run)
         n_exempt = 0
         rows_out = []
         for (sig, sl, reason), a in per_key.items():
@@ -244,8 +289,13 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--apply", action="store_true")
     ap.add_argument("--dry-run", action="store_true")
+    # One-off history backfill of exit_counterfactuals (per-trade rows are
+    # keyed ON CONFLICT DO NOTHING, so a wide window is idempotent):
+    #   python -m ... --apply --window-days 3650
+    ap.add_argument("--window-days", type=int, default=60)
     args = ap.parse_args()
-    out = update_exit_policy(dry_run=not args.apply or args.dry_run)
+    out = update_exit_policy(dry_run=not args.apply or args.dry_run,
+                             window_days=args.window_days)
     print(f"evaluated={out['evaluated']} exempted={out['exempted']} "
           f"unresolved={out['unresolved']} dry_run={out['dry_run']}")
     for r in out["rows"]:

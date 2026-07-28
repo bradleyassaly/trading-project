@@ -115,6 +115,53 @@ PROBE_BAND = float(os.environ.get("PROBE_BAND", "0.05"))
 # beats every sizing boost including the decay-Kelly lift.
 WALLET_PROBATION_STAKE_USD = float(os.environ.get("WALLET_PROBATION_STAKE_USD", "5.0"))
 
+# 2026-07-27 S1 slice surgery: LIVE entry band for resolution_decay BUYs.
+# The post-band-fix live cohort (attempted after the 07-16 0.20-0.30
+# exclusion, n=29) ran EV/$ −0.127 — the loss MIGRATED into the 0.30-0.40
+# band (25/29 fires, −$6.42, 28% WR) opened by the 2026-04-27 widening,
+# while 0.05-0.20 — the only band with a measured positive prior (+$3.20,
+# 07-16 analysis) — barely fires. Live entries are therefore restricted to
+# [LOW, HIGH] = [0.05, 0.20], reverting the April widening FOR THE LIVE
+# LANE ONLY: signal generation stays 0.05-0.40 so paper keeps measuring
+# the full aperture. Checked at execution time against the executor's gate
+# price — which also closes the fire→fill drift leak that let 3 post-fix
+# entries land inside the excluded 0.20-0.30 band. Esports subcategories
+# are excluded outright: out-of-thesis flow (the decay edge was measured
+# on soccer/draw structures); the only 3 live esports decay trades (LoL,
+# 2026-07-27) all stopped out. Applies to $1 probes too — a probe outside
+# the measured-positive band is burn without a promotion path.
+# PRE-REGISTERED CRITERIA (mirrors the maker-experiment kill):
+#   * re-widen only if the 0.05-0.20 live cohort reaches n>=40 with
+#     realized EV/$ > 0;
+#   * the slice dies entirely if its 60d live EV/$ <= −0.10 at n>=30 —
+#     enforced continuously by the slice_gate LIVE overlay
+#     (slice_multiplier_promoter pass 4) with SLICE_GATE_ENFORCE=1.
+RD_LIVE_ENTRY_LOW = float(os.environ.get("RESOLUTION_DECAY_LIVE_ENTRY_LOW", "0.05"))
+RD_LIVE_ENTRY_HIGH = float(os.environ.get("RESOLUTION_DECAY_LIVE_ENTRY_HIGH", "0.20"))
+RD_LIVE_EXCLUDE_SUBCATS = frozenset(
+    s.strip().lower()
+    for s in os.environ.get(
+        "RESOLUTION_DECAY_LIVE_EXCLUDE_SUBCATS", "esports").split(",")
+    if s.strip())
+
+
+def decay_live_entry_block(px: float, subcategory: str | None) -> str | None:
+    """Live-lane band/subcategory gate for resolution_decay BUY entries.
+
+    Returns a block reason, or None to pass. Pure — unit-tested directly.
+    px <= 0 (no price basis) passes: the calibrated-EV gate downstream
+    owns that case.
+    """
+    sub = (subcategory or "").lower()
+    if sub:
+        parts = {p for p in sub.replace("/", " ").split() if p}
+        if parts & RD_LIVE_EXCLUDE_SUBCATS:
+            return f"decay live subcat excluded: {sub}"
+    if px > 0 and not (RD_LIVE_ENTRY_LOW <= px <= RD_LIVE_ENTRY_HIGH):
+        return (f"decay live band: px {px:.3f} outside "
+                f"[{RD_LIVE_ENTRY_LOW:.2f}, {RD_LIVE_ENTRY_HIGH:.2f}]")
+    return None
+
 _TOPIC_STRIP_DATE = __import__("re").compile(
     r"\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+\d+\b",
     __import__("re").IGNORECASE,
@@ -803,6 +850,32 @@ class PolymarketLiveExecutor:
         if sig_type == "resolution_decay" and \
                 (signal.get("direction") or "BUY").upper() == "BUY":
             _gate_px = float(signal.get("price") or 0)
+            # S1 live band/subcat gate (2026-07-27) — runs BEFORE probe
+            # tagging so $1 probes obey the band too. See the
+            # RD_LIVE_ENTRY_* block up top for the evidence + the
+            # pre-registered re-widen/kill criteria.
+            _subcat = signal.get("subcategory")
+            if not _subcat:
+                try:
+                    from trading_platform.polymarket.db_connection import get_connection as _gc
+                    _mc = _gc(self._db_path)
+                    _mrow = _mc.execute(
+                        "SELECT subcategory FROM markets WHERE condition_id = ?",
+                        (signal.get("condition_id"),)).fetchone()
+                    _subcat = _mrow[0] if _mrow else None
+                except Exception:
+                    _subcat = None  # fail-safe: band check still binds
+            _band_block = decay_live_entry_block(_gate_px, _subcat)
+            if _band_block:
+                try:
+                    from trading_platform.polymarket.decision_trace import trace as _dt
+                    _dt(signal=signal, gate="LIVE_DECAY_BAND", passed=False,
+                        value=_gate_px, threshold=RD_LIVE_ENTRY_HIGH,
+                        detail=_band_block, surface="live",
+                        db_path=self._db_path)
+                except Exception:
+                    pass
+                return self._block(signal, _band_block)
             _min_edge = float(os.environ.get("RESOLUTION_DECAY_MIN_EDGE", "0.05"))
             if _gate_px > 0 and confidence <= _gate_px * (1.0 + _min_edge):
                 if self._maybe_probe(signal, _gate_px,
@@ -947,7 +1020,29 @@ class PolymarketLiveExecutor:
             from trading_platform.polymarket import flags as _flags
             _gate_status, _gate_fresh = get_slice_gate(sig_type, cat,
                                                        db_path=self._db_path)
-            if _gate_fresh and _gate_status in ("demoted", "killed"):
+            # 2026-07-27: a DEMOTE blocks capital, not measurement — $1
+            # probes stay eligible (bounded by PROBE_DAILY_BUDGET_USD) so a
+            # demoted slice can still earn its way back with live evidence
+            # (the LIVE overlay clears the demote once the probe cohort's
+            # ev_lb turns positive). Signals that PASSED the EV gates arrive
+            # here untagged; convert those to probes too — otherwise only
+            # EV-gate REJECTS would keep probing and the slice would re-earn
+            # its way back on its worst candidates. KILLED blocks probes as
+            # well: confidently -EV needs no more live burn; paper keeps
+            # measuring.
+            if (_gate_fresh and _gate_status == "demoted"
+                    and sig_type == "resolution_decay"
+                    and (signal.get("direction") or "BUY").upper() == "BUY"
+                    and not signal.get("is_probe")
+                    and self._maybe_probe(signal,
+                                          float(signal.get("price") or 0),
+                                          signal.get("decay_lookup_p"))):
+                signal["is_probe"] = 1
+            if (_gate_fresh and _gate_status == "demoted"
+                    and signal.get("is_probe")):
+                logger.info("[SLICE_GATE] demoted %s × %s — $1 probe exempt",
+                            sig_type, cat)
+            elif _gate_fresh and _gate_status in ("demoted", "killed"):
                 try:
                     from trading_platform.polymarket.decision_trace import trace as _dt
                     _dt(signal=signal,

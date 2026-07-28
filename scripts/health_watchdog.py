@@ -239,6 +239,19 @@ def check_critical_loops() -> ComponentState:
     return _check_heartbeat("critical_loops", stale_s=180)
 
 
+def check_slow_lane() -> ComponentState:
+    """Slow-lane analytics runner heartbeat (scripts/slow_lane.py, own
+    container since 2026-07-27 — the 15-min-cap/OOM refugees: strategy
+    observer, behavior metrics, profiles rebuild, exit counterfactual).
+    The runner's watchdog thread writes a 'slow_lane' service_health row
+    every ~60s regardless of a job being mid-run, so a modest threshold is
+    safe. ALERT-ONLY by design: no auto-restart remediation — heavy jobs
+    legitimately run long, and the container has its own stall self-exit
+    (the retention-catch-up incident is what a restart-happy watchdog does
+    to batch work)."""
+    return _check_heartbeat("slow_lane", stale_s=300)
+
+
 def check_live_collect() -> ComponentState:
     """Detect silent WebSocket death via service_health heartbeat.
 
@@ -761,7 +774,7 @@ def main() -> None:
     while True:
         now = time.time()
         states = [check_api(), check_db(), check_scheduler(),
-                  check_critical_loops(),
+                  check_critical_loops(), check_slow_lane(),
                   check_live_collect(), check_wallet_stream(), check_disk(),
                   check_hypothesis_drift(),
                   check_scheduler_consecutive_failures(),

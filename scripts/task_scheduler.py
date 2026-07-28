@@ -224,17 +224,9 @@ SCHEDULE: list[Task] = [
         interval_seconds=24 * 3600,
         description="Detect wallet copy-relationships (leader/follower graph)",
     ),
-    Task(
-        name="wallet_strategy_observer",
-        # Scans wallet_trades and tags each per behavioral strategy
-        # (accumulator, flipper, longshot, etc.), then writes per-wallet
-        # per-strategy PnL to `wallet_strategy_profiles`. Underlying data
-        # for: strategy-level alpha attribution, copyable-wallet discovery,
-        # and weekly digest highlights. Runs every 12h — data shifts slowly.
-        cmd="python -m trading_platform.polymarket.wallet_strategy_observer",
-        interval_seconds=12 * 3600,
-        description="Per-wallet × per-strategy alpha attribution",
-    ),
+    # wallet_strategy_observer → scripts/slow_lane.py (2026-07-27): died at
+    # the 15-min task cap 9 runs straight; the slow-lane container gives it
+    # a 60-min budget + real memory without risking this dispatch loop.
     Task(
         name="bankroll_refresh",
         # Pulls live USDC balance from the Polymarket CLOB + open-position
@@ -321,12 +313,8 @@ SCHEDULE: list[Task] = [
         interval_seconds=2 * 3600,
         description="Backfill hypothesis resolutions for closed paper trades",
     ),
-    Task(
-        name="wallet_profiles_rebuild",
-        cmd="trading-cli data polymarket wallet-profiles --from-db",
-        interval_seconds=24 * 3600,
-        description="Recompute wallet metrics from the trade history",
-    ),
+    # wallet_profiles_rebuild → scripts/slow_lane.py (2026-07-27): hit the
+    # 15-min task cap; runs with a 60-min budget in the slow lane.
     Task(
         # 2026-05-10: export wallet_profiles from Postgres → parquet weekly.
         # The --from-db path above rebuilds the Postgres wallet_profiles table
@@ -405,17 +393,10 @@ SCHEDULE: list[Task] = [
         interval_seconds=24 * 3600,
         description="Refresh per-(signal × direction) sizing multipliers from live WR",
     ),
-    Task(
-        # 2026-07-07 (A3): exit-policy overrides from the hold-vs-exit
-        # counterfactual. v1 only ever EXEMPTS stop_loss on slices where
-        # stops lose > $10 vs hold at n>=30 (the -$8.58 football-stops
-        # pattern); everything else is written as 'none' for audit. Exit
-        # monitors read fail-safe-closed (stale/missing => stops stay ON).
-        name="update_exit_policy",
-        cmd="python -m trading_platform.polymarket.exit_counterfactual --apply",
-        interval_seconds=24 * 3600,
-        description="Daily exit-policy overrides from the exit counterfactual",
-    ),
+    # update_exit_policy → scripts/slow_lane.py (2026-07-27): now also
+    # persists the per-trade exit_counterfactuals table (X1); the payout
+    # waterfall + backfill grow with history, so it runs on the 60-min
+    # slow-lane budget instead of risking the 15-min cap here.
     Task(
         # 2026-07-07 (A2): fit the empirical decay-curve lookup for
         # resolution_decay from canonical-labeled history. Challenger only —
@@ -670,17 +651,8 @@ SCHEDULE: list[Task] = [
         interval_seconds=24 * 3600,
         description="Daily auto-discovery of high-performing wallets from wallet_trades",
     ),
-    Task(
-        # 2026-04-25: behavioral metrics pipeline. Bootstrap-CI on per-
-        # wallet ROI, per-(wallet,category) z-score, sizing distribution,
-        # sybil/farmer detection, k-means strategy clusters. Replaces
-        # the hand-coded `wallet_type` enum with data-driven flags. Runs
-        # daily after pnl_reconstruction; idempotent upserts.
-        name="wallet_behavior_metrics",
-        cmd="python -m trading_platform.polymarket.wallet_behavior_metrics",
-        interval_seconds=24 * 3600,
-        description="Daily behavioral metrics: bootstrap-CI, z-score, sizing, sybil, clusters",
-    ),
+    # wallet_behavior_metrics → scripts/slow_lane.py (2026-07-27): failed
+    # at the 15-min cap 4x (and previously OOM'd at the container's 2 GiB).
     Task(
         # 2026-04-25: signal health pipeline. Per-signal IC over 30d/14d
         # rolling windows + pairwise correlation across signal types.
@@ -1044,13 +1016,11 @@ SCHEDULE: list[Task] = [
         # from pre-resolution sells (not just resolved markets). Writes
         # realized_pnl_closed per fill and realized_pnl_total on
         # wallet_profiles. Must run after wallet_trade_sync.
-        # 2026-04-25: chained → wallet_behavior_metrics so bootstrap-CI
-        # + sizing distribution + farmer detection refresh in the same
-        # cycle as the underlying trade data, instead of lagging a day.
-        cmd=(
-            "python -m trading_platform.polymarket.wallet_pnl_reconstruction "
-            "&& python -m trading_platform.polymarket.wallet_behavior_metrics"
-        ),
+        # 2026-07-27: the `&& wallet_behavior_metrics` chain tail moved to
+        # scripts/slow_lane.py with the metrics job itself (the chain had
+        # been dead anyway — reconstruction crashes at ~42s and && short-
+        # circuits). Metrics now reads whatever reconstruction last wrote.
+        cmd="python -m trading_platform.polymarket.wallet_pnl_reconstruction",
         interval_seconds=24 * 3600,
         description="Daily FIFO PnL reconstruction → behavior metrics chain",
     ),

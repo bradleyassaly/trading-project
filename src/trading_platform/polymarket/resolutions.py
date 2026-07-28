@@ -47,6 +47,15 @@ SOURCE_RANK = {
     # uma_gamma's explicit UMA-resolved check.
     "clob_winner": 80,
     "data_api_positions": 70,
+    # chain_redeem: winner inferred from on-chain PayoutRedemption cash flow
+    # (wallet_ctf_events) matched against each redeemer's net token position
+    # (redeem pays $1 per winning share, so redeemed USDC ≈ winning-side net
+    # shares). The CASH is ground truth; the side attribution is an
+    # inference, hence below the direct flag reads (clob_winner,
+    # data_api_positions) and above the gamma_bulk price heuristic.
+    # Validated 2026-07-28 against existing high-rank rows before enabling
+    # (see chain_resolutions.py --validate). Immune to Gamma delisting.
+    "chain_redeem": 65,
     "gamma_bulk": 60,
     "wallet_trades_vote": 30,
     "csv_legacy": 20,

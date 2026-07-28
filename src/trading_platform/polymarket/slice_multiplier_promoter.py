@@ -12,6 +12,7 @@ will auto-promote to 1.5× when n hits 10 (or stays here if not yet).
 from __future__ import annotations
 
 import logging
+import os
 import time
 from typing import Any
 
@@ -72,6 +73,13 @@ WILSON_LB_FLOOR = 0.50   # must beat a coin flip at the lower bound
 
 # Demotion criteria (recompute daily; row drops if no longer qualifies)
 DEMO_MIN_WR = 0.45  # below this, expire the override
+
+# Pass 4 (LIVE-truth overlay) window/floor. Live flow is ~1/20th of paper
+# volume, so the window is wider (60d vs paper's 30d) to accumulate n; the
+# floor matches the unprotected demote floor in _slice_gate_decision (the
+# decision function's own n>=20/30 conjuncts still apply on top).
+LIVE_GATE_WINDOW_DAYS = int(os.environ.get("SLICE_GATE_LIVE_WINDOW_DAYS", "60"))
+LIVE_GATE_MIN_N = 20
 
 
 def _wilson_lower_bound(wins: int, n: int, z: float = WILSON_Z) -> float:
@@ -286,6 +294,110 @@ def run_promoter(db_path: str | None = None) -> dict[str, Any]:
                     "WHERE signal_type = ? AND subdomain = ?",
                     (c["signal_type"], c["subdomain"]),
                 )
+        except Exception as exc:
+            logger.warning("slice_gate pass failed: %s", exc)
+
+        # Pass 4 (2026-07-27): LIVE-truth overlay. Pass 3 is computed from
+        # polymarket_paper_trades — and paper fills are fantasy-priced (same
+        # signal, same 30d window: resolution_decay paper +$7.33/trade vs
+        # live −$0.48/trade). A paper-healthy slice therefore SHIELDS a
+        # live-bleeding one from the gate — the exact 2026-07 state:
+        # resolution_decay×sports showed paper +$11.4k while the live cohort
+        # ran EV/$ −0.127 (post-band-fix n=29), and the paper-fed gate never
+        # fired. Where a slice has enough LIVE closes to judge, the live
+        # verdict REPLACES the paper verdict — in BOTH directions:
+        #   * live-negative overrides paper-ok   → demote/kill a paper star
+        #   * live-ok (n>=LIVE_GATE_MIN_N) overrides paper-negative → clear
+        # Slices without sufficient live n keep the paper verdict: paper is
+        # still the only evidence for never-promoted slices. Exact-key
+        # replacement only; parent/child bridging stays in get_slice_gate.
+        # Provenance rides in the reason ("LIVE:" prefix) — no schema change.
+        n_live_eval = 0
+        n_live_demoted = 0
+        n_live_killed = 0
+        n_live_cleared = 0
+        try:
+            live_cutoff = now - LIVE_GATE_WINDOW_DAYS * 86400
+            live_rows = conn.execute(
+                """SELECT lt.signal_type,
+                          COALESCE(m.subcategory, lt.category, 'other') AS subdomain,
+                          COUNT(*) AS n,
+                          SUM(CASE WHEN lt.realized_pnl > 0 THEN 1 ELSE 0 END) AS wins,
+                          SUM(lt.realized_pnl) AS pnl,
+                          AVG(lt.entry_price) AS avg_entry
+                     FROM live_trades lt
+                     LEFT JOIN markets m ON m.condition_id = lt.condition_id
+                    WHERE lt.dry_run = 0
+                      AND lt.status = 'matched'
+                      AND lt.exit_ts IS NOT NULL
+                      AND lt.exit_ts > ?
+                      AND lt.realized_pnl IS NOT NULL
+                    GROUP BY lt.signal_type,
+                             COALESCE(m.subcategory, lt.category, 'other')
+                   HAVING COUNT(*) >= ?""",
+                (live_cutoff, LIVE_GATE_MIN_N),
+            ).fetchall()
+            for r in live_rows:
+                sig, sub = r[0], r[1]
+                n, wins = int(r[2]), int(r[3] or 0)
+                pnl = float(r[4] or 0.0)
+                avg_entry = float(r[5] or 0.0)
+                if not sig or not sub:
+                    continue
+                n_live_eval += 1
+                status, reason = _slice_gate_decision(
+                    n, wins, avg_entry, pnl,
+                    protected=sig in PROTECTED_SIGNALS)
+                prior = conn.execute(
+                    "SELECT status FROM slice_gate "
+                    "WHERE signal_type = ? AND category = ?",
+                    (sig, sub),
+                ).fetchone()
+                conn.execute(
+                    "DELETE FROM slice_gate "
+                    "WHERE signal_type = ? AND category = ?",
+                    (sig, sub),
+                )
+                if status is None:
+                    if prior:
+                        n_live_cleared += 1
+                        logger.info(
+                            "[slice_gate][LIVE] cleared paper %s for %s × %s (%s)",
+                            prior[0], sig, sub, reason)
+                    continue
+                wilson_lb = _wilson_lower_bound(wins, n)
+                ev_lb = (wilson_lb / avg_entry - 1.0) if avg_entry else None
+                conn.execute(
+                    """INSERT INTO slice_gate
+                         (signal_type, category, status, n_resolved, wins,
+                          wr, avg_entry, wilson_lb, ev_lb, sum_pnl, reason,
+                          computed_at)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (sig, sub, status, n, wins,
+                     round(wins / n, 4) if n else 0.0,
+                     round(avg_entry, 4), round(wilson_lb, 4),
+                     round(ev_lb, 4) if ev_lb is not None else None,
+                     round(pnl, 2), "LIVE: " + reason, now),
+                )
+                if status == "killed":
+                    n_live_killed += 1
+                else:
+                    n_live_demoted += 1
+                logger.info("[slice_gate][LIVE] %s %s × %s — %s",
+                            status, sig, sub, reason)
+                # A live-negative slice must not keep a stake BOOST row
+                # either (paper stats may still look promotable).
+                conn.execute(
+                    "DELETE FROM stake_multiplier_overrides "
+                    "WHERE signal_type = ? AND subdomain = ?",
+                    (sig, sub),
+                )
+        except Exception as exc:
+            logger.warning("slice_gate LIVE overlay failed: %s", exc)
+
+        # Meta beacon last, covering both passes — freshness must not be
+        # stamped if the paper pass wrote rows but then crashed pre-meta.
+        try:
             conn.execute(
                 """INSERT INTO slice_gate_meta
                      (id, last_run_at, candidates_tested, n_demoted, n_killed)
@@ -295,10 +407,12 @@ def run_promoter(db_path: str | None = None) -> dict[str, Any]:
                      candidates_tested = EXCLUDED.candidates_tested,
                      n_demoted = EXCLUDED.n_demoted,
                      n_killed = EXCLUDED.n_killed""",
-                (now, len(candidates), n_gate_demoted, n_gate_killed),
+                (now, len(candidates) + n_live_eval,
+                 n_gate_demoted + n_live_demoted,
+                 n_gate_killed + n_live_killed),
             )
         except Exception as exc:
-            logger.warning("slice_gate pass failed: %s", exc)
+            logger.warning("slice_gate meta write failed: %s", exc)
 
         conn.commit()
         return {
@@ -309,6 +423,10 @@ def run_promoter(db_path: str | None = None) -> dict[str, Any]:
             "held": n_held,
             "gate_demoted": n_gate_demoted,
             "gate_killed": n_gate_killed,
+            "live_evaluated": n_live_eval,
+            "live_demoted": n_live_demoted,
+            "live_killed": n_live_killed,
+            "live_cleared": n_live_cleared,
             "top_candidates": sorted(candidates, key=lambda c: -c["pnl"])[:5],
         }
     finally:

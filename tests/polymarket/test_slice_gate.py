@@ -185,6 +185,140 @@ def test_run_promoter_populates_gate_and_meta(monkeypatch):
         os.unlink(path)
 
 
+# ---------------------------------------------------------------------------
+# Pass 4: LIVE-truth overlay (2026-07-27)
+# ---------------------------------------------------------------------------
+
+def _seed_live(path, slices):
+    """slices: (signal_type, category, n, wins, entry_price, pnl_per_trade).
+
+    Wins are rows with realized_pnl > 0 — the overlay's win basis.
+    """
+    c = sqlite3.connect(path)
+    c.execute("""CREATE TABLE IF NOT EXISTS live_trades (
+                   signal_type TEXT, category TEXT, condition_id TEXT,
+                   dry_run INT DEFAULT 0, status TEXT, exit_ts INT,
+                   realized_pnl REAL, entry_price REAL)""")
+    c.execute("CREATE TABLE IF NOT EXISTS markets "
+              "(condition_id TEXT, subcategory TEXT)")
+    now = int(time.time())
+    for sig, cat, n, wins, ep, ppt in slices:
+        for i in range(n):
+            won = i < wins
+            c.execute(
+                "INSERT INTO live_trades VALUES (?,?,?,0,'matched',?,?,?)",
+                (sig, cat, f"lv-{sig}-{cat}-{i}", now - 100,
+                 ppt if won else -abs(ppt), ep))
+    c.commit()
+    c.close()
+
+
+def _promoter_env(monkeypatch):
+    monkeypatch.setenv("DB_BACKEND", "sqlite")
+    from trading_platform.polymarket import db_connection as dbc
+    monkeypatch.setattr(dbc, "DB_BACKEND", "sqlite")
+    monkeypatch.setattr(smp, "_GATE_CACHE",
+                        {"at": 0.0, "rows": {}, "fresh": False})
+
+
+def test_live_overlay_kills_paper_star(monkeypatch):
+    # THE production shape (2026-07): paper says the slice is a star, live
+    # says it burns money. The live verdict must land in the gate — a
+    # paper-healthy slice must not shield a live-bleeding one.
+    fd, path = tempfile.mkstemp(suffix=".db"); os.close(fd)
+    try:
+        _promoter_env(monkeypatch)
+        _seed_paper(path, [("star_sig", "sports", 60, 40, 0.50, 7.0)])  # paper: clean
+        _seed_live(path, [("star_sig", "sports", 40, 2, 0.40, 1.0)])    # live: dead
+        out = smp.run_promoter(db_path=path)
+        assert out["live_killed"] == 1, out
+        c = sqlite3.connect(path)
+        row = c.execute("SELECT status, reason FROM slice_gate WHERE "
+                        "signal_type='star_sig' AND category='sports'").fetchone()
+        c.close()
+        assert row[0] == "killed"
+        assert row[1].startswith("LIVE: ")
+        assert smp.get_slice_gate("star_sig", "sports",
+                                  db_path=path) == ("killed", True)
+    finally:
+        os.unlink(path)
+
+
+def test_live_overlay_demotes_negative_ev_slice(monkeypatch):
+    # WR 33% at n=30 buying 0.30: wilson_ub ≈ 0.51 > 0.30 so not killed,
+    # but ev_lb < 0 and pnl < 0 → demoted.
+    fd, path = tempfile.mkstemp(suffix=".db"); os.close(fd)
+    try:
+        _promoter_env(monkeypatch)
+        _seed_paper(path, [])  # empty paper tables — overlay must still run
+        _seed_live(path, [("meh_live", "sports", 30, 10, 0.30, 0.5)])
+        out = smp.run_promoter(db_path=path)
+        assert out["live_demoted"] == 1, out
+        assert smp.get_slice_gate("meh_live", "sports",
+                                  db_path=path) == ("demoted", True)
+    finally:
+        os.unlink(path)
+
+
+def test_live_ok_clears_paper_demote(monkeypatch):
+    # Symmetric truth override: live evidence at sufficient n CLEARS a
+    # paper-only demote (live wins where paper's cost model loses).
+    fd, path = tempfile.mkstemp(suffix=".db"); os.close(fd)
+    try:
+        _promoter_env(monkeypatch)
+        _seed_paper(path, [("redeemed_sig", "politics", 25, 10, 0.55, 2.0)])  # paper: demoted
+        _seed_live(path, [("redeemed_sig", "politics", 25, 20, 0.50, 2.0)])   # live: strong
+        out = smp.run_promoter(db_path=path)
+        assert out["live_cleared"] == 1, out
+        c = sqlite3.connect(path)
+        n = c.execute("SELECT COUNT(*) FROM slice_gate WHERE "
+                      "signal_type='redeemed_sig'").fetchone()[0]
+        c.close()
+        assert n == 0
+        assert smp.get_slice_gate("redeemed_sig", "politics",
+                                  db_path=path) == (None, True)
+    finally:
+        os.unlink(path)
+
+
+def test_live_insufficient_n_keeps_paper_verdict(monkeypatch):
+    # n=10 live closes is below LIVE_GATE_MIN_N — the paper demote stands.
+    fd, path = tempfile.mkstemp(suffix=".db"); os.close(fd)
+    try:
+        _promoter_env(monkeypatch)
+        _seed_paper(path, [("thin_sig", "sports", 25, 10, 0.55, 2.0)])  # paper: demoted
+        _seed_live(path, [("thin_sig", "sports", 10, 9, 0.50, 2.0)])    # live: thin
+        out = smp.run_promoter(db_path=path)
+        assert out["live_evaluated"] == 0, out
+        assert smp.get_slice_gate("thin_sig", "sports",
+                                  db_path=path) == ("demoted", True)
+    finally:
+        os.unlink(path)
+
+
+def test_live_overlay_deletes_stake_boost(monkeypatch):
+    # A live-negative slice must not keep a paper-earned stake boost.
+    fd, path = tempfile.mkstemp(suffix=".db"); os.close(fd)
+    try:
+        _promoter_env(monkeypatch)
+        _seed_paper(path, [("boosted", "sports", 60, 40, 0.50, 7.0)])
+        _seed_live(path, [("boosted", "sports", 40, 2, 0.40, 1.0)])
+        c = sqlite3.connect(path)
+        c.execute("""CREATE TABLE stake_multiplier_overrides (
+                       signal_type TEXT, subdomain TEXT, multiplier REAL,
+                       n_resolved INT, wr REAL, pnl REAL, promoted_at INT,
+                       expires_at INT, PRIMARY KEY (signal_type, subdomain))""")
+        c.commit(); c.close()
+        smp.run_promoter(db_path=path)
+        c = sqlite3.connect(path)
+        n = c.execute("SELECT COUNT(*) FROM stake_multiplier_overrides "
+                      "WHERE signal_type='boosted'").fetchone()[0]
+        c.close()
+        assert n == 0
+    finally:
+        os.unlink(path)
+
+
 def test_gate_deletes_stake_boost_of_demoted_slice(monkeypatch):
     fd, path = tempfile.mkstemp(suffix=".db"); os.close(fd)
     try:

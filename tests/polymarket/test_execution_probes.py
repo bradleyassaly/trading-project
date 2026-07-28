@@ -106,8 +106,11 @@ def test_db_error_fails_safe(monkeypatch):
 
 def test_wiring_invariants():
     src = inspect.getsource(ple)
-    # probe escape exists at both EV-gate block sites
-    assert src.count('signal["is_probe"] = 1') == 2
+    # probe escape exists at both EV-gate block sites, plus the slice-gate
+    # demote conversion (2026-07-27: a demoted slice converts EV-PASSING
+    # entries to $1 probes so re-measurement runs on the slice's best
+    # candidates, not only its EV-gate rejects)
+    assert src.count('signal["is_probe"] = 1') == 3
     # probe stake pinned, never Kelly-lifted or multiplier-scaled
     assert "size_usd = PROBE_STAKE_USD" in src
     assert 'not signal.get("is_probe")' in src  # kelly stash guard
