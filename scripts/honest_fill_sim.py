@@ -7,9 +7,17 @@ script replays closed paper trades against the firehose tape
 (wallet_trades = every OrderFilled on the exchange, both perspectives)
 and asks two questions the paper engine never did:
 
-  1. ENTRY: did anyone actually print at ≤ our claimed entry price on our
-     token within ENTRY_WINDOW_S after the signal? (cum printed size must
-     cover our share count — a 1-share dust print doesn't fill a $5 order)
+  1. ENTRY (two grades, honest if EITHER passes):
+       a. TAKER — the book captured at fire time (best_ask_at_fire /
+          ask_depth_usd_at_fire on polymarket_paper_trades, populated by
+          the paper executor since 2026-07-28) says a crossing order at
+          the claimed price would have filled: claimed >= best ask AND
+          ask depth (USD, at <= claimed) >= stake. Point-in-time truth.
+       b. RESTING — someone actually printed at ≤ our claimed entry price
+          on our token within ENTRY_WINDOW_S after the signal (cum printed
+          size must cover our share count — a 1-share dust print doesn't
+          fill a $5 order). The only grade available for entries that
+          pre-date book capture.
   2. TP EXIT: for take_profit claims, did anyone print at ≥ our claimed
      exit price between entry and resolution? If NOT, the trade RIDES to
      resolution and gets the resolution payout instead of the TP fantasy.
@@ -17,19 +25,21 @@ and asks two questions the paper engine never did:
 Verdict per signal_type: paper EV/$ vs honest EV/$ and the fill rates.
 Promotion decisions read THIS table, not the raw paper P&L.
 
-INTERPRETATION (learned on the first run, 2026-07-28): the entry check is
-a RESTING-fillability standard — "would a passive order at the claimed
-price have been hit by real flow". It is the right standard for
+INTERPRETATION (learned on the first run, 2026-07-28): the tape-print
+check is a RESTING-fillability standard — "would a passive order at the
+claimed price have been hit by real flow". It is the right standard for
 maker-style execution and for TP exits (a resting sell IS the mechanism),
 but it is STRICTER than the paper engine's implicit taker fill (crossing
 the book fills even when nobody else trades). First-run finding:
 resolution_decay paper entries are 0/42 resting-fillable — 8/10 sampled
 tokens printed NOTHING for a full hour after the signal. That is the
 signal's own thesis (flow has dried up) measured from the tape, and it
-kills maker-style execution (E1) for decay outright. A taker-grade check
-needs book state at paper fire time, which paper does not capture yet
-(order_book_snapshots covers only 2/42 of these markets) — see the
-paper-book-capture chip before trusting entry_fill for taker signals.
+kills maker-style execution (E1) for decay outright. The TAKER grade
+(added 2026-07-28, book state captured at fire by the paper executor)
+answers the question the resting grade can't; its coverage accrues
+forward from deploy only — rows with best_ask_at_fire NULL (pre-deploy
+entries, fetch failures) fall back to the resting grade, so read the
+`taker` coverage column before trusting entry_fill for taker signals.
 
 Assumptions (all conservative-stated, v1):
   * a print at ≤ L after our signal ⇒ our resting bid at L would have
@@ -79,6 +89,8 @@ CREATE TABLE IF NOT EXISTS honest_fill_verdicts (
     window_days      BIGINT,
     n_paper          BIGINT,
     n_entry_filled   BIGINT,
+    n_book_covered   BIGINT,
+    n_taker_filled   BIGINT,
     n_tp_claims      BIGINT,
     n_tp_honest      BIGINT,
     n_unresolved     BIGINT,
@@ -89,6 +101,26 @@ CREATE TABLE IF NOT EXISTS honest_fill_verdicts (
     computed_at      BIGINT NOT NULL
 );
 """
+
+# Lazy-add for verdict tables that pre-date the taker grade. IF NOT EXISTS
+# keeps it error-free on Postgres; SQLite (tests) rejects the syntax but a
+# fresh CREATE there already carries the columns, so the except is safe.
+_VERDICT_LAZY_COLS = ("n_book_covered BIGINT", "n_taker_filled BIGINT")
+
+
+def taker_fillable(claimed_px: float | None, best_ask: float | None,
+                   ask_depth_usd: float | None, stake_usd: float) -> bool:
+    """Would a taker order at the claimed price have filled at fire time?
+
+    True iff the fire-time book was captured AND claimed >= best ask AND
+    the USD ask depth at <= claimed covers the stake. Missing capture
+    (pre-deploy rows, failed fetches) is False — caller falls back to the
+    resting grade, never assumes fillability.
+    """
+    if claimed_px is None or best_ask is None or ask_depth_usd is None:
+        return False
+    return (float(claimed_px) >= float(best_ask) - 1e-9
+            and float(ask_depth_usd) >= float(stake_usd) - 1e-9)
 
 
 def _prints(conn, token_id: str, t0: int, t1: int, max_price: float | None,
@@ -125,7 +157,8 @@ def run_sim(days: int = TAPE_SAFE_DAYS, entry_window_s: int = ENTRY_WINDOW_S,
                       pt.size_usd, pt.realized_pnl, pt.exit_reason,
                       pt.entry_ts, pt.exit_ts,
                       m.yes_token_id,
-                      mr.resolves_yes, mr.payout_yes
+                      mr.resolves_yes, mr.payout_yes,
+                      pt.best_ask_at_fire, pt.ask_depth_usd_at_fire
                  FROM polymarket_paper_trades pt
                  LEFT JOIN markets m ON m.condition_id = pt.condition_id
                  LEFT JOIN market_resolutions mr
@@ -139,10 +172,12 @@ def run_sim(days: int = TAPE_SAFE_DAYS, entry_window_s: int = ENTRY_WINDOW_S,
 
         per_sig: dict[str, dict] = {}
         for (tid, sig, cid, entry_px, exit_px, size_usd, paper_pnl, reason,
-             entry_ts, exit_ts, yes_tok, resolves_yes, payout_yes) in trades:
+             entry_ts, exit_ts, yes_tok, resolves_yes, payout_yes,
+             ask_at_fire, ask_depth_at_fire) in trades:
             sig = sig or "unknown"
             s = per_sig.setdefault(sig, {
-                "n_paper": 0, "n_entry_filled": 0, "n_tp_claims": 0,
+                "n_paper": 0, "n_entry_filled": 0, "n_book_covered": 0,
+                "n_taker_filled": 0, "n_tp_claims": 0,
                 "n_tp_honest": 0, "n_unresolved": 0, "paper_pnl": 0.0,
                 "honest_pnl": 0.0, "paper_staked": 0.0, "honest_staked": 0.0,
             })
@@ -157,10 +192,21 @@ def run_sim(days: int = TAPE_SAFE_DAYS, entry_window_s: int = ENTRY_WINDOW_S,
                 continue
             shares = size_usd / entry_px
 
-            # 1. ENTRY: cum printed size at ≤ entry_px within the window.
-            fills = _prints(conn, str(yes_tok), int(entry_ts),
-                            int(entry_ts) + entry_window_s, entry_px, None)
-            if sum(f[2] for f in fills) < shares:
+            # 1. ENTRY — taker grade first (fire-time book truth; YES rows
+            # only here, so the captured traded-token space IS YES space),
+            # then the resting grade (tape prints) as fallback for rows
+            # without book coverage.
+            if ask_at_fire is not None:
+                s["n_book_covered"] += 1
+            entered = taker_fillable(entry_px, ask_at_fire,
+                                     ask_depth_at_fire, size_usd)
+            if entered:
+                s["n_taker_filled"] += 1
+            else:
+                fills = _prints(conn, str(yes_tok), int(entry_ts),
+                                int(entry_ts) + entry_window_s, entry_px, None)
+                entered = sum(f[2] for f in fills) >= shares
+            if not entered:
                 continue  # honest verdict: never entered — trade drops
             s["n_entry_filled"] += 1
             s["honest_staked"] += size_usd
@@ -198,6 +244,12 @@ def run_sim(days: int = TAPE_SAFE_DAYS, entry_window_s: int = ENTRY_WINDOW_S,
                     conn.execute(stmt)
                 except Exception:
                     pass
+        for col_ddl in _VERDICT_LAZY_COLS:
+            try:
+                conn.execute("ALTER TABLE honest_fill_verdicts "
+                             f"ADD COLUMN IF NOT EXISTS {col_ddl}")
+            except Exception:
+                pass
         conn.execute("DELETE FROM honest_fill_verdicts")
         out_rows = []
         for sig, s in sorted(per_sig.items(),
@@ -207,14 +259,17 @@ def run_sim(days: int = TAPE_SAFE_DAYS, entry_window_s: int = ENTRY_WINDOW_S,
             conn.execute(
                 """INSERT INTO honest_fill_verdicts
                      (signal_type, window_days, n_paper, n_entry_filled,
+                      n_book_covered, n_taker_filled,
                       n_tp_claims, n_tp_honest, n_unresolved, paper_pnl,
                       honest_pnl, paper_ev_per_usd, honest_ev_per_usd,
                       computed_at)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                    ON CONFLICT (signal_type) DO UPDATE SET
                      window_days = EXCLUDED.window_days,
                      n_paper = EXCLUDED.n_paper,
                      n_entry_filled = EXCLUDED.n_entry_filled,
+                     n_book_covered = EXCLUDED.n_book_covered,
+                     n_taker_filled = EXCLUDED.n_taker_filled,
                      n_tp_claims = EXCLUDED.n_tp_claims,
                      n_tp_honest = EXCLUDED.n_tp_honest,
                      n_unresolved = EXCLUDED.n_unresolved,
@@ -224,6 +279,7 @@ def run_sim(days: int = TAPE_SAFE_DAYS, entry_window_s: int = ENTRY_WINDOW_S,
                      honest_ev_per_usd = EXCLUDED.honest_ev_per_usd,
                      computed_at = EXCLUDED.computed_at""",
                 (sig, days, s["n_paper"], s["n_entry_filled"],
+                 s["n_book_covered"], s["n_taker_filled"],
                  s["n_tp_claims"], s["n_tp_honest"], s["n_unresolved"],
                  round(s["paper_pnl"], 2), round(s["honest_pnl"], 2),
                  round(p_ev, 4), round(h_ev, 4), now),
@@ -231,6 +287,7 @@ def run_sim(days: int = TAPE_SAFE_DAYS, entry_window_s: int = ENTRY_WINDOW_S,
             out_rows.append({
                 "signal_type": sig, "n_paper": s["n_paper"],
                 "entry_fill": f"{s['n_entry_filled']}/{s['n_paper']}",
+                "taker": f"{s['n_taker_filled']}/{s['n_book_covered']}",
                 "tp_honest": f"{s['n_tp_honest']}/{s['n_tp_claims']}",
                 "unresolved": s["n_unresolved"],
                 "paper_pnl": round(s["paper_pnl"], 2),
@@ -268,20 +325,23 @@ def _write_report(report: dict) -> None:
             f" ({report['window_days']}d tape-complete window),"
             f" entry patience {report['entry_window_s']}s.",
             "",
-            "Entry honest ⇔ the tape printed ≤ our claimed entry price at our"
-            " size within the window. TP honest ⇔ the tape printed ≥ the"
-            " claimed TP price before resolution; otherwise the trade rides"
-            " to the resolution payout. Stops/expiries keep paper booking"
-            " (honest EV is an UPPER bound for stop-heavy signals).",
+            "Entry honest ⇔ TAKER grade (fire-time book: claimed ≥ best ask"
+            " AND ask depth ≥ stake; `taker` column = taker-filled/book-"
+            "covered, coverage accrues from the 2026-07-28 capture deploy)"
+            " OR RESTING grade (tape printed ≤ our claimed entry price at"
+            " our size within the window). TP honest ⇔ the tape printed ≥"
+            " the claimed TP price before resolution; otherwise the trade"
+            " rides to the resolution payout. Stops/expiries keep paper"
+            " booking (honest EV is an UPPER bound for stop-heavy signals).",
             "",
-            "| signal | n | entry fill | TP honest | unresolved |"
+            "| signal | n | entry fill | taker | TP honest | unresolved |"
             " paper P&L | honest P&L | paper EV/$ | honest EV/$ |",
-            "|---|---|---|---|---|---|---|---|---|",
+            "|---|---|---|---|---|---|---|---|---|---|",
         ]
         for v in report["verdicts"]:
             lines.append(
                 f"| {v['signal_type']} | {v['n_paper']} | {v['entry_fill']} |"
-                f" {v['tp_honest']} | {v['unresolved']} |"
+                f" {v['taker']} | {v['tp_honest']} | {v['unresolved']} |"
                 f" ${v['paper_pnl']:+.2f} | ${v['honest_pnl']:+.2f} |"
                 f" {v['paper_ev_usd']:+.3f} | {v['honest_ev_usd']:+.3f} |")
         path.write_text("\n".join(lines) + "\n", encoding="utf-8")

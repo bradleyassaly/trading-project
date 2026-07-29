@@ -540,6 +540,12 @@ class WalletDB:
             ("alpha_score_at_fire", "REAL"),
             ("entry_context", "TEXT"),
             ("confidence_raw", "REAL"),
+            # 2026-07-28: decision-time book capture (traded-token space) so
+            # honest_fill_sim can grade paper entries by TAKER fillability,
+            # not just tape prints. Nullable — fetch failures store NULL.
+            ("best_bid_at_fire", "REAL"),
+            ("best_ask_at_fire", "REAL"),
+            ("ask_depth_usd_at_fire", "REAL"),
         ]:
             if col not in ppt_cols:
                 try:

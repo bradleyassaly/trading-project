@@ -463,6 +463,53 @@ MAX_PORTFOLIO_PCT = 0.30  # never deploy >30% of bankroll
 MAX_CATEGORY_PCT = 0.40   # max 40% of bankroll in any single category
 MAX_SLIPPAGE = 0.05       # reject if price moved >5% since whale traded
 
+# 2026-07-28: decision-time book capture for paper entries. live_trades has
+# carried best_ask/best_bid/spread at decision since P6, but paper entries had
+# NO book state — honest_fill_sim could only grade them by tape prints
+# (resting-fillability), which structurally zeroes taker-style signals like
+# resolution_decay (0/42 resting-fillable; 8/10 sampled tokens printed nothing
+# for an hour after fire). With these three nullable columns the sim can ask
+# the taker question instead: claimed price >= best ask AND ask depth >= stake.
+_BOOK_EPS = 1e-9
+
+
+def compute_book_state(
+    book: dict[str, Any] | None, claimed_price: float | None,
+) -> tuple[float | None, float | None, float | None]:
+    """(best_bid, best_ask, ask_depth_usd) from a CLOB /book dict.
+
+    All values in the QUERIED token's own price space. ask_depth_usd is the
+    cumulative USD notional (price × size) of asks priced <= claimed_price —
+    the depth a taker crossing at our claimed limit could consume; None when
+    claimed_price is None (no limit to measure against). Best levels come
+    from min/max, not [0]-indexing, so a raw descending-sorted book (the
+    2026-07-06 asks[0]-is-worst trap) cannot poison the capture.
+    """
+    if not isinstance(book, dict):
+        return None, None, None
+
+    def _levels(side_key: str) -> list[tuple[float, float]]:
+        out = []
+        for lvl in (book.get(side_key) or []):
+            try:
+                out.append((float(lvl["price"]), float(lvl["size"])))
+            except (TypeError, ValueError, KeyError):
+                continue
+        return out
+
+    asks = _levels("asks")
+    bids = _levels("bids")
+    best_ask = min((p for p, _ in asks), default=None)
+    best_bid = max((p for p, _ in bids), default=None)
+    depth = None
+    if claimed_price is not None:
+        depth = round(
+            sum(p * sz for p, sz in asks if p <= float(claimed_price) + _BOOK_EPS),
+            2,
+        )
+    return best_bid, best_ask, depth
+
+
 _PAPER_TRADES_SCHEMA = """
 CREATE TABLE IF NOT EXISTS polymarket_paper_trades (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -714,6 +761,56 @@ class PolymarketPaperExecutor:
         final_pct = max(0.01, min(base_pct * sharpe_mult * trend_mult, MAX_POSITION_PCT))
         stake = max(MIN_STAKE, round(bankroll * final_pct, 2))
         return stake, f"profile-Kelly: K={kelly}, S={sharpe}, T={trend}"
+
+    def _capture_book_at_fire(
+        self, signal: dict[str, Any], direction: str,
+        claimed_yes_price: float | None,
+    ) -> tuple[float | None, float | None, float | None]:
+        """Best bid/ask + taker ask depth of the TRADED token at fire time.
+
+        Returns (best_bid, best_ask, ask_depth_usd) in the traded token's
+        own price space. The stored entry_price stays YES-space even for
+        side=NO rows (see _close_position_early), so the claimed cutoff is
+        converted to NO-space here; honest_fill_sim only grades YES rows,
+        where the two spaces coincide. (None, None, None) on ANY failure —
+        capture is telemetry, never a gate on the entry.
+        """
+        try:
+            want_yes = (direction or "BUY").upper() == "BUY"
+            tok = (signal.get("yes_token_id") if want_yes
+                   else signal.get("no_token_id"))
+            if not tok:
+                conn = getattr(self, "_wallet_conn", None)
+                cid = signal.get("condition_id")
+                if conn is not None and cid:
+                    with self._wallet_lock:
+                        row = conn.execute(
+                            "SELECT yes_token_id, no_token_id FROM markets "
+                            "WHERE condition_id = ?", (cid,),
+                        ).fetchone()
+                    if row:
+                        tok = row[0] if want_yes else row[1]
+            # No side-correct token → no capture. The generic token_id
+            # field is NOT a safe fallback: it can be either outcome token,
+            # and a wrong-book capture is silent garbage (worse than NULL).
+            if not tok:
+                return None, None, None
+            claimed = None
+            if claimed_yes_price is not None:
+                claimed = float(claimed_yes_price)
+                if claimed <= 0:
+                    claimed = None
+                elif not want_yes:
+                    claimed = 1.0 - claimed
+            client = getattr(self, "_book_client", None)
+            if client is None:
+                from trading_platform.polymarket.clob_client import ClobClient
+                client = self._book_client = ClobClient()
+            book = client.get_order_book(str(tok))
+            return compute_book_state(book, claimed)
+        except Exception as exc:
+            logger.debug("book capture failed (never blocks entry): %s", exc)
+            return None, None, None
 
     def execute_signal(self, signal: dict[str, Any]) -> dict[str, Any] | None:
         """Place a paper trade for a fired signal in polymarket_paper_trades.
@@ -1689,6 +1786,16 @@ class PolymarketPaperExecutor:
         raw_entry_price = signal.get("price")
         now_ts = int(time.time())
 
+        # Book state at fire time — nullable telemetry for honest_fill_sim's
+        # taker check. Outer try is the hard fail-safe boundary: a failed
+        # (or slow-then-failed) book fetch must never block the paper entry.
+        book_bid = book_ask = book_ask_depth = None
+        try:
+            book_bid, book_ask, book_ask_depth = self._capture_book_at_fire(
+                signal, direction, raw_entry_price)
+        except Exception as exc:
+            logger.debug("book capture failed (never blocks entry): %s", exc)
+
         # Apply CostModel on entry so paper P&L mirrors real execution.
         # Previously: raw signal price was stored; costs only applied on
         # _close_position_early (exits). That left resolution-exit trades
@@ -1732,8 +1839,9 @@ class PolymarketPaperExecutor:
                         size_usd, signal_type, confidence, confidence_raw, wallet, entry_ts,
                         fusion_score, fusion_components, wallet_tier_at_fire,
                         alpha_score_at_fire, entry_context, features_at_fire,
+                        best_bid_at_fire, best_ask_at_fire, ask_depth_usd_at_fire,
                         archived)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)""",
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)""",
                     (condition_id, question, category, side, entry_price,
                      raw_entry_price, entry_spread_cost, entry_slippage_cost,
                      stake, signal_type, confidence,
@@ -1742,7 +1850,8 @@ class PolymarketPaperExecutor:
                      alpha_at_fire, entry_ctx,
                      # N3: full point-in-time signal dict (distinct from
                      # entry_context, which is a curated gate-values subset).
-                     _json.dumps(signal, default=str)),
+                     _json.dumps(signal, default=str),
+                     book_bid, book_ask, book_ask_depth),
                 )
                 trade_id = cursor.lastrowid
                 self._wallet_conn.commit()
@@ -2908,6 +3017,14 @@ class PolymarketPaperExecutor:
         confidence = signal.get("confidence") or 0
         stake = DISCOVERY_STAKE_USD
 
+        # Book state at fire time (same fail-safe contract as the main path).
+        book_bid = book_ask = book_ask_depth = None
+        try:
+            book_bid, book_ask, book_ask_depth = self._capture_book_at_fire(
+                signal, direction, ep)
+        except Exception as exc:
+            logger.debug("book capture failed (never blocks entry): %s", exc)
+
         now_ts = int(__import__("time").time())
         import json as _json
         with self._wallet_lock:
@@ -2917,8 +3034,9 @@ class PolymarketPaperExecutor:
                     size_usd, signal_type, confidence, confidence_raw, wallet, entry_ts,
                     archived, wallet_tier_at_fire, source_wallet,
                     detection_lag_seconds, whale_entry_price, alpha_score_at_fire,
-                    features_at_fire)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)""",
+                    features_at_fire,
+                    best_bid_at_fire, best_ask_at_fire, ask_depth_usd_at_fire)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (condition_id, question[:200], category, side, ep,
                  stake, signal_type, confidence,
                  # This discovery/whale-copy path never runs the ensemble or
@@ -2927,7 +3045,8 @@ class PolymarketPaperExecutor:
                  signal.get("wallet_tier", ""), signal.get("wallet", ""),
                  signal.get("detection_lag_seconds"), signal.get("price"),
                  signal.get("alpha_score", 0),
-                 _json.dumps(signal, default=str)),  # N3 feature snapshot
+                 _json.dumps(signal, default=str),  # N3 feature snapshot
+                 book_bid, book_ask, book_ask_depth),
             )
             self._wallet_conn.commit()
             row = self._wallet_conn.execute(
