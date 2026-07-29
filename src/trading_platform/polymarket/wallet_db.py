@@ -540,7 +540,7 @@ class WalletDB:
             ("alpha_score_at_fire", "REAL"),
             ("entry_context", "TEXT"),
             ("confidence_raw", "REAL"),
-            # 2026-07-28: decision-time book capture (traded-token space) so
+            # 2026-07-29: decision-time book capture (traded-token space) so
             # honest_fill_sim can grade paper entries by TAKER fillability,
             # not just tape prints. Nullable — fetch failures store NULL.
             ("best_bid_at_fire", "REAL"),

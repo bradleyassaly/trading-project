@@ -463,7 +463,7 @@ MAX_PORTFOLIO_PCT = 0.30  # never deploy >30% of bankroll
 MAX_CATEGORY_PCT = 0.40   # max 40% of bankroll in any single category
 MAX_SLIPPAGE = 0.05       # reject if price moved >5% since whale traded
 
-# 2026-07-28: decision-time book capture for paper entries. live_trades has
+# 2026-07-29: decision-time book capture for paper entries. live_trades has
 # carried best_ask/best_bid/spread at decision since P6, but paper entries had
 # NO book state — honest_fill_sim could only grade them by tape prints
 # (resting-fillability), which structurally zeroes taker-style signals like

@@ -10,7 +10,7 @@ and asks two questions the paper engine never did:
   1. ENTRY (two grades, honest if EITHER passes):
        a. TAKER — the book captured at fire time (best_ask_at_fire /
           ask_depth_usd_at_fire on polymarket_paper_trades, populated by
-          the paper executor since 2026-07-28) says a crossing order at
+          the paper executor since 2026-07-29) says a crossing order at
           the claimed price would have filled: claimed >= best ask AND
           ask depth (USD, at <= claimed) >= stake. Point-in-time truth.
        b. RESTING — someone actually printed at ≤ our claimed entry price
@@ -35,7 +35,7 @@ resolution_decay paper entries are 0/42 resting-fillable — 8/10 sampled
 tokens printed NOTHING for a full hour after the signal. That is the
 signal's own thesis (flow has dried up) measured from the tape, and it
 kills maker-style execution (E1) for decay outright. The TAKER grade
-(added 2026-07-28, book state captured at fire by the paper executor)
+(added 2026-07-29, book state captured at fire by the paper executor)
 answers the question the resting grade can't; its coverage accrues
 forward from deploy only — rows with best_ask_at_fire NULL (pre-deploy
 entries, fetch failures) fall back to the resting grade, so read the
@@ -327,7 +327,7 @@ def _write_report(report: dict) -> None:
             "",
             "Entry honest ⇔ TAKER grade (fire-time book: claimed ≥ best ask"
             " AND ask depth ≥ stake; `taker` column = taker-filled/book-"
-            "covered, coverage accrues from the 2026-07-28 capture deploy)"
+            "covered, coverage accrues from the 2026-07-29 capture deploy)"
             " OR RESTING grade (tape printed ≤ our claimed entry price at"
             " our size within the window). TP honest ⇔ the tape printed ≥"
             " the claimed TP price before resolution; otherwise the trade"
