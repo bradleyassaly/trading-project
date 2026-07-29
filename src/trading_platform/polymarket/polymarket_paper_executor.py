@@ -1851,6 +1851,24 @@ class PolymarketPaperExecutor:
         except Exception:
             return {"checked": 0, "resolved": 0}
 
+        # 2026-07-29: settle from CANONICAL truth (market_resolutions)
+        # FIRST. This sweep was Gamma-only — and Gamma delists concluded
+        # markets, so it reported "checked 313 / resolved 0" for days
+        # while 311/313 open paper positions sat on ended markets: the
+        # 300-position cap jammed (smoke_tests paper_position_cap failed
+        # 18x), new paper flow — the slice gate's evidence stream — was
+        # about to be blocked, and the 7-day grace below would have
+        # written them all off as pnl=0 'expired' (the DV-12 /
+        # 2026-07-09 outcome-poisoning class). check_resolutions_v2
+        # settles against clob_winner/gamma_bulk truth; the per-trade
+        # Gamma loop below remains the fallback for markets with no
+        # canonical row yet.
+        canonical_settled = 0
+        try:
+            canonical_settled = len(self.check_resolutions_v2())
+        except Exception as exc:
+            logger.warning("[PAPER] canonical settle pass failed: %s", exc)
+
         with self._wallet_lock:
             open_trades = self._wallet_conn.execute(
                 """SELECT id, condition_id, side, entry_price, size_usd,
@@ -1859,7 +1877,7 @@ class PolymarketPaperExecutor:
                    WHERE archived = 0 AND exit_ts IS NULL"""
             ).fetchall()
 
-        resolved_count = 0
+        resolved_count = canonical_settled
         # Trades older than this with no Gamma record are written off
         # as expired (pnl=0). Without this, paper trades placed against
         # markets that later get deindexed sit "open" forever and the
@@ -2133,7 +2151,9 @@ class PolymarketPaperExecutor:
             len(open_trades), resolved_count, expired_count,
         )
         return {
-            "checked": len(open_trades),
+            # open_trades was read AFTER the canonical pass — add its
+            # settles back so 'checked' still means the full population.
+            "checked": len(open_trades) + canonical_settled,
             "resolved": resolved_count,
             "expired": expired_count,
         }

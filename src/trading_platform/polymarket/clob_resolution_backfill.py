@@ -105,19 +105,35 @@ def record_clob_resolution(condition_id: str, db_path: str | None = None) -> str
 def discover_missing(conn, limit: int | None = None) -> list[str]:
     """Concluded condition_ids we traded/evaluated that are ABSENT from
     market_resolutions — the coverage gap this backfill closes."""
+    from datetime import datetime, timezone
+    today = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d")
     cids: list[str] = []
     seen: set[str] = set()
     queries = [
         # markets we actually resolved a live trade on
-        "SELECT DISTINCT condition_id FROM live_trades "
-        "WHERE realized_pnl IS NOT NULL AND condition_id IS NOT NULL",
+        ("SELECT DISTINCT condition_id FROM live_trades "
+         "WHERE realized_pnl IS NOT NULL AND condition_id IS NOT NULL", ()),
         # signal outcomes that resolved
-        "SELECT DISTINCT condition_id FROM signal_outcomes "
-        "WHERE resolved_at IS NOT NULL AND condition_id IS NOT NULL",
+        ("SELECT DISTINCT condition_id FROM signal_outcomes "
+         "WHERE resolved_at IS NOT NULL AND condition_id IS NOT NULL", ()),
+        # 2026-07-28: OPEN paper positions whose market already ended.
+        # These were invisible to the two queries above (no live trade, no
+        # resolved outcome yet) — and Gamma delists concluded markets, so
+        # NOTHING ever resolved them: 311/313 open paper positions sat on
+        # ended markets (309 with no resolution row), paper_resolutions
+        # swept "checked 313 / resolved 0" for days, the 300-position
+        # paper cap jammed, and smoke_tests' paper_position_cap failed
+        # 18x with new paper signals — the slice gate's evidence stream —
+        # about to be blocked. Paper books are first-class backfill
+        # citizens now.
+        ("SELECT DISTINCT pt.condition_id FROM polymarket_paper_trades pt "
+         "JOIN markets m ON m.condition_id = pt.condition_id "
+         "WHERE pt.exit_ts IS NULL AND pt.archived = 0 "
+         "AND pt.condition_id IS NOT NULL AND m.end_date_iso < ?", (today,)),
     ]
-    for q in queries:
+    for q, params in queries:
         try:
-            for r in conn.execute(q).fetchall():
+            for r in conn.execute(q, params).fetchall():
                 if r and r[0] and r[0] not in seen:
                     seen.add(r[0])
                     cids.append(r[0])
