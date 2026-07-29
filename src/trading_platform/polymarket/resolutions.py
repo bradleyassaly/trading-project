@@ -39,6 +39,16 @@ logger = logging.getLogger(__name__)
 SOURCE_RANK = {
     "manual": 100,
     "uma_gamma": 90,
+    # chain_condition_resolution: the ConditionalTokens ConditionResolution
+    # event decoded live off the wallet-stream WS (wallet_stream.py) —
+    # payoutNumerators straight from the oracle's reportPayouts(), zero
+    # inference, immune to Gamma delisting. YES side mapped via
+    # markets.yes_token_id (= clobTokenIds[0] ↔ outcome slot 0; order
+    # validated empirically against high-rank rows 2026-07-28, see
+    # scripts/validate_condition_resolutions.py). Above clob_winner — it IS
+    # the report the CLOB winner flags derive from — but below uma_gamma
+    # until live coexistence proves it (initial validation in the script).
+    "chain_condition_resolution": 85,
     # clob_winner: CLOB /markets/{cid} per-token winner flags. Gamma DELISTS a
     # market once it resolves, so uma_gamma/gamma_bulk miss it (~50% of concluded
     # markets we traded had no row here); the CLOB keeps the settled market with

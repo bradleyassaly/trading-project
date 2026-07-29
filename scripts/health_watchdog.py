@@ -624,6 +624,40 @@ def check_firehose() -> ComponentState:
         return ComponentState(name, False, f"check err: {str(e)[:80]}")
 
 
+def check_chain_resolutions() -> ComponentState:
+    """Oracle-truth liveness: market_resolutions rows written from the
+    on-chain ConditionResolution event in the last 6h.
+
+    The wallet-stream decodes the ConditionalTokens ConditionResolution log
+    (the oracle report) into rank-85 rows. That subscription can die on its
+    own while fills keep flowing — exactly how the OrderFilled sub went dark
+    for 8.5h on 2026-07-20 while CTF events streamed — and nothing else
+    watches it. Polymarket resolves thousands of conditions a day, so a 6h
+    window with a floor of 20 is far below normal and unambiguous when hit.
+    Skipped when the persist is deliberately disabled."""
+    name = "chain_resolutions"
+    if os.environ.get("CHAIN_RESOLUTION_PERSIST", "1").lower() in ("0", "false", "no"):
+        return ComponentState(name, True, "disabled (CHAIN_RESOLUTION_PERSIST=0)")
+    try:
+        conn = _watchdog_pg()
+        if conn is None:
+            return ComponentState(name, True, "skipped (sqlite backend)")
+        with conn:
+            n = conn.execute(
+                "SELECT COUNT(*) FROM market_resolutions "
+                "WHERE source = 'chain_condition_resolution' AND recorded_at >= %s",
+                (int(time.time()) - 6 * 3600,)).fetchone()[0]
+        threshold = int(os.environ.get("WATCHDOG_CHAIN_RES_MIN_6H", "20"))
+        if int(n or 0) < threshold:
+            return ComponentState(
+                name, False,
+                f"only {int(n or 0)} chain resolutions recorded in 6h "
+                f"(threshold {threshold}) — ConditionResolution sub dead?")
+        return ComponentState(name, True, f"{int(n)} chain resolutions in 6h")
+    except Exception as e:
+        return ComponentState(name, False, f"check err: {str(e)[:80]}")
+
+
 def check_reconcile_age() -> ComponentState:
     """Days since reconcile_polymarket_truth last ran CLEAN (exit 0 = zero
     drifts). A long gap means our ledger may silently diverge from on-chain."""
@@ -788,7 +822,7 @@ def main() -> None:
                   check_scheduler_consecutive_failures(),
                   check_balance_staleness(), check_poller_freshness(),
                   check_reconcile_age(), check_trading_liveness(),
-                  check_firehose()]
+                  check_firehose(), check_chain_resolutions()]
         in_grace = (now - startup_ts) < STARTUP_GRACE_SECONDS
         if in_grace and any(not s.healthy for s in states):
             logger.info("[grace] suppressed alerts during startup window")

@@ -1,0 +1,20 @@
+{
+  "_comment": "Fixture for tests/polymarket/test_chain_decoders.py. See the fixtures README. Do not hand-edit.",
+  "event": "ConditionResolution",
+  "topic0": "0xb44d84d3289691f71497564b85d4233648d9dbae8cbdbb4329f301c3a0185894",
+  "layout": "topics=[sig,conditionId,oracle,questionId]; data=[outcomeSlotCount,offset(0x40),len,numerators...] \u2014 payoutNumerators IS the oracle report; slot i \u2194 clobTokenIds[i]",
+  "source": "eth_getLogs on wss://polygon-bor-rpc.publicnode.com (REAL), canonical ConditionalTokens 0x4d97dcd9\u2026",
+  "log": {
+    "address": "0x4d97dcd97ec945f40cf65f87097ace5ea0476045",
+    "topics": [
+      "0xb44d84d3289691f71497564b85d4233648d9dbae8cbdbb4329f301c3a0185894",
+      "0xda44c9f8e255be5d94c716b0ee5f4849a84aa9f39572cb0def2c27161e2200c0",
+      "0x00000000000000000000000065070be91477460d8a7aeeb94ef92fe056c2f2a7",
+      "0xad3689cae7a790eaada0eba6082a46deb6b014ce9b4a2dd9755bc12db33ef6bf"
+    ],
+    "data": "0x00000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000040000000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001",
+    "blockNumber": "0x56d609d",
+    "transactionHash": "0x30a894b222dce2c0af6250e48799ecae37bf7ac523912a94bb8266519e3f76e5",
+    "logIndex": "0x2a1"
+  }
+}

@@ -18,13 +18,17 @@ from pathlib import Path
 import pytest
 
 from trading_platform.polymarket.wallet_stream import (
+    CONDITION_RESOLUTION_TOPIC,
+    CONDITIONAL_TOKENS,
     CTF_MERGE_TOPIC,
     CTF_REDEEM_TOPIC,
     CTF_SPLIT_TOPIC,
     ORDER_FILLED_TOPIC_V2,
     _CTF_COLLATERAL,
+    decode_condition_resolution,
     decode_ctf_event,
     decode_order_filled,
+    payout_yes_from_numerators,
 )
 
 FIX_DIR = Path(__file__).parent / "fixtures"
@@ -58,6 +62,7 @@ def load_full(name: str) -> dict:
     ("position_split", CTF_SPLIT_TOPIC),
     ("positions_merge", CTF_MERGE_TOPIC),
     ("payout_redemption", CTF_REDEEM_TOPIC),
+    ("condition_resolution", CONDITION_RESOLUTION_TOPIC),
 ])
 def test_fixture_topic0_matches_module_constant(name, topic):
     log = load(name)
@@ -199,6 +204,86 @@ def test_payout_redemption_every_field():
         "amount": pytest.approx(1.835442),
     }
     assert d["collateral"] in _CTF_COLLATERAL
+
+
+# ---------------------------------------------------------------------------
+# ConditionResolution (real) — the oracle report feeding market_resolutions
+# ---------------------------------------------------------------------------
+
+def test_condition_resolution_every_field():
+    log = load("condition_resolution")
+    d = decode_condition_resolution(log["topics"], log["data"])
+    assert d == {
+        "condition_id":
+            "0xda44c9f8e255be5d94c716b0ee5f4849a84aa9f39572cb0def2c27161e2200c0",
+        "oracle": "0x65070be91477460d8a7aeeb94ef92fe056c2f2a7",
+        "question_id":
+            "0xad3689cae7a790eaada0eba6082a46deb6b014ce9b4a2dd9755bc12db33ef6bf",
+        "outcome_slot_count": 2,
+        "payout_numerators": [0, 1],
+    }
+    # [0, 1] = outcome slot 1 takes the pot ⇒ YES (slot 0) paid nothing.
+    assert payout_yes_from_numerators(d["payout_numerators"]) == 0.0
+
+
+def test_condition_resolution_fixture_from_canonical_contract():
+    # The handler trusts ONLY the canonical ConditionalTokens deployment:
+    # conditionId = keccak(oracle, questionId, slotCount) is portable across
+    # CTF clones, so a copycat could emit inverted payouts for real cids.
+    log = load("condition_resolution")
+    assert log["address"].lower() == CONDITIONAL_TOKENS
+    assert CONDITIONAL_TOKENS == CONDITIONAL_TOKENS.lower()
+
+
+def test_payout_yes_from_numerators_semantics():
+    assert payout_yes_from_numerators([1, 0]) == 1.0    # YES (slot 0) wins
+    assert payout_yes_from_numerators([0, 1]) == 0.0    # NO wins
+    assert payout_yes_from_numerators([1, 1]) == 0.5    # 50/50 tie/void
+    assert payout_yes_from_numerators([1000000, 0]) == 1.0  # scale-proof
+    assert payout_yes_from_numerators([3, 1]) == 0.75   # scalar-ish split
+    assert payout_yes_from_numerators([0, 1], yes_index=1) == 1.0
+    assert payout_yes_from_numerators([0, 0]) is None   # unresolvable garbage
+    assert payout_yes_from_numerators([1, 0, 0]) is None  # non-binary
+    assert payout_yes_from_numerators([]) is None
+
+
+def test_condition_resolution_malformed_inputs_return_none():
+    log = load("condition_resolution")
+    assert decode_condition_resolution(log["topics"][:3], log["data"]) is None
+    assert decode_condition_resolution(log["topics"], None) is None
+    assert decode_condition_resolution(log["topics"], "0x") is None
+    assert decode_condition_resolution(log["topics"], "0x" + "0" * 64) is None
+    # truncated: length word says 2 numerators but only one word follows
+    assert decode_condition_resolution(
+        log["topics"], log["data"][:-64]) is None
+    # array length disagreeing with outcomeSlotCount = mis-parse, fail loudly
+    tampered = log["data"][:2 + 64 * 2] + ("0" * 63 + "3") + log["data"][2 + 64 * 3:]
+    assert decode_condition_resolution(log["topics"], tampered) is None
+    # misaligned / out-of-range offset word
+    bad_offset = log["data"][:2 + 64] + ("0" * 62 + "41") + log["data"][2 + 64 * 2:]
+    assert decode_condition_resolution(log["topics"], bad_offset) is None
+
+
+def test_condition_resolution_honors_nonstandard_offset():
+    """The decoder follows the ABI offset word instead of assuming 0x40 —
+    same numerators relocated one word deeper must decode identically."""
+    log = load("condition_resolution")
+    d0 = decode_condition_resolution(log["topics"], log["data"])
+    dh = log["data"].lower().replace("0x", "")
+    words = [dh[i * 64:(i + 1) * 64] for i in range(len(dh) // 64)]
+    # move the array head from word 2 to word 3 (offset 0x40 → 0x60) with a
+    # junk padding word in between
+    shifted = [words[0], "%064x" % 0x60, "f" * 64] + words[2:]
+    d1 = decode_condition_resolution(log["topics"], "0x" + "".join(shifted))
+    assert d1 == d0
+
+
+def test_condition_resolution_normalizes_0x_and_case():
+    log = load("condition_resolution")
+    with_pref = decode_condition_resolution(log["topics"], log["data"])
+    without = decode_condition_resolution(log["topics"], log["data"].replace("0x", ""))
+    upper = decode_condition_resolution(log["topics"], log["data"].upper())
+    assert with_pref == without == upper
 
 
 # ---------------------------------------------------------------------------

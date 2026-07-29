@@ -17,22 +17,28 @@ the real buy-maker capture, existing solely to pin the decoder's SELL branch.
 
 Usage:
     python scripts/capture_chain_decoder_fixtures.py
+    python scripts/capture_chain_decoder_fixtures.py --only condition_resolution
 
 Requires DB access (for the CTF tx hashes) and the publicnode WS endpoint.
-Fixtures are immutable snapshots — only regenerate if a layout genuinely changes.
+Fixtures are immutable snapshots — only regenerate if a layout genuinely
+changes; --only limits capture to the named fixture(s) so the others stay
+untouched.
 """
 from __future__ import annotations
 
 import asyncio
 import json
 import os
+import sys
 
 import websockets
 
 from trading_platform.polymarket.db_connection import get_connection
 from trading_platform.polymarket.wallet_stream import (
     ORDER_FILLED_TOPIC_V2, CTF_SPLIT_TOPIC, CTF_MERGE_TOPIC, CTF_REDEEM_TOPIC,
+    CONDITION_RESOLUTION_TOPIC, CONDITIONAL_TOKENS,
     _CTF_COLLATERAL, decode_ctf_event, decode_order_filled,
+    decode_condition_resolution, payout_yes_from_numerators,
 )
 
 WS_URL = "wss://polygon-bor-rpc.publicnode.com"
@@ -90,41 +96,49 @@ async def _receipt_log(ws, tx, topic0, rid):
     return None
 
 
-async def _capture() -> dict:
+async def _capture(only: set[str] | None = None) -> dict:
+    def want(*keys: str) -> bool:
+        return only is None or any(k in only for k in keys)
+
     got: dict = {}
-    ctf = _ctf_candidates()
+    ctf = _ctf_candidates() if want("position_split", "positions_merge",
+                                    "payout_redemption") else {}
     async with websockets.connect(WS_URL, max_size=32 * 1024 * 1024,
                                   ping_interval=20, ping_timeout=20) as ws:
         rid = 1000
         bn = int((await _call(ws, "eth_blockNumber", [], rid))["result"], 16)
 
-        buy_maker = tok2tok = None
-        start = bn - 30
-        while (buy_maker is None or tok2tok is None) and start < bn:
-            rid += 1
-            msg = await _call(ws, "eth_getLogs", [{
-                "fromBlock": hex(start), "toBlock": hex(min(start + 5, bn)),
-                "address": EXCH_V2, "topics": [[ORDER_FILLED_TOPIC_V2]]}], rid)
-            for lg in msg.get("result") or []:
-                d = decode_order_filled(lg.get("topics"), lg.get("data"))
-                if d is None and buy_maker is not None and tok2tok is None:
-                    tok2tok = _slim(lg)
-                elif d and d["maker_side"] == "BUY" and buy_maker is None:
-                    buy_maker = _slim(lg)
-            start += 6
-        got["order_filled_v2_buy_maker"] = buy_maker
-        got["order_filled_v2_token_to_token"] = tok2tok
+        if want("order_filled_v2_buy_maker", "order_filled_v2_sell_maker",
+                "order_filled_v2_token_to_token"):
+            buy_maker = tok2tok = None
+            start = bn - 30
+            while (buy_maker is None or tok2tok is None) and start < bn:
+                rid += 1
+                msg = await _call(ws, "eth_getLogs", [{
+                    "fromBlock": hex(start), "toBlock": hex(min(start + 5, bn)),
+                    "address": EXCH_V2, "topics": [[ORDER_FILLED_TOPIC_V2]]}], rid)
+                for lg in msg.get("result") or []:
+                    d = decode_order_filled(lg.get("topics"), lg.get("data"))
+                    if d is None and buy_maker is not None and tok2tok is None:
+                        tok2tok = _slim(lg)
+                    elif d and d["maker_side"] == "BUY" and buy_maker is None:
+                        buy_maker = _slim(lg)
+                start += 6
+            got["order_filled_v2_buy_maker"] = buy_maker
+            got["order_filled_v2_token_to_token"] = tok2tok
 
-        if buy_maker:
-            dh = (buy_maker["data"] or "0x").lower().replace("0x", "")
-            w = [dh[i * 64:(i + 1) * 64] for i in range(len(dh) // 64)]
-            w[0], w[1] = w[1], w[0]      # makerAssetId <-> takerAssetId
-            w[2], w[3] = w[3], w[2]      # makerAmount  <-> takerAmount
-            got["order_filled_v2_sell_maker"] = {**buy_maker, "data": "0x" + "".join(w)}
+            if buy_maker:
+                dh = (buy_maker["data"] or "0x").lower().replace("0x", "")
+                w = [dh[i * 64:(i + 1) * 64] for i in range(len(dh) // 64)]
+                w[0], w[1] = w[1], w[0]      # makerAssetId <-> takerAssetId
+                w[2], w[3] = w[3], w[2]      # makerAmount  <-> takerAmount
+                got["order_filled_v2_sell_maker"] = {**buy_maker, "data": "0x" + "".join(w)}
 
         for et, key, topic in (("split", "position_split", CTF_SPLIT_TOPIC),
                                ("merge", "positions_merge", CTF_MERGE_TOPIC),
                                ("redeem", "payout_redemption", CTF_REDEEM_TOPIC)):
+            if not want(key):
+                continue
             for tx in ctf.get(et, []):
                 rid += 1
                 lg = await _receipt_log(ws, tx, topic.lower(), rid)
@@ -134,6 +148,25 @@ async def _capture() -> dict:
                 if d and d["collateral"] in _CTF_COLLATERAL and d["amount"] > 0:
                     got[key] = lg
                     break
+
+        if want("condition_resolution"):
+            # Oracle reports land every few minutes; scan back in small
+            # chunks (publicnode rejects getLogs ranges over ~2.5k blocks)
+            # until a clean BINARY report decodes. No DB needed.
+            hi = bn
+            while "condition_resolution" not in got and hi > bn - 60_000:
+                rid += 1
+                msg = await _call(ws, "eth_getLogs", [{
+                    "fromBlock": hex(hi - 2000), "toBlock": hex(hi),
+                    "address": CONDITIONAL_TOKENS,
+                    "topics": [[CONDITION_RESOLUTION_TOPIC]]}], rid)
+                for lg in msg.get("result") or []:
+                    d = decode_condition_resolution(lg.get("topics"), lg.get("data"))
+                    if d and payout_yes_from_numerators(
+                            d["payout_numerators"]) in (0.0, 1.0):
+                        got["condition_resolution"] = _slim(lg)
+                        break
+                hi -= 2001
     return got
 
 
@@ -172,14 +205,32 @@ _META = {
         "layout": "topics=[sig,redeemer,collateralToken,parentCollectionId]; "
                   "data=[conditionId,indexSets,payout] — OPPOSITE of split/merge",
         "source": "eth_getTransactionReceipt on wss://polygon-bor-rpc.publicnode.com (REAL)"},
+    "condition_resolution": {
+        "event": "ConditionResolution", "topic0": CONDITION_RESOLUTION_TOPIC,
+        "layout": "topics=[sig,conditionId,oracle,questionId]; "
+                  "data=[outcomeSlotCount,offset(0x40),len,numerators...] — "
+                  "payoutNumerators IS the oracle report; slot i ↔ clobTokenIds[i]",
+        "source": "eth_getLogs on wss://polygon-bor-rpc.publicnode.com (REAL), "
+                  "canonical ConditionalTokens 0x4d97dcd9…"},
 }
 
 
 def main() -> int:
+    only: set[str] | None = None
+    if "--only" in sys.argv:
+        only = {s.strip() for s in
+                sys.argv[sys.argv.index("--only") + 1].split(",") if s.strip()}
+        unknown = only - set(_META)
+        if unknown:
+            print(f"unknown fixture name(s): {sorted(unknown)}")
+            return 2
     os.makedirs(FIX_DIR, exist_ok=True)
-    got = asyncio.run(_capture())
-    missing = [k for k in _META if not got.get(k)]
+    got = asyncio.run(_capture(only))
+    wanted = only or set(_META)
+    missing = [k for k in _META if k in wanted and not got.get(k)]
     for key, meta in _META.items():
+        if key not in wanted:
+            continue
         log = got.get(key)
         if not log:
             print(f"!! MISSING {key}")

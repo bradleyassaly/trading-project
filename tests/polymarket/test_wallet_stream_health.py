@@ -131,31 +131,43 @@ def test_await_sub_confirms_routes_interleaved_events():
 # Subscription message shapes
 # ---------------------------------------------------------------------------
 
+def _wallet_scoped(msgs):
+    """Narrow-mode subs that are per-wallet. Excludes the ConditionResolution
+    sub (id 5), which is deliberately global — an oracle report belongs to a
+    market, not a wallet, so scoping it to watched addresses would match
+    nothing."""
+    return [m for m in msgs
+            if m["params"][1].get("topics", [[]])[0]
+            != [wst.CONDITION_RESOLUTION_TOPIC]]
+
+
 def test_narrow_subscribe_includes_watched_topics():
     s = _stream()
-    ws = FakeWS(responses=[{"id": i, "result": f"0x{i}"} for i in (1, 2, 3, 4)])
+    ws = FakeWS(responses=[{"id": i, "result": f"0x{i}"} for i in (1, 2, 3, 4, 5)])
     errors = asyncio.run(s._subscribe(ws, broad=False))
     assert errors == {}
-    assert len(ws.sent) == 4
+    assert len(ws.sent) == 5
     padded = wst._pad_addr(next(iter(s.watched)))
-    # every narrow filter carries the watched set at some topic position
+    # every per-wallet narrow filter carries the watched set at some position
     assert all(
         any(isinstance(t, list) and padded in t
             for t in m["params"][1]["topics"])
-        for m in ws.sent
+        for m in _wallet_scoped(ws.sent)
     )
 
 
 def test_broad_subscribe_has_no_wallet_filter():
     s = _stream()
-    # Broad mode issues three subscriptions (2026-07-20): OrderFilled (id 10),
-    # newHeads (id 11), and the CTF split/merge/redeem topic sub (id 12).
+    # Broad mode issues four subscriptions: OrderFilled (id 10), newHeads
+    # (id 11), the CTF split/merge/redeem topic sub (id 12, 2026-07-20), and
+    # ConditionResolution on the CTF contract (id 13, 2026-07-28).
     ws = FakeWS(responses=[{"id": 10, "result": "0xsub"},
                            {"id": 11, "result": "0xsub2"},
-                           {"id": 12, "result": "0xsub3"}])
+                           {"id": 12, "result": "0xsub3"},
+                           {"id": 13, "result": "0xsub4"}])
     errors = asyncio.run(s._subscribe(ws, broad=True))
     assert errors == {}
-    assert len(ws.sent) == 3
+    assert len(ws.sent) == 4
     params = ws.sent[0]["params"][1]  # the OrderFilled sub (id 10)
     # both event generations OR'd at topic position 0
     assert params["topics"] == [[wst.ORDER_FILLED_TOPIC, wst.ORDER_FILLED_TOPIC_V2]]
@@ -169,15 +181,17 @@ def test_broad_subscribe_has_no_wallet_filter():
 
 def test_narrow_covers_v2_exchange_and_collateral():
     s = _stream()
-    ws = FakeWS(responses=[{"id": i, "result": f"0x{i}"} for i in (1, 2, 3, 4)])
+    ws = FakeWS(responses=[{"id": i, "result": f"0x{i}"} for i in (1, 2, 3, 4, 5)])
     asyncio.run(s._subscribe(ws, broad=False))
-    of_msgs = [m for m in ws.sent
+    sent = _wallet_scoped(ws.sent)
+    of_msgs = [m for m in sent
                if m["params"][1]["topics"][0] != wst.TRANSFER_TOPIC]
+    assert of_msgs
     for m in of_msgs:
         p = m["params"][1]
         assert wst.CTF_EXCHANGE_V2 in p["address"]
         assert wst.ORDER_FILLED_TOPIC_V2 in p["topics"][0]
-    tr_msgs = [m for m in ws.sent
+    tr_msgs = [m for m in sent
                if m["params"][1]["topics"][0] == wst.TRANSFER_TOPIC]
     for m in tr_msgs:
         assert wst.COLLATERAL_V2 in m["params"][1]["address"]

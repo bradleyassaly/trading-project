@@ -123,6 +123,20 @@ _CTF_COLLATERAL = {a.lower() for a in ("0x2791Bca1f2de4661ED88A30C99A7a9449Aa841
                                        "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359",
                                        "0xc011a7e12a19f7b1f670d46f03b03f3342e82dfb")}
 
+# ConditionResolution — the ORACLE REPORT itself (2026-07-28). Emitted by the
+# Gnosis ConditionalTokens contract when reportPayouts() lands; its
+# payoutNumerators ARE the resolution, zero inference. This is the direct
+# on-chain source for market_resolutions: Gamma delists resolved markets
+# (~50% coverage loss, 2026-07-14) and PayoutRedemption↔position attribution
+# is impossible for most volume (Polymarket's settlement relayer redeems on
+# behalf of users — chain_resolutions.py dead end). ConditionResolution has
+# neither problem. Topic hash = keccak of the canonical signature
+# 'ConditionResolution(bytes32,address,bytes32,uint256,uint256[])', verified
+# against 777 live logs 2026-07-28.
+CONDITIONAL_TOKENS = "0x4d97dcd97ec945f40cf65f87097ace5ea0476045"
+CONDITION_RESOLUTION_TOPIC = \
+    "0xb44d84d3289691f71497564b85d4233648d9dbae8cbdbb4329f301c3a0185894"
+
 
 def _parse_ws_urls() -> list[str]:
     """Endpoint pool: env list first (priority order), defaults appended."""
@@ -274,6 +288,74 @@ def decode_ctf_event(etype: str, topics: list, data: str | None) -> dict | None:
     }
 
 
+def decode_condition_resolution(topics: list, data: str | None) -> dict | None:
+    """Decode a ConditionalTokens ConditionResolution log — the oracle report.
+
+    ConditionResolution(bytes32 indexed conditionId, address indexed oracle,
+                        bytes32 indexed questionId, uint outcomeSlotCount,
+                        uint[] payoutNumerators)
+
+    Topic layout (3 indexed):
+      topics[0]=signature  topics[1]=conditionId  topics[2]=oracle
+      topics[3]=questionId
+    Data layout (dynamic-array ABI tail; verified on 777 live logs 2026-07-28):
+      [0] outcomeSlotCount   [1] byte-offset of the array head (0x40 in
+      practice, honored not assumed)   [offset//32] array length
+      [offset//32+1 ..] one numerator per word
+
+    payoutNumerators is per OUTCOME SLOT; which slot is the YES token is the
+    caller's job via the markets table (payout_yes_from_numerators). Returns
+    None for malformed logs: fewer than 4 topics, short/truncated data, a
+    misaligned offset, or an array length that disagrees with
+    outcomeSlotCount (the contract enforces payouts.length == slotCount, so
+    a mismatch means we mis-parsed).
+    """
+    if len(topics) < 4:
+        return None
+    data_hex = (data or "0x").lower().replace("0x", "")
+    if len(data_hex) < 64 * 3 or len(data_hex) % 64:
+        return None
+    words = [data_hex[i * 64:(i + 1) * 64] for i in range(len(data_hex) // 64)]
+    slot_count = int(words[0], 16)
+    offset_bytes = int(words[1], 16)
+    if offset_bytes % 32 or offset_bytes // 32 >= len(words):
+        return None
+    len_idx = offset_bytes // 32
+    n = int(words[len_idx], 16)
+    if n != slot_count or n <= 0 or len_idx + 1 + n > len(words):
+        return None
+    return {
+        "condition_id": topics[1].lower(),
+        "oracle": _addr_from_topic(topics[2]),
+        "question_id": topics[3].lower(),
+        "outcome_slot_count": slot_count,
+        "payout_numerators": [int(words[len_idx + 1 + i], 16) for i in range(n)],
+    }
+
+
+def payout_yes_from_numerators(payout_numerators: list[int],
+                               yes_index: int = 0) -> float | None:
+    """YES-token payout (canonical price space) from raw payoutNumerators.
+
+    yes_index=0: markets.yes_token_id is clobTokenIds[0], and Gamma's
+    clobTokenIds order matches CTF outcome-slot order (slot i ↔ indexSet
+    1<<i ↔ clobTokenIds[i]) — verified empirically against high-rank
+    market_resolutions rows before this source went live (2026-07-28,
+    scripts/validate_condition_resolutions.py).
+
+    Returns num[yes]/sum — 1.0/0.0 for clean binary resolutions, 0.5 for a
+    [1,1] tie/void split. None when there's nothing YES/NO-shaped to map:
+    non-binary conditions (len != 2) or an all-zero array (unresolved; the
+    contract can't emit that, so it means garbage input).
+    """
+    if len(payout_numerators) != 2:
+        return None
+    den = sum(payout_numerators)
+    if den <= 0:
+        return None
+    return payout_numerators[yes_index] / den
+
+
 def _load_watched_wallets() -> set[str]:
     """Union of alpha-copyable + insider wallets. Refreshed at startup.
 
@@ -377,7 +459,27 @@ class WalletStream:
                                  CTF_REDEEM_TOPIC]]},
                 ],
             },
+            self._resolution_sub_msg(13),
         ]
+
+    @staticmethod
+    def _resolution_sub_msg(rid: int) -> dict:
+        """ConditionResolution on the canonical ConditionalTokens contract —
+        the oracle report feeding market_resolutions. Address-filtered
+        (unlike the CTF cash-flow sub): conditionId derivation excludes the
+        emitting contract, so a hostile CTF clone could replay OUR
+        conditionIds with inverted payouts; only the canonical deployment is
+        trusted (the handler re-checks log.address for providers that
+        ignore address filters). ~1-2k events/day — negligible traffic, so
+        it rides in narrow mode too."""
+        return {
+            "jsonrpc": "2.0", "id": rid, "method": "eth_subscribe",
+            "params": [
+                "logs",
+                {"address": [CONDITIONAL_TOKENS],
+                 "topics": [[CONDITION_RESOLUTION_TOPIC]]},
+            ],
+        }
 
     async def _await_sub_confirms(self, ws, expected_ids: list,
                                   timeout: float = 10.0) -> dict:
@@ -499,6 +601,8 @@ class WalletStream:
                     },
                 ],
             },
+            # Oracle resolutions — tiny (~1-2k/day), safe on metered tiers.
+            self._resolution_sub_msg(5),
         ]
         for m in sub_msgs:
             await ws.send(json.dumps(m))
@@ -532,6 +636,9 @@ class WalletStream:
 
         if topic0 in _CTF_TOPIC_TYPE:
             await self._handle_ctf_event(log, topics, _CTF_TOPIC_TYPE[topic0])
+            return
+        if topic0 == CONDITION_RESOLUTION_TOPIC.lower():
+            await self._handle_condition_resolution(log, topics)
             return
         if topic0 in (ORDER_FILLED_TOPIC.lower(), ORDER_FILLED_TOPIC_V2.lower()):
             # V1 and V2 share the decode: same indexed (orderHash, maker,
@@ -930,6 +1037,92 @@ class WalletStream:
                 logger.warning("[ctf] persist failed (%d total): %s",
                                self._stats["ctf_errors"], str(exc)[:120])
 
+    async def _handle_condition_resolution(self, log: dict, topics: list) -> None:
+        """Oracle report → market_resolutions (source rank 85).
+
+        The decode is pure (decode_condition_resolution); this handler
+        applies policy: canonical-contract pin, binary-only mapping via the
+        markets table (yes_token_id ↔ outcome slot 0), and the monotonic
+        record_resolution write. A cid we haven't indexed is counted and
+        skipped — the scheduled clob_winner backfill still covers those,
+        and scripts/validate_condition_resolutions.py --apply can sweep
+        gaps from chain history.
+        """
+        try:
+            if os.environ.get("CHAIN_RESOLUTION_PERSIST", "1").lower() in ("0", "false", "no"):
+                return
+            # Trust ONLY the canonical ConditionalTokens deployment:
+            # conditionId = keccak(oracle, questionId, slotCount) is portable
+            # across CTF clones, so a copycat contract could emit inverted
+            # payouts for our real cids. Belt (provider address filter) and
+            # braces (this check).
+            if (log.get("address") or "").lower() != CONDITIONAL_TOKENS:
+                return
+            decoded = decode_condition_resolution(topics, log.get("data"))
+            if decoded is None:
+                return
+            payout_yes = payout_yes_from_numerators(decoded["payout_numerators"])
+            if payout_yes is None:
+                # non-binary condition — nothing YES/NO-shaped to record
+                self._stats["chain_res_nonbinary"] = \
+                    self._stats.get("chain_res_nonbinary", 0) + 1
+                return
+            cid = decoded["condition_id"]
+            num = decoded["payout_numerators"]
+            # Exact-numerator verdict (scale-proof); a [1,1] tie keeps
+            # resolves_yes NULL with payout_yes=0.5 — honest half-payout.
+            resolves_yes = 1 if num[0] == sum(num) else (0 if num[0] == 0 else None)
+            tx = log.get("transactionHash") or ""
+            ts = await self._block_timestamp(log.get("blockNumber"))
+
+            def _record() -> str | None:
+                from trading_platform.polymarket.db_connection import get_connection
+                conn = get_connection()
+                try:
+                    row = conn.execute(
+                        "SELECT yes_token_id, no_token_id, question FROM markets "
+                        "WHERE condition_id = ?", (cid,)).fetchone()
+                finally:
+                    try: conn.close()
+                    except Exception: pass
+                if not row or not row[0] or not row[1]:
+                    return None  # not in our indexed universe (or tokens unknown)
+                from trading_platform.polymarket.resolutions import record_resolution
+                return record_resolution(
+                    cid,
+                    source="chain_condition_resolution",
+                    resolves_yes=resolves_yes,
+                    payout_yes=payout_yes,
+                    winning_outcome=("Yes" if resolves_yes == 1 else
+                                     "No" if resolves_yes == 0 else None),
+                    yes_token_id=str(row[0]), no_token_id=str(row[1]),
+                    resolved_at=ts,
+                    question=row[2],
+                    details={"oracle": decoded["oracle"],
+                             "question_id": decoded["question_id"],
+                             "numerators": num, "tx": tx},
+                )
+
+            sem = getattr(self, "_persist_sem", None)
+            if sem is None:
+                sem = self._persist_sem = asyncio.Semaphore(8)
+            async with sem:
+                status = await asyncio.to_thread(_record)
+            if status is None:
+                self._stats["chain_res_unknown_cid"] = \
+                    self._stats.get("chain_res_unknown_cid", 0) + 1
+                return
+            self._stats["chain_resolutions"] = \
+                self._stats.get("chain_resolutions", 0) + 1
+            logger.info("[chain-res] %s… payout_yes=%.2f %s → %s tx=%s…",
+                        cid[:14], payout_yes, num, status, tx[:12])
+        except Exception as exc:
+            self._stats["chain_res_errors"] = \
+                self._stats.get("chain_res_errors", 0) + 1
+            if self._stats["chain_res_errors"] % 20 == 1:
+                logger.warning("[chain-res] failed (%d total): %s",
+                               self._stats["chain_res_errors"], str(exc)[:150])
+
     async def _maybe_trigger_exit_check(self, wallet: str, meta: dict | None) -> None:
         """Run the live exit monitor now if this whale-sell touches our book.
 
@@ -1264,6 +1457,7 @@ async def _heartbeat(stream: WalletStream) -> None:
                     f"reconnects={stream._stats['reconnects']} "
                     f"sub_errors={stream._stats['subscribe_errors']} "
                     f"silence_reboots={stream._stats['silence_reboots']} "
+                    f"chain_res={stream._stats.get('chain_resolutions', 0)} "
                     f"mode={stream._stats['mode']} "
                     f"last_event_age={event_age}s "
                     f"endpoint={stream._stats['endpoint']} "
