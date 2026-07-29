@@ -228,6 +228,37 @@ class TestDiscoveryInsertCarriesBookState:
         assert row[2] == pytest.approx(14.0)
         assert row[3] == 0.14
 
+    def test_markets_fallback_through_full_path_does_not_deadlock(self):
+        # _capture_book_at_fire takes _wallet_lock for its markets lookup
+        # and threading.Lock is NOT reentrant — if a call site ever held
+        # the lock, the executor would hang forever instead of trading.
+        # Exercise the fallback (signal carries no yes_token_id) through
+        # the real INSERT path, which also takes the lock.
+        ex = self._executor(_FakeClob(book=TestCaptureBookAtFire.BOOK))
+        ex._wallet_conn.execute(
+            "CREATE TABLE markets (condition_id TEXT PRIMARY KEY,"
+            " yes_token_id TEXT, no_token_id TEXT)")
+        ex._wallet_conn.execute(
+            "INSERT INTO markets VALUES ('c-fb', 'yfb', 'nfb')")
+        ex._wallet_conn.commit()
+        sig = _discovery_signal("c-fb")
+        sig.pop("yes_token_id")
+        sig.pop("no_token_id")
+
+        done: list = []
+
+        def _run():
+            done.append(ex._execute_discovery(sig, "resolution_decay", 0))
+
+        t = threading.Thread(target=_run, daemon=True)
+        t.start()
+        t.join(timeout=10)
+        assert not t.is_alive(), "executor deadlocked on _wallet_lock"
+        assert done and done[0] is not None
+        row = ex._wallet_conn.execute(
+            "SELECT best_ask_at_fire FROM polymarket_paper_trades").fetchone()
+        assert row[0] == 0.14
+
     def test_fetch_failure_never_blocks_entry(self):
         # THE contract: a dead CLOB stores NULLs but the paper entry lands.
         ex = self._executor(_FakeClob(exc=ConnectionError("clob down")))
