@@ -23,6 +23,17 @@ Limitations:
       both react to the same external signal independently (news, price
       spike). We only measure CO-OCCURRENCE with temporal order.
     - Short-window relationships only; doesn't detect long-hold copyists.
+
+Status (2026-07-28): the daily scheduler task was DELETED. refresh()
+loads every wallet_trades row in the lookback into memory — fine at
+the old roster-synced volume, an OOM (exit 137, killed the task 9 runs
+straight) once the 2026-07-16 backfill + firehose took the table to
+53M rows / 59 GB. Copy-entry was formally killed 2026-07-07 and no
+live path consumes fresh output (network_leader_entry freshness-gates
+itself; get_crowding_discount fails open), so wallet_copy_relationships
+is intentionally frozen at 2026-07-16. For ad-hoc research, add a
+wallet/roster filter to the fetch before calling refresh() — do NOT
+run it as-is against the firehose-inflated table.
 """
 from __future__ import annotations
 

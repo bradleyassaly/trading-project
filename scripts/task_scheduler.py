@@ -214,16 +214,15 @@ SCHEDULE: list[Task] = [
         timeout_override=600,
         description="Weekly signal-engine backtest (EV validation)",
     ),
-    Task(
-        name="wallet_copy_graph",
-        # Mines wallet_trades for copy-relationships (wallet B follows A
-        # within 2h on same market/side). Populates wallet_copy_relationships
-        # — used by network_leader_entry signal. Runs daily; relationships
-        # shift slowly and 90d lookback is ~plenty.
-        cmd="python -m trading_platform.polymarket.wallet_copy_graph",
-        interval_seconds=24 * 3600,
-        description="Detect wallet copy-relationships (leader/follower graph)",
-    ),
+    # wallet_copy_graph task DELETED (2026-07-28): OOM-killed (exit 137) 9
+    # runs straight — refresh() fetchall()s 90d of wallet_trades into this
+    # 2 GB container, and the 07-16 data-layer backfill + firehose grew that
+    # table to 53M rows / 59 GB. Not worth a SQL rewrite: copy-entry was
+    # formally killed 2026-07-07, network_leader_entry (the only signal
+    # consumer) hasn't produced a paper trade since 07-02 and now
+    # freshness-gates itself quiet on the frozen graph, and
+    # get_crowding_discount fails open. wallet_copy_relationships stays
+    # frozen at 2026-07-16; the module is kept for ad-hoc research.
     # wallet_strategy_observer → scripts/slow_lane.py (2026-07-27): died at
     # the 15-min task cap 9 runs straight; the slow-lane container gives it
     # a 60-min budget + real memory without risking this dispatch loop.

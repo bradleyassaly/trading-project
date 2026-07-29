@@ -61,6 +61,13 @@ def test_never_run_task_is_due_immediately():
 
 
 def test_real_schedule_marks_money_loop_critical():
+    # 2026-07-23: live_position_monitor / live_equity_snapshot were EXTRACTED
+    # from SCHEDULE into the critical-loops container (commit 1d7a716) so the
+    # money loop survives dispatch-loop death. In SCHEDULE the remaining
+    # critical task is the entry signal; the monitors must NOT quietly
+    # reappear here — that would put live exits back behind batch jobs.
+    names = {t.name for t in ts.SCHEDULE}
     crit = {t.name for t in ts.SCHEDULE if getattr(t, "critical", False)}
     assert "resolution_decay_signal" in crit
-    assert "live_position_monitor" in crit
+    assert "live_position_monitor" not in names
+    assert "live_equity_snapshot" not in names

@@ -820,6 +820,12 @@ class WhaleSignalEngine:
     # ── Network leader (wallet has quality followers) ──────────────────────
     _NETWORK_LEADER_MIN_FOLLOWERS = 3
     _NETWORK_LEADER_MIN_LAG_MIN = 10  # filters MM-bot clusters
+    # 2026-07-28: the daily wallet_copy_graph task was deleted (OOM against
+    # the 53M-row wallet_trades; copy-entry strategy killed 2026-07-07), so
+    # wallet_copy_relationships no longer refreshes. Relationships older than
+    # this are fossil evidence — go quiet rather than fire on a frozen graph.
+    # An ad-hoc rerun of the miner revives the signal automatically.
+    _NETWORK_LEADER_MAX_AGE_S = 7 * 86400
 
     def _check_network_leader_entry(
         self, trade: WhaleTrade, now_ts: int,
@@ -836,13 +842,16 @@ class WhaleSignalEngine:
           - Exclude MM-bot clusters (lag < 10min)
           - Require the leader has non-negative PnL (their calls are
             at least break-even — we're not copying losers)
+          - Require the graph itself is fresh (computed_at within
+            _NETWORK_LEADER_MAX_AGE_S) — see note above the constant
         """
         if not trade.wallet:
             return None
         try:
             with self.db._lock:
                 row = self.db._conn.execute(
-                    "SELECT COUNT(*) AS n_followers, AVG(avg_lag_minutes) AS avg_lag "
+                    "SELECT COUNT(*) AS n_followers, AVG(avg_lag_minutes) AS avg_lag, "
+                    " MAX(computed_at) AS computed_at "
                     "FROM wallet_copy_relationships "
                     "WHERE leader_wallet = ? AND avg_lag_minutes > ?",
                     (trade.wallet, self._NETWORK_LEADER_MIN_LAG_MIN),
@@ -851,7 +860,9 @@ class WhaleSignalEngine:
             return None
         if not row or not row[0]:
             return None
-        n_followers, avg_lag = row[0], row[1]
+        n_followers, avg_lag, computed_at = row[0], row[1], row[2]
+        if not computed_at or now_ts - int(computed_at) > self._NETWORK_LEADER_MAX_AGE_S:
+            return None
         if n_followers < self._NETWORK_LEADER_MIN_FOLLOWERS:
             return None
 
