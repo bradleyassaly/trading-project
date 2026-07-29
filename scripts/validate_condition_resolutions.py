@@ -120,17 +120,41 @@ async def scan_resolutions(max_blocks: int, stop_check=None) -> dict[str, dict]:
 
 
 async def _block_timestamps(blocks: list[int]) -> dict[int, int]:
+    """Exact block timestamps for resolved_at, pipelined.
+
+    A backfill pass can touch thousands of distinct blocks; one
+    request-response round trip each would take half an hour. Batched
+    request ids let the provider answer a whole window at once — the
+    responses are matched by id, so out-of-order replies are fine."""
     out: dict[int, int] = {}
-    async with websockets.connect(WS_URL, max_size=8 * 1024 * 1024,
+    if not blocks:
+        return out
+    async with websockets.connect(WS_URL, max_size=32 * 1024 * 1024,
                                   ping_interval=20, ping_timeout=20) as ws:
-        rid = 9000
-        for b in blocks:
-            rid += 1
-            msg = await _call(ws, "eth_getBlockByNumber", [hex(b), False], rid)
-            ts = (msg.get("result") or {}).get("timestamp")
-            if ts:
-                out[b] = int(ts, 16)
-            await asyncio.sleep(0.05)
+        for i in range(0, len(blocks), 50):
+            window = blocks[i:i + 50]
+            ids = {}
+            for n, b in enumerate(window):
+                rid = 9000 + i + n
+                ids[rid] = b
+                await ws.send(json.dumps({
+                    "jsonrpc": "2.0", "id": rid,
+                    "method": "eth_getBlockByNumber", "params": [hex(b), False]}))
+            pending = set(ids)
+            while pending:
+                try:
+                    msg = json.loads(await asyncio.wait_for(ws.recv(), timeout=30))
+                except asyncio.TimeoutError:
+                    break
+                rid = msg.get("id")
+                if rid not in pending:
+                    continue
+                pending.discard(rid)
+                ts = (msg.get("result") or {}).get("timestamp")
+                if ts:
+                    out[ids[rid]] = int(ts, 16)
+            if i and i % 1000 == 0:
+                logger.info("block timestamps: %d/%d", len(out), len(blocks))
     return out
 
 
