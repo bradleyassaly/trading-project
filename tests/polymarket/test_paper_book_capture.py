@@ -72,7 +72,12 @@ class TestComputeBookState:
 
     def test_empty_and_malformed(self):
         assert compute_book_state(None, 0.5) == (None, None, None)
+        # Transport failure must NOT read as depth 0.0 ("no liquidity at
+        # our price") — that would be a claim about the market.
         assert compute_book_state({"error": "HTTP 500", "bids": [], "asks": []},
+                                  0.5) == (None, None, None)
+        # A genuinely empty book IS zero depth — real information.
+        assert compute_book_state({"bids": [], "asks": []},
                                   0.5) == (None, None, 0.0)
         junk = {"asks": [{"price": "abc"}, {"size": "5"},
                          {"price": "0.20", "size": "10"}],

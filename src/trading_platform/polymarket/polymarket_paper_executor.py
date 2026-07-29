@@ -485,7 +485,11 @@ def compute_book_state(
     from min/max, not [0]-indexing, so a raw descending-sorted book (the
     2026-07-06 asks[0]-is-worst trap) cannot poison the capture.
     """
-    if not isinstance(book, dict):
+    # An "error" key is the client's transport-failure shape ({"error":
+    # ..., "bids": [], "asks": []}). Reading it as a book would store
+    # depth 0.0 — "no liquidity at our price", which is a claim about the
+    # market. A failed fetch must be indistinguishable from no capture.
+    if not isinstance(book, dict) or book.get("error"):
         return None, None, None
 
     def _levels(side_key: str) -> list[tuple[float, float]]:
