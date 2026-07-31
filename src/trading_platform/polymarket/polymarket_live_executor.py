@@ -1889,6 +1889,38 @@ class PolymarketLiveExecutor:
             logger.info("[LIVE][DEPTH_BLOCK] %s %s", sig_type, _reason)
             return self._block(signal, _reason, size_usd)
 
+        # 2026-07-31: decay band re-check on the EXECUTABLE price. The gate
+        # up top reads signal["price"] — the SIGNAL's price — which is not
+        # what we pay: observed drift signal→fill was +0.005..+0.035
+        # (0.115 signal → 0.150 fill, +30% relative), and one entry landed
+        # at 0.205 fill from a 0.195 signal, i.e. OUTSIDE the [0.05, 0.20]
+        # live band the gate had just approved. The commit that added that
+        # gate claimed it "closes the fire→fill drift leak" — it did not;
+        # only this check does. best_ask_at_decision is the price the
+        # marketable order actually crosses, and it is known here (book
+        # snapshot above) before the order goes out. Fail-safe: no book
+        # ⇒ no re-check (the signal-price gate already bound).
+        if sig_type == "resolution_decay" and \
+                (signal.get("direction") or "BUY").upper() == "BUY":
+            _exec_px = signal.get("_best_ask_at_decision")
+            if _exec_px is not None:
+                _exec_block = decay_live_entry_block(float(_exec_px), None)
+                if _exec_block:
+                    try:
+                        from trading_platform.polymarket.decision_trace import trace as _dt
+                        _dt(signal=signal, gate="LIVE_DECAY_BAND_EXEC",
+                            passed=False, value=float(_exec_px),
+                            threshold=RD_LIVE_ENTRY_HIGH,
+                            detail=f"exec {_exec_block} (signal px "
+                                   f"{float(signal.get('price') or 0):.3f})",
+                            surface="live", db_path=self._db_path)
+                    except Exception:
+                        pass
+                    logger.info("[LIVE][DECAY_BAND_EXEC] BLOCK %s — %s",
+                                sig_type, _exec_block)
+                    return self._block(signal, f"exec-price {_exec_block}",
+                                       size_usd)
+
         # 2026-04-28: per-signal DRY_RUN check + real-trade hard cap.
         # 2026-05-02: cap is now ladder-driven AND slice-scaled.
         # Higher-EV (signal × category) slices get full ladder cap;
@@ -1912,7 +1944,16 @@ class PolymarketLiveExecutor:
                         size_usd, sig_type, cat,
                         float(signal.get("price") or 0))
         _dk = signal.get("_decay_kelly_usd")
-        if _dk and not is_dry:
+        # 2026-07-31: `not is_probe` is LOad-BEARING, not belt-and-braces.
+        # _decay_kelly_usd is stashed at the EV gate under a `not is_probe`
+        # guard — but the slice-gate DEMOTE conversion (2026-07-27) tags
+        # is_probe LATER, so an EV-passing signal arrived here carrying a
+        # $5+ Kelly stash and this block's max(size_usd, _dk_fit>=5.0)
+        # silently overrode the $1 probe pin. Three $5 "probes" fired that
+        # way (2026-07-29/30); two stopped out for −$6.09 where $1 stakes
+        # would have lost ~−$1.22. The comment above claimed probes are
+        # "never Kelly-lifted" — now the code enforces it.
+        if _dk and not is_dry and not signal.get("is_probe"):
             _dk_fit = min(float(_dk), fillable_depth / 1.5) if fillable_depth else float(_dk)
             _dk_fit = max(5.0, _dk_fit)
             if _dk_fit > runtime_cap:

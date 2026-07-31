@@ -120,6 +120,32 @@ def test_wiring_invariants():
     assert '"is_probe INTEGER"' in src
 
 
+def test_decay_kelly_lift_cannot_override_probe_pin():
+    """2026-07-31 regression: the decay-Kelly stash is written at the EV
+    gate under a `not is_probe` guard, but the slice-gate DEMOTE
+    conversion tags is_probe LATER — so an EV-passing signal reached the
+    sizing block carrying a $5+ stash and max(size_usd, _dk_fit) silently
+    overrode the $1 probe pin. Three $5 'probes' fired; two stopped out
+    for −$6.09 where $1 stakes would have lost ~−$1.22."""
+    src = inspect.getsource(ple)
+    # the Kelly-lift block must be probe-guarded
+    assert 'if _dk and not is_dry and not signal.get("is_probe"):' in src
+    # and the stash site keeps its own guard
+    assert 'not signal.get("is_probe")' in src
+
+
+def test_decay_band_rechecked_on_executable_price():
+    """The signal-price band gate is not sufficient: observed signal→fill
+    drift was up to +0.035 (0.195 signal → 0.205 fill, outside the band).
+    A second check must run on best_ask_at_decision — the price a
+    marketable order actually crosses — before the order is placed."""
+    src = inspect.getsource(ple)
+    assert "LIVE_DECAY_BAND_EXEC" in src
+    assert '_exec_px = signal.get("_best_ask_at_decision")' in src
+    # re-check must reuse the same pure gate (one band definition)
+    assert "decay_live_entry_block(float(_exec_px), None)" in src
+
+
 def test_probe_waives_performance_ks_blocks_only():
     """2026-07-09: the KS sits downstream of probe tagging, so a signal-
     level WR halt silently starved the whole probe program (709 eligible,
