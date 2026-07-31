@@ -90,8 +90,23 @@ dev = [
 trading-cli = "trading_platform.cli.__main__:main"
 
 [tool.pytest.ini_options]
+# Single source of pytest config. A pytest.ini used to sit alongside this
+# and, because pytest reads ini options from exactly one file, it silently
+# voided everything here ("WARNING: ignoring pytest config in
+# pyproject.toml!"). Consequences while it existed:
+#   * pythonpath was inert, so `trading_platform` resolved only via the
+#     venv's editable .pth — which points at the PARENT checkout. Tests run
+#     from a git worktree imported main's source, making a worktree's own
+#     src/ edits invisible to its own test run.
+#   * testpaths was inert, so a bare `pytest` (what CI runs) collected
+#     scripts/test_signal_engine.py — 0 tests, but it load_dotenv()s the
+#     real .env at import.
+# Keep pytest config here only; do not reintroduce pytest.ini.
 pythonpath = ["src"]
 testpaths = ["tests"]
+filterwarnings = [
+  "ignore::DeprecationWarning:websockets.*",
+]
 
 [tool.ruff]
 target-version = "py310"
