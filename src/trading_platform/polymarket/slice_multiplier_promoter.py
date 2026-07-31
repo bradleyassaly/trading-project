@@ -363,7 +363,15 @@ def run_promoter(db_path: str | None = None) -> dict[str, Any]:
                           COUNT(*) AS n,
                           SUM(CASE WHEN lt.realized_pnl > 0 THEN 1 ELSE 0 END) AS wins,
                           SUM(lt.realized_pnl) AS pnl,
-                          AVG(lt.entry_price) AS avg_entry,
+                          -- 2026-07-31: entry_price is the EXPECTED price
+                          -- (the signal's target), not what we paid —
+                          -- consistently ~0.5c below the executed fill.
+                          -- avg_entry sets the breakeven win rate in
+                          -- _slice_gate_decision, so using it made every
+                          -- slice look cheaper (and therefore better) than
+                          -- it was. fill_price is the on-chain-verified
+                          -- executed price; fall back only when absent.
+                          AVG(COALESCE(lt.fill_price, lt.entry_price)) AS avg_entry,
                           SUM(lt.size_usd) AS staked
                      FROM live_trades lt
                      LEFT JOIN markets m ON m.condition_id = lt.condition_id

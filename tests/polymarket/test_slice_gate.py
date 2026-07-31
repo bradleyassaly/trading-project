@@ -225,10 +225,14 @@ def _seed_live(path, slices, stake=1.0):
     `stake` sets size_usd per row, the realized-EV denominator.
     """
     c = sqlite3.connect(path)
+    # fill_price mirrors the real schema: avg_entry reads
+    # COALESCE(fill_price, entry_price) because entry_price is the
+    # EXPECTED price, not what we paid (2026-07-31).
     c.execute("""CREATE TABLE IF NOT EXISTS live_trades (
                    signal_type TEXT, category TEXT, condition_id TEXT,
                    dry_run INT DEFAULT 0, status TEXT, exit_ts INT,
-                   realized_pnl REAL, entry_price REAL, size_usd REAL)""")
+                   realized_pnl REAL, entry_price REAL, size_usd REAL,
+                   fill_price REAL)""")
     c.execute("CREATE TABLE IF NOT EXISTS markets "
               "(condition_id TEXT, subcategory TEXT)")
     now = int(time.time())
@@ -236,9 +240,9 @@ def _seed_live(path, slices, stake=1.0):
         for i in range(n):
             won = i < wins
             c.execute(
-                "INSERT INTO live_trades VALUES (?,?,?,0,'matched',?,?,?,?)",
+                "INSERT INTO live_trades VALUES (?,?,?,0,'matched',?,?,?,?,?)",
                 (sig, cat, f"lv-{sig}-{cat}-{i}", now - 100,
-                 ppt if won else -abs(ppt), ep, stake))
+                 ppt if won else -abs(ppt), ep, stake, ep))
     c.commit()
     c.close()
 

@@ -113,11 +113,41 @@ def backfill_actual_fills(lookback_hours: int = 24) -> int:
             continue
         conn = get_connection()
         try:
+            # 2026-07-31: recompute the execution-cost metrics from the
+            # CORRECTED fill. This UPDATE used to fix fill_price and leave
+            # slippage_c holding the value computed at insert time from the
+            # PROVISIONAL price (the posted limit, best_ask + tick), so
+            # every reconciled row carried a constant +1c (one tick) of
+            # phantom execution cost: stored 1.371c vs a true 0.662c on
+            # n=67, i.e. the metric read as a FULL spread when the real
+            # cost is the HALF spread. cost_model.py discounts paper P&L
+            # with these numbers, so every paper strategy was penalised a
+            # full extra spread. Derive them here or they stay stale.
             conn.execute(
                 """UPDATE live_trades
-                      SET fill_price = ?, shares = ?
+                      SET fill_price = ?, shares = ?,
+                          slippage_c = CASE
+                              WHEN mid_at_decision IS NOT NULL
+                              THEN ROUND(((? - mid_at_decision) * 100)::numeric, 4)
+                              ELSE slippage_c END,
+                          slippage = CASE
+                              WHEN entry_price IS NOT NULL AND entry_price > 0
+                              THEN ROUND((ABS(? - entry_price) / entry_price)::numeric, 6)
+                              ELSE slippage END,
+                          slippage_signed = CASE
+                              WHEN entry_price IS NOT NULL AND entry_price > 0
+                              THEN ROUND((
+                                  CASE WHEN UPPER(COALESCE(direction,'BUY')) = 'SELL'
+                                       THEN -(? - entry_price)
+                                       ELSE (? - entry_price) END
+                                  / entry_price)::numeric, 6)
+                              ELSE slippage_signed END,
+                          slippage_cost_usd = CASE
+                              WHEN entry_price IS NOT NULL
+                              THEN ROUND((ABS(? - entry_price) * ?)::numeric, 4)
+                              ELSE slippage_cost_usd END
                     WHERE id = ? AND exit_ts IS NULL""",
-                (vwap, tot_sz, lid),
+                (vwap, tot_sz, vwap, vwap, vwap, vwap, vwap, tot_sz, lid),
             )
             conn.commit()
         finally:
@@ -203,12 +233,18 @@ def reconcile_open_orders() -> dict[str, int]:
                 fill_time_ms = int((now_ts - int(submitted_at or now_ts)) * 1000)
                 conn = get_connection()
                 try:
+                    # slippage_c must follow fill_price here too — same
+                    # staleness bug as correct_fill_prices() above.
                     conn.execute(
                         """UPDATE live_trades
                            SET status='matched', fill_price=?, filled_at=?,
-                               slippage=?, fill_time_ms=?
+                               slippage=?, fill_time_ms=?,
+                               slippage_c = CASE
+                                   WHEN mid_at_decision IS NOT NULL AND ? IS NOT NULL
+                                   THEN ROUND(((? - mid_at_decision) * 100)::numeric, 4)
+                                   ELSE slippage_c END
                            WHERE id=?""",
-                        (fp, now_ts, slippage, fill_time_ms, lid),
+                        (fp, now_ts, slippage, fill_time_ms, fp, fp, lid),
                     )
                     conn.commit()
                 finally:
