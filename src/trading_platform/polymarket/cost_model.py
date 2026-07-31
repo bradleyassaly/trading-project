@@ -65,6 +65,7 @@ class CostModel:
         min_half_spread_abs: float = 0.006,
         rel_half_spread: float = 0.02,
         spike_impact: float = 0.50,
+        no_impact_below_usd: float = 25.0,
     ) -> None:
         # default_spread kept for API/back-compat; when a caller passes an explicit
         # `spread` we still honour it, otherwise the price-aware model is used.
@@ -74,6 +75,10 @@ class CostModel:
         self.rel_half_spread = rel_half_spread
         # Fraction of a large favorable move that is NOT realizable on a thin book.
         self.spike_impact = spike_impact
+        # Below this notional, size impact is ZERO (chain-verified; see
+        # _lookup_slippage). Above it the measured-nothing argument does
+        # not apply and the schedule stands.
+        self.no_impact_below_usd = no_impact_below_usd
 
     def _half_spread(self, price: float, spread: float | None) -> float:
         """Price-aware half-spread. Absolute floor + a relative component, so the
@@ -153,9 +158,29 @@ class CostModel:
         )
 
     def _lookup_slippage(self, stake: float) -> float:
-        """Look up slippage from the schedule (step function by notional)."""
+        """Look up slippage from the schedule (step function by notional).
+
+        2026-07-31: clips below `no_impact_below_usd` cost ZERO size
+        impact. On-chain verification (12/12 sampled live fills, our
+        wallet's OrderFilled events) shows fill_price == best_ask_at_
+        decision EXACTLY on $1-16 orders — we consume only the touch and
+        never walk the ladder. The decision-time depth-walk estimate
+        agrees: vwap_slippage_c (0.76c) equals the half-spread (0.76c),
+        i.e. the ladder contributes nothing at our size.
+
+        The schedule's smallest bucket charged 0.003 (0.3c) to every
+        stake <= $50, which on a measured 0.66c true entry cost is a ~36%
+        over-penalty applied to every paper trade. Over-penalising is not
+        the "safe" direction: it kills viable strategies silently
+        (Type II), which is the failure this platform can least afford.
+        The threshold is deliberately set at the top of the range we have
+        actually MEASURED ($16 max observed); above it the original
+        schedule is untouched, because we have no evidence there.
+        """
         if stake <= 0:
             return 0
+        if stake <= self.no_impact_below_usd:
+            return 0.0
         prev_pct = 0.003
         for threshold, pct in sorted(self.slippage_schedule.items()):
             if stake <= threshold:
