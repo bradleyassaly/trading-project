@@ -81,6 +81,45 @@ DEMO_MIN_WR = 0.45  # below this, expire the override
 LIVE_GATE_WINDOW_DAYS = int(os.environ.get("SLICE_GATE_LIVE_WINDOW_DAYS", "60"))
 LIVE_GATE_MIN_N = 20
 
+# Realized-EV criterion for the LIVE overlay (2026-07-31).
+#
+# _slice_gate_decision derives EV from the WIN RATE: wilson_lb/avg_entry - 1.
+# That is only valid for a HOLD-TO-RESOLUTION payoff, where a win pays $1
+# per share. The live lane is EXIT-MANAGED (stops/TP/trailing), so a "win"
+# is whatever the exit clipped. Measured on resolution_decay x sports:
+# WR 36.4% at avg entry 0.250 (breakeven WR 25%) reads as +6% ev_lb and
+# escapes the gate — while the slice actually lost $30.46 on $259.27
+# staked (EV/$ -0.117), because avg win is $2.67 vs avg loss $2.15 on a
+# ~$3.37 average stake: a 0.25 winner held to resolution should return
+# ~3x, but the exits return ~0.8x. Win-rate EV structurally cannot see
+# that. This criterion reads the money directly.
+#
+# This is the 2026-07-27 pre-registered decay kill rule ("60d live EV/$
+# <= -0.10 at n>=30") made enforceable. The staked floor stops a handful
+# of dust probes from tripping a kill on noise.
+LIVE_EV_KILL_PER_USD = float(os.environ.get("SLICE_GATE_LIVE_EV_KILL", "-0.10"))
+LIVE_EV_KILL_MIN_N = 30
+LIVE_EV_MIN_STAKED_USD = 50.0
+
+
+def _live_ev_decision(n: int, staked: float, pnl: float,
+                      ) -> tuple[str | None, str]:
+    """Realized-money verdict for a live slice. Pure; unit-tested.
+
+    KILL when a slice has enough real trades AND real stake AND its
+    realized EV per dollar is at or below the kill threshold. Positive
+    pnl can never trip it, so lottery-shaped slices stay safe by
+    construction (no separate pnl conjunct needed).
+    """
+    if n < LIVE_EV_KILL_MIN_N or staked < LIVE_EV_MIN_STAKED_USD:
+        return (None, f"insufficient live evidence n={n} staked=${staked:.2f}")
+    ev = pnl / staked if staked else 0.0
+    if ev <= LIVE_EV_KILL_PER_USD:
+        return ("killed",
+                f"realized EV/$ {ev:+.3f} <= {LIVE_EV_KILL_PER_USD:+.2f} "
+                f"on ${staked:.2f} staked at n={n} (pnl {pnl:+.2f})")
+    return (None, f"ok realized EV/$ {ev:+.3f} at n={n}")
+
 
 def _wilson_lower_bound(wins: int, n: int, z: float = WILSON_Z) -> float:
     """95% Wilson score lower bound for a binomial proportion."""
@@ -324,7 +363,8 @@ def run_promoter(db_path: str | None = None) -> dict[str, Any]:
                           COUNT(*) AS n,
                           SUM(CASE WHEN lt.realized_pnl > 0 THEN 1 ELSE 0 END) AS wins,
                           SUM(lt.realized_pnl) AS pnl,
-                          AVG(lt.entry_price) AS avg_entry
+                          AVG(lt.entry_price) AS avg_entry,
+                          SUM(lt.size_usd) AS staked
                      FROM live_trades lt
                      LEFT JOIN markets m ON m.condition_id = lt.condition_id
                     WHERE lt.dry_run = 0
@@ -342,12 +382,21 @@ def run_promoter(db_path: str | None = None) -> dict[str, Any]:
                 n, wins = int(r[2]), int(r[3] or 0)
                 pnl = float(r[4] or 0.0)
                 avg_entry = float(r[5] or 0.0)
+                staked = float(r[6] or 0.0)
                 if not sig or not sub:
                     continue
                 n_live_eval += 1
                 status, reason = _slice_gate_decision(
                     n, wins, avg_entry, pnl,
                     protected=sig in PROTECTED_SIGNALS)
+                # Realized-money criterion runs alongside the win-rate one;
+                # the STRICTER verdict wins. Win-rate EV assumes a $1
+                # hold-to-resolution payout and therefore cannot see an
+                # exit-managed lane clipping its winners (see
+                # _live_ev_decision). Either signal alone is enough to gate.
+                ev_status, ev_reason = _live_ev_decision(n, staked, pnl)
+                if ev_status == "killed" or (ev_status and status is None):
+                    status, reason = ev_status, ev_reason
                 prior = conn.execute(
                     "SELECT status FROM slice_gate "
                     "WHERE signal_type = ? AND category = ?",

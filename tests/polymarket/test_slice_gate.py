@@ -186,19 +186,49 @@ def test_run_promoter_populates_gate_and_meta(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# Realized-EV criterion (2026-07-31) — win-rate EV cannot see clipped wins
+# ---------------------------------------------------------------------------
+
+def test_realized_ev_kills_what_win_rate_misses():
+    # THE production shape: resolution_decay x sports, 60d live — WR 36.4%
+    # at avg entry 0.250 reads as ev_lb +0.06 (breakeven WR is 25%), so the
+    # win-rate gate cleared it, while the slice actually lost $30.46 on
+    # $259.27 staked because the exits clipped every winner.
+    assert smp._slice_gate_decision(77, 28, 0.250, -30.46,
+                                    protected=False)[0] is None
+    status, why = smp._live_ev_decision(77, 259.27, -30.46)
+    assert status == "killed"
+    assert "-0.117" in why or "realized EV" in why
+
+
+def test_realized_ev_spares_profitable_and_lottery_slices():
+    # positive pnl can never trip it — lottery shapes safe by construction
+    assert smp._live_ev_decision(50, 500.0, 2110.0)[0] is None
+    # mildly negative but above the kill threshold
+    assert smp._live_ev_decision(50, 500.0, -20.0)[0] is None
+
+
+def test_realized_ev_needs_real_evidence():
+    # too few trades, and too little money, must both abstain
+    assert smp._live_ev_decision(10, 500.0, -400.0)[0] is None
+    assert smp._live_ev_decision(50, 20.0, -18.0)[0] is None
+
+
+# ---------------------------------------------------------------------------
 # Pass 4: LIVE-truth overlay (2026-07-27)
 # ---------------------------------------------------------------------------
 
-def _seed_live(path, slices):
+def _seed_live(path, slices, stake=1.0):
     """slices: (signal_type, category, n, wins, entry_price, pnl_per_trade).
 
     Wins are rows with realized_pnl > 0 — the overlay's win basis.
+    `stake` sets size_usd per row, the realized-EV denominator.
     """
     c = sqlite3.connect(path)
     c.execute("""CREATE TABLE IF NOT EXISTS live_trades (
                    signal_type TEXT, category TEXT, condition_id TEXT,
                    dry_run INT DEFAULT 0, status TEXT, exit_ts INT,
-                   realized_pnl REAL, entry_price REAL)""")
+                   realized_pnl REAL, entry_price REAL, size_usd REAL)""")
     c.execute("CREATE TABLE IF NOT EXISTS markets "
               "(condition_id TEXT, subcategory TEXT)")
     now = int(time.time())
@@ -206,9 +236,9 @@ def _seed_live(path, slices):
         for i in range(n):
             won = i < wins
             c.execute(
-                "INSERT INTO live_trades VALUES (?,?,?,0,'matched',?,?,?)",
+                "INSERT INTO live_trades VALUES (?,?,?,0,'matched',?,?,?,?)",
                 (sig, cat, f"lv-{sig}-{cat}-{i}", now - 100,
-                 ppt if won else -abs(ppt), ep))
+                 ppt if won else -abs(ppt), ep, stake))
     c.commit()
     c.close()
 
