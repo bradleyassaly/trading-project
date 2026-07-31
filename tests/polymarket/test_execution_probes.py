@@ -20,6 +20,49 @@ from trading_platform.polymarket.polymarket_live_executor import (
 )
 
 
+# ---------------------------------------------------------------------------
+# Frozen clock
+#
+# _maybe_probe scopes the daily budget to the UTC day
+# (`midnight = now - now % 86400`) and the min-interval to `now - last_ts`.
+# Seeding rows relative to the *wall* clock silently couples these tests to
+# the hour the suite happens to run at: a row seeded "2h ago" lands BEFORE
+# UTC midnight whenever that hour is 00:00-02:00 UTC, so the budget query
+# skips it, `spent` reads 0 and the assertions invert. Measured against a
+# faked wall clock, pre-fix:
+#
+#   00:00Z  2 failed   budget (7200s seed) + min-interval (600s seed)
+#   00:30Z  1 failed   budget
+#   01:40Z  1 failed   budget   <- hit for real on 2026-07-31
+#   02:59Z+ all pass
+#
+# The survivors in 00:00-01:00Z were worse than the failures: min-interval
+# part 2 and the blocked-rows test passed *vacuously*, their seeds dropping
+# out of the UTC-day window rather than out of the interval / status filter
+# they exist to exercise.
+#
+# Pinning time.time() to a fixed mid-day epoch decouples all of it: every
+# seed is anchored to the same frozen "now", so the window position of each
+# row is a property of the test, not of when CI ran.
+# ---------------------------------------------------------------------------
+
+_FROZEN_MIDNIGHT = 1785456000                 # 2026-07-31T00:00:00Z
+_FROZEN_NOW = _FROZEN_MIDNIGHT + 12 * 3600    # 12:00:00Z — mid-window
+
+
+@pytest.fixture(autouse=True)
+def frozen_clock(monkeypatch):
+    """Pin time.time() for the whole module (executor *and* _seed_probe).
+
+    Autouse rather than opt-in so no future test in this file can
+    reintroduce the wall-clock coupling by omitting it. Patching the
+    ``time`` module attribute covers the executor too — it resolves
+    ``time.time`` at call time.
+    """
+    monkeypatch.setattr(time, "time", lambda: float(_FROZEN_NOW))
+    return _FROZEN_NOW
+
+
 def _ex(path, probes_on=True, monkeypatch=None):
     ex = object.__new__(PolymarketLiveExecutor)
     ex._db_path = path
@@ -44,10 +87,18 @@ def pdb(monkeypatch):
 
 
 def _seed_probe(path, size, ago_s, status="matched"):
+    # time.time() is the frozen clock (see frozen_clock), so ago_s is an
+    # offset from a known point in the UTC day, not from "whenever now is".
     c = sqlite3.connect(path)
     c.execute("INSERT INTO live_trades (dry_run, is_probe, status, size_usd, "
               "attempted_at) VALUES (0,1,?,?,?)",
               (status, size, int(time.time()) - ago_s))
+    c.commit(); c.close()
+
+
+def _clear(path):
+    c = sqlite3.connect(path)
+    c.execute("DELETE FROM live_trades")
     c.commit(); c.close()
 
 
@@ -68,7 +119,7 @@ def test_probe_refuses_confident_negative(pdb, monkeypatch):
 
 def test_probe_respects_daily_budget(pdb, monkeypatch):
     ex = _ex(pdb, monkeypatch=monkeypatch)
-    for _ in range(5):  # $5 budget consumed today
+    for _ in range(5):  # $5 budget consumed today (10:00Z — inside the window)
         _seed_probe(pdb, 1.0, ago_s=7200)
     assert ex._maybe_probe({}, 0.15, None) is False
 
@@ -77,17 +128,66 @@ def test_probe_respects_min_interval(pdb, monkeypatch):
     ex = _ex(pdb, monkeypatch=monkeypatch)
     _seed_probe(pdb, 1.0, ago_s=600)  # 10 min ago < 1h interval
     assert ex._maybe_probe({}, 0.15, None) is False
-    # but a probe from 2h ago does not block
-    c = sqlite3.connect(pdb); c.execute("DELETE FROM live_trades"); c.commit(); c.close()
+    # but a probe from 2h ago does not block. The frozen clock is what makes
+    # this assertion mean anything: seeded at 10:00Z it is old enough to age
+    # out of the interval *and* still inside today's budget window, so a
+    # True here proves the interval gate released rather than the row simply
+    # falling out of the query.
+    _clear(pdb)
     _seed_probe(pdb, 1.0, ago_s=7200)
     assert ex._maybe_probe({}, 0.15, None) is True
 
 
 def test_blocked_probes_do_not_consume_budget(pdb, monkeypatch):
     ex = _ex(pdb, monkeypatch=monkeypatch)
+    # Seeded at 10:00Z, i.e. inside the budget window — so a True here is
+    # the status filter doing the work, not the rows falling out of scope.
     for _ in range(10):  # blocked rows are free
         _seed_probe(pdb, 1.0, ago_s=7200, status="blocked")
     assert ex._maybe_probe({}, 0.15, None) is True
+
+
+@pytest.mark.parametrize(
+    "tod_s",
+    [0, 1800, 6000, 43200, 86340],
+    ids=["00:00Z", "00:30Z", "01:40Z", "12:00Z", "23:59Z"],
+)
+def test_probe_bounds_hold_at_every_utc_hour(pdb, monkeypatch, tod_s):
+    """2026-07-31 regression: the bounds must not depend on time of day.
+
+    Seeds are anchored to the UTC-day window rather than to a fixed
+    "N seconds ago", so each assertion stays reachable at any hour.
+    """
+    now = _FROZEN_MIDNIGHT + tod_s
+    monkeypatch.setattr(time, "time", lambda: float(now))
+    ex = _ex(pdb, monkeypatch=monkeypatch)
+    interval = ple.PROBE_MIN_INTERVAL_S
+
+    # Budget: five in-window rows exhaust it however far into the day we
+    # are. ago_s=tod_s puts them at exactly UTC midnight, the earliest
+    # timestamp the window can hold.
+    for _ in range(5):
+        _seed_probe(pdb, 1.0, ago_s=tod_s)
+    assert ex._maybe_probe({}, 0.15, None) is False
+
+    # Interval: a probe younger than PROBE_MIN_INTERVAL_S blocks. Clamped
+    # to tod_s so the row never lands in yesterday.
+    _clear(pdb)
+    _seed_probe(pdb, 1.0, ago_s=min(interval // 2, tod_s))
+    assert ex._maybe_probe({}, 0.15, None) is False
+
+    _clear(pdb)
+    if tod_s >= interval:
+        # Far enough in for a same-day probe to age out → releases.
+        _seed_probe(pdb, 1.0, ago_s=interval + 60)
+        assert ex._maybe_probe({}, 0.15, None) is True
+    else:
+        # First UTC hour: every same-day probe is younger than the interval
+        # by construction, so even the oldest possible one still blocks.
+        # This is the case that is unreachable-by-design, asserted rather
+        # than skipped.
+        _seed_probe(pdb, 1.0, ago_s=tod_s)
+        assert ex._maybe_probe({}, 0.15, None) is False
 
 
 def test_flag_off_no_probe(pdb, monkeypatch):
