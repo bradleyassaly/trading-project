@@ -43,6 +43,13 @@ build/
 dist/
 *.egg-info/
 
+# Frontend deps. NOTE: this directory is currently TRACKED (~5.1k files
+# are committed), and .gitignore never untracks anything - so this rule
+# only suppresses the subdirectories npm regenerates on install
+# (@babel/*/data, caniuse-lite/data, ...) that would otherwise show as
+# untracked forever. Untracking node_modules is a separate decision.
+/src/trading_platform/frontend/node_modules/
+
 # Jupyter
 .ipynb_checkpoints/
 
@@ -68,6 +75,7 @@ htmlcov/
 /backtests/
 /checkpoints/
 /backups/
+/exports/
 reports/*.json
 reports/*.csv
 reports/*.parquet
