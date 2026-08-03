@@ -20,7 +20,7 @@ from typing import Any
 
 import requests
 
-from trading_platform.polymarket.db_connection import db, get_connection
+from trading_platform.polymarket.db_connection import ensure_columns, get_connection
 
 logger = logging.getLogger(__name__)
 
@@ -29,16 +29,13 @@ VOLUME_URL = "https://lb-api.polymarket.com/volume"
 
 
 def _ensure_columns() -> None:
-    with db() as c:
-        for col, typ in (
-            ("pm_pnl_usdc", "DOUBLE PRECISION"),
-            ("pm_volume_usdc", "DOUBLE PRECISION"),
-            ("pm_synced_at", "BIGINT"),
-        ):
-            try:
-                c.execute(f'ALTER TABLE wallet_profiles ADD COLUMN {col} {typ}')
-            except Exception:
-                pass  # already exists
+    # 2026-08-02: was three bare ALTERs in try/except — three ACCESS
+    # EXCLUSIVE locks on wallet_profiles per sync, every one a no-op.
+    ensure_columns("wallet_profiles", (
+        ("pm_pnl_usdc", "DOUBLE PRECISION"),
+        ("pm_volume_usdc", "DOUBLE PRECISION"),
+        ("pm_synced_at", "BIGINT"),
+    ))
 
 
 def fetch_leaderboard(url: str, window: str = "all", limit: int = 500) -> list[dict]:

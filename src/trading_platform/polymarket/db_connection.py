@@ -91,6 +91,32 @@ POOL_TIMEOUT = float(os.environ.get("PG_POOL_TIMEOUT", "60.0"))
 POOL_MAX_IDLE = float(os.environ.get("PG_POOL_MAX_IDLE", "60.0"))
 POOL_MAX_LIFETIME = float(os.environ.get("PG_POOL_MAX_LIFETIME", "1800.0"))
 
+# ── DDL lock guard ────────────────────────────────────────────────────────
+# 2026-08-02: a lock convoy froze every reader of `markets` and
+# `live_trades` for 5+ minutes. Chain: the nightly pg_dump held ACCESS
+# SHARE on all tables (an 84M-row wallet_trades COPY takes a while) → a
+# schema-ensure `ALTER TABLE markets ADD COLUMN event_slug` queued for
+# ACCESS EXCLUSIVE behind it → and once an ACCESS EXCLUSIVE request is
+# queued, every LATER reader of that table queues behind the ALTER. A
+# no-op DDL statement on a table nobody was modifying stalled the whole
+# platform.
+#
+# lock_timeout bounds the *acquisition* wait only — it never aborts a
+# statement that already holds its lock, so a genuine long index build is
+# unaffected. Set on every lock-taking DDL statement so the failure mode
+# is "this ALTER gave up after 5s and will retry" instead of "every
+# reader of this table is stuck until the backup finishes".
+DDL_LOCK_TIMEOUT_MS = int(os.environ.get("PG_DDL_LOCK_TIMEOUT_MS", "5000"))
+
+# DDL that takes a lock strong enough to block or be blocked by readers.
+# CREATE TABLE / CREATE TABLE IF NOT EXISTS is excluded: it takes no lock
+# on an existing relation.
+_DDL_LOCK_RE = re.compile(
+    r"^\s*(?:ALTER\s+TABLE|DROP\s+(?:TABLE|INDEX|VIEW)|TRUNCATE"
+    r"|CREATE\s+(?:UNIQUE\s+)?INDEX|REINDEX|CLUSTER)\b",
+    re.IGNORECASE,
+)
+
 
 def _get_pool():
     """Return a process-wide Postgres connection pool (lazy-init).
@@ -410,6 +436,15 @@ class _PgCursorWrapper:
             if _tbl and _table_has_id_column(_tbl):
                 _rw = _rw.rstrip().rstrip(";") + " RETURNING id"
                 _capture_id = True
+        # Lock-taking DDL runs under a short lock_timeout so it can never
+        # convoy readers behind it (see DDL_LOCK_TIMEOUT_MS). Bounds only
+        # the wait to ACQUIRE the lock, not the statement's own runtime.
+        _ddl_guard = DDL_LOCK_TIMEOUT_MS > 0 and _DDL_LOCK_RE.match(_rw) is not None
+        if _ddl_guard:
+            try:
+                self._cur.execute(f"SET lock_timeout = '{DDL_LOCK_TIMEOUT_MS}ms'")
+            except Exception:
+                _ddl_guard = False  # couldn't arm it; run the DDL unguarded
         try:
             if params is None:
                 self._cur.execute(_rw)
@@ -424,6 +459,16 @@ class _PgCursorWrapper:
                     self._lastrowid = None
         except psycopg.errors.InFailedSqlTransaction:
             raise
+        finally:
+            # Restore the session default — pooled connections outlive this
+            # statement. Inside a transaction a failed DDL aborts the block
+            # and this reset raises InFailedSqlTransaction; that's fine, the
+            # rollback reverts the SET too.
+            if _ddl_guard:
+                try:
+                    self._cur.execute("SET lock_timeout = DEFAULT")
+                except Exception:
+                    pass
         return self
 
     def executemany(self, sql, param_seq):
@@ -607,6 +652,131 @@ def db(db_path: str | Path | None = None, *, row_factory: bool = False):
             conn.close()
         except Exception:
             pass
+
+
+# ── Idempotent column migration ───────────────────────────────────────────
+# Tables we've already confirmed carry every column a given call site asks
+# for. Sound to cache for the process lifetime: this codebase only ever ADDS
+# columns, so "present" never becomes "absent". Keyed by the exact column
+# set requested, so a caller that later asks for more still re-checks.
+_ENSURED_COLUMNS_CACHE: dict[tuple, bool] = {}
+
+
+def _normalize_column_specs(columns) -> list[tuple[str, str]]:
+    """Accept ("col", "TYPE") pairs or "col TYPE" strings → [(name, type)]."""
+    specs: list[tuple[str, str]] = []
+    for item in columns:
+        if isinstance(item, (tuple, list)):
+            name, typedef = item[0], item[1]
+        else:
+            name, _, typedef = str(item).strip().partition(" ")
+        name = str(name).strip()
+        typedef = str(typedef).strip()
+        if name and typedef:
+            specs.append((name, typedef))
+    return specs
+
+
+def table_columns(table: str, *, db_path: str | Path | None = None) -> set[str]:
+    """Lower-cased column names for `table`; empty set if it doesn't exist."""
+    conn = get_connection(db_path)
+    try:
+        rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+        return {str(r[1]).lower() for r in rows}
+    except Exception:
+        return set()
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+def ensure_columns(
+    table: str,
+    columns,
+    *,
+    db_path: str | Path | None = None,
+    retries: int = 2,
+    retry_delay: float = 2.0,
+) -> list[str]:
+    """Add any of `columns` that `table` lacks. Returns the names added.
+
+    Replaces the "fire the ALTER and swallow the error" idiom, which was
+    the cause of the 2026-08-02 lock convoy. Two properties matter:
+
+    1. **It reads the catalog first and emits NO DDL when nothing is
+       missing.** This is the load-bearing part, not the `IF NOT EXISTS`.
+       Verified on the live DB: `ALTER TABLE t ADD COLUMN IF NOT EXISTS c`
+       on an ALREADY-EXISTING column still takes ACCESS EXCLUSIVE and
+       still convoys every reader — `IF NOT EXISTS` suppresses the error,
+       not the lock. Only skipping the statement outright avoids the lock.
+    2. It runs each ALTER on its own short-lived autocommit connection, so
+       a failure can never poison a caller's open transaction (and, under
+       the DDL lock guard, can never wait more than DDL_LOCK_TIMEOUT_MS).
+
+    Adding a column is genuinely rare, so a lock-timeout there is retried
+    rather than swallowed — dropping it would leave later INSERTs failing.
+    """
+    specs = _normalize_column_specs(columns)
+    if not specs:
+        return []
+
+    cache_key = (DB_BACKEND, str(db_path or ""), table,
+                 tuple(sorted(n.lower() for n, _ in specs)))
+    if _ENSURED_COLUMNS_CACHE.get(cache_key):
+        return []
+
+    existing = table_columns(table, db_path=db_path)
+    if not existing:
+        # Table doesn't exist yet — the caller's CREATE TABLE defines the
+        # full column list. Don't cache; re-check once it's been created.
+        return []
+
+    missing = [(n, t) for n, t in specs if n.lower() not in existing]
+    if not missing:
+        _ENSURED_COLUMNS_CACHE[cache_key] = True
+        return []
+
+    # SQLite has no ADD COLUMN IF NOT EXISTS; the pre-check above covers it.
+    if_not_exists = "IF NOT EXISTS " if DB_BACKEND != "sqlite" else ""
+    added: list[str] = []
+    for name, typedef in missing:
+        stmt = f"ALTER TABLE {table} ADD COLUMN {if_not_exists}{name} {typedef}"
+        for attempt in range(retries + 1):
+            conn = get_connection(db_path)
+            try:
+                conn.execute(stmt)
+                conn.commit()
+                added.append(name)
+                logger.info("[schema] added %s.%s %s", table, name, typedef)
+                break
+            except Exception as exc:
+                msg = str(exc).lower()
+                if "already exists" in msg or "duplicate column" in msg:
+                    added.append(name)  # lost a race with another process
+                    break
+                if "lock" in msg and attempt < retries:
+                    logger.warning(
+                        "[schema] %s.%s blocked on a lock (attempt %d/%d), "
+                        "retrying in %.0fs: %s",
+                        table, name, attempt + 1, retries + 1, retry_delay,
+                        str(exc)[:120],
+                    )
+                    time.sleep(retry_delay)
+                    continue
+                logger.warning("[schema] could not add %s.%s: %s",
+                               table, name, str(exc)[:200])
+                break
+            finally:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
+    if len(added) == len(missing):
+        _ENSURED_COLUMNS_CACHE[cache_key] = True
+    return added
 
 
 def execute_with_retry(

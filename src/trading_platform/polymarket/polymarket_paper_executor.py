@@ -2676,15 +2676,17 @@ class PolymarketPaperExecutor:
         if missing — lazy migration pattern.
         """
         try:
+            # Lazy-add the mae/mfe columns.
+            # 2026-08-02: was two bare ALTERs in try/except INSIDE the
+            # per-mark update — every mark-to-market on every open position
+            # asked for ACCESS EXCLUSIVE on polymarket_paper_trades only to
+            # fail with "column already exists". ensure_columns() reads the
+            # catalog once per process and then emits nothing at all.
+            from trading_platform.polymarket.db_connection import ensure_columns
+            ensure_columns("polymarket_paper_trades",
+                           [("mae", "REAL"), ("mfe", "REAL")],
+                           db_path=self._wallet_db_path)
             with self._wallet_lock:
-                # Lazy-add the mae/mfe columns; idempotent via IF NOT EXISTS
-                for col in ("mae", "mfe"):
-                    try:
-                        self._wallet_conn.execute(
-                            f"ALTER TABLE polymarket_paper_trades ADD COLUMN {col} REAL"
-                        )
-                    except Exception:
-                        pass  # already exists
                 # MAE = minimum unrealized (most negative). MFE = maximum.
                 unr_rounded = round(unrealized, 2)
                 self._wallet_conn.execute(

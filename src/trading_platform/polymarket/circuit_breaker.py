@@ -555,14 +555,15 @@ class CircuitBreaker:
         _read_state so a missing column can never brick can_trade();
         the column is lazy-added here (idempotent, both backends)."""
         try:
+            # 2026-08-02: the lazy-add was a bare ALTER in try/except, so
+            # every stamp took ACCESS EXCLUSIVE just to fail. ensure_columns
+            # checks the catalog and caches the answer for the process.
+            from trading_platform.polymarket.db_connection import ensure_columns
+            ensure_columns("circuit_breaker_state",
+                           [("last_equity_sync_at", "INTEGER")],
+                           db_path=self._db_path)
             conn = connect_wallet_db(self._db_path)
             try:
-                try:
-                    conn.execute(
-                        "ALTER TABLE circuit_breaker_state ADD COLUMN last_equity_sync_at INTEGER"
-                    )
-                except Exception:
-                    pass  # already exists
                 conn.execute(
                     "UPDATE circuit_breaker_state SET last_equity_sync_at = ? WHERE id = 1",
                     (int(ts),),

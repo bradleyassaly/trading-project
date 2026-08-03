@@ -21,7 +21,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from trading_platform.polymarket.db_connection import db, get_connection
+from trading_platform.polymarket.db_connection import db, ensure_columns, get_connection
 
 logger = logging.getLogger(__name__)
 _GAMMA_URL = "https://gamma-api.polymarket.com/markets"
@@ -65,28 +65,28 @@ CREATE INDEX IF NOT EXISTS idx_markets_no_token  ON markets(no_token_id);
 
 
 def ensure_schema() -> None:
-    # 2026-07-06: event_slug added for the per-event exposure cap — one
-    # football match carried 6 correlated positions because the
-    # topic-stem cap can't see that "Spread: Belgium (-1.5)" and "Will
-    # Belgium win..." are the same event. The ALTER must run BEFORE the
-    # index statements in _SCHEMA (CREATE TABLE IF NOT EXISTS is a no-op
-    # on existing deployments, so idx_markets_event would otherwise
-    # reference a missing column). Separate transaction: a failed ALTER
-    # ("already exists") poisons a shared Postgres transaction.
-    try:
-        with db() as c:
-            c.execute("ALTER TABLE markets ADD COLUMN event_slug TEXT")
-    except Exception:
-        pass  # already present (or table doesn't exist yet — created below)
-    # 2026-07-07 (P4): neg_risk cache — NULL=unknown, 0=false, 1=true.
-    # neg_risk selects which exchange contract an order is signed against;
-    # a market's tokens are minted under one exchange and never move, so
-    # this is immutable and safe to cache forever.
-    try:
-        with db() as c:
-            c.execute("ALTER TABLE markets ADD COLUMN neg_risk INTEGER")
-    except Exception:
-        pass
+    # These columns post-date the original table and must exist BEFORE the
+    # index statements in _SCHEMA run (CREATE TABLE IF NOT EXISTS is a
+    # no-op on existing deployments, so idx_markets_event would otherwise
+    # reference a missing column).
+    #   event_slug (2026-07-06) — the per-event exposure cap's grouping
+    #     key; one football match carried 6 correlated positions because
+    #     the topic-stem cap can't see that "Spread: Belgium (-1.5)" and
+    #     "Will Belgium win..." are the same event.
+    #   neg_risk (2026-07-07, P4) — NULL=unknown, 0=false, 1=true. Selects
+    #     which exchange contract an order is signed against; immutable
+    #     per market, so safe to cache forever.
+    #
+    # 2026-08-02: this was two bare ALTERs in try/except. Both columns had
+    # existed for weeks, so every call was a no-op that STILL took ACCESS
+    # EXCLUSIVE on `markets` — and behind the nightly pg_dump's ACCESS
+    # SHARE that queued for 303s with every reader of `markets` stuck
+    # behind it. ensure_columns() reads the catalog and emits no DDL at
+    # all when the columns are present.
+    ensure_columns("markets", [
+        ("event_slug", "TEXT"),
+        ("neg_risk", "INTEGER"),
+    ])
     with db() as c:
         for stmt in _SCHEMA.split(";"):
             if stmt.strip():

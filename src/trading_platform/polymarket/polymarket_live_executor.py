@@ -632,9 +632,43 @@ class PolymarketLiveExecutor:
             pass
         return False
 
+    # Columns that pre-date the live_trades schema below.
+    # (P6 audit) The fresh CREATE TABLE lacks most columns the attempt
+    # INSERT writes — on a truly fresh deployment every record silently
+    # failed. All INSERT columns are covered here.
+    _LIVE_TRADES_COLUMNS = (
+        "outcome TEXT", "exit_ts INTEGER", "signal_price REAL",
+        "whale_trade_ts BIGINT", "detection_latency_sec REAL",
+        "slippage_signed REAL", "slippage_cost_usd REAL",
+        "features_at_fire TEXT",
+        "token_id TEXT", "side TEXT", "fill_price REAL",
+        "shares REAL", "category TEXT", "signal_wallet TEXT",
+        "submitted_at INTEGER", "filled_at INTEGER",
+        "expected_price REAL", "slippage REAL",
+        "fill_time_ms REAL", "resolution_date BIGINT",
+        "ask_depth_entry REAL", "signal_fired_at BIGINT",
+        "wallet_tier TEXT", "realized_pnl REAL",
+        # P6: decision-time market context on EVERY attempt (incl.
+        # rejects/errors) — the measurement substrate execution work needs.
+        "mid_at_decision REAL", "yes_mid_at_decision REAL",
+        "best_ask_at_decision REAL", "best_bid_at_decision REAL",
+        "spread_at_decision REAL", "book_target_price REAL",
+        "slippage_c REAL", "spread_paid_c REAL",
+        # #2 Stage A: depth-walked VWAP price impact for the sized order at
+        # decision time (instrument-only; compare vs realized slippage_c).
+        "vwap_slippage_c REAL",
+        # P3: real delivery-lane tag
+        "source_lane TEXT",
+        # 2026-07-09: $1 execution-probe tag — excluded from all EV
+        # evidence streams
+        "is_probe INTEGER",
+    )
+
     def _ensure_live_trades_table(self) -> None:
         try:
-            from trading_platform.polymarket.db_connection import get_connection
+            from trading_platform.polymarket.db_connection import (
+                ensure_columns, get_connection,
+            )
             conn = get_connection(self._db_path)
             try:
                 conn.execute("""
@@ -660,45 +694,19 @@ class PolymarketLiveExecutor:
                 conn.execute(
                     "CREATE INDEX IF NOT EXISTS idx_live_trades_ts ON live_trades(attempted_at DESC)"
                 )
-                # Lazy-add columns that pre-date this schema — idempotent.
-                # (P6 audit) The fresh-CREATE above lacks most columns the
-                # attempt INSERT writes — on a truly fresh deployment every
-                # record silently failed. All INSERT columns now covered here.
-                for col_ddl in ("outcome TEXT", "exit_ts INTEGER", "signal_price REAL",
-                                "whale_trade_ts BIGINT", "detection_latency_sec REAL",
-                                "slippage_signed REAL", "slippage_cost_usd REAL",
-                                "features_at_fire TEXT",
-                                "token_id TEXT", "side TEXT", "fill_price REAL",
-                                "shares REAL", "category TEXT", "signal_wallet TEXT",
-                                "submitted_at INTEGER", "filled_at INTEGER",
-                                "expected_price REAL", "slippage REAL",
-                                "fill_time_ms REAL", "resolution_date BIGINT",
-                                "ask_depth_entry REAL", "signal_fired_at BIGINT",
-                                "wallet_tier TEXT", "realized_pnl REAL",
-                                # P6: decision-time market context on EVERY
-                                # attempt (incl. rejects/errors) — the
-                                # measurement substrate execution work needs.
-                                "mid_at_decision REAL", "yes_mid_at_decision REAL",
-                                "best_ask_at_decision REAL", "best_bid_at_decision REAL",
-                                "spread_at_decision REAL", "book_target_price REAL",
-                                "slippage_c REAL", "spread_paid_c REAL",
-                                # #2 Stage A: depth-walked VWAP price impact for
-                                # the sized order at decision time (instrument-
-                                # only; compare vs realized slippage_c).
-                                "vwap_slippage_c REAL",
-                                # P3: real delivery-lane tag
-                                "source_lane TEXT",
-                                # 2026-07-09: $1 execution-probe tag —
-                                # excluded from all EV evidence streams
-                                "is_probe INTEGER"):
-                    try:
-                        conn.execute(f"ALTER TABLE live_trades ADD COLUMN {col_ddl}")
-                    except Exception:
-                        pass
                 conn.commit()
             finally:
                 try: conn.close()
                 except Exception: pass
+            # 2026-08-02: this was 33 bare ALTERs fired unconditionally on
+            # every ensure and swallowed individually. Each took ACCESS
+            # EXCLUSIVE on live_trades purely to fail with "column already
+            # exists"; behind the nightly pg_dump the first one queued for
+            # 304s and every reader of live_trades piled up behind it.
+            # ensure_columns() checks the catalog once and emits zero DDL
+            # when the columns are already present.
+            ensure_columns("live_trades", self._LIVE_TRADES_COLUMNS,
+                           db_path=self._db_path)
         except Exception as exc:
             logger.debug("live_trades table ensure failed: %s", exc)
 

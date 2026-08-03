@@ -27,34 +27,32 @@ import time
 from collections import defaultdict, deque
 from typing import Any
 
-from trading_platform.polymarket.db_connection import db, get_connection
+from trading_platform.polymarket.db_connection import db, ensure_columns, get_connection
 
 logger = logging.getLogger(__name__)
 
 
 def _ensure_columns() -> None:
-    """Idempotent ALTERs — new columns on existing tables.
+    """Add the reconstruction columns if they're missing.
 
-    Uses a fresh connection per ALTER because Postgres aborts the
-    whole transaction when any statement errors, so a single batch
-    would silently skip everything after the first "already exists".
+    2026-08-02: this used to fire a bare ALTER per column on a fresh
+    connection and swallow "already exists". wallet_trades is the 84M-row
+    table the nightly pg_dump spends the longest COPYing — so those
+    permanent no-ops were two ACCESS EXCLUSIVE requests per run against
+    exactly the table most likely to have the dump holding ACCESS SHARE,
+    with every reader queuing behind them. ensure_columns() reads the
+    catalog first and emits no DDL when nothing is missing.
     """
-    for table, col, typ in (
-        ("wallet_trades", "realized_pnl_closed", "DOUBLE PRECISION"),
-        ("wallet_trades", "lot_remaining", "DOUBLE PRECISION"),
-        ("wallet_profiles", "realized_pnl_total", "DOUBLE PRECISION"),
-        ("wallet_profiles", "unrealized_pnl_estimate", "DOUBLE PRECISION"),
-        ("wallet_profiles", "pnl_reconstructed_at", "BIGINT"),
-        ("wallet_profiles", "closed_trades_count", "INTEGER"),
-    ):
-        c = get_connection()
-        try:
-            c.execute(f"ALTER TABLE {table} ADD COLUMN {col} {typ}")
-            c.commit()
-        except Exception:
-            pass  # already exists
-        finally:
-            c.close()
+    ensure_columns("wallet_trades", (
+        ("realized_pnl_closed", "DOUBLE PRECISION"),
+        ("lot_remaining", "DOUBLE PRECISION"),
+    ))
+    ensure_columns("wallet_profiles", (
+        ("realized_pnl_total", "DOUBLE PRECISION"),
+        ("unrealized_pnl_estimate", "DOUBLE PRECISION"),
+        ("pnl_reconstructed_at", "BIGINT"),
+        ("closed_trades_count", "INTEGER"),
+    ))
 
 
 def _fifo_match(trades: list[dict]) -> tuple[list[tuple[int, float, float]], float, float]:
