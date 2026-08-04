@@ -19,13 +19,25 @@ running). Every deploy is BOTH steps:
 git pull --ff-only                     # 1. bring the tree to origin/main
 docker restart polymarket-scheduler polymarket-watchdog \
     polymarket-telegram-bot polymarket-wallet-stream \
-    polymarket-wallet-poller polymarket-api polymarket-live-collect
+    polymarket-wallet-poller polymarket-api polymarket-live-collect \
+    polymarket-critical-loops polymarket-analytics-slow
                                        # 2. reload every long-lived importer
 ```
 
 (`polymarket-postgres` and `polymarket-frontend` don't import python code —
 leave them.) Local commits must be pushed promptly for the same reason in
 reverse: an un-pushed local commit means origin's view of "deployed" is wrong.
+
+**2026-08-02:** `polymarket-critical-loops` and `polymarket-analytics-slow`
+were missing from the list above — it was written 2026-07-17 and never
+updated when those containers were added (critical-loops 2026-07-23,
+slow-lane 2026-07-27). Both run a long-lived `python scripts/…` process
+(`critical_loops.py`, `slow_lane.py`), so both hold stale imports exactly
+like the others; between them they own the money loops and
+`wallet_pnl_reconstruction`. Following the old list deployed code to seven
+containers and silently left two running the previous revision — the same
+failure mode this section exists to prevent. **When adding a service that
+runs a long-lived python process, add it here in the same commit.**
 
 **Guard:** the `deploy_drift` scheduler task (`scripts/check_deploy_drift.py`,
 6h) alerts on Telegram when local HEAD ≠ origin/main **or** when code moved
